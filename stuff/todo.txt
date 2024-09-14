@@ -5,18 +5,13 @@
     > RAG-tuned models can be found on HF. can chatgpt or other general models utilize this?
     > I think RAG is done as a function within the transformer logic so it's unclear if a gguf can be used
     > seems related to being able to run internal functions so that may be good to implement alongside
-- explore storm (wiki generator)
+- expand image upload functionality to more models/APIs
 
 # Features:
-# TODO: integrate huggingface hub for easy changing of local model weights
 # TODO: TIME based memory instead of message #s or 'start conversation' system
 # TODO: make tiny gui for easier parameter tuning
 # TODO: add multiple hyperparameter fields for personas to account for differences in models (ie openai_temp vs local_model_x_temp. Wonder if some kind of crude modifiers can work)
 # TODO: create new TODOs via chat interface (dev command to write to this file? need to make .txt for security)
-# TODO: dev command to cancel a generation and dump partial reply #/api/extra/generate/check #/api/extra/abort
-# TODO: have a 'default' model tag which uses whatever model is defined as default in config (for mass updating since most use 3.5t)
-# TODO: add local model config list to util function, ability to specify config file on local model launch
-# TODO: expand 'set model' such that it can spin up any given model in koboldcpp from a preconfigured list (adding hf transformers somehow would be sweet as well)
 # TODO: command to toggle token and model display
 # TODO: include context count in reply w/tokens
 # TODO: consider making personas use server or channel specific configurations for context and other params
@@ -39,14 +34,10 @@
 # TODO: add personal messages: currently break due to lack of channel or guild name (both?)
 # TODO: add a persona prompt log - keep losing personas and wanting old versions back
 # TODO: derpr persona should reset after some length of time or at least on restart.
-# TODO: easier way to write gpt-3.5-turbo  (ie 'gpt3'==)
+# TODO: easier way to write model names, esp anthropic. (ie 'gpt3'==gpt-3.5-turbo)
 # TODO: new function to handle when derpr responds (include @derpr and every-message options)
 
-# Bugfixes:
-# TODO: developer commands end up in message history, usually don't want this
-# TODO: all persona settings except prompt are lost UNLESS prompt is also changed. Need to add a method to all these updates to resave. Kind of like this now as I usually don't want permanent changes but still seems not ideal behavior
-# TODO(BIG): filter history/context for dev commands so they don't pollute input (check each history line with preprocess()?)
-# TODO: koboldcpp console messages are not pushed to the debug discord channel for some reason
+# Bugs:
 # reset_discord_status sometimes doesn't work (on dev commands?), not repeatable
 
 LOCAL PERSONA MANAGEMENT:
@@ -70,3 +61,13 @@ LOCAL PERSONA MANAGEMENT:
         + database of available models and their default values? save yaml in config for each persona?
     > can maybe use this to configure local models that use different parameters so that they are properly called via the api
     > example yaml: persona (name, prompt, context_limit, model (temperature, top_p, top_k, other model-specific parameters))
+
+KOBOLD:
+- better/functional handling of start/stop/restart of app including feedback during startup
+- # TODO: koboldcpp console messages are not pushed to the debug discord channel for some reason
+# TODO: dev command to cancel a generation and dump partial reply #/api/extra/generate/check #/api/extra/abort
+# TODO: add local model config list to util function, ability to specify config file on local model launch
+# TODO: expand 'set model' such that it can spin up any given model in koboldcpp from a preconfigured list (adding hf transformers somehow would be sweet as well)
+
+OTHER LOCAL:
+# TODO: integrate huggingface hub for easy changing of local model weights
