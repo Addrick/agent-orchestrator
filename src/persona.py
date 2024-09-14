@@ -1,9 +1,6 @@
-import logging
-
 from src import engine
 from src.message_handler import *
-from src.utils import *
-from src.global_config import *
+from config.global_config import *
 
 # Summary:
 # Data type to maintain discrete personas

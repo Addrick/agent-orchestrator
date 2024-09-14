@@ -1,18 +1,14 @@
 import json
 import logging
-
 import aiohttp
-import google.generativeai as palm
-import openai
 import anthropic
 
-from openai import OpenAI, AsyncOpenAI
-from stuff import api_keys
+from openai import OpenAI, AsyncOpenAI, APIError
 from vertexai.generative_models import HarmCategory, HarmBlockThreshold
 
-from src import utils
-from src.global_config import *
+from config.global_config import *
 from src.utils import models
+from config import api_keys
 
 
 # Summary:
@@ -52,10 +48,10 @@ class TextEngine:
         self.google_models_available = self.all_available_models['From Google']
         self.top_k = top_k
         self.unsafe_settings = {
-                                    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-                                    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-                                    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-                                    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+                                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+                                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+                                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+                                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
                                 }
 
         # Anthropic models
@@ -122,7 +118,7 @@ class TextEngine:
             if self.model_name in self.anthropic_models_available:
                 response = await self._generate_anthropic_response(prompt, messages)
 
-        # TODO: test (finish?) Google model query
+        # Google request
         elif self.model_name in self.google_models_available:
             response = self._generate_google_response(prompt, message, context)
 
@@ -171,7 +167,7 @@ class TextEngine:
                 logging.debug(response + token_count_and_model)
                 return response + token_count_and_model
 
-            except openai.APIError as e:
+            except APIError as e:
 
                 return e.code + ": \n" + e.message
 
@@ -312,6 +308,7 @@ class TextEngine:
             "id": self.model_name,
         }
         return response.text
+
 
 def launch_koboldcpp():
     """WIP: Launch a KoboldCPP instance with preconfigured settings."""

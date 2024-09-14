@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from src.global_config import PERSONA_SAVE_FILE
+from config.global_config import PERSONA_SAVE_FILE
 from src.persona import Persona
 
 

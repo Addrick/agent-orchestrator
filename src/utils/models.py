@@ -1,4 +1,4 @@
-import stuff.api_keys
+import config.api_keys
 
 from src.message_handler import *
 from src.utils import config

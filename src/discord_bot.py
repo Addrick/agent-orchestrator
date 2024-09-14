@@ -1,16 +1,12 @@
-import asyncio
-import datetime
 import logging
 import re
 
 import discord
 from discord import HTTPException
 
-from src import local_terminal, global_config
-from src.app_manager import restart_app, stop_app
-from src.chat_system import ChatSystem
-from src.global_config import *
-from src.global_config import DISCORD_CHAR_LIMIT
+from config import global_config
+from config.global_config import *
+from config.global_config import DISCORD_CHAR_LIMIT
 from src.utils.messages import split_string_by_limit
 
 

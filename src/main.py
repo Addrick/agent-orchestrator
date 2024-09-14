@@ -1,12 +1,13 @@
-import logging
+import asyncio
 import os
 import sys
 
-from src import local_terminal, global_config, discord_bot
+from src import local_terminal
+from src.chat_system import ChatSystem
 from src.discord_bot import *
-from src.global_config import *
+from config.global_config import *
 
-import stuff.api_keys
+import config.api_keys
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, stream=sys.stdout, format='%(asctime)s - %(message)s',
@@ -25,7 +26,7 @@ if __name__ == "__main__":
     # Initialize bots:
     if DISCORD_BOT:
         discord_bot = create_discord_bot(bot)
-        discord_bot.run(stuff.api_keys.discord)
+        discord_bot.run(config.api_keys.discord)
 
     else:
         from datetime import datetime
@@ -41,5 +42,5 @@ if __name__ == "__main__":
                                                                guild=local_terminal.Guild(),
                                                                timestamp=current_time)
 
-            # Process the message using your existing bot's message processing logic
-            asyncio.create_task(on_message(simulated_message))
+            # Process the message using local_terminal
+            asyncio.create_task(local_terminal.on_message(bot, simulated_message))
