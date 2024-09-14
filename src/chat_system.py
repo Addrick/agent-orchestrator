@@ -45,8 +45,11 @@ class ChatSystem:
             logging.info(f"Failed to add to prompt, persona '{persona_name}' does not exist.")
 
     async def generate_response(self, persona_name, message, context='', image_url=None):
-        """Generate a response using the specified persona and message channel.
-        TODO: extract the discord code below and put it in discord_bot.py"""
+        """Generate a response using the specified persona and message channel."""
+        # skip any images if the model can't handle it (currently only gpt-4o)
+        # todo: determine if other apis support this and if I can tell which do via some request
+        if self.personas[persona_name].model is not 'gpt-4o':
+            image_url = None
         if persona_name in self.personas:
             persona = self.personas[persona_name]
             reply = await persona.generate_response(message, context, image_url)
