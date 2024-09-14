@@ -44,13 +44,12 @@ class ChatSystem:
         else:
             logging.info(f"Failed to add to prompt, persona '{persona_name}' does not exist.")
 
-    async def generate_response(self, persona_name, message, context=''):
-
+    async def generate_response(self, persona_name, message, context='', image_url=None):
         """Generate a response using the specified persona and message channel.
         TODO: extract the discord code below and put it in discord_bot.py"""
         if persona_name in self.personas:
             persona = self.personas[persona_name]
-            reply = await persona.generate_response(message, context)
+            reply = await persona.generate_response(message, context, image_url)
             if persona_name != 'derpr':
                 reply = f"{persona_name}: {reply}"
             return reply

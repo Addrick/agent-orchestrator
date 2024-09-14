@@ -80,7 +80,7 @@ class Persona:
     def set_conversation_mode(self, conversation_mode):
         self.conversation_mode = conversation_mode
 
-    async def generate_response(self, message, context):
+    async def generate_response(self, message, context, image_url=None):
         logging.info('Querying response as ' + self.persona_name + '...')
         if self.context_length > 0:
             context = context[1:self.context_length+1]
@@ -90,9 +90,8 @@ class Persona:
         else:
             context = None
 
-        # todo: implement token limit
-        #  token_limit = self.response_token_limit
-        response = await self.model.generate_response(self.prompt, message, context)
+        token_limit = self.response_token_limit
+        response = await self.model.generate_response(self.prompt, message, context, image_url, token_limit)
         self.last_json = self.model.get_raw_json_request()
 
         # conversation mode

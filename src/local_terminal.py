@@ -1,4 +1,4 @@
-#     Used to emulate discord, utilities below may not work
+#     Used to emulate discord, utilities below may not still be necessary
 #     StrippedMessage.__init__: Initializes a new StrippedMessage instance with the provided message content, timestamp, channel, guild, and author information.
 #     Guild.__init__: Initializes a new Guild instance with an optional name, defaulting to 'local_guild'.
 #     User.__init__: Initializes a new User instance with an optional name 'admin' and an id of 1 by default.
@@ -56,7 +56,7 @@ def local_history_logger(persona_name, response):
         file.write(response)
 
 
-async def on_message(bot: ChatSystem, message, log_chat=True):
+async def on_message(bot, message, log_chat=True):
     logging.debug(f'{message.author}: {message.content}')
 
     if log_chat:
@@ -76,7 +76,7 @@ async def on_message(bot: ChatSystem, message, log_chat=True):
             async with message.channel.typing():
                 # Gather context (message history) from local terminal
                 context = []
-                history = local_history_reader(limit=GLOBAL_CONTEXT_LIMIT)  # todo: pull context limit from persona
+                history = local_history_reader(persona.context_length)
                 for msg in history:
                     if msg.channel.name.startswith(persona_mention):
                         msg.content = persona_mention + " " + msg.content

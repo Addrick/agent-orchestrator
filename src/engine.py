@@ -87,14 +87,15 @@ class TextEngine:
         self.top_k = top_k
 
     # Generates response based on model_name
-    async def generate_response(self, prompt, message, context):
+    async def generate_response(self, prompt, message, context, image_url, token_limit):
         """Generate a response based on the selected model."""
         # route specific API and model to use based on model_name
         # if model_name matches models found in various APIs
         response = ''
+        self.max_tokens = token_limit
         # OpenAI request
         if self.model_name in self.openai_models_available:
-            response = await self._generate_openai_response(prompt, message, context)
+            response = await self._generate_openai_response(prompt, message, context, image_url)
 
         # Anthropic request
         elif self.model_name in self.anthropic_models_available:
@@ -115,7 +116,7 @@ class TextEngine:
 
         return response
 
-    async def _generate_openai_response(self, prompt, message, context):
+    async def _generate_openai_response(self, prompt, message, context, image_url=None):
         """Prepare messages for async OpenAI API call."""
         if context is not None:
             messages = [
@@ -127,6 +128,13 @@ class TextEngine:
             messages = [
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": message}]
+        if image_url is not None:
+            messages.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_url,
+                    }
+            })
 
         openai_client = AsyncOpenAI(api_key=api_keys.openai)  # TODO: put this somewhere better
         self.json_request = self.parse_request_json(messages)
