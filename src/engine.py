@@ -122,19 +122,18 @@ class TextEngine:
             messages = [
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": context},
-                # TODO: try iterating this for 1 msg/context block for better model processing
+                # TODO: try iterating this for 1 msg/context block for better model processing?
                 {"role": "user", "content": message}]
         else:
             messages = [
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": message}]
         if image_url is not None:
-            messages.append({
+            messages.append(
+                {"role": "user", "content": [{
                     "type": "image_url",
-                    "image_url": {
-                        "url": image_url,
-                    }
-            })
+                    "image_url":
+                        {"url": image_url}}]})
 
         openai_client = AsyncOpenAI(api_key=api_keys.openai)  # TODO: put this somewhere better
         self.json_request = self.parse_request_json(messages)

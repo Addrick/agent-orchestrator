@@ -83,39 +83,65 @@ def create_discord_bot(chat_system):
                         # Formats each message to put persona name first # TODO: add persona field to preprocess_message and pass in when generating: allows messages to be used that don't start with persona name (better?)
                         # If preprocess_message with check_only=True returns True, the message is skipped as it is identified as a dev command
                         channel = client.get_channel(message.channel.id)
-                        context = []
-                        history = channel.history(before=message, limit=global_config.GLOBAL_CONTEXT_LIMIT)
-                        async for msg in history:
-                            if msg.author is not client.user.id and msg.channel.name.startswith(persona_mention):
-                                msg.content = persona_mention + " " + msg.content
-                            # If a message begins with derpr: <persona_name> ``` the message is considered a dev message response and also skipped
-                            # # zero-width space is a hack used in send_dev_command to escape existing code commenting
-                            is_previous_dev_response = 'derpr: ' + persona_mention + ' `​``' in msg.content
-                            if bot.bot_logic.preprocess_message(msg, check_only=True) or is_previous_dev_response:
-                                continue
-                            else:
-                                context.append(
-                                    f"{msg.created_at.strftime('%Y-%m-%d, %H:%M:%S')}, {msg.author.name}: {msg.content}")
-                        # Change discord status to 'streaming <persona>...'
-                        activity = discord.Activity(
-                            type=discord.ActivityType.streaming,
-                            name=persona_name + '...',
-                            url='https://www.twitch.tv/discordmakesmedothis')
-                        await client.change_presence(activity=activity)
 
-                    # Message processing starts
-                    # Check for dev commands
-                    dev_response = bot.bot_logic.preprocess_message(message)
-                    if dev_response is None:
-                        async with channel.typing():
-                            # If no dev response found, process as a bot request
-                            response = await bot.generate_response(persona_name, message.content, context=context)
-                            await send_message(channel, response, char_limit=DISCORD_CHAR_LIMIT)
+                        image_url = await get_image_attachments(message)
+
+                        context = await history_gatherer(channel, message, persona_mention)
+
+                        await set_status_streaming(persona_name)
+
+                        # Message processing starts
+                        # Check for dev commands
+                        dev_response = bot.bot_logic.preprocess_message(message)
+                        if dev_response is None:
+                            async with channel.typing():
+                                # If no dev response found, process as a bot request
+                                response = await bot.generate_response(persona_name, message.content, context=context, image_url=image_url)
+                                await send_message(channel, response, char_limit=DISCORD_CHAR_LIMIT)
+                                await reset_discord_status()
+
+                        else:  # If dev message found, send it now and reset status
+                            await send_discord_dev_message(channel, dev_response)
                             await reset_discord_status()
 
-                    else:  # If dev message found, send it now and reset status
-                        await send_discord_dev_message(channel, dev_response)
-                        await reset_discord_status()
+    async def get_image_attachments(message):
+        image_url = None
+        # Check for image attachments
+        if any(attachment.url.lower().endswith(('png', 'jpg', 'jpeg', 'gif', 'bmp')) for attachment in
+               message.attachments):
+            print("Message contains an image attachment.")
+        # Check for image URLs in the message content
+        image_url_pattern = re.compile(r'(https?://\S+\.(?:png|jpg|jpeg|gif|bmp))', re.IGNORECASE)
+        if image_url_pattern.search(message.content):
+            print("Message contains an image URL.")
+            # Handle image URL here
+            image_url = image_url_pattern.search(message.content)[0]
+        return image_url
+
+    async def history_gatherer(channel, message, persona_mention): # TODO: explore using local chat logs instead of chat-platform-specific message queries (would not respect deleted messages without a bunch of work which is why I have it this way)
+        context = []
+        history = channel.history(before=message,
+                                  limit=global_config.GLOBAL_CONTEXT_LIMIT)  # TODO: use persona-specific context limit here?
+        async for msg in history:
+            if msg.author is not client.user.id and msg.channel.name.startswith(persona_mention):
+                msg.content = persona_mention + " " + msg.content
+            # If a message begins with derpr: <persona_name> ``` the message is considered a dev message response and also skipped
+            # # zero-width space is a hack used in send_dev_command to escape existing code commenting
+            is_previous_dev_response = 'derpr: ' + persona_mention + ' `​``' in msg.content
+            if bot.bot_logic.preprocess_message(msg, check_only=True) or is_previous_dev_response:
+                continue
+            else:
+                context.append(
+                    f"{msg.created_at.strftime('%Y-%m-%d, %H:%M:%S')}, {msg.author.name}: {msg.content}")
+        return context
+
+    async def set_status_streaming(persona_name):
+        # Change discord status to 'streaming <persona>...'
+        activity = discord.Activity(
+            type=discord.ActivityType.streaming,
+            name=persona_name + '...',
+            url='https://www.twitch.tv/discordmakesmedothis')
+        await client.change_presence(activity=activity)
 
     async def reset_discord_status():
         """ Reset discord name and status to default"""
