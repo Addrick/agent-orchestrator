@@ -107,14 +107,13 @@ def create_discord_bot(chat_system):
     async def get_image_attachments(message):
         image_url = None
         # Check for image attachments
-        if any(attachment.url.lower().endswith(('png', 'jpg', 'jpeg', 'gif', 'bmp')) for attachment in
-               message.attachments):
+        if any(attachment.filename.lower().endswith(('png', 'jpg', 'jpeg', 'gif', 'bmp')) for attachment in message.attachments):
             print("Message contains an image attachment.")
+            image_url = message.attachments[0].url
         # Check for image URLs in the message content
         image_url_pattern = re.compile(r'(https?://\S+\.(?:png|jpg|jpeg|gif|bmp))', re.IGNORECASE)
         if image_url_pattern.search(message.content):
             print("Message contains an image URL.")
-            # Handle image URL here
             image_url = image_url_pattern.search(message.content)[0]
         return image_url
 

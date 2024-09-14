@@ -48,7 +48,7 @@ class ChatSystem:
         """Generate a response using the specified persona and message channel."""
         # skip any images if the model can't handle it (currently only gpt-4o)
         # todo: determine if other apis support this and if I can tell which do via some request
-        if self.personas[persona_name].model is not 'gpt-4o':
+        if self.personas[persona_name].model.model_name != 'gpt-4o':
             image_url = None
         if persona_name in self.personas:
             persona = self.personas[persona_name]
