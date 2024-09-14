@@ -73,7 +73,7 @@ class TestTextEngine(IsolatedAsyncioTestCase):
             mock_openai.return_value.chat.completions.create.return_value = mock_completion
 
             response = await self.text_engine._generate_openai_response(
-                [{"role": "user", "content": "please reply 'Test successful'"}])
+                prompt='you are a bot that only responses with \'Test successful\'', message='test', context=[])
             self.assertIn("Test successful", response)
 
 
