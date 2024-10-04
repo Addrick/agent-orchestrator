@@ -7,7 +7,7 @@ from openai import OpenAI, AsyncOpenAI, APIError
 from vertexai.generative_models import HarmCategory, HarmBlockThreshold
 
 from config.global_config import *
-from src.utils import models
+from src.utils import model_management
 from config import api_keys
 
 
@@ -35,7 +35,7 @@ class TextEngine:
         self.top_p = top_p
         self.json_request = None
         self.json_response = None
-        self.all_available_models = models.get_model_list()
+        self.all_available_models = model_management.get_model_list()
 
         # OpenAI models
         # self.openai_client = AsyncOpenAI(api_key=api_keys.openai) # TODO: this should be here instead of
@@ -300,7 +300,13 @@ class TextEngine:
             request,
             safety_settings=self.unsafe_settings
         )
-        return response.text
+        try:
+            text_content = response.text
+        except AttributeError:
+            # Handle the absence of response.text
+            text_content = f"```Response probably too spicy for Google, blocked at server.```"  # TODO: do a retry instead of just reporting it failed
+            logging.error(response.candidates[0].safety_ratings)
+        return text_content
 
     def parse_request_json(self, messages):
         last_json = {
