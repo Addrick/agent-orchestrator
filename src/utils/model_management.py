@@ -1,7 +1,7 @@
-import config.api_keys
+import config.api_keys as api_keys
 
 from src.message_handler import *
-from src.utils import config
+from src.utils import config_utils
 import openai
 
 
@@ -63,10 +63,10 @@ def get_model_list(update=False):
                                 'Local': ['local']
                                 }
         logging.debug(all_available_models)
-        utils.config.save_models_to_file(all_available_models)
+        config_utils.save_models_to_file(all_available_models)
         return all_available_models
     else:
-        return config.load_models_from_file()
+        return config_utils.load_models_from_file()
 
 
 def check_model_available(model_to_check):

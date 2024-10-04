@@ -5,8 +5,8 @@ from src import kobold_api
 from src.engine import *
 from src.persona import *
 from src.app_manager import *
-from src.utils import config
-from src.utils.models import get_model_list
+from src.utils import config_utils
+from src.utils.model_management import get_model_list
 
 
 # Summary:
@@ -24,7 +24,7 @@ class BotLogic:
         self.local_model = kobold_api.LocalModel()
         self.command_handlers = {
             'help': self._handle_help,
-            'update models': self._handle_update_models,
+            'update_models': self._handle_update_models,
             'remember': self._handle_remember,
             'save': self._handle_save,
             'add': self._handle_add,

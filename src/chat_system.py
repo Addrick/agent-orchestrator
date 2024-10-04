@@ -1,11 +1,11 @@
 import os
 import logging
 
-import src.utils.messages
+import src.utils.message_utils
 from src.message_handler import *
 from src.persona import *
-from src.utils.config import save_personas_to_file, load_personas_from_file
-from src.utils.models import get_model_list
+from src.utils.config_utils import save_personas_to_file, load_personas_from_file
+from src.utils.model_management import get_model_list
 
 
 # ChatSystem

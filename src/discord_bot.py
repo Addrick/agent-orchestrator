@@ -7,7 +7,7 @@ from discord import HTTPException
 from config import global_config
 from config.global_config import *
 from config.global_config import DISCORD_CHAR_LIMIT
-from src.utils.messages import split_string_by_limit
+from src.utils.message_utils import split_string_by_limit
 
 
 # Summary:
