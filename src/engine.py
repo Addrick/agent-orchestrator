@@ -304,7 +304,7 @@ class TextEngine:
             text_content = response.text
         except AttributeError:
             # Handle the absence of response.text
-            text_content = f"```Response probably too spicy for Google, blocked at server.```"  # TODO: do a retry instead of just reporting it failed
+            text_content = f"```Response probably too spicy for Google, blocked at server. Try again, mix up your request a bit if it persists.```"  # TODO: do a retry instead of just reporting it failed
             logging.error(response.candidates[0].safety_ratings)
         return text_content
 
