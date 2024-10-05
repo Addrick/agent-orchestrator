@@ -7,7 +7,7 @@ from openai import OpenAI, AsyncOpenAI, APIError
 from vertexai.generative_models import HarmCategory, HarmBlockThreshold
 
 from config.global_config import *
-from src.utils import model_management
+from src.utils import model_utils
 from config import api_keys
 
 
@@ -35,7 +35,7 @@ class TextEngine:
         self.top_p = top_p
         self.json_request = None
         self.json_response = None
-        self.all_available_models = model_management.get_model_list()
+        self.all_available_models = model_utils.get_model_list()
 
         # OpenAI models
         # self.openai_client = AsyncOpenAI(api_key=api_keys.openai) # TODO: this should be here instead of
@@ -202,7 +202,7 @@ class TextEngine:
 
             # Print the streamed output to the console
             for chunk in completion:
-                print(chunk['choices'][0]['text'])
+                print(chunk.choices[0]['text'])
 
     async def _generate_local_response(self, prompt, message, context=None):
         """Generate a response using a local model (KoboldCPP)."""

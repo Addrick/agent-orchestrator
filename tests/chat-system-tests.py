@@ -1,7 +1,6 @@
 import unittest
-import asyncio
 from unittest.async_case import IsolatedAsyncioTestCase
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, patch
 from src.chat_system import ChatSystem
 from src.persona import Persona
 from src.engine import TextEngine

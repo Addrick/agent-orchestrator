@@ -2,7 +2,6 @@ import json
 import logging
 import os
 from config.global_config import PERSONA_SAVE_FILE
-from src.persona import Persona
 
 
 def load_models_from_file():
@@ -56,6 +55,7 @@ def to_dict(personas):
 
 
 def load_personas_from_file(file_path=PERSONA_SAVE_FILE):
+    from src.persona import Persona
     """Load personas from a JSON-formatted file."""
     if not os.path.exists(file_path):
         logging.warning(f"File '{file_path}' does not exist.")
