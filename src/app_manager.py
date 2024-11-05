@@ -14,7 +14,7 @@ For use with remote development and redeployment
 
 def update_app():
     # Path to local repository
-    repo_path = 'C:\\Users\Adam\Programming\Python\derpr-python'
+    repo_path = 'C:\\Users\\Adam\\Programming\\Python\\derpr-python'
     # 'https://github.com/Addrick/derpr-python/tree/master'
 
     # Open the repository

@@ -1,11 +1,32 @@
 # derpr todo:
 
+- check token count addendums aren't sent to LLM for processing
+- find a solution for the name repetition generation problem ('derpr derpr derpr <actual response>')
+
 - add module for voice chat functionality
 - explore utilizing rag
     > RAG-tuned models can be found on HF. can chatgpt or other general models utilize this?
     > I think RAG is done as a function within the transformer logic so it's unclear if a gguf can be used
     > seems related to being able to run internal functions so that may be good to implement alongside
 - expand image upload functionality to more models/APIs
+
+# PERSONA-ROUTING
+>> basically: how best to address one persona vs another?
+options:
+- first word of message as name (currently implemented for discord, should move to ChatSystem)
+- guild/channel name of message as name (currently implemented for discord, might be inherently discord-specific)
+- drop-down list via a UI
+-
+
+# WebUI:
+- add history support
+    > text history viewer
+    > context integration for requests
+- gui for parameter tuning
+- persona lister/selector in place of existing name text box
+- wizard for new or edit persona
+- make gradio stop spying on my shit and spamming my console (what do they even really want?)
+
 
 # Features:
 # TODO: TIME based memory instead of message #s or 'start conversation' system

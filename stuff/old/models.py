@@ -1,10 +1,10 @@
-from stuff import api_keys
+from config import api_keys
 from openai import OpenAI
 
 import google.generativeai as palm
 import inspect
 import sys
-from global_config import *
+from config.global_config import *
 
 
 # TODO: make 2 superclasses, OpenAI and Google, oh and Local, and utilize the built-in model names from publishers
