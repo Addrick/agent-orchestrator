@@ -2,7 +2,6 @@
 
 - check token count addendums aren't sent to LLM for processing
 - find a solution for the name repetition generation problem ('derpr derpr derpr <actual response>')
-- make gradio stop spying on my shit and spamming my console (what do they even really want?)
 
 - add module for voice chat functionality
 - explore utilizing rag
@@ -18,6 +17,16 @@ options:
 - guild/channel name of message as name (currently implemented for discord, might be inherently discord-specific)
 - drop-down list via a UI
 -
+
+# WebUI:
+- add history support
+    > text history viewer
+    > context integration for requests
+- gui for parameter tuning
+- persona lister/selector in place of existing name text box
+- wizard for new or edit persona
+- make gradio stop spying on my shit and spamming my console (what do they even really want?)
+
 
 # Features:
 # TODO: TIME based memory instead of message #s or 'start conversation' system
