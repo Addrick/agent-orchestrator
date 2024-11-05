@@ -1,8 +1,7 @@
 import asyncio
 import os
 import sys
-
-from src import local_terminal
+import logging
 from src.chat_system import ChatSystem
 from src.discord_bot import *
 from config.global_config import *
@@ -15,7 +14,7 @@ logging.basicConfig(level=logging.INFO, stream=sys.stdout, format='%(asctime)s -
 logger = logging.getLogger(__name__)
 
 if __name__ == "__main__":
-
+    print("Starting derpr...")
     if not os.path.exists(CHAT_LOG_LOCATION):
         os.makedirs(CHAT_LOG_LOCATION)
         logger.warning("Logs folder created!")
@@ -28,9 +27,18 @@ if __name__ == "__main__":
         discord_bot = create_discord_bot(bot)
         discord_bot.run(config.api_keys.discord)
 
-    else:
-        from datetime import datetime
+    if WEBUI:
+        from src.basic_webui import WebUI
+        webui = WebUI(bot)
 
+        # from src import local_terminal, webui
+        # from src.webui import server
+        # webui = server.launch_webui(bot=bot)
+
+    else:
+        print("No standard chat interfaces enabled, defaulting to command line...")
+        from datetime import datetime
+        from src import local_terminal
         client = local_terminal.Client()
         while 1:
             message = input("Enter a message: ")

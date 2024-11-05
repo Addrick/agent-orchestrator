@@ -1,7 +1,3 @@
-import os
-import logging
-
-import src.utils.messages
 from src.message_handler import *
 from src.persona import *
 from src.utils.config import save_personas_to_file, load_personas_from_file
@@ -44,6 +40,7 @@ class ChatSystem:
         else:
             logging.info(f"Failed to add to prompt, persona '{persona_name}' does not exist.")
 
+    # async def generate_response(self, persona_name, message, context='', image_url=None):
     async def generate_response(self, persona_name, message, context='', image_url=None):
         """Generate a response using the specified persona and message channel."""
         # skip any images if the model can't handle it (currently only gpt-4o)

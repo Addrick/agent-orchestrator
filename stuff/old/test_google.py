@@ -4,7 +4,7 @@ also known as a waste of a supercomputer
 """
 
 import google.generativeai as palm
-from stuff import api_keys
+from config import api_keys
 
 
 def ask_palm(prompt, messages):

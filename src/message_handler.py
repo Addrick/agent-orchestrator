@@ -1,6 +1,3 @@
-import logging
-import re
-
 from src import kobold_api
 from src.engine import *
 from src.persona import *
@@ -59,7 +56,7 @@ class BotLogic:
             else:
                 return handler()
         logging.debug("No dev commands found.")
-        return None
+        return self.persona_name
 
     def _handle_help(self):
         help_msg = "" \

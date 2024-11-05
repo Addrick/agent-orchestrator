@@ -1,4 +1,5 @@
-from src import engine
+import logging
+
 from src.message_handler import *
 from config.global_config import *
 
@@ -67,7 +68,8 @@ class Persona:
         return self.prompt
 
     def set_model(self, model_name):
-        model = engine.TextEngine(model_name,
+        import src.engine
+        model = src.engine.TextEngine(model_name,
                                   token_limit=(self.response_token_limit+1),
                                   top_k=self.top_k,
                                   top_p=self.top_p)
