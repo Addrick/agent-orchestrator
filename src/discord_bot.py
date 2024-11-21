@@ -1,12 +1,13 @@
 import logging
 import re
+from datetime import timedelta
 
 import discord
 from discord import HTTPException
 
 from config import global_config
 from config.global_config import *
-from config.global_config import DISCORD_CHAR_LIMIT
+from config.global_config import DISCORD_CHAR_LIMIT, DEFAULT_CONVERSATIONAL_PAUSE_LIMIT
 from src.utils.message_utils import split_string_by_limit
 
 
@@ -86,7 +87,7 @@ def create_discord_bot(chat_system):
 
                         image_url = await get_image_attachments(message)
 
-                        context = await history_gatherer(channel, message, persona_mention)
+                        context = await history_gatherer(channel, message, persona_mention, cutoff_timer)
 
                         await set_status_streaming(persona_name)
 
@@ -117,15 +118,20 @@ def create_discord_bot(chat_system):
             image_url = image_url_pattern.search(message.content)[0]
         return image_url
 
-    async def history_gatherer(channel, message, persona_mention): # TODO: explore using local chat logs instead of chat-platform-specific message queries (would not respect deleted messages without a bunch of work which is why I have it this way)
+    async def history_gatherer(channel, message, persona_mention, cutoff_timer=DEFAULT_CONVERSATIONAL_PAUSE_LIMIT): # TODO: explore using local chat logs instead of chat-platform-specific message queries (would not respect deleted messages without a bunch of work which is why I have it this way)
         context = []
         history = channel.history(before=message,
                                   limit=global_config.GLOBAL_CONTEXT_LIMIT)  # TODO: use persona-specific context limit here?
         async for msg in history:
+            time_difference = message.created_at - msg.created_at
+            if time_difference > timedelta(seconds=cutoff_timer):
+                # If the message is older than the cutoff, skip it
+                continue
             if msg.author is not client.user.id and msg.channel.name.startswith(persona_mention):
                 msg.content = persona_mention + " " + msg.content
-            # If a message begins with derpr: <persona_name> ``` the message is considered a dev message response and also skipped
-            # # zero-width space is a hack used in send_dev_command to escape existing code commenting
+            # If a message begins with derpr: <persona_name> ``` the message is considered a dev message response and
+            # also skipped
+            # zero-width space is a hack used in send_dev_command to escape existing code commenting in messages
             is_previous_dev_response = 'derpr: ' + persona_mention + ' `​``' in msg.content
             if bot.bot_logic.preprocess_message(msg, check_only=True) or is_previous_dev_response:
                 continue

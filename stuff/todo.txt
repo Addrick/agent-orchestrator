@@ -1,6 +1,12 @@
-# derpr todo:
+##derprtodo:
 
-- check token count addendums aren't sent to LLM for processing
+## new time-based context aggregator
+- add method to change and check what the message timeout is
+- test n whatnot
+
+- find better solution for api keys (and apparently things like 'google_project_id') for when running on other devices
+- move addon selection (discord, webui etc) somewhere more accessible (launch params? gui? startup prompt?)
+- check the token count addendum isn't sent to LLM for processing
 - find a solution for the name repetition generation problem ('derpr derpr derpr <actual response>')
 
 - add module for voice chat functionality
@@ -26,6 +32,7 @@ options:
 - persona lister/selector in place of existing name text box
 - wizard for new or edit persona
 - make gradio stop spying on my shit and spamming my console (what do they even really want?)
+    > https://github.com/gradio-app/gradio/pull/4194
 
 
 # Features:
