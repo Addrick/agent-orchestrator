@@ -3,6 +3,7 @@ import config.api_keys as api_keys
 from src.message_handler import *
 from src.utils import config_utils
 import openai
+import logging
 
 
 def refresh_available_openai_models():
@@ -49,7 +50,7 @@ def refresh_available_anthropic_models():
     return models
 
 
-def get_model_list(update=False):
+def get_model_list(update=True):
     """
     # get_model_list(update=False): If the update parameter is set to True, the function queries the API to update
     # and print the list of available models from OpenAI and Google. If update is False, it will return the models

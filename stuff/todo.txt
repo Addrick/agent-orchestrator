@@ -4,6 +4,8 @@
 - add method to change and check what the message timeout is
 - test n whatnot
 
+
+- setting(s) that can be changed via chat (ie redirecting the console output to discord channel)
 - find better solution for api keys (and apparently things like 'google_project_id') for when running on other devices
 - move addon selection (discord, webui etc) somewhere more accessible (launch params? gui? startup prompt?)
 - check the token count addendum isn't sent to LLM for processing

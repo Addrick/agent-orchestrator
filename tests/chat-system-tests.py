@@ -1,5 +1,6 @@
 import unittest
 import asyncio
+import logging
 from unittest.async_case import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, patch, MagicMock
 from src.chat_system import ChatSystem
@@ -10,6 +11,15 @@ from src.engine import TextEngine
 class TestChatSystem(IsolatedAsyncioTestCase):
     def setUp(self):
         self.chat_system = ChatSystem()
+    # Store the current directory
+        self.original_directory = os.getcwd()
+        print(self.original_directory)
+        # Change to the desired directory
+        # os.chdir('/../')
+
+    def tearDown(self):
+        # Change back to the original directory after the test
+        os.chdir(self.original_directory)
 
     def test_add_persona(self):
         self.chat_system.add_persona("test_persona", "gpt-3.5-turbo", "You are a helpful assistant.", 10, 100)
