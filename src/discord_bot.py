@@ -96,9 +96,12 @@ def create_discord_bot(chat_system):
                         if dev_response is None:
                             async with channel.typing():
                                 # If no dev response found, process as a bot request
-                                response = await bot.generate_response(persona_name, message.content, context=context, image_url=image_url)
-                                await send_message(channel, response, char_limit=DISCORD_CHAR_LIMIT)
-                                await reset_discord_status()
+                                try:
+                                    response = await bot.generate_response(persona_name, message.content, context=context, image_url=image_url)
+                                except TypeError as e:
+                                    response = "Request failed: " + str(e)
+                            await send_message(channel, response, char_limit=DISCORD_CHAR_LIMIT)
+                            await reset_discord_status()
 
                         else:  # If dev message found, send it now and reset status
                             await send_discord_dev_message(channel, dev_response)
@@ -201,7 +204,7 @@ async def send_discord_dev_message(channel, msg: str):
     # msg.replace("```", "\```")
     formatted_msg = re.sub('```', '`\u200B``', msg)
     # Split the response into multiple messages if it exceeds 2000 characters
-    chunks = split_string_by_limit(formatted_msg, DISCORD_CHAR_LIMIT)
+    chunks = split_string_by_limit(formatted_msg, DISCORD_CHAR_LIMIT-6)
     for chunk in chunks:
         try:
             await channel.send(f"```{chunk}```")
