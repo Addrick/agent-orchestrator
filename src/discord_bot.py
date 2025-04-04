@@ -1,5 +1,4 @@
 import logging
-import re
 
 import discord
 from discord import HTTPException
@@ -121,7 +120,7 @@ async def set_status_streaming(client, persona_name):
         activity = discord.Activity(
             type=discord.ActivityType.streaming,
             name=persona_name + '...',
-            url='https://www.twitch.tv/discordmakesmedothis')  # Static URL from original code
+            url='https://www.twitch.tv/discordmakesmedothis')
         await client.change_presence(activity=activity)
         logger.info(f"Set status to streaming {persona_name}")
     except Exception as e:
@@ -129,19 +128,33 @@ async def set_status_streaming(client, persona_name):
 
 
 async def reset_discord_status(client, chat_system):
-    """ Resets the bot's status to default watching."""
+    """ Resets the bot's status, respecting Discord's character limit."""
     try:
         available_personas = ', '.join(list(chat_system.get_persona_list().keys()))
-        # presence_txt = f"as {available_personas} 👀"
-        presence_txt = f"👀"
-        activity = discord.Activity(name=presence_txt, type=discord.ActivityType.watching)
+
+        # Check if the desired text exceeds the limit
+        if len(available_personas) > DISCORD_STATUS_LIMIT:
+            # Calculate how much to truncate (leave space for the extra added text)
+            truncate_at = DISCORD_STATUS_LIMIT - 5
+            presence_txt = available_personas[:truncate_at]
+            logger.warning(f"Status text exceeded {DISCORD_STATUS_LIMIT} chars. Truncated.")
+        else:
+            presence_txt = available_personas
+
+        # Construct the desired base status text
+        formatted_presence_txt = f"as {presence_txt} 👀"
+
+        # Set the activity using the potentially truncated text
+        activity = discord.Activity(name=formatted_presence_txt, type=discord.ActivityType.watching)
         await client.change_presence(activity=activity)
-        logger.info(f"Reset status to watching: {presence_txt}")
+        logger.debug(f"Reset status to watching: {formatted_presence_txt}")
+
+    except discord.errors.HTTPException as e:
+        logger.error(f"Failed to set status due to Discord API error: {e}")
     except Exception as e:
-        logger.error(f"Failed to reset status: {e}")
+        # Catch any other unexpected errors
+        logger.error(f"An unexpected error occurred while resetting status: {e}", exc_info=True)  # Log traceback
 
-
-# --- Main Bot Creation Function (Refactored) ---
 
 def create_discord_bot(chat_system):
     """Creates and configures the Discord bot client."""
@@ -220,14 +233,13 @@ def create_discord_bot(chat_system):
                     context = await history_gatherer(client, channel, message, persona_mention_prefix, bot.bot_logic,
                                                      global_config.GLOBAL_CONTEXT_LIMIT)
 
-                    await set_status_streaming(client, active_persona_name)
-
                     # Message processing starts
                     # Check for dev commands first (using original message object)
                     dev_response = bot.bot_logic.preprocess_message(message)
 
                     if dev_response is None:
                         # No dev command, generate normal response
+                        await set_status_streaming(client, active_persona_name)
                         async with channel.typing():  # Keep typing indicator active
                             try:
                                 # Use the (potentially modified) message.content
