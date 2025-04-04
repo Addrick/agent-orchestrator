@@ -36,7 +36,7 @@ class ChatSystem:
     def add_to_prompt(self, persona_name, text_to_add):
         """Add text to a persona's prompt."""
         if persona_name in self.personas:
-            self.personas[persona_name].add_to_prompt(text_to_add)
+            self.personas[persona_name].update_prompt(text_to_add)
         else:
             logging.info(f"Failed to add to prompt, persona '{persona_name}' does not exist.")
 
@@ -44,7 +44,7 @@ class ChatSystem:
         """Generate a response using the specified persona and message channel."""
         # skip any images if the model can't handle it (currently only gpt-4o)
         # todo: determine if other apis support this and if I can tell which do via some request
-        if self.personas[persona_name].model.model_name != 'gpt-4o':
+        if self.personas[persona_name].model.model_name != 'gpt-4o' and image_url is not None:
             image_url = None
             logging.warning('Image URL discarded because the selected model is not gpt-4o and it cannot handle images (yet).')
         if persona_name in self.personas:
