@@ -69,7 +69,7 @@ def create_discord_bot(chat_system):
         # check new discord message for instance of persona name
         if message.author.id != client.user.id:
             # check for persona mention in message
-            for persona_name, persona in bot.get_persona_list().items():
+            for persona_name, persona in list(bot.get_persona_list().items()):
                 persona_mention = f"{persona_name}"
                 logging.debug('Checking for persona name: ' + persona_name)
                 if (message.content.lower().startswith(persona_mention) or
