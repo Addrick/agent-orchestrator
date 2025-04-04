@@ -1,5 +1,16 @@
-# derpr todo:
+### TESTING ###
+-
 
+### BUGS ###
+-
+
+#### derpr todo:
+- rewrite OpenAI reasoning (perhaps others) to utilize the Responses API instead (allows for summary of reasoning process)
+- change default parameter handling to simply not provide a value which will use the provider's default values instead of my somewhat arbitrary ones
+- when ready as an offering to clients, explore utilizing ATL's existing workspace subscription and compare capabilities, ie does it integrate with her GMail contents?
+- explore fine-tuning and RAG for purposes of creating an ai technician with org-specific focus/knowledge
+- update google model names per email (3/6/25)
+- add logit bias for 'fuck' or other things to see if derpr gets funny
 - add module for voice chat functionality
 - explore utilizing rag
     > RAG-tuned models can be found on HF. can chatgpt or other general models utilize this?
@@ -13,6 +24,7 @@
 # TODO: add multiple hyperparameter fields for personas to account for differences in models (ie openai_temp vs local_model_x_temp. Wonder if some kind of crude modifiers can work)
 # TODO: create new TODOs via chat interface (dev command to write to this file? need to make .txt for security)
 # TODO: command to toggle token and model display
+# TODO: add token counter and model display for anthropic and google models
 # TODO: include context count in reply w/tokens
 # TODO: consider making personas use server or channel specific configurations for context and other params
 
