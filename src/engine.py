@@ -1,9 +1,10 @@
 import json
 import logging
+import re
+
 import aiohttp
 import anthropic
 
-from openai import OpenAI, AsyncOpenAI, APIError
 from vertexai.generative_models import HarmCategory, HarmBlockThreshold
 
 from config.global_config import *
@@ -38,12 +39,10 @@ class TextEngine:
         self.all_available_models = model_utils.get_model_list()
 
         # OpenAI models
-        # self.openai_client = AsyncOpenAI(api_key=api_keys.openai) # TODO: this should be here instead of
-        #  re-instantiated on every _generate_openai_response call but when moving declaration here 'await' throws an
-        #  error and not using await blocks code during the request
         self.openai_models_available = self.all_available_models['From OpenAI']
         self.frequency_penalty = 0
         self.presence_penalty = 0
+        self.openai_client = None
 
         # Google models
         self.google_models_available = self.all_available_models['From Google']
@@ -58,10 +57,14 @@ class TextEngine:
         # Anthropic models
         self.anthropic_models_available = self.all_available_models['From Anthropic']
 
-        self.openai_client = OpenAI(api_key=api_keys.openai)
-
         # Local models
-        # TODO: add me (Kobold cpp?)
+        # TODO: add me after finishing. Kobold will be launched with a particular model and takes ages to start up; model selection must be done on startup/shutdown
+
+    async def initialize_openai_client(self):
+
+        from openai import OpenAI, AsyncOpenAI, APIError
+
+        self.openai_client = AsyncOpenAI(api_key=api_keys.openai)
 
     def get_raw_json_request(self):
         return self.json_request
@@ -95,7 +98,35 @@ class TextEngine:
         self.max_tokens = token_limit
         # OpenAI request
         if self.model_name in self.openai_models_available:
-            response = await self._generate_openai_response(prompt, message, context, image_url)
+            # Search models
+            if any(token in self.model_name for token in ["search"]):
+                response = await self._generate_openai_search_response(prompt, message, context, image_url)
+                return response
+            # Chat models
+            if any(token in self.model_name for token in ["gpt-4", "gpt-3.5-turbo", "chatgpt"]):
+                response = await self._generate_openai_response(prompt, message, context, image_url)
+                return response
+            # Reasoning models
+            if re.match(r'^o\d+(?:-|$)', self.model_name):
+                response = await self._generate_openai_reasoning_response(prompt, message, context, image_url)
+                return response
+            # Image generation models
+            # elif "dall-e" in self.model_name.lower():
+            #     # return "image"
+            #     # response = await self._generate_openai_image_response(prompt, message, context, image_url)
+            # # Audio transcription/processing (e.g., Whisper)
+            # elif "whisper" in self.model_name.lower():
+            #     # return "audio"
+            #     # response = await self._generate_openai_audio_response(prompt, message, context, image_url)
+            # # Embedding models
+            # elif "embedding" in self.model_name.lower():
+            #     # return "embedding"
+            #     # response = await self._generate_openai_embedding_response(prompt, message, context, image_url)
+            # # Standard completions (older models)
+            # elif any(token in self.model_name for token in ["davinci", "babbage", "curie", "ada"]):
+            # return "completion"
+            # response = await self._generate_openai_completion_response(prompt, message, context, image_url)
+
 
         # Anthropic request
         elif self.model_name in self.anthropic_models_available:
@@ -116,6 +147,7 @@ class TextEngine:
 
         return response
 
+    # OpenAI
     async def _generate_openai_response(self, prompt, message, context, image_url=None):
         """Prepare messages for async OpenAI API call."""
         if context is not None:
@@ -135,16 +167,61 @@ class TextEngine:
                     "image_url":
                         {"url": image_url}}]})
 
-        openai_client = AsyncOpenAI(api_key=api_keys.openai)  # TODO: put this somewhere better
+        if self.openai_client is None:
+            await self.initialize_openai_client()
+
         self.json_request = self.parse_request_json(messages)
 
         try:
-            completion = await openai_client.chat.completions.create(
+            completion = await self.openai_client.chat.completions.create(
                 messages=messages,
                 model=self.model_name,
-                temperature=self.temperature,
+                # temperature=self.temperature,
                 max_tokens=self.max_tokens,
-                top_p=self.top_p,
+                # top_p=self.top_p,
+                # frequency_penalty=self.frequency_penalty,
+                # presence_penalty=self.presence_penalty,
+            )
+            self.json_response = completion
+            token_count_and_model = f' ({str(completion.usage.total_tokens)} tokens using {self.model_name})'
+            response = completion.choices[0].message.content
+            logging.debug(response + token_count_and_model)
+            return response + token_count_and_model
+
+        except Exception as e:
+            return str(e)
+        # except AttributeError as e:
+        #     return str(e)
+
+    async def _generate_openai_reasoning_response(self, prompt, message, context, image_url=None):
+
+        """Prepare messages for async OpenAI API call."""
+        if context is not None:
+            messages = [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": context},
+                # TODO: try iterating this for 1 msg/context block for better model processing?
+                {"role": "user", "content": message}]
+        else:
+            messages = [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": message}]
+        if image_url is not None:
+            messages.append(
+                {"role": "user", "content": [{
+                    "type": "image_url",
+                    "image_url":
+                        {"url": image_url}}]})
+
+        self.json_request = self.parse_request_json(messages)
+
+        if self.openai_client is None:
+            await self.initialize_openai_client()
+
+        try:
+            completion = await self.openai_client.chat.completions.create(
+                messages=messages,
+                model=self.model_name,
                 frequency_penalty=self.frequency_penalty,
                 presence_penalty=self.presence_penalty,
             )
@@ -154,56 +231,110 @@ class TextEngine:
             logging.debug(response + token_count_and_model)
             return response + token_count_and_model
 
-        except APIError as e:
+        except Exception as e:
             return e.code + ": \n" + e.message
-        except AttributeError as e:
-            return str(e)
+        # except AttributeError as e:
+        #     return str(e)
 
-    # response = client.chat.completions.create(
-    #     model="gpt-4o",
-    #     messages=[
-    #         {
-    #             "role": "user",
-    #             "content": [
-    #                 {"type": "text", "text": "What's in this image?"},
-    #                 {
-    #                     "type": "image_url",
-    #                     "image_url": {
-    #                         "url": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",
-    #                     }
-    #                 },
-    #             ],
-    #         }
-    #     ],
-    #     max_tokens=300,
-    # )
-    #
-    # print(response.choices[0])
-
-    async def _generate_openai_response_stream(self, messages):
-        # TODO: finish if I ever get a use case for streamed output
-        # currently does not provide usage field for token usage reporting and provides no current benefit
-        from openai import AsyncOpenAI
-        client = AsyncOpenAI(api_key=api_keys.openai)  # TODO: put this somewhere better, may be a memory leak
-        if self.model_name not in self.openai_models_available:
-            logging.info("Error: model name not found in available OpenAI models.")
-            return "Error: model name not found in available OpenAI models."
+    async def _generate_openai_search_response(self, prompt, message, context, image_url=None):
+        """Prepare messages for async OpenAI API call."""
+        if context is not None:
+            messages = [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": context},
+                # TODO: try iterating this for 1 msg/context block for better model processing?
+                {"role": "user", "content": message}]
         else:
-            completion = await client.chat.completions.create(
+            messages = [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": message}]
+        if image_url is not None:
+            messages.append(
+                {"role": "user", "content": [{
+                    "type": "image_url",
+                    "image_url":
+                        {"url": image_url}}]})
+
+        self.json_request = self.parse_request_json(messages)
+
+        if self.openai_client is None:
+            await self.initialize_openai_client()
+
+        try:
+            completion = await self.openai_client.chat.completions.create(
                 messages=messages,
                 model=self.model_name,
-                temperature=self.temperature,
+                # temperature=self.temperature,
                 max_tokens=self.max_tokens,
-                top_p=self.top_p,
-                frequency_penalty=self.frequency_penalty,
-                presence_penalty=self.presence_penalty,
-                stream=True
+                # top_p=self.top_p,
+                # frequency_penalty=self.frequency_penalty,
+                # presence_penalty=self.presence_penalty,
             )
+            self.json_response = completion
+            token_count_and_model = f' ({str(completion.usage.total_tokens)} tokens using {self.model_name})'
+            response = completion.choices[0].message.content
+            logging.debug(response + token_count_and_model)
+            return response + token_count_and_model
 
-            # Print the streamed output to the console
-            for chunk in completion:
-                print(chunk.choices[0]['text'])
+        except Exception as e:
+            return str(e)
+        # except AttributeError as e:
+        #     return str(e)
 
+    # Google # TODO: async?
+    def _generate_google_response(self, prompt, message, context):
+        """Generate a response using Google's Vertex AI."""
+        import vertexai
+        from vertexai.generative_models import GenerativeModel
+
+        vertexai.init(project=api_keys.google_project_id, location="us-east1")
+
+        # TODO: further test and refine context and prompt structure
+        # TODO: add model parameter customization
+
+        model = GenerativeModel(self.model_name)
+
+        request = '### Instructions: ###' + prompt + '\n### Recent chat history: ### \n' + str(
+            context) + '\n### Now respond to the most recent message: ###\n' + message
+        self.json_request = self.parse_request_json(request)
+
+        response = model.generate_content(
+            request,
+            safety_settings=self.unsafe_settings
+        )
+        try:
+            text_content = response.text
+        except ValueError:
+            # Handle the absence of response.text
+            text_content = f"```Response too spicy for Google, blocked at server. Try again, mix up your request a bit if it persists.```"  # TODO: do a retry instead of just reporting it failed
+            logging.error(response.candidates[0].safety_ratings)
+        return text_content
+
+    # Anthropic
+    async def _generate_anthropic_response(self, prompt, message, context):
+        """Generate a response using Anthropic API."""
+        if context is not None:
+            messages = [
+                {"role": "user", "content": f'{context} \n {message}'}]
+            # TODO: this needs distinct flagging of assistant message, so logic based on username
+        else:
+            messages = [
+                {"role": "user", "content": message}]
+        client = anthropic.Anthropic(api_key=api_keys.anthropic)
+        self.json_request = self.parse_request_json(messages)
+        message = client.messages.create(
+            system=prompt,
+            model=self.model_name,
+            temperature=self.temperature,
+            top_p=self.top_p,
+            top_k=self.top_k,
+            max_tokens=self.max_tokens,
+            messages=messages,
+            stream=False
+        )
+        return message.content[0].text
+
+    # KoboldCPP
     async def _generate_local_response(self, prompt, message, context=None):
         """Generate a response using a local model (KoboldCPP)."""
         # Message formatting must match model's expected syntax for best results (TODO: find a way to automate the formatting)
@@ -257,64 +388,14 @@ class TextEngine:
             logging.info(err_response)
             return err_response
 
-    async def _generate_anthropic_response(self, prompt, message, context):
-        """Generate a response using Anthropic API."""
-        if context is not None:
-            messages = [
-                {"role": "user", "content": f'{context} \n {message}'}]
-            # TODO: this needs distinct flagging of assistant message, so logic based on username
-        else:
-            messages = [
-                {"role": "user", "content": message}]
-        client = anthropic.Anthropic(api_key=api_keys.anthropic)
-        self.json_request = self.parse_request_json(messages)
-        message = client.messages.create(
-            system=prompt,
-            model=self.model_name,
-            temperature=self.temperature,
-            top_p=self.top_p,
-            top_k=self.top_k,
-            max_tokens=self.max_tokens,
-            messages=messages,
-            stream=False
-        )
-        return message.content[0].text
-
-    def _generate_google_response(self, prompt, message, context):
-        """Generate a response using Google's Vertex AI."""
-        import vertexai
-        from vertexai.generative_models import GenerativeModel
-
-        vertexai.init(project=api_keys.google_project_id, location="us-east1")
-
-        # TODO: further test and refine context and prompt structure
-        # TODO: add model parameter customization
-
-        model = GenerativeModel(self.model_name)
-
-        request = '### Instructions: ###' + prompt + '\n### Recent chat history: ### \n' + str(
-            context) + '\n### Now respond to the most recent message: ###\n' + message
-        self.json_request = self.parse_request_json(request)
-
-        response = model.generate_content(
-            request,
-            safety_settings=self.unsafe_settings
-        )
-        try:
-            text_content = response.text
-        except ValueError:
-            # Handle the absence of response.text
-            text_content = f"```Response probably too spicy for Google, blocked at server. Try again, mix up your request a bit if it persists.```"  # TODO: do a retry instead of just reporting it failed
-            logging.error(response.candidates[0].safety_ratings)
-        return text_content
-
+    # JSON Utility
     def parse_request_json(self, messages):
         last_json = {
             "model": self.model_name,
             "messages": messages,
             "options": {
                 "temperature": self.temperature,
-                "max_tokens": self.max_tokens,
+                "max_completion_tokens": self.max_tokens,
                 "top_p": self.top_p,
                 "frequency_penalty": self.frequency_penalty,
                 "presence_penalty": self.presence_penalty
