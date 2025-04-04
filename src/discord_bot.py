@@ -14,24 +14,43 @@ from src.utils.message_utils import split_string_by_limit
 # This code implements a Discord bot using the discord.py library. The bot manages multiple personas,
 # responds to messages, and handles various commands. It includes features like logging, context
 # gathering, and dynamic status updates. The bot uses an external ChatSystem for generating responses.
-#
-# Declare all discort intents and instantiating Discord client - declaring 'all' intents for simplicity while testing
-# intents = discord.Intents.all()
-# client = discord.Client(intents=intents)
-# guild = discord.Guild
 
-# Import ChatSystem for use of core bot logic
-# bot = ChatSystem()
-# bot.load_personas_from_file(PERSONA_SAVE_FILE)
-
-# Discord channel to dump log messages for remote debugging
-# debug_channel = client.get_channel(1222358674127982622)
+class ConnectionErrorFilter(logging.Filter):
+    def filter(self, record):
+        # Filter out specific connection-related log messages
+        connection_keywords = [
+            'Attempting a reconnect',
+            'WebSocket closed',
+            'ConnectionClosed',
+            'ClientConnectorError'
+        ]
+        return not any(keyword in record.getMessage() for keyword in connection_keywords)
 
 
 class CustomDiscordBot(discord.Client):
     def __init__(self, chat_system, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.bot = chat_system
+
+        # Set up error handling for connection issues
+        self.add_error_handler()
+
+    def add_error_handler(self):
+        # Configure logging to reduce noise from connection errors
+        logger = logging.getLogger('discord')
+        connection_filter = ConnectionErrorFilter()
+        logger.addFilter(connection_filter)
+
+        # Optional: Set logging level for discord-related logs
+        logger.setLevel(logging.WARNING)
+
+    async def on_disconnect(self):
+        """Custom disconnect handler"""
+        logging.info("Discord client disconnected. Attempting to reconnect...")
+
+    async def on_connect(self):
+        """Custom connect handler"""
+        logging.info("Discord client connected successfully.")
 
 
 def create_discord_bot(chat_system):
@@ -155,48 +174,6 @@ def create_discord_bot(chat_system):
             activity=discord.Activity(name=presence_txt, type=discord.ActivityType.watching))
 
     return client
-
-
-# # Module to forward console messages to discord
-    #     # Redirect console output to discord for remote monitoring
-    #     discord_console = discord_bot.DiscordConsoleOutput()
-    #     # sys.stdout = discord_console
-    #     # sys.stderr = discord_console
-    #     # sys.excepthook = discord_console.discord_excepthook
-# class DiscordConsoleOutput:
-#     def __init__(self):
-#         self.DISCORD_DISCONNECT_TIME = None
-#
-#     def write(self, msg):
-#         asyncio.ensure_future(send_dev_message(debug_channel, msg))
-#
-#     def flush(self):
-#         pass
-#
-#     def discord_excepthook(self, type, value, traceback):
-#         if issubclass(type, ConnectionError):
-#             asyncio.create_task(self.on_disconnect())
-#         else:
-#             error_report = f'Error logged: \n {type} \n {value} \n {traceback}'
-#             asyncio.create_task(send_dev_message(debug_channel, error_report))
-#
-#     def on_disconnect(self):  # Disconnects must be handled as a special case so it does not flood the channel on reconnect and cause another disconnect
-#         if self.DISCORD_DISCONNECT_TIME is None:
-#             self.DISCORD_DISCONNECT_TIME = datetime.datetime.now()
-#         else:
-#             pass
-#
-#
-# class DiscordLogHandler(logging.Handler):
-#     def __init__(self):
-#         super().__init__()
-#         self.debug_channel = client.get_channel(1222358674127982622)
-#
-#     def emit(self, record):
-#         log_message = self.format(record)
-#         if 'ClientConnectorError' in log_message or 'We are being rate limited.' in log_message:
-#             return  # Do not send message if log_message contains discord connection/rate limit errors
-#         asyncio.create_task(send_dev_message(self.debug_channel, log_message))
 
 
 async def send_discord_dev_message(channel, msg: str):
