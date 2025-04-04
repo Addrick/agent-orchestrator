@@ -2,14 +2,15 @@ import config.api_keys as api_keys
 
 from src.message_handler import *
 from src.utils import save_utils
-import openai
 
 
 def refresh_available_openai_models():
     """# OpenAI API query to get current list of active models"""
+    import openai
     client = openai.OpenAI(api_key=api_keys.openai)
     openai_models = client.models.list()
-    trimmed_list = [model.id for model in openai_models if 'gpt-3' in model.id or 'gpt-4' in model.id]
+    trimmed_list = [model.id for model in openai_models]
+    # trimmed_list = [model.id for model in openai_models if 'gpt-3' in model.id or 'gpt-4' in model.id]
     logging.debug(trimmed_list)
     return trimmed_list
 
@@ -34,19 +35,22 @@ def refresh_available_google_models():
 
 
 def refresh_available_anthropic_models():
-    """# Anthropic
-    # TODO: can't find api call, some other way to get this information dynamically?
-    # can maybe dig names out of the python library: https://github.com/anthropics/anthropic-sdk-python/blob/0336233fc076f20017b28433df9e3d9dd56ffa8d/src/anthropic/types/message_create_params.py#L127
-    #     anthropic-sdk-python/src/anthropic/types/message_create_params.py"""
-    models = [
-        "claude-3-5-sonnet-20240620",
-        "claude-3-opus-20240229",
-        "claude-3-sonnet-20240229",
-        "claude-3-haiku-20240307",
-        "claude-2.1",
-        "claude-2.0",
-        "claude-instant-1.2"]
-    return models
+    import anthropic
+    from dotenv import load_dotenv
+    import os
+
+    # load .env for api key
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    root_dir = os.path.join(current_dir, '..\..')
+    load_dotenv(os.path.join(root_dir, '.env'))
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+
+    client = anthropic.Anthropic(api_key=api_key)
+    models = client.models.list(limit=20)
+    model_infos = models.data
+    # Extract the 'id' field from each ModelInfo object
+    model_ids = [model_info.id for model_info in model_infos]
+    return model_ids
 
 
 def get_model_list(update=False):
