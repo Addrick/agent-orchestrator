@@ -18,6 +18,7 @@ from config.global_config import *
 
 load_dotenv()
 
+
 class TestTextEngine(IsolatedAsyncioTestCase):
     def setUp(self):
         self.text_engine = TextEngine("gpt-3.5-turbo",
