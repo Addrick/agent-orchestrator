@@ -1,5 +1,5 @@
 import logging
-
+import re
 import discord
 from discord import HTTPException
 
@@ -8,11 +8,13 @@ from config.global_config import *
 from config.global_config import DISCORD_CHAR_LIMIT
 from src.utils.message_utils import split_string_by_limit
 
+logger = logging.getLogger()
 
 # Summary:
 # This code implements a Discord bot using the discord.py library. The bot manages multiple personas,
 # responds to messages, and handles various commands. It includes features like logging, context
 # gathering, and dynamic status updates. The bot uses an external ChatSystem for generating responses.
+
 
 class ConnectionErrorFilter(logging.Filter):
     def filter(self, record):
@@ -51,19 +53,6 @@ class CustomDiscordBot(discord.Client):
         """Custom connect handler"""
         logging.info("Discord client connected successfully.")
 
-
-import discord
-import logging
-import re
-
-# Assume CustomDiscordBot, DISCORD_DEBUG_CHANNEL, CHAT_LOG_LOCATION,
-# global_config, DISCORD_CHAR_LIMIT, send_message, send_discord_dev_message
-# are defined or imported elsewhere in this file (src.discord_bot.py)
-
-logger = logging.getLogger()  # Assuming logger might be used in helpers too
-
-
-# --- Helper Functions (Moved to Module Level) ---
 
 async def get_image_attachments(message):
     """Gets image attachments or URLs from a message."""
