@@ -23,7 +23,9 @@ class ConnectionErrorFilter(logging.Filter):
             'Attempting a reconnect',
             'WebSocket closed',
             'ConnectionClosed',
-            'ClientConnectorError'
+            'ClientConnectorError',
+            'Shard ID None has connected to Gateway'
+            'Shard ID None has successfully RESUMED'
         ]
         return not any(keyword in record.getMessage() for keyword in connection_keywords)
 
@@ -38,16 +40,15 @@ class CustomDiscordBot(discord.Client):
 
     def add_error_handler(self):
         # Configure logging to reduce noise from connection errors
-        logger = logging.getLogger('discord')
+        discord_logger = logging.getLogger('discord')
         connection_filter = ConnectionErrorFilter()
-        logger.addFilter(connection_filter)
+        discord_logger.addFilter(connection_filter)
 
-        # Optional: Set logging level for discord-related logs
-        logger.setLevel(logging.WARNING)
+        discord_logger.setLevel(logging.WARNING)
 
     async def on_disconnect(self):
         """Custom disconnect handler"""
-        logging.info("Discord client disconnected. Attempting to reconnect...")
+        logging.debug("Discord client disconnected. Attempting to reconnect...")
 
     async def on_connect(self):
         """Custom connect handler"""
@@ -229,25 +230,21 @@ def create_discord_bot(chat_system):
                     if dev_response is None:
                         # No dev command, generate normal response
                         await set_status_streaming(client, active_persona_name)
-                        async with channel.typing():  # Keep typing indicator active
-                            try:
-                                # Use the (potentially modified) message.content
-                                response = await bot.generate_response(active_persona_name, message.content,
-                                                                       context=context, image_url=image_url)
-                            except TypeError as e:
-                                response = f"Request failed: {e}"
-                            except Exception as e:
-                                logger.exception(f"Error during bot.generate_response for {active_persona_name}")
-                                response = "Sorry, I encountered an error while generating a response."
+                        try:
+                            # Use the (potentially modified) message.content
+                            response = await bot.generate_response(active_persona_name, message.content,
+                                                                   context=context, image_url=image_url)
+                        except TypeError as e:
+                            response = f"Request failed: {e}"
+                        except Exception as e:
+                            logger.exception(f"Error during bot.generate_response for {active_persona_name}")
+                            response = "Sorry, I encountered an error while generating a response."
 
-                        # Assuming send_message is defined/imported module level
-                        # Pass DISCORD_CHAR_LIMIT explicitly
                         await send_message(channel, response, char_limit=DISCORD_CHAR_LIMIT)
                         await reset_discord_status(client, chat_system)  # Reset status after sending
 
                     else:
                         # Dev command response found
-                        # Assuming send_discord_dev_message is defined/imported module level
                         await send_discord_dev_message(channel, dev_response)
                         await reset_discord_status(client, chat_system)  # Reset status after sending
 
@@ -267,7 +264,7 @@ def create_discord_bot(chat_system):
 
 
 async def send_discord_dev_message(channel, msg: str):
-    """Escape discord code formatting instances, seems to require this weird hack with a zero-width space"""
+    """Escape discord code formatting instances, seems to require this hack with a zero-width space"""
     # msg.replace("```", "\```")
     formatted_msg = re.sub('```', '`\u200B``', msg)
     # Split the response into multiple messages if it exceeds 2000 characters
