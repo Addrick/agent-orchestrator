@@ -7,6 +7,8 @@ from src.discord_bot import *
 from config.global_config import *
 
 import config.api_keys
+from dotenv import load_dotenv
+load_dotenv('.env')
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, stream=sys.stdout, format='%(asctime)s - %(message)s',

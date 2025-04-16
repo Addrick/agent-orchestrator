@@ -47,7 +47,7 @@ class Persona:
         self.model.set_temperature(new_temp)
 
     def set_top_p(self, new_top_p):
-        self.model.set_new_top_p(new_top_p)
+        self.model.set_top_p(new_top_p)
 
     def set_top_k(self, new_top_k):
         self.model.set_top_k(new_top_k)
@@ -85,7 +85,7 @@ class Persona:
     async def generate_response(self, message, context, image_url=None):
         logging.info('Querying response as ' + self.persona_name + '...')
         if self.context_length > 0:
-            context = context[1:self.context_length+1]
+            context = context[0:self.context_length+1]
             context = context[::-1]  # Reverse the history list
             context = " \n".join(context)
             context = 'recent chat history: \n' + context
@@ -97,7 +97,7 @@ class Persona:
         self.last_json = self.model.get_raw_json_request()
 
         # conversation mode
-        if self.conversation_mode and self.context_length < GLOBAL_CONTEXT_LIMIT:
+        if self.conversation_mode and self.context_length <= (GLOBAL_CONTEXT_LIMIT-2):
             self.context_length += 2
 
         return response

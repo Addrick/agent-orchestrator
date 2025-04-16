@@ -2,8 +2,8 @@ from src import kobold_api
 from src.engine import *
 from src.persona import *
 from src.app_manager import *
-from src.utils import config_utils
-from src.utils.model_management import get_model_list
+from src.utils import save_utils
+from src.utils.model_utils import get_model_list
 
 
 # Summary:
@@ -160,20 +160,20 @@ class BotLogic:
             self.current_persona.set_prompt(prompt)
             logging.debug(f"Prompt set for '{self.persona_name}'.")
             # logging.info(f"Updated save for '{self.persona_name}'.")
-            config.save_personas_to_file(self.chat_system.personas)
+            save_utils.save_personas_to_file(self.chat_system.personas)
             response = 'Personas saved.'
             return response
         if self.args[0] == 'default_prompt':
             prompt = DEFAULT_PERSONA
             self.current_persona.set_prompt(prompt)
             logging.debug(f"Prompt set for '{self.persona_name}'.")
-            config.save_personas_to_file(self.chat_system.personas)
+            save_utils.save_personas_to_file(self.chat_system.personas)
             message = DEFAULT_WELCOME_REQUEST
             response = self.current_persona.generate_response(self.persona_name, message)
             return response
         elif self.args[0] == 'model':
             model_name = self.args[1]
-            if models.check_model_available(model_name):
+            if model_utils.check_model_available(model_name):
                 self.current_persona.set_model(model_name)
                 return f"Model set to '{model_name}'."
             else:
@@ -246,7 +246,7 @@ class BotLogic:
         return f"{self.persona_name}: {last_request}"
 
     def _handle_save(self):
-        config.save_personas_to_file(self.chat_system.personas)
+        save_utils.save_personas_to_file(self.chat_system.personas)
         response = 'Personas saved.'
         return response
 
