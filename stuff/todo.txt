@@ -9,7 +9,6 @@
 - change default parameter handling to simply not provide a value which will use the provider's default values instead of my somewhat arbitrary ones
 - when ready as an offering to clients, explore utilizing ATL's existing workspace subscription and compare capabilities, ie does it integrate with her GMail contents?
 - explore fine-tuning and RAG for purposes of creating an ai technician with org-specific focus/knowledge
-- update google model names per email (3/6/25)
 - add logit bias for 'fuck' or other things to see if derpr gets funny
 - add module for voice chat functionality
 - explore utilizing rag
