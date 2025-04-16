@@ -14,6 +14,7 @@ from src.utils.model_utils import get_model_list
 class BotLogic:
     def __init__(self, chat_system):
         self.persona_name = None
+        self.args = None
         self.message = None
         self.chat_system = chat_system
         self.current_persona = None
@@ -56,7 +57,7 @@ class BotLogic:
             else:
                 return handler()
         logging.debug("No dev commands found.")
-        return self.persona_name
+        return None
 
     def _handle_help(self):
         help_msg = "" \
