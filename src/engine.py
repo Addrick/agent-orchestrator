@@ -60,19 +60,19 @@ class TextEngine:
         self.unsafe_settings_google_generativeai = [
             {
                 "category": "HARM_CATEGORY_HARASSMENT",
-                "threshold": "BLOCK_ONLY_HIGH"  # Strictest for Harassment
+                "threshold": "BLOCK_NONE"
             },
             {
                 "category": "HARM_CATEGORY_HATE_SPEECH",
-                "threshold": "BLOCK_ONLY_HIGH"  # Default for Hate Speech
+                "threshold": "BLOCK_NONE"
             },
             {
                 "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                "threshold": "BLOCK_ONLY_HIGH"  # More permissive for Sexually Explicit
+                "threshold": "BLOCK_NONE"
             },
             {
                 "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                "threshold": "BLOCK_ONLY_HIGH"  # Default for Dangerous Content
+                "threshold": "BLOCK_NONE"
             }
             ]
 

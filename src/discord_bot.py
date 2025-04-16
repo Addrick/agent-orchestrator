@@ -20,12 +20,12 @@ class ConnectionErrorFilter(logging.Filter):
     def filter(self, record):
         # Filter out specific connection-related log messages
         connection_keywords = [
-            'Attempting a reconnect',
-            'WebSocket closed',
-            'ConnectionClosed',
-            'ClientConnectorError',
-            'Shard ID None has connected to Gateway'
-            'Shard ID None has successfully RESUMED'
+            # 'Attempting a reconnect',
+            # 'WebSocket closed',
+            # 'ConnectionClosed',
+            # 'ClientConnectorError',
+            # 'Shard ID None has connected to Gateway'
+            # 'Shard ID None has successfully RESUMED'
         ]
         return not any(keyword in record.getMessage() for keyword in connection_keywords)
 
@@ -157,9 +157,6 @@ def create_discord_bot(chat_system):
 
     @client.event
     async def on_ready():
-        # Logger is already defined at module level
-        # if global_config.DISCORD_LOGGER: # Assuming global_config is accessible
-        #     logger.addHandler(DiscordLogHandler()) # Assuming DiscordLogHandler is defined/imported
         logging.info('Hello {0.user} !'.format(client))
         # Call module-level helper
         await reset_discord_status(client, chat_system)
