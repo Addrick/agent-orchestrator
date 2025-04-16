@@ -1,6 +1,8 @@
 import unittest
 from unittest.async_case import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, patch, MagicMock
+import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -10,9 +12,21 @@ from src.engine import TextEngine
 
 load_dotenv()
 
+# Path to test personas file
+TEST_PERSONAS_FILE = os.path.join(os.path.dirname(__file__), 'test_personas')
+
+
 class TestChatSystem(IsolatedAsyncioTestCase):
 
     def setUp(self):
+        # Patch the PERSONA_SAVE_FILE constant to use the test file
+        self.persona_save_patch = patch('src.utils.save_utils.PERSONA_SAVE_FILE', TEST_PERSONAS_FILE)
+        self.persona_save_patch.start()
+
+        # Also patch any direct imports of PERSONA_SAVE_FILE
+        self.config_patch = patch('config.global_config.PERSONA_SAVE_FILE', TEST_PERSONAS_FILE)
+        self.config_patch.start()
+
         self.chat_system = ChatSystem()
         # Mock the save_personas_to_file function to avoid actual file writes during tests
         self.save_mock = patch('src.utils.save_utils.save_personas_to_file').start()
@@ -40,7 +54,18 @@ class TestChatSystem(IsolatedAsyncioTestCase):
 
 class TestPersona(IsolatedAsyncioTestCase):
     def setUp(self):
+        # Patch the PERSONA_SAVE_FILE constant to use the test file
+        self.persona_save_patch = patch('src.utils.save_utils.PERSONA_SAVE_FILE', TEST_PERSONAS_FILE)
+        self.persona_save_patch.start()
+
+        # Also patch any direct imports of PERSONA_SAVE_FILE
+        self.config_patch = patch('config.global_config.PERSONA_SAVE_FILE', TEST_PERSONAS_FILE)
+        self.config_patch.start()
+
         self.persona = Persona("test_persona", "gpt-3.5-turbo", "You are a helpful assistant.", 10, 100)
+
+    def tearDown(self):
+        patch.stopall()
 
     def test_set_prompt(self):
         new_prompt = "You are a friendly chatbot."
@@ -62,6 +87,14 @@ class TestPersona(IsolatedAsyncioTestCase):
 
 class TestTextEngine(IsolatedAsyncioTestCase):
     def setUp(self):
+        # Patch the PERSONA_SAVE_FILE constant to use the test file
+        self.persona_save_patch = patch('src.utils.save_utils.PERSONA_SAVE_FILE', TEST_PERSONAS_FILE)
+        self.persona_save_patch.start()
+
+        # Also patch any direct imports of PERSONA_SAVE_FILE
+        self.config_patch = patch('config.global_config.PERSONA_SAVE_FILE', TEST_PERSONAS_FILE)
+        self.config_patch.start()
+
         self.text_engine = TextEngine("gpt-3.5-turbo")
         self.chat_system = ChatSystem()
         # Mock the save_personas_to_file function to avoid actual file writes during tests
@@ -81,11 +114,11 @@ class TestTextEngine(IsolatedAsyncioTestCase):
         self.assertEqual(self.text_engine.get_max_tokens(), new_max_tokens)
 
     async def test_generate_openai_response(self):
-        with patch('openai.AsyncOpenAI') as mock_openai_class: # Patch where AsyncOpenAI is LOOKED UP
+        with patch('openai.AsyncOpenAI') as mock_openai_class:  # Patch where AsyncOpenAI is LOOKED UP
             mock_client_instance = AsyncMock()
             mock_openai_class.return_value = mock_client_instance
             mock_completion_result = MagicMock()
-            mock_completion_result.choices = [MagicMock()] # Needs to be a list
+            mock_completion_result.choices = [MagicMock()]  # Needs to be a list
             mock_completion_result.choices[0].message = MagicMock()
             mock_completion_result.choices[0].message.content = "Test successful"
             mock_completion_result.usage = MagicMock()

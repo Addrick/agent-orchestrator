@@ -4,8 +4,11 @@ import re
 
 import aiohttp
 import anthropic
+from dotenv import load_dotenv
 
 from vertexai.generative_models import HarmCategory, HarmBlockThreshold
+from google import genai
+from google.genai import types
 
 from config.global_config import *
 from src.utils import model_utils
@@ -29,6 +32,7 @@ class TextEngine:
                  temperature=DEFAULT_TEMPERATURE,
                  top_p=DEFAULT_TOP_P,
                  top_k=DEFAULT_TOP_K):
+        self.logger = logging.getLogger()
 
         self.model_name = model_name
         self.temperature = temperature
@@ -47,12 +51,30 @@ class TextEngine:
         # Google models
         self.google_models_available = self.all_available_models['From Google']
         self.top_k = top_k
-        self.unsafe_settings = {
+        self.unsafe_settings_vertexai = {
             HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
             HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_ONLY_HIGH,
             HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
             HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
         }
+        self.unsafe_settings_google_generativeai = [
+            {
+                "category": "HARM_CATEGORY_HARASSMENT",
+                "threshold": "BLOCK_NONE"
+            },
+            {
+                "category": "HARM_CATEGORY_HATE_SPEECH",
+                "threshold": "BLOCK_NONE"
+            },
+            {
+                "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                "threshold": "BLOCK_NONE"
+            },
+            {
+                "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                "threshold": "BLOCK_NONE"
+            }
+            ]
 
         # Anthropic models
         self.anthropic_models_available = self.all_available_models['From Anthropic']
@@ -135,7 +157,7 @@ class TextEngine:
 
         # Google request
         elif self.model_name in self.google_models_available:
-            response = self._generate_google_response(prompt, message, context)
+            response = await self._generate_google_response_ai_studio_async(prompt, message, context)
 
         # Local koboldcpp request
         elif self.model_name == 'local':
@@ -232,7 +254,7 @@ class TextEngine:
             return response + token_count_and_model
 
         except Exception as e:
-            return e.code + ": \n" + e.message
+            return str(e)
         # except AttributeError as e:
         #     return str(e)
 
@@ -282,7 +304,7 @@ class TextEngine:
         #     return str(e)
 
     # Google # TODO: async?
-    def _generate_google_response(self, prompt, message, context):
+    def _generate_google_response_vertex(self, prompt, message, context):
         """Generate a response using Google's Vertex AI."""
         import vertexai
         from vertexai.generative_models import GenerativeModel
@@ -300,7 +322,7 @@ class TextEngine:
 
         response = model.generate_content(
             request,
-            safety_settings=self.unsafe_settings
+            safety_settings=self.unsafe_settings_vertexai
         )
         try:
             text_content = response.text
@@ -308,6 +330,70 @@ class TextEngine:
             # Handle the absence of response.text
             text_content = f"```Response too spicy for Google, blocked at server. Try again, mix up your request a bit if it persists.```"  # TODO: do a retry instead of just reporting it failed
             logging.error(response.candidates[0].safety_ratings)
+        return text_content
+
+    async def _generate_google_response_ai_studio_async(self, prompt, message, context):
+        """Generate a response asynchronously using Google AI Studio (genai library)."""
+        import google.generativeai as genai
+        import os
+
+        # load .env for api key
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        root_dir = os.path.join(current_dir, '..')
+        load_dotenv(os.path.join(root_dir, '.env'))
+        google_api_key = os.environ.get("GOOGLE_GENERATIVEAI_API_KEY")
+
+        # Configure the genai library (ideally done once at application start)
+        genai.configure(api_key=google_api_key)
+
+        # Model instantiation using the genai library
+        # You might want to cache this model instance if used frequently
+        model = genai.GenerativeModel(self.model_name)
+
+        # Construct the request string (same logic as before)
+        request_content = '### Instructions: ###' + prompt + '\n### Recent chat history: ### \n' + str(
+            context) + '\n### Now respond to the most recent message: ###\n' + message
+
+        # Optional: Log the structured request if needed
+        # self.json_request = self.parse_request_json(request_content) # Assuming this method is synchronous
+
+        try:
+            # Use the asynchronous generation method
+            response = await model.generate_content_async(
+                request_content,
+                safety_settings=self.unsafe_settings_google_generativeai
+                # Add other generation config parameters here if needed (temperature, etc.)
+                # generation_config=genai.types.GenerationConfig(...)
+            )
+
+            # Check if the response was blocked due to safety settings
+            if response.prompt_feedback and response.prompt_feedback.block_reason:
+                block_reason = response.prompt_feedback.block_reason.name
+                text_content = f"```Response blocked by Google due to {block_reason}. Try again, mix up your request a bit if it persists.```"
+                self.logger.error(f"Google AI Studio response blocked. Reason: {block_reason}")
+                if response.prompt_feedback.safety_ratings:
+                    self.logger.error(f"Safety Ratings: {response.prompt_feedback.safety_ratings}")
+                # TODO: Implement retry logic here instead of just reporting failure
+            else:
+                # Access the text content safely
+                # The .text attribute should exist if not blocked, but good practice to check
+                try:
+                    text_content = response.text
+                except ValueError:
+                    # This path might be less common with genai if block_reason is checked first,
+                    # but kept for robustness similar to original code.
+                    text_content = "```Error retrieving text from response, even though not explicitly blocked.```"
+                    self.logger.error("ValueError accessing response.text despite no block reason.")
+                    if hasattr(response, 'candidates') and response.candidates:
+                        self.logger.error(
+                            f"Candidate safety ratings (if available): {response.candidates[0].safety_ratings}")
+
+
+        except Exception as e:
+            # Catch potential API errors or other issues
+            self.logger.error(f"Error during Google AI Studio generation: {e}", exc_info=True)
+            text_content = f"```An error occurred during generation: {e}```"
+
         return text_content
 
     # Anthropic

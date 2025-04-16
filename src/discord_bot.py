@@ -1,32 +1,33 @@
 import logging
 import re
-from datetime import timedelta
-
 import discord
 from discord import HTTPException
 
 from config import global_config
 from config.global_config import *
-from config.global_config import DISCORD_CHAR_LIMIT, DEFAULT_CONVERSATIONAL_PAUSE_LIMIT
+from config.global_config import DISCORD_CHAR_LIMIT
 from src.utils.message_utils import split_string_by_limit
 
+logger = logging.getLogger()
 
 # Summary:
 # This code implements a Discord bot using the discord.py library. The bot manages multiple personas,
 # responds to messages, and handles various commands. It includes features like logging, context
 # gathering, and dynamic status updates. The bot uses an external ChatSystem for generating responses.
-#
-# Declare all discort intents and instantiating Discord client - declaring 'all' intents for simplicity while testing
-# intents = discord.Intents.all()
-# client = discord.Client(intents=intents)
-# guild = discord.Guild
 
-# Import ChatSystem for use of core bot logic
-# bot = ChatSystem()
-# bot.load_personas_from_file(PERSONA_SAVE_FILE)
 
-# Discord channel to dump log messages for remote debugging
-# debug_channel = client.get_channel(1222358674127982622)
+class ConnectionErrorFilter(logging.Filter):
+    def filter(self, record):
+        # Filter out specific connection-related log messages
+        connection_keywords = [
+            # 'Attempting a reconnect',
+            # 'WebSocket closed',
+            # 'ConnectionClosed',
+            # 'ClientConnectorError',
+            # 'Shard ID None has connected to Gateway'
+            # 'Shard ID None has successfully RESUMED'
+        ]
+        return not any(keyword in record.getMessage() for keyword in connection_keywords)
 
 
 class CustomDiscordBot(discord.Client):
@@ -34,183 +35,237 @@ class CustomDiscordBot(discord.Client):
         super().__init__(*args, **kwargs)
         self.bot = chat_system
 
+        # Set up error handling for connection issues
+        self.add_error_handler()
 
-def create_discord_bot(chat_system):
-    bot = chat_system
-    intents = discord.Intents.default()
-    intents.message_content = True
-    client = CustomDiscordBot(chat_system, intents=intents)
-    debug_channel = client.get_channel(DISCORD_DEBUG_CHANNEL)
+    def add_error_handler(self):
+        # Configure logging to reduce noise from connection errors
+        discord_logger = logging.getLogger('discord')
+        connection_filter = ConnectionErrorFilter()
+        discord_logger.addFilter(connection_filter)
 
-    @client.event
-    async def on_ready():
-        logger = logging.getLogger()
-        # if global_config.DISCORD_LOGGER:
-        #     logger.addHandler(DiscordLogHandler())
-        logging.info('Hello {0.user} !'.format(client))
-        available_personas = ', '.join(list(bot.get_persona_list().keys()))
-        presence_txt = f"as {available_personas} 👀"
-        await client.change_presence(
-            activity=discord.Activity(name=presence_txt, type=discord.ActivityType.watching))
+        discord_logger.setLevel(logging.WARNING)
 
-    @client.event
-    async def on_message(message, log_chat=True):
-        # ignore debug channel
-        if message.channel.id == debug_channel:
-            return
+    async def on_disconnect(self):
+        """Custom disconnect handler"""
+        logging.debug("Discord client disconnected. Attempting to reconnect...")
 
-        logging.debug(f'{message.author}: {message.content}')
+    async def on_connect(self):
+        """Custom connect handler"""
+        logging.info("Discord client connected successfully.")
 
-        if log_chat:
-            # Log chat history to local text file
-            chat_log = CHAT_LOG_LOCATION + message.guild.name + " #" + message.channel.name + ".txt"
-            with open(chat_log, 'a', encoding='utf-8') as file:
-                file.write(f'{message.created_at} {message.author.name}: {message.content}\n')
 
-        # check new discord message for instance of persona name
-        if message.author.id != client.user.id:
-            # check for persona mention in message
-            for persona_name, persona in list(bot.get_persona_list().items()):
-                persona_mention = f"{persona_name}"
-                logging.debug('Checking for persona name: ' + persona_name)
-                if (message.content.lower().startswith(persona_mention) or
-                        message.channel.name.startswith(persona_mention)):
-                    if message.channel.name.startswith(persona_mention):
-                        message.content = persona_mention + " " + message.content
-                    logging.debug('Found persona name: ' + persona_name)
-                    async with message.channel.typing():
-                        # Gather context (message history) from discord
-                        # Pulls a list of length GLOBAL_CONTEXT_LIMIT, is pruned later based on persona context setting #TODO: can make this more efficient by pulling the persona context limit here
-                        # Formats each message to put persona name first # TODO: add persona field to preprocess_message and pass in when generating: allows messages to be used that don't start with persona name (better?)
-                        # If preprocess_message with check_only=True returns True, the message is skipped as it is identified as a dev command
-                        channel = client.get_channel(message.channel.id)
+async def get_image_attachments(message):
+    """Gets image attachments or URLs from a message."""
+    image_url = None
+    # Check for image attachments
+    if message.attachments:
+        for attachment in message.attachments:
+            if attachment.filename.lower().endswith(('png', 'jpg', 'jpeg', 'gif', 'bmp')):
+                logger.info("Message contains an image attachment.")
+                image_url = attachment.url
+                break  # Use the first image found
 
-                        image_url = await get_image_attachments(message)
-
-                        context = await history_gatherer(channel, message, persona_mention, cutoff_timer)
-
-                        await set_status_streaming(persona_name)
-
-                        # Message processing starts
-                        # Check for dev commands
-                        dev_response = bot.bot_logic.preprocess_message(message)
-                        if dev_response is None:
-                            async with channel.typing():
-                                # If no dev response found, process as a bot request
-                                try:
-                                    response = await bot.generate_response(persona_name, message.content, context=context, image_url=image_url)
-                                except TypeError as e:
-                                    response = "Request failed: " + str(e)
-                            await send_message(channel, response, char_limit=DISCORD_CHAR_LIMIT)
-                            await reset_discord_status()
-
-                        else:  # If dev message found, send it now and reset status
-                            await send_discord_dev_message(channel, dev_response)
-                            await reset_discord_status()
-
-    async def get_image_attachments(message):
-        image_url = None
-        # Check for image attachments
-        if any(attachment.filename.lower().endswith(('png', 'jpg', 'jpeg', 'gif', 'bmp')) for attachment in message.attachments):
-            print("Message contains an image attachment.")
-            image_url = message.attachments[0].url
-        # Check for image URLs in the message content
+    # Check for image URLs in the message content if no attachment found yet
+    if image_url is None:
         image_url_pattern = re.compile(r'(https?://\S+\.(?:png|jpg|jpeg|gif|bmp))', re.IGNORECASE)
-        if image_url_pattern.search(message.content):
-            print("Message contains an image URL.")
-            image_url = image_url_pattern.search(message.content)[0]
-        return image_url
+        match = image_url_pattern.search(message.content)
+        if match:
+            logger.info("Message contains an image URL.")
+            image_url = match[0]
 
-    async def history_gatherer(channel, message, persona_mention, cutoff_timer=DEFAULT_CONVERSATIONAL_PAUSE_LIMIT): # TODO: explore using local chat logs instead of chat-platform-specific message queries (would not respect deleted messages without a bunch of work which is why I have it this way)
-        context = []
-        history = channel.history(before=message,
-                                  limit=global_config.GLOBAL_CONTEXT_LIMIT)  # TODO: use persona-specific context limit here?
-        async for msg in history:
-            time_difference = message.created_at - msg.created_at
-            if time_difference > timedelta(seconds=cutoff_timer):
-                # If the message is older than the cutoff, skip it
-                continue
-            if msg.author is not client.user.id and msg.channel.name.startswith(persona_mention):
-                msg.content = persona_mention + " " + msg.content
-            # If a message begins with derpr: <persona_name> ``` the message is considered a dev message response and
-            # also skipped
-            # zero-width space is a hack used in send_dev_command to escape existing code commenting in messages
-            is_previous_dev_response = 'derpr: ' + persona_mention + ' `​``' in msg.content
-            if bot.bot_logic.preprocess_message(msg, check_only=True) or is_previous_dev_response:
-                continue
-            else:
-                context.append(
-                    f"{msg.created_at.strftime('%Y-%m-%d, %H:%M:%S')}, {msg.author.name}: {msg.content}")
-        return context
+    return image_url
 
-    async def set_status_streaming(persona_name):
-        # Change discord status to 'streaming <persona>...'
+
+async def history_gatherer(client, channel, message, persona_mention, bot_logic, context_limit):
+    """Gathers message history for context."""
+    context = []
+    # Use the passed context_limit
+    history = channel.history(before=message, limit=context_limit)
+    async for msg in history:
+        # Original logic checks author ID against client ID
+        is_own_message = msg.author.id == client.user.id
+        author_name = "Bot" if is_own_message else msg.author.name
+
+        processed_content = msg.content
+        # Add persona prefix if necessary (consistent with original logic for non-bot messages)
+        if not is_own_message and msg.channel.name.startswith(
+                persona_mention) and not processed_content.lower().startswith(persona_mention.lower()):
+            processed_content = persona_mention + " " + msg.content
+
+        # Check for previous dev response markers or preprocess flags
+        is_previous_dev_response = f'derpr: {persona_mention} `\u200b``' in processed_content  # zero-width space check
+        if bot_logic.preprocess_message(msg, check_only=True) or is_previous_dev_response:
+            continue
+        else:
+            context.append(
+                f"{msg.created_at.strftime('%Y-%m-%d, %H:%M:%S')}, {author_name}: {processed_content}")
+    # The history is gathered oldest->newest relative to the limit, reverse to get chronological order for context
+    return context[::-1]
+
+
+async def set_status_streaming(client, persona_name):
+    """Sets the bot's status to streaming."""
+    try:
         activity = discord.Activity(
             type=discord.ActivityType.streaming,
             name=persona_name + '...',
             url='https://www.twitch.tv/discordmakesmedothis')
         await client.change_presence(activity=activity)
+        logger.info(f"Set status to streaming {persona_name}")
+    except Exception as e:
+        logger.error(f"Failed to set streaming status: {e}")
 
-    async def reset_discord_status():
-        """ Reset discord name and status to default"""
-        # await client.user.edit(username='derpr')
-        # Reset discord status to 'watching'
+
+async def reset_discord_status(client, chat_system):
+    """ Resets the bot's status, respecting Discord's character limit."""
+    try:
         available_personas = ', '.join(list(chat_system.get_persona_list().keys()))
-        presence_txt = f"as {available_personas} 👀"
-        await client.change_presence(
-            activity=discord.Activity(name=presence_txt, type=discord.ActivityType.watching))
+
+        # Check if the desired text exceeds the limit
+        if len(available_personas) > DISCORD_STATUS_LIMIT:
+            # Calculate how much to truncate (leave space for the extra added text)
+            truncate_at = DISCORD_STATUS_LIMIT - 5
+            presence_txt = available_personas[:truncate_at]
+            logger.warning(f"Status text exceeded {DISCORD_STATUS_LIMIT} chars. Truncated.")
+        else:
+            presence_txt = available_personas
+
+        # Construct the desired base status text
+        formatted_presence_txt = f"as {presence_txt} 👀"
+
+        # Set the activity using the potentially truncated text
+        activity = discord.Activity(name=formatted_presence_txt, type=discord.ActivityType.watching)
+        await client.change_presence(activity=activity)
+        logger.debug(f"Reset status to watching: {formatted_presence_txt}")
+
+    except discord.errors.HTTPException as e:
+        logger.error(f"Failed to set status due to Discord API error: {e}")
+    except Exception as e:
+        # Catch any other unexpected errors
+        logger.error(f"An unexpected error occurred while resetting status: {e}", exc_info=True)  # Log traceback
+
+
+def create_discord_bot(chat_system):
+    """Creates and configures the Discord bot client."""
+    bot = chat_system  # Alias for convenience
+    intents = discord.Intents.default()
+    intents.message_content = True
+    client = CustomDiscordBot(chat_system, intents=intents)
+    # We need the ID, get_channel is called later if needed
+    debug_channel_id = DISCORD_DEBUG_CHANNEL
+
+    @client.event
+    async def on_ready():
+        logging.info('Hello {0.user} !'.format(client))
+        # Call module-level helper
+        await reset_discord_status(client, chat_system)
+
+    @client.event
+    async def on_message(message, log_chat=True):
+        # Check if message is in the debug channel using the ID
+        if message.channel.id == debug_channel_id:
+            return
+
+        logging.debug(f'{message.author}: {message.content}')
+
+        if log_chat:
+            try:
+                # Log chat history to local text file
+                # Assuming CHAT_LOG_LOCATION is accessible
+                chat_log = CHAT_LOG_LOCATION + message.guild.name + " #" + message.channel.name + ".txt"
+                with open(chat_log, 'a', encoding='utf-8') as file:
+                    file.write(f'{message.created_at} {message.author.name}: {message.content}\n')
+            except Exception as e:
+                logger.error(f"Failed to write to chat log: {e}")
+
+        # Ignore messages from the bot itself
+        if message.author.id == client.user.id:
+            return
+
+        # Process messages potentially mentioning a persona
+        active_persona_name = None
+        persona_mention_prefix = ""
+
+        # Check if message starts with a persona name or is in a persona-named channel
+        for persona_name in list(bot.get_persona_list().keys()):
+            mention = f"{persona_name.lower()}"  # Use lower case for matching
+            content_lower = message.content.lower()
+            channel_name_lower = message.channel.name.lower()
+
+            if content_lower.startswith(mention) or channel_name_lower.startswith(mention):
+                active_persona_name = persona_name  # Store the correctly cased name
+                persona_mention_prefix = f"{persona_name}"  # Store the correctly cased prefix for history
+                logging.debug(f'Found persona trigger: {persona_name}')
+
+                # Prepend persona name if triggered by channel name only
+                if channel_name_lower.startswith(mention) and not content_lower.startswith(mention):
+                    message.content = f"{persona_name} {message.content}"
+                    logging.debug(f'Prepended persona name to message content.')
+                break  # Process first matching persona
+
+        # If a persona was triggered, proceed with generation logic
+        if active_persona_name:
+            try:
+                async with message.channel.typing():
+                    # Get channel object - potential API call
+                    channel = client.get_channel(message.channel.id)
+                    if not channel:
+                        logger.error(f"Could not find channel with ID: {message.channel.id}")
+                        return
+
+                    # Call module-level helpers, passing necessary arguments
+                    image_url = await get_image_attachments(message)
+                    # Pass global_config.GLOBAL_CONTEXT_LIMIT explicitly
+                    context = await history_gatherer(client, channel, message, persona_mention_prefix, bot.bot_logic,
+                                                     global_config.GLOBAL_CONTEXT_LIMIT)
+
+                    # Message processing starts
+                    # Check for dev commands first (using original message object)
+                    dev_response = bot.bot_logic.preprocess_message(message)
+
+                    if dev_response is None:
+                        # No dev command, generate normal response
+                        await set_status_streaming(client, active_persona_name)
+                        try:
+                            # Use the (potentially modified) message.content
+                            response = await bot.generate_response(active_persona_name, message.content,
+                                                                   context=context, image_url=image_url)
+                        except TypeError as e:
+                            response = f"Request failed: {e}"
+                        except Exception as e:
+                            logger.exception(f"Error during bot.generate_response for {active_persona_name}")
+                            response = "Sorry, I encountered an error while generating a response."
+
+                        await send_message(channel, response, char_limit=DISCORD_CHAR_LIMIT)
+                        await reset_discord_status(client, chat_system)  # Reset status after sending
+
+                    else:
+                        # Dev command response found
+                        await send_discord_dev_message(channel, dev_response)
+                        await reset_discord_status(client, chat_system)  # Reset status after sending
+
+            except discord.errors.NotFound:
+                logger.warning(f"Message {message.id} not found, likely deleted.")
+            except discord.errors.Forbidden:
+                logger.warning(f"Missing permissions for channel {message.channel.id} or action.")
+            except Exception as e:
+                logger.exception(f"An unexpected error occurred processing message {message.id}: {e}")
+                # Attempt to reset status even on error
+                try:
+                    await reset_discord_status(client, chat_system)
+                except Exception as reset_e:
+                    logger.error(f"Failed to reset status after error: {reset_e}")
 
     return client
 
 
-# # Module to forward console messages to discord
-    #     # Redirect console output to discord for remote monitoring
-    #     discord_console = discord_bot.DiscordConsoleOutput()
-    #     # sys.stdout = discord_console
-    #     # sys.stderr = discord_console
-    #     # sys.excepthook = discord_console.discord_excepthook
-# class DiscordConsoleOutput:
-#     def __init__(self):
-#         self.DISCORD_DISCONNECT_TIME = None
-#
-#     def write(self, msg):
-#         asyncio.ensure_future(send_dev_message(debug_channel, msg))
-#
-#     def flush(self):
-#         pass
-#
-#     def discord_excepthook(self, type, value, traceback):
-#         if issubclass(type, ConnectionError):
-#             asyncio.create_task(self.on_disconnect())
-#         else:
-#             error_report = f'Error logged: \n {type} \n {value} \n {traceback}'
-#             asyncio.create_task(send_dev_message(debug_channel, error_report))
-#
-#     def on_disconnect(self):  # Disconnects must be handled as a special case so it does not flood the channel on reconnect and cause another disconnect
-#         if self.DISCORD_DISCONNECT_TIME is None:
-#             self.DISCORD_DISCONNECT_TIME = datetime.datetime.now()
-#         else:
-#             pass
-#
-#
-# class DiscordLogHandler(logging.Handler):
-#     def __init__(self):
-#         super().__init__()
-#         self.debug_channel = client.get_channel(1222358674127982622)
-#
-#     def emit(self, record):
-#         log_message = self.format(record)
-#         if 'ClientConnectorError' in log_message or 'We are being rate limited.' in log_message:
-#             return  # Do not send message if log_message contains discord connection/rate limit errors
-#         asyncio.create_task(send_dev_message(self.debug_channel, log_message))
-
-
 async def send_discord_dev_message(channel, msg: str):
-    """Escape discord code formatting instances, seems to require this weird hack with a zero-width space"""
+    """Escape discord code formatting instances, seems to require this hack with a zero-width space"""
     # msg.replace("```", "\```")
     formatted_msg = re.sub('```', '`\u200B``', msg)
     # Split the response into multiple messages if it exceeds 2000 characters
-    chunks = split_string_by_limit(formatted_msg, DISCORD_CHAR_LIMIT-6)
+    chunks = split_string_by_limit(formatted_msg, DISCORD_CHAR_LIMIT - 6)
     for chunk in chunks:
         try:
             await channel.send(f"```{chunk}```")
