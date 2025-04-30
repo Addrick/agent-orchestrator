@@ -1,6 +1,5 @@
 import config.api_keys as api_keys
-
-from src.message_handler import *
+import logging
 from src.utils import save_utils
 
 
