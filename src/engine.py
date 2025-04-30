@@ -11,7 +11,7 @@ from google import genai
 from google.genai import types
 
 from config.global_config import *
-from src.utils import model_utils
+from src.utils.model_utils import get_model_list
 from config import api_keys
 
 
@@ -40,7 +40,7 @@ class TextEngine:
         self.top_p = top_p
         self.json_request = None
         self.json_response = None
-        self.all_available_models = model_utils.get_model_list()
+        self.all_available_models = get_model_list()
 
         # OpenAI models
         self.openai_models_available = self.all_available_models['From OpenAI']
@@ -335,6 +335,7 @@ class TextEngine:
     async def _generate_google_response_ai_studio_async(self, prompt, message, context):
         """Generate a response asynchronously using Google AI Studio (genai library)."""
         import google.generativeai as genai
+        from google.genai.types import Tool, GenerateContentConfig, GoogleSearch
         import os
 
         # load .env for api key
@@ -349,9 +350,8 @@ class TextEngine:
         # Model instantiation using the genai library
         # You might want to cache this model instance if used frequently
         model = genai.GenerativeModel(self.model_name)
-
-        # Construct the request string (same logic as before)
-        request_content = '### Instructions: ###' + prompt + '\n### Recent chat history: ### \n' + str(
+        google_search_tool = Tool(google_search = GoogleSearch())
+        request_content = '### Instructions: ###' + prompt + '\n### Recent chat room history: ### \n' + str(
             context) + '\n### Now respond to the most recent message: ###\n' + message
 
         # Optional: Log the structured request if needed
@@ -361,9 +361,7 @@ class TextEngine:
             # Use the asynchronous generation method
             response = await model.generate_content_async(
                 request_content,
-                safety_settings=self.unsafe_settings_google_generativeai
-                # Add other generation config parameters here if needed (temperature, etc.)
-                # generation_config=genai.types.GenerationConfig(...)
+                safety_settings=self.unsafe_settings_google_generativeai,
             )
 
             # Check if the response was blocked due to safety settings
@@ -408,16 +406,28 @@ class TextEngine:
                 {"role": "user", "content": message}]
         client = anthropic.Anthropic(api_key=api_keys.anthropic)
         self.json_request = self.parse_request_json(messages)
-        message = client.messages.create(
-            system=prompt,
-            model=self.model_name,
-            temperature=self.temperature,
-            top_p=self.top_p,
-            top_k=self.top_k,
-            max_tokens=self.max_tokens,
-            messages=messages,
-            stream=False
-        )
+
+        # Build API parameters with only non-None values
+        api_params = {
+            'system': prompt,
+            'model': self.model_name,
+            'messages': messages,
+            'stream': False
+        }
+
+        if self.temperature is not None:
+            api_params['temperature'] = self.temperature
+
+        if self.top_p is not None:
+            api_params['top_p'] = self.top_p
+
+        if self.top_k is not None:
+            api_params['top_k'] = self.top_k
+
+        if self.max_tokens is not None:
+            api_params['max_tokens'] = self.max_tokens
+
+        message = client.messages.create(**api_params)
         return message.content[0].text
 
     # KoboldCPP
