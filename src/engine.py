@@ -72,7 +72,7 @@ class TextEngine:
                 "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
                 "threshold": "BLOCK_NONE"
             }
-            ]
+        ]
 
         # Anthropic models
         self.anthropic_models_available = self.all_available_models['From Anthropic']
@@ -405,8 +405,13 @@ class TextEngine:
         root_dir = os.path.join(current_dir, '..')
         load_dotenv(os.path.join(root_dir, '.env'))
         google_api_key = os.environ.get("GOOGLE_GENERATIVEAI_API_KEY")
+        if not google_api_key:
+            self.logger.error("GOOGLE_GENERATIVEAI_API_KEY not found in environment variables.")
+            return "```Error: API key not configured.```"
 
-        client = genai.Client(api_key=google_api_key)
+        client = genai.client.BaseApiClient(api_key=google_api_key)
+        async_client = genai.client.AsyncClient(client)
+
         model_id = self.model_name
 
         google_search_tool = Tool(
@@ -420,18 +425,16 @@ class TextEngine:
         self.json_request = self.parse_request_json(request_content)
 
         try:
-            # Use the asynchronous generation method
-            response = client.models.generate_content(
+            response = await async_client.models.generate_content(
                 model=model_id,
                 contents=request_content,
-                # safety_settings=self.unsafe_settings_google_generativeai,
+                # safety_settings=self.unsafe_settings_google_generativeai, # Uncomment if you have this
                 config=GenerateContentConfig(
                     tools=[google_search_tool],
                     response_modalities=["TEXT"],
                 )
             )
-            # print(response.candidates[0].grounding_metadata.grounding_chunks)
-            # print(response.candidates[0].grounding_metadata.grounding_supports)
+
             # Check if the response was blocked due to safety settings
             if response.prompt_feedback and response.prompt_feedback.block_reason:
                 block_reason = response.prompt_feedback.block_reason.name
@@ -439,23 +442,92 @@ class TextEngine:
                 self.logger.error(f"Google AI Studio response blocked. Reason: {block_reason}")
                 if response.prompt_feedback.safety_ratings:
                     self.logger.error(f"Safety Ratings: {response.prompt_feedback.safety_ratings}")
-                # TODO: Implement retry logic here instead of just reporting failure
             else:
                 try:
                     text_content = response.text
-                    try:
-                        # print the search details
-                        text_content += f"\nSearch Query: {response.candidates[0].grounding_metadata.web_search_queries}"
-                        # urls used for grounding
-                        # text_content += f"\nSearch Pages: {', '.join([site.web.title for site in response.candidates[0].grounding_metadata.grounding_chunks])}"
-                        text_content += f"\nSearch URLs: <{'>\n <'.join([resolve_redirect_url(site.web.uri) for site in response.candidates[0].grounding_metadata.grounding_chunks])}>"
-                    except Exception as e:
-                        self.logger.error(e)
+                    # --- Citation Logic ---
+                    citations_text = ""
+                    search_query_text = ""
+
+                    if response.candidates and response.candidates[0].grounding_metadata:
+                        metadata = response.candidates[0].grounding_metadata
+
+                        # 1. Get Search Query (optional, keep if desired)
+                        if metadata.web_search_queries:
+                            search_query_text = f"\nSearch Query: {', '.join(metadata.web_search_queries)}"
+
+                        if metadata.grounding_chunks and metadata.grounding_supports:
+                            # Map chunks to unique sources and assign citation numbers
+                            source_map = {}  # Maps chunk index to source number (1-based)
+                            source_list = []  # List of unique source URLs/info in citation order
+
+                            for chunk_index, chunk in enumerate(metadata.grounding_chunks):
+                                if chunk.web and chunk.web.uri:
+                                    resolved_uri = resolve_redirect_url(chunk.web.uri)
+                                    # Find if this URL is already in our source list
+                                    try:
+                                        source_number = source_list.index(resolved_uri) + 1
+                                    except ValueError:
+                                        # URL not found, add it
+                                        source_list.append(resolved_uri)
+                                        source_number = len(source_list)
+                                    source_map[chunk_index] = source_number
+                                # Handle other types of chunks if necessary (e.g., document chunks)
+                                # Currently only handling web chunks as per original code's focus
+
+                            # Sort supports by end index descending to insert citations from the end first
+                            # This avoids shifting indices affecting subsequent insertions
+                            sorted_supports = sorted(metadata.grounding_supports, key=lambda s: s.segment.end_index,
+                                                     reverse=True)
+
+                            modified_text = text_content
+                            citation_insertions = {}  # Store insertion points and citation strings
+
+                            # Collect all citation insertions
+                            for support in sorted_supports:
+                                # Get the unique source numbers for the chunks supporting this segment
+                                supporting_source_numbers = sorted(list(set(
+                                    source_map[c_idx] for c_idx in support.grounding_chunk_indices if c_idx in source_map
+                                )))
+
+                                if supporting_source_numbers:
+                                    citation_string = f"[{', '.join(map(str, supporting_source_numbers))}]"
+                                    end_index = support.segment.end_index
+
+                                    # Append citation string at the end index.
+                                    # If multiple supports end at the same index, combine their citations.
+                                    if end_index in citation_insertions:
+                                        # Append new citations, ensuring uniqueness and sorting
+                                        existing_citations = set(citation_insertions[end_index].strip('[]').split(', '))
+                                        new_citations = set(map(str, supporting_source_numbers))
+                                        all_citations = sorted(list(existing_citations | new_citations),
+                                                               key=int)  # Combine, sort, unique
+                                        citation_insertions[end_index] = f"[{', '.join(all_citations)}]"
+                                    else:
+                                        citation_insertions[end_index] = citation_string
+
+                            # Apply insertions from the end of the text
+                            for end_index in sorted(citation_insertions.keys(), reverse=True):
+                                citation_string = citation_insertions[end_index]
+                                modified_text = modified_text[:end_index] + citation_string + modified_text[end_index:]
+
+                            text_content = modified_text
+
+                            # Build the list of sources
+                            if source_list:
+                                citations_text = "\n\nSources:\n"
+                                for i, source_url in enumerate(source_list):
+                                    citations_text += f"{i + 1}. <{source_url}>\n"  # Using angle brackets similar to some formats
+
+                        text_content += search_query_text  # Add search query before sources
+                        text_content += citations_text  # Add the list of sources at the end
+
+                    # --- End Citation Logic ---
+
                 except ValueError:
-                    # This path might be less common with genai if block_reason is checked first,
-                    # but kept for robustness similar to original code.
-                    text_content = "```Error retrieving text from response, even though not explicitly blocked.```"
-                    self.logger.error("ValueError accessing response.text despite no block reason.")
+                    # This might happen if response.text is not available
+                    text_content = "```Error retrieving text from response.```"
+                    self.logger.error("ValueError accessing response.text.")
                     if hasattr(response, 'candidates') and response.candidates:
                         self.logger.error(
                             f"Candidate safety ratings (if available): {response.candidates[0].safety_ratings}")
