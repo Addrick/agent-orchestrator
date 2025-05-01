@@ -2,7 +2,7 @@ from src import kobold_api
 from src.engine import *
 from src.persona import *
 from src.app_manager import *
-from src.utils import save_utils
+from src.utils import save_utils, model_utils
 from src.utils.model_utils import get_model_list
 
 
