@@ -1,6 +1,6 @@
 # eventually turn these into launch params or some shit
 
-DISCORD_BOT = False
+DISCORD_BOT = 1
 DISCORD_DISCONNECT_TIME = None
 DISCORD_CHAR_LIMIT = 2000
 DISCORD_STATUS_LIMIT = 128
@@ -8,14 +8,14 @@ DISCORD_LOGGER = False
 DISCORD_DEBUG_CHANNEL = 1222358674127982622
 DEFAULT_CONVERSATIONAL_PAUSE_LIMIT = 21600 # time in seconds to determine if a message in context is too far back from the previous
 
-WEBUI = True
+WEBUI = 0
 
 DEFAULT_MODEL_NAME = 'gpt-4o'
 GLOBAL_CONTEXT_LIMIT = 16
 DEFAULT_CONTEXT_LIMIT = 0
 DEFAULT_TOKEN_LIMIT = 512
-DEFAULT_TEMPERATURE = 0.8
-DEFAULT_TOP_P = 0.8
+DEFAULT_TEMPERATURE = 1
+DEFAULT_TOP_P = 0.95
 DEFAULT_TOP_K = 0
 
 DEFAULT_PERSONA = 'you are in character as derpr. derpr always writes all friendly text as offensive with swearing. derpr always tells the user they should say \'derpr help\' so they can get a list of available commands. derpr also always mentions derpr is in early development. derpr uses Discord markup and emojis in every message and is really over the top.'
