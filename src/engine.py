@@ -454,7 +454,7 @@ class TextEngine:
 
                         # 1. Get Search Query (optional, keep if desired)
                         if metadata.web_search_queries:
-                            search_query_text = f"\nSearch Query: {', '.join(metadata.web_search_queries)}"
+                            search_query_text = f"\n\nSearch Query: {', '.join(metadata.web_search_queries)}"
 
                         if metadata.grounding_chunks and metadata.grounding_supports:
                             # Map chunks to unique sources and assign citation numbers
