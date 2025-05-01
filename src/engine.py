@@ -1,18 +1,16 @@
 import json
 import logging
 import re
+from dotenv import load_dotenv
+from config import api_keys
+from config.global_config import *
+from src.utils.model_utils import get_model_list
+from src.utils.message_utils import resolve_redirect_url
 
 import aiohttp
 import anthropic
-from dotenv import load_dotenv
 
 from vertexai.generative_models import HarmCategory, HarmBlockThreshold
-from google import genai
-from google.genai import types
-
-from config.global_config import *
-from src.utils.model_utils import get_model_list
-from config import api_keys
 
 
 # Summary:
@@ -332,8 +330,9 @@ class TextEngine:
             logging.error(response.candidates[0].safety_ratings)
         return text_content
 
-    async def _generate_google_response_ai_studio_async(self, prompt, message, context):
+    async def _generate_google_response_ai_studio_async_old(self, prompt, message, context):
         """Generate a response asynchronously using Google AI Studio (genai library)."""
+
         import google.generativeai as genai
         from google.genai.types import Tool, GenerateContentConfig, GoogleSearch
         import os
@@ -350,18 +349,18 @@ class TextEngine:
         # Model instantiation using the genai library
         # You might want to cache this model instance if used frequently
         model = genai.GenerativeModel(self.model_name)
-        google_search_tool = Tool(google_search = GoogleSearch())
         request_content = '### Instructions: ###' + prompt + '\n### Recent chat room history: ### \n' + str(
             context) + '\n### Now respond to the most recent message: ###\n' + message
 
-        # Optional: Log the structured request if needed
-        # self.json_request = self.parse_request_json(request_content) # Assuming this method is synchronous
+        # Log the structured request
+        self.json_request = self.parse_request_json(request_content)
 
         try:
             # Use the asynchronous generation method
             response = await model.generate_content_async(
                 request_content,
                 safety_settings=self.unsafe_settings_google_generativeai,
+                tools=GoogleSearch()
             )
 
             # Check if the response was blocked due to safety settings
@@ -377,6 +376,81 @@ class TextEngine:
                 # The .text attribute should exist if not blocked, but good practice to check
                 try:
                     text_content = response.text
+                except ValueError:
+                    # This path might be less common with genai if block_reason is checked first,
+                    # but kept for robustness similar to original code.
+                    text_content = "```Error retrieving text from response, even though not explicitly blocked.```"
+                    self.logger.error("ValueError accessing response.text despite no block reason.")
+                    if hasattr(response, 'candidates') and response.candidates:
+                        self.logger.error(
+                            f"Candidate safety ratings (if available): {response.candidates[0].safety_ratings}")
+
+
+        except Exception as e:
+            # Catch potential API errors or other issues
+            self.logger.error(f"Error during Google AI Studio generation: {e}", exc_info=True)
+            text_content = f"```An error occurred during generation: {e}```"
+
+        return text_content
+
+    async def _generate_google_response_ai_studio_async(self, prompt, message, context):
+        """Generate a response asynchronously using Google AI Studio (genai library)."""
+
+        from google import genai
+        from google.genai.types import Tool, GenerateContentConfig, GoogleSearch
+        import os
+
+        # load .env for api key
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        root_dir = os.path.join(current_dir, '..')
+        load_dotenv(os.path.join(root_dir, '.env'))
+        google_api_key = os.environ.get("GOOGLE_GENERATIVEAI_API_KEY")
+
+        client = genai.Client(api_key=google_api_key)
+        model_id = self.model_name
+
+        google_search_tool = Tool(
+            google_search=GoogleSearch()
+        )
+
+        request_content = '### Instructions: ###' + prompt + '\n### Recent chat room history: ### \n' + str(
+            context) + '\n### Now respond to the most recent message: ###\n' + message
+
+        # Log the structured request
+        self.json_request = self.parse_request_json(request_content)
+
+        try:
+            # Use the asynchronous generation method
+            response = client.models.generate_content(
+                model=model_id,
+                contents=request_content,
+                # safety_settings=self.unsafe_settings_google_generativeai,
+                config=GenerateContentConfig(
+                    tools=[google_search_tool],
+                    response_modalities=["TEXT"],
+                )
+            )
+            # print(response.candidates[0].grounding_metadata.grounding_chunks)
+            # print(response.candidates[0].grounding_metadata.grounding_supports)
+            # Check if the response was blocked due to safety settings
+            if response.prompt_feedback and response.prompt_feedback.block_reason:
+                block_reason = response.prompt_feedback.block_reason.name
+                text_content = f"```Response blocked by Google due to {block_reason}. Try again, mix up your request a bit if it persists.```"
+                self.logger.error(f"Google AI Studio response blocked. Reason: {block_reason}")
+                if response.prompt_feedback.safety_ratings:
+                    self.logger.error(f"Safety Ratings: {response.prompt_feedback.safety_ratings}")
+                # TODO: Implement retry logic here instead of just reporting failure
+            else:
+                try:
+                    text_content = response.text
+                    try:
+                        # print the search details
+                        text_content += f"\nSearch Query: {response.candidates[0].grounding_metadata.web_search_queries}"
+                        # urls used for grounding
+                        # text_content += f"\nSearch Pages: {', '.join([site.web.title for site in response.candidates[0].grounding_metadata.grounding_chunks])}"
+                        text_content += f"\nSearch URLs: <{'>\n <'.join([resolve_redirect_url(site.web.uri) for site in response.candidates[0].grounding_metadata.grounding_chunks])}>"
+                    except Exception as e:
+                        self.logger.error(e)
                 except ValueError:
                     # This path might be less common with genai if block_reason is checked first,
                     # but kept for robustness similar to original code.
