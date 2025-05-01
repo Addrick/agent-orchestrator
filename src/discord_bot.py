@@ -18,7 +18,7 @@ logger = logging.getLogger()
 
 class ConnectionErrorFilter(logging.Filter):
     def filter(self, record):
-        # Filter out specific connection-related log messages
+        # Filter out specific log messages
         connection_keywords = [
             # 'Attempting a reconnect',
             # 'WebSocket closed',
@@ -45,14 +45,6 @@ class CustomDiscordBot(discord.Client):
         discord_logger.addFilter(connection_filter)
 
         discord_logger.setLevel(logging.WARNING)
-
-    async def on_disconnect(self):
-        """Custom disconnect handler"""
-        logging.debug("Discord client disconnected. Attempting to reconnect...")
-
-    async def on_connect(self):
-        """Custom connect handler"""
-        logging.info("Discord client connected successfully.")
 
 
 async def get_image_attachments(message):
