@@ -199,19 +199,19 @@ class TextEngine:
                 'model': self.model_name,
             }
 
-            if self.max_tokens is not None:
+            if isinstance(self.max_tokens, int):
                 api_params['max_tokens'] = self.max_tokens
 
-            if self.temperature is not None:
+            if isinstance(self.temperature, (int, float)):
                 api_params['temperature'] = self.temperature
 
-            if self.top_p is not None:
+            if isinstance(self.temperature, (int, float)):
                 api_params['top_p'] = self.top_p
 
-            if self.frequency_penalty != 0:
+            if isinstance(self.frequency_penalty, (int, float)):
                 api_params['frequency_penalty'] = self.frequency_penalty
 
-            if self.presence_penalty != 0:
+            if isinstance(self.presence_penalty, (int, float)):
                 api_params['presence_penalty'] = self.presence_penalty
 
             completion = await self.openai_client.chat.completions.create(**api_params)
@@ -258,19 +258,19 @@ class TextEngine:
                 'model': self.model_name,
             }
 
-            if self.max_tokens is not None:
+            if isinstance(self.max_tokens, int):
                 api_params['max_tokens'] = self.max_tokens
 
-            if self.temperature is not None:
+            if isinstance(self.temperature, (int, float)):
                 api_params['temperature'] = self.temperature
 
-            if self.top_p is not None:
+            if isinstance(self.temperature, (int, float)):
                 api_params['top_p'] = self.top_p
 
-            if self.frequency_penalty != 0:
+            if isinstance(self.frequency_penalty, (int, float)):
                 api_params['frequency_penalty'] = self.frequency_penalty
 
-            if self.presence_penalty != 0:
+            if isinstance(self.presence_penalty, (int, float)):
                 api_params['presence_penalty'] = self.presence_penalty
 
             completion = await self.openai_client.chat.completions.create(**api_params)
@@ -316,19 +316,19 @@ class TextEngine:
                 'model': self.model_name,
             }
 
-            if self.max_tokens is not None:
+            if isinstance(self.max_tokens, int):
                 api_params['max_tokens'] = self.max_tokens
 
-            if self.temperature is not None:
+            if isinstance(self.temperature, (int, float)):
                 api_params['temperature'] = self.temperature
 
-            if self.top_p is not None:
+            if isinstance(self.temperature, (int, float)):
                 api_params['top_p'] = self.top_p
 
-            if self.frequency_penalty != 0:
+            if isinstance(self.frequency_penalty, (int, float)):
                 api_params['frequency_penalty'] = self.frequency_penalty
 
-            if self.presence_penalty != 0:
+            if isinstance(self.presence_penalty, (int, float)):
                 api_params['presence_penalty'] = self.presence_penalty
 
             completion = await self.openai_client.chat.completions.create(**api_params)
@@ -398,7 +398,7 @@ class TextEngine:
         self.json_request = self.parse_request_json(request_content)
 
         try:
-            # Build API parameters with only non-None values
+            # Build API parameters with only valid values
             api_params = {
                 'messages': request_content,
                 'model': self.model_name,
@@ -406,19 +406,19 @@ class TextEngine:
                 'tools' : GoogleSearch()
             }
 
-            if self.max_tokens is not None:
+            if isinstance(self.max_tokens, int):
                 api_params['max_tokens'] = self.max_tokens
 
-            if self.temperature is not None:
+            if isinstance(self.temperature, (int, float)):
                 api_params['temperature'] = self.temperature
 
-            if self.top_p is not None:
+            if isinstance(self.temperature, (int, float)):
                 api_params['top_p'] = self.top_p
 
-            if self.frequency_penalty != 0:
+            if isinstance(self.frequency_penalty, (int, float)):
                 api_params['frequency_penalty'] = self.frequency_penalty
 
-            if self.presence_penalty != 0:
+            if isinstance(self.presence_penalty, (int, float)):
                 api_params['presence_penalty'] = self.presence_penalty
 
             # Use the asynchronous generation method
@@ -487,15 +487,43 @@ class TextEngine:
         self.json_request = self.parse_request_json(request_content)
 
         try:
-            response = await async_client.models.generate_content(
-                model=model_id,
-                contents=request_content,
-                # safety_settings=self.unsafe_settings_google_generativeai, # Uncomment if you have this
-                config=GenerateContentConfig(
-                    tools=[google_search_tool],
-                    response_modalities=["TEXT"],
-                )
-            )
+            # Build API parameters with only valid values
+            content_config = {
+                'tools' : [google_search_tool],
+                'response_modalities' : ["TEXT"],
+                'safety_settings' : self.unsafe_settings_google_generativeai
+            }
+
+            if isinstance(self.max_tokens, int):
+                content_config['max_output_tokens'] = self.max_tokens
+
+            if isinstance(self.temperature, (int, float)):
+                content_config['temperature'] = self.temperature
+
+            if isinstance(self.temperature, (int, float)):
+                content_config['top_p'] = self.top_p
+
+            if isinstance(self.frequency_penalty, (int, float)):
+                content_config['frequency_penalty'] = self.frequency_penalty
+
+            if isinstance(self.presence_penalty, (int, float)):
+                content_config['presence_penalty'] = self.presence_penalty
+            api_params = {
+                'model':model_id,
+                'contents':request_content,
+                'config':GenerateContentConfig(**content_config)
+            }
+            # Use the asynchronous generation method
+            response = await async_client.models.generate_content(**api_params)
+            # response = await async_client.models.generate_content(
+            #     model=model_id,
+            #     contents=request_content,
+            #     # safety_settings=self.unsafe_settings_google_generativeai, # Uncomment if you have this
+            #     config=GenerateContentConfig(
+            #         tools=[google_search_tool],
+            #         response_modalities=["TEXT"],
+            #     )
+            # )
 
             # Check if the response was blocked due to safety settings
             if response.prompt_feedback and response.prompt_feedback.block_reason:

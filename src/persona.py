@@ -30,18 +30,20 @@ class Persona:
         return self.context_length
 
     def set_context_length(self, context_length):
-        self.context_length = int(context_length)
+        self.context_length = context_length
 
     def get_response_token_limit(self):
         return self.response_token_limit
 
     def set_response_token_limit(self, response_token_limit):
-        if isinstance(response_token_limit, int):
-            self.response_token_limit = response_token_limit
-            return True
-        else:
-            logging.error("Error: Input is not an integer.")
-            return False
+        # if isinstance(response_token_limit, int):
+        #     self.response_token_limit = response_token_limit
+        #     return True
+        # else:
+        #     logging.error("Error: Input is not an integer.")
+        #     return False
+        self.response_token_limit = response_token_limit
+        return True
 
     def set_temperature(self, new_temp):
         self.model.set_temperature(new_temp)
