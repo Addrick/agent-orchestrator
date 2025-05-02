@@ -44,7 +44,7 @@ class BotLogic:
     def preprocess_message(self, message, check_only=False):  # TODO: add persona field and pass in when generating: allows messages to be used that don't start with persona name (better?)
         logging.debug('Checking for dev commands...')
         self.message = message
-        self.args = re.split(r'[ ]', message.content)
+        self.args = re.split(r'[ ]', message.content.lower())
         try:
             self.persona_name, command, self.args = self.args[0].lower(), self.args[1].lower(), self.args[2:]
         except IndexError:
@@ -68,7 +68,7 @@ class BotLogic:
                                                                  "hello (start new conversation), \n" \
                                                                  "goodbye (end conversation), \n" \
                                                                  "remember <+prompt>, \n" \
-                                                                 "what prompt/model/personas/context/tokens, \n" \
+                                                                 "what prompt/model/models(+openai/google/anthropic)/personas/context/tokens, \n" \
                                                                  "set prompt/model/context/tokens, \n" \
                                                                  "add <persona>, \n" \
                                                                  "delete <persona>, \n" \
@@ -138,9 +138,19 @@ class BotLogic:
             return response
         elif self.args[0] == 'models':
             model_names = self.chat_system.models_available
-            formatted_models = json.dumps(model_names, indent=2, ensure_ascii=False, separators=(',', ':')).replace(
-                '\"', '')
-            response = f"Available model options: {formatted_models}"
+            if self.args[1] == 'openai':
+                response = json.dumps(model_names['From OpenAI'], indent=2, ensure_ascii=False, separators=(',', ':')).replace(
+                    '\"', '')
+            elif self.args[1] == 'google':
+                response = json.dumps(model_names['From Google'], indent=2, ensure_ascii=False, separators=(',', ':')).replace(
+                    '\"', '')
+            elif self.args[1] == 'anthropic':
+                response = json.dumps(model_names['From Anthropic'], indent=2, ensure_ascii=False, separators=(',', ':')).replace(
+                    '\"', '')
+            else:
+                formatted_models = json.dumps(model_names, indent=2, ensure_ascii=False, separators=(',', ':')).replace(
+                    '\"', '')
+                response = f"Available model options: {formatted_models}"
             return response
         elif self.args[0] == 'personas':
             personas = self.chat_system.get_persona_list()
