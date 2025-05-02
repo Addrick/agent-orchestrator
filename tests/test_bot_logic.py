@@ -44,7 +44,7 @@ class TestBotLogic(unittest.TestCase):
                                                                  "hello (start new conversation), \n" \
                                                                  "goodbye (end conversation), \n" \
                                                                  "remember <+prompt>, \n" \
-                                                                 "what prompt/model/personas/context/tokens, \n" \
+                                                                 "what prompt/model/models(+openai/google/anthropic)/personas/context/tokens, \n" \
                                                                  "set prompt/model/context/tokens, \n" \
                                                                  "add <persona>, \n" \
                                                                  "delete <persona>, \n" \
