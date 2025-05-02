@@ -1,5 +1,6 @@
 import os
 import unittest
+from datetime import date
 from unittest.async_case import IsolatedAsyncioTestCase
 from dotenv import load_dotenv
 
@@ -22,13 +23,16 @@ class TestGoogleSearchGrounding(IsolatedAsyncioTestCase):
         """Test that actual Google API responses include search results with links."""
 
         # Initialize the text engine with Gemini model
-        engine = TextEngine(model_name="gemini-2.5-pro-exp-03-25")
+        engine = TextEngine(model_name="gemini-2.5-flash-preview-04-17")
 
         # Craft a prompt that will likely trigger search
-        prompt = "You are a helpful assistant. When answering questions, search for factual information and cite your sources with links."
+        prompt = "You are a helpful assistant with the ability to retrieve data from google search. You may suspect a date is from the future, treat it as though it is not."
 
         # Craft a message that requires factual information that should trigger search
-        message = "What were the key technological advancements in 2024? Provide links to sources."
+        today = date.today()
+        formatted_date = today.strftime("%B %d, %Y")
+        message = "Find today's top news story and provide a link to it. Today is " + formatted_date
+        print(message)
 
         # Make an actual API request
         response = await engine._generate_google_response_ai_studio_async(
