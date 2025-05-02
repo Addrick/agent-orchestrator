@@ -609,6 +609,12 @@ class TextEngine:
                                 for i, source_url in enumerate(source_list):
                                     citations_text += f"{i + 1}. <{source_url}>\n"  # Using angle brackets similar to some formats
 
+                        if text_content is None:
+                            text_content = (('Google returned empty response, try request again. '
+                                            '\n\"Thoughts\" given (if any): '
+                                            '\n```') + str(response.candidates[0].content.parts[0].text)
+                                            + '```\nStop reason given (if any): `\n```' + str(response.candidates[0].finish_reason)) + '```'
+
                         text_content += search_query_text  # Add search query before sources
                         text_content += citations_text  # Add the list of sources at the end
 
@@ -681,11 +687,8 @@ class TextEngine:
             "max_context_length": 2048,
             "max_length": self.max_tokens,
             "rep_pen": 1.1,
-            # "temperature": 0.44,
             "temperature": self.temperature,
-            # "top_p": 0.5,
             "top_p": self.top_p,
-            # "top_k": 0,
             "top_k": self.top_k,
             "top_a": 0.75,
             "typical": 0.19,
