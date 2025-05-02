@@ -16,9 +16,9 @@ class Persona:
         self.response_token_limit = token_limit
 
         self.model = None
-        self.temperature = DEFAULT_TEMPERATURE
-        self.top_p = DEFAULT_TOP_P
-        self.top_k = DEFAULT_TOP_K
+        self.temperature = None
+        self.top_p = None
+        self.top_k = None
 
         self.last_json = 'none yet'
         self.conversation_mode = False

@@ -26,10 +26,10 @@ class TextEngine:
     """Initialize the TextEngine with model settings and API clients."""
 
     def __init__(self, model_name='none',
-                 token_limit=DEFAULT_TOKEN_LIMIT,
-                 temperature=DEFAULT_TEMPERATURE,
-                 top_p=DEFAULT_TOP_P,
-                 top_k=DEFAULT_TOP_K):
+                 token_limit=None,
+                 temperature=None,
+                 top_p=None,
+                 top_k=None):
         self.logger = logging.getLogger()
 
         self.model_name = model_name
@@ -193,15 +193,28 @@ class TextEngine:
         self.json_request = self.parse_request_json(messages)
 
         try:
-            completion = await self.openai_client.chat.completions.create(
-                messages=messages,
-                model=self.model_name,
-                # temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                # top_p=self.top_p,
-                # frequency_penalty=self.frequency_penalty,
-                # presence_penalty=self.presence_penalty,
-            )
+            # Build API parameters with only non-None values
+            api_params = {
+                'messages': messages,
+                'model': self.model_name,
+            }
+
+            if self.max_tokens is not None:
+                api_params['max_tokens'] = self.max_tokens
+
+            if self.temperature is not None:
+                api_params['temperature'] = self.temperature
+
+            if self.top_p is not None:
+                api_params['top_p'] = self.top_p
+
+            if self.frequency_penalty != 0:
+                api_params['frequency_penalty'] = self.frequency_penalty
+
+            if self.presence_penalty != 0:
+                api_params['presence_penalty'] = self.presence_penalty
+
+            completion = await self.openai_client.chat.completions.create(**api_params)
             self.json_response = completion
             token_count_and_model = f' ({str(completion.usage.total_tokens)} tokens using {self.model_name})'
             response = completion.choices[0].message.content
@@ -239,12 +252,28 @@ class TextEngine:
             await self.initialize_openai_client()
 
         try:
-            completion = await self.openai_client.chat.completions.create(
-                messages=messages,
-                model=self.model_name,
-                frequency_penalty=self.frequency_penalty,
-                presence_penalty=self.presence_penalty,
-            )
+            # Build API parameters with only non-None values
+            api_params = {
+                'messages': messages,
+                'model': self.model_name,
+            }
+
+            if self.max_tokens is not None:
+                api_params['max_tokens'] = self.max_tokens
+
+            if self.temperature is not None:
+                api_params['temperature'] = self.temperature
+
+            if self.top_p is not None:
+                api_params['top_p'] = self.top_p
+
+            if self.frequency_penalty != 0:
+                api_params['frequency_penalty'] = self.frequency_penalty
+
+            if self.presence_penalty != 0:
+                api_params['presence_penalty'] = self.presence_penalty
+
+            completion = await self.openai_client.chat.completions.create(**api_params)
             self.json_response = completion
             token_count_and_model = f' ({str(completion.usage.total_tokens)} tokens using {self.model_name})'
             response = completion.choices[0].message.content
@@ -281,15 +310,28 @@ class TextEngine:
             await self.initialize_openai_client()
 
         try:
-            completion = await self.openai_client.chat.completions.create(
-                messages=messages,
-                model=self.model_name,
-                # temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                # top_p=self.top_p,
-                # frequency_penalty=self.frequency_penalty,
-                # presence_penalty=self.presence_penalty,
-            )
+            # Build API parameters with only non-None values
+            api_params = {
+                'messages': messages,
+                'model': self.model_name,
+            }
+
+            if self.max_tokens is not None:
+                api_params['max_tokens'] = self.max_tokens
+
+            if self.temperature is not None:
+                api_params['temperature'] = self.temperature
+
+            if self.top_p is not None:
+                api_params['top_p'] = self.top_p
+
+            if self.frequency_penalty != 0:
+                api_params['frequency_penalty'] = self.frequency_penalty
+
+            if self.presence_penalty != 0:
+                api_params['presence_penalty'] = self.presence_penalty
+
+            completion = await self.openai_client.chat.completions.create(**api_params)
             self.json_response = completion
             token_count_and_model = f' ({str(completion.usage.total_tokens)} tokens using {self.model_name})'
             response = completion.choices[0].message.content
@@ -356,12 +398,32 @@ class TextEngine:
         self.json_request = self.parse_request_json(request_content)
 
         try:
+            # Build API parameters with only non-None values
+            api_params = {
+                'messages': request_content,
+                'model': self.model_name,
+                'safety_settings' : self.unsafe_settings_google_generativeai,
+                'tools' : GoogleSearch()
+            }
+
+            if self.max_tokens is not None:
+                api_params['max_tokens'] = self.max_tokens
+
+            if self.temperature is not None:
+                api_params['temperature'] = self.temperature
+
+            if self.top_p is not None:
+                api_params['top_p'] = self.top_p
+
+            if self.frequency_penalty != 0:
+                api_params['frequency_penalty'] = self.frequency_penalty
+
+            if self.presence_penalty != 0:
+                api_params['presence_penalty'] = self.presence_penalty
+
             # Use the asynchronous generation method
-            response = await model.generate_content_async(
-                request_content,
-                safety_settings=self.unsafe_settings_google_generativeai,
-                tools=GoogleSearch()
-            )
+            response = await model.generate_content_async(**api_params)
+
 
             # Check if the response was blocked due to safety settings
             if response.prompt_feedback and response.prompt_feedback.block_reason:
@@ -635,17 +697,27 @@ class TextEngine:
         last_json = {
             "model": self.model_name,
             "messages": messages,
-            "options": {
-                "temperature": self.temperature,
-                "max_completion_tokens": self.max_tokens,
-                "top_p": self.top_p,
-                "frequency_penalty": self.frequency_penalty,
-                "presence_penalty": self.presence_penalty
-            },
-            "id": self.model_name,
+            "options": {}
         }
-        return last_json
 
+        # Only add parameters if they're not None
+        options = {}
+        if self.temperature is not None:
+            options["temperature"] = self.temperature
+        if self.max_tokens is not None:
+            options["max_completion_tokens"] = self.max_tokens
+        if self.top_p is not None:
+            options["top_p"] = self.top_p
+        if self.frequency_penalty != 0:
+            options["frequency_penalty"] = self.frequency_penalty
+        if self.presence_penalty != 0:
+            options["presence_penalty"] = self.presence_penalty
+
+        if options:
+            last_json["options"] = options
+
+        last_json["id"] = self.model_name
+        return last_json
 
 def launch_koboldcpp():
     """WIP: Launch a KoboldCPP instance with preconfigured settings."""
