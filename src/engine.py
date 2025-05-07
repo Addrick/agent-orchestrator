@@ -18,8 +18,6 @@ from vertexai.generative_models import HarmCategory, HarmBlockThreshold
 # It supports OpenAI, Anthropic, Google, and local models. The class provides methods to
 # set parameters, generate responses, and handle different API calls. It also includes
 # a function to launch a local KoboldCPP instance.
-# TODO: Implement a method to validate and sanitize input parameters
-# TODO: Implement proper error handling and logging for all API calls
 
 
 class TextEngine:
@@ -130,23 +128,6 @@ class TextEngine:
             if re.match(r'^o\d+(?:-|$)', self.model_name):
                 response = await self._generate_openai_reasoning_response(prompt, message, context, image_url)
                 return response
-            # Image generation models
-            # elif "dall-e" in self.model_name.lower():
-            #     # return "image"
-            #     # response = await self._generate_openai_image_response(prompt, message, context, image_url)
-            # # Audio transcription/processing (e.g., Whisper)
-            # elif "whisper" in self.model_name.lower():
-            #     # return "audio"
-            #     # response = await self._generate_openai_audio_response(prompt, message, context, image_url)
-            # # Embedding models
-            # elif "embedding" in self.model_name.lower():
-            #     # return "embedding"
-            #     # response = await self._generate_openai_embedding_response(prompt, message, context, image_url)
-            # # Standard completions (older models)
-            # elif any(token in self.model_name for token in ["davinci", "babbage", "curie", "ada"]):
-            # return "completion"
-            # response = await self._generate_openai_completion_response(prompt, message, context, image_url)
-
 
         # Anthropic request
         elif self.model_name in self.anthropic_models_available:
@@ -223,8 +204,6 @@ class TextEngine:
 
         except Exception as e:
             return str(e)
-        # except AttributeError as e:
-        #     return str(e)
 
     async def _generate_openai_reasoning_response(self, prompt, message, context, image_url=None):
 
@@ -282,8 +261,6 @@ class TextEngine:
 
         except Exception as e:
             return str(e)
-        # except AttributeError as e:
-        #     return str(e)
 
     async def _generate_openai_search_response(self, prompt, message, context, image_url=None):
         """Prepare messages for async OpenAI API call."""
@@ -402,8 +379,8 @@ class TextEngine:
             api_params = {
                 'messages': request_content,
                 'model': self.model_name,
-                'safety_settings' : self.unsafe_settings_google_generativeai,
-                'tools' : GoogleSearch()
+                'safety_settings': self.unsafe_settings_google_generativeai,
+                'tools': GoogleSearch()
             }
 
             if isinstance(self.max_tokens, int):
@@ -423,7 +400,6 @@ class TextEngine:
 
             # Use the asynchronous generation method
             response = await model.generate_content_async(**api_params)
-
 
             # Check if the response was blocked due to safety settings
             if response.prompt_feedback and response.prompt_feedback.block_reason:
@@ -489,9 +465,9 @@ class TextEngine:
         try:
             # Build API parameters with only valid values
             content_config = {
-                'tools' : [google_search_tool],
-                'response_modalities' : ["TEXT"],
-                'safety_settings' : self.unsafe_settings_google_generativeai
+                'tools': [google_search_tool],
+                'response_modalities': ["TEXT"],
+                'safety_settings': self.unsafe_settings_google_generativeai
             }
 
             if isinstance(self.max_tokens, int):
@@ -509,21 +485,12 @@ class TextEngine:
             if isinstance(self.presence_penalty, (int, float)):
                 content_config['presence_penalty'] = self.presence_penalty
             api_params = {
-                'model':model_id,
-                'contents':request_content,
-                'config':GenerateContentConfig(**content_config)
+                'model': model_id,
+                'contents': request_content,
+                'config': GenerateContentConfig(**content_config)
             }
             # Use the asynchronous generation method
             response = await async_client.models.generate_content(**api_params)
-            # response = await async_client.models.generate_content(
-            #     model=model_id,
-            #     contents=request_content,
-            #     # safety_settings=self.unsafe_settings_google_generativeai, # Uncomment if you have this
-            #     config=GenerateContentConfig(
-            #         tools=[google_search_tool],
-            #         response_modalities=["TEXT"],
-            #     )
-            # )
 
             # Check if the response was blocked due to safety settings
             if response.prompt_feedback and response.prompt_feedback.block_reason:
@@ -577,7 +544,8 @@ class TextEngine:
                             for support in sorted_supports:
                                 # Get the unique source numbers for the chunks supporting this segment
                                 supporting_source_numbers = sorted(list(set(
-                                    source_map[c_idx] for c_idx in support.grounding_chunk_indices if c_idx in source_map
+                                    source_map[c_idx] for c_idx in support.grounding_chunk_indices if
+                                    c_idx in source_map
                                 )))
 
                                 if supporting_source_numbers:
@@ -610,10 +578,22 @@ class TextEngine:
                                     citations_text += f"{i + 1}. <{source_url}>\n"  # Using angle brackets similar to some formats
 
                         if text_content is None:
+                            thoughts = ' '
+                            finish_reason = ' '
+                            try:
+                                thoughts += str(response.candidates[0].content.parts[0].text)
+                            except Exception as e:
+                                self.logger.info('Attempted to obtain response thoughts, got error: ' + str(e))
+                            try:
+                                finish_reason += str(response.candidates[0].finish_reason)
+                            except Exception as e:
+                                self.logger.info('Attempted to obtain finish reason, got error: ' + str(e))
+
                             text_content = (('Google returned empty response, try request again. '
-                                            '\n\"Thoughts\" given (if any): '
-                                            '\n```') + str(response.candidates[0].content.parts[0].text)
-                                            + '```\nStop reason given (if any): `\n```' + str(response.candidates[0].finish_reason)) + '```'
+                                             '\nThought process given (if any): '
+                                             '\n```') + thoughts + '```' +
+                                             '\nStop reason given (if any): '
+                                             '\n```' + finish_reason + '```')
 
                         text_content += search_query_text  # Add search query before sources
                         text_content += citations_text  # Add the list of sources at the end
@@ -749,6 +729,7 @@ class TextEngine:
 
         last_json["id"] = self.model_name
         return last_json
+
 
 def launch_koboldcpp():
     """WIP: Launch a KoboldCPP instance with preconfigured settings."""
