@@ -36,12 +36,6 @@ class Persona:
         return self.response_token_limit
 
     def set_response_token_limit(self, response_token_limit):
-        # if isinstance(response_token_limit, int):
-        #     self.response_token_limit = response_token_limit
-        #     return True
-        # else:
-        #     logging.error("Error: Input is not an integer.")
-        #     return False
         self.response_token_limit = response_token_limit
         return True
 
@@ -72,7 +66,7 @@ class Persona:
     def set_model(self, model_name):
         import src.engine
         model = src.engine.TextEngine(model_name,
-                                  token_limit=(self.response_token_limit+1),
+                                  token_limit=self.response_token_limit,
                                   top_k=self.top_k,
                                   top_p=self.top_p)
         self.model = model
