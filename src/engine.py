@@ -519,14 +519,18 @@ class TextEngine:
                             # --- Part 1: Source Mapping (similar to your existing code) ---
                             source_map = {}  # Maps chunk index to source number (1-based)
                             source_list = []  # List of unique source URLs/info in citation order
+                            short_source_list = []  # List of unique source URLs/info in citation order
 
                             for chunk_index, chunk in enumerate(metadata.grounding_chunks):
                                 if chunk.web and chunk.web.uri:
-                                    resolved_uri = resolve_redirect_url(chunk.web.uri)
+                                    resolved_uri = chunk.web.uri
+                                    short_uri = chunk.web.title
                                     try:
                                         source_number = source_list.index(resolved_uri) + 1
+                                        short_source_list = source_list.index(short_uri) + 1
                                     except ValueError:
                                         source_list.append(resolved_uri)
+                                        short_source_list.append(short_uri)
                                         source_number = len(source_list)
                                     source_map[chunk_index] = source_number
 
@@ -599,7 +603,22 @@ class TextEngine:
                                 for loc in sorted(insertion_points_map.keys()):
                                     modified_text_parts.append(base_text_from_response[last_slice_end:loc])
                                     sorted_citations = sorted(list(insertion_points_map[loc]))
-                                    citation_str_to_insert = f"[{','.join(map(str, sorted_citations))}]"
+
+                                    # MODIFICATION START
+                                    hyperlinked_citation_parts = []
+                                    for num in sorted_citations:
+                                        # source_list is 0-indexed, citation numbers (num) are 1-based.
+                                        # Assuming num is always a valid reference to an item in source_list
+                                        # as per prior logic (source_map population).
+                                        url = source_list[num - 1]
+                                        hyperlinked_citation_parts.append(f"[{num}](<{url}>)")
+
+                                    citation_str_to_insert = f"[{', '.join(hyperlinked_citation_parts)}]"
+                                    # If sorted_citations was empty, hyperlinked_citation_parts will be empty,
+                                    # join will produce "", and citation_str_to_insert will be "[]".
+                                    # This matches the behavior of the original f"[{','.join(map(str, []))}]".
+                                    # MODIFICATION END
+
                                     modified_text_parts.append(citation_str_to_insert)
                                     last_slice_end = loc
                                 modified_text_parts.append(base_text_from_response[last_slice_end:])
@@ -608,8 +627,8 @@ class TextEngine:
                             # --- Part 5: Build the list of sources ---
                             if source_list:
                                 citations_text = "\n\nSources:\n"
-                                for i, source_url in enumerate(source_list):
-                                    citations_text += f"{i + 1}. <{source_url}>\n"
+                                for i, source_url in enumerate(short_source_list):
+                                    citations_text += f"{i + 1}. {source_url}\n"
 
                         # Check if original text was empty AND we didn't add anything meaningful (like citations)
                         is_content_effectively_empty = not base_text_from_response.strip()
