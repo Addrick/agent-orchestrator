@@ -490,128 +490,176 @@ class TextEngine:
                 'config': GenerateContentConfig(**content_config)
             }
             # Use the asynchronous generation method
-            response = await async_client.models.generate_content(**api_params)
+            response_obj = await async_client.models.generate_content(**api_params)
 
             # Check if the response was blocked due to safety settings
-            if response.prompt_feedback and response.prompt_feedback.block_reason:
-                block_reason = response.prompt_feedback.block_reason.name
+            if response_obj.prompt_feedback and response_obj.prompt_feedback.block_reason:
+                block_reason = response_obj.prompt_feedback.block_reason.name
                 text_content = f"```Response blocked by Google due to {block_reason}. Try again, mix up your request a bit if it persists.```"
                 self.logger.error(f"Google AI Studio response blocked. Reason: {block_reason}")
-                if response.prompt_feedback.safety_ratings:
-                    self.logger.error(f"Safety Ratings: {response.prompt_feedback.safety_ratings}")
+                if response_obj.prompt_feedback.safety_ratings:
+                    self.logger.error(f"Safety Ratings: {response_obj.prompt_feedback.safety_ratings}")
             else:
                 try:
-                    text_content = response.text
-                    # --- Citation Logic ---
-                    citations_text = ""
-                    search_query_text = ""
+                    # Ensure base_text_from_response is initialized from the response
+                    # In the Google AI SDK, response.text is a convenient way to get candidate.content.parts[0].text
+                    base_text_from_response = response_obj.text
+                    if base_text_from_response is None:
+                        base_text_from_response = ""  # Ensure it's a string
 
-                    if response.candidates and response.candidates[0].grounding_metadata:
-                        metadata = response.candidates[0].grounding_metadata
+                    text_content = base_text_from_response  # Initialize text_content with the AI's generated text
 
-                        # 1. Get Search Query (optional, keep if desired)
+                    if response_obj.candidates and response_obj.candidates[0].grounding_metadata:
+                        metadata = response_obj.candidates[0].grounding_metadata
+
                         if metadata.web_search_queries:
                             search_query_text = f"\n\nSearch Query: {', '.join(metadata.web_search_queries)}"
 
                         if metadata.grounding_chunks and metadata.grounding_supports:
-                            # Map chunks to unique sources and assign citation numbers
+                            # --- Part 1: Source Mapping (similar to your existing code) ---
                             source_map = {}  # Maps chunk index to source number (1-based)
                             source_list = []  # List of unique source URLs/info in citation order
 
                             for chunk_index, chunk in enumerate(metadata.grounding_chunks):
                                 if chunk.web and chunk.web.uri:
                                     resolved_uri = resolve_redirect_url(chunk.web.uri)
-                                    # Find if this URL is already in our source list
                                     try:
                                         source_number = source_list.index(resolved_uri) + 1
                                     except ValueError:
-                                        # URL not found, add it
                                         source_list.append(resolved_uri)
                                         source_number = len(source_list)
                                     source_map[chunk_index] = source_number
-                                # Handle other types of chunks if necessary (e.g., document chunks)
-                                # Currently only handling web chunks as per original code's focus
 
-                            # Sort supports by end index descending to insert citations from the end first
-                            # This avoids shifting indices affecting subsequent insertions
-                            sorted_supports = sorted(metadata.grounding_supports, key=lambda s: s.segment.end_index,
-                                                     reverse=True)
+                            # --- Part 2 & 3: Collect Segments, Find in Text, Mark Insertions ---
+                            segments_to_cite = []
+                            for support in metadata.grounding_supports:
+                                s_text = support.segment.text
+                                s_start_hint = support.segment.start_index if support.segment.start_index is not None else 0
 
-                            modified_text = text_content
-                            citation_insertions = {}  # Store insertion points and citation strings
+                                supporting_source_numbers = set()
+                                if support.grounding_chunk_indices:
+                                    for c_idx in support.grounding_chunk_indices:
+                                        if c_idx in source_map:
+                                            supporting_source_numbers.add(source_map[c_idx])
 
-                            # Collect all citation insertions
-                            for support in sorted_supports:
-                                # Get the unique source numbers for the chunks supporting this segment
-                                supporting_source_numbers = sorted(list(set(
-                                    source_map[c_idx] for c_idx in support.grounding_chunk_indices if
-                                    c_idx in source_map
-                                )))
+                                if s_text and supporting_source_numbers:
+                                    segments_to_cite.append({
+                                        "start_hint": s_start_hint,
+                                        "text": s_text,
+                                        "citations": supporting_source_numbers
+                                    })
 
-                                if supporting_source_numbers:
-                                    citation_string = f"[{', '.join(map(str, supporting_source_numbers))}]"
-                                    end_index = support.segment.end_index
+                            segments_to_cite.sort(key=lambda s: s["start_hint"])
 
-                                    # Append citation string at the end index.
-                                    # If multiple supports end at the same index, combine their citations.
-                                    if end_index in citation_insertions:
-                                        # Append new citations, ensuring uniqueness and sorting
-                                        existing_citations = set(citation_insertions[end_index].strip('[]').split(', '))
-                                        new_citations = set(map(str, supporting_source_numbers))
-                                        all_citations = sorted(list(existing_citations | new_citations),
-                                                               key=int)  # Combine, sort, unique
-                                        citation_insertions[end_index] = f"[{', '.join(all_citations)}]"
-                                    else:
-                                        citation_insertions[end_index] = citation_string
+                            insertion_points_map = {}
+                            current_search_cursor = 0
 
-                            # Apply insertions from the end of the text
-                            for end_index in sorted(citation_insertions.keys(), reverse=True):
-                                citation_string = citation_insertions[end_index]
-                                modified_text = modified_text[:end_index] + citation_string + modified_text[end_index:]
+                            for segment_data in segments_to_cite:
+                                segment_text = segment_data["text"]
+                                citation_numbers = segment_data["citations"]
 
-                            text_content = modified_text
+                                found_index = base_text_from_response.find(segment_text, current_search_cursor)
 
-                            # Build the list of sources
+                                if found_index == -1:
+                                    # Check if the segment might have been found *before* current_search_cursor due to very off start_hints
+                                    # This is a more aggressive fallback.
+                                    alt_found_index = base_text_from_response.find(segment_text, 0)
+                                    if alt_found_index != -1 and alt_found_index < current_search_cursor:
+                                        # If found earlier, and this segment hasn't effectively been "claimed" by being part of a longer segment already processed
+                                        # This condition is tricky. For now, we assume start_hint sorting is good enough,
+                                        # and if not found from cursor, a global search is a last resort.
+                                        self.logger.warning(
+                                            f"Segment text (starts with: '{segment_text[:50].replace(chr(10), ' ')}...') not found starting from original index {current_search_cursor}. Found earlier at {alt_found_index} via global search.")
+                                        found_index = alt_found_index  # Use this earlier finding
+                                    else:  # Not found earlier or same as not found from cursor
+                                        self.logger.warning(
+                                            f"Segment text (starts with: '{segment_text[:50].replace(chr(10), ' ')}...') not found starting from original index {current_search_cursor}. Trying from start of document (or already tried).")
+                                        if alt_found_index != -1:  # Found from global search, but not earlier
+                                            found_index = alt_found_index
+                                        # If still -1, it will be caught by the next check
+
+                                    if found_index == -1:
+                                        self.logger.error(
+                                            f"Segment text (starts with: '{segment_text[:50].replace(chr(10), ' ')}...') could not be found anywhere in the response text. Skipping this citation.")
+                                        continue
+
+                                insertion_location = found_index + len(segment_text)
+
+                                if insertion_location not in insertion_points_map:
+                                    insertion_points_map[insertion_location] = set()
+                                insertion_points_map[insertion_location].update(citation_numbers)
+
+                                # Update cursor to search for next segment *after* the current one's found_index.
+                                current_search_cursor = found_index + len(segment_text)
+
+                            # --- Part 4: Build the new text_content with citations inserted ---
+                            if insertion_points_map:
+                                modified_text_parts = []
+                                last_slice_end = 0
+                                for loc in sorted(insertion_points_map.keys()):
+                                    modified_text_parts.append(base_text_from_response[last_slice_end:loc])
+                                    sorted_citations = sorted(list(insertion_points_map[loc]))
+                                    citation_str_to_insert = f"[{','.join(map(str, sorted_citations))}]"
+                                    modified_text_parts.append(citation_str_to_insert)
+                                    last_slice_end = loc
+                                modified_text_parts.append(base_text_from_response[last_slice_end:])
+                                text_content = "".join(modified_text_parts)
+
+                            # --- Part 5: Build the list of sources ---
                             if source_list:
                                 citations_text = "\n\nSources:\n"
                                 for i, source_url in enumerate(source_list):
-                                    citations_text += f"{i + 1}. <{source_url}>\n"  # Using angle brackets similar to some formats
+                                    citations_text += f"{i + 1}. <{source_url}>\n"
 
-                        if text_content is None:
-                            thoughts = ' '
-                            finish_reason = ' '
+                        # Check if original text was empty AND we didn't add anything meaningful (like citations)
+                        is_content_effectively_empty = not base_text_from_response.strip()
+                        if is_content_effectively_empty and not (
+                                insertion_points_map or source_list or metadata.web_search_queries):
+                            thoughts = ' '  # Placeholder for actual thoughts if available from API
+                            finish_reason_str = ' '
                             try:
-                                thoughts += str(response.candidates[0].content.parts[0].text)
+                                # This part might need adjustment based on actual API response structure for "thoughts".
+                                pass  # No direct "thought" field in the provided mock structure for Part.
                             except Exception as e:
                                 self.logger.info('Attempted to obtain response thoughts, got error: ' + str(e))
                             try:
-                                finish_reason += str(response.candidates[0].finish_reason)
+                                if response_obj.candidates and response_obj.candidates[0].finish_reason:
+                                    finish_reason_str += str(response_obj.candidates[0].finish_reason)
                             except Exception as e:
                                 self.logger.info('Attempted to obtain finish reason, got error: ' + str(e))
 
-                            text_content = (('Google returned empty response, try request again. '
-                                             '\nThought process given (if any): '
-                                             '\n```') + thoughts + '```' +
-                                             '\nStop reason given (if any): '
-                                             '\n```' + finish_reason + '```')
+                            # If text_content was just whitespace and no citations/queries were added, then use the empty response message.
+                            # Otherwise, text_content might already have citations and we should keep that.
+                            if not text_content.strip():  # Re-check text_content itself
+                                text_content = (('Google returned empty response, try request again. '
+                                                 '\nThought process given (if any): '
+                                                 '\n```') + thoughts + '```' +
+                                                '\nStop reason given (if any): '
+                                                '\n```' + finish_reason_str + '```')
 
-                        text_content += search_query_text  # Add search query before sources
-                        text_content += citations_text  # Add the list of sources at the end
+                        text_content += search_query_text
+                        text_content += citations_text
 
-                    # --- End Citation Logic ---
 
                 except ValueError:
-                    # This might happen if response.text is not available
-                    text_content = "```Error retrieving text from response.```"
-                    self.logger.error("ValueError accessing response.text.")
-                    if hasattr(response, 'candidates') and response.candidates:
-                        self.logger.error(
-                            f"Candidate safety ratings (if available): {response.candidates[0].safety_ratings}")
 
+                    # This might happen if response.text is not available
+
+                    text_content = "```Error retrieving text from response.```"
+
+                    self.logger.error("ValueError accessing response.text.")
+
+                    if hasattr(response_obj, 'candidates') and response_obj.candidates:
+                        self.logger.error(
+
+                            f"Candidate safety ratings (if available): {response_obj.candidates[0].safety_ratings}")
 
         except Exception as e:
+
             # Catch potential API errors or other issues
+
             self.logger.error(f"Error during Google AI Studio generation: {e}", exc_info=True)
+
             text_content = f"```An error occurred during generation: {e}```"
 
         return text_content
