@@ -30,13 +30,19 @@ class Persona:
         return self.context_length
 
     def set_context_length(self, context_length):
-        self.context_length = context_length
+        try:
+            self.context_length = int(context_length)
+        except Exception:
+            self.context_length = context_length
 
     def get_response_token_limit(self):
         return self.response_token_limit
 
     def set_response_token_limit(self, response_token_limit):
-        self.response_token_limit = response_token_limit
+        try:
+            self.response_token_limit = int(response_token_limit)
+        except Exception:
+            self.response_token_limit = response_token_limit
         return True
 
     def set_temperature(self, new_temp):
