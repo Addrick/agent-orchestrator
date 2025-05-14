@@ -5,11 +5,14 @@
 -
 
 #### derpr todo:
-- rewrite OpenAI reasoning (perhaps others) to utilize the Responses API instead (allows for summary of reasoning process)
-- change default parameter handling to simply not provide a value which will use the provider's default values instead of my somewhat arbitrary ones
-- when ready as an offering to clients, explore utilizing ATL's existing workspace subscription and compare capabilities, ie does it integrate with her GMail contents?
-- explore fine-tuning and RAG for purposes of creating an ai technician with org-specific focus/knowledge
-- add logit bias for 'fuck' or other things to see if derpr gets funny
+- DEPLOYMENT: dockerize to be able to run on different server, set up git update control etc
+- GOOGLE SEARCH: include citations as a thread in the actual response - resolving the URLs takes as much time to complete as the request generation and they're usually not needed [require expansion of discord_bot.py to open up a thread or similar]
+- CONTEXT: set a specific time that all messages posted after will be included in the context window - would need to pass discord timestamps into engine.py
+- CONTEXT: make use of discord threads
+- OPENAI engine.py: rewrite OpenAI reasoning (perhaps others) to utilize the Responses API instead (allows for summary of reasoning process)
+- TECHOPS: when ready as an offering to clients, explore utilizing ATL's existing workspace subscription and compare capabilities, ie does it integrate with her GMail contents?
+- TECHOPS: explore fine-tuning and RAG for purposes of creating an ai technician with org-specific focus/knowledge
+- OPENAI: add logit bias for 'fuck' or other things to see if derpr gets funny
 - add module for voice chat functionality
 - explore utilizing rag
     > RAG-tuned models can be found on HF. can chatgpt or other general models utilize this?
