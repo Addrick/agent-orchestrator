@@ -74,13 +74,7 @@ class BotLogic:
                                                                  "delete <persona>, \n" \
                                                                  "save, \n" \
                                                                  "update_models, \n" \
-                                                                 "dump_last, \n\n" \
-                                                                 "Koboldcpp system management (WIP):, \n" \
-                                                                 "start_koboldcpp, \n" \
-                                                                 "stop_koboldcpp, \n" \
-                                                                 "check_koboldcpp, \n" \
-                                                                 "query_generation, \n" \
-                                                                 "restart_app"
+                                                                 "dump_last"
 
         return help_msg
 
@@ -137,20 +131,23 @@ class BotLogic:
             response = f"{self.persona_name} is using {model_name}"
             return response
         elif self.args[0] == 'models':
+            # Prefills response as entire model list, tries to set response to a smaller subsection if exists
             model_names = self.chat_system.models_available
-            if self.args[1] == 'openai':
-                response = json.dumps(model_names['From OpenAI'], indent=2, ensure_ascii=False, separators=(',', ':')).replace(
-                    '\"', '')
-            elif self.args[1] == 'google':
-                response = json.dumps(model_names['From Google'], indent=2, ensure_ascii=False, separators=(',', ':')).replace(
-                    '\"', '')
-            elif self.args[1] == 'anthropic':
-                response = json.dumps(model_names['From Anthropic'], indent=2, ensure_ascii=False, separators=(',', ':')).replace(
-                    '\"', '')
-            else:
-                formatted_models = json.dumps(model_names, indent=2, ensure_ascii=False, separators=(',', ':')).replace(
-                    '\"', '')
-                response = f"Available model options: {formatted_models}"
+            formatted_models = json.dumps(model_names, indent=2, ensure_ascii=False, separators=(',', ':')).replace(
+                '\"', '')
+            response = f"Available model options: {formatted_models}"
+            try:
+                if self.args[1] == 'openai':
+                    response = json.dumps(model_names['From OpenAI'], indent=2, ensure_ascii=False, separators=(',', ':')).replace(
+                        '\"', '')
+                elif self.args[1] == 'google':
+                    response = json.dumps(model_names['From Google'], indent=2, ensure_ascii=False, separators=(',', ':')).replace(
+                        '\"', '')
+                elif self.args[1] == 'anthropic':
+                    response = json.dumps(model_names['From Anthropic'], indent=2, ensure_ascii=False, separators=(',', ':')).replace(
+                        '\"', '')
+            except NameError:
+                pass
             return response
         elif self.args[0] == 'personas':
             personas = self.chat_system.get_persona_list()
