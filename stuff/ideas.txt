@@ -1,4 +1,12 @@
-﻿- ways to better deal with conversations:
+﻿- personas/conversations defined within specific Discord text channels
+    > use channel description for prompt
+    ?> how to flag message as requiring generation without a persona name? use text channel category? (ie for herp: 'professional bots', 'testing', 'weird results')
+
+- self-talk mode: allow personas to address one another
+    > add prompt tag for instructions on how to activate the persona(s)?
+    > would be interesting to have to have a mock argument where each side is prompted with a different belief
+
+- ways to better deal with conversations:
     > time-based cutoff
     > dev command to start conversation sequence
         - start/stop
@@ -15,6 +23,8 @@
     > 'best guess' encourage wider answers
     > write/respond concisely
     
+- add image support
+    > local BAGEL model (7B) appears to be current sota (5/22/25)
 
 =======
 -DEV COMMAND TO ADD LIST:
