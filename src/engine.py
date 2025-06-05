@@ -462,6 +462,13 @@ class TextEngine:
         # Log the structured request
         self.json_request = self.parse_request_json(request_content)
 
+        insertion_points_map = {}
+        current_search_cursor = 0
+
+        # --- Part 1: Source Mapping (similar to your existing code) ---
+        source_map = {}  # Maps chunk index to source number (1-based)
+        source_list = []  # List of unique source URLs/info in citation order
+        short_source_list = []  # List of unique source URLs/info in citation order
         try:
             # Build API parameters with only valid values
             content_config = {
@@ -512,14 +519,12 @@ class TextEngine:
                     if response_obj.candidates and response_obj.candidates[0].grounding_metadata:
                         metadata = response_obj.candidates[0].grounding_metadata
 
+                        search_query_text = f"\n\nSearch Query: None"
+                        citations_text = "\n\nSources:\n"
                         if metadata.web_search_queries:
                             search_query_text = f"\n\nSearch Query: {', '.join(metadata.web_search_queries)}"
 
                         if metadata.grounding_chunks and metadata.grounding_supports:
-                            # --- Part 1: Source Mapping (similar to your existing code) ---
-                            source_map = {}  # Maps chunk index to source number (1-based)
-                            source_list = []  # List of unique source URLs/info in citation order
-                            short_source_list = []  # List of unique source URLs/info in citation order
 
                             for chunk_index, chunk in enumerate(metadata.grounding_chunks):
                                 if chunk.web and chunk.web.uri:
@@ -554,9 +559,6 @@ class TextEngine:
                                     })
 
                             segments_to_cite.sort(key=lambda s: s["start_hint"])
-
-                            insertion_points_map = {}
-                            current_search_cursor = 0
 
                             for segment_data in segments_to_cite:
                                 segment_text = segment_data["text"]
@@ -656,8 +658,10 @@ class TextEngine:
                                                 '\nStop reason given (if any): '
                                                 '\n```' + finish_reason_str + '```')
 
-                        text_content += search_query_text
-                        text_content += citations_text
+                        if search_query_text != f"\n\nSearch Query: None":
+                            text_content += search_query_text
+                        if citations_text != "\n\nSources:\n":
+                            text_content += citations_text
 
 
                 except ValueError:
