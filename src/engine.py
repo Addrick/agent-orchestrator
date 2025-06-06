@@ -10,6 +10,8 @@ from src.utils.message_utils import resolve_redirect_url
 import aiohttp
 import anthropic
 
+import os
+
 from vertexai.generative_models import HarmCategory, HarmBlockThreshold
 
 
@@ -71,18 +73,30 @@ class TextEngine:
                 "threshold": "BLOCK_NONE"
             }
         ]
+        self.googleaistudio_client = None
 
         # Anthropic models
         self.anthropic_models_available = self.all_available_models['From Anthropic']
-
-        # Local models
-        # TODO: add me after finishing. Kobold will be launched with a particular model and takes ages to start up; model selection must be done on startup/shutdown
 
     async def initialize_openai_client(self):
 
         from openai import OpenAI, AsyncOpenAI, APIError
 
         self.openai_client = AsyncOpenAI(api_key=api_keys.openai)
+
+    def initialize_googleaistudio_client(self):
+        from google import genai
+        # load .env for api key
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        root_dir = os.path.join(current_dir, '..')
+        load_dotenv(os.path.join(root_dir, '.env'))
+        google_api_key = os.environ.get("GOOGLE_GENERATIVEAI_API_KEY")
+        if not google_api_key:
+            self.logger.error("GOOGLE_GENERATIVEAI_API_KEY not found in environment variables.")
+            raise ValueError("GOOGLE_GENERATIVEAI_API_KEY not configured.")
+
+        client = genai.client.BaseApiClient(api_key=google_api_key)
+        self.googleaistudio_client = genai.client.AsyncClient(client)
 
     def get_raw_json_request(self):
         return self.json_request
@@ -320,7 +334,7 @@ class TextEngine:
         # except AttributeError as e:
         #     return str(e)
 
-    # Google # TODO: async?
+    # Google
     def _generate_google_response_vertex(self, prompt, message, context):
         """Generate a response using Google's Vertex AI."""
         import vertexai
@@ -433,22 +447,10 @@ class TextEngine:
 
     async def _generate_google_response_ai_studio_async(self, prompt, message, context):
         """Generate a response asynchronously using Google AI Studio (genai library)."""
-
-        from google import genai
         from google.genai.types import Tool, GenerateContentConfig, GoogleSearch
-        import os
 
-        # load .env for api key
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        root_dir = os.path.join(current_dir, '..')
-        load_dotenv(os.path.join(root_dir, '.env'))
-        google_api_key = os.environ.get("GOOGLE_GENERATIVEAI_API_KEY")
-        if not google_api_key:
-            self.logger.error("GOOGLE_GENERATIVEAI_API_KEY not found in environment variables.")
-            return "```Error: API key not configured.```"
-
-        client = genai.client.BaseApiClient(api_key=google_api_key)
-        async_client = genai.client.AsyncClient(client)
+        if self.googleaistudio_client is None:
+            self.initialize_googleaistudio_client()
 
         model_id = self.model_name
 
@@ -497,7 +499,7 @@ class TextEngine:
                 'config': GenerateContentConfig(**content_config)
             }
             # Use the asynchronous generation method
-            response_obj = await async_client.models.generate_content(**api_params)
+            response_obj = await self.googleaistudio_client.models.generate_content(**api_params)
 
             # Check if the response was blocked due to safety settings
             if response_obj.prompt_feedback and response_obj.prompt_feedback.block_reason:
