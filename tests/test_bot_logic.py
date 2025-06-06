@@ -50,13 +50,7 @@ class TestBotLogic(unittest.TestCase):
                                                                  "delete <persona>, \n" \
                                                                  "save, \n" \
                                                                  "update_models, \n" \
-                                                                 "dump_last, \n\n" \
-                                                                 "Koboldcpp system management (WIP):, \n" \
-                                                                 "start_koboldcpp, \n" \
-                                                                 "stop_koboldcpp, \n" \
-                                                                 "check_koboldcpp, \n" \
-                                                                 "query_generation, \n" \
-                                                                 "restart_app"
+                                                                 "dump_last"
         self.assertEqual(result, help_msg)
 
     def test_preprocess_message_no_command(self):

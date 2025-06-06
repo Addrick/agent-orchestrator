@@ -146,7 +146,7 @@ class BotLogic:
                 elif self.args[1] == 'anthropic':
                     response = json.dumps(model_names['From Anthropic'], indent=2, ensure_ascii=False, separators=(',', ':')).replace(
                         '\"', '')
-            except NameError:
+            except IndexError:
                 pass
             return response
         elif self.args[0] == 'personas':
