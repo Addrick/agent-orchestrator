@@ -1,13 +1,12 @@
 import unittest
 import logging
-import re
 from unittest.async_case import IsolatedAsyncioTestCase
-from unittest.mock import AsyncMock, MagicMock, patch, mock_open, call, PropertyMock
+from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 
 import discord
 
 from config.global_config import DISCORD_CHAR_LIMIT, DISCORD_STATUS_LIMIT
-from src.discord_bot import (
+from src.interfaces.discord_bot import (
     ConnectionErrorFilter,
     CustomDiscordBot,
     create_discord_bot,
@@ -386,7 +385,7 @@ class TestCreateDiscordBot(unittest.TestCase):
             return coro
 
         self.mock_client.event = mock_event
-        from src.discord_bot import CustomDiscordBot
+        from src.interfaces.discord_bot import CustomDiscordBot
         CustomDiscordBot.return_value = self.mock_client
 
     def tearDown(self):
@@ -399,7 +398,7 @@ class TestCreateDiscordBot(unittest.TestCase):
             client = create_discord_bot(self.mock_chat_system)
 
             # Verify client was created with correct parameters
-            from src.discord_bot import CustomDiscordBot
+            from src.interfaces.discord_bot import CustomDiscordBot
             CustomDiscordBot.assert_called_once()
 
             # Check that event handlers were registered

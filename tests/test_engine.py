@@ -29,7 +29,7 @@ class TestTextEngine(IsolatedAsyncioTestCase):
 
     def test_init(self):
         self.assertEqual(self.text_engine.model_name, "gpt-3.5-turbo")
-        self.assertEqual(self.text_engine.max_tokens, 100)
+        self.assertEqual(self.text_engine.max_output_tokens, 100)
         self.assertEqual(self.text_engine.temperature, 0.7)
         self.assertEqual(self.text_engine.top_p, 0.9)
         self.assertEqual(self.text_engine.top_k, 40)
@@ -85,7 +85,7 @@ class TestTextEngine(IsolatedAsyncioTestCase):
 
     async def test_initialize_openai_client(self):
         with patch('openai.AsyncOpenAI') as mock_openai:
-            await self.text_engine.initialize_openai_client()
+            await self.text_engine._initialize_openai()
             mock_openai.assert_called_once()
             self.assertIsNotNone(self.text_engine.openai_client)
 
@@ -103,7 +103,7 @@ class TestTextEngine(IsolatedAsyncioTestCase):
             mock_openai_class.return_value = mock_client
 
             # Set up the test
-            await self.text_engine.initialize_openai_client()
+            await self.text_engine._initialize_openai()
             response = await self.text_engine._generate_openai_response(
                 "You are a helpful assistant.", "Hello, how are you?", None)
 
@@ -135,7 +135,7 @@ class TestTextEngine(IsolatedAsyncioTestCase):
             mock_openai_class.return_value = mock_client
 
             # Set up the test
-            await self.text_engine.initialize_openai_client()
+            await self.text_engine._initialize_openai()
             response = await self.text_engine._generate_openai_response(
                 "You are a helpful assistant.",
                 "What did I ask before?",
