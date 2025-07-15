@@ -67,6 +67,7 @@ def get_model_list(update=False):
                                 }
         logging.debug(all_available_models)
         save_utils.save_models_to_file(all_available_models)
+        logging.info('Current available models set from API.')
         return all_available_models
     else:
         return save_utils.load_models_from_file()
