@@ -1,4 +1,16 @@
-﻿- personas/conversations defined within specific Discord text channels
+﻿###TECHNICIAN###
+repurpose history function to have persistent memory?
+- run requests every 15 min or whatever as a heartbeat to check for errors (ie just got 'model not supported' today)
+
+###GENERAL###
+- finish adding support for default persona - set it up at the persona level and sub the default model name during
+- ++ mass update persona model settings
+    > looking to avoid tedium when a model is deprecated
+    > use default model setting; if 'model not found' error set model to default
+
+- add more self-info to derpr so he can provide help to users
+
+- personas/conversations defined within specific Discord text channels
     > use channel description for prompt
     ?> how to flag message as requiring generation without a persona name? use text channel category? (ie for herp: 'professional bots', 'testing', 'weird results')
 
