@@ -181,6 +181,8 @@ class BotLogic:
             return response
         elif self.args[0] == 'model':
             model_name = self.args[1]
+            if model_name == 'default':
+                model_name = DEFAULT_MODEL_NAME
             if model_utils.check_model_available(model_name):
                 self.current_persona.set_model(model_name)
                 return f"Model set to '{model_name}'."
