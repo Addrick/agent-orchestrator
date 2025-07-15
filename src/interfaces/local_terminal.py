@@ -40,7 +40,7 @@ class Client:
 
 
 def local_history_reader(context_limit: int):
-    with open('../stuff/logs/local_guild #local_channel.txt', 'r') as file:
+    with open('../../stuff/logs/local_guild #local_channel.txt', 'r') as file:
         lines = file.readlines()
         # Grabs last history_length number of messages from local chat history file and joins them
         context = '/n'.join(lines[-1 * (context_limit + 1):-1])
@@ -49,7 +49,7 @@ def local_history_reader(context_limit: int):
 
 def local_history_logger(persona_name, response):
     import datetime
-    with open('../stuff/logs/local_guild #local_channel.txt', 'a', encoding='utf-8') as file:
+    with open('../../stuff/logs/local_guild #local_channel.txt', 'a', encoding='utf-8') as file:
         current_time = datetime.datetime.now().time()
         response = '\n' + persona_name + ': ' + str(current_time) + ' ' + response
 
