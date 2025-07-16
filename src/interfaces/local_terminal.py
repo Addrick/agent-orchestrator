@@ -3,9 +3,13 @@
 #     Guild.__init__: Initializes a new Guild instance with an optional name, defaulting to 'local_guild'.
 #     User.__init__: Initializes a new User instance with an optional name 'admin' and an id of 1 by default.
 #     Channel.__init__: Initializes a new Channel instance with an optional name, defaulting to 'local_channel'.
+import asyncio
 import logging
+from datetime import datetime
 
 from config.global_config import GLOBAL_CONTEXT_LIMIT, CHAT_LOG_LOCATION
+from src.chat_system import ChatSystem
+from src.main import logger
 
 
 class StrippedMessage:
@@ -38,6 +42,29 @@ class Client:
         self.id = name
         self.user = User(name=name)
 
+
+async def run_terminal_interface(bot: ChatSystem):
+    """
+    Asynchronous function to run the command-line interface.
+    """
+    client = Client()
+    logger.info("Command-line interface is ready.")
+    while True:
+        # Run the blocking input() in a separate thread to avoid blocking the asyncio event loop
+        message_content = await asyncio.to_thread(input, "Enter a message: ")
+
+        if message_content.strip():
+            # Create a simulated message object
+            current_time = datetime.now().time()
+            simulated_message = StrippedMessage(
+                message_content,
+                author=User(),
+                channel=Channel(),
+                guild=Guild(),
+                timestamp=current_time
+            )
+            # Process the message asynchronously
+            await on_message(bot, simulated_message)
 
 def local_history_reader(context_limit: int):
     with open('../../stuff/logs/local_guild #local_channel.txt', 'r') as file:

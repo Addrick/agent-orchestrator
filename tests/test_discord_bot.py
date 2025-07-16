@@ -503,7 +503,7 @@ class TestOnMessageEvent(IsolatedAsyncioTestCase):
             patch('src.discord_bot.reset_discord_status', new_callable=AsyncMock),
             patch('src.discord_bot.send_message', new_callable=AsyncMock),
             patch('src.discord_bot.send_discord_dev_message', new_callable=AsyncMock),
-            patch('logging.info'),
+            patch('logger.info'),
             patch('logging.debug'),
             patch('logging.error'),
             patch('logging.warning')

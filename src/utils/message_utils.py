@@ -32,7 +32,7 @@ def resolve_redirect_url(redirect_url: str, max_retries: int = 3, initial_delay:
 
     while retries <= max_retries:
         try:
-            logging.debug(f"Attempting to resolve {redirect_url} using HEAD (Attempt {retries + 1}/{max_retries + 1})...")
+            logger.debug(f"Attempting to resolve {redirect_url} using HEAD (Attempt {retries + 1}/{max_retries + 1})...")
 
             # Use requests.head() which follows redirects and doesn't download body
             # allow_redirects=True is default for HEAD too, but explicit is clear
@@ -47,25 +47,25 @@ def resolve_redirect_url(redirect_url: str, max_retries: int = 3, initial_delay:
                 if retries <= max_retries:
                     # Retry logic for 429
                     delay = initial_delay * (2 ** (retries - 1))
-                    logging.debug(f"Received 429 status for {redirect_url}. Retrying HEAD in {delay:.2f} seconds...")
+                    logger.debug(f"Received 429 status for {redirect_url}. Retrying HEAD in {delay:.2f} seconds...")
                     retry_after = response.headers.get('Retry-After')
                     if retry_after:
                         try:
                             # Server specified how long to wait
                             server_delay = int(retry_after)
-                            logging.debug(f"Server requested waiting {server_delay} seconds.")
+                            logger.debug(f"Server requested waiting {server_delay} seconds.")
                             time.sleep(max(delay,
                                            server_delay))  # Wait at least server_delay, but not less than our calculated delay
                         except ValueError:
                             # Handle date format Retry-After if necessary, or just use our delay
-                            logging.debug(f"Could not parse Retry-After header '{retry_after}'. Using calculated delay.")
+                            logger.debug(f"Could not parse Retry-After header '{retry_after}'. Using calculated delay.")
                             time.sleep(delay)
                     else:
                         time.sleep(delay)
                     continue  # Go back to the start of the while loop for the retry
                 else:
                     # Max 429 retries reached. We did get a response and its URL on the last attempt.
-                    logging.debug(
+                    logger.debug(
                         f"Max 429 retries reached for {redirect_url}. Returning the last resolved URL from HEAD: {response.url}")
                     return response.url  # Return the URL even if the last attempt was 429
 
@@ -73,7 +73,7 @@ def resolve_redirect_url(redirect_url: str, max_retries: int = 3, initial_delay:
             # For any other status code (2xx, 3xx, 403, 404, 500, etc.), we successfully
             # completed the HEAD request to the final destination.
             # The user wants the final URL regardless of the final status code.
-            logging.debug(f"Resolved {redirect_url} to {response.url} with final status {response.status_code} using HEAD.")
+            logger.debug(f"Resolved {redirect_url} to {response.url} with final status {response.status_code} using HEAD.")
             return response.url  # Return the final URL
 
 
@@ -82,7 +82,7 @@ def resolve_redirect_url(redirect_url: str, max_retries: int = 3, initial_delay:
             # the final destination or during the redirect process, like connection errors,
             # timeouts before any response, or malformed URLs that requests can't even start with.
             # In these cases, we couldn't successfully reach the final URL.
-            logging.debug(f"Request error resolving redirect {redirect_url} using HEAD: {e}")
+            logger.debug(f"Request error resolving redirect {redirect_url} using HEAD: {e}")
             # If you wanted to retry *any* RequestException, you'd adjust the loop and conditions here.
             # But based on your problem description (403 after getting the URL),
             # retrying only 429 and returning None on other RequestExceptions seems appropriate.
@@ -90,13 +90,13 @@ def resolve_redirect_url(redirect_url: str, max_retries: int = 3, initial_delay:
 
         except Exception as e:
             # Catch any other unexpected errors
-            logging.debug(f"An unexpected error occurred resolving redirect {redirect_url} using HEAD: {e}")
+            logger.debug(f"An unexpected error occurred resolving redirect {redirect_url} using HEAD: {e}")
             return redirect_url
 
     # This part should only be reached if max_retries for 429 are exhausted and the
     # last attempt was 429, in which case we already returned the URL inside the loop.
     # Defensive coding:
-    logging.debug(f"Retry loop finished for {redirect_url} without returning.")
+    logger.debug(f"Retry loop finished for {redirect_url} without returning.")
     return redirect_url
 
 

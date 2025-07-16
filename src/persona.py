@@ -2,7 +2,7 @@ import logging
 
 from src.message_handler import *
 from config.global_config import *
-
+logger = logging.getLogger(__name__)
 # Summary:
 # Data type to maintain discrete personas
 # Accepts name, prompt and various other parameters for customizing model outputs
@@ -85,7 +85,7 @@ class Persona:
         self.conversation_mode = conversation_mode
 
     async def generate_response(self, message, context, image_url=None):
-        logging.info('Querying response as ' + self.persona_name + '...')
+        logger.info('Querying response as ' + self.persona_name + '...')
         if self.context_length > 0:
             context = context[0:self.context_length+1]
             context = context[::-1]  # Reverse the history list

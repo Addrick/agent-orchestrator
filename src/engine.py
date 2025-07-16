@@ -16,7 +16,8 @@ from vertexai.generative_models import HarmCategory, HarmBlockThreshold
 
 from src.utils.model_utils import get_model_list
 
-
+import logging
+logger = logging.getLogger(__name__)
 # Summary:
 # This code defines a TextEngine class that handles text generation using various AI models.
 # It supports OpenAI, Anthropic, Google, and local models. The class provides methods to
@@ -156,7 +157,6 @@ class TextEngine:
                  temperature=None,
                  top_p=None,
                  top_k=None):
-        self.logger = logging.getLogger(__name__)
 
         self.model_name = model_name
         self.temperature = temperature
@@ -185,6 +185,7 @@ class TextEngine:
         ]
         self.google_aistudio_client = None
         self.google_aistudio_search_tool = None
+        self.google_tool_config = None
 
         # Anthropic
         self.anthropic_models_available = self.all_available_models['From Anthropic']
@@ -194,7 +195,7 @@ class TextEngine:
         if self.openai_client is None:
             from openai import AsyncOpenAI  # Import here for lazy loading
 
-            self.logger.info("Initializing OpenAI client...")
+            logger.info("Initializing OpenAI client...")
             # Load .env for API key - adjust path if .env is elsewhere
             current_dir = os.path.dirname(os.path.abspath(__file__))
             env_path = os.path.join(current_dir, '..', '.env')  # Assumes .env is in parent of current file's dir
@@ -202,11 +203,11 @@ class TextEngine:
                 load_dotenv(env_path)
             openai_api_key = os.environ.get("OPENAI_API_KEY")
             if not openai_api_key:
-                self.logger.error("OPENAI_API_KEY not found in environment variables.")
+                logger.error("OPENAI_API_KEY not found in environment variables.")
                 raise ValueError("OPENAI_API_KEY not configured.")
 
             self.openai_client = AsyncOpenAI(api_key=openai_api_key)
-            self.logger.info("OpenAI client initialized.")
+            logger.info("OpenAI client initialized.")
 
     def _initialize_google_aistudio(self):
         """Initializes Google AI Studio model and search tool if not already."""
@@ -216,7 +217,7 @@ class TextEngine:
         # Imports specific to Google AI Studio initialization
         from google import genai
         from google.genai.types import Tool, GoogleSearch
-        self.logger.info("Initializing Google AI Studio client...")
+        logger.info("Initializing Google AI Studio client...")
 
         # Load .env for API key - adjust path if .env is elsewhere
         current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -226,8 +227,14 @@ class TextEngine:
 
         google_api_key = os.environ.get("GOOGLE_GENERATIVEAI_API_KEY")
         if not google_api_key:
-            self.logger.error("GOOGLE_GENERATIVEAI_API_KEY not found in environment variables.")
+            logger.error("GOOGLE_GENERATIVEAI_API_KEY not found in environment variables.")
             raise ValueError("GOOGLE_GENERATIVEAI_API_KEY not configured.")
+
+        self.google_tool_config = {
+            "function_calling_config": {
+                "mode": "AUTO",  # Or "ANY" or "NONE" depending on your needs
+            }
+        }
 
         client = genai.client.BaseApiClient(api_key=google_api_key)
         self.google_aistudio_client = genai.client.AsyncClient(client)
@@ -261,7 +268,7 @@ class TextEngine:
             self.max_output_tokens = new_response_token_limit
             return True
         else:
-            logging.info("Error: Input is not an integer.")
+            logger.info("Error: Input is not an integer.")
             return False
 
     def set_temperature(self, new_temp):
@@ -309,9 +316,10 @@ class TextEngine:
             response = await self._generate_local_response(prompt, message, context)
 
         else:
-            logging.info("Error: persona's model name not found.")
+            logger.info("Error: persona's model name not found.")
             response = "Error: persona's model name not found. Try: ```set model default``` or find a new model with: ```what models```"
 
+        logger.info('Response generated.')
         return response
 
     # OpenAI
@@ -492,19 +500,25 @@ class TextEngine:
         try:
             self._initialize_google_aistudio()  # Ensures model and tool are ready
         except ValueError as e:  # Catch API key or config errors from initializer
-            self.logger.error(f"Initialization failed for Google AI Studio: {e}")
+            logger.error(f"Initialization failed for Google AI Studio: {e}")
             return f"```Error: Google AI Studio not configured properly: {e}```"
         except Exception as e:  # Catch other init errors
-            self.logger.error(f"Unexpected error during Google AI Studio initialization: {e}", exc_info=True)
+            logger.error(f"Unexpected error during Google AI Studio initialization: {e}", exc_info=True)
             return f"```Error: Failed to initialize Google AI Studio: {e}```"
 
-        request_content = f"### Instructions: ###\n{prompt}\n\n### Recent chat room history: ###\n{str(context)}\n\n### Now respond to the most recent message: ###\n{message}"
+        request_content = (f"### Instructions: ###\n"
+                           f"{prompt}\n\n"
+                           f"### Recent chat room history: ###\n"
+                           f"{str(context)}\n\n"
+                           f"### Now respond to the most recent message: "
+                           f"###\n{message}")
         self.json_request = self.parse_request_json(request_content)
 
         try:
             # Build API parameters with only valid values
             content_config = {
                 'tools': [self.google_aistudio_search_tool],
+                'tool_config': self.google_tool_config,
                 'response_modalities': ["TEXT"],
                 'safety_settings': self.unsafe_settings_google_generativeai
             }
@@ -528,9 +542,9 @@ class TextEngine:
             # Check for immediate blocking due to prompt or safety settings
             if response_obj.prompt_feedback and response_obj.prompt_feedback.block_reason:
                 block_reason = response_obj.prompt_feedback.block_reason.name
-                self.logger.error(f"Google AI Studio request blocked. Reason: {block_reason}")
+                logger.error(f"Google AI Studio request blocked. Reason: {block_reason}")
                 if response_obj.prompt_feedback.safety_ratings:
-                    self.logger.error(f"Prompt Safety Ratings: {response_obj.prompt_feedback.safety_ratings}")
+                    logger.error(f"Prompt Safety Ratings: {response_obj.prompt_feedback.safety_ratings}")
                 return f"```Response blocked by Google due to {block_reason}. Try again, mix up your request a bit if it persists.```"
 
             base_text_from_response = ""
@@ -551,16 +565,16 @@ class TextEngine:
                 metadata = candidate.grounding_metadata
                 # Check if the necessary attributes for your processing exist
                 if hasattr(metadata, 'grounding_chunks') and hasattr(metadata, 'grounding_supports'):
-                    self.logger.info("Processing grounding metadata for citations...")
+                    logger.debug("Processing grounding metadata for citations...")
                     final_text_content, search_query_display, citations_display = \
-                        _process_grounding_metadata(base_text_from_response, metadata, self.logger)
+                        _process_grounding_metadata(base_text_from_response, metadata, logger)
                 else:
-                    self.logger.info(
+                    logger.info(
                         "Grounding metadata present, but 'grounding_chunks' or 'grounding_supports' missing. Skipping citation processing.")
 
             # Handle cases where the response might be empty or only whitespace AFTER processing
             if not final_text_content.strip() and not search_query_display and not citations_display:
-                self.logger.warning(
+                logger.warning(
                     "Google AI Studio returned an effectively empty response (no text, no citations, no search query).")
                 finish_reason_str = "Unknown"
                 if candidate and candidate.finish_reason:
@@ -578,7 +592,7 @@ class TextEngine:
 
         except Exception as e:
             # Consider more specific error handling for google.api_core.exceptions if needed
-            self.logger.error(f"Error during Google AI Studio generation: {e}", exc_info=True)
+            logger.error(f"Error during Google AI Studio generation: {e}", exc_info=True)
             return f"```An error occurred during Google AI Studio generation: {e}```"
 
     # Anthropic
@@ -661,11 +675,11 @@ class TextEngine:
                     json_data = json.loads(response_data)
                     response_text = json_data['results'][0]['text'].split(': ')
 
-                    logging.info(response_text)
+                    logger.info(response_text)
                     return '\n'.join(response_text)
         except aiohttp.ClientError as e:
             err_response = f"An error occurred: {e}"
-            logging.info(err_response)
+            logger.info(err_response)
             return err_response
 
     # JSON Utility

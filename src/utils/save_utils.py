@@ -3,6 +3,7 @@ import logging
 import os
 from config.global_config import PERSONA_SAVE_FILE
 
+logger = logging.getLogger(__name__)
 
 def load_models_from_file():
     if not os.path.exists(PERSONA_SAVE_FILE):
@@ -19,7 +20,7 @@ def save_models_to_file(models_dict):  #  TODO: use self.models_dict
     save_data['models'] = models_dict
     with open(PERSONA_SAVE_FILE, 'w') as file:
         json.dump(save_data, file, indent=4)
-    logging.info(f"Updated persona save.")
+    logger.info(f"Updated persona save.")
 
 
 def save_personas_to_file(personas):
@@ -36,7 +37,7 @@ def save_personas_to_file(personas):
     save_data['personas'] = persona_dict
     with open(PERSONA_SAVE_FILE, 'w') as file:
         json.dump(save_data, file, indent=4)
-    logging.info(f"Updated persona save.")
+    logger.info(f"Updated persona save.")
 
 
 def to_dict(personas):
@@ -72,6 +73,6 @@ def load_personas_from_file(file_path=PERSONA_SAVE_FILE):
                 token_limit = new_persona["token_limit"]
                 personas[name] = Persona(name, model_name, prompt, context_limit, token_limit)
             except json.JSONDecodeError as e:
-                logging.info(f"Error decoding JSON file '{file_path}': {str(e)}")
+                logger.info(f"Error decoding JSON file '{file_path}': {str(e)}")
                 return
         return personas

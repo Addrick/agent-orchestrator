@@ -8,12 +8,9 @@ from config.global_config import *
 from config.global_config import DISCORD_CHAR_LIMIT
 from src.utils.message_utils import split_string_by_limit
 
-logger = logging.getLogger()
+import logging
 
-# Summary:
-# This code implements a Discord bot using the discord.py library. The bot manages multiple personas,
-# responds to messages, and handles various commands. It includes features like logging, context
-# gathering, and dynamic status updates. The bot uses an external ChatSystem for generating responses.
+logger = logging.getLogger(__name__)
 
 
 class ConnectionErrorFilter(logging.Filter):
@@ -149,7 +146,7 @@ def create_discord_bot(chat_system):
 
     @client.event
     async def on_ready():
-        logging.info('Hello {0.user} !'.format(client))
+        logger.info('Hello {0.user} !'.format(client))
         # Call module-level helper
         await reset_discord_status(client, chat_system)
 

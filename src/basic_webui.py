@@ -1,5 +1,6 @@
 from src.chat_system import ChatSystem
-
+import logging
+logger = logging.getLogger(__name__)
 
 class WebUI:
     def __init__(self, bot: ChatSystem):

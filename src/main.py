@@ -16,36 +16,16 @@ from src.utils.model_utils import get_model_list
 load_dotenv('.env')
 
 # Configure logging
+LOG_FORMAT = '%(asctime)s - [%(levelname)s] - [%(name)s:%(funcName)s:%(lineno)d] - %(message)s'
 logging.basicConfig(level=logging.INFO,
                     stream=sys.stdout,
-                    format='%(asctime)s [%(levelname)s][%(name)s]: %(message)s',
+                    format='%(asctime)s [%(levelname)s][%(name)s:%(lineno)d]: %(message)s',
                     datefmt='[%Y-%m-%d] %H:%M:%S')
+
+logging.getLogger('google_genai').setLevel(logging.WARNING)
+logging.getLogger('discord').setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
-
-
-async def run_terminal_interface(bot: ChatSystem):
-    """
-    Asynchronous function to run the command-line interface.
-    """
-    from src.interfaces import local_terminal
-    client = local_terminal.Client()
-    logger.info("Command-line interface is ready.")
-    while True:
-        # Run the blocking input() in a separate thread to avoid blocking the asyncio event loop
-        message_content = await asyncio.to_thread(input, "Enter a message: ")
-
-        if message_content.strip():
-            # Create a simulated message object
-            current_time = datetime.now().time()
-            simulated_message = local_terminal.StrippedMessage(
-                message_content,
-                author=local_terminal.User(),
-                channel=local_terminal.Channel(),
-                guild=local_terminal.Guild(),
-                timestamp=current_time
-            )
-            # Process the message asynchronously
-            await local_terminal.on_message(bot, simulated_message)
 
 
 async def main():
@@ -60,9 +40,12 @@ async def main():
     # Initialize ChatSystem core:
     bot = ChatSystem()
 
-    # --- Initialize Interfaces ---
     tasks = []
+    if UPDATE_MODELS_ON_STARTUP:
+        update_task = asyncio.create_task(asyncio.to_thread(get_model_list, update=True))
+        tasks.append(update_task)
 
+    # --- Initialize Interfaces ---
     if DISCORD_BOT:
         logger.info("Initializing Discord bot...")
         discord_bot = create_discord_bot(bot)
@@ -77,14 +60,9 @@ async def main():
     # --- Default to command line if no other standard interface is enabled ---
     if not DISCORD_BOT and not WEBUI:
         print("No standard chat interfaces enabled, defaulting to command line...")
+        from src.interfaces.local_terminal import run_terminal_interface
         task = asyncio.create_task(run_terminal_interface(bot))
         tasks.append(task)
-
-    # --- Startup Tasks ---
-    if UPDATE_MODELS_ON_STARTUP:
-        update_task = asyncio.create_task(asyncio.to_thread(get_model_list, update=True))
-        tasks.append(update_task)
-
     # --- Run all tasks concurrently ---
     if not tasks:
         logger.warning("No interfaces were enabled or created. The application will now exit.")

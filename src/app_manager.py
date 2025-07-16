@@ -4,6 +4,8 @@ import logging
 from git import Repo
 import psutil
 
+logger = logging.getLogger(__name__)
+
 """
 For use with remote development and redeployment
 - update code from github
@@ -44,7 +46,7 @@ def restart_app():
     """Restarts the current program, with file objects and descriptors
        cleanup
     """
-    logging.info('Restarting application...')
+    logger.info('Restarting application...')
 
     try:
         p = psutil.Process(os.getpid())

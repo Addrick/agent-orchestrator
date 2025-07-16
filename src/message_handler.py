@@ -5,7 +5,8 @@ from src.app_manager import *
 from src.utils import save_utils, model_utils
 from src.utils.model_utils import get_model_list
 
-
+import logging
+logger = logging.getLogger(__name__)
 # Summary:
 # Handles all dev commands and their message responses
 
@@ -167,7 +168,7 @@ class BotLogic:
             prompt = ' '.join(self.args[1:])
             self.current_persona.set_prompt(prompt)
             logging.debug(f"Prompt set for '{self.persona_name}'.")
-            # logging.info(f"Updated save for '{self.persona_name}'.")
+            # logger.info(f"Updated save for '{self.persona_name}'.")
             save_utils.save_personas_to_file(self.chat_system.personas)
             response = 'Prompt saved.'
             return response
@@ -223,12 +224,12 @@ class BotLogic:
         return f"{self.persona_name}: Hello! Starting new conversation..."
 
     def _handle_check_koboldcpp(self):
-        logging.info('checking if koboldcpp is running...')
+        logger.info('checking if koboldcpp is running...')
         if self.koboldcpp_thread is not None:
             return self.koboldcpp_thread.isAlive()
 
     def _handle_stop_koboldcpp(self):
-        logging.info('attempting to stop koboldcpp...')
+        logger.info('attempting to stop koboldcpp...')
         if self.koboldcpp_thread is not None:
             self.koboldcpp_thread.do_run = False
             self.koboldcpp_thread.join()

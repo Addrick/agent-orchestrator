@@ -1,6 +1,7 @@
 import config.api_keys as api_keys
 import logging
 from src.utils import save_utils
+logger = logging.getLogger(__name__)
 
 
 def refresh_available_openai_models():
@@ -10,7 +11,7 @@ def refresh_available_openai_models():
     openai_models = client.models.list()
     trimmed_list = [model.id for model in openai_models]
     # trimmed_list = [model.id for model in openai_models if 'gpt-3' in model.id or 'gpt-4' in model.id]
-    logging.debug(trimmed_list)
+    logger.debug(trimmed_list)
     return trimmed_list
 
 
@@ -40,7 +41,7 @@ def refresh_available_anthropic_models():
 
     # load .env for api key
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    root_dir = os.path.join(current_dir, '..\..')
+    root_dir = os.path.join(current_dir, r'..\..')
     load_dotenv(os.path.join(root_dir, '.env'))
     api_key = os.environ.get("ANTHROPIC_API_KEY")
 
@@ -59,15 +60,15 @@ def get_model_list(update=False):
     # saved in gloabl_config
     """
     if update:
-        logging.info('Updating available models from API...')
+        logger.info('Updating available models from API...')
         all_available_models = {'From OpenAI': refresh_available_openai_models(),
                                 'From Google': refresh_available_google_models(),
                                 'From Anthropic': refresh_available_anthropic_models(),
                                 'Local': ['local']
                                 }
-        logging.debug(all_available_models)
+        logger.debug(all_available_models)
         save_utils.save_models_to_file(all_available_models)
-        logging.info('Current available models set from API.')
+        logger.info('Current available models set from API.')
         return all_available_models
     else:
         return save_utils.load_models_from_file()
@@ -85,5 +86,5 @@ def check_model_available(model_to_check):
     if model_to_check in lowest_order_items:
         return True
     else:
-        logging.info(f"The value '{model_to_check}' is not found.")
+        logger.info(f"The value '{model_to_check}' is not found.")
         return False

@@ -3,7 +3,8 @@ from src.persona import *
 from src.utils.save_utils import save_personas_to_file, load_personas_from_file
 from src.utils.model_utils import get_model_list
 
-
+import logging
+logger = logging.getLogger(__name__)
 # ChatSystem
 # Maintains personas, queries the engine system for responses, executes dev commands
 # It handles loading and saving personas from/to a file, adding and deleting personas,
@@ -38,7 +39,7 @@ class ChatSystem:
         if persona_name in self.personas:
             self.personas[persona_name].update_prompt(text_to_add)
         else:
-            logging.info(f"Failed to add to prompt, persona '{persona_name}' does not exist.")
+            logger.info(f"Failed to add to prompt, persona '{persona_name}' does not exist.")
 
     async def generate_response(self, persona_name, message, context='', image_url=None):
         """Generate a response using the specified persona and message channel."""
