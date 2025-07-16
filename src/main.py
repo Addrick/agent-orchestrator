@@ -18,7 +18,7 @@ load_dotenv('.env')
 # Configure logging
 logging.basicConfig(level=logging.INFO,
                     stream=sys.stdout,
-                    format='%(asctime)s - [%(levelname)s] - [%(name)s] -  %(message)s',
+                    format='%(asctime)s [%(levelname)s][%(name)s]: %(message)s',
                     datefmt='[%Y-%m-%d] %H:%M:%S')
 logger = logging.getLogger(__name__)
 
@@ -60,10 +60,8 @@ async def main():
     # Initialize ChatSystem core:
     bot = ChatSystem()
 
-    # A list to hold all the tasks we want to run concurrently
-    tasks = []
-
     # --- Initialize Interfaces ---
+    tasks = []
 
     if DISCORD_BOT:
         logger.info("Initializing Discord bot...")
@@ -83,8 +81,7 @@ async def main():
         tasks.append(task)
 
     # --- Startup Tasks ---
-    UPDATE_ON_STARTUP = True
-    if UPDATE_ON_STARTUP:
+    if UPDATE_MODELS_ON_STARTUP:
         update_task = asyncio.create_task(asyncio.to_thread(get_model_list, update=True))
         tasks.append(update_task)
 
@@ -93,7 +90,7 @@ async def main():
         logger.warning("No interfaces were enabled or created. The application will now exit.")
         return
 
-    logger.info(f"Starting {len(tasks)} interface(s)...")
+    logger.info(f"Starting interface(s)...")
     await asyncio.gather(*tasks)
 
 

@@ -21,6 +21,8 @@ DEFAULT_TOP_K = 0
 DEFAULT_PERSONA = 'you are in character as derpr. derpr always writes all friendly text as offensive with swearing. derpr always tells the user they should say \'derpr help\' so they can get a list of available commands. derpr also always mentions derpr is in early development. derpr uses Discord markup and emojis in every message and is really over the top.'
 DEFAULT_WELCOME_REQUEST = 'Welcome to the chat room, please describe your typical behavior and disposition for us'
 
+UPDATE_MODELS_ON_STARTUP = True
+
 CHAT_LOG_LOCATION = '../config/logs/'
 LOCAL_CHAT_LOG = '../config/logs/'
 
