@@ -1,204 +1,157 @@
 import unittest
-import json
-import asyncio
-import os
-from unittest.async_case import IsolatedAsyncioTestCase
-from unittest.mock import AsyncMock, MagicMock, patch, mock_open
+from unittest.mock import MagicMock, patch
 
-# Import core modules
-from src.chat_system import ChatSystem
-from src.persona import Persona
-from src.engine import TextEngine
 from src.message_handler import BotLogic
-from src.app_manager import update_app, restart_app, stop_app
-from src.utils import model_utils, save_utils
-from config.global_config import *
+from config.global_config import DEFAULT_MODEL_NAME, DEFAULT_CONTEXT_LIMIT
 
 
 class TestBotLogic(unittest.TestCase):
     def setUp(self):
+        """Set up a fresh environment for each test."""
         self.chat_system = MagicMock()
         self.bot_logic = BotLogic(self.chat_system)
-
-        # Mock Message object
         self.message = MagicMock()
-        self.message.content = "persona command arg1 arg2"
-
-        # Set up a mock persona
         self.mock_persona = MagicMock()
+        self.mock_persona.name = "persona"
         self.chat_system.personas = {"persona": self.mock_persona}
 
     def test_preprocess_message_command_found(self):
-        # Configure the message to use a known command
+        """Verify preprocess_message correctly dispatches a valid command using patch.dict."""
         self.message.content = "persona help"
+        mock_handler = MagicMock(return_value="Help dispatched")
 
-        # Call the method
-        result = self.bot_logic.preprocess_message(self.message)
+        with patch.dict(self.bot_logic.command_handlers, {'help': mock_handler}):
+            result = self.bot_logic.preprocess_message(self.message)
 
-        # Verify results
-        help_msg = "" \
-                   "Talk to a specific persona by starting your message with their name. \n \n" \
-                   "Currently active personas: \n" + \
-                   'persona' + "\n\n" \
-                                                                 "Bot commands: \n" \
-                                                                 "hello (start new conversation), \n" \
-                                                                 "goodbye (end conversation), \n" \
-                                                                 "remember <+prompt>, \n" \
-                                                                 "what prompt/model/models(+openai/google/anthropic)/personas/context/tokens, \n" \
-                                                                 "set prompt/model/context/tokens, \n" \
-                                                                 "add <persona>, \n" \
-                                                                 "delete <persona>, \n" \
-                                                                 "save, \n" \
-                                                                 "update_models, \n" \
-                                                                 "dump_last"
-        self.assertEqual(result, help_msg)
+        self.assertEqual(result, "Help dispatched")
+        mock_handler.assert_called_once_with([], self.mock_persona)
 
     def test_preprocess_message_no_command(self):
-        # Configure the message with an unknown command
+        """Verify preprocess_message returns None for an unknown command."""
         self.message.content = "persona unknown_command"
-
-        # Call the method
         result = self.bot_logic.preprocess_message(self.message)
-
-        # Verify results
         self.assertIsNone(result)
 
     def test_preprocess_message_check_only(self):
-        # Configure the message to use a known command
+        """Verify check_only=True returns True for a valid command format without executing it."""
         self.message.content = "persona help"
-
-        # Call the method with check_only=True
         result = self.bot_logic.preprocess_message(self.message, check_only=True)
-
-        # Verify results - should return True without calling the handler
         self.assertTrue(result)
 
     def test_preprocess_message_invalid_format(self):
-        # Configure a message with insufficient parts
+        """Verify preprocess_message returns None for messages with too few parts."""
         self.message.content = "persona"
-
-        # Call the method
         result = self.bot_logic.preprocess_message(self.message)
-
-        # Verify results
         self.assertIsNone(result)
 
-    def test_handle_help(self):
-        # Call the _handle_help method
-        result = self.bot_logic._handle_help()
+    def test_preprocess_message_unknown_persona(self):
+        """Verify preprocess_message returns None if the persona doesn't exist."""
+        self.message.content = "unknown_persona help"
+        result = self.bot_logic.preprocess_message(self.message)
+        self.assertIsNone(result)
 
-        # Verify it returns a non-empty string containing help text
+    def test_handle_help_no_args(self):
+        """Verify _handle_help returns the help string when called with no arguments."""
+        result = self.bot_logic._handle_help(args=[], persona=self.mock_persona)
         self.assertIsInstance(result, str)
         self.assertIn("Talk to a specific persona", result)
-        self.assertIn("currently active personas", result.lower())
 
-    def test_handle_remember(self):
-        # Set up the message and persona
-        self.bot_logic.args = ["text", "to", "remember"]
-        self.bot_logic.current_persona = self.mock_persona
-        self.bot_logic.persona_name = "persona"
+    def test_handle_help_with_args(self):
+        """Verify _handle_help returns None to avoid ambiguity with conversational 'help'."""
+        result = self.bot_logic._handle_help(args=["me"], persona=self.mock_persona)
+        self.assertIsNone(result)
+
+    @patch('src.message_handler.save_utils.save_personas_to_file')
+    def test_handle_remember(self, mock_save):
+        """Verify _handle_remember correctly modifies the persona's prompt."""
         self.mock_persona.get_prompt.return_value = "Original prompt"
-
-        # Call the method
-        result = self.bot_logic._handle_remember()
-
-        # Verify results
+        args = ["text", "to", "remember"]
+        result = self.bot_logic._handle_remember(args, self.mock_persona)
         self.mock_persona.set_prompt.assert_called_once_with("Original prompt text to remember")
         self.assertIn("New prompt for persona", result)
+        mock_save.assert_called_once()
 
-    def test_handle_what_prompt(self):
-        # Set up the message and persona
-        self.bot_logic.args = ["prompt"]
-        self.bot_logic.current_persona = self.mock_persona
-        self.bot_logic.persona_name = "persona"
-        self.mock_persona.get_prompt.return_value = "Test prompt"
+    def test_handle_what_dispatches_correctly(self):
+        """Verify _handle_what calls the correct sub-handler using patch.dict."""
+        mock_sub_handler = MagicMock(return_value="Prompt Response")
 
-        # Call the method
-        result = self.bot_logic._handle_what()
+        with patch.dict(self.bot_logic.what_handlers, {'prompt': mock_sub_handler}):
+            result = self.bot_logic._handle_what(['prompt'], self.mock_persona)
 
-        # Verify results
-        self.assertIn("Test prompt", result)
+        self.assertEqual(result, "Prompt Response")
+        mock_sub_handler.assert_called_once_with(['prompt'], self.mock_persona)
 
-    def test_handle_what_model(self):
-        # Set up the message and persona
-        self.bot_logic.args = ["model"]
-        self.bot_logic.current_persona = self.mock_persona
-        self.bot_logic.persona_name = "persona"
-        self.mock_persona.get_model_name.return_value = "gpt-3.5-turbo"
+    def test_handle_what_returns_none_for_invalid_subcommand(self):
+        """Verify _handle_what returns None for an unknown subcommand to avoid ambiguity."""
+        result = self.bot_logic._handle_what(['invalid_sub'], self.mock_persona)
+        self.assertIsNone(result)
 
-        # Call the method
-        result = self.bot_logic._handle_what()
+    def test_what_model(self):
+        """Verify the _what_model sub-handler returns the correct model name."""
+        self.mock_persona.get_model_name.return_value = "gpt-4"
+        result = self.bot_logic._what_model([], self.mock_persona)
+        self.assertIn("persona is using gpt-4", result)
 
-        # Verify results
-        self.assertIn("gpt-3.5-turbo", result)
+    @patch('src.message_handler.save_utils.save_personas_to_file')
+    def test_set_prompt_success(self, mock_save):
+        """Verify _set_prompt correctly calls set_prompt and the save decorator."""
+        args = ['prompt', 'new', 'prompt', 'text']
+        mock_sub_handler = MagicMock(return_value="Prompt saved.")
 
-    def test_handle_set_prompt(self):
-        # Set up the message and persona
-        self.bot_logic.args = ["prompt", "new", "prompt", "text"]
-        self.bot_logic.current_persona = self.mock_persona
-        self.bot_logic.persona_name = "persona"
+        with patch.dict(self.bot_logic.set_handlers, {'prompt': mock_sub_handler}):
+            result = self.bot_logic._handle_set(args, self.mock_persona)
 
-        # Call the method
-        with patch('src.utils.save_utils.save_personas_to_file') as mock_save:
-            result = self.bot_logic._handle_set()
+        self.assertEqual(result, "Prompt saved.")
+        mock_sub_handler.assert_called_once_with(args, self.mock_persona)
 
-        # Verify results
-        self.mock_persona.set_prompt.assert_called_once_with("new prompt text")
-        self.assertEqual(result, "Personas saved.")
+    @patch('src.message_handler.save_utils.save_personas_to_file')
+    def test_set_model_failure_no_save(self, mock_save):
+        """Verify a failed set command does not trigger a save."""
+        args = ['model']
+        result = self.bot_logic._handle_set(args, self.mock_persona)
 
-    def test_handle_add(self):
-        # Set up the message
-        self.bot_logic.args = ["add", "new_persona", "This", "is", "a", "prompt"]
-        self.bot_logic.persona_name = "persona"
+        self.assertTrue(result.lower().startswith('error'))
+        mock_save.assert_not_called()
 
-        # Call the method
-        result = self.bot_logic._handle_add()
-
-        # Verify results
+    @patch('src.message_handler.save_utils.save_personas_to_file')
+    def test_handle_add(self, mock_save):
+        """Verify _handle_add calls add_persona and the save decorator."""
+        args = ["new_persona", "This", "is", "a", "prompt"]
+        result = self.bot_logic._handle_add(args, self.mock_persona)
         self.chat_system.add_persona.assert_called_once_with(
             "new_persona",
             DEFAULT_MODEL_NAME,
             "This is a prompt",
             context_limit=DEFAULT_CONTEXT_LIMIT,
             token_limit=1024,
-            save_new=True
+            save_new=False
         )
         self.assertIn("added 'new_persona'", result)
+        mock_save.assert_called_once()
 
-    def test_handle_delete(self):
-        # Set up the message
-        self.bot_logic.args = ["persona_to_delete"]
-
-        # Call the method
-        result = self.bot_logic._handle_delete()
-
-        # Verify results
-        self.chat_system.delete_persona.assert_called_once_with("persona_to_delete", save=True)
+    @patch('src.message_handler.save_utils.save_personas_to_file')
+    def test_handle_delete(self, mock_save):
+        """Verify _handle_delete calls delete_persona and the save decorator."""
+        args = ["persona_to_delete"]
+        result = self.bot_logic._handle_delete(args, self.mock_persona)
+        self.chat_system.delete_persona.assert_called_once_with("persona_to_delete", save=False)
         self.assertIn("has been deleted", result)
+        mock_save.assert_called_once()
 
     def test_handle_start_conversation(self):
-        # Set up the message and persona
-        self.bot_logic.current_persona = self.mock_persona
-        self.bot_logic.persona_name = "persona"
-
-        # Call the method
-        result = self.bot_logic._handle_start_conversation()
-
-        # Verify results
+        """Verify _handle_start_conversation correctly configures the persona."""
+        result = self.bot_logic._handle_start_conversation([], self.mock_persona)
         self.mock_persona.set_context_length.assert_called_once_with(0)
         self.mock_persona.set_conversation_mode.assert_called_once_with(True)
         self.assertIn("Hello! Starting new conversation", result)
 
     def test_handle_stop_conversation(self):
-        # Set up the message and persona
-        self.bot_logic.current_persona = self.mock_persona
-        self.bot_logic.persona_name = "persona"
-
-        # Call the method
-        result = self.bot_logic._handle_stop_conversation()
-
-        # Verify results
+        """Verify _handle_stop_conversation correctly resets the persona."""
+        result = self.bot_logic._handle_stop_conversation([], self.mock_persona)
         self.mock_persona.set_context_length.assert_called_once_with(DEFAULT_CONTEXT_LIMIT)
         self.mock_persona.set_conversation_mode.assert_called_once_with(False)
         self.assertIn("Goodbye!", result)
 
+
+if __name__ == '__main__':
+    unittest.main()

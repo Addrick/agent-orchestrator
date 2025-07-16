@@ -3,6 +3,9 @@ repurpose history function to have persistent memory?
 - run requests every 15 min or whatever as a heartbeat to check for errors (ie just got 'model not supported' today)
 
 ###GENERAL###
+- memory-based context (forgets everything in 5 minutes), rolls based on message time'
+    > set 'time based' vs '#msg' based context lengths
+
 - when setting a prompt (or via command?), make a request for a sample response that displays the character of the persona (prove no largest prime in iambic pentameter)
 - finish adding support for default persona - set it up at the persona level and sub the default model name during
 - ++ mass update persona model settings
