@@ -137,7 +137,7 @@ class TestTextEngine(IsolatedAsyncioTestCase):
     def test_add_persona(self):
         self.chat_system.add_persona("test_persona", "gpt-3.5-turbo", "You are a helpful assistant.", 10, 100)
         self.assertIn("test_persona", self.chat_system.personas)
-        self.assertEqual(self.chat_system.personas["test_persona"].persona_name, "test_persona")
+        self.assertEqual(self.chat_system.personas["test_persona"].name, "test_persona")
         self.assertEqual(self.chat_system.personas["test_persona"].get_prompt(), "You are a helpful assistant.")
         self.assertEqual(self.chat_system.personas["test_persona"].get_context_length(), 10)
         self.assertEqual(self.chat_system.personas["test_persona"].get_response_token_limit(), 100)

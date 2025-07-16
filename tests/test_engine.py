@@ -162,7 +162,6 @@ class TestTextEngine(IsolatedAsyncioTestCase):
                 patch.object(self.text_engine, '_generate_openai_reasoning_response') as mock_reasoning, \
                 patch.object(self.text_engine, '_generate_openai_search_response') as mock_search, \
                 patch.object(self.text_engine, '_generate_anthropic_response') as mock_anthropic, \
-                patch.object(self.text_engine, '_generate_google_response_vertex') as mock_google_vertex, \
                 patch.object(self.text_engine, '_generate_google_response_ai_studio_async') as mock_google_ai_studio, \
                 patch.object(self.text_engine, '_generate_local_response') as mock_local:
             # Set return values
@@ -170,7 +169,6 @@ class TestTextEngine(IsolatedAsyncioTestCase):
             mock_reasoning.return_value = "Reasoning response"
             mock_search.return_value = "Search response"
             mock_anthropic.return_value = "Anthropic response"
-            mock_google_vertex.return_value = "Google vertex response"
             mock_google_ai_studio.return_value = "Google ai studio response"
             mock_local.return_value = "Local response"
 
@@ -213,15 +211,6 @@ class TestTextEngine(IsolatedAsyncioTestCase):
                 mock_google_ai_studio.assert_called_once()
                 self.assertEqual(response, "Google ai studio response")
                 mock_google_ai_studio.reset_mock()
-
-            # Test Google Vertex AI models
-            ## not currently routed for response for any models
-            # with patch.object(self.text_engine, 'google_models_available', ["gemini-pro"]):
-            #     self.text_engine.model_name = "gemini-pro"
-            #     response = await self.text_engine.generate_response("prompt", "message", "context", None, 100)
-            #     mock_google_vertex.assert_called_once()
-            #     self.assertEqual(response, "Google ai studio response")
-            #     mock_google_vertex.reset_mock()
 
             # Test Local model
             self.text_engine.model_name = "local"

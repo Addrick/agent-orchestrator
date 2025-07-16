@@ -23,7 +23,7 @@ class TestGoogleSearchGrounding(IsolatedAsyncioTestCase):
         """Test that actual Google API responses include search results with links."""
 
         # Initialize the text engine with Gemini model
-        engine = TextEngine(model_name="gemini-2.5-flash-preview-04-17")
+        engine = TextEngine(model_name="gemini-2.5-flash")
 
         # Craft a prompt that will likely trigger search
         prompt = "You are a helpful assistant with the ability to retrieve data from google search. You may suspect a date is from the future, treat it as though it is not."

@@ -21,7 +21,7 @@ class TestPersona(IsolatedAsyncioTestCase):
         self.persona = Persona("test_persona", "gpt-3.5-turbo", "You are a helpful assistant.", 10, 100)
 
     def test_init(self):
-        self.assertEqual(self.persona.persona_name, "test_persona")
+        self.assertEqual(self.persona.name, "test_persona")
         self.assertEqual(self.persona.prompt, "You are a helpful assistant.")
         self.assertEqual(self.persona.context_length, 10)
         self.assertEqual(self.persona.response_token_limit, 100)

@@ -7,7 +7,6 @@ import discord
 
 from config.global_config import DISCORD_CHAR_LIMIT, DISCORD_STATUS_LIMIT
 from src.interfaces.discord_bot import (
-    ConnectionErrorFilter,
     CustomDiscordBot,
     create_discord_bot,
     get_image_attachments,
@@ -19,27 +18,6 @@ from src.interfaces.discord_bot import (
 )
 
 
-class TestConnectionErrorFilter(unittest.TestCase):
-    def setUp(self):
-        self.filter = ConnectionErrorFilter()
-
-    def test_filter_allows_normal_messages(self):
-        record = MagicMock()
-        record.getMessage.return_value = "Normal log message"
-        self.assertTrue(self.filter.filter(record))
-
-    def test_filter_blocks_connection_messages(self):
-        record = MagicMock()
-        # Test with a connection message that should be filtered
-        for keyword in ['Attempting a reconnect', 'WebSocket closed', 'ConnectionClosed',
-                        'ClientConnectorError', 'Shard ID None has connected to Gateway']:
-            # This test will fail since these keywords are commented out in the actual implementation
-            # This test is included to demonstrate proper testing, but should be updated if keywords are re-enabled
-            record.getMessage.return_value = f"Message with {keyword} should be filtered"
-            # Currently this will pass because the keywords are commented out
-            self.assertTrue(self.filter.filter(record))
-
-
 class TestCustomDiscordBot(unittest.TestCase):
     def setUp(self):
         self.mock_chat_system = MagicMock()
@@ -48,21 +26,6 @@ class TestCustomDiscordBot(unittest.TestCase):
 
     def test_initialization(self):
         self.assertEqual(self.bot.bot, self.mock_chat_system)
-
-    def test_error_handler_adds_filter(self):
-        with patch('logging.getLogger') as mock_get_logger:
-            mock_logger = MagicMock()
-            mock_get_logger.return_value = mock_logger
-
-            self.bot.add_error_handler()
-
-            mock_logger.addFilter.assert_called_once()
-            # Verify the filter is an instance of ConnectionErrorFilter
-            args, _ = mock_logger.addFilter.call_args
-            self.assertIsInstance(args[0], ConnectionErrorFilter)
-
-            # Check that the log level is set to WARNING
-            mock_logger.setLevel.assert_called_once_with(logging.WARNING)
 
 
 class TestGetImageAttachments(IsolatedAsyncioTestCase):
@@ -75,7 +38,7 @@ class TestGetImageAttachments(IsolatedAsyncioTestCase):
         mock_message.attachments = [mock_attachment]
         mock_message.content = "Hello with image"
 
-        with patch('src.discord_bot.logger.info') as mock_info:
+        with patch('src.interfaces.discord_bot.logger.info') as mock_info:
             result = await get_image_attachments(mock_message)
             self.assertEqual(result, "https://example.com/image.png")
             mock_info.assert_called_once_with("Message contains an image attachment.")
@@ -92,7 +55,7 @@ class TestGetImageAttachments(IsolatedAsyncioTestCase):
         mock_message.attachments = [mock_attachment1, mock_attachment2]
         mock_message.content = "Hello with images"
 
-        with patch('src.discord_bot.logger.info') as mock_info:
+        with patch('src.interfaces.discord_bot.logger.info') as mock_info:
             result = await get_image_attachments(mock_message)
             self.assertEqual(result, "https://example.com/image.png")
             mock_info.assert_called_once_with("Message contains an image attachment.")
@@ -114,7 +77,7 @@ class TestGetImageAttachments(IsolatedAsyncioTestCase):
         mock_message.attachments = []
         mock_message.content = "Hello with image https://example.com/image.jpg"
 
-        with patch('src.discord_bot.logger.info') as mock_info:
+        with patch('src.interfaces.discord_bot.logger.info') as mock_info:
             result = await get_image_attachments(mock_message)
             self.assertEqual(result, "https://example.com/image.jpg")
             mock_info.assert_called_once_with("Message contains an image URL.")
@@ -125,7 +88,7 @@ class TestGetImageAttachments(IsolatedAsyncioTestCase):
         mock_message.attachments = []
         mock_message.content = "URLs: https://example.com/first.jpg and https://example.com/second.png"
 
-        with patch('src.discord_bot.logger.info') as mock_info:
+        with patch('src.interfaces.discord_bot.logger.info') as mock_info:
             result = await get_image_attachments(mock_message)
             self.assertEqual(result, "https://example.com/first.jpg")
             mock_info.assert_called_once_with("Message contains an image URL.")
@@ -268,7 +231,7 @@ class TestSetStatusStreaming(IsolatedAsyncioTestCase):
         mock_client.change_presence = AsyncMock()
         persona_name = "test_persona"
 
-        with patch('src.discord_bot.logger.info') as mock_info:
+        with patch('src.interfaces.discord_bot.logger.info') as mock_info:
             await set_status_streaming(mock_client, persona_name)
 
             mock_activity.assert_called_once_with(
@@ -284,7 +247,7 @@ class TestSetStatusStreaming(IsolatedAsyncioTestCase):
         mock_client = MagicMock()
         mock_client.change_presence = AsyncMock(side_effect=Exception("Test error"))
 
-        with patch('src.discord_bot.logger.error') as mock_error:
+        with patch('src.interfaces.discord_bot.logger.error') as mock_error:
             await set_status_streaming(mock_client, "test_persona")
             mock_error.assert_called_once_with("Failed to set streaming status: Test error")
 
@@ -299,7 +262,7 @@ class TestResetDiscordStatus(IsolatedAsyncioTestCase):
         mock_chat_system = MagicMock()
         mock_chat_system.get_persona_list.return_value = {"persona1": None, "persona2": None}
 
-        with patch('src.discord_bot.logger.debug') as mock_debug:
+        with patch('src.interfaces.discord_bot.logger.debug') as mock_debug:
             await reset_discord_status(mock_client, mock_chat_system)
 
             mock_activity.assert_called_once_with(
@@ -320,7 +283,7 @@ class TestResetDiscordStatus(IsolatedAsyncioTestCase):
         mock_chat_system = MagicMock()
         mock_chat_system.get_persona_list.return_value = personas
 
-        with patch('src.discord_bot.logger.warning') as mock_warning:
+        with patch('src.interfaces.discord_bot.logger.warning') as mock_warning:
             # Instead of patching the enum, we'll just check the call arguments
             await reset_discord_status(mock_client, mock_chat_system)
 
@@ -339,7 +302,7 @@ class TestResetDiscordStatus(IsolatedAsyncioTestCase):
         mock_chat_system = MagicMock()
         mock_chat_system.get_persona_list.return_value = {"persona1": None}
 
-        with patch('src.discord_bot.logger.error') as mock_error:
+        with patch('src.interfaces.discord_bot.logger.error') as mock_error:
             await reset_discord_status(mock_client, mock_chat_system)
             mock_error.assert_called_once()
             self.assertIn("Failed to set status due to Discord API error",
@@ -353,7 +316,7 @@ class TestResetDiscordStatus(IsolatedAsyncioTestCase):
         mock_chat_system = MagicMock()
         mock_chat_system.get_persona_list.return_value = {"persona1": None}
 
-        with patch('src.discord_bot.logger.error') as mock_error:
+        with patch('src.interfaces.discord_bot.logger.error') as mock_error:
             await reset_discord_status(mock_client, mock_chat_system)
             mock_error.assert_called_once()
             self.assertIn("An unexpected error occurred while resetting status",
@@ -370,7 +333,7 @@ class TestCreateDiscordBot(unittest.TestCase):
         self.patches = [
             patch('discord.Intents.default'),
             patch('discord.Client.__init__', return_value=None),
-            patch('src.discord_bot.CustomDiscordBot')
+            patch('src.interfaces.discord_bot.CustomDiscordBot')
         ]
         for p in self.patches:
             p.start()
@@ -394,7 +357,7 @@ class TestCreateDiscordBot(unittest.TestCase):
 
     def test_create_discord_bot(self):
         # Test that the function creates and returns a CustomDiscordBot instance
-        with patch('src.discord_bot.DISCORD_DEBUG_CHANNEL', 123456):
+        with patch('src.interfaces.discord_bot.DISCORD_DEBUG_CHANNEL', 123456):
             client = create_discord_bot(self.mock_chat_system)
 
             # Verify client was created with correct parameters
@@ -497,12 +460,12 @@ class TestOnMessageEvent(IsolatedAsyncioTestCase):
         self.patches = [
             patch('discord.Client.__init__', return_value=None),
             patch('discord.Client.get_channel'),
-            patch('src.discord_bot.get_image_attachments', new_callable=AsyncMock, return_value=None),
-            patch('src.discord_bot.history_gatherer', new_callable=AsyncMock, return_value=[]),
-            patch('src.discord_bot.set_status_streaming', new_callable=AsyncMock),
-            patch('src.discord_bot.reset_discord_status', new_callable=AsyncMock),
-            patch('src.discord_bot.send_message', new_callable=AsyncMock),
-            patch('src.discord_bot.send_discord_dev_message', new_callable=AsyncMock),
+            patch('src.interfaces.discord_bot.get_image_attachments', new_callable=AsyncMock, return_value=None),
+            patch('src.interfaces.discord_bot.history_gatherer', new_callable=AsyncMock, return_value=[]),
+            patch('src.interfaces.discord_bot.set_status_streaming', new_callable=AsyncMock),
+            patch('src.interfaces.discord_bot.reset_discord_status', new_callable=AsyncMock),
+            patch('src.interfaces.discord_bot.send_message', new_callable=AsyncMock),
+            patch('src.interfaces.discord_bot.send_discord_dev_message', new_callable=AsyncMock),
             patch('logger.info'),
             patch('logging.debug'),
             patch('logging.error'),

@@ -45,7 +45,7 @@ def to_dict(personas):
     persona_dict = []
     for persona_name, persona in personas.items():
         persona_json = {
-            "name": persona.persona_name,
+            "name": persona.name,
             "prompt": persona.prompt,
             "model_name": persona.model.model_name,
             "context_limit": persona.context_length,

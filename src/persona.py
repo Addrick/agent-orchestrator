@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 class Persona:
     def __init__(self, persona_name, model_name, prompt, context_limit=10, token_limit=100):
-        self.persona_name = persona_name
+        self.name = persona_name
         self.prompt = prompt
         self.context_length = int(context_limit)
         self.response_token_limit = token_limit
@@ -85,7 +85,7 @@ class Persona:
         self.conversation_mode = conversation_mode
 
     async def generate_response(self, message, context, image_url=None):
-        logger.info('Querying response as ' + self.persona_name + '...')
+        logger.info('Querying response as ' + self.name + '...')
         if self.context_length > 0:
             context = context[0:self.context_length+1]
             context = context[::-1]  # Reverse the history list

@@ -16,10 +16,11 @@ from src.utils.model_utils import get_model_list
 load_dotenv('.env')
 
 # Configure logging
-LOG_FORMAT = '%(asctime)s - [%(levelname)s] - [%(name)s:%(funcName)s:%(lineno)d] - %(message)s'
+LOG_FORMAT = '%(asctime)s [%(levelname)s] [%(name)s:%(funcName)s:%(lineno)d]: %(message)s'
 logging.basicConfig(level=logging.INFO,
                     stream=sys.stdout,
-                    format='%(asctime)s [%(levelname)s][%(name)s:%(lineno)d]: %(message)s',
+                    format=LOG_FORMAT,
+                    # format='%(asctime)s [%(levelname)s][%(name)s:%(lineno)d]: %(message)s',
                     datefmt='[%Y-%m-%d] %H:%M:%S')
 
 logging.getLogger('google_genai').setLevel(logging.WARNING)
