@@ -16,7 +16,8 @@ from src.utils.model_utils import get_model_list
 load_dotenv('.env')
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, stream=sys.stdout, format='%(asctime)s - %(message)s',
+# Configure logging
+logging.basicConfig(level=logging.INFO, stream=sys.stdout, format='%(asctime)s - [%(levelname)s] - [%(name)s] -  %(message)s',
                     datefmt='[%Y-%m-%d] %H:%M:%S')
 logger = logging.getLogger(__name__)
 

@@ -169,7 +169,7 @@ class BotLogic:
             logging.debug(f"Prompt set for '{self.persona_name}'.")
             # logging.info(f"Updated save for '{self.persona_name}'.")
             save_utils.save_personas_to_file(self.chat_system.personas)
-            response = 'Personas saved.'
+            response = 'Prompt saved.'
             return response
         if self.args[0] == 'default_prompt':
             prompt = DEFAULT_PERSONA
@@ -185,9 +185,10 @@ class BotLogic:
                 model_name = DEFAULT_MODEL_NAME
             if model_utils.check_model_available(model_name):
                 self.current_persona.set_model(model_name)
+                save_utils.save_personas_to_file(self.chat_system.personas)
                 return f"Model set to '{model_name}'."
             else:
-                return f"Model '{model_name}' does not exist. Currently available models are: {self.chat_system.models_available}"
+                return f"Model '{model_name}' does not exist. Try 'set model default' or 'what models'."
         elif self.args[0] == 'tokens':
             token_limit = self.args[1]
             if self.current_persona.set_response_token_limit(token_limit):
