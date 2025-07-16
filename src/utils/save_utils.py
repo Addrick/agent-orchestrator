@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 
 def load_models_from_file():
     if not os.path.exists(PERSONA_SAVE_FILE):
-        logging.warning(f"File '{PERSONA_SAVE_FILE}' does not exist.")
+        logger.warning(f"File '{PERSONA_SAVE_FILE}' does not exist.")
         return
     with open(PERSONA_SAVE_FILE, "r") as file:
         data = json.load(file)
@@ -59,7 +59,7 @@ def load_personas_from_file(file_path=PERSONA_SAVE_FILE):
     from src.persona import Persona
     """Load personas from a JSON-formatted file."""
     if not os.path.exists(file_path):
-        logging.warning(f"File '{file_path}' does not exist.")
+        logger.warning(f"File '{file_path}' does not exist.")
         return
     with open(file_path, "r") as file:
         persona_data = json.load(file)

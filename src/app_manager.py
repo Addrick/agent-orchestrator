@@ -26,16 +26,16 @@ def update_app():
     result = origin.pull()
 
     if (result[0].flags & 4) != 0:
-        logging.warning("Pull successful. Changed files:")
+        logger.warning("Pull successful. Changed files:")
         # Get the changes after the pull
         # changes = repo.git.diff('HEAD@{1}', 'HEAD')
         diff_index = repo.index.diff(None)
         for diff_added in diff_index.iter_change_type('A'):
-            logging.warning(f"Added: {diff_added.b_path}")
+            logger.warning(f"Added: {diff_added.b_path}")
         for diff_modified in diff_index.iter_change_type('M'):
-            logging.warning(f"Modified: {diff_modified.b_path}")
+            logger.warning(f"Modified: {diff_modified.b_path}")
         for diff_deleted in diff_index.iter_change_type('D'):
-            logging.warning(f"Deleted: {diff_deleted.b_path}")
+            logger.warning(f"Deleted: {diff_deleted.b_path}")
         return f"Pull successful, {diff_index.iter_change_type('M')} files modified."
 
     else:
@@ -54,7 +54,7 @@ def restart_app():
             if handler.fd:
                 os.close(handler.fd)
     except Exception as e:
-        logging.error(e)
+        logger.error(e)
 
     python = sys.executable
     os.execl(python, python, "\"{}\"".format(sys.argv[0]))

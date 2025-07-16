@@ -3,11 +3,16 @@ repurpose history function to have persistent memory?
 - run requests every 15 min or whatever as a heartbeat to check for errors (ie just got 'model not supported' today)
 
 ###GENERAL###
+- remove citation/link contents for chat context history?
+    > save the original response somewhere rather than pulling history from discord - maybe big overhaul
+
 - memory-based context (forgets everything in 5 minutes), rolls based on message time'
     > set 'time based' vs '#msg' based context lengths
 
 - when setting a prompt (or via command?), make a request for a sample response that displays the character of the persona (prove no largest prime in iambic pentameter)
+
 - finish adding support for default persona - set it up at the persona level and sub the default model name during
+
 - ++ mass update persona model settings
     > looking to avoid tedium when a model is deprecated
     > use default model setting; if 'model not found' error set model to default
@@ -41,7 +46,8 @@ repurpose history function to have persistent memory?
     
 - add image support
     > local BAGEL model (7B) appears to be current sota (5/22/25)
-
+###ENTERTAINING###
+- evaluate each message for a 'how likely am I to reply' score and have derpr respond to chat as it it had its own persistent opinions
 =======
 -DEV COMMAND TO ADD LIST:
 

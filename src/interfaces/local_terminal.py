@@ -84,7 +84,7 @@ def local_history_logger(persona_name, response):
 
 
 async def on_message(bot, message, log_chat=True):
-    logging.debug(f'{message.author}: {message.content}')
+    logger.debug(f'{message.author}: {message.content}')
 
     if log_chat:
         # Log chat history to local text file
@@ -94,12 +94,12 @@ async def on_message(bot, message, log_chat=True):
 
     for persona_name, persona in bot.get_persona_list().items():
         persona_mention = f"{persona_name}"
-        logging.debug('Checking for persona name: ' + persona_name)
+        logger.debug('Checking for persona name: ' + persona_name)
         if (message.content.lower().startswith(persona_mention) or
                 message.channel.name.startswith(persona_mention)):
             if message.channel.name.startswith(persona_mention):
                 message.content = persona_mention + " " + message.content
-            logging.debug('Found persona name: ' + persona_name)
+            logger.debug('Found persona name: ' + persona_name)
             async with message.channel.typing():
                 # Gather context (message history) from local terminal
                 context = []

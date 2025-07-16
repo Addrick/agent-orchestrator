@@ -75,7 +75,7 @@ async def set_status_streaming(client, persona_name):
             name=persona_name + '...',
             url='https://www.twitch.tv/discordmakesmedothis')
         await client.change_presence(activity=activity)
-        logger.info(f"Set status to streaming {persona_name}")
+        logger.debug(f"Set status to streaming {persona_name}")
     except Exception as e:
         logger.error(f"Failed to set streaming status: {e}")
 
@@ -130,7 +130,7 @@ def create_discord_bot(chat_system):
         if message.channel.id == debug_channel_id:
             return
 
-        logging.debug(f'{message.author}: {message.content}')
+        logger.debug(f'{message.author}: {message.content}')
 
         if log_chat:
             try:
@@ -159,12 +159,12 @@ def create_discord_bot(chat_system):
             if content_lower.startswith(mention) or channel_name_lower.startswith(f"{persona_name.lower()}"):
                 active_persona_name = persona_name  # Store the correctly cased name
                 persona_mention_prefix = f"{persona_name}"  # Store the correctly cased prefix for history
-                logging.debug(f'Found persona trigger: {persona_name}')
+                logger.debug(f'Found persona trigger: {persona_name}')
 
                 # Prepend persona name if triggered by channel name only
                 if channel_name_lower.startswith(f"{persona_name.lower()}") and not content_lower.startswith(mention):
                     message.content = f"{persona_name} {message.content}"
-                    logging.debug(f'Prepended persona name to message content.')
+                    logger.debug(f'Prepended persona name to message content.')
                 break  # Process first matching persona
 
         # If a persona was triggered, proceed with generation logic
@@ -233,7 +233,7 @@ async def send_discord_dev_message(channel, msg: str):
         try:
             await channel.send(f"```{chunk}```")
         except HTTPException as e:
-            logging.error(f"An error occurred: {e}")
+            logger.error(f"An error occurred: {e}")
             pass
 
 

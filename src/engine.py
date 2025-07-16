@@ -373,7 +373,7 @@ class TextEngine:
             self.json_response = completion
             token_count_and_model = f' ({str(completion.usage.total_tokens)} tokens using {self.model_name})'
             response = completion.choices[0].message.content
-            logging.debug(response + token_count_and_model)
+            logger.debug(response + token_count_and_model)
             return response + token_count_and_model
 
         except Exception as e:
@@ -430,7 +430,7 @@ class TextEngine:
             self.json_response = completion
             token_count_and_model = f' ({str(completion.usage.total_tokens)} tokens using {self.model_name})'
             response = completion.choices[0].message.content
-            logging.debug(response + token_count_and_model)
+            logger.debug(response + token_count_and_model)
             return response + token_count_and_model
 
         except Exception as e:
@@ -486,7 +486,7 @@ class TextEngine:
             self.json_response = completion
             token_count_and_model = f' ({str(completion.usage.total_tokens)} tokens using {self.model_name})'
             response = completion.choices[0].message.content
-            logging.debug(response + token_count_and_model)
+            logger.debug(response + token_count_and_model)
             return response + token_count_and_model
 
         except Exception as e:

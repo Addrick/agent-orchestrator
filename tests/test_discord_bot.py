@@ -231,7 +231,7 @@ class TestSetStatusStreaming(IsolatedAsyncioTestCase):
         mock_client.change_presence = AsyncMock()
         persona_name = "test_persona"
 
-        with patch('src.interfaces.discord_bot.logger.info') as mock_info:
+        with patch('src.interfaces.discord_bot.logger.debug') as mock_info:
             await set_status_streaming(mock_client, persona_name)
 
             mock_activity.assert_called_once_with(
@@ -411,7 +411,7 @@ class TestSendDiscordDevMessage(IsolatedAsyncioTestCase):
         mock_channel.send = AsyncMock(side_effect=discord.HTTPException(
             response=MagicMock(), message="HTTP Exception"))
 
-        with patch('logging.error') as mock_error:
+        with patch('logger.error') as mock_error:
             await send_discord_dev_message(mock_channel, "Test message")
             mock_error.assert_called_once()
 
@@ -467,9 +467,9 @@ class TestOnMessageEvent(IsolatedAsyncioTestCase):
             patch('src.interfaces.discord_bot.send_message', new_callable=AsyncMock),
             patch('src.interfaces.discord_bot.send_discord_dev_message', new_callable=AsyncMock),
             patch('logger.info'),
-            patch('logging.debug'),
-            patch('logging.error'),
-            patch('logging.warning')
+            patch('logger.debug'),
+            patch('logger.error'),
+            patch('logger.warning')
         ]
         for p in self.patches:
             p.start()

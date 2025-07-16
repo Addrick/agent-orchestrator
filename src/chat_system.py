@@ -47,7 +47,7 @@ class ChatSystem:
         # todo: determine if other apis support this and if I can tell which do via some request
         if self.personas[persona_name].model.model_name != 'gpt-4o' and image_url is not None:
             image_url = None
-            logging.warning('Image URL discarded because the selected model is not gpt-4o and it cannot handle images (yet).')
+            logger.warning('Image URL discarded because the selected model is not gpt-4o and it cannot handle images (yet).')
         if persona_name in self.personas:
             persona = self.personas[persona_name]
             reply = await persona.generate_response(message, context, image_url)
@@ -56,6 +56,6 @@ class ChatSystem:
             return reply
 
         else:
-            logging.warning(f"persona '{persona_name}' does not exist.")
+            logger.warning(f"persona '{persona_name}' does not exist.")
             return "Error in chat_system generate_response"
 

@@ -1,12 +1,22 @@
 # eventually turn these into launch params or some shit
 
 DISCORD_BOT = 1
+# --- DISCORD_BOT CONFIG ---
 DISCORD_DISCONNECT_TIME = None
 DISCORD_CHAR_LIMIT = 2000
 DISCORD_STATUS_LIMIT = 128
 DISCORD_LOGGER = False
 DISCORD_DEBUG_CHANNEL = 1222358674127982622
 DEFAULT_CONVERSATIONAL_PAUSE_LIMIT = 21600 # time in seconds to determine if a message in context is too far back from the previous
+
+GMAIL_BOT = True
+# --- GMAIL BOT CONFIG ---
+GMAIL_PROJECT_ID = 'gchat-test-462719'
+GMAIL_PUBSUB_TOPIC = 'projects/your-gcp-project-id/topics/your-topic-name'
+GMAIL_PUBSUB_SUBSCRIPTION_ID = 'your-subscription-id' # <-- ADD YOUR DETAILS
+GMAIL_CREDENTIALS_FILE = 'gmail_credentials.json' # The file from Google Cloud
+GMAIL_TOKEN_FILE = 'gmail_token.json' # This will be created automatically
+
 
 WEBUI = 0
 

@@ -20,7 +20,7 @@ def save_after_change(func):
         response = func(self, *args, **kwargs)
         if isinstance(response, str) and not response.lower().startswith('error'):
             save_utils.save_personas_to_file(self.chat_system.personas)
-            logging.debug(f"Personas saved automatically after function '{func.__name__}' execution.")
+            logger.debug(f"Personas saved automatically after function '{func.__name__}' execution.")
         return response
 
     return wrapper
@@ -72,7 +72,7 @@ class BotLogic:
         }
 
     def preprocess_message(self, message, check_only=False):
-        logging.debug('Checking for dev commands...')
+        logger.debug('Checking for dev commands...')
         self.message = message
         split_args = re.split(r'[ ]', message.content.lower())
         try:
@@ -91,7 +91,7 @@ class BotLogic:
             else:
                 return handler(args, current_persona)
 
-        logging.debug("No dev commands found.")
+        logger.debug("No dev commands found.")
         return None
 
     def _handle_help(self, args, persona):
@@ -208,14 +208,14 @@ class BotLogic:
         if not prompt:
             return "Error: 'set prompt' requires text for the new prompt."
         persona.set_prompt(prompt)
-        logging.debug(f"Prompt set for '{persona.name}'.")
+        logger.debug(f"Prompt set for '{persona.name}'.")
         return 'Prompt saved.'
 
     @save_after_change
     def _set_default_prompt(self, args, persona):
         prompt = DEFAULT_PERSONA
         persona.set_prompt(prompt)
-        logging.debug(f"Prompt set for '{persona.name}'.")
+        logger.debug(f"Prompt set for '{persona.name}'.")
         message = DEFAULT_WELCOME_REQUEST
         return persona.generate_response(persona.name, message)
 
