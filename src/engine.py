@@ -24,6 +24,130 @@ from src.utils.model_utils import get_model_list
 # a function to launch a local KoboldCPP instance.
 
 
+def _process_grounding_metadata(base_text_from_response: str, metadata, logger):
+    """Processes grounding metadata to insert citations and list sources."""
+    if not (metadata and metadata.grounding_chunks and metadata.grounding_supports):
+        return base_text_from_response, "", ""
+
+    insertion_points_map = {}  # Maps insertion_location -> set of citation_ids
+    current_search_cursor = 0
+
+    # Store unique sources: uri -> {id: int (1-based), title: str, url: str}
+    processed_sources = {}
+    source_id_counter = 1
+    # Maps API's internal grounding_chunk_index to our processed_sources ID
+    chunk_idx_to_source_id_map = {}
+
+    for chunk_index, chunk in enumerate(metadata.grounding_chunks):
+        if chunk.web and chunk.web.uri:
+            uri = chunk.web.uri
+            title = chunk.web.title or uri  # Use URI if title is missing
+            if uri not in processed_sources:
+                processed_sources[uri] = {'id': source_id_counter, 'title': title, 'url': uri}
+                source_id_counter += 1
+            chunk_idx_to_source_id_map[chunk_index] = processed_sources[uri]['id']
+
+    segments_to_cite = []
+    for support in metadata.grounding_supports:
+        s_text = support.segment.text
+        # API provides start_index, but it might not always be accurate.
+        s_start_hint = support.segment.start_index if support.segment.start_index is not None else 0
+
+        supporting_source_ids = set()
+        if support.grounding_chunk_indices:
+            for c_idx in support.grounding_chunk_indices:
+                if c_idx in chunk_idx_to_source_id_map:
+                    supporting_source_ids.add(chunk_idx_to_source_id_map[c_idx])
+
+        if s_text and supporting_source_ids:
+            segments_to_cite.append({
+                "start_hint": s_start_hint,
+                "text": s_text,
+                "citations": sorted(list(supporting_source_ids))  # Store sorted citation IDs
+            })
+
+    # Sort segments by their start_hint to process them in order of appearance (ideally)
+    segments_to_cite.sort(key=lambda s: s["start_hint"])
+
+    for segment_data in segments_to_cite:
+        segment_text = segment_data["text"]
+        citation_ids_for_segment = segment_data["citations"]
+
+        found_index = base_text_from_response.find(segment_text, current_search_cursor)
+        if found_index == -1:  # Segment not found starting from current_search_cursor
+            # Fallback: search from the beginning of the response
+            alt_found_index = base_text_from_response.find(segment_text, 0)
+            if alt_found_index != -1:
+                logger.warning(
+                    f"Segment (starts with: '{segment_text[:30].replace(chr(10), ' ')}...') "
+                    f"not found from cursor {current_search_cursor}. Found at {alt_found_index} via global search."
+                )
+                found_index = alt_found_index
+            else:
+                logger.error(
+                    f"Segment (starts with: '{segment_text[:30].replace(chr(10), ' ')}...') "
+                    f"could not be found anywhere in the response. Skipping citation for this segment."
+                )
+                continue  # Skip this segment's citations
+
+        # Position to insert the citation mark (after the segment)
+        insertion_location = found_index + len(segment_text)
+
+        if citation_ids_for_segment:  # Only proceed if there are citations for this segment
+            if insertion_location not in insertion_points_map:
+                insertion_points_map[insertion_location] = set()
+            insertion_points_map[insertion_location].update(citation_ids_for_segment)
+
+        # Update cursor to search for the *next* segment after the current one's *found_index*.
+        # This helps avoid re-matching parts of already processed segments if hints are off.
+        current_search_cursor = max(current_search_cursor, insertion_location)
+
+    # Build the new text_content with citations inserted
+    text_with_citations = base_text_from_response
+    if insertion_points_map:
+        modified_text_parts = []
+        last_slice_end = 0
+        for loc in sorted(insertion_points_map.keys()):  # Process in order of appearance
+            modified_text_parts.append(base_text_from_response[last_slice_end:loc])
+
+            hyperlinked_citation_parts = []
+            # Get the unique, sorted citation IDs for this specific insertion location
+            sorted_citation_ids_at_loc = sorted(list(insertion_points_map[loc]))
+
+            for src_id in sorted_citation_ids_at_loc:
+                # Find the source URL using our internal ID from processed_sources
+                source_info = next((s_info for s_info in processed_sources.values() if s_info['id'] == src_id),
+                                   None)
+                if source_info:  # Should always find it if logic is correct
+                    hyperlinked_citation_parts.append(f"[{src_id}](<{source_info['url']}>)")
+
+            citation_str_to_insert = ""
+            if hyperlinked_citation_parts:  # Only add if there are actual links
+                # Example: " [\[1](<url1>), \[2](<url2>)]" - note the space for separation
+                citation_str_to_insert = f" [{', '.join(hyperlinked_citation_parts)}]"
+
+            modified_text_parts.append(citation_str_to_insert)
+            last_slice_end = loc
+        modified_text_parts.append(base_text_from_response[last_slice_end:])  # Append remaining text
+        text_with_citations = "".join(modified_text_parts)
+
+    # Build the list of sources for display
+    citations_text_list_str = ""
+    if processed_sources:
+        citations_text_list_str = "\n\nSources:\n"
+        # Sort sources by their assigned ID for consistent display order
+        ordered_sources_for_display = sorted(processed_sources.values(), key=lambda s: s['id'])
+        for src_info in ordered_sources_for_display:
+            citations_text_list_str += f"{src_info['id']}. {src_info['title']}\n"
+
+    # Build search query text
+    search_query_text_str = ""
+    if metadata.web_search_queries:  # Check if attribute exists and is not empty
+        search_query_text_str = f"\n\nSearch Query: {', '.join(metadata.web_search_queries)}"
+
+    return text_with_citations, search_query_text_str, citations_text_list_str
+
+
 class TextEngine:
     """Initialize the TextEngine with model settings."""
 
@@ -45,21 +169,14 @@ class TextEngine:
 
         self.all_available_models = get_model_list()
 
-        # OpenAI specific
+        # OpenAI
         self.openai_models_available = self.all_available_models['From OpenAI']
         self.frequency_penalty = 0
         self.presence_penalty = 0
         self.openai_client = None
 
-        # Google common settings
+        # Google
         self.google_models_available = self.all_available_models['From Google']
-        self.unsafe_settings_vertexai = {
-            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-        }
-        # For Google AI Studio / google-generativeai library
         self.unsafe_settings_google_generativeai = [
             {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
             {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -69,7 +186,7 @@ class TextEngine:
         self.google_aistudio_client = None
         self.google_aistudio_search_tool = None
 
-        # Anthropic models - settings would go here
+        # Anthropic
         self.anthropic_models_available = self.all_available_models['From Anthropic']
 
     async def _initialize_openai(self):
@@ -133,129 +250,6 @@ class TextEngine:
 
         return GenerateContentConfig(**config_params) if config_params else None
 
-    def _process_grounding_metadata(self, base_text_from_response: str, metadata, logger):
-        """Processes grounding metadata to insert citations and list sources."""
-        if not (metadata and metadata.grounding_chunks and metadata.grounding_supports):
-            return base_text_from_response, "", ""
-
-        insertion_points_map = {}  # Maps insertion_location -> set of citation_ids
-        current_search_cursor = 0
-
-        # Store unique sources: uri -> {id: int (1-based), title: str, url: str}
-        processed_sources = {}
-        source_id_counter = 1
-        # Maps API's internal grounding_chunk_index to our processed_sources ID
-        chunk_idx_to_source_id_map = {}
-
-        for chunk_index, chunk in enumerate(metadata.grounding_chunks):
-            if chunk.web and chunk.web.uri:
-                uri = chunk.web.uri
-                title = chunk.web.title or uri  # Use URI if title is missing
-                if uri not in processed_sources:
-                    processed_sources[uri] = {'id': source_id_counter, 'title': title, 'url': uri}
-                    source_id_counter += 1
-                chunk_idx_to_source_id_map[chunk_index] = processed_sources[uri]['id']
-
-        segments_to_cite = []
-        for support in metadata.grounding_supports:
-            s_text = support.segment.text
-            # API provides start_index, but it might not always be accurate.
-            s_start_hint = support.segment.start_index if support.segment.start_index is not None else 0
-
-            supporting_source_ids = set()
-            if support.grounding_chunk_indices:
-                for c_idx in support.grounding_chunk_indices:
-                    if c_idx in chunk_idx_to_source_id_map:
-                        supporting_source_ids.add(chunk_idx_to_source_id_map[c_idx])
-
-            if s_text and supporting_source_ids:
-                segments_to_cite.append({
-                    "start_hint": s_start_hint,
-                    "text": s_text,
-                    "citations": sorted(list(supporting_source_ids))  # Store sorted citation IDs
-                })
-
-        # Sort segments by their start_hint to process them in order of appearance (ideally)
-        segments_to_cite.sort(key=lambda s: s["start_hint"])
-
-        for segment_data in segments_to_cite:
-            segment_text = segment_data["text"]
-            citation_ids_for_segment = segment_data["citations"]
-
-            found_index = base_text_from_response.find(segment_text, current_search_cursor)
-            if found_index == -1:  # Segment not found starting from current_search_cursor
-                # Fallback: search from the beginning of the response
-                alt_found_index = base_text_from_response.find(segment_text, 0)
-                if alt_found_index != -1:
-                    logger.warning(
-                        f"Segment (starts with: '{segment_text[:30].replace(chr(10), ' ')}...') "
-                        f"not found from cursor {current_search_cursor}. Found at {alt_found_index} via global search."
-                    )
-                    found_index = alt_found_index
-                else:
-                    logger.error(
-                        f"Segment (starts with: '{segment_text[:30].replace(chr(10), ' ')}...') "
-                        f"could not be found anywhere in the response. Skipping citation for this segment."
-                    )
-                    continue  # Skip this segment's citations
-
-            # Position to insert the citation mark (after the segment)
-            insertion_location = found_index + len(segment_text)
-
-            if citation_ids_for_segment:  # Only proceed if there are citations for this segment
-                if insertion_location not in insertion_points_map:
-                    insertion_points_map[insertion_location] = set()
-                insertion_points_map[insertion_location].update(citation_ids_for_segment)
-
-            # Update cursor to search for the *next* segment after the current one's *found_index*.
-            # This helps avoid re-matching parts of already processed segments if hints are off.
-            current_search_cursor = max(current_search_cursor, insertion_location)
-
-        # Build the new text_content with citations inserted
-        text_with_citations = base_text_from_response
-        if insertion_points_map:
-            modified_text_parts = []
-            last_slice_end = 0
-            for loc in sorted(insertion_points_map.keys()):  # Process in order of appearance
-                modified_text_parts.append(base_text_from_response[last_slice_end:loc])
-
-                hyperlinked_citation_parts = []
-                # Get the unique, sorted citation IDs for this specific insertion location
-                sorted_citation_ids_at_loc = sorted(list(insertion_points_map[loc]))
-
-                for src_id in sorted_citation_ids_at_loc:
-                    # Find the source URL using our internal ID from processed_sources
-                    source_info = next((s_info for s_info in processed_sources.values() if s_info['id'] == src_id),
-                                       None)
-                    if source_info:  # Should always find it if logic is correct
-                        hyperlinked_citation_parts.append(f"[{src_id}](<{source_info['url']}>)")
-
-                citation_str_to_insert = ""
-                if hyperlinked_citation_parts:  # Only add if there are actual links
-                    # Example: " [\[1](<url1>), \[2](<url2>)]" - note the space for separation
-                    citation_str_to_insert = f" [{', '.join(hyperlinked_citation_parts)}]"
-
-                modified_text_parts.append(citation_str_to_insert)
-                last_slice_end = loc
-            modified_text_parts.append(base_text_from_response[last_slice_end:])  # Append remaining text
-            text_with_citations = "".join(modified_text_parts)
-
-        # Build the list of sources for display
-        citations_text_list_str = ""
-        if processed_sources:
-            citations_text_list_str = "\n\nSources:\n"
-            # Sort sources by their assigned ID for consistent display order
-            ordered_sources_for_display = sorted(processed_sources.values(), key=lambda s: s['id'])
-            for src_info in ordered_sources_for_display:
-                citations_text_list_str += f"{src_info['id']}. {src_info['title']}\n"
-
-        # Build search query text
-        search_query_text_str = ""
-        if metadata.web_search_queries:  # Check if attribute exists and is not empty
-            search_query_text_str = f"\n\nSearch Query: {', '.join(metadata.web_search_queries)}"
-
-        return text_with_citations, search_query_text_str, citations_text_list_str
-
     def get_raw_json_request(self):
         return self.json_request
 
@@ -316,7 +310,7 @@ class TextEngine:
 
         else:
             logging.info("Error: persona's model name not found.")
-            response = "Error: persona's model name not found."
+            response = "Error: persona's model name not found. Try: ```set model default``` or find a new model with: ```what models```"
 
         return response
 
@@ -493,116 +487,6 @@ class TextEngine:
         #     return str(e)
 
     # Google
-
-    # def _generate_google_response_vertex(self, prompt, message, context):
-    #     """Generate a response using Google's Vertex AI."""
-    #     import vertexai
-    #     from vertexai.generative_models import GenerativeModel
-    #
-    #     vertexai.init(project=api_keys.google_project_id, location="us-east1")
-    #
-    #     # TODO: further test and refine context and prompt structure
-    #     # TODO: add model parameter customization
-    #
-    #     model = GenerativeModel(self.model_name)
-    #
-    #     request = '### Instructions: ###' + prompt + '\n### Recent chat history: ### \n' + str(
-    #         context) + '\n### Now respond to the most recent message: ###\n' + message
-    #     self.json_request = self.parse_request_json(request)
-    #
-    #     response = model.generate_content(
-    #         request,
-    #         safety_settings=self.unsafe_settings_vertexai
-    #     )
-    #     try:
-    #         text_content = response.text
-    #     except ValueError:
-    #         # Handle the absence of response.text
-    #         text_content = f"```Response too spicy for Google, blocked at server. Try again, mix up your request a bit if it persists.```"  # TODO: do a retry instead of just reporting it failed
-    #         logging.error(response.candidates[0].safety_ratings)
-    #     return text_content
-
-    async def _generate_google_response_ai_studio_async_old(self, prompt, message, context):
-        """Generate a response asynchronously using Google AI Studio (genai library)."""
-
-        import google.generativeai as genai
-        from google.genai.types import GoogleSearch
-        import os
-
-        # load .env for api key
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        root_dir = os.path.join(current_dir, '..')
-        load_dotenv(os.path.join(root_dir, '.env'))
-        google_api_key = os.environ.get("GOOGLE_GENERATIVEAI_API_KEY")
-
-        # Configure the genai library (ideally done once at application start)
-        genai.configure(api_key=google_api_key)
-
-        # Model instantiation using the genai library
-        # You might want to cache this model instance if used frequently
-        model = genai.GenerativeModel(self.model_name)
-        request_content = '### Instructions: ###' + prompt + '\n### Recent chat room history: ### \n' + str(
-            context) + '\n### Now respond to the most recent message: ###\n' + message
-
-        # Log the structured request
-        self.json_request = self.parse_request_json(request_content)
-
-        try:
-            # Build API parameters with only valid values
-            api_params = {
-                'messages': request_content,
-                'model': self.model_name,
-                'safety_settings': self.unsafe_settings_google_generativeai,
-                'tools': GoogleSearch()
-            }
-
-            if isinstance(self.max_output_tokens, int):
-                api_params['max_tokens'] = self.max_output_tokens
-
-            if isinstance(self.temperature, (int, float)):
-                api_params['temperature'] = self.temperature
-
-            if isinstance(self.temperature, (int, float)):
-                api_params['top_p'] = self.top_p
-
-            if isinstance(self.frequency_penalty, (int, float)):
-                api_params['frequency_penalty'] = self.frequency_penalty
-
-            if isinstance(self.presence_penalty, (int, float)):
-                api_params['presence_penalty'] = self.presence_penalty
-
-            # Use the asynchronous generation method
-            response = await model.generate_content_async(**api_params)
-
-            # Check if the response was blocked due to safety settings
-            if response.prompt_feedback and response.prompt_feedback.block_reason:
-                block_reason = response.prompt_feedback.block_reason.name
-                text_content = f"```Response blocked by Google due to {block_reason}. Try again, mix up your request a bit if it persists.```"
-                self.logger.error(f"Google AI Studio response blocked. Reason: {block_reason}")
-                if response.prompt_feedback.safety_ratings:
-                    self.logger.error(f"Safety Ratings: {response.prompt_feedback.safety_ratings}")
-                # TODO: Implement retry logic here instead of just reporting failure
-            else:
-                # Access the text content safely
-                # The .text attribute should exist if not blocked, but good practice to check
-                try:
-                    text_content = response.text
-                except ValueError:
-                    # This path might be less common with genai if block_reason is checked first,
-                    # but kept for robustness similar to original code.
-                    text_content = "```Error retrieving text from response, even though not explicitly blocked.```"
-                    self.logger.error("ValueError accessing response.text despite no block reason.")
-                    if hasattr(response, 'candidates') and response.candidates:
-                        self.logger.error(
-                            f"Candidate safety ratings (if available): {response.candidates[0].safety_ratings}")
-
-        except Exception as e:
-            # Catch potential API errors or other issues
-            self.logger.error(f"Error during Google AI Studio generation: {e}", exc_info=True)
-            text_content = f"```An error occurred during generation: {e}```"
-
-        return text_content
-
     async def _generate_google_response_ai_studio_async(self, prompt: str, message: str, context: str):
         """Generate a response asynchronously using Google AI Studio (genai library)."""
         try:
@@ -669,7 +553,7 @@ class TextEngine:
                 if hasattr(metadata, 'grounding_chunks') and hasattr(metadata, 'grounding_supports'):
                     self.logger.info("Processing grounding metadata for citations...")
                     final_text_content, search_query_display, citations_display = \
-                        self._process_grounding_metadata(base_text_from_response, metadata, self.logger)
+                        _process_grounding_metadata(base_text_from_response, metadata, self.logger)
                 else:
                     self.logger.info(
                         "Grounding metadata present, but 'grounding_chunks' or 'grounding_supports' missing. Skipping citation processing.")
