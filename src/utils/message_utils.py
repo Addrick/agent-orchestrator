@@ -2,6 +2,9 @@ import requests
 import time
 import logging
 
+logger = logging.getLogger(__name__)
+
+
 def resolve_redirect_url(redirect_url: str, max_retries: int = 3, initial_delay: int = 5) -> str | None:
     """
     Follows a redirect URL using HEAD method to get the final URL,

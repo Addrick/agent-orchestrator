@@ -20,7 +20,7 @@ def save_models_to_file(models_dict):  #  TODO: use self.models_dict
     save_data['models'] = models_dict
     with open(PERSONA_SAVE_FILE, 'w') as file:
         json.dump(save_data, file, indent=4)
-    logger.info(f"Updated persona save.")
+    logger.debug(f"Updated model save.")
 
 
 def save_personas_to_file(personas):
@@ -37,7 +37,7 @@ def save_personas_to_file(personas):
     save_data['personas'] = persona_dict
     with open(PERSONA_SAVE_FILE, 'w') as file:
         json.dump(save_data, file, indent=4)
-    logger.info(f"Updated persona save.")
+    logger.debug(f"Updated persona save.")
 
 
 def to_dict(personas):

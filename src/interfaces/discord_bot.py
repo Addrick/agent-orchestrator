@@ -12,36 +12,10 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-
-class ConnectionErrorFilter(logging.Filter):
-    def filter(self, record):
-        # Filter out specific log messages
-        connection_keywords = [
-            # 'Attempting a reconnect',
-            # 'WebSocket closed',
-            # 'ConnectionClosed',
-            # 'ClientConnectorError',
-            # 'Shard ID None has connected to Gateway'
-            # 'Shard ID None has successfully RESUMED'
-        ]
-        return not any(keyword in record.getMessage() for keyword in connection_keywords)
-
-
 class CustomDiscordBot(discord.Client):
     def __init__(self, chat_system, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.bot = chat_system
-
-        # Set up error handling for connection issues
-        self.add_error_handler()
-
-    def add_error_handler(self):
-        # Configure logging to reduce noise from connection errors
-        discord_logger = logging.getLogger('discord')
-        connection_filter = ConnectionErrorFilter()
-        discord_logger.addFilter(connection_filter)
-
-        discord_logger.setLevel(logging.WARNING)
 
 
 async def get_image_attachments(message):

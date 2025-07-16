@@ -46,6 +46,8 @@ async def main():
         tasks.append(update_task)
 
     # --- Initialize Interfaces ---
+    logger.info(f"Starting interface(s)...")
+
     if DISCORD_BOT:
         logger.info("Initializing Discord bot...")
         discord_bot = create_discord_bot(bot)
@@ -68,7 +70,6 @@ async def main():
         logger.warning("No interfaces were enabled or created. The application will now exit.")
         return
 
-    logger.info(f"Starting interface(s)...")
     await asyncio.gather(*tasks)
 
 
