@@ -12,11 +12,11 @@ DEFAULT_CONVERSATIONAL_PAUSE_LIMIT = 21600 # time in seconds to determine if a m
 GMAIL_BOT = True
 # --- GMAIL BOT CONFIG ---
 GMAIL_PROJECT_ID = 'gchat-test-462719'
-GMAIL_PUBSUB_TOPIC = 'projects/your-gcp-project-id/topics/your-topic-name'
-GMAIL_PUBSUB_SUBSCRIPTION_ID = 'your-subscription-id' # <-- ADD YOUR DETAILS
-GMAIL_CREDENTIALS_FILE = 'gmail_credentials.json' # The file from Google Cloud
-GMAIL_TOKEN_FILE = 'gmail_token.json' # This will be created automatically
-
+GMAIL_PUBSUB_TOPIC = 'projects/gchat-test-462719/topics/derpr_gmail'
+GMAIL_PUBSUB_SUBSCRIPTION_ID = 'derpr_gmail-sub'
+GMAIL_CREDENTIALS_FILE = '../config/creds/client_secret_738920553711-tojr3uquv65jf5k3j3js2nql4t77hbkh.apps.googleusercontent.com.json'
+GMAIL_TOKEN_FILE = 'gmail_token.json'  # created automatically
+BLOCK_EXTERNAL_SENDER_REPLIES = True
 
 WEBUI = 0
 
