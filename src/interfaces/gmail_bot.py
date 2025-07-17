@@ -116,9 +116,8 @@ class GmailInterface:
             if BLOCK_EXTERNAL_SENDER_REPLIES:
                 allowed_sender = 'adam@tech-ops.it'
                 if allowed_sender not in sender:
-                    logger.info(f"Skipping email from '{sender}' (ID: {msg_id}) as sender blocking is enabled.")
-                    await asyncio.to_thread(service.users().messages().modify(userId='me', id=msg_id, body={
-                        'removeLabelIds': ['UNREAD']}).execute)
+                    logger.info(
+                        f"Skipping email from '{sender}' (ID: {msg_id}) as sender blocking is enabled. Email will remain unread.")
                     return
 
             thread_id = get_response['threadId']
@@ -127,42 +126,43 @@ class GmailInterface:
             if "parts" in payload:
                 for part in payload['parts']:
                     if part['mimeType'] == 'text/plain':
-                        body_data = part['body'].get('data');
+                        body_data = part['body'].get('data')
                         if body_data: user_input = base64.urlsafe_b64decode(body_data).decode('utf-8', 'ignore'); break
             else:
                 body_data = payload['body'].get('data')
                 if body_data: user_input = base64.urlsafe_b64decode(body_data).decode('utf-8', 'ignore')
 
             if not user_input.strip():
-                logger.warning(f"Email from {sender} (ID: {msg_id}) had no readable text body. Skipping.")
-                await asyncio.to_thread(service.users().messages().modify(userId='me', id=msg_id,
-                                                                          body={'removeLabelIds': ['UNREAD']}).execute)
+                logger.warning(
+                    f"Email from {sender} (ID: {msg_id}) had no readable text body. Skipping. Email will remain unread.")
                 return
 
             active_persona_name = 'testr'
 
-            # --- CHANGE: Add dev command check before generating response ---
             pseudo_message = type('PseudoMessage', (), {'content': user_input})()
             dev_response = self.chat_system.bot_logic.preprocess_message(active_persona_name, pseudo_message)
 
             response_text = None
             if dev_response is not None:
-                # A dev command was found and executed.
                 logger.info(f"Dev command processed for email (ID: {msg_id}).")
                 response_text = dev_response
             else:
-                # No dev command, proceed with LLM generation.
                 context = await self._gather_thread_history(service, thread_id)
                 logger.info(f"Handing off email from {sender} (ID: {msg_id}) to '{active_persona_name}' persona.")
                 response_text = await self.chat_system.generate_response(active_persona_name, user_input,
                                                                          context=context, image_url=None)
 
             if response_text:
+                # First, send the reply
                 await self._send_reply(service, to=sender, subject=subject, body=response_text,
                                        in_reply_to=message_id_header, thread_id=thread_id)
 
-            await asyncio.to_thread(
-                service.users().messages().modify(userId='me', id=msg_id, body={'removeLabelIds': ['UNREAD']}).execute)
+                # THEN, mark the original message as read
+                await asyncio.to_thread(
+                    service.users().messages().modify(userId='me', id=msg_id,
+                                                      body={'removeLabelIds': ['UNREAD']}).execute)
+                logger.info(f"Successfully replied to and marked email as read (ID: {msg_id}).")
+
         except Exception as e:
             logger.error(f"Error handling message ID {msg_id}: {e}", exc_info=True)
 
