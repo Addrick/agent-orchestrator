@@ -1,5 +1,3 @@
-# In src/interfaces/gmail_bot.py
-
 import asyncio
 import base64
 import json
@@ -73,14 +71,11 @@ class GmailInterface:
 
             try:
                 service = build('gmail', 'v1', credentials=self.credentials, cache_discovery=False)
-
                 history_response = await asyncio.to_thread(
                     service.users().history().list(userId='me', startHistoryId=self.last_known_history_id).execute
                 )
-
                 new_history_id = history_response.get('historyId')
-                if new_history_id:
-                    self.last_known_history_id = new_history_id
+                if new_history_id: self.last_known_history_id = new_history_id
 
                 added_messages = []
                 if 'history' in history_response:
@@ -93,14 +88,9 @@ class GmailInterface:
                     return
 
                 for msg_summary in added_messages:
-                    # --- THIS IS THE FIX ---
-                    # The message summary from the history list contains labels.
-                    # If 'SENT' is in the labels, it's an outgoing mail. Ignore it.
                     if 'SENT' in msg_summary['message'].get('labelIds', []):
                         logger.debug(f"Skipping self-sent message with ID: {msg_summary['message']['id']}")
                         continue
-                    # -----------------------
-
                     msg_id = msg_summary['message']['id']
                     if msg_id in self._processed_ids:
                         logger.warning(f"Duplicate message ID '{msg_id}' detected in history. Skipping.")
@@ -150,10 +140,22 @@ class GmailInterface:
                 return
 
             active_persona_name = 'testr'
-            context = await self._gather_thread_history(service, thread_id)
-            logger.info(f"Handing off email from {sender} (ID: {msg_id}) to '{active_persona_name}' persona.")
-            response_text = await self.chat_system.generate_response(active_persona_name, user_input, context=context,
-                                                                     image_url=None)
+
+            # --- CHANGE: Add dev command check before generating response ---
+            pseudo_message = type('PseudoMessage', (), {'content': user_input})()
+            dev_response = self.chat_system.bot_logic.preprocess_message(active_persona_name, pseudo_message)
+
+            response_text = None
+            if dev_response is not None:
+                # A dev command was found and executed.
+                logger.info(f"Dev command processed for email (ID: {msg_id}).")
+                response_text = dev_response
+            else:
+                # No dev command, proceed with LLM generation.
+                context = await self._gather_thread_history(service, thread_id)
+                logger.info(f"Handing off email from {sender} (ID: {msg_id}) to '{active_persona_name}' persona.")
+                response_text = await self.chat_system.generate_response(active_persona_name, user_input,
+                                                                         context=context, image_url=None)
 
             if response_text:
                 await self._send_reply(service, to=sender, subject=subject, body=response_text,

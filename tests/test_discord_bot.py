@@ -198,22 +198,29 @@ class TestHistoryGatherer(IsolatedAsyncioTestCase):
         dev_msg = MagicMock()
         dev_msg.author.id = 67890
         dev_msg.author.name = "User1"
-        dev_msg.content = "derpr: test_persona `\u200b``Help command"
+        # The content of dev_msg doesn't need the persona name anymore,
+        # but the check for `is_previous_dev_response` might still use it.
+        # Let's keep it simple for now as the main check is the side effect.
+        dev_msg.content = "Help command"
         dev_msg.created_at.strftime.return_value = "2023-01-01, 10:01:00"
         dev_msg.channel.name = "general"
 
-        # Setup bot_logic to identify dev commands
-        def preprocess_side_effect(msg, check_only=False):
+        # --- THIS IS THE FIX ---
+        # Update the side effect function's signature to match the real function.
+        def preprocess_side_effect(persona_name, msg, check_only=False):
+            # The logic now correctly checks the message object passed to it.
             if msg == dev_msg and check_only:
                 return True
             return None
+        # ------------------------
 
         mock_bot_logic.preprocess_message.side_effect = preprocess_side_effect
 
         # Mock channel.history to return our mock messages
         mock_history = AsyncMock()
-        mock_history.__aiter__.return_value = [dev_msg, normal_msg]
-        mock_channel.history.return_value = mock_history
+        # Note: __aiter__ should yield values, not return a list directly.
+        # A simpler way for tests is to mock the async for loop's result.
+        mock_channel.history.return_value.__aiter__.return_value = [dev_msg, normal_msg]
 
         context = await history_gatherer(mock_client, mock_channel, mock_message,
                                          mock_persona_mention, mock_bot_logic, 10)
@@ -221,7 +228,6 @@ class TestHistoryGatherer(IsolatedAsyncioTestCase):
         # Check that only normal message is included
         self.assertEqual(len(context), 1)
         self.assertEqual(context[0], "2023-01-01, 10:00:00, User1: Normal message")
-
 
 class TestSetStatusStreaming(IsolatedAsyncioTestCase):
     @patch('discord.Activity')
@@ -411,7 +417,7 @@ class TestSendDiscordDevMessage(IsolatedAsyncioTestCase):
         mock_channel.send = AsyncMock(side_effect=discord.HTTPException(
             response=MagicMock(), message="HTTP Exception"))
 
-        with patch('logger.error') as mock_error:
+        with patch('src.interfaces.discord_bot.logger.error') as mock_error:
             await send_discord_dev_message(mock_channel, "Test message")
             mock_error.assert_called_once()
 

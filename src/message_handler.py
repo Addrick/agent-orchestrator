@@ -28,6 +28,7 @@ def save_after_change(func):
 
 class BotLogic:
     def __init__(self, chat_system):
+        self.persona_name = 'testr'
         self.message = None
         self.chat_system = chat_system
         self.koboldcpp_thread = None
@@ -71,12 +72,13 @@ class BotLogic:
             'top_k': self._set_top_k,
         }
 
-    def preprocess_message(self, message, check_only=False):
+    def preprocess_message(self, persona_name, message, check_only=False):
         logger.debug('Checking for dev commands...')
+        persona_name = persona_name
         self.message = message
         split_args = re.split(r'[ ]', message.content.lower())
         try:
-            persona_name, command, args = split_args[0].lower(), split_args[1].lower(), split_args[2:]
+            command, args = split_args[0], split_args[1:]
         except IndexError:
             return None
 

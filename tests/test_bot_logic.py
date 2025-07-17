@@ -17,39 +17,53 @@ class TestBotLogic(unittest.TestCase):
 
     def test_preprocess_message_command_found(self):
         """Verify preprocess_message correctly dispatches a valid command using patch.dict."""
-        self.message.content = "persona help"
+        self.message.content = "help"
         mock_handler = MagicMock(return_value="Help dispatched")
 
         with patch.dict(self.bot_logic.command_handlers, {'help': mock_handler}):
-            result = self.bot_logic.preprocess_message(self.message)
+            result = self.bot_logic.preprocess_message('persona', self.message)
 
         self.assertEqual(result, "Help dispatched")
         mock_handler.assert_called_once_with([], self.mock_persona)
 
     def test_preprocess_message_no_command(self):
         """Verify preprocess_message returns None for an unknown command."""
-        self.message.content = "persona unknown_command"
-        result = self.bot_logic.preprocess_message(self.message)
+        self.message.content = "unknown_command"
+        result = self.bot_logic.preprocess_message('persona', self.message)
         self.assertIsNone(result)
 
     def test_preprocess_message_check_only(self):
         """Verify check_only=True returns True for a valid command format without executing it."""
-        self.message.content = "persona help"
-        result = self.bot_logic.preprocess_message(self.message, check_only=True)
+        # CHANGE: We now simulate the interface's behavior. The interface identifies the persona
+        # and provides the cleaned message content to the pre-processor.
+        persona_name = 'persona'  # The interface would determine this.
+        self.message.content = 'help'  # This is now the cleaned input, not the raw message.
+
+        # The call now explicitly passes the persona name.
+        result = self.bot_logic.preprocess_message(persona_name, self.message, check_only=True)
         self.assertTrue(result)
 
     def test_preprocess_message_invalid_format(self):
-        """Verify preprocess_message returns None for messages with too few parts."""
-        self.message.content = "persona"
-        result = self.bot_logic.preprocess_message(self.message)
+        """Verify preprocess_message returns None for messages with an empty command."""
+        # CHANGE: The concept of "too few parts" is now handled by the interface (which strips the
+        # persona name). The test now checks the resulting behavior: what happens when the
+        # command part of the message is empty.
+        persona_name = 'persona'
+        self.message.content = ''  # The interface would pass an empty string after stripping "persona" from the input.
+
+        result = self.bot_logic.preprocess_message(persona_name, self.message)
         self.assertIsNone(result)
 
     def test_preprocess_message_unknown_persona(self):
-        """Verify preprocess_message returns None if the persona doesn't exist."""
-        self.message.content = "unknown_persona help"
-        result = self.bot_logic.preprocess_message(self.message)
-        self.assertIsNone(result)
+        """Verify preprocess_message returns None if passed a persona that doesn't exist."""
+        # CHANGE: The responsibility for checking if a persona exists is now in the interface.
+        # However, this test is still valuable to ensure the function itself is robust
+        # and doesn't crash if an interface somehow passes an invalid persona name.
+        unknown_persona_name = 'unknown_persona'
+        self.message.content = 'help'  # The content of the message is less important here.
 
+        result = self.bot_logic.preprocess_message(unknown_persona_name, self.message)
+        self.assertIsNone(result)
     def test_handle_help_no_args(self):
         """Verify _handle_help returns the help string when called with no arguments."""
         result = self.bot_logic._handle_help(args=[], persona=self.mock_persona)
