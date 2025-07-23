@@ -195,7 +195,7 @@ class BotLogic:
             token_limit = args[1]
             if persona.set_response_token_limit(token_limit):
                 return f"Set token limit to '{token_limit}' for {persona.get_name()}.", True
-            return "Received non-integer value, using provider default.", True
+            return f"Non-integer token limit provided: '{token_limit}'. No limit set (this will use provider default).", True
         except (IndexError, ValueError):
             return "Error setting tokens.", False
 

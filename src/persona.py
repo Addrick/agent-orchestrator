@@ -85,7 +85,7 @@ class Persona:
             logger.info(f"Persona '{self._name}' response token limit set to {self._response_token_limit}.")
         except (ValueError, TypeError):
             self._response_token_limit = None
-            logger.info(f"Invalid token limit provided: '{new_limit}'. Must be an integer. Setting to None.")
+            logger.info(f"Non-integer token limit provided: '{new_limit}'. No limit set (this will use provider default).")
         return self._response_token_limit
 
     def set_context_length(self, new_length: Any) -> Optional[int]:

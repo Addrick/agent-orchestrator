@@ -1,4 +1,7 @@
-﻿###TECHNICIAN###
+﻿###DATABASE###
+- store messages with names rather than assistant/user
+
+###TECHNICIAN###
 repurpose history function to have persistent memory?
 - run requests every 15 min or whatever as a heartbeat to check for errors (ie just got 'model not supported' today)
 
