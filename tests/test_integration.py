@@ -1,6 +1,7 @@
 import unittest
 import os
 import json
+import sqlite3
 from unittest.mock import patch, AsyncMock
 
 # Ensure the test can find the src modules
@@ -8,10 +9,13 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.chat_system import ChatSystem
+from src.chat_system import ChatSystem, ResponseType
 from src.engine import TextEngine
 from src.database.context_manager import ContextManager
 from src.utils.save_utils import load_personas_from_file
+
+# Assuming the ResponseType Enum exists and can be imported.
+# If this path is wrong, you can adjust it.
 
 
 class TestIntegration(unittest.IsolatedAsyncioTestCase):
@@ -38,11 +42,15 @@ class TestIntegration(unittest.IsolatedAsyncioTestCase):
         with open(self.test_persona_file, 'w') as f:
             json.dump(test_persona_data, f, indent=4)
 
-        # Use a named, sharable in-memory database URI
-        db_uri = "file:integration_test_db?mode=memory&cache=shared"
+        # Create one single connection for the entire test
+        self.connection = sqlite3.connect(":memory:", detect_types=sqlite3.PARSE_DECLTYPES)
+        self.connection.row_factory = sqlite3.Row
 
-        # This sequence is now correct and will work because __init__ is clean
-        self.cm = ContextManager(db_path=db_uri)
+        self.cm = ContextManager(db_path=":memory:")
+        # Monkey-patch the instance to use our single, persistent connection
+        self.cm._get_connection = lambda: self.connection
+
+        # Perform setup using the instance. All calls will use the same connection.
         self.cm.create_schema()
         self.cm._initialize_db()
 
@@ -52,7 +60,8 @@ class TestIntegration(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         """Clean up resources after each test."""
-        self.cm = None
+        if self.connection:
+            self.connection.close()
         if os.path.exists(self.test_persona_file):
             os.remove(self.test_persona_file)
 
@@ -73,7 +82,7 @@ class TestIntegration(unittest.IsolatedAsyncioTestCase):
         message = "Hello, this is a test message."
 
         # --- 2. Act ---
-        final_response = await self.chat_system.generate_response(
+        final_response_tuple = await self.chat_system.generate_response(
             persona_name=persona_name,
             user_identifier=user_identifier,
             channel=channel,
@@ -81,30 +90,35 @@ class TestIntegration(unittest.IsolatedAsyncioTestCase):
         )
 
         # --- 3. Assert ---
-        self.assertEqual(final_response, mock_response_text)
+        # --- FIX: Unpack the tuple and assert on both parts ---
+        response_text, response_type = final_response_tuple
+
+        self.assertEqual(response_text, mock_response_text)
+        self.assertEqual(response_type, ResponseType.LLM_GENERATION)
+
         mock_generate_response.assert_called_once()
 
-        with self.cm._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT contact_id FROM Contact_Identifiers WHERE identifier_value = ?", (user_identifier,))
-            contact_row = cursor.fetchone()
-            self.assertIsNotNone(contact_row)
-            contact_id = contact_row['contact_id']
+        cursor = self.connection.cursor()
 
-            cursor.execute("SELECT ticket_id FROM Tickets WHERE contact_id = ?", (contact_id,))
-            ticket_row = cursor.fetchone()
-            self.assertIsNotNone(ticket_row)
-            ticket_id = ticket_row['ticket_id']
+        cursor.execute("SELECT contact_id FROM Contact_Identifiers WHERE identifier_value = ?", (user_identifier,))
+        contact_row = cursor.fetchone()
+        self.assertIsNotNone(contact_row)
+        contact_id = contact_row['contact_id']
 
-            cursor.execute("SELECT direction, raw_content FROM Interactions WHERE ticket_id = ?", (ticket_id,))
-            interactions = cursor.fetchall()
-            self.assertEqual(len(interactions), 2)
+        cursor.execute("SELECT ticket_id FROM Tickets WHERE contact_id = ?", (contact_id,))
+        ticket_row = cursor.fetchone()
+        self.assertIsNotNone(ticket_row)
+        ticket_id = ticket_row['ticket_id']
 
-            inbound_msg = [row['raw_content'] for row in interactions if row['direction'] == 'inbound']
-            outbound_msg = [row['raw_content'] for row in interactions if row['direction'] == 'outbound']
+        cursor.execute("SELECT direction, raw_content FROM Interactions WHERE ticket_id = ?", (ticket_id,))
+        interactions = cursor.fetchall()
+        self.assertEqual(len(interactions), 2)
 
-            self.assertEqual(inbound_msg[0], message)
-            self.assertEqual(outbound_msg[0], mock_response_text)
+        inbound_msg = [row['raw_content'] for row in interactions if row['direction'] == 'inbound']
+        outbound_msg = [row['raw_content'] for row in interactions if row['direction'] == 'outbound']
+
+        self.assertEqual(inbound_msg[0], message)
+        self.assertEqual(outbound_msg[0], mock_response_text)
 
         stored_payload = self.chat_system.last_api_requests[user_identifier][persona_name]
         self.assertEqual(stored_payload, mock_api_payload)

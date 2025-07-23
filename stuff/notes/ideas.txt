@@ -3,6 +3,8 @@ repurpose history function to have persistent memory?
 - run requests every 15 min or whatever as a heartbeat to check for errors (ie just got 'model not supported' today)
 
 ###GENERAL###
+- code vs llm as a computer yin/yang for problem solving
+
 - remove citation/link contents for chat context history?
     > save the original response somewhere rather than pulling history from discord - maybe big overhaul
 

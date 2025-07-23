@@ -1,0 +1,12 @@
+[tool.pytest.ini_options]
+pythonpath = [
+  "src",
+  "."
+]
+testpaths = [
+  "tests"
+]
+env = [
+  # Example environment variable for tests
+  "DATABASE_FILE=:memory:"
+]

@@ -11,19 +11,19 @@ DATABASE_FILE = DB_DIR / "it_support_memory.db"
 UNASSOCIATED_BUSINESS_NAME = "Unassociated Contacts"
 
 class ContextManager:
-    def __init__(self, db_path: str = str(DATABASE_FILE)) -> None:
+    def __init__(self, db_path: Optional[str] = None) -> None:
         """
-        Initializes the ContextManager with a path to the database.
-        Does NOT perform any database operations on its own.
+        Initializes the ContextManager.
+        If db_path is None, it falls back to the DATABASE_FILE constant.
         """
-        self.db_path = db_path
+        self.db_path = db_path if db_path is not None else str(DATABASE_FILE)
 
     def _get_connection(self) -> sqlite3.Connection:
         """Returns a configured database connection."""
-        # --- THE FIX: Add uri=True to correctly parse in-memory URIs ---
         conn = sqlite3.connect(self.db_path, detect_types=sqlite3.PARSE_DECLTYPES, uri=True)
         conn.row_factory = sqlite3.Row
         return conn
+
 
     def create_schema(self) -> None:
         """Creates the full database schema if it doesn't exist. Ideal for setup."""
@@ -31,49 +31,52 @@ class ContextManager:
         CREATE TABLE IF NOT EXISTS Businesses (
             business_id INTEGER PRIMARY KEY AUTOINCREMENT,
             business_name TEXT NOT NULL UNIQUE,
-            client_infra_overview TEXT
+            client_infra_overview TEXT,
+            common_issues TEXT
         );
         CREATE TABLE IF NOT EXISTS Contacts (
             contact_id INTEGER PRIMARY KEY AUTOINCREMENT,
             business_id INTEGER,
-            full_name TEXT,
+            full_name TEXT NOT NULL,
             role_in_company TEXT,
+            communication_style_summary TEXT,
             FOREIGN KEY (business_id) REFERENCES Businesses(business_id)
         );
         CREATE TABLE IF NOT EXISTS Contact_Identifiers (
             identifier_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            contact_id INTEGER,
+            contact_id INTEGER NOT NULL,
             channel TEXT NOT NULL,
             identifier_value TEXT NOT NULL,
+            UNIQUE(channel, identifier_value),
             FOREIGN KEY (contact_id) REFERENCES Contacts(contact_id)
         );
         CREATE TABLE IF NOT EXISTS Tickets (
             ticket_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            contact_id INTEGER,
-            business_id INTEGER,
-            status TEXT NOT NULL,
-            creation_timestamp TIMESTAMP,
-            last_update_timestamp TIMESTAMP,
+            contact_id INTEGER NOT NULL,
+            business_id INTEGER NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('open', 'in_progress', 'resolved', 'closed')),
+            creation_timestamp TIMESTAMP NOT NULL,
+            last_update_timestamp TIMESTAMP NOT NULL,
             ticket_summary TEXT,
             FOREIGN KEY (contact_id) REFERENCES Contacts(contact_id),
             FOREIGN KEY (business_id) REFERENCES Businesses(business_id)
         );
         CREATE TABLE IF NOT EXISTS Interactions (
             interaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ticket_id INTEGER,
-            timestamp TIMESTAMP,
-            channel TEXT,
-            direction TEXT,
-            raw_content TEXT,
+            ticket_id INTEGER NOT NULL,
+            timestamp TIMESTAMP NOT NULL,
+            channel TEXT NOT NULL,
+            direction TEXT NOT NULL CHECK(direction IN ('inbound', 'outbound')),
+            raw_content TEXT NOT NULL,
             image_url TEXT,
             FOREIGN KEY (ticket_id) REFERENCES Tickets(ticket_id)
         );
         CREATE TABLE IF NOT EXISTS Contact_Placement_Guesses (
             guess_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            contact_id INTEGER,
+            contact_id INTEGER NOT NULL,
             guessed_business_id INTEGER,
             reasoning TEXT,
-            timestamp TIMESTAMP,
+            timestamp TIMESTAMP NOT NULL,
             FOREIGN KEY (contact_id) REFERENCES Contacts(contact_id),
             FOREIGN KEY (guessed_business_id) REFERENCES Businesses(business_id)
         );
@@ -136,8 +139,9 @@ class ContextManager:
                 cursor.execute("SELECT business_id FROM Contacts WHERE contact_id = ?", (contact_id,))
                 business_id = cursor.fetchone()['business_id']
                 now = datetime.now()
+                # Use isoformat() to explicitly convert datetime to string
                 cursor.execute("INSERT INTO Tickets (contact_id, business_id, status, creation_timestamp, last_update_timestamp, ticket_summary) VALUES (?, ?, 'open', ?, ?, ?)",
-                               (contact_id, business_id, now, now, "New ticket initiated."))
+                               (contact_id, business_id, now.isoformat(), now.isoformat(), "New ticket initiated."))
                 conn.commit()
                 return cursor.lastrowid
 
@@ -145,9 +149,10 @@ class ContextManager:
         """Logs a single message to the database and updates the parent ticket's timestamp."""
         now = datetime.now()
         with self._get_connection() as conn:
+            # Use isoformat() to explicitly convert datetime to string
             conn.execute("INSERT INTO Interactions (ticket_id, timestamp, channel, direction, raw_content, image_url) VALUES (?, ?, ?, ?, ?, ?)",
-                         (ticket_id, now, channel, direction, content, image_url))
-            conn.execute("UPDATE Tickets SET last_update_timestamp = ? WHERE ticket_id = ?", (now, ticket_id))
+                         (ticket_id, now.isoformat(), channel, direction, content, image_url))
+            conn.execute("UPDATE Tickets SET last_update_timestamp = ? WHERE ticket_id = ?", (now.isoformat(), ticket_id))
             conn.commit()
 
     def get_all_businesses(self) -> List[Dict[str, Any]]:
@@ -160,8 +165,9 @@ class ContextManager:
     def record_business_guess(self, contact_id: int, guessed_business_id: Optional[int], reasoning: str) -> NoReturn:
         """Records the LLM's guess for a new contact's business affiliation."""
         with self._get_connection() as conn:
+            # Use isoformat() here as well for consistency
             conn.execute("INSERT INTO Contact_Placement_Guesses (contact_id, guessed_business_id, reasoning, timestamp) VALUES (?, ?, ?, ?)",
-                         (contact_id, guessed_business_id, reasoning, datetime.now()))
+                         (contact_id, guessed_business_id, reasoning, datetime.now().isoformat()))
             conn.commit()
 
     def get_context_for_generation(self, user_identifier: str, channel: str) -> Tuple[int, int, bool]:

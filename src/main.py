@@ -1,8 +1,11 @@
+# src/main.py
+
 import asyncio
 import os
 import sys
 import logging
 
+from config import global_config
 from src.chat_system import ChatSystem
 from src.engine import TextEngine
 from src.database.context_manager import ContextManager
@@ -33,24 +36,25 @@ async def main():
         logger.warning("Logs folder created!")
 
     # --- ARCHITECTURE INITIALIZATION ---
-    # 1. Initialize the database manager
-    context_manager = ContextManager()
+    # 1. Initialize the database manager, allowing path override via environment variable
+    db_path = global_config.DATABASE_FILE_PATH
+    context_manager = ContextManager(db_path=db_path)
 
-    # --- FIX: Explicitly set up the database on startup ---
+    # 2. Set up the database schema and default data on startup
     logger.info("Setting up database schema and default data...")
     context_manager.create_schema()
     context_manager._initialize_db()
     logger.info("Database setup complete.")
 
-    # 2. Initialize the centralized text generation engine
+    # 3. Initialize the centralized text generation engine
     text_engine = TextEngine()
 
-    # 3. Initialize ChatSystem core, injecting dependencies
+    # 4. Initialize ChatSystem core, injecting dependencies
     bot = ChatSystem(context_manager=context_manager, text_engine=text_engine)
 
     tasks = []
 
-    # --- Initialize Interfaces (pass the 'bot' instance as before) ---
+    # --- Initialize Interfaces ---
     logger.info("Starting interface(s)...")
 
     if DISCORD_BOT:

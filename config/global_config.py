@@ -41,3 +41,6 @@ STDOUT_LOG = '../config/logs/stdout.txt'
 
 KOBOLDCPP_EXE = r'F:\Machine Learning\koboldcpp.exe'
 KOBOLDCPP_CONFIG = r'F:\Machine Learning\dolphin-2.7-mixtral-8x7b.Q5_K_M.kcpps'
+
+LOCAL_REPO_PATH = 'C:\\Users\\Adam\\Programming\\Python\\derpr-python'
+DATABASE_FILE_PATH = '../src/database/it_support_memory.db'

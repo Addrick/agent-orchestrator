@@ -1,3 +1,5 @@
+# src/app_manager.py
+
 import os
 import sys
 import logging
@@ -15,7 +17,10 @@ For use with remote development and redeployment
 
 def update_app():
     # Path to local repository
-    repo_path = 'C:\\Users\\Adam\\Programming\\Python\\derpr-python'
+    repo_path = os.environ.get("REPO_PATH")
+    if not repo_path:
+        logger.error("REPO_PATH environment variable not set. Cannot update app.")
+        return "Update failed: REPO_PATH not configured."
     # 'https://github.com/Addrick/derpr-python/tree/master'
 
     # Open the repository
@@ -63,7 +68,3 @@ def restart_app():
 def stop_app():
     print("Stopping the program...")
     sys.exit()
-
-# update_app()
-# restart_app()
-# restart_program()
