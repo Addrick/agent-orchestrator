@@ -1,45 +1,46 @@
+# src/interfaces/gmail_bot.py
 import asyncio
 import base64
-import json
 import logging
-import os
-import re
-from email.mime.text import MIMEText
 from collections import deque
-from googleapiclient.discovery import build
+from email.mime.text import MIMEText
+from typing import Optional, Dict, Any, List, Deque
 
-from google.cloud import pubsub_v1
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
+from google.cloud import pubsub_v1
+from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from config.global_config import *
+
+# Forward declaration for type hinting
+if typing.TYPE_CHECKING:
+    from src.chat_system import ChatSystem
 
 logger = logging.getLogger(__name__)
 
 
 class GmailInterface:
-    SCOPES = [
-        "https://www.googleapis.com/auth/gmail.modify",
-        "https://www.googleapis.com/auth/pubsub"
-    ]
+    """Handles all interaction with the Gmail API for receiving and responding to emails."""
+    SCOPES = ["https://www.googleapis.com/auth/gmail.modify", "https://www.googleapis.com/auth/pubsub"]
     PROCESSED_ID_CACHE_SIZE = 100
 
-    def __init__(self, chat_system):
-        self.chat_system = chat_system
-        self.credentials = None
+    def __init__(self, chat_system: 'ChatSystem'):
+        self.chat_system: 'ChatSystem' = chat_system
+        self.credentials: Optional[Credentials] = None
+        self.credentials_file: str = GMAIL_CREDENTIALS_FILE
+        self.token_file: str = GMAIL_TOKEN_FILE
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
+        self._shutdown_event: asyncio.Event = asyncio.Event()
         self._subscription_future = None
-        self.credentials_file = GMAIL_CREDENTIALS_FILE
-        self.token_file = GMAIL_TOKEN_FILE
-        self._shutdown_event = asyncio.Event()
-        self.loop = None
-        self._processing_lock = asyncio.Lock()
-        self._processed_ids = deque(maxlen=self.PROCESSED_ID_CACHE_SIZE)
-        self.last_known_history_id = None
+        self._processing_lock: asyncio.Lock = asyncio.Lock()
+        self._processed_ids: Deque[str] = deque(maxlen=self.PROCESSED_ID_CACHE_SIZE)
+        self.last_known_history_id: Optional[str] = None
 
-    async def _authenticate(self):
-        """Handles user authentication."""
+    async def _authenticate(self) -> None:
+        """Handles user authentication with Google Cloud, refreshing tokens as needed."""
         creds = None
         if os.path.exists(self.token_file):
             creds = await asyncio.to_thread(Credentials.from_authorized_user_file, self.token_file, self.SCOPES)
@@ -54,21 +55,72 @@ class GmailInterface:
         self.credentials = creds
         logger.info("Gmail authentication successful.")
 
-    def _sync_callback_wrapper(self, message):
-        """Schedules the async event processor on the main event loop."""
-        if not self.loop:
-            logger.error("Event loop not available for sync callback.")
-            return
-        asyncio.run_coroutine_threadsafe(self._process_new_events(), self.loop)
-        message.ack()
+    def _get_persona_from_recipient(self, recipient_email: str) -> str:
+        """Determines the target persona from the recipient email address."""
+        try:
+            local_part = recipient_email.split('@')[0]
+            if '-' in local_part:
+                # Assumes format like 'support-persona@domain.com'
+                return local_part.split('-')[1]
+        except (IndexError, AttributeError):
+            logger.warning(f"Could not parse persona from recipient '{recipient_email}'. Using default.")
+        return "derpr"  # Default persona
 
-    async def _process_new_events(self):
-        """Checks for new history records and processes them."""
-        async with self._processing_lock:
-            if not self.last_known_history_id:
-                logger.warning("No starting historyId found. Bot may have just started. Skipping first check.")
+    async def _handle_specific_message(self, service, msg_id: str) -> None:
+        """Fetches a specific email, processes it, and orchestrates the reply."""
+        try:
+            msg_data = await asyncio.to_thread(
+                service.users().messages().get(userId='me', id=msg_id, format='full').execute
+            )
+            payload = msg_data['payload']
+            headers = payload['headers']
+            subject = next((h['value'] for h in headers if h['name'].lower() == 'subject'), 'No Subject')
+            sender = next((h['value'] for h in headers if h['name'].lower() == 'from'), '')
+            recipient = next((h['value'] for h in headers if h['name'].lower() == 'to'), '')
+            message_id_header = next((h['value'] for h in headers if h['name'].lower() == 'message-id'), None)
+
+            # Extract email body
+            user_input = ""
+            if "parts" in payload:
+                for part in payload['parts']:
+                    if part['mimeType'] == 'text/plain' and part['body'].get('data'):
+                        user_input = base64.urlsafe_b64decode(part['body']['data']).decode('utf-8', 'ignore')
+                        break
+            elif payload['body'].get('data'):
+                user_input = base64.urlsafe_b64decode(payload['body']['data']).decode('utf-8', 'ignore')
+
+            if not user_input.strip():
+                logger.warning(f"Email from {sender} (ID: {msg_id}) has no text body. Skipping.")
                 return
 
+            active_persona_name = self._get_persona_from_recipient(recipient)
+            full_message = f"Subject: {subject}\n\n{user_input}"
+
+            # Use the new, stateful generate_response method
+            response_text = await self.chat_system.generate_response(
+                persona_name=active_persona_name,
+                user_identifier=sender,  # The sender's email is the unique ID
+                channel="gmail",
+                message=full_message,
+                history_limit=20  # Example history limit
+            )
+
+            if response_text:
+                await self._send_reply(service, to=sender, subject=subject, body=response_text,
+                                       in_reply_to=message_id_header, thread_id=msg_data['threadId'])
+                await asyncio.to_thread(
+                    service.users().messages().modify(userId='me', id=msg_id,
+                                                      body={'removeLabelIds': ['UNREAD']}).execute
+                )
+                logger.info(f"Successfully replied to and marked as read email ID: {msg_id}")
+
+        except Exception as e:
+            logger.error(f"Error handling message ID {msg_id}: {e}", exc_info=True)
+
+    async def _process_new_events(self) -> None:
+        """Checks for new history records via the Gmail API and processes them."""
+        async with self._processing_lock:
+            if not self.last_known_history_id: return
             try:
                 service = build('gmail', 'v1', credentials=self.credentials, cache_discovery=False)
                 history_response = await asyncio.to_thread(
@@ -77,145 +129,56 @@ class GmailInterface:
                 new_history_id = history_response.get('historyId')
                 if new_history_id: self.last_known_history_id = new_history_id
 
-                added_messages = []
-                if 'history' in history_response:
-                    for history_record in history_response['history']:
-                        if 'messagesAdded' in history_record:
-                            added_messages.extend(history_record['messagesAdded'])
-
-                if not added_messages:
-                    logger.debug(f"History check complete. No new messages found.")
+                if 'history' not in history_response:
+                    logger.debug("History check complete. No new events.")
                     return
 
-                for msg_summary in added_messages:
-                    if 'SENT' in msg_summary['message'].get('labelIds', []):
-                        logger.debug(f"Skipping self-sent message with ID: {msg_summary['message']['id']}")
-                        continue
-                    msg_id = msg_summary['message']['id']
-                    if msg_id in self._processed_ids:
-                        logger.warning(f"Duplicate message ID '{msg_id}' detected in history. Skipping.")
-                        continue
+                for history_record in history_response['history']:
+                    if 'messagesAdded' in history_record:
+                        for msg_summary in history_record['messagesAdded']:
+                            # Skip our own replies and duplicates
+                            if 'SENT' in msg_summary['message'].get('labelIds', []) or msg_summary['message'][
+                                'id'] in self._processed_ids:
+                                continue
 
-                    self._processed_ids.append(msg_id)
-                    await self._handle_specific_message(service, msg_id)
-
+                            msg_id = msg_summary['message']['id']
+                            self._processed_ids.append(msg_id)
+                            await self._handle_specific_message(service, msg_id)
             except Exception as e:
-                logger.error(f"Error processing new events: {e}", exc_info=True)
+                logger.error(f"Error processing new Gmail events: {e}", exc_info=True)
 
-    async def _handle_specific_message(self, service, msg_id):
-        """Contains the logic to process one specific email message."""
-        try:
-            get_response = await asyncio.to_thread(
-                service.users().messages().get(userId='me', id=msg_id, format='full').execute)
-
-            payload = get_response['payload']
-            headers = payload['headers']
-            subject = next((h['value'] for h in headers if h['name'].lower() == 'subject'), '')
-            sender = next((h['value'] for h in headers if h['name'].lower() == 'from'), '')
-
-            if BLOCK_EXTERNAL_SENDER_REPLIES:
-                allowed_sender = 'adam@tech-ops.it'
-                if allowed_sender not in sender:
-                    logger.info(
-                        f"Skipping email from '{sender}' (ID: {msg_id}) as sender blocking is enabled. Email will remain unread.")
-                    return
-
-            thread_id = get_response['threadId']
-            message_id_header = next((h['value'] for h in headers if h['name'].lower() == 'message-id'), None)
-            user_input = ""
-            if "parts" in payload:
-                for part in payload['parts']:
-                    if part['mimeType'] == 'text/plain':
-                        body_data = part['body'].get('data')
-                        if body_data: user_input = base64.urlsafe_b64decode(body_data).decode('utf-8', 'ignore'); break
-            else:
-                body_data = payload['body'].get('data')
-                if body_data: user_input = base64.urlsafe_b64decode(body_data).decode('utf-8', 'ignore')
-
-            if not user_input.strip():
-                logger.warning(
-                    f"Email from {sender} (ID: {msg_id}) had no readable text body. Skipping. Email will remain unread.")
-                return
-
-            active_persona_name = 'testr'
-
-            pseudo_message = type('PseudoMessage', (), {'content': user_input})()
-            dev_response = self.chat_system.bot_logic.preprocess_message(active_persona_name, pseudo_message)
-
-            response_text = None
-            if dev_response is not None:
-                logger.info(f"Dev command processed for email (ID: {msg_id}).")
-                response_text = dev_response
-            else:
-                context = await self._gather_thread_history(service, thread_id)
-                logger.info(f"Handing off email from {sender} (ID: {msg_id}) to '{active_persona_name}' persona.")
-                response_text = await self.chat_system.generate_response(active_persona_name, user_input,
-                                                                         context=context, image_url=None)
-
-            if response_text:
-                # First, send the reply
-                await self._send_reply(service, to=sender, subject=subject, body=response_text,
-                                       in_reply_to=message_id_header, thread_id=thread_id)
-
-                # THEN, mark the original message as read
-                await asyncio.to_thread(
-                    service.users().messages().modify(userId='me', id=msg_id,
-                                                      body={'removeLabelIds': ['UNREAD']}).execute)
-                logger.info(f"Successfully replied to and marked email as read (ID: {msg_id}).")
-
-        except Exception as e:
-            logger.error(f"Error handling message ID {msg_id}: {e}", exc_info=True)
-
-    async def _gather_thread_history(self, service, thread_id):
-        try:
-            thread_data = await asyncio.to_thread(
-                service.users().threads().get(userId='me', id=thread_id, format='full').execute)
-            history = []
-            for msg in reversed(thread_data.get('messages', [])):
-                payload = msg['payload']
-                content = ""
-                if "parts" in payload:
-                    for part in payload['parts']:
-                        if part['mimeType'] == 'text/plain':
-                            body_data = part['body'].get('data')
-                            if body_data: content = base64.urlsafe_b64decode(body_data).decode('utf-8', 'ignore'); break
-                else:
-                    body_data = payload['body'].get('data')
-                    if body_data: content = base64.urlsafe_b64decode(body_data).decode('utf-8', 'ignore')
-                if content:
-                    sender_header = next((h['value'] for h in msg['payload']['headers'] if h['name'].lower() == 'from'),
-                                         'Unknown')
-                    history.append(f"From: {sender_header}\n{content}")
-            return "\n---\n".join(history)
-        except Exception as e:
-            logger.error(f"Failed to gather email thread history: {e}")
-            return ""
-
-    async def _send_reply(self, service, to, subject, body, in_reply_to, thread_id):
+    async def _send_reply(self, service, to: str, subject: str, body: str, in_reply_to: Optional[str],
+                          thread_id: str) -> None:
+        """Constructs and sends an email reply."""
         try:
             message = MIMEText(body)
             message['to'] = to
             message['subject'] = subject if subject.lower().startswith("re:") else f"Re: {subject}"
-            if in_reply_to: message['In-Reply-To'] = in_reply_to; message['References'] = in_reply_to
+            if in_reply_to:
+                message['In-Reply-To'] = in_reply_to
+                message['References'] = in_reply_to
             raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
             create_message = {'raw': raw_message, 'threadId': thread_id}
             await asyncio.to_thread(service.users().messages().send(userId='me', body=create_message).execute)
-            logger.info(f"Reply sent successfully to {to}")
+            logger.info(f"Reply successfully sent to {to}")
         except HttpError as error:
-            logger.error(f'An error occurred while sending email: {error}')
+            logger.error(f'An error occurred while sending email reply: {error}')
 
-    async def _setup_watch(self):
-        """Sets up the watch request and gets the initial historyId."""
-        logger.info("Setting up Gmail watch and getting initial historyId...")
-        service = build('gmail', 'v1', credentials=self.credentials, cache_discovery=False)
-        request = {'labelIds': ['INBOX'], 'topicName': GMAIL_PUBSUB_TOPIC}
-        watch_response = await asyncio.to_thread(service.users().watch(userId='me', body=request).execute)
-        self.last_known_history_id = watch_response['historyId']
-        logger.info(f"Initial historyId set to: {self.last_known_history_id}")
+    def _sync_callback_wrapper(self, message) -> None:
+        """Schedules the async event processor on the main event loop from the sync Pub/Sub callback."""
+        if self.loop:
+            asyncio.run_coroutine_threadsafe(self._process_new_events(), self.loop)
+        message.ack()
 
-    async def start(self):
+    async def start(self) -> None:
+        """Initializes authentication, sets up the watch, and starts the Pub/Sub listener."""
         await self._authenticate()
-        await self._setup_watch()
+        service = build('gmail', 'v1', credentials=self.credentials, cache_discovery=False)
+        watch_request = {'labelIds': ['INBOX'], 'topicName': GMAIL_PUBSUB_TOPIC}
+        watch_response = await asyncio.to_thread(service.users().watch(userId='me', body=watch_request).execute)
+        self.last_known_history_id = watch_response['historyId']
+        logger.info(f"Gmail watch configured. Initial historyId: {self.last_known_history_id}")
+
         self.loop = asyncio.get_running_loop()
         subscriber = pubsub_v1.SubscriberClient(credentials=self.credentials)
         subscription_path = subscriber.subscription_path(GMAIL_PROJECT_ID, GMAIL_PUBSUB_SUBSCRIPTION_ID)
@@ -225,12 +188,13 @@ class GmailInterface:
             await self._shutdown_event.wait()
         finally:
             self._subscription_future.cancel()
-            logger.info("Gmail subscription future cancelled.")
 
-    def stop(self):
+    def stop(self) -> None:
+        """Signals the main loop to shut down."""
         logger.info("Stopping Gmail listener...")
         self._shutdown_event.set()
 
 
-def create_gmail_bot(chat_system):
+def create_gmail_bot(chat_system: 'ChatSystem') -> GmailInterface:
+    """Factory function to create an instance of the GmailInterface."""
     return GmailInterface(chat_system)

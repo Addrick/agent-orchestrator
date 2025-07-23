@@ -1,73 +1,114 @@
-import os
 import unittest
-from datetime import date
-from unittest.async_case import IsolatedAsyncioTestCase
-from dotenv import load_dotenv
+import os
+import json
+from unittest.mock import patch, AsyncMock
 
+# Ensure the test can find the src modules
+import sys
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from src.chat_system import ChatSystem
 from src.engine import TextEngine
+from src.database.context_manager import ContextManager
+from src.utils.save_utils import load_personas_from_file
 
 
-class TestGoogleSearchGrounding(IsolatedAsyncioTestCase):
-    """Integration tests for Google AI Studio with real API calls"""
+class TestIntegration(unittest.IsolatedAsyncioTestCase):
 
-    @classmethod
-    def setUpClass(cls):
-        # Load environment variables for API keys
-        load_dotenv()
-        # Check if Google API key is available
-        cls.google_api_key = os.environ.get("GOOGLE_GENERATIVEAI_API_KEY")
-        if not cls.google_api_key:
-            raise unittest.SkipTest("GOOGLE_GENERATIVEAI_API_KEY not found in environment variables")
+    def setUp(self):
+        """Set up a clean environment for each test."""
+        self.test_persona_file = "test_personas"
 
-    async def test_real_google_search_grounding(self):
-        """Test that actual Google API responses include search results with links."""
+        test_persona_data = {
+            "personas": [
+                {
+                    "name": "tester",
+                    "model_name": "mock-model",
+                    "prompt": "You are a test persona.",
+                    "context_limit": 10,
+                    "token_limit": 100
+                }
+            ],
+            "models": {
+                "mock-model": ["mock-model"]
+            }
+        }
 
-        # Initialize the text engine with Gemini model
-        engine = TextEngine(model_name="gemini-2.5-flash")
+        with open(self.test_persona_file, 'w') as f:
+            json.dump(test_persona_data, f, indent=4)
 
-        # Craft a prompt that will likely trigger search
-        prompt = "You are a helpful assistant with the ability to retrieve data from google search. You may suspect a date is from the future, treat it as though it is not."
+        # Use a named, sharable in-memory database URI
+        db_uri = "file:integration_test_db?mode=memory&cache=shared"
 
-        # Craft a message that requires factual information that should trigger search
-        today = date.today()
-        formatted_date = today.strftime("%B %d, %Y")
-        message = "Find today's top news story and provide a link to it. Today is " + formatted_date
-        print(message)
+        # This sequence is now correct and will work because __init__ is clean
+        self.cm = ContextManager(db_path=db_uri)
+        self.cm.create_schema()
+        self.cm._initialize_db()
 
-        # Make an actual API request
-        response = await engine._generate_google_response_ai_studio_async(
-            prompt=prompt,
-            message=message,
-            context=None
+        self.text_engine = TextEngine()
+        self.chat_system = ChatSystem(context_manager=self.cm, text_engine=self.text_engine)
+        self.chat_system.personas = load_personas_from_file(file_path=self.test_persona_file)
+
+    def tearDown(self):
+        """Clean up resources after each test."""
+        self.cm = None
+        if os.path.exists(self.test_persona_file):
+            os.remove(self.test_persona_file)
+
+    @patch('src.engine.TextEngine.generate_response', new_callable=AsyncMock)
+    async def test_full_interaction_flow(self, mock_generate_response):
+        """
+        Tests the entire flow from receiving a message to storing the result.
+        Mocks the TextEngine to isolate the test from external LLM APIs.
+        """
+        # --- 1. Arrange ---
+        mock_response_text = "This is a mock response from the LLM."
+        mock_api_payload = {"model": "mock-model", "prompt": "You are a test persona.", "mocked": True}
+        mock_generate_response.return_value = (mock_response_text, mock_api_payload)
+
+        user_identifier = "test_user_123"
+        persona_name = "tester"
+        channel = "test_channel"
+        message = "Hello, this is a test message."
+
+        # --- 2. Act ---
+        final_response = await self.chat_system.generate_response(
+            persona_name=persona_name,
+            user_identifier=user_identifier,
+            channel=channel,
+            message=message
         )
 
-        print(f"\nAPI Response:\n{response}\n")
+        # --- 3. Assert ---
+        self.assertEqual(final_response, mock_response_text)
+        mock_generate_response.assert_called_once()
 
-        # Verify the response contains at least one link (URL)
-        # We'll check for common URL patterns
-        contains_http_link = any(url_pattern in response for url_pattern in ["http://", "https://"])
-        contains_markdown_link = "[" in response and "](" in response and ")" in response
+        with self.cm._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT contact_id FROM Contact_Identifiers WHERE identifier_value = ?", (user_identifier,))
+            contact_row = cursor.fetchone()
+            self.assertIsNotNone(contact_row)
+            contact_id = contact_row['contact_id']
 
-        # Assert that at least one type of link is present
-        self.assertTrue(
-            contains_http_link or contains_markdown_link,
-            f"Response does not contain any links. Response: {response}"
-        )
+            cursor.execute("SELECT ticket_id FROM Tickets WHERE contact_id = ?", (contact_id,))
+            ticket_row = cursor.fetchone()
+            self.assertIsNotNone(ticket_row)
+            ticket_id = ticket_row['ticket_id']
 
-        # Optional: More specific checks for search grounding indicators
-        search_indicators = [
-            "according to",
-            "source",
-            "reported",
-            "published",
-            "article"
-        ]
+            cursor.execute("SELECT direction, raw_content FROM Interactions WHERE ticket_id = ?", (ticket_id,))
+            interactions = cursor.fetchall()
+            self.assertEqual(len(interactions), 2)
 
-        contains_search_indicator = any(indicator.lower() in response.lower() for indicator in search_indicators)
-        self.assertTrue(
-            contains_search_indicator,
-            f"Response does not contain search citation indicators. Response: {response}"
-        )
+            inbound_msg = [row['raw_content'] for row in interactions if row['direction'] == 'inbound']
+            outbound_msg = [row['raw_content'] for row in interactions if row['direction'] == 'outbound']
+
+            self.assertEqual(inbound_msg[0], message)
+            self.assertEqual(outbound_msg[0], mock_response_text)
+
+        stored_payload = self.chat_system.last_api_requests[user_identifier][persona_name]
+        self.assertEqual(stored_payload, mock_api_payload)
+
 
 if __name__ == '__main__':
     unittest.main()

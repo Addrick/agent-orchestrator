@@ -1,205 +1,129 @@
+# src/interfaces/discord_bot.py
 import logging
 import re
 import discord
-from discord import HTTPException
+import typing
+from typing import Optional
 
-from config import global_config
-from config.global_config import *
-from config.global_config import DISCORD_CHAR_LIMIT
+from config.global_config import DISCORD_CHAR_LIMIT, DISCORD_STATUS_LIMIT, CHAT_LOG_LOCATION, DISCORD_DEBUG_CHANNEL
 from src.utils.message_utils import split_string_by_limit
-
-import logging
 
 logger = logging.getLogger(__name__)
 
+# Forward declare ChatSystem and import the new ResponseType
+if typing.TYPE_CHECKING:
+    from src.chat_system import ChatSystem, ResponseType
+
 
 class CustomDiscordBot(discord.Client):
-    def __init__(self, chat_system, *args, **kwargs):
+    def __init__(self, chat_system: 'ChatSystem', *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.bot = chat_system
+        self.chat_system = chat_system
 
 
-async def get_image_attachments(message):
-    """Gets image attachments or URLs from a message."""
-    image_url = None
+async def get_image_url(message: discord.Message) -> Optional[str]:
     if message.attachments:
         for attachment in message.attachments:
-            if attachment.filename.lower().endswith(('png', 'jpg', 'jpeg', 'gif', 'bmp')):
-                logger.info("Message contains an image attachment.")
-                image_url = attachment.url
-                break
-    if image_url is None:
-        image_url_pattern = re.compile(r'(https?://\S+\.(?:png|jpg|jpeg|gif|bmp))', re.IGNORECASE)
-        match = image_url_pattern.search(message.content)
-        if match:
-            logger.info("Message contains an image URL.")
-            image_url = match[0]
-    return image_url
+            if attachment.content_type and attachment.content_type.startswith('image/'):
+                return attachment.url
+    url_match = re.search(r'(https?://\S+\.(?:png|jpg|jpeg|gif|webp|bmp))', message.content, re.IGNORECASE)
+    if url_match:
+        return url_match.group(0)
+    return None
 
 
-async def history_gatherer(client, channel, message, persona_mention, bot_logic, context_limit):
-    """Gathers message history for context."""
-    context = []
-    history = channel.history(before=message, limit=context_limit)
-    async for msg in history:
-        is_own_message = msg.author.id == client.user.id
-        author_name = "Bot" if is_own_message else msg.author.name
-        processed_content = msg.content
-        if not is_own_message and msg.channel.name.startswith(
-                persona_mention) and not processed_content.lower().startswith(persona_mention.lower()):
-            processed_content = persona_mention + " " + msg.content
-
-        is_previous_dev_response = f'derpr: {persona_mention} `\u200b``' in processed_content
-
-        # --- CHANGE 1: Pass persona_mention to preprocess_message ---
-        if bot_logic.preprocess_message(persona_mention, msg, check_only=True) or is_previous_dev_response:
-            continue
-        else:
-            context.append(
-                f"{msg.created_at.strftime('%Y-%m-%d, %H:%M:%S')}, {author_name}: {processed_content}")
-    return context[::-1]
+async def set_status_streaming(client: discord.Client, persona_name: str) -> None:
+    activity = discord.Activity(name=f'{persona_name}...', type=discord.ActivityType.streaming,
+                                url='https://www.twitch.tv/placeholder')
+    await client.change_presence(activity=activity)
 
 
-async def set_status_streaming(client, persona_name):
-    """Sets the bot's status to streaming."""
-    try:
-        activity = discord.Activity(
-            type=discord.ActivityType.streaming,
-            name=persona_name + '...',
-            url='https://www.twitch.tv/discordmakesmedothis')
-        await client.change_presence(activity=activity)
-        logger.debug(f"Set status to streaming {persona_name}")
-    except Exception as e:
-        logger.error(f"Failed to set streaming status: {e}")
+async def reset_discord_status(client: discord.Client, chat_system: 'ChatSystem') -> None:
+    personas = list(chat_system.personas.keys())
+    status_text = f"as {', '.join(personas)} 👀"
+    if len(status_text) > DISCORD_STATUS_LIMIT:
+        status_text = status_text[:DISCORD_STATUS_LIMIT - 3] + "..."
+    activity = discord.Activity(name=status_text, type=discord.ActivityType.watching)
+    await client.change_presence(activity=activity)
 
 
-async def reset_discord_status(client, chat_system):
-    """ Resets the bot's status, respecting Discord's character limit."""
-    try:
-        available_personas = ', '.join(list(chat_system.get_persona_list().keys()))
-        if len(available_personas) > DISCORD_STATUS_LIMIT:
-            truncate_at = DISCORD_STATUS_LIMIT - 5
-            presence_txt = available_personas[:truncate_at]
-            logger.warning(f"Status text exceeded {DISCORD_STATUS_LIMIT} chars. Truncated.")
-        else:
-            presence_txt = available_personas
-        formatted_presence_txt = f"as {presence_txt} 👀"
-        activity = discord.Activity(name=formatted_presence_txt, type=discord.ActivityType.watching)
-        await client.change_presence(activity=activity)
-        logger.debug(f"Reset status to watching: {formatted_presence_txt}")
-    except discord.errors.HTTPException as e:
-        logger.error(f"Failed to set status due to Discord API error: {e}")
-    except Exception as e:
-        logger.error(f"An unexpected error occurred while resetting status: {e}", exc_info=True)
-
-
-def create_discord_bot(chat_system):
-    """Creates and configures the Discord bot client."""
-    bot = chat_system
-    intents = discord.Intents.default()
-    intents.message_content = True
-    client = CustomDiscordBot(chat_system, intents=intents)
-    debug_channel_id = DISCORD_DEBUG_CHANNEL
-
-    @client.event
-    async def on_ready():
-        logger.info('Hello {0.user} !'.format(client))
-        await reset_discord_status(client, chat_system)
-
-    @client.event
-    async def on_message(message, log_chat=True):
-        if message.channel.id == debug_channel_id:
-            return
-        logger.debug(f'{message.author}: {message.content}')
-        if log_chat:
-            try:
-                chat_log = CHAT_LOG_LOCATION + message.guild.name + " #" + message.channel.name + ".txt"
-                with open(chat_log, 'a', encoding='utf-8') as file:
-                    file.write(f'{message.created_at} {message.author.name}: {message.content}\n')
-            except Exception as e:
-                logger.error(f"Failed to write to chat log: {e}")
-        if message.author.id == client.user.id:
-            return
-
-        active_persona_name = None
-        persona_mention_prefix = ""
-        cleaned_user_input = message.content
-
-        for persona_name in list(bot.get_persona_list().keys()):
-            mention = f"{persona_name.lower()} "
-            content_lower = message.content.lower()
-            channel_name_lower = message.channel.name.lower()
-            is_triggered_by_mention = content_lower.startswith(mention)
-            is_triggered_by_channel = channel_name_lower.startswith(f"{persona_name.lower()}")
-
-            if is_triggered_by_mention or is_triggered_by_channel:
-                active_persona_name = persona_name
-                persona_mention_prefix = f"{persona_name}"
-                logger.debug(f'Found persona trigger: {persona_name}')
-                if is_triggered_by_mention:
-                    cleaned_user_input = message.content[len(mention):].lstrip()
-                    logger.debug(f"Stripped persona mention. Cleaned input: '{cleaned_user_input}'")
-                break
-
-        if active_persona_name:
-            try:
-                async with message.channel.typing():
-                    channel = client.get_channel(message.channel.id)
-                    if not channel:
-                        logger.error(f"Could not find channel with ID: {message.channel.id}")
-                        return
-                    image_url = await get_image_attachments(message)
-                    context = await history_gatherer(client, channel, message, persona_mention_prefix, bot.bot_logic,
-                                                     global_config.GLOBAL_CONTEXT_LIMIT)
-
-                    # --- CHANGE 2: Pass active_persona_name to preprocess_message ---
-                    pseudo_message = type('PseudoMessage', (), {'content': cleaned_user_input})()
-                    dev_response = bot.bot_logic.preprocess_message(active_persona_name, pseudo_message)
-
-                    if dev_response is None:
-                        await set_status_streaming(client, active_persona_name)
-                        try:
-                            response = await bot.generate_response(active_persona_name, cleaned_user_input,
-                                                                   context=context, image_url=image_url)
-                        except TypeError as e:
-                            response = f"Request failed: {e}"
-                        except Exception as e:
-                            logger.exception(f"Error during bot.generate_response for {active_persona_name}")
-                            response = "Sorry, I encountered an error while generating a response."
-                        await send_message(channel, response, char_limit=DISCORD_CHAR_LIMIT)
-                        await reset_discord_status(client, chat_system)
-                    else:
-                        await send_discord_dev_message(channel, dev_response)
-                        await reset_discord_status(client, chat_system)
-
-            except discord.errors.NotFound:
-                logger.warning(f"Message {message.id} not found, likely deleted.")
-            except discord.errors.Forbidden:
-                logger.warning(f"Missing permissions for channel {message.channel.id} or action.")
-            except Exception as e:
-                logger.exception(f"An unexpected error occurred processing message {message.id}: {e}")
-                try:
-                    await reset_discord_status(client, chat_system)
-                except Exception as reset_e:
-                    logger.error(f"Failed to reset status after error: {reset_e}")
-
-    return client
-
-
-async def send_discord_dev_message(channel, msg: str):
-    """Escape discord code formatting instances, seems to require this hack with a zero-width space"""
+async def _send_dev_response(channel: discord.TextChannel, msg: str):
     formatted_msg = re.sub('```', '`\u200B``', msg)
-    chunks = split_string_by_limit(formatted_msg, DISCORD_CHAR_LIMIT - 6)
+    lang_hint = "json" if "Last API Request Payload" in msg else ""
+    limit = DISCORD_CHAR_LIMIT - (len(lang_hint) + 8)
+    chunks = split_string_by_limit(formatted_msg, limit)
     for chunk in chunks:
         try:
-            await channel.send(f"```{chunk}```")
-        except HTTPException as e:
-            logger.error(f"An error occurred: {e}")
+            await channel.send(f"```{lang_hint}\n{chunk}```")
+        except discord.HTTPException as e:
+            logger.error(f"An error occurred sending a dev response: {e}")
             pass
 
 
-async def send_message(channel, msg, char_limit):
-    """# Set name to currently speaking persona"""
-    chunks = split_string_by_limit(msg, char_limit)
-    for chunk in chunks:
-        await channel.send(f"{chunk}")
+def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
+    intents = discord.Intents.default()
+    intents.message_content = True
+    client = CustomDiscordBot(chat_system, intents=intents)
+
+    @client.event
+    async def on_ready():
+        logger.info(f'Logged in as {client.user}!')
+        # Import here to avoid circular dependency at module level
+        from src.chat_system import ResponseType
+        client.response_type_enum = ResponseType
+        await reset_discord_status(client, chat_system)
+
+    @client.event
+    async def on_message(message: discord.Message):
+        if message.author == client.user or message.channel.id == DISCORD_DEBUG_CHANNEL:
+            return
+
+        active_persona_name: Optional[str] = None
+        cleaned_message: str = message.content
+
+        for name in chat_system.personas.keys():
+            if message.content.lower().startswith(f"{name.lower()} "):
+                active_persona_name = name
+                cleaned_message = message.content[len(name) + 1:].lstrip()
+                break
+            elif message.channel.name.lower().startswith(name.lower()):
+                active_persona_name = name
+                break
+
+        if not active_persona_name:
+            return
+
+        try:
+            async with message.channel.typing():
+                user_identifier = str(message.author.id)
+                channel_name = message.channel.name
+                image_url = await get_image_url(message)
+
+                # **MODIFIED: Use the new response tuple**
+                response_text, response_type = await chat_system.generate_response(
+                    persona_name=active_persona_name,
+                    user_identifier=user_identifier,
+                    channel=channel_name,
+                    message=cleaned_message,
+                    image_url=image_url,
+                    history_limit=20
+                )
+
+                if response_text:
+                    # **MODIFIED: Use the response type to determine formatting**
+                    if response_type == client.response_type_enum.DEV_COMMAND:
+                        await _send_dev_response(message.channel, response_text)
+                    else:  # This is an LLM_GENERATION
+                        for chunk in split_string_by_limit(response_text, DISCORD_CHAR_LIMIT):
+                            await message.channel.send(chunk)
+                else:
+                    await message.channel.send("Sorry, I encountered an error and couldn't generate a response.")
+
+            await reset_discord_status(client, chat_system)
+
+        except Exception as e:
+            logger.error(f"An unexpected error occurred in on_message: {e}", exc_info=True)
+            await message.channel.send("A critical error occurred. Please check the logs.")
+            await reset_discord_status(client, chat_system)
+
+    return client

@@ -45,11 +45,11 @@ def to_dict(personas):
     persona_dict = []
     for persona_name, persona in personas.items():
         persona_json = {
-            "name": persona.name,
-            "prompt": persona.prompt,
-            "model_name": persona.model.model_name,
-            "context_limit": persona.context_length,
-            "token_limit": persona.response_token_limit,
+            "name": persona.get_name(),
+            "prompt": persona.get_prompt(),
+            "model_name": persona.get_model_name(),
+            "context_limit": persona.get_context_length(),
+            "token_limit": persona.get_response_token_limit(),
         }
         persona_dict.append(persona_json)
     return persona_dict

@@ -1,106 +1,157 @@
 import logging
+from typing import Optional, Dict, Any
 
-from src.message_handler import *
-from config.global_config import *
+from config import global_config
+
 logger = logging.getLogger(__name__)
-# Summary:
-# Data type to maintain discrete personas
-# Accepts name, prompt and various other parameters for customizing model outputs
 
 
 class Persona:
-    def __init__(self, persona_name, model_name, prompt, context_limit=10, token_limit=100):
-        self.name = persona_name
-        self.prompt = prompt
-        self.context_length = int(context_limit)
-        self.response_token_limit = token_limit
+    """
+    A data class to hold settings and state for a specific LLM persona.
+    Attributes are managed via getter and setter methods for robust control.
+    """
 
-        self.model = None
-        self.temperature = None
-        self.top_p = None
-        self.top_k = None
+    def __init__(
+            self,
+            persona_name: str,
+            model_name: str,
+            prompt: str,
+            token_limit: Optional[int] = global_config.DEFAULT_TOKEN_LIMIT,
+            context_length: Optional[int] = global_config.DEFAULT_CONTEXT_LIMIT,
+            temperature: Optional[float] = None,
+            top_p: Optional[float] = None,
+            top_k: Optional[int] = None
+    ) -> None:
+        self._name: str = persona_name
+        self._model_name: str = model_name
+        self._prompt: str = prompt
+        self._response_token_limit: Optional[int] = token_limit
+        self._context_length: Optional[int] = context_length
 
-        self.last_json = 'none yet'
-        self.conversation_mode = False
-        # self.last_response = 'none yet'
+        # Model-specific generation parameters
+        self._temperature: Optional[float] = temperature
+        self._top_p: Optional[float] = top_p
+        self._top_k: Optional[int] = top_k
 
-        self.set_model(model_name)
+    # --- Getters ---
 
-    def get_context_length(self):
-        return self.context_length
+    def get_name(self) -> str:
+        return self._name
 
-    def set_context_length(self, context_length):
+    def get_model_name(self) -> str:
+        return self._model_name
+
+    def get_prompt(self) -> str:
+        return self._prompt
+
+    def get_response_token_limit(self) -> Optional[int]:
+        return self._response_token_limit
+
+    def get_context_length(self) -> Optional[int]:
+        return self._context_length
+
+    def get_temperature(self) -> Optional[float]:
+        return self._temperature
+
+    def get_top_p(self) -> Optional[float]:
+        return self._top_p
+
+    def get_top_k(self) -> Optional[int]:
+        return self._top_k
+
+    # --- Setters ---
+
+    def set_model_name(self, new_model_name: str) -> None:
+        """Sets the model name for the persona."""
+        self._model_name = str(new_model_name)
+        logger.info(f"Persona '{self._name}' model set to {self._model_name}.")
+
+    def set_prompt(self, new_prompt: str) -> None:
+        """Sets the persona's base prompt."""
+        self._prompt = str(new_prompt)
+        logger.info(f"Persona '{self._name}' prompt has been updated.")
+
+    def set_response_token_limit(self, new_limit: Any) -> Optional[int]:
+        """
+        Sets the response token limit. Returns the integer value if successful,
+        or None if the input is invalid (in which case the limit is also set to None).
+        """
         try:
-            self.context_length = int(context_length)
-        except Exception:
-            self.context_length = context_length
+            self._response_token_limit = int(new_limit)
+            if self._response_token_limit < 100:
+                self._response_token_limit = 100
+                logger.warning(f"Warning: very low token response limit received, setting value to 100.")
+            logger.info(f"Persona '{self._name}' response token limit set to {self._response_token_limit}.")
+        except (ValueError, TypeError):
+            self._response_token_limit = None
+            logger.info(f"Invalid token limit provided: '{new_limit}'. Must be an integer. Setting to None.")
+        return self._response_token_limit
 
-    def get_response_token_limit(self):
-        return self.response_token_limit
-
-    def set_response_token_limit(self, response_token_limit):
+    def set_context_length(self, new_length: Any) -> Optional[int]:
+        """
+        Sets the context length. Returns the integer value if successful,
+        or None if the input is invalid (in which case the length is also set to None).
+        """
         try:
-            self.response_token_limit = int(response_token_limit)
-        except Exception:
-            self.response_token_limit = response_token_limit
-        return True
+            self._context_length = int(new_length)
+            logger.info(f"Persona '{self._name}' context length set to {self._context_length}.")
+        except (ValueError, TypeError):
+            self._context_length = None
+            logger.info(f"Invalid context length provided: '{new_length}'. Must be an integer. Setting to None.")
+        return self._context_length
 
-    def set_temperature(self, new_temp):
-        self.model.set_temperature(new_temp)
+    def set_temperature(self, new_temp: Any) -> Optional[float]:
+        """
+        Sets the temperature. Returns the float value if successful,
+        or None if the input is invalid (in which case the temperature is also set to None).
+        """
+        try:
+            self._temperature = float(new_temp)
+            logger.info(f"Persona '{self._name}' temperature set to {self._temperature}.")
+        except (ValueError, TypeError):
+            self._temperature = None
+            logger.info(f"Invalid temperature value provided: '{new_temp}'. Must be a number. Setting to None.")
+        return self._temperature
 
-    def set_top_p(self, new_top_p):
-        self.model.set_top_p(new_top_p)
+    def set_top_p(self, new_top_p: Any) -> Optional[float]:
+        """
+        Sets top_p. Returns the float value if successful,
+        or None if the input is invalid (in which case top_p is also set to None).
+        """
+        try:
+            self._top_p = float(new_top_p)
+            logger.info(f"Persona '{self._name}' top_p set to {self._top_p}.")
+        except (ValueError, TypeError):
+            self._top_p = None
+            logger.info(f"Invalid top_p value provided: '{new_top_p}'. Must be a number. Setting to None.")
+        return self._top_p
 
-    def set_top_k(self, new_top_k):
-        self.model.set_top_k(new_top_k)
+    def set_top_k(self, new_top_k: Any) -> Optional[int]:
+        """
+        Sets top_k. Returns the integer value if successful,
+        or None if the input is invalid (in which case top_k is also set to None).
+        """
+        try:
+            self._top_k = int(new_top_k)
+            logger.info(f"Persona '{self._name}' top_k set to {self._top_k}.")
+        except (ValueError, TypeError):
+            self._top_k = None
+            logger.info(f"Invalid top_k value provided: '{new_top_k}'. Must be an integer. Setting to None.")
+        return self._top_k
 
-    def set_last_json(self, last_json):
-        self.last_json = last_json
+    # --- Utility Methods ---
 
-    def get_last_json(self):
-        return self.last_json
+    def append_to_prompt(self, message: str) -> None:
+        """Appends text to the persona's base prompt."""
+        self._prompt += message
 
-    def set_prompt(self, prompt):
-        self.prompt = prompt
-
-    def update_prompt(self, message):
-        self.prompt += message
-
-    def get_prompt(self):
-        return self.prompt
-
-    def set_model(self, model_name):
-        import src.engine
-        model = src.engine.TextEngine(model_name,
-                                  token_limit=self.response_token_limit,
-                                  top_k=self.top_k,
-                                  top_p=self.top_p)
-        self.model = model
-        return model
-
-    def get_model_name(self):
-        return self.model.model_name
-
-    def set_conversation_mode(self, conversation_mode):
-        self.conversation_mode = conversation_mode
-
-    async def generate_response(self, message, context, image_url=None):
-        logger.info('Querying response as ' + self.name + '...')
-        if self.context_length > 0:
-            context = context[0:self.context_length+1]
-            context = context[::-1]  # Reverse the history list
-            context = " \n".join(context)
-            context = 'recent chat history: \n' + context
-        else:
-            context = None
-
-        token_limit = self.response_token_limit
-        response = await self.model.generate_response(self.prompt, message, context, image_url, token_limit)
-        self.last_json = self.model.get_raw_json_request()
-
-        # conversation mode
-        if self.conversation_mode and self.context_length <= (GLOBAL_CONTEXT_LIMIT-2):
-            self.context_length += 2
-
-        return response
-
+    def get_config_for_engine(self) -> Dict[str, Any]:
+        """Returns a dictionary of the current generation parameters for the TextEngine."""
+        return {
+            "model_name": self._model_name,
+            "max_output_tokens": self._response_token_limit,
+            "temperature": self._temperature,
+            "top_p": self._top_p,
+            "top_k": self._top_k,
+        }
