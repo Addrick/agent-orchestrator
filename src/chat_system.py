@@ -1,3 +1,5 @@
+# src/chat_system.py
+
 import asyncio
 import json
 import logging
@@ -82,7 +84,13 @@ class ChatSystem:
                 asyncio.create_task(self._guess_and_record_business(contact_id, user_identifier))
 
             self.context_manager.log_interaction(ticket_id, 'inbound', message, channel, image_url)
-            context_object = self.context_manager.build_prompt_context_object(contact_id, history_limit)
+
+            # Determine the effective history limit. Prioritize the persona's setting.
+            effective_limit = persona.get_context_length()
+            if effective_limit is None:
+                effective_limit = history_limit  # Fallback to the limit from the interface call
+
+            context_object = self.context_manager.build_prompt_context_object(contact_id, effective_limit)
             context_object["persona_prompt"] = persona.get_prompt()
             context_object["current_message"] = {"text": message, "image_url": image_url}
 
