@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 """
 For use with remote development and redeployment
-- update code from github
+- update code from .github
 - restart the application with new changes applied
 """
 
