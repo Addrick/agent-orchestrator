@@ -1,5 +1,7 @@
-import config.api_keys as api_keys
+# src/utils/model_utils.py
+
 import logging
+import os
 from src.utils import save_utils
 logger = logging.getLogger(__name__)
 
@@ -7,7 +9,7 @@ logger = logging.getLogger(__name__)
 def refresh_available_openai_models():
     """# OpenAI API query to get current list of active models"""
     import openai
-    client = openai.OpenAI(api_key=api_keys.openai)
+    client = openai.OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     openai_models = client.models.list()
     trimmed_list = [model.id for model in openai_models]
     # trimmed_list = [model.id for model in openai_models if 'gpt-3' in model.id or 'gpt-4' in model.id]
@@ -23,7 +25,7 @@ def refresh_available_google_models():
     # vertexai models can be viewed at https://console.cloud.google.com/vertex-ai/model-garden
     # model garden includes tons of shit, incl non-google models if I wanted to run them on google hardware I guess. Also fine tuning"""
     import google.generativeai as genai
-    genai.configure(api_key=api_keys.google)
+    genai.configure(api_key=os.environ.get("GOOGLE_GENERATIVEAI_API_KEY"))
     google_models = []
     for model in genai.list_models():
         if 'generateContent' in model.supported_generation_methods: # remove non-genai models
@@ -36,14 +38,7 @@ def refresh_available_google_models():
 
 def refresh_available_anthropic_models():
     import anthropic
-    from dotenv import load_dotenv
-    import os
-
-    # load .env for api key
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    root_dir = os.path.join(current_dir, r'..\..')
-    load_dotenv(os.path.join(root_dir, '.env'))
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    api_key = os.environ.get("ANTHROPIC_API_KEY") # Assumes .env is loaded at app startup
 
     client = anthropic.Anthropic(api_key=api_key)
     models = client.models.list(limit=20)

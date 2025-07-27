@@ -12,6 +12,7 @@ from src.database.context_manager import ContextManager
 from src.interfaces.discord_bot import create_discord_bot
 from config.global_config import *
 from dotenv import load_dotenv
+from src.utils.model_utils import get_model_list
 
 load_dotenv('.env')
 
@@ -51,6 +52,17 @@ async def main():
     # 4. Initialize ChatSystem core, injecting dependencies
     bot = ChatSystem(context_manager=context_manager, text_engine=text_engine)
 
+    # 5. Optionally update the model list on startup
+    if UPDATE_MODELS_ON_STARTUP:
+        logger.info("Updating available models from APIs...")
+        # Run the blocking network calls in a separate thread to avoid blocking the event loop
+        updated_models = await asyncio.to_thread(get_model_list, update=True)
+        if updated_models:
+            bot.models_available = updated_models
+            logger.info("Model list updated successfully.")
+        else:
+            logger.error("Failed to update model list.")
+
     tasks = []
 
     # --- Initialize Interfaces ---
@@ -80,4 +92,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Application shutting down.")
-        

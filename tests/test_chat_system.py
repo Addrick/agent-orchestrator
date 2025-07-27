@@ -1,10 +1,10 @@
 # tests/test_chat_system.py
 
 import pytest
-import asyncio
 from unittest.mock import AsyncMock, patch, MagicMock
 from src.chat_system import ChatSystem, ResponseType
 from src.persona import Persona
+from src.message_handler import BotLogic
 
 
 # Since ChatSystem loads personas on init, we patch it globally for all tests
@@ -179,3 +179,37 @@ async def test_generate_response_engine_exception(chat_system: ChatSystem, mock_
 
     assert "An internal error occurred" in response
     assert response_type == ResponseType.DEV_COMMAND
+
+
+def test_chat_system_initialization(mock_context_manager: MagicMock, mock_text_engine: AsyncMock):
+    """
+    Tests that the ChatSystem constructor correctly initializes all critical attributes.
+    This test would have caught the missing 'models_available' attribute.
+    """
+    # The 'autouse' mock_load_personas fixture is already patching load_personas_from_file.
+    # We also patch get_model_list to isolate the constructor from the file system.
+    with patch('src.chat_system.get_model_list', return_value={'test_provider': ['test_model']}) as mock_get_models:
+        # Instantiate the class under test
+        chat_system = ChatSystem(context_manager=mock_context_manager, text_engine=mock_text_engine)
+
+        # Assert that the constructor called the model loader
+        mock_get_models.assert_called_once()
+
+        # --- Assertions ---
+        # Assert that critical attributes exist
+        assert hasattr(chat_system, 'personas')
+        assert hasattr(chat_system, 'context_manager')
+        assert hasattr(chat_system, 'text_engine')
+        assert hasattr(chat_system, 'bot_logic')
+        assert hasattr(chat_system, 'models_available')
+        assert hasattr(chat_system, 'background_tasks')
+
+        # Assert that attributes have the correct value or type
+        assert isinstance(chat_system.personas, dict)
+        assert chat_system.context_manager is mock_context_manager
+        assert chat_system.text_engine is mock_text_engine
+        assert isinstance(chat_system.bot_logic, BotLogic)
+        assert isinstance(chat_system.background_tasks, set)
+
+        # Assert the value was set correctly from the patch
+        assert chat_system.models_available == {'test_provider': ['test_model']}

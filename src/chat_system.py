@@ -1,3 +1,5 @@
+# src/chat_system.py
+
 import asyncio
 import json
 import logging
@@ -9,6 +11,7 @@ from src.database.context_manager import ContextManager
 from src.engine import TextEngine
 from src.message_handler import BotLogic
 from src.persona import Persona
+from src.utils.model_utils import get_model_list
 from src.utils.save_utils import save_personas_to_file, load_personas_from_file
 
 logger = logging.getLogger(__name__)
@@ -27,6 +30,7 @@ class ChatSystem:
         self.text_engine: TextEngine = text_engine
         self.bot_logic: BotLogic = BotLogic(self)
         self.last_api_requests: Dict[str, Dict[str, Optional[Dict[str, Any]]]] = defaultdict(dict)
+        self.models_available: Dict[str, Any] = get_model_list()
         self.background_tasks = set()
 
     async def _guess_and_record_business(self, contact_id: int, user_identifier: str) -> None:
