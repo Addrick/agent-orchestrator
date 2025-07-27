@@ -1,6 +1,7 @@
 # tests/test_chat_system.py
 
 import pytest
+import asyncio
 from unittest.mock import AsyncMock, patch, MagicMock
 from src.chat_system import ChatSystem, ResponseType
 from src.persona import Persona
@@ -106,13 +107,13 @@ async def test_generate_response_llm_generation(chat_system: ChatSystem, mock_co
 
 
 @pytest.mark.asyncio
-@patch('src.chat_system.asyncio.create_task')
+@patch('src.chat_system.asyncio.create_task', new_callable=AsyncMock)
 async def test_generate_response_new_contact_triggers_guess(mock_create_task, chat_system: ChatSystem,
                                                             mock_context_manager: MagicMock):
     """Test that a new contact interaction triggers the business guessing task."""
     mock_context_manager.get_context_for_generation.return_value = (2, 102, True)  # is_new = True
 
-    await chat_system.generate_response(
+    _, _ = await chat_system.generate_response(
         persona_name="test_persona",
         user_identifier="new_user",
         channel="channel1",
@@ -123,6 +124,12 @@ async def test_generate_response_new_contact_triggers_guess(mock_create_task, ch
     # Ensure the coroutine passed to create_task is the correct one
     created_coro = mock_create_task.call_args[0][0]
     assert created_coro.__name__ == '_guess_and_record_business'
+
+    # Await the background task to prevent the RuntimeWarning
+    # In a real scenario, the event loop runs this, but in tests we must do it manually.
+    assert len(chat_system.background_tasks) == 1
+    task = chat_system.background_tasks.pop()
+    await task
 
 
 @pytest.mark.asyncio
@@ -172,4 +179,3 @@ async def test_generate_response_engine_exception(chat_system: ChatSystem, mock_
 
     assert "An internal error occurred" in response
     assert response_type == ResponseType.DEV_COMMAND
-    
