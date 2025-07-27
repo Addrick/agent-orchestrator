@@ -2,6 +2,8 @@
 import asyncio
 import base64
 import logging
+import os
+import typing
 from collections import deque
 from email.mime.text import MIMEText
 from typing import Optional, Dict, Any, List, Deque
@@ -58,11 +60,16 @@ class GmailInterface:
     def _get_persona_from_recipient(self, recipient_email: str) -> str:
         """Determines the target persona from the recipient email address."""
         try:
+            if '@' not in recipient_email:
+                raise ValueError("Invalid email format, no '@' symbol.")
             local_part = recipient_email.split('@')[0]
             if '-' in local_part:
                 # Assumes format like 'support-persona@domain.com'
-                return local_part.split('-')[1]
-        except (IndexError, AttributeError):
+                parts = local_part.split('-')
+                # Ensure there is a second part and it's not empty
+                if len(parts) > 1 and parts[1]:
+                    return parts[1]
+        except (IndexError, AttributeError, ValueError):
             logger.warning(f"Could not parse persona from recipient '{recipient_email}'. Using default.")
         return "derpr"  # Default persona
 
@@ -97,7 +104,7 @@ class GmailInterface:
             full_message = f"Subject: {subject}\n\n{user_input}"
 
             # Use the new, stateful generate_response method
-            response_text = await self.chat_system.generate_response(
+            response_text, response_type = await self.chat_system.generate_response(
                 persona_name=active_persona_name,
                 user_identifier=sender,  # The sender's email is the unique ID
                 channel="gmail",

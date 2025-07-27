@@ -1,8 +1,22 @@
+# src/database/context_manager.py
+
 import sqlite3
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Tuple, Optional, NoReturn
+from typing import Any, Dict, List, Tuple, Optional
 from pathlib import Path
+
+# --- DATETIME <-> ISO 8601 STRING CONVERSION FOR SQLITE ---
+def adapt_datetime_iso(dt_obj):
+    """Adapt datetime.datetime to timezone-naive ISO 8601 format."""
+    return dt_obj.isoformat()
+
+def convert_timestamp_iso(ts_bytes):
+    """Convert ISO 8601 format string from bytes to datetime.datetime object."""
+    return datetime.fromisoformat(ts_bytes.decode('utf-8'))
+
+sqlite3.register_adapter(datetime, adapt_datetime_iso)
+sqlite3.register_converter("timestamp", convert_timestamp_iso)
 
 # --- PATH LOGIC ---
 DB_DIR = Path(__file__).resolve().parent
@@ -17,10 +31,19 @@ class ContextManager:
         If db_path is None, it falls back to the DATABASE_FILE constant.
         """
         self.db_path = db_path if db_path is not None else str(DATABASE_FILE)
+        self._in_memory_conn: Optional[sqlite3.Connection] = None
 
     def _get_connection(self) -> sqlite3.Connection:
         """Returns a configured database connection."""
-        conn = sqlite3.connect(self.db_path, detect_types=sqlite3.PARSE_DECLTYPES, uri=True)
+        if self.db_path == ':memory:':
+            if self._in_memory_conn is None:
+                # Use PARSE_COLNAMES to enable the registered "timestamp" converter
+                self._in_memory_conn = sqlite3.connect(':memory:', detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
+                self._in_memory_conn.row_factory = sqlite3.Row
+            return self._in_memory_conn
+
+        # Use PARSE_COLNAMES to enable the registered "timestamp" converter
+        conn = sqlite3.connect(self.db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES, uri=True)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -85,9 +108,12 @@ class ContextManager:
             conn.executescript(schema_sql)
             logging.info("Database schema created or verified successfully.")
 
-    def _initialize_db(self) -> NoReturn:
+    def _initialize_db(self) -> None:
         """Ensures the default 'Unassociated' business exists."""
-        DB_DIR.mkdir(parents=True, exist_ok=True)
+        # This check prevents creating a directory when using an in-memory database
+        if self.db_path != ':memory:':
+            DB_DIR.mkdir(parents=True, exist_ok=True)
+
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT business_id FROM Businesses WHERE business_name = ?", (UNASSOCIATED_BUSINESS_NAME,))
@@ -139,20 +165,18 @@ class ContextManager:
                 cursor.execute("SELECT business_id FROM Contacts WHERE contact_id = ?", (contact_id,))
                 business_id = cursor.fetchone()['business_id']
                 now = datetime.now()
-                # Use isoformat() to explicitly convert datetime to string
                 cursor.execute("INSERT INTO Tickets (contact_id, business_id, status, creation_timestamp, last_update_timestamp, ticket_summary) VALUES (?, ?, 'open', ?, ?, ?)",
-                               (contact_id, business_id, now.isoformat(), now.isoformat(), "New ticket initiated."))
+                               (contact_id, business_id, now, now, "New ticket initiated."))
                 conn.commit()
                 return cursor.lastrowid
 
-    def log_interaction(self, ticket_id: int, direction: str, content: str, channel: str, image_url: Optional[str] = None) -> NoReturn:
+    def log_interaction(self, ticket_id: int, direction: str, content: str, channel: str, image_url: Optional[str] = None) -> None:
         """Logs a single message to the database and updates the parent ticket's timestamp."""
         now = datetime.now()
         with self._get_connection() as conn:
-            # Use isoformat() to explicitly convert datetime to string
             conn.execute("INSERT INTO Interactions (ticket_id, timestamp, channel, direction, raw_content, image_url) VALUES (?, ?, ?, ?, ?, ?)",
-                         (ticket_id, now.isoformat(), channel, direction, content, image_url))
-            conn.execute("UPDATE Tickets SET last_update_timestamp = ? WHERE ticket_id = ?", (now.isoformat(), ticket_id))
+                         (ticket_id, now, channel, direction, content, image_url))
+            conn.execute("UPDATE Tickets SET last_update_timestamp = ? WHERE ticket_id = ?", (now, ticket_id))
             conn.commit()
 
     def get_all_businesses(self) -> List[Dict[str, Any]]:
@@ -162,12 +186,11 @@ class ContextManager:
             cursor.execute("SELECT business_id, business_name FROM Businesses WHERE business_name != ?", (UNASSOCIATED_BUSINESS_NAME,))
             return [dict(row) for row in cursor.fetchall()]
 
-    def record_business_guess(self, contact_id: int, guessed_business_id: Optional[int], reasoning: str) -> NoReturn:
+    def record_business_guess(self, contact_id: int, guessed_business_id: Optional[int], reasoning: str) -> None:
         """Records the LLM's guess for a new contact's business affiliation."""
         with self._get_connection() as conn:
-            # Use isoformat() here as well for consistency
             conn.execute("INSERT INTO Contact_Placement_Guesses (contact_id, guessed_business_id, reasoning, timestamp) VALUES (?, ?, ?, ?)",
-                         (contact_id, guessed_business_id, reasoning, datetime.now().isoformat()))
+                         (contact_id, guessed_business_id, reasoning, datetime.now()))
             conn.commit()
 
     def get_context_for_generation(self, user_identifier: str, channel: str) -> Tuple[int, int, bool]:

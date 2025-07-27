@@ -5,7 +5,6 @@ import os
 import sys
 import logging
 
-from config import global_config
 from src.chat_system import ChatSystem
 from src.engine import TextEngine
 from src.database.context_manager import ContextManager
@@ -37,7 +36,7 @@ async def main():
 
     # --- ARCHITECTURE INITIALIZATION ---
     # 1. Initialize the database manager, allowing path override via environment variable
-    db_path = global_config.DATABASE_FILE_PATH
+    db_path = os.environ.get("DATABASE_FILE")
     context_manager = ContextManager(db_path=db_path)
 
     # 2. Set up the database schema and default data on startup
@@ -81,3 +80,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Application shutting down.")
+        

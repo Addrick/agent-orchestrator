@@ -1,5 +1,3 @@
-# src/chat_system.py
-
 import asyncio
 import json
 import logging
@@ -29,6 +27,7 @@ class ChatSystem:
         self.text_engine: TextEngine = text_engine
         self.bot_logic: BotLogic = BotLogic(self)
         self.last_api_requests: Dict[str, Dict[str, Optional[Dict[str, Any]]]] = defaultdict(dict)
+        self.background_tasks = set()
 
     async def _guess_and_record_business(self, contact_id: int, user_identifier: str) -> None:
         try:
@@ -71,17 +70,18 @@ class ChatSystem:
                 save_personas_to_file(self.personas)
             return command_result["response"], ResponseType.DEV_COMMAND
 
-        if persona_name not in self.personas:
-            logger.error(f"Persona '{persona_name}' does not exist.")
-            return "Error: Persona not found.", ResponseType.DEV_COMMAND
-
-        persona = self.personas[persona_name]
-
         try:
+            persona = self.personas.get(persona_name)
+            if not persona:
+                logger.error(f"Persona '{persona_name}' does not exist.")
+                return "Error: Persona not found.", ResponseType.DEV_COMMAND
+
             contact_id, ticket_id, is_new_contact = self.context_manager.get_context_for_generation(user_identifier,
                                                                                                     channel)
             if is_new_contact:
-                asyncio.create_task(self._guess_and_record_business(contact_id, user_identifier))
+                task = asyncio.create_task(self._guess_and_record_business(contact_id, user_identifier))
+                self.background_tasks.add(task)
+                task.add_done_callback(self.background_tasks.discard)
 
             self.context_manager.log_interaction(ticket_id, 'inbound', message, channel, image_url)
 

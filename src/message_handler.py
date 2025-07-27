@@ -65,6 +65,9 @@ class BotLogic:
             return {"response": "Error: Current persona not found.", "mutated": False}
 
         response, mutated = handler(args, current_persona, user_identifier)
+        if response is None:
+            return None
+
         return {"response": response, "mutated": mutated}
 
     def _handle_help(self, args: list, persona: Persona, user_identifier: str) -> Tuple[str, bool]:
@@ -115,7 +118,7 @@ class BotLogic:
             f"Details for Persona: {persona.get_name()}\n"
             f"----------------------------------------\n"
             f"Model: {persona.get_model_name() or 'default'}\n"
-            f"Context Length: {persona.get_context_length() or 'default'}\n"
+            f"Context Length: {persona.get_context_length()}\n"
             f"Response Token Limit: {persona.get_response_token_limit() or 'default'}\n"
             f"Generation Parameters:\n"
             f"  - Temperature: {persona.get_temperature() or 'default'}\n"
@@ -126,14 +129,14 @@ class BotLogic:
         )
         return details, False
 
-    def _handle_what(self, args: list, persona: Persona, user_identifier: str) -> Tuple[str, bool]:
+    def _handle_what(self, args: list, persona: Persona, user_identifier: str) -> Tuple[Optional[str], bool]:
         if not args:
             return "Error: 'what' command requires a sub-command.", False
         sub_command = args[0]
         handler = self.what_handlers.get(sub_command)
         if handler:
             return handler(args, persona)
-        return f"Error: Unknown 'what' command: {sub_command}", False
+        return None, False
 
     def _what_prompt(self, args: list, persona: Persona) -> Tuple[str, bool]:
         return f"Prompt for '{persona.get_name()}': {persona.get_prompt()}", False
@@ -192,48 +195,67 @@ class BotLogic:
 
     def _set_tokens(self, args: list, persona: Persona) -> Tuple[str, bool]:
         try:
-            token_limit = args[1]
-            if persona.set_response_token_limit(token_limit):
-                return f"Set token limit to '{token_limit}' for {persona.get_name()}.", True
-            return f"Non-integer token limit provided: '{token_limit}'. No limit set (this will use provider default).", True
-        except (IndexError, ValueError):
-            return "Error setting tokens.", False
+            limit_str = args[1]
+            token_limit = int(limit_str)
+            persona.set_response_token_limit(token_limit)
+            return f"Set token limit to '{token_limit}' for {persona.get_name()}.", True
+        except IndexError:
+            return "Error: 'set tokens' requires a numeric value.", False
+        except ValueError:
+            persona.set_response_token_limit(None)
+            return f"Non-numeric token limit '{limit_str}' provided. The default token limit will be used for {persona.get_name()}.", True
 
     def _set_context(self, args: list, persona: Persona) -> Tuple[str, bool]:
         try:
-            context_limit = int(args[1])
+            limit_str = args[1]
+            context_limit = int(limit_str)
             persona.set_context_length(context_limit)
             return f"Set context limit for {persona.get_name()} to '{context_limit}'.", True
-        except (IndexError, ValueError):
+        except IndexError:
             return "Error: 'set context' requires a numeric value.", False
+        except ValueError:
+            persona.set_context_length(None)
+            return f"Non-numeric context limit '{limit_str}' provided. The default context length will be used for {persona.get_name()}.", True
 
     def _set_temp(self, args: list, persona: Persona) -> Tuple[str, bool]:
         try:
-            new_temp = float(args[1])
+            temp_str = args[1]
+            new_temp = float(temp_str)
             if not 0 <= new_temp <= 2:
-                return f"Error: Temperature must be between 0 and 2.", False
+                return "Error: Temperature must be between 0 and 2.", False
             persona.set_temperature(new_temp)
             return f"Set temperature to {new_temp} for {persona.get_name()}.", True
-        except (IndexError, ValueError):
+        except IndexError:
             return "Error: 'set temp' requires a numeric value.", False
+        except ValueError:
+            persona.set_temperature(None)
+            return f"Non-numeric temperature '{temp_str}' provided. The default temperature will be used for {persona.get_name()}.", True
 
     def _set_top_p(self, args: list, persona: Persona) -> Tuple[str, bool]:
         try:
-            new_top_p = float(args[1])
+            top_p_str = args[1]
+            new_top_p = float(top_p_str)
             if not 0 <= new_top_p <= 1:
                 return "Error: Top P must be between 0 and 1.", False
             persona.set_top_p(new_top_p)
             return f"Set top_p to {new_top_p} for {persona.get_name()}.", True
-        except (IndexError, ValueError):
+        except IndexError:
             return "Error: 'set top_p' requires a numeric value.", False
+        except ValueError:
+            persona.set_top_p(None)
+            return f"Non-numeric Top P '{top_p_str}' provided. The default Top P will be used for {persona.get_name()}.", True
 
     def _set_top_k(self, args: list, persona: Persona) -> Tuple[str, bool]:
         try:
-            new_top_k = int(args[1])
+            top_k_str = args[1]
+            new_top_k = int(top_k_str)
             persona.set_top_k(new_top_k)
             return f"Set top_k to {new_top_k} for {persona.get_name()}.", True
-        except (IndexError, ValueError):
+        except IndexError:
             return "Error: 'set top_k' requires an integer value.", False
+        except ValueError:
+            persona.set_top_k(None)
+            return f"Non-numeric Top K '{top_k_str}' provided. The default Top K will be used for {persona.get_name()}.", True
 
     def _handle_start_conversation(self, args: list, persona: Persona, user_identifier: str) -> Tuple[str, bool]:
         if args:
