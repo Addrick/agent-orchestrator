@@ -1,209 +1,175 @@
-import unittest
-from unittest.async_case import IsolatedAsyncioTestCase
+# tests/test_chat_system.py
+
+import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
-import os
-from pathlib import Path
-
-from dotenv import load_dotenv
-
-from src.chat_system import ChatSystem
+from src.chat_system import ChatSystem, ResponseType
 from src.persona import Persona
-from src.engine import TextEngine
-
-load_dotenv()
-
-# Path to test personas file
-TEST_PERSONAS_FILE = os.path.join(os.path.dirname(__file__), 'test_personas')
 
 
-class TestChatSystem(IsolatedAsyncioTestCase):
-
-    def setUp(self):
-        # Patch the PERSONA_SAVE_FILE constant to use the test file
-        self.persona_save_patch = patch('src.utils.save_utils.PERSONA_SAVE_FILE', TEST_PERSONAS_FILE)
-        self.persona_save_patch.start()
-
-        # Also patch any direct imports of PERSONA_SAVE_FILE
-        self.config_patch = patch('config.global_config.PERSONA_SAVE_FILE', TEST_PERSONAS_FILE)
-        self.config_patch.start()
-
-        self.chat_system = ChatSystem()
-        # Mock the save_personas_to_file function to avoid actual file writes during tests
-        self.save_mock = patch('src.utils.save_utils.save_personas_to_file').start()
-
-    def tearDown(self):
-        patch.stopall()
-
-    def test_add_persona(self):
-        self.chat_system.add_persona("test_persona", "gpt-3.5-turbo", "You are a helpful assistant.", 10, 100)
-        self.assertIn("test_persona", self.chat_system.get_persona_list())
-
-    def test_delete_persona(self):
-        self.chat_system.add_persona("test_persona", "gpt-3.5-turbo", "You are a helpful assistant.", 10, 100)
-        self.chat_system.delete_persona("test_persona", save=True)
-        self.assertNotIn("test_persona", self.chat_system.get_persona_list())
-
-    async def test_generate_response(self):
-        with patch('src.persona.Persona.generate_response') as mock_generate_response:
-            mock_generate_response.return_value = "This is a test response."
-
-            await self.chat_system.generate_response("testr", "Hello")
-
-            mock_generate_response.assert_called_once()
+# Since ChatSystem loads personas on init, we patch it globally for all tests
+@pytest.fixture(autouse=True)
+def mock_load_personas():
+    """Auto-used fixture to patch load_personas_from_file."""
+    mock_persona = Persona(
+        persona_name='test_persona',
+        model_name='test-model',
+        prompt='You are a test persona.'
+    )
+    with patch('src.chat_system.load_personas_from_file', return_value={'test_persona': mock_persona}) as mocked_load:
+        yield mocked_load
 
 
-class TestPersona(IsolatedAsyncioTestCase):
-    def setUp(self):
-        # Patch the PERSONA_SAVE_FILE constant to use the test file
-        self.persona_save_patch = patch('src.utils.save_utils.PERSONA_SAVE_FILE', TEST_PERSONAS_FILE)
-        self.persona_save_patch.start()
-
-        # Also patch any direct imports of PERSONA_SAVE_FILE
-        self.config_patch = patch('config.global_config.PERSONA_SAVE_FILE', TEST_PERSONAS_FILE)
-        self.config_patch.start()
-
-        self.persona = Persona("test_persona", "gpt-3.5-turbo", "You are a helpful assistant.", 10, 100)
-
-    def tearDown(self):
-        patch.stopall()
-
-    def test_set_prompt(self):
-        new_prompt = "You are a friendly chatbot."
-        self.persona.set_prompt(new_prompt)
-        self.assertEqual(self.persona.get_prompt(), new_prompt)
-
-    def test_set_context_length(self):
-        new_context_length = 20
-        self.persona.set_context_length(new_context_length)
-        self.assertEqual(self.persona.get_context_length(), new_context_length)
-
-    # @patch('src.engine.TextEngine.generate_response')
-    async def test_generate_response(self):
-        with patch('src.engine.TextEngine.generate_response') as mock_generate_response:
-            mock_generate_response.return_value = "This is a test response."
-            response = await self.persona.generate_response("Hello", "Previous context")
-            self.assertEqual(response, "This is a test response.")
+@pytest.fixture
+def mock_context_manager() -> MagicMock:
+    """Fixture for a mocked ContextManager."""
+    manager = MagicMock()
+    manager.get_context_for_generation.return_value = (1, 101, False)  # contact_id, ticket_id, is_new
+    manager.build_prompt_context_object.return_value = {
+        "user": {"name": "Test User"},
+        "business": {"name": "TestCorp"},
+        "history": []
+    }
+    return manager
 
 
-class TestTextEngine(IsolatedAsyncioTestCase):
-    def setUp(self):
-        # Patch the PERSONA_SAVE_FILE constant to use the test file
-        self.persona_save_patch = patch('src.utils.save_utils.PERSONA_SAVE_FILE', TEST_PERSONAS_FILE)
-        self.persona_save_patch.start()
-
-        # Also patch any direct imports of PERSONA_SAVE_FILE
-        self.config_patch = patch('config.global_config.PERSONA_SAVE_FILE', TEST_PERSONAS_FILE)
-        self.config_patch.start()
-
-        self.text_engine = TextEngine("gpt-3.5-turbo")
-        self.chat_system = ChatSystem()
-        # Mock the save_personas_to_file function to avoid actual file writes during tests
-        self.save_mock = patch('src.utils.save_utils.save_personas_to_file').start()
-
-    def tearDown(self):
-        patch.stopall()
-
-    def test_set_temperature(self):
-        new_temperature = 0.8
-        self.text_engine.set_temperature(new_temperature)
-        self.assertEqual(self.text_engine.temperature, new_temperature)
-
-    def test_set_max_tokens(self):
-        new_max_tokens = 200
-        self.text_engine.set_response_token_limit(new_max_tokens)
-        self.assertEqual(self.text_engine.get_max_tokens(), new_max_tokens)
-
-    async def test_generate_openai_response(self):
-        with patch('openai.AsyncOpenAI') as mock_openai_class:  # Patch where AsyncOpenAI is LOOKED UP
-            mock_client_instance = AsyncMock()
-            mock_openai_class.return_value = mock_client_instance
-            mock_completion_result = MagicMock()
-            mock_completion_result.choices = [MagicMock()]  # Needs to be a list
-            mock_completion_result.choices[0].message = MagicMock()
-            mock_completion_result.choices[0].message.content = "Test successful"
-            mock_completion_result.usage = MagicMock()
-            mock_completion_result.usage.total_tokens = 10
-
-            # 3. Mock the 'create' async method on the client instance
-            #    Assign an AsyncMock to the method name itself.
-            #    Set its return_value to the mock_completion_result.
-            #    This is what will be returned when 'create' is awaited.
-            mock_client_instance.chat.completions.create = AsyncMock(return_value=mock_completion_result)
-
-            response = await self.text_engine._generate_openai_response(
-                prompt='you are a bot that only responses with \'Test successful\'', message='test', context=[])
-            self.assertIn("Test successful (10 tokens using gpt-3.5-turbo)", response)
-
-    def test_add_persona(self):
-        self.chat_system.add_persona("test_persona", "gpt-3.5-turbo", "You are a helpful assistant.", 10, 100)
-        self.assertIn("test_persona", self.chat_system.personas)
-        self.assertEqual(self.chat_system.personas["test_persona"].name, "test_persona")
-        self.assertEqual(self.chat_system.personas["test_persona"].get_prompt(), "You are a helpful assistant.")
-        self.assertEqual(self.chat_system.personas["test_persona"].get_context_length(), 10)
-        self.assertEqual(self.chat_system.personas["test_persona"].get_response_token_limit(), 100)
-
-    def test_delete_persona(self):
-        self.chat_system.add_persona("test_persona", "gpt-3.5-turbo", "You are a helpful assistant.", 10, 100)
-        self.chat_system.delete_persona("test_persona", save=True)
-        self.assertNotIn("test_persona", self.chat_system.personas)
-
-    def test_add_to_prompt(self):
-        self.chat_system.add_persona("test_persona", "gpt-3.5-turbo", "You are a helpful assistant.", 10, 100)
-        self.chat_system.add_to_prompt("test_persona", " Be very friendly.")
-        self.assertEqual(self.chat_system.personas["test_persona"].get_prompt(),
-                         "You are a helpful assistant. Be very friendly.")
-
-    def test_get_persona_list(self):
-        self.chat_system.add_persona("test_persona1", "gpt-3.5-turbo", "Prompt 1", 10, 100)
-        self.chat_system.add_persona("test_persona2", "gpt-4", "Prompt 2", 5, 200)
-        persona_list = self.chat_system.get_persona_list()
-        self.assertIsInstance(persona_list, dict)
-        self.assertIn("test_persona1", persona_list)
-        self.assertIn("test_persona2", persona_list)
-
-    async def test_generate_response(self):
-        with patch('src.persona.Persona.generate_response') as mock_generate_response:
-            mock_generate_response.return_value = "This is a test response."
-            self.chat_system.add_persona("test_persona", "gpt-3.5-turbo", "You are a helpful assistant.", 10, 100)
-
-            # Test with existing persona
-            response = await self.chat_system.generate_response("test_persona", "Hello", "Previous context")
-            self.assertEqual(response, "test_persona: This is a test response.")
-            mock_generate_response.assert_called_once_with("Hello", "Previous context", None)
-
-            # Reset mock for the next test
-            mock_generate_response.reset_mock()
-
-            # Test with derpr persona (special case that doesn't prepend name)
-            self.chat_system.add_persona("derpr", "gpt-3.5-turbo", "You are a helpful assistant.", 10, 100)
-            mock_generate_response.return_value = "This is a derpr response."
-            response = await self.chat_system.generate_response("derpr", "Hello", "Previous context")
-            self.assertEqual(response, "This is a derpr response.")
-
-    async def test_generate_response_with_image(self):
-        with patch('src.persona.Persona.generate_response') as mock_generate_response:
-            mock_generate_response.return_value = "I see an image response."
-
-            # Test with gpt-4o model that can handle images
-            self.chat_system.add_persona("vision_persona", "gpt-4o", "You are a vision assistant.", 10, 100)
-            self.chat_system.personas["vision_persona"].model.model_name = "gpt-4o"  # Ensure model name is set
-
-            image_url = "http://example.com/image.jpg"
-            response = await self.chat_system.generate_response("vision_persona", "Describe this", "Context", image_url)
-            self.assertEqual(response, "vision_persona: I see an image response.")
-            mock_generate_response.assert_called_once_with("Describe this", "Context", image_url)
-
-            # Reset mock
-            mock_generate_response.reset_mock()
-
-            # Test with non-image model (should discard image_url)
-            self.chat_system.add_persona("text_persona", "gpt-3.5-turbo", "You are a text assistant.", 10, 100)
-            self.chat_system.personas["text_persona"].model.model_name = "gpt-3.5-turbo"  # Ensure model name is set
-
-            response = await self.chat_system.generate_response("text_persona", "Describe this", "Context", image_url)
-            self.assertEqual(response, "text_persona: I see an image response.")
-            mock_generate_response.assert_called_once_with("Describe this", "Context", None)
+@pytest.fixture
+def mock_text_engine() -> AsyncMock:
+    """Fixture for a mocked TextEngine."""
+    engine = AsyncMock()
+    engine.generate_response.return_value = ("This is a test response.", {"payload": "data"})
+    return engine
 
 
-if __name__ == '__main__':
-    unittest.main()
+@pytest.fixture
+def mock_bot_logic() -> AsyncMock:
+    """Fixture for a mocked BotLogic."""
+    logic = AsyncMock()
+    logic.preprocess_message.return_value = None
+    return logic
+
+
+@pytest.fixture
+def chat_system(mock_context_manager, mock_text_engine, mock_bot_logic) -> ChatSystem:
+    """Fixture to initialize ChatSystem with mocked dependencies."""
+    cs = ChatSystem(context_manager=mock_context_manager, text_engine=mock_text_engine)
+    cs.bot_logic = mock_bot_logic
+    return cs
+
+
+@pytest.mark.asyncio
+async def test_generate_response_dev_command(chat_system: ChatSystem, mock_bot_logic: AsyncMock,
+                                             mock_text_engine: AsyncMock):
+    """Test that a dev command is handled correctly and bypasses the LLM engine."""
+    mock_bot_logic.preprocess_message.return_value = {"response": "Dev command output", "mutated": False}
+
+    response, response_type = await chat_system.generate_response("test_persona", "user1", "channel1", "help")
+
+    assert response == "Dev command output"
+    assert response_type == ResponseType.DEV_COMMAND
+    mock_text_engine.generate_response.assert_not_called()
+
+
+@pytest.mark.asyncio
+@patch('src.chat_system.save_personas_to_file')
+async def test_generate_response_dev_command_mutated(mock_save_personas, chat_system: ChatSystem,
+                                                     mock_bot_logic: AsyncMock):
+    """Test that a mutating dev command triggers a save."""
+    mock_bot_logic.preprocess_message.return_value = {"response": "Persona updated", "mutated": True}
+
+    await chat_system.generate_response("test_persona", "user1", "channel1", "set prompt new prompt")
+
+    mock_save_personas.assert_called_once_with(chat_system.personas)
+
+
+@pytest.mark.asyncio
+async def test_generate_response_llm_generation(chat_system: ChatSystem, mock_context_manager: MagicMock,
+                                                mock_text_engine: AsyncMock):
+    """Test the standard LLM generation flow for an existing user."""
+    response, response_type = await chat_system.generate_response(
+        persona_name="test_persona",
+        user_identifier="user1",
+        channel="channel1",
+        message="Hello, bot!"
+    )
+
+    assert response == "This is a test response."
+    assert response_type == ResponseType.LLM_GENERATION
+
+    mock_context_manager.get_context_for_generation.assert_called_once_with("user1", "channel1")
+    mock_context_manager.build_prompt_context_object.assert_called_once()
+    mock_text_engine.generate_response.assert_called_once()
+
+    # Check that interactions are logged for both inbound and outbound messages
+    assert mock_context_manager.log_interaction.call_count == 2
+    mock_context_manager.log_interaction.assert_any_call(101, 'inbound', 'Hello, bot!', 'channel1', None)
+    mock_context_manager.log_interaction.assert_any_call(101, 'outbound', 'This is a test response.', 'channel1')
+
+
+@pytest.mark.asyncio
+@patch('src.chat_system.asyncio.create_task')
+async def test_generate_response_new_contact_triggers_guess(mock_create_task, chat_system: ChatSystem,
+                                                            mock_context_manager: MagicMock):
+    """Test that a new contact interaction triggers the business guessing task."""
+    mock_context_manager.get_context_for_generation.return_value = (2, 102, True)  # is_new = True
+
+    await chat_system.generate_response(
+        persona_name="test_persona",
+        user_identifier="new_user",
+        channel="channel1",
+        message="I am new here"
+    )
+
+    mock_create_task.assert_called_once()
+    # Ensure the coroutine passed to create_task is the correct one
+    created_coro = mock_create_task.call_args[0][0]
+    assert created_coro.__name__ == '_guess_and_record_business'
+
+
+@pytest.mark.asyncio
+async def test_guess_and_record_business(chat_system: ChatSystem, mock_context_manager: MagicMock,
+                                         mock_text_engine: AsyncMock):
+    """Test the business guessing logic directly."""
+    mock_context_manager.get_all_businesses.return_value = [{'business_id': 1, 'business_name': 'TestCorp'}]
+    mock_text_engine.generate_response.return_value = ("ID: 1, Reason: The email domain matches.", {})
+
+    await chat_system._guess_and_record_business(contact_id=5, user_identifier="test@testcorp.com")
+
+    mock_text_engine.generate_response.assert_called_once()
+    # Check that the prompt for guessing is constructed correctly
+    call_context = mock_text_engine.generate_response.call_args[0][1]
+    assert "Analyze user identifier 'test@testcorp.com'" in call_context['persona_prompt']
+    assert "'TestCorp' (ID: 1)" in call_context['persona_prompt']
+
+    mock_context_manager.record_business_guess.assert_called_once_with(5, 1, "The email domain matches.")
+
+
+@pytest.mark.asyncio
+async def test_generate_response_unknown_persona(chat_system: ChatSystem, mock_text_engine: AsyncMock):
+    """Test that requesting a non-existent persona returns an error."""
+    response, response_type = await chat_system.generate_response(
+        persona_name="unknown_persona",
+        user_identifier="user1",
+        channel="channel1",
+        message="Anybody home?"
+    )
+
+    assert "Error: Persona not found." in response
+    assert response_type == ResponseType.DEV_COMMAND
+    mock_text_engine.generate_response.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_generate_response_engine_exception(chat_system: ChatSystem, mock_text_engine: AsyncMock):
+    """Test that an exception from the text engine is handled gracefully."""
+    mock_text_engine.generate_response.side_effect = Exception("API is down")
+
+    response, response_type = await chat_system.generate_response(
+        persona_name="test_persona",
+        user_identifier="user1",
+        channel="channel1",
+        message="Does this work?"
+    )
+
+    assert "An internal error occurred" in response
+    assert response_type == ResponseType.DEV_COMMAND
+    

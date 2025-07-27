@@ -90,7 +90,6 @@ class TestIntegration(unittest.IsolatedAsyncioTestCase):
         )
 
         # --- 3. Assert ---
-        # --- FIX: Unpack the tuple and assert on both parts ---
         response_text, response_type = final_response_tuple
 
         self.assertEqual(response_text, mock_response_text)
