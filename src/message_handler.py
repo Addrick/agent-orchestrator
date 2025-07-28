@@ -1,3 +1,5 @@
+# src/message_handler.py
+
 from config.global_config import DEFAULT_MODEL_NAME, DEFAULT_CONTEXT_LIMIT, DEFAULT_PERSONA, DEFAULT_WELCOME_REQUEST
 from src.persona import Persona
 from src.utils import model_utils
@@ -80,7 +82,7 @@ class BotLogic:
                                                                   "hello (start new conversation), \n"
                                                                   "goodbye (end conversation), \n"
                                                                   "remember <+prompt>, \n"
-                                                                  "what prompt/model/models(+openai/google/anthropic)/personas/context/tokens/temp, \n"
+                                                                  "what prompt/model/models (google/openai/anthropic)/personas/context/tokens/temp, \n"
                                                                   "set prompt/model/context/tokens/temp, \n"
                                                                   "add <persona>, \n"
                                                                   "delete <persona>, \n"
@@ -144,9 +146,21 @@ class BotLogic:
     def _what_model(self, args: list, persona: Persona) -> Tuple[str, bool]:
         return f"{persona.get_name()} is using {persona.get_model_name()}", False
 
-    def _what_models(self, args: list, persona: Persona) -> Tuple[str, bool]:
-        model_names = self.chat_system.models_available
-        return f"Available model options: {json.dumps(model_names, indent=2)}", False
+    def _what_models(self, args: list, persona: Persona) -> Tuple[Optional[str], bool]:
+        all_models = self.chat_system.models_available
+        # Case 1: No vendor specified, show all models.
+        if len(args) == 1:
+            return f"Available model options: {json.dumps(all_models, indent=2)}", False
+
+        # Case 2: Vendor specified, try to find and filter.
+        if len(args) == 2:
+            vendor_arg = args[1].lower()
+            for key, models in all_models.items():
+                if vendor_arg in key.lower():
+                    return f"Available models from {key}: {json.dumps({key: models}, indent=2)}", False
+
+        # Case 3: Invalid vendor or too many args, fall through to LLM.
+        return None, False
 
     def _what_personas(self, args: list, persona: Persona) -> Tuple[str, bool]:
         return f"Available personas are: {list(self.chat_system.personas.keys())}", False
