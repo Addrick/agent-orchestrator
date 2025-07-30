@@ -7,7 +7,8 @@ import logging
 
 from src.chat_system import ChatSystem
 from src.engine import TextEngine
-from src.database.context_manager import ContextManager
+from src.database.memory_manager import MemoryManager
+from src.clients.zammad_client import ZammadClient
 
 from src.interfaces.discord_bot import create_discord_bot
 from config.global_config import *
@@ -36,21 +37,25 @@ async def main():
         logger.warning("Logs folder created!")
 
     # --- ARCHITECTURE INITIALIZATION ---
-    # 1. Initialize the database manager, allowing path override via environment variable
-    db_path = os.environ.get("DATABASE_FILE")
-    context_manager = ContextManager(db_path=db_path)
+    # 1. Initialize the user memory database
+    memory_db_path = os.environ.get("MEMORY_DATABASE_FILE")
+    memory_manager = MemoryManager(db_path=memory_db_path)
+    logger.info("Setting up user memory database schema...")
+    memory_manager.create_schema()
+    logger.info("User memory database setup complete.")
 
-    # 2. Set up the database schema and default data on startup
-    logger.info("Setting up database schema and default data...")
-    context_manager.create_schema()
-    context_manager._initialize_db()
-    logger.info("Database setup complete.")
-
-    # 3. Initialize the centralized text generation engine
+    # 2. Initialize the centralized text generation engine
     text_engine = TextEngine()
 
+    # 3. Initialize the Zammad client for ticketing
+    zammad_client = ZammadClient()
+
     # 4. Initialize ChatSystem core, injecting dependencies
-    bot = ChatSystem(context_manager=context_manager, text_engine=text_engine)
+    bot = ChatSystem(
+        memory_manager=memory_manager,
+        text_engine=text_engine,
+        zammad_client=zammad_client
+    )
 
     # 5. Optionally update the model list on startup
     if UPDATE_MODELS_ON_STARTUP:
