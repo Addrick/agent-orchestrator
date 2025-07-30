@@ -33,8 +33,6 @@ DEFAULT_WELCOME_REQUEST = 'Welcome to the chat room, please describe your typica
 
 UPDATE_MODELS_ON_STARTUP = True
 
-CHAT_LOG_LOCATION = '../config/logs/'
-LOCAL_CHAT_LOG = '../config/logs/'
 
 PERSONA_SAVE_FILE = '../config/personas'
 STDOUT_LOG = '../config/logs/stdout.txt'
@@ -42,5 +40,17 @@ STDOUT_LOG = '../config/logs/stdout.txt'
 KOBOLDCPP_EXE = r'F:\Machine Learning\koboldcpp.exe'
 KOBOLDCPP_CONFIG = r'F:\Machine Learning\dolphin-2.7-mixtral-8x7b.Q5_K_M.kcpps'
 
+
+####
+# HISTORY CONFIGURATION
 LOCAL_REPO_PATH = 'C:\\Users\\Adam\\Programming\\Python\\derpr-python'
 DATABASE_FILE_PATH = '../src/database/it_support_memory.db'
+
+CHAT_LOG_LOCATION = '../config/logs/'
+LOCAL_CHAT_LOG = '../config/logs/'
+
+####
+# Zammad Ticketing
+ZAMMAD_BOT = 1
+SUPPORT_CHANNELS = ['tech-support', 'it-help']
+ZAMMAD_DEFAULT_GROUP = "Users"
