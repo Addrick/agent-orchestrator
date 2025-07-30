@@ -176,7 +176,7 @@ class BotLogic:
 
     def _handle_set(self, args: list, persona: Persona, user_identifier: str) -> Tuple[str, bool]:
         if not args:
-            return "Error: 'set' command requires a sub-command.", False
+            return None, False
         sub_command = args[0]
         handler = self.set_handlers.get(sub_command)
         if handler:
@@ -186,7 +186,7 @@ class BotLogic:
     def _set_prompt(self, args: list, persona: Persona) -> Tuple[str, bool]:
         prompt = ' '.join(args[1:])
         if not prompt:
-            return "Error: 'set prompt' requires text for the new prompt.", False
+            return None, False
         persona.set_prompt(prompt)
         return 'Prompt saved.', True
 
@@ -198,7 +198,7 @@ class BotLogic:
         try:
             model_name = args[1]
         except IndexError:
-            return "Error: 'set model' requires a model name.", False
+            return None, False
         if model_name == 'default':
             model_name = DEFAULT_MODEL_NAME
         if model_utils.check_model_available(model_name):
@@ -214,7 +214,7 @@ class BotLogic:
             persona.set_response_token_limit(token_limit)
             return f"Set token limit to '{token_limit}' for {persona.get_name()}.", True
         except IndexError:
-            return "Error: 'set tokens' requires a numeric value.", False
+            return None, False
         except ValueError:
             persona.set_response_token_limit(None)
             return f"Non-numeric token limit '{limit_str}' provided. The default token limit will be used for {persona.get_name()}.", True
@@ -226,7 +226,7 @@ class BotLogic:
             persona.set_context_length(context_limit)
             return f"Set context limit for {persona.get_name()} to '{context_limit}'.", True
         except IndexError:
-            return "Error: 'set context' requires a numeric value.", False
+            return None, False
         except ValueError:
             persona.set_context_length(None)
             return f"Non-numeric context limit '{limit_str}' provided. The default context length will be used for {persona.get_name()}.", True
@@ -240,7 +240,7 @@ class BotLogic:
             persona.set_temperature(new_temp)
             return f"Set temperature to {new_temp} for {persona.get_name()}.", True
         except IndexError:
-            return "Error: 'set temp' requires a numeric value.", False
+            return None, False
         except ValueError:
             persona.set_temperature(None)
             return f"Non-numeric temperature '{temp_str}' provided. The default temperature will be used for {persona.get_name()}.", True
@@ -254,7 +254,7 @@ class BotLogic:
             persona.set_top_p(new_top_p)
             return f"Set top_p to {new_top_p} for {persona.get_name()}.", True
         except IndexError:
-            return "Error: 'set top_p' requires a numeric value.", False
+            return None, False
         except ValueError:
             persona.set_top_p(None)
             return f"Non-numeric Top P '{top_p_str}' provided. The default Top P will be used for {persona.get_name()}.", True
@@ -266,26 +266,26 @@ class BotLogic:
             persona.set_top_k(new_top_k)
             return f"Set top_k to {new_top_k} for {persona.get_name()}.", True
         except IndexError:
-            return "Error: 'set top_k' requires an integer value.", False
+            return None, False
         except ValueError:
             persona.set_top_k(None)
             return f"Non-numeric Top K '{top_k_str}' provided. The default Top K will be used for {persona.get_name()}.", True
 
     def _handle_start_conversation(self, args: list, persona: Persona, user_identifier: str) -> Tuple[str, bool]:
         if args:
-            return "Error: 'hello' does not take arguments.", False
+            return None, False
         persona.set_context_length(0)
         return f"{persona.get_name()}: Hello! Starting new conversation...", True
 
     def _handle_stop_conversation(self, args: list, persona: Persona, user_identifier: str) -> Tuple[str, bool]:
         if args:
-            return "Error: 'goodbye' does not take arguments.", False
+            return None, False
         persona.set_context_length(DEFAULT_CONTEXT_LIMIT)
         return f"{persona.get_name()}: Goodbye! Resetting context.", True
 
     def _handle_dump_last(self, args: list, persona: Persona, user_identifier: str) -> Tuple[str, bool]:
         if args:
-            return "Error: `dump_last` does not take arguments.", False
+            return None, False
 
         persona_name = persona.get_name()
         last_request = self.chat_system.last_api_requests.get(user_identifier, {}).get(persona_name)
@@ -303,11 +303,11 @@ class BotLogic:
 
     def _handle_save(self, args: list, persona: Persona, user_identifier: str) -> Tuple[str, bool]:
         if args:
-            return "Error: 'save' command does not take any arguments.", False
+            return None, False
         return 'Personas saved.', True
 
     def _handle_update_models(self, args: list, persona: Persona, user_identifier: str) -> Tuple[str, bool]:
         if args:
-            return "Error: 'update_models' does not take arguments.", False
+            return None, False
         self.chat_system.models_available = get_model_list(update=True)
         return f"Model list updated. Currently available: {json.dumps(self.chat_system.models_available, indent=2)}", False
