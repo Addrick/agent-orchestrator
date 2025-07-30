@@ -3,11 +3,14 @@
 import asyncio
 import json
 import logging
+import re
 from typing import Dict, Any, Optional, Tuple
 from collections import defaultdict
 from enum import Enum, auto
 
-from src.database.context_manager import ContextManager
+from src.database.memory_manager import MemoryManager
+from src.clients.zammad_client import ZammadClient
+from config.global_config import SUPPORT_CHANNELS
 from src.engine import TextEngine
 from src.message_handler import BotLogic
 from src.persona import Persona
@@ -24,39 +27,63 @@ class ResponseType(Enum):
 
 
 class ChatSystem:
-    def __init__(self, context_manager: ContextManager, text_engine: TextEngine) -> None:
+    def __init__(self, memory_manager: MemoryManager, text_engine: TextEngine, zammad_client: ZammadClient) -> None:
         self.personas: Dict[str, Persona] = load_personas_from_file()
-        self.context_manager: ContextManager = context_manager
+        self.memory_manager: MemoryManager = memory_manager
         self.text_engine: TextEngine = text_engine
+        self.zammad_client: ZammadClient = zammad_client
         self.bot_logic: BotLogic = BotLogic(self)
         self.last_api_requests: Dict[str, Dict[str, Optional[Dict[str, Any]]]] = defaultdict(dict)
         self.models_available: Dict[str, Any] = get_model_list()
         self.background_tasks = set()
 
-    async def _guess_and_record_business(self, contact_id: int, user_identifier: str) -> None:
+    def _should_create_ticket(self, channel: str, message: str) -> bool:
+        """Determines if an interaction should generate a Zammad ticket."""
+        # Simple check against configured support channels.
+        # This can be expanded with more complex rules (e.g., LLM analysis) in the future.
+        return channel.lower() in [c.lower() for c in SUPPORT_CHANNELS]
+
+    def _find_ticket_id_in_message(self, message: str) -> Optional[int]:
+        """Finds a ticket ID pattern like [Ticket#12345] in a message."""
+        match = re.search(r'\[Ticket#(\d+)\]', message, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+        return None
+
+    async def _get_or_create_zammad_user(self, user_identifier: str) -> Optional[int]:
+        """
+        Finds a Zammad user by email or creates a new one.
+        Returns the Zammad user ID.
+        """
+        # Regex to extract email from "First Last <email@example.com>" format
+        email_match = re.search(r'<(.+?)>', user_identifier)
+        email = email_match.group(1) if email_match else user_identifier
+
+        # Name is everything before the email bracket, or "Unknown"
+        name_part = user_identifier.split('<')[0].strip() if email_match else "Unknown User"
+        name_parts = name_part.split()
+        firstname = name_parts[0] if name_parts else "Unknown"
+        lastname = ' '.join(name_parts[1:]) if len(name_parts) > 1 else "User"
+
         try:
-            logger.info(f"Performing business affiliation guess for new contact ID {contact_id}.")
-            businesses = self.context_manager.get_all_businesses()
-            if not businesses: return
-            business_list_str = ", ".join([f"'{b['business_name']}' (ID: {b['business_id']})" for b in businesses])
-            classifier_persona = self.personas.get('derpr') or next(iter(self.personas.values()))
-            prompt = (
-                f"Analyze user identifier '{user_identifier}'. Which business is the most likely match: {business_list_str}? Respond: `ID: <id>, Reason: <reasoning>`. If none, `ID: None, Reason: <reasoning>`.")
-            context_object = {"persona_prompt": prompt, "history": [], "current_message": {"text": ""}}
+            # Search for existing user
+            search_results = await asyncio.to_thread(self.zammad_client.search_user, email)
+            if search_results:
+                return search_results[0]['id']
 
-            raw_guess, _ = await self.text_engine.generate_response(
-                classifier_persona.get_config_for_engine(),
-                context_object
+            # If not found, create a new user
+            logger.info(f"Creating new Zammad user for email: {email}")
+            new_user = await asyncio.to_thread(
+                self.zammad_client.create_user,
+                email=email,
+                firstname=firstname,
+                lastname=lastname
             )
+            return new_user['id']
 
-            guessed_id_str = raw_guess.split("ID:")[1].split(",")[0].strip()
-            reasoning = raw_guess.split("Reason:")[1].strip()
-            guessed_id = int(guessed_id_str) if guessed_id_str.lower() != 'none' else None
-
-            self.context_manager.record_business_guess(contact_id, guessed_id, reasoning)
-            logger.info(f"Recorded business guess for contact {contact_id}: Business ID {guessed_id}")
         except Exception as e:
-            logger.error(f"Failed to guess business for contact {contact_id}: {e}", exc_info=True)
+            logger.error(f"Error getting or creating Zammad user for '{user_identifier}': {e}", exc_info=True)
+            return None
 
     async def generate_response(
             self,
@@ -80,30 +107,79 @@ class ChatSystem:
                 logger.error(f"Persona '{persona_name}' does not exist.")
                 return "Error: Persona not found.", ResponseType.DEV_COMMAND
 
-            contact_id, ticket_id, is_new_contact = self.context_manager.get_context_for_generation(user_identifier,
-                                                                                                    channel)
-            if is_new_contact:
-                task = asyncio.create_task(self._guess_and_record_business(contact_id, user_identifier))
-                self.background_tasks.add(task)
-                task.add_done_callback(self.background_tasks.discard)
-
-            self.context_manager.log_interaction(ticket_id, 'inbound', message, channel, image_url)
-
-            # Determine the effective history limit. Prioritize the persona's setting.
+            # --- CONTEXT BUILDING using MemoryManager ---
             effective_limit = persona.get_context_length()
             if effective_limit is None:
-                effective_limit = history_limit  # Fallback to the limit from the interface call
+                effective_limit = history_limit
 
-            context_object = self.context_manager.build_prompt_context_object(contact_id, effective_limit)
-            context_object["persona_prompt"] = persona.get_prompt()
-            context_object["current_message"] = {"text": message, "image_url": image_url}
+            history_from_db = self.memory_manager.get_history(user_identifier, effective_limit)
+            interaction_history = []
+            for item in history_from_db:
+                interaction_history.append({"role": "user", "content": item["user_message"]})
+                interaction_history.append({"role": "assistant", "content": item["bot_response"]})
 
+            context_object = {
+                "persona_prompt": persona.get_prompt(),
+                "history": interaction_history,
+                "current_message": {"text": message, "image_url": image_url}
+            }
+
+            # --- DUAL-MODE LOGIC ---
+            is_ticket_request = self._should_create_ticket(channel, message)
+            zammad_ticket_id = self._find_ticket_id_in_message(message)
+            ticket_to_log = None  # The ticket ID we will log to memory
+
+            if is_ticket_request:
+                customer_id = await self._get_or_create_zammad_user(user_identifier)
+                if customer_id:
+                    if zammad_ticket_id:
+                        # Add to existing ticket
+                        await asyncio.to_thread(
+                            self.zammad_client.add_article_to_ticket,
+                            ticket_id=zammad_ticket_id,
+                            body=message
+                        )
+                        ticket_to_log = zammad_ticket_id
+                        logger.info(f"Added new message to existing Zammad ticket #{ticket_to_log}")
+                    else:
+                        # Create new ticket
+                        title = f"New request from {user_identifier}"
+                        new_ticket = await asyncio.to_thread(
+                            self.zammad_client.create_ticket,
+                            title=title,
+                            group='Users',  # Or some other default
+                            customer_id=customer_id,
+                            article_body=message
+                        )
+                        ticket_to_log = new_ticket['id']
+                        logger.info(f"Created new Zammad ticket #{ticket_to_log}")
+                else:
+                    logger.error("Could not get or create Zammad user, proceeding without ticket.")
+
+            # --- LLM RESPONSE GENERATION ---
             persona_config = persona.get_config_for_engine()
             reply_content, api_payload = await self.text_engine.generate_response(persona_config, context_object)
-
             self.last_api_requests[user_identifier][persona_name] = api_payload
 
-            self.context_manager.log_interaction(ticket_id, 'outbound', reply_content, channel)
+            # --- POST-GENERATION ACTIONS ---
+            # If it was a ticket request, add the bot's reply as an article
+            if is_ticket_request and ticket_to_log:
+                await asyncio.to_thread(
+                    self.zammad_client.add_article_to_ticket,
+                    ticket_id=ticket_to_log,
+                    body=reply_content
+                )
+                logger.info(f"Added bot reply to Zammad ticket #{ticket_to_log}")
+
+            # Log the entire exchange to the user memory DB
+            self.memory_manager.log_interaction(
+                user_identifier=user_identifier,
+                channel=channel,
+                user_message=message,
+                bot_response=reply_content,
+                zammad_ticket_id=ticket_to_log
+            )
+
             return reply_content, ResponseType.LLM_GENERATION
 
         except Exception as e:
