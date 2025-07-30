@@ -174,7 +174,7 @@ class BotLogic:
     def _what_temp(self, args: list, persona: Persona) -> Tuple[str, bool]:
         return f"Temperature for {persona.get_name()} is set to {persona.get_temperature() or 'default'}.", False
 
-    def _handle_set(self, args: list, persona: Persona, user_identifier: str) -> Tuple[str, bool]:
+    def _handle_set(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[None, bool]:
         if not args:
             return None, False
         sub_command = args[0]
@@ -183,18 +183,18 @@ class BotLogic:
             return handler(args, persona)
         return f"Error: Unknown 'set' command: {sub_command}", False
 
-    def _set_prompt(self, args: list, persona: Persona) -> Tuple[str, bool]:
+    def _set_prompt(self, args: list, persona: Persona) -> tuple[str, bool] | tuple[None, bool]:
         prompt = ' '.join(args[1:])
         if not prompt:
             return None, False
         persona.set_prompt(prompt)
         return 'Prompt saved.', True
 
-    def _set_default_prompt(self, args: list, persona: Persona) -> Tuple[str, bool]:
+    def _set_default_prompt(self, args: list, persona: Persona) -> tuple[str, bool] | tuple[None, bool]:
         persona.set_prompt(DEFAULT_PERSONA)
         return f"Prompt for {persona.get_name()} reset to default.", True
 
-    def _set_model(self, args: list, persona: Persona) -> Tuple[str, bool]:
+    def _set_model(self, args: list, persona: Persona) -> tuple[str, bool] | tuple[None, bool]:
         try:
             model_name = args[1]
         except IndexError:
@@ -207,7 +207,7 @@ class BotLogic:
         else:
             return f"Error: Model '{model_name}' does not exist.", False
 
-    def _set_tokens(self, args: list, persona: Persona) -> Tuple[str, bool]:
+    def _set_tokens(self, args: list, persona: Persona) -> tuple[str, bool] | tuple[None, bool]:
         try:
             limit_str = args[1]
             token_limit = int(limit_str)
@@ -219,7 +219,7 @@ class BotLogic:
             persona.set_response_token_limit(None)
             return f"Non-numeric token limit '{limit_str}' provided. The default token limit will be used for {persona.get_name()}.", True
 
-    def _set_context(self, args: list, persona: Persona) -> Tuple[str, bool]:
+    def _set_context(self, args: list, persona: Persona) -> tuple[str, bool] | tuple[None, bool]:
         try:
             limit_str = args[1]
             context_limit = int(limit_str)
@@ -231,7 +231,7 @@ class BotLogic:
             persona.set_context_length(None)
             return f"Non-numeric context limit '{limit_str}' provided. The default context length will be used for {persona.get_name()}.", True
 
-    def _set_temp(self, args: list, persona: Persona) -> Tuple[str, bool]:
+    def _set_temp(self, args: list, persona: Persona) -> tuple[str, bool] | tuple[None, bool]:
         try:
             temp_str = args[1]
             new_temp = float(temp_str)
@@ -245,7 +245,7 @@ class BotLogic:
             persona.set_temperature(None)
             return f"Non-numeric temperature '{temp_str}' provided. The default temperature will be used for {persona.get_name()}.", True
 
-    def _set_top_p(self, args: list, persona: Persona) -> Tuple[str, bool]:
+    def _set_top_p(self, args: list, persona: Persona) -> tuple[str, bool] | tuple[None, bool]:
         try:
             top_p_str = args[1]
             new_top_p = float(top_p_str)
@@ -259,7 +259,7 @@ class BotLogic:
             persona.set_top_p(None)
             return f"Non-numeric Top P '{top_p_str}' provided. The default Top P will be used for {persona.get_name()}.", True
 
-    def _set_top_k(self, args: list, persona: Persona) -> Tuple[str, bool]:
+    def _set_top_k(self, args: list, persona: Persona) -> tuple[str, bool] | tuple[None, bool]:
         try:
             top_k_str = args[1]
             new_top_k = int(top_k_str)
@@ -271,19 +271,19 @@ class BotLogic:
             persona.set_top_k(None)
             return f"Non-numeric Top K '{top_k_str}' provided. The default Top K will be used for {persona.get_name()}.", True
 
-    def _handle_start_conversation(self, args: list, persona: Persona, user_identifier: str) -> Tuple[str, bool]:
+    def _handle_start_conversation(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[None, bool]:
         if args:
             return None, False
         persona.set_context_length(0)
         return f"{persona.get_name()}: Hello! Starting new conversation...", True
 
-    def _handle_stop_conversation(self, args: list, persona: Persona, user_identifier: str) -> Tuple[str, bool]:
+    def _handle_stop_conversation(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[None, bool]:
         if args:
             return None, False
         persona.set_context_length(DEFAULT_CONTEXT_LIMIT)
         return f"{persona.get_name()}: Goodbye! Resetting context.", True
 
-    def _handle_dump_last(self, args: list, persona: Persona, user_identifier: str) -> Tuple[str, bool]:
+    def _handle_dump_last(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[None, bool]:
         if args:
             return None, False
 
@@ -293,7 +293,6 @@ class BotLogic:
         if not last_request:
             return f"{persona_name}: No previous request to dump for your session with this persona.", False
 
-        # **MODIFIED FOR READABILITY**
         # Create a pretty-printed JSON string
         pretty_json = json.dumps(last_request, indent=2, sort_keys=True)
         # For display purposes, un-escape newlines so they render as line breaks in Discord
@@ -301,12 +300,12 @@ class BotLogic:
 
         return f"{persona_name}: Last API Request Payload\n{display_json}", False
 
-    def _handle_save(self, args: list, persona: Persona, user_identifier: str) -> Tuple[str, bool]:
+    def _handle_save(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[None, bool]:
         if args:
             return None, False
         return 'Personas saved.', True
 
-    def _handle_update_models(self, args: list, persona: Persona, user_identifier: str) -> Tuple[str, bool]:
+    def _handle_update_models(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[None, bool]:
         if args:
             return None, False
         self.chat_system.models_available = get_model_list(update=True)
