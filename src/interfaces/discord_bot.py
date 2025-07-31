@@ -1,4 +1,5 @@
 # src/interfaces/discord_bot.py
+
 import logging
 import re
 import discord
@@ -96,23 +97,22 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                 user_identifier = str(message.author.id)
                 channel_name = message.channel.name
                 image_url = await get_image_url(message)
+                user_display_name = message.author.display_name # Get display name for Zammad title/articles
 
-                # **MODIFIED: Use the new response tuple**
                 response_text, response_type = await chat_system.generate_response(
                     persona_name=active_persona_name,
                     user_identifier=user_identifier,
                     channel=channel_name,
                     message=cleaned_message,
                     image_url=image_url,
-                    history_limit=20
+                    history_limit=20,
+                    user_display_name=user_display_name # Pass new parameter
                 )
 
                 if response_text:
                     if response_type == ResponseType.DEV_COMMAND:
-                        # Use the special formatting function for these commands
                         await _send_dev_response(message.channel, response_text)
                     else:
-                        # Use the standard logic for all other messages
                         for chunk in split_string_by_limit(response_text, DISCORD_CHAR_LIMIT):
                             await message.channel.send(chunk)
                 else:

@@ -167,9 +167,12 @@ async def test_new_ticket_lifecycle(live_chat_system, managed_zammad_user):
     created_ticket_id = None
 
     try:
+        # The return_value must be a tuple (user_id, email) to match the real method's signature.
+        mock_user_return = (user_info["id"], PERSISTENT_TEST_USER_EMAIL)
+
         # Patch flaky dependencies to isolate the test's focus
         with patch.object(chat_system, '_get_or_create_zammad_user', new_callable=AsyncMock,
-                          return_value=user_info["id"]), \
+                          return_value=mock_user_return), \
                 patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
                              return_value=("Mocked LLM reply.", ResponseType.LLM_GENERATION)):
 
@@ -177,7 +180,8 @@ async def test_new_ticket_lifecycle(live_chat_system, managed_zammad_user):
                 persona_name="derpr",
                 user_identifier=user_info["identifier"],
                 channel="gmail",
-                message="My computer is on fire, please help!"
+                message="My computer is on fire, please help!",
+                user_display_name="Pytest PersistentUser"
             )
 
             # Assertions must be inside the 'with' block to ensure mocks are active.

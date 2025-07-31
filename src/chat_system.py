@@ -49,17 +49,36 @@ class ChatSystem:
             return int(match.group(1))
         return None
 
-    async def _get_or_create_zammad_user(self, user_identifier: str, channel: str) -> Optional[int]:
+    async def _find_active_ticket_for_user(self, customer_id: int) -> Optional[int]:
+        """Finds the most recently updated open ticket for a given Zammad user ID."""
+        try:
+            query = f"customer_id:{customer_id} AND state.name:open"
+            search_results = await asyncio.to_thread(
+                self.zammad_client.search_tickets,
+                query=query,
+                sort_by='updated_at',
+                order_by='desc'
+            )
+            if search_results:
+                return search_results[0]['id']
+            return None
+        except Exception as e:
+            logger.error(f"Error searching for active tickets for customer {customer_id}: {e}", exc_info=True)
+            return None
+
+    async def _get_or_create_zammad_user(self, user_identifier: str, channel: str,
+                                         user_display_name: Optional[str] = None) -> Tuple[
+        Optional[int], Optional[str]]:
         """
-        Finds a Zammad user by email or creates a new one. Handles non-email identifiers
-        by creating a unique, channel-specific dummy email. Returns the Zammad user ID.
+        Finds a Zammad user by email or creates one. Uses display name for better user creation.
+        Returns a tuple of (Zammad user ID, Zammad-registered email).
         """
         email_match = re.search(r'<(.+?)>', user_identifier)
         is_real_email = email_match is not None
 
         if is_real_email:
             email = email_match.group(1)
-            name_part = user_identifier.split('<')[0].strip()
+            name_part = user_display_name if user_display_name else user_identifier.split('<')[0].strip()
             name_parts = name_part.split()
             firstname = name_parts[0] if name_parts else "Unknown"
             lastname = ' '.join(name_parts[1:]) if len(name_parts) > 1 else "User"
@@ -67,25 +86,28 @@ class ChatSystem:
         else:
             domain = urlparse(self.zammad_client.api_url).hostname
             email = f"{channel.lower()}-{user_identifier}@{domain}"
-            firstname = f"{channel.capitalize()} User"
-            lastname = user_identifier
+            # Use the display name for a more human-readable name in Zammad
+            name_parts = user_display_name.split() if user_display_name else [f"{channel.capitalize()} User",
+                                                                              user_identifier]
+            firstname = name_parts[0]
+            lastname = ' '.join(name_parts[1:]) if len(name_parts) > 1 else ""
             note = f"Auto-generated user from {channel.capitalize()}. Original identifier: {user_identifier}"
 
         try:
             search_results = await asyncio.to_thread(self.zammad_client.search_user, email)
             if search_results:
-                return search_results[0]['id']
+                return search_results[0]['id'], search_results[0]['email']
 
             logger.info(f"Creating new Zammad user for identifier '{user_identifier}' with email: {email}")
             new_user = await asyncio.to_thread(
                 self.zammad_client.create_user,
                 email=email, firstname=firstname, lastname=lastname, note=note
             )
-            return new_user['id']
+            return new_user['id'], new_user['email']
 
         except Exception as e:
             logger.error(f"Error getting or creating Zammad user for '{user_identifier}': {e}", exc_info=True)
-            return None
+            return None, None
 
     async def generate_response(
             self,
@@ -94,7 +116,8 @@ class ChatSystem:
             channel: str,
             message: str,
             image_url: Optional[str] = None,
-            history_limit: Optional[int] = None
+            history_limit: Optional[int] = None,
+            user_display_name: Optional[str] = None
     ) -> Tuple[str, ResponseType]:
         """Orchestrates response generation, returning the response string and its type."""
         command_result = await self.bot_logic.preprocess_message(persona_name, user_identifier, message)
@@ -103,7 +126,7 @@ class ChatSystem:
                 save_personas_to_file(self.personas)
             return command_result["response"], ResponseType.DEV_COMMAND
 
-        ticket_to_log = None # Initialize here to be available in the final except block
+        ticket_to_log = None
         try:
             persona = self.personas.get(persona_name)
             if not persona:
@@ -116,27 +139,46 @@ class ChatSystem:
                 interaction_history.append({"role": "user", "content": item["user_message"]})
                 interaction_history.append({"role": "assistant", "content": item["bot_response"]})
 
-            context_object = {"persona_prompt": persona.get_prompt(), "history": interaction_history, "current_message": {"text": message, "image_url": image_url}}
+            context_object = {"persona_prompt": persona.get_prompt(), "history": interaction_history,
+                              "current_message": {"text": message, "image_url": image_url}}
             is_ticket_request = self._should_create_ticket(channel, message)
-            zammad_ticket_id = self._find_ticket_id_in_message(message)
 
             if is_ticket_request:
-                # This inner block isolates Zammad errors, ensuring the interaction is logged even if Zammad fails.
                 try:
-                    customer_id = await self._get_or_create_zammad_user(user_identifier, channel)
-                    if customer_id:
-                        if zammad_ticket_id:
-                            await asyncio.to_thread(self.zammad_client.add_article_to_ticket, ticket_id=zammad_ticket_id, body=message)
-                            ticket_to_log = zammad_ticket_id
-                        else:
-                            sanitized_identifier = user_identifier.split('<')[0].strip()
-                            title = f"New request from {sanitized_identifier} via {channel}"
-                            new_ticket = await asyncio.to_thread(self.zammad_client.create_ticket, title=title, group='Users', customer_id=customer_id, article_body=message)
-                            ticket_to_log = new_ticket.get('id') if new_ticket else None
-                except Exception as zammad_error:
-                    logger.error(f"A Zammad API error occurred during ticket creation: {zammad_error}", exc_info=True)
+                    customer_id, zammad_email = await self._get_or_create_zammad_user(user_identifier, channel,
+                                                                                      user_display_name)
+                    if customer_id and zammad_email:
+                        # Priority 1: Check for an explicit ticket ID in the message
+                        ticket_id = self._find_ticket_id_in_message(message)
+                        # Priority 2: If no explicit ID, search for an active open ticket for the user
+                        if not ticket_id:
+                            ticket_id = await self._find_active_ticket_for_user(customer_id)
 
-            reply_content, api_payload = await self.text_engine.generate_response(persona.get_config_for_engine(), context_object)
+                        if ticket_id:
+                            await asyncio.to_thread(self.zammad_client.add_article_to_ticket, ticket_id=ticket_id,
+                                                    body=message, impersonate_email=zammad_email)
+                            ticket_to_log = ticket_id
+                        else:
+                            ticket_title_name = user_display_name if user_display_name else user_identifier.split('<')[
+                                0].strip()
+                            title = f"New request from {ticket_title_name} via {channel}"
+
+                            empty_ticket = await asyncio.to_thread(self.zammad_client.create_ticket, title=title,
+                                                                   group='Users', customer_id=customer_id)
+
+                            if empty_ticket and empty_ticket.get('id'):
+                                ticket_to_log = empty_ticket['id']
+                                await asyncio.to_thread(self.zammad_client.add_article_to_ticket,
+                                                        ticket_id=ticket_to_log, body=message,
+                                                        impersonate_email=zammad_email)
+                                logger.info(f"Created new Zammad ticket #{ticket_to_log} and added initial article.")
+                            else:
+                                logger.error("Zammad client returned a null ticket object after creation attempt.")
+                except Exception as zammad_error:
+                    logger.error(f"A Zammad API error occurred during ticket processing: {zammad_error}", exc_info=True)
+
+            reply_content, api_payload = await self.text_engine.generate_response(persona.get_config_for_engine(),
+                                                                                  context_object)
             self.last_api_requests[user_identifier][persona_name] = api_payload
 
             self.memory_manager.log_interaction(
@@ -146,15 +188,16 @@ class ChatSystem:
 
             if is_ticket_request and ticket_to_log:
                 try:
-                    await asyncio.to_thread(self.zammad_client.add_article_to_ticket, ticket_id=ticket_to_log, body=reply_content)
+                    await asyncio.to_thread(self.zammad_client.add_article_to_ticket, ticket_id=ticket_to_log,
+                                            body=reply_content)
                 except Exception as e:
-                    logger.error(f"Failed to add bot reply to Zammad ticket #{ticket_to_log}. The interaction is still logged locally. Error: {e}", exc_info=True)
+                    logger.error(
+                        f"Failed to add bot reply to Zammad ticket #{ticket_to_log}. The interaction is still logged locally. Error: {e}",
+                        exc_info=True)
 
             return reply_content, ResponseType.LLM_GENERATION
 
         except Exception as e:
-            # This is the production safety net. It catches any unexpected errors (e.g., from the LLM)
-            # and ensures the failed attempt is still logged for auditing.
             logger.error(f"A critical error occurred in generate_response for {user_identifier}: {e}", exc_info=True)
             error_message = f"An internal error occurred: {type(e).__name__}"
             self.memory_manager.log_interaction(
