@@ -35,37 +35,26 @@ class ZammadClient:
             raise ValueError("ZAMMAD_URL and ZAMMAD_API_KEY must be set in .env")
 
         # Prepare the authentication header for all subsequent requests
-        self.headers = {
+        self.base_headers = {
             'Authorization': f'Token token={self.api_token}',
             'Content-Type': 'application/json'
         }
 
-    def _make_request(self, method: str, endpoint: str, params: Optional[Dict[str, Any]] = None, **kwargs):
+    def _make_request(self, method: str, endpoint: str, params: Optional[Dict[str, Any]] = None,
+                      impersonate_email: Optional[str] = None, **kwargs):
         """
         A private helper method to make authenticated requests to the Zammad API.
-
-        Args:
-            method (str): The HTTP method (e.g., 'get', 'post', 'put').
-            endpoint (str): The API endpoint (e.g., 'tickets', 'users/me').
-            params (Optional[Dict[str, Any]]): A dictionary of URL parameters for the request.
-            **kwargs: Additional keyword arguments passed to requests.request.
-
-        Returns:
-            dict or list: The JSON response from the API.
-
-        Raises:
-            requests.exceptions.RequestException: For connection errors or HTTP error status codes.
         """
         url = f"{self.api_url}/api/v1/{endpoint}"
 
+        headers = self.base_headers.copy()
+        if impersonate_email:
+            headers['X-On-Behalf-Of'] = impersonate_email
+
         try:
-            # Pass params directly to requests to handle URL encoding safely.
-            response = requests.request(method, url, params=params, headers=self.headers, timeout=15, **kwargs)
-            # Raise an exception if the response was an HTTP error (4xx or 5xx)
+            response = requests.request(method, url, params=params, headers=headers, timeout=15, **kwargs)
             response.raise_for_status()
 
-            # If the response has no content, we cannot parse JSON.
-            # This handles 204 No Content, and also 200 OK with an empty body from DELETE requests.
             if not response.content:
                 return None
 
@@ -76,31 +65,22 @@ class ZammadClient:
 
     # --- Ticket Methods ---
 
-    def create_ticket(self, title: str, group: str, customer_id: int, article_body: str, tags: Optional[List[str]] = None) -> dict:
+    def create_ticket(self, title: str, group: str, customer_id: int, article_body: Optional[str] = None,
+                      tags: Optional[List[str]] = None) -> dict:
         """
-        Creates a new ticket in Zammad.
-
-        Args:
-            title (str): The title of the ticket.
-            group (str): The name of the group to assign the ticket to.
-            customer_id (int): The Zammad ID of the customer user.
-            article_body (str): The initial message/body of the ticket.
-            tags (Optional[List[str]]): A list of tags to add to the ticket.
-
-        Returns:
-            dict: A dictionary representing the newly created ticket.
+        Creates a new ticket in Zammad. If article_body is omitted, creates an empty ticket.
         """
         payload = {
             "title": title,
             "group": group,
             "customer_id": customer_id,
-            "article": {
+        }
+        if article_body:
+            payload["article"] = {
                 "body": article_body,
                 "type": "note",
                 "internal": False
             }
-        }
-        # Zammad's API expects tags as a comma-separated string
         if tags:
             payload['tags'] = ','.join(tags)
         return self._make_request('post', 'tickets', json=payload)
@@ -108,23 +88,13 @@ class ZammadClient:
     def delete_ticket(self, ticket_id: int) -> None:
         """
         Deletes a ticket from Zammad.
-
-        Args:
-            ticket_id (int): The ID of the ticket to delete.
         """
         return self._make_request('delete', f'tickets/{ticket_id}')
 
-    def add_article_to_ticket(self, ticket_id: int, body: str, internal: bool = False) -> dict:
+    def add_article_to_ticket(self, ticket_id: int, body: str, internal: bool = False,
+                              impersonate_email: Optional[str] = None) -> dict:
         """
         Adds a new article (a message or note) to an existing ticket.
-
-        Args:
-            ticket_id (int): The ID of the ticket to add the article to.
-            body (str): The content of the message.
-            internal (bool): Whether the article is an internal note (default False).
-
-        Returns:
-            dict: A dictionary representing the newly created article.
         """
         payload = {
             "ticket_id": ticket_id,
@@ -132,20 +102,17 @@ class ZammadClient:
             "type": "note",
             "internal": internal
         }
-        return self._make_request('post', 'ticket_articles', json=payload)
+        return self._make_request('post', 'ticket_articles', json=payload, impersonate_email=impersonate_email)
 
-    def search_tickets(self, query: str, limit: int = 50) -> list:
+    def search_tickets(self, query: str, limit: int = 50, sort_by: Optional[str] = None,
+                       order_by: Optional[str] = 'desc') -> list:
         """
-        Searches for tickets by a query string.
-
-        Args:
-            query (str): The search term (e.g., 'customer_id:123').
-            limit (int): The maximum number of tickets to return.
-
-        Returns:
-            list: A list of ticket objects matching the query.
+        Searches for tickets by a query string with optional sorting.
         """
         params = {'query': query, 'limit': limit}
+        if sort_by:
+            params['sort_by'] = sort_by
+            params['order_by'] = order_by
         return self._make_request('get', 'tickets/search', params=params)
 
     # --- User Methods ---
@@ -153,31 +120,18 @@ class ZammadClient:
     def get_self(self) -> dict:
         """
         Retrieves the user object associated with the API token.
-        Useful for verifying authentication.
-
-        Returns:
-            dict: A dictionary representing the authenticated user.
         """
         return self._make_request('get', 'users/me')
 
     def create_user(self, email: str, firstname: str, lastname: str, note: Optional[str] = None) -> dict:
         """
         Creates a new customer user.
-
-        Args:
-            email (str): The user's email address.
-            firstname (str): The user's first name.
-            lastname (str): The user's last name.
-            note (Optional[str]): An optional note for the user's profile.
-
-        Returns:
-            dict: A dictionary representing the newly created user.
         """
         payload = {
             "firstname": firstname,
             "lastname": lastname,
             "email": email,
-            "roles": ["Customer"],  # Explicitly set role
+            "roles": ["Customer"],
             "active": True
         }
         if note:
@@ -187,21 +141,12 @@ class ZammadClient:
     def delete_user(self, user_id: int) -> None:
         """
         Deletes a user from Zammad.
-
-        Args:
-            user_id (int): The ID of the user to delete.
         """
         return self._make_request('delete', f'users/{user_id}')
 
     def search_user(self, query: str) -> list:
         """
-        Searches for users by a query string (e.g., email or name).
-
-        Args:
-            query (str): The search term.
-
-        Returns:
-            list: A list of user objects matching the query.
+        Searches for users by a query string.
         """
         params = {'query': query}
         return self._make_request('get', 'users/search', params=params)

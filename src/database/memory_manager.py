@@ -108,7 +108,7 @@ class MemoryManager:
         """
         params = {'user_identifier': user_identifier}
 
-        if limit is not None and limit > 0:
+        if isinstance(limit, int) and limit > 0:
             query += " LIMIT :limit"
             params['limit'] = limit
 

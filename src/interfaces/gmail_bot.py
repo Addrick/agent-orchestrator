@@ -56,7 +56,8 @@ class GmailInterface:
             try:
                 await asyncio.to_thread(creds.refresh, Request())
             except RefreshError as e:
-                logger.warning(f"Refresh token is invalid, deleting '{self.token_file}' and re-authenticating. Error: {e}")
+                logger.warning(
+                    f"Refresh token is invalid, deleting '{self.token_file}' and re-authenticating. Error: {e}")
                 if os.path.exists(self.token_file):
                     os.remove(self.token_file)
                 creds = None  # Force re-authentication
@@ -66,7 +67,8 @@ class GmailInterface:
                 logger.error(f"FATAL: Gmail credentials file not found at '{self.credentials_file}'. Please create it.")
                 self._shutdown_event.set()
                 return
-            flow = await asyncio.to_thread(InstalledAppFlow.from_client_secrets_file, self.credentials_file, self.SCOPES)
+            flow = await asyncio.to_thread(InstalledAppFlow.from_client_secrets_file, self.credentials_file,
+                                           self.SCOPES)
             creds = await asyncio.to_thread(flow.run_local_server, port=0)
             await asyncio.to_thread(lambda: open(self.token_file, 'w').write(creds.to_json()))
 
@@ -96,16 +98,25 @@ class GmailInterface:
             payload = msg_data['payload']
             headers = payload['headers']
             subject = next((h['value'] for h in headers if h['name'].lower() == 'subject'), 'No Subject')
-            sender = next((h['value'] for h in headers if h['name'].lower() == 'from'), '')
+
+            sender_header_value = next((h['value'] for h in headers if h['name'].lower() == 'from'), '')
+            sender_email_match = re.search(r'<(.+?)>', sender_header_value)
+            sender_email = sender_email_match.group(
+                1) if sender_email_match else sender_header_value  # Full email as identifier
+
+            # Extract display name for Zammad title/articles
+            user_display_name = sender_header_value.split('<')[0].strip() if sender_email_match else sender_email
+
             recipient = next((h['value'] for h in headers if h['name'].lower() == 'to'), '')
             message_id_header = next((h['value'] for h in headers if h['name'].lower() == 'message-id'), None)
 
             # --- SENDER BLOCKING LOGIC ---
             if BLOCK_EXTERNAL_SENDER_REPLIES:
-                sender_email_match = re.search(r'<(.+?)>', sender)
-                sender_email = sender_email_match.group(1).lower() if sender_email_match else sender.lower()
-                if not any(allowed.lower() in sender_email for allowed in ALLOWED_SENDER_LIST):
-                    logger.info(f"Skipping email from '{sender}' (ID: {msg_id}) as they are not in the allowed list.")
+                sender_email_only = sender_email_match.group(
+                    1).lower() if sender_email_match else sender_header_value.lower()
+                if not any(allowed.lower() in sender_email_only for allowed in ALLOWED_SENDER_LIST):
+                    logger.info(
+                        f"Skipping email from '{sender_header_value}' (ID: {msg_id}) as they are not in the allowed list.")
                     return
 
             # --- MESSAGE PROCESSING ---
@@ -119,7 +130,7 @@ class GmailInterface:
                 user_input = base64.urlsafe_b64decode(payload['body']['data']).decode('utf-8', 'ignore')
 
             if not user_input.strip():
-                logger.warning(f"Email from {sender} (ID: {msg_id}) has no text body. Skipping.")
+                logger.warning(f"Email from {sender_header_value} (ID: {msg_id}) has no text body. Skipping.")
                 return
 
             active_persona_name = self._get_persona_from_recipient(recipient)
@@ -127,14 +138,16 @@ class GmailInterface:
 
             response_text, response_type = await self.chat_system.generate_response(
                 persona_name=active_persona_name,
-                user_identifier=sender,
+                user_identifier=sender_email,  # Pass parsed email as identifier
                 channel="gmail",
                 message=full_message,
-                history_limit=20
+                image_url=None,
+                history_limit=20,
+                user_display_name=user_display_name  # Pass new parameter
             )
 
             if response_text:
-                await self._send_reply(service, to=sender, subject=subject, body=response_text,
+                await self._send_reply(service, to=sender_header_value, subject=subject, body=response_text,
                                        in_reply_to=message_id_header, thread_id=msg_data['threadId'])
                 await asyncio.to_thread(
                     service.users().messages().modify(userId='me', id=msg_id,
@@ -164,7 +177,8 @@ class GmailInterface:
                 for history_record in history_response['history']:
                     if 'messagesAdded' in history_record:
                         for msg_summary in history_record['messagesAdded']:
-                            if 'SENT' in msg_summary['message'].get('labelIds', []) or msg_summary['message']['id'] in self._processed_ids:
+                            if 'SENT' in msg_summary['message'].get('labelIds', []) or msg_summary['message'][
+                                'id'] in self._processed_ids:
                                 continue
                             msg_id = msg_summary['message']['id']
                             self._processed_ids.append(msg_id)

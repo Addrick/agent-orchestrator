@@ -57,8 +57,8 @@ def test_make_request_http_error(mock_request, zammad_client):
 # --- Ticket Method Tests ---
 
 @patch('src.clients.zammad_client.ZammadClient._make_request')
-def test_create_ticket(mock_make_request, zammad_client):
-    """Test the payload construction for creating a ticket."""
+def test_create_ticket_with_article(mock_make_request, zammad_client):
+    """Test the payload construction for creating a ticket with an initial article."""
     zammad_client.create_ticket(
         title="New Issue",
         group="Users",
@@ -76,7 +76,23 @@ def test_create_ticket(mock_make_request, zammad_client):
             "type": "note",
             "internal": False
         },
-        "tags": "pytest,automated"  # Verify tags are comma-separated
+        "tags": "pytest,automated"
+    }
+    mock_make_request.assert_called_once_with('post', 'tickets', json=expected_payload)
+
+
+@patch('src.clients.zammad_client.ZammadClient._make_request')
+def test_create_ticket_without_article(mock_make_request, zammad_client):
+    """Test that creating a ticket without an article body omits the 'article' key."""
+    zammad_client.create_ticket(
+        title="Empty Ticket",
+        group="Users",
+        customer_id=123
+    )
+    expected_payload = {
+        "title": "Empty Ticket",
+        "group": "Users",
+        "customer_id": 123
     }
     mock_make_request.assert_called_once_with('post', 'tickets', json=expected_payload)
 
@@ -89,12 +105,36 @@ def test_delete_ticket(mock_make_request, zammad_client):
 
 
 @patch('src.clients.zammad_client.ZammadClient._make_request')
-def test_search_tickets(mock_make_request, zammad_client):
-    """Test that search_tickets calls _make_request with a params dictionary."""
-    query = "customer_id:123 AND state:open"
-    zammad_client.search_tickets(query=query, limit=10)
+def test_add_article_with_impersonation(mock_make_request, zammad_client):
+    """Test that the impersonation header is correctly added when adding an article."""
+    zammad_client.add_article_to_ticket(
+        ticket_id=123,
+        body="User's reply",
+        impersonate_email="customer@example.com"
+    )
+    expected_payload = {
+        "ticket_id": 123,
+        "body": "User's reply",
+        "type": "note",
+        "internal": False
+    }
+    mock_make_request.assert_called_once_with(
+        'post', 'ticket_articles', json=expected_payload, impersonate_email="customer@example.com"
+    )
 
-    expected_params = {'query': query, 'limit': 10}
+
+@patch('src.clients.zammad_client.ZammadClient._make_request')
+def test_search_tickets_with_sorting(mock_make_request, zammad_client):
+    """Test that search_tickets correctly includes sorting parameters."""
+    query = "customer_id:123"
+    zammad_client.search_tickets(query=query, limit=10, sort_by='updated_at', order_by='asc')
+
+    expected_params = {
+        'query': query,
+        'limit': 10,
+        'sort_by': 'updated_at',
+        'order_by': 'asc'
+    }
     mock_make_request.assert_called_once_with('get', 'tickets/search', params=expected_params)
 
 
@@ -135,7 +175,6 @@ def test_create_user_without_note(mock_make_request, zammad_client):
         "roles": ["Customer"],
         "active": True
     }
-    # Note should not be in the payload
     mock_make_request.assert_called_once_with('post', 'users', json=expected_payload)
 
 
