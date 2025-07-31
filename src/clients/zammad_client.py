@@ -2,11 +2,13 @@
 
 import os
 import requests
+import logging
 from dotenv import load_dotenv
 from typing import Optional, List, Dict, Any
 
 # Load environment variables from a .env file if it exists
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 
 class ZammadClient:
@@ -69,8 +71,7 @@ class ZammadClient:
 
             return response.json()
         except requests.exceptions.RequestException as e:
-            # You would add more robust logging here in a real application
-            print(f"API Request Error to {url}: {e}")
+            logger.error(f"Zammad API Request Error to {method.upper()} {url}: {e}", exc_info=True)
             raise
 
     # --- Ticket Methods ---

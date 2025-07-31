@@ -3,7 +3,9 @@ Settings and default values.
 """
 import os
 CREDENTIALS_DIR = os.path.join(os.path.dirname(__file__), 'creds')
-
+CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
+SRC_DIR = os.path.dirname(CONFIG_DIR)
+ROOT_DIR = os.path.dirname(SRC_DIR)
 #
 DISCORD_BOT = 1
 # --- DISCORD_BOT CONFIG ---
@@ -44,6 +46,7 @@ UPDATE_MODELS_ON_STARTUP = True
 
 
 PERSONA_SAVE_FILE = '../config/personas'
+TEST_PERSONA_SAVE_FILE = TEST_DATABASE_DIR = os.path.join(ROOT_DIR, 'tests', 'test_personas')
 STDOUT_LOG = '../config/logs/stdout.txt'
 
 KOBOLDCPP_EXE = r'F:\Machine Learning\koboldcpp.exe'
@@ -55,11 +58,15 @@ KOBOLDCPP_CONFIG = r'F:\Machine Learning\dolphin-2.7-mixtral-8x7b.Q5_K_M.kcpps'
 LOCAL_REPO_PATH = 'C:\\Users\\Adam\\Programming\\Python\\derpr-python'
 DATABASE_FILE_PATH = '../src/database/it_support_memory.db'
 
+# Dedicated path for the integration test database, located within the tests directory
+TEST_DATABASE_DIR = os.path.join(ROOT_DIR, 'tests', 'database')
+TEST_MEMORY_DATABASE_FILE = os.path.join(TEST_DATABASE_DIR, "user_memory.test.db")
+
 CHAT_LOG_LOCATION = '../config/logs/'
 LOCAL_CHAT_LOG = '../config/logs/'
 
 ####
 # Zammad Ticketing
 ZAMMAD_BOT = 1
-SUPPORT_CHANNELS = ['tech-support', 'it-help']
+SUPPORT_CHANNELS = ['tech-support', 'it-help', 'gmail']
 ZAMMAD_DEFAULT_GROUP = "Users"

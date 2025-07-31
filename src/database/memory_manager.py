@@ -35,24 +35,34 @@ class MemoryManager:
         If db_path is None, it falls back to the DATABASE_FILE constant.
         """
         self.db_path = db_path if db_path is not None else str(DATABASE_FILE)
-        self._in_memory_conn: Optional[sqlite3.Connection] = None
+        self._conn: Optional[sqlite3.Connection] = None
         if self.db_path != ':memory:':
             DB_DIR.mkdir(parents=True, exist_ok=True)
 
     def _get_connection(self) -> sqlite3.Connection:
-        """Returns a configured database connection."""
-        if self.db_path == ':memory:':
-            if self._in_memory_conn is None:
-                # Use PARSE_COLNAMES to enable the registered "timestamp" converter
-                self._in_memory_conn = sqlite3.connect(':memory:',
-                                                       detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
-                self._in_memory_conn.row_factory = sqlite3.Row
-            return self._in_memory_conn
+        """
+        Returns a single, persistent database connection.
+        Creates the connection on the first call.
+        """
+        if self._conn is None:
+            # check_same_thread=False is required for this connection to be used
+            # across different threads, which is what `asyncio.to_thread` does and
+            # what happens in our pytest integration tests.
+            self._conn = sqlite3.connect(
+                self.db_path,
+                detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
+                uri=True,
+                check_same_thread=False
+            )
+            self._conn.row_factory = sqlite3.Row
+        return self._conn
 
-        # Use PARSE_COLNAMES to enable the registered "timestamp" converter
-        conn = sqlite3.connect(self.db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES, uri=True)
-        conn.row_factory = sqlite3.Row
-        return conn
+    def close(self) -> None:
+        """Explicitly closes the database connection. Important for test cleanup."""
+        if self._conn:
+            self._conn.close()
+            self._conn = None
+            logger.info(f"Database connection to '{self.db_path}' closed.")
 
     def create_schema(self) -> None:
         """Creates the user interactions table if it doesn't exist."""
@@ -69,24 +79,25 @@ class MemoryManager:
         CREATE INDEX IF NOT EXISTS idx_user_identifier_timestamp
         ON User_Interactions (user_identifier, timestamp);
         """
-        with self._get_connection() as conn:
-            conn.executescript(schema_sql)
-            logging.info("User memory database schema created or verified successfully.")
+        conn = self._get_connection()
+        conn.executescript(schema_sql)
+        conn.commit()
+        logging.info("User memory database schema created or verified successfully.")
 
     def log_interaction(self, user_identifier: str, channel: str, user_message: str, bot_response: str,
                         zammad_ticket_id: Optional[int] = None) -> None:
         """Logs a complete user-bot interaction."""
         now = datetime.now()
-        with self._get_connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO User_Interactions 
-                (user_identifier, channel, timestamp, user_message, bot_response, zammad_ticket_id)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (user_identifier, channel, now, user_message, bot_response, zammad_ticket_id)
-            )
-            conn.commit()
+        conn = self._get_connection()
+        conn.execute(
+            """
+            INSERT INTO User_Interactions 
+            (user_identifier, channel, timestamp, user_message, bot_response, zammad_ticket_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (user_identifier, channel, now, user_message, bot_response, zammad_ticket_id)
+        )
+        conn.commit()
 
     def get_history(self, user_identifier: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         """Retrieves the most recent interactions for a given user."""
@@ -97,13 +108,13 @@ class MemoryManager:
         """
         params = {'user_identifier': user_identifier}
 
-        if isinstance(limit, int) and limit > 0:
+        if limit is not None and limit > 0:
             query += " LIMIT :limit"
             params['limit'] = limit
 
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(query, params)
-            # We want chronological order for the prompt, so we reverse the DESC query result
-            rows = cursor.fetchall()
-            return [dict(row) for row in reversed(rows)]
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        # We want chronological order for the prompt, so we reverse the DESC query result
+        rows = cursor.fetchall()
+        return [dict(row) for row in reversed(rows)]
