@@ -7,12 +7,10 @@ from typing import Optional
 
 from config.global_config import DISCORD_CHAR_LIMIT, DISCORD_STATUS_LIMIT, CHAT_LOG_LOCATION, DISCORD_DEBUG_CHANNEL
 from src.utils.message_utils import split_string_by_limit
+from src.chat_system import ChatSystem, ResponseType
 
 logger = logging.getLogger(__name__)
 
-# Forward declare ChatSystem and import the new ResponseType
-if typing.TYPE_CHECKING:
-    from src.chat_system import ChatSystem, ResponseType
 
 
 class CustomDiscordBot(discord.Client):
@@ -110,10 +108,11 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                 )
 
                 if response_text:
-                    # **MODIFIED: Use the response type to determine formatting**
-                    if response_type == client.response_type_enum.DEV_COMMAND:
+                    if response_type == ResponseType.DEV_COMMAND:
+                        # Use the special formatting function for these commands
                         await _send_dev_response(message.channel, response_text)
-                    else:  # This is an LLM_GENERATION
+                    else:
+                        # Use the standard logic for all other messages
                         for chunk in split_string_by_limit(response_text, DISCORD_CHAR_LIMIT):
                             await message.channel.send(chunk)
                 else:

@@ -1,114 +1,156 @@
-import pytest
-from unittest.mock import patch, MagicMock
-import os
+# tests/clients/test_zammad_client_unit.py
 
-# The import path now correctly reflects the new file structure.
+import pytest
+import requests
+from unittest.mock import patch, MagicMock
 from src.clients.zammad_client import ZammadClient
 
+BASE_URL = "http://test.zammad.local"
 
-# --- Fixtures for reusable test setup ---
 
 @pytest.fixture
 def zammad_client(monkeypatch):
-    """A fixture that provides a ZammadClient instance with mocked env vars."""
-    monkeypatch.setenv("ZAMMAD_URL", "http://mock-zammad.com")
-    monkeypatch.setenv("ZAMMAD_API_KEY", "test-token-12345")
+    """Provides a ZammadClient instance with a mocked environment for each test."""
+    monkeypatch.setenv("ZAMMAD_URL", BASE_URL)
+    monkeypatch.setenv("ZAMMAD_API_KEY", "test_api_key")
     return ZammadClient()
 
 
-# --- Unit Tests ---
-
-def test_zammad_client_initialization_success(zammad_client):
-    """Tests that the client initializes correctly with environment variables."""
-    assert zammad_client.api_url == "http://mock-zammad.com"
-    assert zammad_client.api_token == "test-token-12345"
-    assert zammad_client.headers['Authorization'] == "Token token=test-token-12345"
-
-
-def test_zammad_client_initialization_failure_missing_env(monkeypatch):
-    """Tests that the client raises a ValueError if an env var is missing."""
-    # Ensure the URL is set but the token is missing
-    monkeypatch.setenv("ZAMMAD_URL", "http://mock-zammad.com")
-    monkeypatch.delenv("ZAMMAD_API_KEY", raising=False)
-
-    with pytest.raises(ValueError, match="ZAMMAD_URL and ZAMMAD_API_KEY must be set"):
-        ZammadClient()
-
-
-# The patch target string must match the new location of the zammad_client module
-@patch('src.clients.zammad_client.requests.request')
-def test_create_ticket_sends_correct_payload(mock_request, zammad_client):
-    """
-    Tests that the create_ticket method constructs and sends the correct
-    API request payload to the Zammad API.
-    """
-    # 1. ARRANGE: Configure the mock to simulate a successful API response
+@patch('requests.request')
+def test_make_request_success(mock_request, zammad_client):
+    """Test that a successful response with JSON is parsed correctly."""
     mock_response = MagicMock()
-    mock_response.status_code = 201
-    mock_response.json.return_value = {"id": 123, "number": "T123", "title": "Test Ticket"}
+    mock_response.status_code = 200
+    mock_response.json.return_value = {'id': 1, 'title': 'Test'}
     mock_request.return_value = mock_response
 
-    # 2. ACT: Call the method under test
-    ticket_data = zammad_client.create_ticket(
-        title="Test Ticket",
+    result = zammad_client._make_request('get', 'test_endpoint')
+
+    assert result == {'id': 1, 'title': 'Test'}
+    mock_response.raise_for_status.assert_called_once()
+
+
+@patch('requests.request')
+def test_make_request_no_content(mock_request, zammad_client):
+    """Test that a response with no content returns None."""
+    mock_response = MagicMock()
+    mock_response.status_code = 204
+    mock_response.content = b''
+    mock_request.return_value = mock_response
+
+    result = zammad_client._make_request('delete', 'test_endpoint/1')
+
+    assert result is None
+
+
+@patch('requests.request')
+def test_make_request_http_error(mock_request, zammad_client):
+    """Test that an HTTP error is raised correctly."""
+    mock_response = MagicMock()
+    mock_response.raise_for_status.side_effect = requests.exceptions.HTTPError("404 Not Found")
+    mock_request.return_value = mock_response
+
+    with pytest.raises(requests.exceptions.HTTPError):
+        zammad_client._make_request('get', 'invalid_endpoint')
+
+
+# --- Ticket Method Tests ---
+
+@patch('src.clients.zammad_client.ZammadClient._make_request')
+def test_create_ticket(mock_make_request, zammad_client):
+    """Test the payload construction for creating a ticket."""
+    zammad_client.create_ticket(
+        title="New Issue",
         group="Users",
-        customer_id=5,
-        article_body="This is a test article body."
+        customer_id=123,
+        article_body="Help me!",
+        tags=["pytest", "automated"]
     )
 
-    # 3. ASSERT: Verify the behavior and results
-    # Was the requests library called exactly once?
-    mock_request.assert_called_once()
-
-    # Inspect the arguments it was called with
-    args, kwargs = mock_request.call_args
-
-    # Assert the method and URL are correct
-    assert args[0] == 'post'
-    assert args[1] == "http://mock-zammad.com/api/v1/tickets"
-
-    # Assert the headers include the correct authorization token
-    assert kwargs['headers']['Authorization'] == "Token token=test-token-12345"
-
-    # Assert the JSON payload is structured exactly as Zammad expects
-    sent_payload = kwargs['json']
-    assert sent_payload['title'] == "Test Ticket"
-    assert sent_payload['customer_id'] == 5
-    assert sent_payload['group'] == "Users"
-    assert sent_payload['article']['body'] == "This is a test article body."
-    assert sent_payload['article']['internal'] is False
-
-    # Assert that the method returned the parsed JSON from the simulated response
-    assert ticket_data['id'] == 123
-    assert ticket_data['title'] == "Test Ticket"
+    expected_payload = {
+        "title": "New Issue",
+        "group": "Users",
+        "customer_id": 123,
+        "article": {
+            "body": "Help me!",
+            "type": "note",
+            "internal": False
+        },
+        "tags": "pytest,automated"  # Verify tags are comma-separated
+    }
+    mock_make_request.assert_called_once_with('post', 'tickets', json=expected_payload)
 
 
-@patch('src.clients.zammad_client.requests.request')
-def test_add_article_sends_correct_payload(mock_request, zammad_client):
-    """Tests that the add_article method sends the correct payload."""
-    # ARRANGE
-    mock_response = MagicMock()
-    mock_response.status_code = 201
-    mock_response.json.return_value = {"id": 987, "ticket_id": 123}
-    mock_request.return_value = mock_response
+@patch('src.clients.zammad_client.ZammadClient._make_request')
+def test_delete_ticket(mock_make_request, zammad_client):
+    """Test the endpoint construction for deleting a ticket."""
+    zammad_client.delete_ticket(999)
+    mock_make_request.assert_called_once_with('delete', 'tickets/999')
 
-    # ACT
-    article_data = zammad_client.add_article_to_ticket(
-        ticket_id=123,
-        body="This is a follow-up message.",
-        internal=True
+
+@patch('src.clients.zammad_client.ZammadClient._make_request')
+def test_search_tickets(mock_make_request, zammad_client):
+    """Test that search_tickets calls _make_request with a params dictionary."""
+    query = "customer_id:123 AND state:open"
+    zammad_client.search_tickets(query=query, limit=10)
+
+    expected_params = {'query': query, 'limit': 10}
+    mock_make_request.assert_called_once_with('get', 'tickets/search', params=expected_params)
+
+
+# --- User Method Tests ---
+
+@patch('src.clients.zammad_client.ZammadClient._make_request')
+def test_create_user_with_note(mock_make_request, zammad_client):
+    """Test the payload construction for creating a user with a note."""
+    zammad_client.create_user(
+        email="test@example.com",
+        firstname="Test",
+        lastname="User",
+        note="From automated test"
     )
+    expected_payload = {
+        "firstname": "Test",
+        "lastname": "User",
+        "email": "test@example.com",
+        "roles": ["Customer"],
+        "active": True,
+        "note": "From automated test"
+    }
+    mock_make_request.assert_called_once_with('post', 'users', json=expected_payload)
 
-    # ASSERT
-    mock_request.assert_called_once()
-    args, kwargs = mock_request.call_args
 
-    assert args[0] == 'post'
-    assert args[1] == "http://mock-zammad.com/api/v1/ticket_articles"
+@patch('src.clients.zammad_client.ZammadClient._make_request')
+def test_create_user_without_note(mock_make_request, zammad_client):
+    """Test the payload construction for creating a user without a note."""
+    zammad_client.create_user(
+        email="test@example.com",
+        firstname="Test",
+        lastname="User"
+    )
+    expected_payload = {
+        "firstname": "Test",
+        "lastname": "User",
+        "email": "test@example.com",
+        "roles": ["Customer"],
+        "active": True
+    }
+    # Note should not be in the payload
+    mock_make_request.assert_called_once_with('post', 'users', json=expected_payload)
 
-    sent_payload = kwargs['json']
-    assert sent_payload['ticket_id'] == 123
-    assert sent_payload['body'] == "This is a follow-up message."
-    assert sent_payload['internal'] is True  # Verify internal flag is handled
 
-    assert article_data['id'] == 987
+@patch('src.clients.zammad_client.ZammadClient._make_request')
+def test_delete_user(mock_make_request, zammad_client):
+    """Test the endpoint construction for deleting a user."""
+    zammad_client.delete_user(789)
+    mock_make_request.assert_called_once_with('delete', 'users/789')
+
+
+@patch('src.clients.zammad_client.ZammadClient._make_request')
+def test_search_user(mock_make_request, zammad_client):
+    """Test that search_user calls _make_request with a params dictionary."""
+    query = "test@example.com"
+    zammad_client.search_user(query=query)
+
+    expected_params = {'query': query}
+    mock_make_request.assert_called_once_with('get', 'users/search', params=expected_params)

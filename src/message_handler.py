@@ -72,9 +72,9 @@ class BotLogic:
 
         return {"response": response, "mutated": mutated}
 
-    def _handle_help(self, args: list, persona: Persona, user_identifier: str) -> Tuple[str, bool]:
+    def _handle_help(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[None, bool]:
         if args:
-            return "Error: 'help' does not take arguments.", False
+            return None, False
         help_msg = ("Talk to a specific persona by starting your message with their name. \n \n"
                     "Currently active personas: \n" +
                     ', '.join(self.chat_system.personas.keys()) + "\n\n"

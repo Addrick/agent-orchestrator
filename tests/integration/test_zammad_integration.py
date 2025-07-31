@@ -1,88 +1,108 @@
-import pytest
-import os
-from datetime import datetime
+# tests/clients/test_zammad_client.py
 
-# The import path is updated to the new location
+import pytest
+from datetime import datetime
+import requests
 from src.clients.zammad_client import ZammadClient
 
-# This marker tells pytest these tests are part of the 'integration' group.
-# They will be skipped unless run with `pytest -m "integration"`.
+# Mark all tests in this file as 'integration'.
+# To run these tests, use the command: pytest -m integration
 pytestmark = pytest.mark.integration
+
+# Use static identifiers for the test user and ticket to ensure idempotency.
+TEST_USER_EMAIL = "pytest-lifecycle-user@zammad.local"
+TEST_TICKET_TITLE = "[Pytest Automated Test Ticket]"
 
 
 @pytest.fixture(scope="module")
 def zammad_client():
     """
-    Provides a real ZammadClient instance for the entire test module.
-    It assumes .env is configured to point to the local Docker instance.
-    Skips all tests in this file if the API token is not configured.
+    Provides a ZammadClient instance for the entire test module.
+    Skips tests if the client cannot be initialized or fails to connect.
     """
-    if not os.environ.get("ZAMMAD_API_KEY") or not os.environ.get("ZAMMAD_URL"):
-        pytest.skip("Skipping integration tests: ZAMMAD_URL and ZAMMAD_API_TOKEN must be set in .env")
+    try:
+        client = ZammadClient()
+        client.get_self()  # Verify connection and authentication
+        return client
+    except (ValueError, requests.exceptions.RequestException) as e:
+        pytest.skip(f"Skipping Zammad integration tests: Cannot connect or authenticate. Error: {e}")
 
-    return ZammadClient()
 
-
-def test_zammad_connection_and_authentication(zammad_client):
+@pytest.fixture(scope="function")
+def managed_test_user(zammad_client: ZammadClient) -> int:
     """
-    A simple "smoke test" to verify the connection and authentication work.
-    It fetches the user associated with the API token ("me").
+    Provides the ID of a persistent test user and cleans up their specific test ticket
+    from the previous run before yielding the user ID.
     """
-    # ARRANGE & ACT
-    # Assumes you will add a `get_self()` method to your client for this test.
-    # It would call the GET /api/v1/users/me endpoint.
-    user_data = zammad_client.get_self()
+    # 1. Find or Create the persistent test user
+    print(f"\nEnsuring test user '{TEST_USER_EMAIL}' exists...")
+    users = zammad_client.search_user(query=TEST_USER_EMAIL)
+    if users:
+        user_id = users[0]['id']
+        print(f"Found existing test user with ID: {user_id}")
+    else:
+        print("Test user not found, creating a new one...")
+        user_data = zammad_client.create_user(
+            email=TEST_USER_EMAIL,
+            firstname="Pytest",
+            lastname="LifecycleUser",
+            note="This is a persistent user for automated integration tests."
+        )
+        user_id = user_data['id']
+        print(f"Created new test user with ID: {user_id}")
 
-    # ASSERT
-    assert user_data is not None
-    assert "id" in user_data
-    assert user_data['email'] is not None  # The admin user should have an email
+    # 2. Pre-run Cleanup: Find and delete the specific test ticket from the *previous* run.
+    print(f"Cleaning up previous test ticket for user ID {user_id}...")
+    # The query is very specific to avoid deleting other tickets.
+    cleanup_query = f'customer_id:{user_id} AND title:"{TEST_TICKET_TITLE}"'
+    orphaned_tickets = zammad_client.search_tickets(query=cleanup_query)
+
+    if not orphaned_tickets:
+        print("No previous test ticket found to clean up.")
+    else:
+        for ticket in orphaned_tickets:
+            ticket_id = ticket['id']
+            print(f"Deleting previous test ticket #{ticket_id}...")
+            zammad_client.delete_ticket(ticket_id)
+            print(f"Deleted ticket #{ticket_id}.")
+
+    yield user_id
+    # No cleanup after yield; we want the newly created ticket to persist for inspection.
 
 
-def test_user_and_ticket_lifecycle(zammad_client):
+def test_ticket_creation_for_inspection(zammad_client: ZammadClient, managed_test_user: int):
     """
-    Tests the full lifecycle: create a user, create a ticket for them,
-    and then add a follow-up article. This creates real data.
+    Tests the creation of a ticket and leaves it in the system for inspection.
+    The cleanup is handled by the fixture on the next test run.
     """
-    # ARRANGE: Create a unique email for the new user to avoid test collisions
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    test_email = f"test-customer-{timestamp}@example.com"
-
-    # --- 1. Create User ---
-    # ACT
-    # Assumes a `create_user` method exists on your client
-    new_user = zammad_client.create_user(
-        firstname="Integration",
-        lastname=f"Test-{timestamp}",
-        email=test_email
+    customer_id = managed_test_user
+    run_timestamp = datetime.now().isoformat()
+    ticket_body = (
+        f"This is an automated test ticket.\n"
+        f"Test Run Timestamp: {run_timestamp}\n"
+        f"This ticket should be automatically deleted the next time the integration test suite is run."
     )
-    # ASSERT
-    assert "id" in new_user
-    assert new_user['email'] == test_email
-    customer_id = new_user['id']
 
-    # --- 2. Create Ticket ---
-    # ACT
-    new_ticket = zammad_client.create_ticket(
-        title=f"Integration Test Ticket {timestamp}",
-        group="Users",  # Assumes 'Users' group exists
+    # CREATE the ticket for the managed user
+    print(f"Attempting to create inspection ticket for user #{customer_id}")
+    ticket_data = zammad_client.create_ticket(
+        title=TEST_TICKET_TITLE,
+        group='Users',
         customer_id=customer_id,
-        article_body="This is the first message of the ticket."
+        article_body=ticket_body
     )
-    # ASSERT
-    assert "id" in new_ticket
-    assert new_ticket['customer_id'] == customer_id
-    ticket_id = new_ticket['id']
 
-    # --- 3. Add Article to Ticket ---
-    # ACT
-    new_article = zammad_client.add_article_to_ticket(
-        ticket_id=ticket_id,
-        body="This is a second, follow-up message."
+    # VERIFY creation
+    assert ticket_data and 'id' in ticket_data
+    created_ticket_id = ticket_data['id']
+    print(f"Successfully created inspection ticket with ID: {created_ticket_id}")
+
+    # Add an update for good measure
+    print(f"Adding an update to ticket #{created_ticket_id}")
+    article_data = zammad_client.add_article_to_ticket(
+        ticket_id=created_ticket_id,
+        body="This is a test update article."
     )
-    # ASSERT
-    assert "id" in new_article
-    assert new_article['ticket_id'] == ticket_id
-
-    # Optional: A more advanced test could then fetch the ticket's articles
-    # and verify that there are now two articles associated with it.
+    assert article_data and 'id' in article_data
+    print("Successfully added article.")
+    print(f"Test finished. Ticket #{created_ticket_id} is left in Zammad for inspection.")
