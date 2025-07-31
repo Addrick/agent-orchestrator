@@ -11,6 +11,7 @@ from src.database.memory_manager import MemoryManager
 from src.clients.zammad_client import ZammadClient
 
 from src.interfaces.discord_bot import create_discord_bot
+from src.interfaces.gmail_bot import create_gmail_bot
 from config.global_config import *
 from dotenv import load_dotenv
 from src.utils.model_utils import get_model_list
@@ -79,8 +80,14 @@ async def main():
         task = asyncio.create_task(discord_bot.start(os.environ.get("DISCORD_API_KEY")))
         tasks.append(task)
 
-    if not DISCORD_BOT:
-        print("No standard chat interfaces enabled, defaulting to command line...")
+    if GMAIL_BOT:
+        logger.info("Initializing Gmail bot...")
+        gmail_bot = create_gmail_bot(bot)
+        task = asyncio.create_task(gmail_bot.start())
+        tasks.append(task)
+
+    if not tasks:
+        logger.info("Initializing local terminal interface...")
         from src.interfaces.local_terminal import run_terminal_interface
         task = asyncio.create_task(run_terminal_interface(bot))
         tasks.append(task)

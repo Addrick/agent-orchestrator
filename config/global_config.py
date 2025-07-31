@@ -1,5 +1,10 @@
-# eventually turn these into launch params or some shit
+"""
+Settings and default values.
+"""
+import os
+CREDENTIALS_DIR = os.path.join(os.path.dirname(__file__), 'creds')
 
+#
 DISCORD_BOT = 1
 # --- DISCORD_BOT CONFIG ---
 DISCORD_DISCONNECT_TIME = None
@@ -9,17 +14,21 @@ DISCORD_LOGGER = False
 DISCORD_DEBUG_CHANNEL = 1222358674127982622
 DEFAULT_CONVERSATIONAL_PAUSE_LIMIT = 21600 # time in seconds to determine if a message in context is too far back from the previous
 
-GMAIL_BOT = True
+#
+GMAIL_BOT = 0
 # --- GMAIL BOT CONFIG ---
+BLOCK_EXTERNAL_SENDER_REPLIES = True  # will only reply to the emails set in ALLOWED_SENDER_LIST
+ALLOWED_SENDER_LIST = ['adam@tech-ops.it']
 GMAIL_PROJECT_ID = 'gchat-test-462719'
 GMAIL_PUBSUB_TOPIC = 'projects/gchat-test-462719/topics/derpr_gmail'
 GMAIL_PUBSUB_SUBSCRIPTION_ID = 'derpr_gmail-sub'
-GMAIL_CREDENTIALS_FILE = '../config/creds/client_secret_738920553711-tojr3uquv65jf5k3j3js2nql4t77hbkh.apps.googleusercontent.com.json'
-GMAIL_TOKEN_FILE = 'gmail_token.json'  # created automatically
-BLOCK_EXTERNAL_SENDER_REPLIES = True
-
+GMAIL_CREDENTIALS_FILE = os.path.join(CREDENTIALS_DIR, "client_secret_738920553711-tojr3uquv65jf5k3j3js2nql4t77hbkh.apps.googleusercontent.com.json")
+GMAIL_TOKEN_FILE = os.path.join(CREDENTIALS_DIR, "gmail_token.json")
+#
 WEBUI = 0
-
+# --- WEBUI INTERFACE (WIP) --- #
+# nonfunctional, gradio kinda sucks
+#
 DEFAULT_MODEL_NAME = 'gemini-2.5-flash'
 GLOBAL_CONTEXT_LIMIT = 16
 DEFAULT_CONTEXT_LIMIT = 0

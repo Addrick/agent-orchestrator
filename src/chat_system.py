@@ -7,6 +7,7 @@ import re
 from typing import Dict, Any, Optional, Tuple
 from collections import defaultdict
 from enum import Enum, auto
+from urllib.parse import urlparse
 
 from src.database.memory_manager import MemoryManager
 from src.clients.zammad_client import ZammadClient
@@ -50,34 +51,44 @@ class ChatSystem:
             return int(match.group(1))
         return None
 
-    async def _get_or_create_zammad_user(self, user_identifier: str) -> Optional[int]:
+    async def _get_or_create_zammad_user(self, user_identifier: str, channel: str) -> Optional[int]:
         """
-        Finds a Zammad user by email or creates a new one.
-        Returns the Zammad user ID.
+        Finds a Zammad user by email or creates a new one. Handles non-email identifiers
+        by creating a unique, channel-specific dummy email. Returns the Zammad user ID.
         """
-        # Regex to extract email from "First Last <email@example.com>" format
         email_match = re.search(r'<(.+?)>', user_identifier)
-        email = email_match.group(1) if email_match else user_identifier
+        is_real_email = email_match is not None
 
-        # Name is everything before the email bracket, or "Unknown"
-        name_part = user_identifier.split('<')[0].strip() if email_match else "Unknown User"
-        name_parts = name_part.split()
-        firstname = name_parts[0] if name_parts else "Unknown"
-        lastname = ' '.join(name_parts[1:]) if len(name_parts) > 1 else "User"
+        if is_real_email:
+            email = email_match.group(1)
+            name_part = user_identifier.split('<')[0].strip()
+            name_parts = name_part.split()
+            firstname = name_parts[0] if name_parts else "Unknown"
+            lastname = ' '.join(name_parts[1:]) if len(name_parts) > 1 else "User"
+            note = None
+        else:
+            # Not an email, so it's a platform ID (e.g., from Discord)
+            # Create a stable, unique dummy email address
+            domain = urlparse(self.zammad_client.api_url).hostname
+            email = f"{channel.lower()}-{user_identifier}@{domain}"
+            firstname = f"{channel.capitalize()} User"
+            lastname = user_identifier
+            note = f"Auto-generated user from {channel.capitalize()}. Original identifier: {user_identifier}"
 
         try:
-            # Search for existing user
+            # Search for existing user by the real or dummy email
             search_results = await asyncio.to_thread(self.zammad_client.search_user, email)
             if search_results:
                 return search_results[0]['id']
 
             # If not found, create a new user
-            logger.info(f"Creating new Zammad user for email: {email}")
+            logger.info(f"Creating new Zammad user for identifier '{user_identifier}' with email: {email}")
             new_user = await asyncio.to_thread(
                 self.zammad_client.create_user,
                 email=email,
                 firstname=firstname,
-                lastname=lastname
+                lastname=lastname,
+                note=note
             )
             return new_user['id']
 
@@ -130,7 +141,7 @@ class ChatSystem:
             ticket_to_log = None  # The ticket ID we will log to memory
 
             if is_ticket_request:
-                customer_id = await self._get_or_create_zammad_user(user_identifier)
+                customer_id = await self._get_or_create_zammad_user(user_identifier, channel)
                 if customer_id:
                     if zammad_ticket_id:
                         # Add to existing ticket
@@ -143,7 +154,7 @@ class ChatSystem:
                         logger.info(f"Added new message to existing Zammad ticket #{ticket_to_log}")
                     else:
                         # Create new ticket
-                        title = f"New request from {user_identifier}"
+                        title = f"New request from {user_identifier} via {channel}"
                         new_ticket = await asyncio.to_thread(
                             self.zammad_client.create_ticket,
                             title=title,
@@ -154,7 +165,7 @@ class ChatSystem:
                         ticket_to_log = new_ticket['id']
                         logger.info(f"Created new Zammad ticket #{ticket_to_log}")
                 else:
-                    logger.error("Could not get or create Zammad user, proceeding without ticket.")
+                    logger.error(f"Could not get or create Zammad user for '{user_identifier}', proceeding without ticket.")
 
             # --- LLM RESPONSE GENERATION ---
             persona_config = persona.get_config_for_engine()

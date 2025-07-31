@@ -15,11 +15,15 @@ def chat_system_with_mocks():
     mock_memory_manager = MagicMock(spec=MemoryManager)
     mock_text_engine = MagicMock(spec=TextEngine)
     mock_zammad_client = MagicMock(spec=ZammadClient)
+    # Mock the api_url attribute so we can parse its hostname in tests
+    mock_zammad_client.api_url = "http://test.zammad.local"
 
     mock_text_engine.generate_response = AsyncMock(return_value=("LLM Reply", {}))
     # Use MagicMock for synchronous methods called via asyncio.to_thread
     mock_zammad_client.create_ticket = MagicMock(return_value={'id': 12345})
     mock_zammad_client.add_article_to_ticket = MagicMock()
+    mock_zammad_client.search_user = MagicMock()
+    mock_zammad_client.create_user = MagicMock()
 
     with patch('src.chat_system.load_personas_from_file') as mock_load_personas:
         mock_persona = MagicMock()
@@ -85,7 +89,7 @@ async def test_ticket_mode_new_ticket(chat_system_with_mocks):
         message='Help me!'
     )
 
-    system._get_or_create_zammad_user.assert_awaited_once_with('user_gmail_1')
+    system._get_or_create_zammad_user.assert_awaited_once_with('user_gmail_1', 'gmail')
     zammad_mock.create_ticket.assert_called_once()
     # Bot reply is added to the newly created ticket
     zammad_mock.add_article_to_ticket.assert_called_once_with(
@@ -167,7 +171,7 @@ async def test_get_or_create_zammad_user_existing_user(mock_to_thread, chat_syst
     zammad_mock.search_user.return_value = [{'id': 505}]
     mock_to_thread.side_effect = lambda func, *args, **kwargs: func(*args, **kwargs)
 
-    user_id = await system._get_or_create_zammad_user("Test User <test@example.com>")
+    user_id = await system._get_or_create_zammad_user("Test User <test@example.com>", "gmail")
 
     assert user_id == 505
     zammad_mock.search_user.assert_called_once_with("test@example.com")
@@ -185,12 +189,39 @@ async def test_get_or_create_zammad_user_new_user(mock_to_thread, chat_system_wi
     zammad_mock.create_user.return_value = {'id': 707}
     mock_to_thread.side_effect = lambda func, *args, **kwargs: func(*args, **kwargs)
 
-    user_id = await system._get_or_create_zammad_user("New User <new@example.com>")
+    user_id = await system._get_or_create_zammad_user("New User <new@example.com>", "gmail")
 
     assert user_id == 707
     zammad_mock.search_user.assert_called_once_with("new@example.com")
     zammad_mock.create_user.assert_called_once_with(
         email="new@example.com",
         firstname="New",
-        lastname="User"
+        lastname="User",
+        note=None
+    )
+
+
+@pytest.mark.asyncio
+@patch('asyncio.to_thread')
+async def test_get_or_create_zammad_user_for_non_email_id(mock_to_thread, chat_system_with_mocks):
+    """Tests that a non-email identifier creates a dummy email and a descriptive note."""
+    system, _, _, zammad_mock, _ = chat_system_with_mocks
+    system._get_or_create_zammad_user.side_effect = system.__class__._get_or_create_zammad_user.__get__(system)
+
+    discord_id = "321783731146850305"
+    expected_email = f"discord-{discord_id}@test.zammad.local"
+
+    zammad_mock.search_user.return_value = []
+    zammad_mock.create_user.return_value = {'id': 909}
+    mock_to_thread.side_effect = lambda func, *args, **kwargs: func(*args, **kwargs)
+
+    user_id = await system._get_or_create_zammad_user(discord_id, "discord")
+
+    assert user_id == 909
+    zammad_mock.search_user.assert_called_once_with(expected_email)
+    zammad_mock.create_user.assert_called_once_with(
+        email=expected_email,
+        firstname="Discord User",
+        lastname=discord_id,
+        note=f"Auto-generated user from Discord. Original identifier: {discord_id}"
     )

@@ -3,11 +3,13 @@ import asyncio
 import base64
 import logging
 import os
+import re
 import typing
 from collections import deque
 from email.mime.text import MIMEText
-from typing import Optional, Dict, Any, List, Deque
+from typing import Optional, Deque
 
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -42,18 +44,32 @@ class GmailInterface:
         self.last_known_history_id: Optional[str] = None
 
     async def _authenticate(self) -> None:
-        """Handles user authentication with Google Cloud, refreshing tokens as needed."""
+        """Handles user authentication, refreshing tokens and re-authenticating on failure."""
         creds = None
+        # Ensure the directory for credentials exists before any file operations.
+        os.makedirs(CREDENTIALS_DIR, exist_ok=True)
+
         if os.path.exists(self.token_file):
             creds = await asyncio.to_thread(Credentials.from_authorized_user_file, self.token_file, self.SCOPES)
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
+
+        if creds and creds.expired and creds.refresh_token:
+            try:
                 await asyncio.to_thread(creds.refresh, Request())
-            else:
-                flow = await asyncio.to_thread(InstalledAppFlow.from_client_secrets_file, self.credentials_file,
-                                               self.SCOPES)
-                creds = await asyncio.to_thread(flow.run_local_server, port=0)
+            except RefreshError as e:
+                logger.warning(f"Refresh token is invalid, deleting '{self.token_file}' and re-authenticating. Error: {e}")
+                if os.path.exists(self.token_file):
+                    os.remove(self.token_file)
+                creds = None  # Force re-authentication
+
+        if not creds or not creds.valid:
+            if not os.path.exists(self.credentials_file):
+                logger.error(f"FATAL: Gmail credentials file not found at '{self.credentials_file}'. Please create it.")
+                self._shutdown_event.set()
+                return
+            flow = await asyncio.to_thread(InstalledAppFlow.from_client_secrets_file, self.credentials_file, self.SCOPES)
+            creds = await asyncio.to_thread(flow.run_local_server, port=0)
             await asyncio.to_thread(lambda: open(self.token_file, 'w').write(creds.to_json()))
+
         self.credentials = creds
         logger.info("Gmail authentication successful.")
 
@@ -64,14 +80,12 @@ class GmailInterface:
                 raise ValueError("Invalid email format, no '@' symbol.")
             local_part = recipient_email.split('@')[0]
             if '-' in local_part:
-                # Assumes format like 'support-persona@domain.com'
                 parts = local_part.split('-')
-                # Ensure there is a second part and it's not empty
                 if len(parts) > 1 and parts[1]:
                     return parts[1]
         except (IndexError, AttributeError, ValueError):
             logger.warning(f"Could not parse persona from recipient '{recipient_email}'. Using default.")
-        return "derpr"  # Default persona
+        return "derpr"
 
     async def _handle_specific_message(self, service, msg_id: str) -> None:
         """Fetches a specific email, processes it, and orchestrates the reply."""
@@ -86,7 +100,15 @@ class GmailInterface:
             recipient = next((h['value'] for h in headers if h['name'].lower() == 'to'), '')
             message_id_header = next((h['value'] for h in headers if h['name'].lower() == 'message-id'), None)
 
-            # Extract email body
+            # --- SENDER BLOCKING LOGIC ---
+            if BLOCK_EXTERNAL_SENDER_REPLIES:
+                sender_email_match = re.search(r'<(.+?)>', sender)
+                sender_email = sender_email_match.group(1).lower() if sender_email_match else sender.lower()
+                if not any(allowed.lower() in sender_email for allowed in ALLOWED_SENDER_LIST):
+                    logger.info(f"Skipping email from '{sender}' (ID: {msg_id}) as they are not in the allowed list.")
+                    return
+
+            # --- MESSAGE PROCESSING ---
             user_input = ""
             if "parts" in payload:
                 for part in payload['parts']:
@@ -103,13 +125,12 @@ class GmailInterface:
             active_persona_name = self._get_persona_from_recipient(recipient)
             full_message = f"Subject: {subject}\n\n{user_input}"
 
-            # Use the new, stateful generate_response method
             response_text, response_type = await self.chat_system.generate_response(
                 persona_name=active_persona_name,
-                user_identifier=sender,  # The sender's email is the unique ID
+                user_identifier=sender,
                 channel="gmail",
                 message=full_message,
-                history_limit=20  # Example history limit
+                history_limit=20
             )
 
             if response_text:
@@ -143,11 +164,8 @@ class GmailInterface:
                 for history_record in history_response['history']:
                     if 'messagesAdded' in history_record:
                         for msg_summary in history_record['messagesAdded']:
-                            # Skip our own replies and duplicates
-                            if 'SENT' in msg_summary['message'].get('labelIds', []) or msg_summary['message'][
-                                'id'] in self._processed_ids:
+                            if 'SENT' in msg_summary['message'].get('labelIds', []) or msg_summary['message']['id'] in self._processed_ids:
                                 continue
-
                             msg_id = msg_summary['message']['id']
                             self._processed_ids.append(msg_id)
                             await self._handle_specific_message(service, msg_id)
@@ -180,6 +198,10 @@ class GmailInterface:
     async def start(self) -> None:
         """Initializes authentication, sets up the watch, and starts the Pub/Sub listener."""
         await self._authenticate()
+        if self._shutdown_event.is_set():
+            logger.error("Gmail bot startup aborted due to authentication failure.")
+            return
+
         service = build('gmail', 'v1', credentials=self.credentials, cache_discovery=False)
         watch_request = {'labelIds': ['INBOX'], 'topicName': GMAIL_PUBSUB_TOPIC}
         watch_response = await asyncio.to_thread(service.users().watch(userId='me', body=watch_request).execute)
