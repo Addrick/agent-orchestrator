@@ -115,12 +115,13 @@ async def test_casual_chat_flow(live_chat_system):
     """
     chat_system, memory_manager, _ = live_chat_system
     user_id = "discord-user-12345"
+    persona_name = "derpr"
 
     # Mock the LLM call to make the test faster and more reliable
     with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
                       return_value=("Mocked LLM response.", ResponseType.LLM_GENERATION)):
         response_text, response_type = await chat_system.generate_response(
-            persona_name="derpr",
+            persona_name=persona_name,
             user_identifier=user_id,
             channel="discord-general",
             message="Hello, how are you today?"
@@ -128,86 +129,134 @@ async def test_casual_chat_flow(live_chat_system):
 
         assert response_type == ResponseType.LLM_GENERATION
         assert isinstance(response_text, str) and "internal error" not in response_text.lower()
-        history = memory_manager.get_history(user_id)
-        assert len(history) == 1
-
-
-def test_ticket_direct_api_lifecycle(live_chat_system, managed_zammad_user):
-    """
-    A direct, lower-level test to ensure the Zammad client can create and delete
-    a ticket for the persistent test user.
-    """
-    _, _, zammad_client = live_chat_system
-    user_id = managed_zammad_user["id"]
-    created_ticket_id = None
-
-    try:
-        print(f"\nDirect API Test: Creating ticket for user {user_id}...")
-        ticket_data = zammad_client.create_ticket(
-            title="Direct API Test Ticket", group="Users", customer_id=user_id, article_body="This is a test."
-        )
-        assert ticket_data and 'id' in ticket_data
-        created_ticket_id = ticket_data['id']
-        print(f"Direct API Test: Created ticket with ID {created_ticket_id}")
-    finally:
-        if created_ticket_id:
-            print(f"Direct API Test: Cleaning up ticket #{created_ticket_id}...")
-            zammad_client.delete_ticket(created_ticket_id)
-            print("Direct API Test: Zammad cleanup complete.")
+        history = memory_manager.get_personal_history(user_id, persona_name)
+        assert len(history) == 2
 
 
 @pytest.mark.asyncio
 async def test_new_ticket_lifecycle(live_chat_system, managed_zammad_user):
     """
-    Tests the full end-to-end flow using the persistent user.
-    This test patches flaky network dependencies (LLM and user search) to be deterministic.
+    Tests the full end-to-end flow for creating a NEW ticket.
     """
     chat_system, memory_manager, zammad_client = live_chat_system
     user_info = managed_zammad_user
+    persona_name = "derpr"  # Use a known-good persona
     created_ticket_id = None
 
     try:
-        # The return_value must be a tuple (user_id, email) to match the real method's signature.
         mock_user_return = (user_info["id"], PERSISTENT_TEST_USER_EMAIL)
-
-        # Patch flaky dependencies to isolate the test's focus
+        # Mock dependencies to isolate test's focus on NEW ticket creation
         with patch.object(chat_system, '_get_or_create_zammad_user', new_callable=AsyncMock,
                           return_value=mock_user_return), \
+                patch.object(chat_system, '_find_active_ticket_for_user', new_callable=AsyncMock, return_value=None), \
                 patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
-                             return_value=("Mocked LLM reply.", ResponseType.LLM_GENERATION)):
+                             return_value=("Mocked new ticket reply.", ResponseType.LLM_GENERATION)):
 
-            response_text, response_type = await chat_system.generate_response(
-                persona_name="derpr",
+            response_text, _ = await chat_system.generate_response(
+                persona_name=persona_name,
                 user_identifier=user_info["identifier"],
                 channel="gmail",
-                message="My computer is on fire, please help!",
+                message="My first issue, please create a ticket.",
                 user_display_name="Pytest PersistentUser"
             )
 
-            # Assertions must be inside the 'with' block to ensure mocks are active.
-            assert response_type == ResponseType.LLM_GENERATION
-            assert "internal error" not in response_text.lower(), f"Generate response returned an error: {response_text}"
-
-            history = memory_manager.get_history(user_info["identifier"])
-            assert len(history) == 1
+            assert "internal error" not in response_text.lower()
             with memory_manager._get_connection() as conn:
                 cursor = conn.execute(
-                    "SELECT zammad_ticket_id, bot_response FROM User_Interactions WHERE user_identifier = ?",
+                    "SELECT zammad_ticket_id FROM User_Interactions WHERE user_identifier = ? AND role = 'assistant'",
                     (user_info["identifier"],))
                 row = cursor.fetchone()
+                assert row is not None, "Database query did not find the logged interaction."
                 created_ticket_id = row['zammad_ticket_id']
-                bot_response = row['bot_response']
-                assert created_ticket_id is not None, f"Ticket ID was not logged in the database. Bot response was: '{bot_response}'"
+                assert created_ticket_id is not None, "A new ticket ID was not logged to the database."
 
             ticket_data = zammad_client._make_request('get', f'tickets/{created_ticket_id}')
             assert ticket_data['customer_id'] == user_info["id"]
-            print(f"\nHigh-level test verified ticket #{created_ticket_id} creation.")
+            print(f"\nNew ticket lifecycle test verified ticket #{created_ticket_id} creation.")
 
     finally:
         if created_ticket_id:
-            print(f"High-level test: Cleaning up ticket #{created_ticket_id}...")
+            print(f"Cleaning up ticket from new_ticket_lifecycle: #{created_ticket_id}...")
             zammad_client.delete_ticket(created_ticket_id)
-            print("High-level test: Cleanup complete.")
+
+
+@pytest.mark.asyncio
+async def test_existing_ticket_flow(live_chat_system, managed_zammad_user):
+    """
+    Tests that the system correctly finds and uses an existing open ticket.
+    """
+    chat_system, memory_manager, zammad_client = live_chat_system
+    user_info = managed_zammad_user
+    persona_name = "derpr"  # Use a known-good persona
+    initial_ticket_id = None
+
+    try:
+        # 1. SETUP: Create an initial ticket with an article body to ensure it's in a searchable state.
+        print("\nSetting up for existing_ticket_flow: Creating initial ticket...")
+        initial_ticket_data = zammad_client.create_ticket(
+            title="Initial Test Ticket",
+            group="Users",
+            customer_id=user_info["id"],
+            article_body="This is the first message that creates the ticket."
+        )
+        initial_ticket_id = initial_ticket_data['id']
+        # Log the corresponding interaction to our local DB for context history
+        memory_manager.log_interaction(
+            user_identifier=user_info["identifier"],
+            persona_name=persona_name,
+            channel="gmail",
+            user_message="This is the first message.",
+            bot_response="I have created a ticket for you.",
+            zammad_ticket_id=initial_ticket_id
+        )
+        print(f"Initial ticket #{initial_ticket_id} created and history logged.")
+
+        # 2. ACTION & ASSERTIONS
+        mock_user_return = (user_info["id"], PERSISTENT_TEST_USER_EMAIL)
+        with patch.object(chat_system, '_get_or_create_zammad_user', new_callable=AsyncMock,
+                          return_value=mock_user_return), \
+                patch.object(chat_system, '_find_active_ticket_for_user', new_callable=AsyncMock,
+                             return_value=initial_ticket_id), \
+                patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock) as mock_llm_call, \
+                patch.object(memory_manager, 'get_ticket_history',
+                             wraps=memory_manager.get_ticket_history) as mock_get_ticket_history, \
+                patch.object(zammad_client, 'create_ticket', wraps=zammad_client.create_ticket) as mock_create_ticket:
+
+            # Make the follow-up call
+            await chat_system.generate_response(
+                persona_name=persona_name,
+                user_identifier=user_info["identifier"],
+                channel="gmail",
+                message="This is a follow-up on my ticket.",
+                user_display_name="Pytest PersistentUser"
+            )
+
+            # Assert correct history method was used
+            mock_get_ticket_history.assert_called_once()
+
+            # Assert that the system did NOT create a new ticket
+            mock_create_ticket.assert_not_called()
+
+            # Assert correct context was passed to LLM
+            mock_llm_call.assert_called_once()
+            context_object = mock_llm_call.call_args[0][1]
+            system_message = context_object['history'][0]
+            assert system_message['role'] == 'system'
+            assert f"ticket #{initial_ticket_id}" in system_message['content']
+
+            # Assert the follow-up was logged to the SAME ticket
+            with memory_manager._get_connection() as conn:
+                cursor = conn.execute("SELECT COUNT(*) FROM User_Interactions WHERE zammad_ticket_id = ?",
+                                      (initial_ticket_id,))
+                count = cursor.fetchone()[0]
+                assert count == 4, "The follow-up interaction was not logged to the existing ticket."
+            print("Existing ticket flow test passed.")
+
+    finally:
+        # 3. CLEANUP
+        if initial_ticket_id:
+            print(f"Cleaning up ticket from existing_ticket_flow: #{initial_ticket_id}...")
+            zammad_client.delete_ticket(initial_ticket_id)
 
 
 @pytest.mark.asyncio
@@ -217,10 +266,11 @@ async def test_dev_command_flow(live_chat_system):
     """
     chat_system, memory_manager, _ = live_chat_system
     user_id = "dev-user-789"
+    persona_name = "derpr"
     response_text, response_type = await chat_system.generate_response(
-        persona_name="derpr", user_identifier=user_id, channel="any", message="help"
+        persona_name=persona_name, user_identifier=user_id, channel="any", message="help"
     )
     assert response_type == ResponseType.DEV_COMMAND
     assert "Talk to a specific persona" in response_text
-    history = memory_manager.get_history(user_id)
+    history = memory_manager.get_personal_history(user_id, persona_name)
     assert len(history) == 0
