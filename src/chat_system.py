@@ -17,7 +17,6 @@ from src.message_handler import BotLogic
 from src.persona import Persona
 from src.utils.model_utils import get_model_list
 from src.utils.save_utils import save_personas_to_file, load_personas_from_file
-from src.utils.message_utils import cleanse_message_for_history
 
 logger = logging.getLogger(__name__)
 
@@ -120,19 +119,22 @@ class ChatSystem:
             image_url: Optional[str] = None,
             history_limit: Optional[int] = None,
             user_display_name: Optional[str] = None
-    ) -> Tuple[str, ResponseType]:
-        """Orchestrates response generation, returning the response string and its type."""
+    ) -> Tuple[str, ResponseType, Optional[int]]:
+        """
+        Orchestrates response generation, returning the response, its type, and any relevant ticket ID.
+        NOTE: This method is now LOG-AGNOSTIC. The calling interface is responsible for logging.
+        """
         command_result = await self.bot_logic.preprocess_message(persona_name, user_identifier, message)
         if command_result:
             if command_result.get("mutated", False):
                 save_personas_to_file(self.personas)
-            return command_result["response"], ResponseType.DEV_COMMAND
+            return command_result["response"], ResponseType.DEV_COMMAND, None
 
         ticket_to_log = None
         try:
             persona = self.personas.get(persona_name)
             if not persona:
-                return "Error: Persona not found.", ResponseType.DEV_COMMAND
+                return "Error: Persona not found.", ResponseType.DEV_COMMAND, None
 
             # --- CONTEXT GATHERING ---
             is_ticket_channel = self._should_create_ticket(channel, message)
@@ -191,26 +193,15 @@ class ChatSystem:
                 except Exception as zammad_error:
                     logger.error(f"A Zammad API error occurred during ticket action processing: {zammad_error}", exc_info=True)
 
-
             # --- LLM GENERATION ---
             reply_content, api_payload = await self.text_engine.generate_response(persona.get_config_for_engine(),
                                                                                   context_object)
             self.last_api_requests[user_identifier][persona_name] = api_payload
 
-            # --- LOGGING & FINAL ZAMMAD UPDATE ---
-            cleansed_reply = cleanse_message_for_history(reply_content)
-            self.memory_manager.log_interaction(
-                user_identifier=user_identifier,
-                persona_name=persona_name,
-                channel=channel,
-                user_message=message,
-                bot_response=cleansed_reply,
-                zammad_ticket_id=ticket_to_log
-            )
-
+            # --- FINAL ZAMMAD UPDATE ---
             if is_ticket_channel and ticket_to_log:
                 try:
-                    # Add the bot's full, un-cleansed reply to the Zammad ticket.
+                    # Add the bot's full reply to the Zammad ticket.
                     await asyncio.to_thread(self.zammad_client.add_article_to_ticket, ticket_id=ticket_to_log,
                                             body=reply_content)
                 except Exception as e:
@@ -218,19 +209,8 @@ class ChatSystem:
                         f"Failed to add bot reply to Zammad ticket #{ticket_to_log}. The interaction is still logged locally. Error: {e}",
                         exc_info=True)
 
-            return reply_content, ResponseType.LLM_GENERATION
+            return reply_content, ResponseType.LLM_GENERATION, ticket_to_log
 
         except Exception as e:
             logger.error(f"A critical error occurred in generate_response for {user_identifier}: {e}", exc_info=True)
-            error_message = f"An internal error occurred: {type(e).__name__}"
-            # Ensure persona_name is available for logging in case of early failure
-            current_persona_name = persona_name if 'persona_name' in locals() else "unknown_persona"
-            self.memory_manager.log_interaction(
-                user_identifier=user_identifier,
-                persona_name=current_persona_name,
-                channel=channel,
-                user_message=message,
-                bot_response=error_message,
-                zammad_ticket_id=ticket_to_log
-            )
-            return "An internal error occurred while processing your request.", ResponseType.DEV_COMMAND
+            return "An internal error occurred while processing your request.", ResponseType.DEV_COMMAND, ticket_to_log

@@ -65,7 +65,7 @@ class MemoryManager:
             logger.info(f"Database connection to '{self.db_path}' closed.")
 
     def create_schema(self) -> None:
-        """Creates the user interactions table with a message-centric schema."""
+        """Creates the database schema, including tables for interactions and suppressions."""
         # NOTE: This is a breaking schema change. Old databases must be deleted.
         schema_sql = """
         CREATE TABLE IF NOT EXISTS User_Interactions (
@@ -76,51 +76,75 @@ class MemoryManager:
             role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'system')),
             content TEXT,
             timestamp TIMESTAMP NOT NULL,
-            zammad_ticket_id INTEGER
+            zammad_ticket_id INTEGER,
+            platform_message_id TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_user_persona_ticket_timestamp
         ON User_Interactions (user_identifier, persona_name, zammad_ticket_id, timestamp);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_platform_message_id
+        ON User_Interactions (platform_message_id);
+
+        CREATE TABLE IF NOT EXISTS Suppressed_Interactions (
+            suppression_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            interaction_id INTEGER NOT NULL UNIQUE,
+            suppressed_at TIMESTAMP NOT NULL,
+            FOREIGN KEY (interaction_id) REFERENCES User_Interactions(interaction_id) ON DELETE CASCADE
+        );
         """
         conn = self._get_connection()
         conn.executescript(schema_sql)
         conn.commit()
         logging.info("User memory database schema created or verified successfully.")
 
-    def log_interaction(self, user_identifier: str, persona_name: str, channel: str, user_message: str, bot_response: str,
-                        zammad_ticket_id: Optional[int] = None) -> None:
-        """Logs a user message and a bot response as two separate entries."""
+    def log_message(self, user_identifier: str, persona_name: str, channel: str, role: str, content: str,
+                    timestamp: datetime, platform_message_id: Optional[str] = None,
+                    zammad_ticket_id: Optional[int] = None) -> None:
+        """Logs a single message to the database."""
         conn = self._get_connection()
-        user_timestamp = datetime.now()
-        # Ensure the assistant's timestamp is slightly later for deterministic sorting
-        assistant_timestamp = user_timestamp + timedelta(microseconds=1)
-
-        # Insert user message
         conn.execute(
             """
             INSERT INTO User_Interactions 
-            (user_identifier, persona_name, channel, role, content, timestamp, zammad_ticket_id)
-            VALUES (?, ?, ?, 'user', ?, ?, ?)
+            (user_identifier, persona_name, channel, role, content, timestamp, zammad_ticket_id, platform_message_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (user_identifier, persona_name, channel, user_message, user_timestamp, zammad_ticket_id)
-        )
-
-        # Insert bot response
-        conn.execute(
-            """
-            INSERT INTO User_Interactions 
-            (user_identifier, persona_name, channel, role, content, timestamp, zammad_ticket_id)
-            VALUES (?, ?, ?, 'assistant', ?, ?, ?)
-            """,
-            (user_identifier, persona_name, channel, bot_response, assistant_timestamp, zammad_ticket_id)
+            (user_identifier, persona_name, channel, role, content, timestamp, zammad_ticket_id, platform_message_id)
         )
         conn.commit()
 
+    def suppress_message_by_platform_id(self, platform_message_id: str) -> bool:
+        """Flags a message to be ignored in future context based on its platform ID."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT interaction_id FROM User_Interactions WHERE platform_message_id = ?",
+                       (platform_message_id,))
+        row = cursor.fetchone()
+
+        if not row:
+            logger.warning(f"Could not find message with platform_id '{platform_message_id}' to suppress.")
+            return False
+
+        interaction_id = row['interaction_id']
+        now = datetime.now()
+
+        try:
+            cursor.execute("INSERT INTO Suppressed_Interactions (interaction_id, suppressed_at) VALUES (?, ?)",
+                           (interaction_id, now))
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            logger.warning(f"Message with interaction_id {interaction_id} is already suppressed.")
+            return False
+
     def get_personal_history(self, user_identifier: str, persona_name: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Retrieves the most recent messages for a given user and persona."""
+        """Retrieves the most recent non-suppressed messages for a given user and persona."""
         query = """
-            SELECT role, content FROM User_Interactions
-            WHERE user_identifier = :user_identifier AND persona_name = :persona_name
-            ORDER BY timestamp DESC
+            SELECT T1.role, T1.content FROM User_Interactions AS T1
+            LEFT JOIN Suppressed_Interactions AS T2 ON T1.interaction_id = T2.interaction_id
+            WHERE T1.user_identifier = :user_identifier 
+              AND T1.persona_name = :persona_name
+              AND T2.suppression_id IS NULL
+            ORDER BY T1.timestamp DESC
         """
         params = {'user_identifier': user_identifier, 'persona_name': persona_name}
 
@@ -132,15 +156,16 @@ class MemoryManager:
         cursor = conn.cursor()
         cursor.execute(query, params)
         rows = cursor.fetchall()
-        # Return in chronological order, already formatted for the LLM API.
         return [dict(row) for row in reversed(rows)]
 
     def get_ticket_history(self, ticket_id: int, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Retrieves all messages for a given Zammad ticket ID."""
+        """Retrieves all non-suppressed messages for a given Zammad ticket ID."""
         query = """
-            SELECT role, content FROM User_Interactions
-            WHERE zammad_ticket_id = :ticket_id
-            ORDER BY timestamp DESC
+            SELECT T1.role, T1.content FROM User_Interactions AS T1
+            LEFT JOIN Suppressed_Interactions AS T2 ON T1.interaction_id = T2.interaction_id
+            WHERE T1.zammad_ticket_id = :ticket_id
+              AND T2.suppression_id IS NULL
+            ORDER BY T1.timestamp DESC
         """
         params = {'ticket_id': ticket_id}
 
@@ -152,5 +177,4 @@ class MemoryManager:
         cursor = conn.cursor()
         cursor.execute(query, params)
         rows = cursor.fetchall()
-        # Return in chronological order, already formatted for the LLM API.
         return [dict(row) for row in reversed(rows)]
