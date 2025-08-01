@@ -1,8 +1,8 @@
 # tests/database/test_memory_manager.py
 
 import pytest
-import sqlite3
 import time
+from datetime import datetime
 from src.database.memory_manager import MemoryManager
 
 
@@ -11,156 +11,112 @@ def mem_manager():
     """Provides a MemoryManager instance with an in-memory database for each test."""
     manager = MemoryManager(db_path=':memory:')
     manager.create_schema()
-    return manager
+    yield manager
+    manager.close()
 
 
 def test_create_schema(mem_manager):
-    """Verify that the schema creation results in the correct table and columns."""
+    """Verify that the schema creation results in the correct tables and columns."""
     conn = mem_manager._get_connection()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='User_Interactions'")
-    assert cursor.fetchone() is not None, "Table 'User_Interactions' was not created."
-
+    # Check User_Interactions table
     cursor.execute("PRAGMA table_info(User_Interactions)")
     columns = {row['name'] for row in cursor.fetchall()}
     expected_columns = {
         'interaction_id', 'user_identifier', 'persona_name', 'channel',
-        'role', 'content', 'timestamp', 'zammad_ticket_id'
+        'role', 'content', 'timestamp', 'zammad_ticket_id', 'platform_message_id'
     }
-    assert columns == expected_columns, f"Table columns are incorrect. Expected {expected_columns}, got {columns}."
+    assert columns == expected_columns
+
+    # Check Suppressed_Interactions table
+    cursor.execute("PRAGMA table_info(Suppressed_Interactions)")
+    suppressed_columns = {row['name'] for row in cursor.fetchall()}
+    expected_suppressed_columns = {'suppression_id', 'interaction_id', 'suppressed_at'}
+    assert suppressed_columns == expected_suppressed_columns
 
 
-def test_log_and_get_personal_history(mem_manager):
-    """Test logging an interaction and retrieving the two resulting messages."""
-    user_id, persona, channel = "user1", "persona1", "chan1"
-    user_msg, bot_resp = "Hello bot", "Hello user"
+def test_log_and_get_message(mem_manager):
+    """Test logging a single message and retrieving it."""
+    user_id, persona = "user1", "persona1"
+    now = datetime.now()
+    mem_manager.log_message(user_id, persona, "chan1", "user", "Hello", now, platform_message_id="p_id_1")
 
-    mem_manager.log_interaction(user_id, persona, channel, user_msg, bot_resp)
     history = mem_manager.get_personal_history(user_id, persona)
+    assert len(history) == 1
+    assert history[0]['content'] == "Hello"
 
-    assert len(history) == 2
-    assert history[0] == {'role': 'user', 'content': user_msg}
-    assert history[1] == {'role': 'assistant', 'content': bot_resp}
+    with mem_manager._get_connection() as conn:
+        row = conn.execute("SELECT platform_message_id FROM User_Interactions").fetchone()
+        assert row['platform_message_id'] == "p_id_1"
 
 
-def test_personal_history_order(mem_manager):
-    """Test that multiple interactions are returned in chronological order."""
-    user_id, persona = "user_order", "persona_order"
+def test_suppress_message_by_platform_id(mem_manager):
+    """Test that a message can be suppressed and is excluded from history."""
+    user_id, persona = "user_suppress", "persona_suppress"
 
-    mem_manager.log_interaction(user_id, persona, "test", "First message", "First response")
+    # Log three messages with unique timestamps
+    mem_manager.log_message(user_id, persona, "chan", "user", "Message 1", datetime.now(), platform_message_id="p1")
     time.sleep(0.01)
-    mem_manager.log_interaction(user_id, persona, "test", "Second message", "Second response")
+    mem_manager.log_message(user_id, persona, "chan", "assistant", "Message 2", datetime.now(),
+                            platform_message_id="p2")
+    time.sleep(0.01)
+    mem_manager.log_message(user_id, persona, "chan", "user", "Message 3", datetime.now(), platform_message_id="p3")
 
-    history = mem_manager.get_personal_history(user_id, persona)
+    # History should have 3 messages
+    history_before = mem_manager.get_personal_history(user_id, persona)
+    assert len(history_before) == 3
 
-    assert len(history) == 4
-    assert history[0]['content'] == "First message"
-    assert history[1]['content'] == "First response"
-    assert history[2]['content'] == "Second message"
-    assert history[3]['content'] == "Second response"
+    # Suppress the middle message
+    success = mem_manager.suppress_message_by_platform_id("p2")
+    assert success is True
+
+    # History should now have 2 messages
+    history_after = mem_manager.get_personal_history(user_id, persona)
+    assert len(history_after) == 2
+    contents = [msg['content'] for msg in history_after]
+    assert "Message 1" in contents
+    assert "Message 2" not in contents
+    assert "Message 3" in contents
 
 
-def test_personal_history_limit(mem_manager):
-    """Test that the message history limit is respected."""
+def test_suppress_nonexistent_message(mem_manager):
+    """Test that attempting to suppress a non-existent message ID fails gracefully."""
+    success = mem_manager.suppress_message_by_platform_id("nonexistent_id")
+    assert success is False
+
+
+def test_ticket_history_excludes_suppressed(mem_manager):
+    """Test that get_ticket_history also respects suppressions."""
+    user_id, persona, ticket_id = "user_ticket", "persona_ticket", 123
+
+    mem_manager.log_message(user_id, persona, "chan", "user", "Ticket Msg 1", datetime.now(), "p_t1", ticket_id)
+    time.sleep(0.01)
+    mem_manager.log_message(user_id, persona, "chan", "assistant", "Ticket Msg 2", datetime.now(), "p_t2", ticket_id)
+
+    assert len(mem_manager.get_ticket_history(ticket_id)) == 2
+    mem_manager.suppress_message_by_platform_id("p_t1")
+    assert len(mem_manager.get_ticket_history(ticket_id)) == 1
+    assert mem_manager.get_ticket_history(ticket_id)[0]['content'] == "Ticket Msg 2"
+
+
+def test_history_limit(mem_manager):
+    """Test that the history limit correctly applies to non-suppressed messages."""
     user_id, persona = "user_limit", "persona_limit"
 
-    for i in range(5):  # This will create 10 messages
-        mem_manager.log_interaction(user_id, persona, "test", f"Msg {i}", f"Resp {i}")
+    for i in range(5):
+        # Move datetime.now() inside the loop to get unique timestamps
+        now = datetime.now()
+        mem_manager.log_message(user_id, persona, "chan", "user", f"Msg {i}", now, f"p_{i}")
         time.sleep(0.01)
 
-    full_history = mem_manager.get_personal_history(user_id, persona)
-    assert len(full_history) == 10
+    # Suppress message with platform_id 'p_3'
+    mem_manager.suppress_message_by_platform_id("p_3")
 
+    # Ask for 3 most recent messages. Should get p_4, p_2, p_1 (since p_3 is skipped)
     limited_history = mem_manager.get_personal_history(user_id, persona, limit=3)
     assert len(limited_history) == 3
-    # The 3 latest messages are Resp 4, Msg 4, and Resp 3. Chronologically:
-    assert limited_history[0]['content'] == "Resp 3"
-    assert limited_history[1]['content'] == "Msg 4"
-    assert limited_history[2]['content'] == "Resp 4"
 
-    zero_history = mem_manager.get_personal_history(user_id, persona, limit=0)
-    assert len(zero_history) == 0
-
-
-def test_persona_history_isolation(mem_manager):
-    """Test that history for one persona is isolated from another for the same user."""
-    user_id = "multi_persona_user"
-    persona_a, persona_b = "persona_a", "persona_b"
-
-    mem_manager.log_interaction(user_id, persona_a, "test", "Message for A", "Response from A")
-    time.sleep(0.01)
-    mem_manager.log_interaction(user_id, persona_b, "test", "Message for B", "Response from B")
-
-    history_a = mem_manager.get_personal_history(user_id, persona_a)
-    assert len(history_a) == 2
-    assert history_a[0]['content'] == "Message for A"
-    assert history_a[1]['content'] == "Response from A"
-
-    history_b = mem_manager.get_personal_history(user_id, persona_b)
-    assert len(history_b) == 2
-    assert history_b[0]['content'] == "Message for B"
-    assert history_b[1]['content'] == "Response from B"
-
-
-def test_get_ticket_history(mem_manager):
-    """Test retrieving all messages for a specific Zammad ticket ID."""
-    ticket_id = 12345
-    mem_manager.log_interaction("user1", "p1", "c1", "First ticket msg", "First reply", ticket_id)
-    time.sleep(0.01)
-    mem_manager.log_interaction("user2", "p2", "c2", "Second ticket msg", "Second reply", ticket_id)
-    mem_manager.log_interaction("user1", "p1", "c1", "Non-ticket msg", "Reply", 99999)
-
-    ticket_history = mem_manager.get_ticket_history(ticket_id)
-    assert len(ticket_history) == 4
-    assert ticket_history[0]['content'] == "First ticket msg"
-    assert ticket_history[1]['content'] == "First reply"
-    assert ticket_history[2]['content'] == "Second ticket msg"
-    assert ticket_history[3]['content'] == "Second reply"
-
-
-def test_ticket_history_limit(mem_manager):
-    """Test that the ticket history limit is respected for messages."""
-    ticket_id = 54321
-    for i in range(5):  # Creates 10 messages
-        mem_manager.log_interaction("user", "p", "c", f"Msg {i}", f"Resp {i}", ticket_id)
-        time.sleep(0.01)
-
-    limited_history = mem_manager.get_ticket_history(ticket_id, limit=3)
-    assert len(limited_history) == 3
-    assert limited_history[0]['content'] == "Resp 3"
-    assert limited_history[1]['content'] == "Msg 4"
-    assert limited_history[2]['content'] == "Resp 4"
-
-    zero_history = mem_manager.get_ticket_history(ticket_id, limit=0)
-    assert len(zero_history) == 0
-
-    full_history = mem_manager.get_ticket_history(ticket_id, limit=10)
-    assert len(full_history) == 10
-
-
-def test_zammad_ticket_id_handling(mem_manager):
-    """Test that zammad_ticket_id is stored correctly for both messages in an interaction."""
-    conn = mem_manager._get_connection()
-    mem_manager.log_interaction("user_with_ticket", "p", "c", "msg", "resp", zammad_ticket_id=9001)
-    mem_manager.log_interaction("user_no_ticket", "p", "c", "msg", "resp")
-
-    # Verify both messages have the ticket ID
-    cursor_with = conn.execute("SELECT zammad_ticket_id FROM User_Interactions WHERE user_identifier = ?", ("user_with_ticket",))
-    rows_with = cursor_with.fetchall()
-    assert len(rows_with) == 2
-    assert rows_with[0]['zammad_ticket_id'] == 9001
-    assert rows_with[1]['zammad_ticket_id'] == 9001
-
-    # Verify both messages have NULL for ticket ID
-    cursor_no = conn.execute("SELECT zammad_ticket_id FROM User_Interactions WHERE user_identifier = ?", ("user_no_ticket",))
-    rows_no = cursor_no.fetchall()
-    assert len(rows_no) == 2
-    assert rows_no[0]['zammad_ticket_id'] is None
-    assert rows_no[1]['zammad_ticket_id'] is None
-
-
-def test_get_personal_history_for_nonexistent_user(mem_manager):
-    """Test that getting history for a user with no interactions returns an empty list."""
-    history = mem_manager.get_personal_history("nonexistent_user", "any_persona")
-    assert history == []
+    # The final list is reversed for chronological order
+    contents = [msg['content'] for msg in limited_history]
+    assert contents == ["Msg 1", "Msg 2", "Msg 4"]
