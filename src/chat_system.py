@@ -17,6 +17,7 @@ from src.message_handler import BotLogic
 from src.persona import Persona
 from src.utils.model_utils import get_model_list
 from src.utils.save_utils import save_personas_to_file, load_personas_from_file
+from src.utils.message_utils import cleanse_message_for_history
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +51,10 @@ class ChatSystem:
         return None
 
     async def _find_active_ticket_for_user(self, customer_id: int) -> Optional[int]:
-        """Finds the most recently updated open ticket for a given Zammad user ID."""
+        """Finds the most recently updated open or new ticket for a given Zammad user ID."""
         try:
-            query = f"customer_id:{customer_id} AND state.name:open"
+            # A ticket can be in 'new' or 'open' state to be considered active.
+            query = f"customer_id:{customer_id} AND state.name:(open OR new)"
             search_results = await asyncio.to_thread(
                 self.zammad_client.search_tickets,
                 query=query,
@@ -132,62 +134,83 @@ class ChatSystem:
             if not persona:
                 return "Error: Persona not found.", ResponseType.DEV_COMMAND
 
+            # --- CONTEXT GATHERING ---
+            is_ticket_channel = self._should_create_ticket(channel, message)
+            ticket_id_for_context = None
+            customer_id = None
+            zammad_email = None
+
+            if is_ticket_channel:
+                try:
+                    customer_id, zammad_email = await self._get_or_create_zammad_user(user_identifier, channel, user_display_name)
+                    if customer_id:
+                        ticket_id_for_context = self._find_ticket_id_in_message(message)
+                        if not ticket_id_for_context:
+                            ticket_id_for_context = await self._find_active_ticket_for_user(customer_id)
+                except Exception as zammad_error:
+                    logger.error(f"A Zammad API error occurred during user/ticket search: {zammad_error}", exc_info=True)
+
             effective_limit = persona.get_context_length() if persona.get_context_length() is not None else history_limit
-            history_from_db = self.memory_manager.get_history(user_identifier, effective_limit)
             interaction_history = []
-            for item in history_from_db:
-                interaction_history.append({"role": "user", "content": item["user_message"]})
-                interaction_history.append({"role": "assistant", "content": item["bot_response"]})
+            system_context_message = None
+
+            if ticket_id_for_context:
+                interaction_history = self.memory_manager.get_ticket_history(ticket_id_for_context, effective_limit)
+                system_context_message = f"This conversation is part of Zammad ticket #{ticket_id_for_context}. All messages are related to this ticket."
+            else:
+                interaction_history = self.memory_manager.get_personal_history(user_identifier, persona_name, effective_limit)
+
+            if system_context_message:
+                interaction_history.insert(0, {"role": "system", "content": system_context_message})
 
             context_object = {"persona_prompt": persona.get_prompt(), "history": interaction_history,
                               "current_message": {"text": message, "image_url": image_url}}
-            is_ticket_request = self._should_create_ticket(channel, message)
 
-            if is_ticket_request:
+            # --- ZAMMAD TICKET ACTIONS ---
+            if is_ticket_channel and customer_id:
+                ticket_to_log = ticket_id_for_context
                 try:
-                    customer_id, zammad_email = await self._get_or_create_zammad_user(user_identifier, channel,
-                                                                                      user_display_name)
-                    if customer_id and zammad_email:
-                        # Priority 1: Check for an explicit ticket ID in the message
-                        ticket_id = self._find_ticket_id_in_message(message)
-                        # Priority 2: If no explicit ID, search for an active open ticket for the user
-                        if not ticket_id:
-                            ticket_id = await self._find_active_ticket_for_user(customer_id)
-
-                        if ticket_id:
-                            await asyncio.to_thread(self.zammad_client.add_article_to_ticket, ticket_id=ticket_id,
-                                                    body=message, impersonate_email=zammad_email)
-                            ticket_to_log = ticket_id
+                    if ticket_to_log:
+                        # An existing ticket was found, add the user's message to it.
+                        await asyncio.to_thread(self.zammad_client.add_article_to_ticket, ticket_id=ticket_to_log,
+                                                body=message, impersonate_email=zammad_email)
+                    else:
+                        # No existing ticket found, create a new one.
+                        ticket_title_name = user_display_name if user_display_name else user_identifier.split('<')[0].strip()
+                        title = f"New request from {ticket_title_name} via {channel}"
+                        new_ticket = await asyncio.to_thread(self.zammad_client.create_ticket, title=title,
+                                                               group='Users', customer_id=customer_id)
+                        if new_ticket and new_ticket.get('id'):
+                            ticket_to_log = new_ticket['id']
+                            await asyncio.to_thread(self.zammad_client.add_article_to_ticket,
+                                                    ticket_id=ticket_to_log, body=message,
+                                                    impersonate_email=zammad_email)
+                            logger.info(f"Created new Zammad ticket #{ticket_to_log} and added initial article.")
                         else:
-                            ticket_title_name = user_display_name if user_display_name else user_identifier.split('<')[
-                                0].strip()
-                            title = f"New request from {ticket_title_name} via {channel}"
-
-                            empty_ticket = await asyncio.to_thread(self.zammad_client.create_ticket, title=title,
-                                                                   group='Users', customer_id=customer_id)
-
-                            if empty_ticket and empty_ticket.get('id'):
-                                ticket_to_log = empty_ticket['id']
-                                await asyncio.to_thread(self.zammad_client.add_article_to_ticket,
-                                                        ticket_id=ticket_to_log, body=message,
-                                                        impersonate_email=zammad_email)
-                                logger.info(f"Created new Zammad ticket #{ticket_to_log} and added initial article.")
-                            else:
-                                logger.error("Zammad client returned a null ticket object after creation attempt.")
+                            logger.error("Zammad client returned a null ticket object after creation attempt.")
                 except Exception as zammad_error:
-                    logger.error(f"A Zammad API error occurred during ticket processing: {zammad_error}", exc_info=True)
+                    logger.error(f"A Zammad API error occurred during ticket action processing: {zammad_error}", exc_info=True)
 
+
+            # --- LLM GENERATION ---
             reply_content, api_payload = await self.text_engine.generate_response(persona.get_config_for_engine(),
                                                                                   context_object)
             self.last_api_requests[user_identifier][persona_name] = api_payload
 
+            # --- LOGGING & FINAL ZAMMAD UPDATE ---
+            cleansed_reply = cleanse_message_for_history(reply_content)
             self.memory_manager.log_interaction(
-                user_identifier=user_identifier, channel=channel, user_message=message,
-                bot_response=reply_content, zammad_ticket_id=ticket_to_log
+                user_identifier=user_identifier,
+                persona_name=persona_name,
+                channel=channel,
+                user_message=message,
+                bot_response=cleansed_reply,
+                zammad_ticket_id=ticket_to_log
             )
 
-            if is_ticket_request and ticket_to_log:
+            if is_ticket_channel and ticket_to_log:
                 try:
+                    # Add the bot's full, un-cleansed reply to the Zammad ticket.
                     await asyncio.to_thread(self.zammad_client.add_article_to_ticket, ticket_id=ticket_to_log,
                                             body=reply_content)
                 except Exception as e:
@@ -200,8 +223,14 @@ class ChatSystem:
         except Exception as e:
             logger.error(f"A critical error occurred in generate_response for {user_identifier}: {e}", exc_info=True)
             error_message = f"An internal error occurred: {type(e).__name__}"
+            # Ensure persona_name is available for logging in case of early failure
+            current_persona_name = persona_name if 'persona_name' in locals() else "unknown_persona"
             self.memory_manager.log_interaction(
-                user_identifier=user_identifier, channel=channel, user_message=message,
-                bot_response=error_message, zammad_ticket_id=ticket_to_log
+                user_identifier=user_identifier,
+                persona_name=current_persona_name,
+                channel=channel,
+                user_message=message,
+                bot_response=error_message,
+                zammad_ticket_id=ticket_to_log
             )
             return "An internal error occurred while processing your request.", ResponseType.DEV_COMMAND

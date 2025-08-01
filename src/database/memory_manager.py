@@ -2,7 +2,7 @@
 
 import sqlite3
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Tuple, Optional
 from pathlib import Path
 
@@ -65,56 +65,92 @@ class MemoryManager:
             logger.info(f"Database connection to '{self.db_path}' closed.")
 
     def create_schema(self) -> None:
-        """Creates the user interactions table if it doesn't exist."""
+        """Creates the user interactions table with a message-centric schema."""
+        # NOTE: This is a breaking schema change. Old databases must be deleted.
         schema_sql = """
         CREATE TABLE IF NOT EXISTS User_Interactions (
             interaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_identifier TEXT NOT NULL,
+            persona_name TEXT NOT NULL,
             channel TEXT NOT NULL,
+            role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'system')),
+            content TEXT,
             timestamp TIMESTAMP NOT NULL,
-            user_message TEXT,
-            bot_response TEXT,
             zammad_ticket_id INTEGER
         );
-        CREATE INDEX IF NOT EXISTS idx_user_identifier_timestamp
-        ON User_Interactions (user_identifier, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_user_persona_ticket_timestamp
+        ON User_Interactions (user_identifier, persona_name, zammad_ticket_id, timestamp);
         """
         conn = self._get_connection()
         conn.executescript(schema_sql)
         conn.commit()
         logging.info("User memory database schema created or verified successfully.")
 
-    def log_interaction(self, user_identifier: str, channel: str, user_message: str, bot_response: str,
+    def log_interaction(self, user_identifier: str, persona_name: str, channel: str, user_message: str, bot_response: str,
                         zammad_ticket_id: Optional[int] = None) -> None:
-        """Logs a complete user-bot interaction."""
-        now = datetime.now()
+        """Logs a user message and a bot response as two separate entries."""
         conn = self._get_connection()
+        user_timestamp = datetime.now()
+        # Ensure the assistant's timestamp is slightly later for deterministic sorting
+        assistant_timestamp = user_timestamp + timedelta(microseconds=1)
+
+        # Insert user message
         conn.execute(
             """
             INSERT INTO User_Interactions 
-            (user_identifier, channel, timestamp, user_message, bot_response, zammad_ticket_id)
-            VALUES (?, ?, ?, ?, ?, ?)
+            (user_identifier, persona_name, channel, role, content, timestamp, zammad_ticket_id)
+            VALUES (?, ?, ?, 'user', ?, ?, ?)
             """,
-            (user_identifier, channel, now, user_message, bot_response, zammad_ticket_id)
+            (user_identifier, persona_name, channel, user_message, user_timestamp, zammad_ticket_id)
+        )
+
+        # Insert bot response
+        conn.execute(
+            """
+            INSERT INTO User_Interactions 
+            (user_identifier, persona_name, channel, role, content, timestamp, zammad_ticket_id)
+            VALUES (?, ?, ?, 'assistant', ?, ?, ?)
+            """,
+            (user_identifier, persona_name, channel, bot_response, assistant_timestamp, zammad_ticket_id)
         )
         conn.commit()
 
-    def get_history(self, user_identifier: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Retrieves the most recent interactions for a given user."""
+    def get_personal_history(self, user_identifier: str, persona_name: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Retrieves the most recent messages for a given user and persona."""
         query = """
-            SELECT user_message, bot_response FROM User_Interactions
-            WHERE user_identifier = :user_identifier
+            SELECT role, content FROM User_Interactions
+            WHERE user_identifier = :user_identifier AND persona_name = :persona_name
             ORDER BY timestamp DESC
         """
-        params = {'user_identifier': user_identifier}
+        params = {'user_identifier': user_identifier, 'persona_name': persona_name}
 
-        if isinstance(limit, int) and limit > 0:
+        if isinstance(limit, int):
             query += " LIMIT :limit"
             params['limit'] = limit
 
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute(query, params)
-        # We want chronological order for the prompt, so we reverse the DESC query result
         rows = cursor.fetchall()
+        # Return in chronological order, already formatted for the LLM API.
+        return [dict(row) for row in reversed(rows)]
+
+    def get_ticket_history(self, ticket_id: int, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Retrieves all messages for a given Zammad ticket ID."""
+        query = """
+            SELECT role, content FROM User_Interactions
+            WHERE zammad_ticket_id = :ticket_id
+            ORDER BY timestamp DESC
+        """
+        params = {'ticket_id': ticket_id}
+
+        if isinstance(limit, int):
+            query += " LIMIT :limit"
+            params['limit'] = limit
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        # Return in chronological order, already formatted for the LLM API.
         return [dict(row) for row in reversed(rows)]
