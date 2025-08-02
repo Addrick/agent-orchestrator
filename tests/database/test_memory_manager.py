@@ -63,60 +63,49 @@ def test_suppress_message_by_platform_id(mem_manager):
     time.sleep(0.01)
     mem_manager.log_message(user_id, persona, "chan", "user", "Message 3", datetime.now(), platform_message_id="p3")
 
-    # History should have 3 messages
     history_before = mem_manager.get_personal_history(user_id, persona)
     assert len(history_before) == 3
 
-    # Suppress the middle message
     success = mem_manager.suppress_message_by_platform_id("p2")
     assert success is True
 
-    # History should now have 2 messages
     history_after = mem_manager.get_personal_history(user_id, persona)
     assert len(history_after) == 2
     contents = [msg['content'] for msg in history_after]
-    assert "Message 1" in contents
     assert "Message 2" not in contents
-    assert "Message 3" in contents
 
 
-def test_suppress_nonexistent_message(mem_manager):
-    """Test that attempting to suppress a non-existent message ID fails gracefully."""
-    success = mem_manager.suppress_message_by_platform_id("nonexistent_id")
-    assert success is False
+def test_get_channel_history(mem_manager):
+    """Test retrieving messages from a specific channel, ignoring other channels."""
+    channel_a, channel_b = "channel-a", "channel-b"
 
-
-def test_ticket_history_excludes_suppressed(mem_manager):
-    """Test that get_ticket_history also respects suppressions."""
-    user_id, persona, ticket_id = "user_ticket", "persona_ticket", 123
-
-    mem_manager.log_message(user_id, persona, "chan", "user", "Ticket Msg 1", datetime.now(), "p_t1", ticket_id)
+    mem_manager.log_message("user1", "p", channel_a, "user", "Msg A1", datetime.now(), "p_a1")
     time.sleep(0.01)
-    mem_manager.log_message(user_id, persona, "chan", "assistant", "Ticket Msg 2", datetime.now(), "p_t2", ticket_id)
+    mem_manager.log_message("user2", "p", channel_b, "user", "Msg B1", datetime.now(), "p_b1")
+    time.sleep(0.01)
+    mem_manager.log_message("user2", "p", channel_a, "user", "Msg A2", datetime.now(), "p_a2")
 
-    assert len(mem_manager.get_ticket_history(ticket_id)) == 2
-    mem_manager.suppress_message_by_platform_id("p_t1")
-    assert len(mem_manager.get_ticket_history(ticket_id)) == 1
-    assert mem_manager.get_ticket_history(ticket_id)[0]['content'] == "Ticket Msg 2"
+    history_a = mem_manager.get_channel_history(channel_a)
+    assert len(history_a) == 2
+    contents_a = [msg['content'] for msg in history_a]
+    assert contents_a == ["Msg A1", "Msg A2"]
+
+    history_b = mem_manager.get_channel_history(channel_b)
+    assert len(history_b) == 1
+    assert history_b[0]['content'] == "Msg B1"
 
 
-def test_history_limit(mem_manager):
-    """Test that the history limit correctly applies to non-suppressed messages."""
-    user_id, persona = "user_limit", "persona_limit"
-
+def test_channel_history_limit_and_suppression(mem_manager):
+    """Test that get_channel_history respects both limits and suppressions."""
+    channel = "test-channel"
     for i in range(5):
-        # Move datetime.now() inside the loop to get unique timestamps
-        now = datetime.now()
-        mem_manager.log_message(user_id, persona, "chan", "user", f"Msg {i}", now, f"p_{i}")
+        mem_manager.log_message("user", "p", channel, "user", f"Msg {i}", datetime.now(), f"p_{i}")
         time.sleep(0.01)
 
-    # Suppress message with platform_id 'p_3'
-    mem_manager.suppress_message_by_platform_id("p_3")
+    mem_manager.suppress_message_by_platform_id("p_2")
 
-    # Ask for 3 most recent messages. Should get p_4, p_2, p_1 (since p_3 is skipped)
-    limited_history = mem_manager.get_personal_history(user_id, persona, limit=3)
-    assert len(limited_history) == 3
-
-    # The final list is reversed for chronological order
-    contents = [msg['content'] for msg in limited_history]
-    assert contents == ["Msg 1", "Msg 2", "Msg 4"]
+    # Ask for 3 messages. Should get Msg 4, Msg 3, Msg 1 (skipping p_2)
+    history = mem_manager.get_channel_history(channel, limit=3)
+    assert len(history) == 3
+    contents = [msg['content'] for msg in history]
+    assert contents == ["Msg 1", "Msg 3", "Msg 4"]

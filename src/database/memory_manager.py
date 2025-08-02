@@ -178,3 +178,24 @@ class MemoryManager:
         cursor.execute(query, params)
         rows = cursor.fetchall()
         return [dict(row) for row in reversed(rows)]
+
+    def get_channel_history(self, channel: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Retrieves the most recent non-suppressed messages for a given channel."""
+        query = """
+            SELECT T1.role, T1.content FROM User_Interactions AS T1
+            LEFT JOIN Suppressed_Interactions AS T2 ON T1.interaction_id = T2.interaction_id
+            WHERE T1.channel = :channel
+              AND T2.suppression_id IS NULL
+            ORDER BY T1.timestamp DESC
+        """
+        params = {'channel': channel}
+
+        if isinstance(limit, int):
+            query += " LIMIT :limit"
+            params['limit'] = limit
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        return [dict(row) for row in reversed(rows)]
