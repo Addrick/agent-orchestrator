@@ -1,3 +1,5 @@
+# src/persona.py
+
 import logging
 from typing import Optional, Dict, Any
 
@@ -21,7 +23,8 @@ class Persona:
             context_length: Optional[int] = global_config.DEFAULT_CONTEXT_LIMIT,
             temperature: Optional[float] = None,
             top_p: Optional[float] = None,
-            top_k: Optional[int] = None
+            top_k: Optional[int] = None,
+            memory_type: str = "auto"
     ) -> None:
         self._name: str = persona_name
         self._model_name: str = model_name
@@ -33,6 +36,7 @@ class Persona:
         self._temperature: Optional[float] = temperature
         self._top_p: Optional[float] = top_p
         self._top_k: Optional[int] = top_k
+        self._memory_type: str = memory_type if memory_type in ["auto", "personal", "channel"] else "auto"
 
     # --- Getters ---
 
@@ -59,6 +63,9 @@ class Persona:
 
     def get_top_k(self) -> Optional[int]:
         return self._top_k
+
+    def get_memory_type(self) -> str:
+        return self._memory_type
 
     # --- Setters ---
 

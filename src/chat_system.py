@@ -155,12 +155,18 @@ class ChatSystem:
             effective_limit = persona.get_context_length() if persona.get_context_length() is not None else history_limit
             interaction_history = []
             system_context_message = None
+            memory_type = persona.get_memory_type()
 
+            # Priority 1: Ticket History
             if ticket_id_for_context:
                 interaction_history = self.memory_manager.get_ticket_history(ticket_id_for_context, effective_limit)
                 system_context_message = f"This conversation is part of Zammad ticket #{ticket_id_for_context}. All messages are related to this ticket."
-            else:
+            # Priority 2: Persona Override for "personal" mode
+            elif memory_type == "personal":
                 interaction_history = self.memory_manager.get_personal_history(user_identifier, persona_name, effective_limit)
+            # Priority 3 (Default): Channel History for "auto" and "channel" modes
+            else:
+                interaction_history = self.memory_manager.get_channel_history(channel, effective_limit)
 
             if system_context_message:
                 interaction_history.insert(0, {"role": "system", "content": system_context_message})
@@ -173,11 +179,9 @@ class ChatSystem:
                 ticket_to_log = ticket_id_for_context
                 try:
                     if ticket_to_log:
-                        # An existing ticket was found, add the user's message to it.
                         await asyncio.to_thread(self.zammad_client.add_article_to_ticket, ticket_id=ticket_to_log,
                                                 body=message, impersonate_email=zammad_email)
                     else:
-                        # No existing ticket found, create a new one.
                         ticket_title_name = user_display_name if user_display_name else user_identifier.split('<')[0].strip()
                         title = f"New request from {ticket_title_name} via {channel}"
                         new_ticket = await asyncio.to_thread(self.zammad_client.create_ticket, title=title,
@@ -201,13 +205,10 @@ class ChatSystem:
             # --- FINAL ZAMMAD UPDATE ---
             if is_ticket_channel and ticket_to_log:
                 try:
-                    # Add the bot's full reply to the Zammad ticket.
                     await asyncio.to_thread(self.zammad_client.add_article_to_ticket, ticket_id=ticket_to_log,
                                             body=reply_content)
                 except Exception as e:
-                    logger.error(
-                        f"Failed to add bot reply to Zammad ticket #{ticket_to_log}. The interaction is still logged locally. Error: {e}",
-                        exc_info=True)
+                    logger.error(f"Failed to add bot reply to Zammad ticket #{ticket_to_log}. Error: {e}", exc_info=True)
 
             return reply_content, ResponseType.LLM_GENERATION, ticket_to_log
 
