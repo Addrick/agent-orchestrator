@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 from src.database.memory_manager import MemoryManager
 from src.clients.zammad_client import ZammadClient
 from config.global_config import SUPPORT_CHANNELS
-from src.engine import TextEngine
+from src.engine import TextEngine, LLMCommunicationError
 from src.message_handler import BotLogic
 from src.persona import Persona
 from src.utils.model_utils import get_model_list
@@ -152,23 +152,7 @@ class ChatSystem:
                     logger.error(f"A Zammad API error occurred during user/ticket search: {zammad_error}",
                                  exc_info=True)
 
-            # --- START OF FIX: CORRECT LIMIT PRECEDENCE LOGIC ---
-            persona_limit = persona.get_context_length()
-
-            # Step 1: Determine the base limit. The persona's setting takes precedence if it's a positive number.
-            # Otherwise, fall back to the limit from the function call.
-            if persona_limit and persona_limit > 0:
-                base_limit = persona_limit
-            else:
-                base_limit = history_limit
-
-            # Step 2: Apply the history_limit as a cap, if it's provided.
-            # The effective limit cannot be greater than the per-call limit.
-            effective_limit = base_limit
-            if history_limit is not None and base_limit is not None:
-                effective_limit = min(base_limit, history_limit)
-            # --- END OF FIX ---
-
+            effective_limit = persona.get_context_length() if persona.get_context_length() else history_limit
             memory_type = persona.get_memory_type()
             raw_history = []
             system_context_message = None
@@ -240,6 +224,9 @@ class ChatSystem:
 
             return reply_content, ResponseType.LLM_GENERATION, ticket_to_log
 
+        except LLMCommunicationError as e:
+            logger.error(f"A recoverable LLM communication error occurred for {user_identifier}: {e}")
+            return "I'm having trouble connecting to the AI service right now. Please try your request again in a moment.", ResponseType.DEV_COMMAND, ticket_to_log
         except Exception as e:
             logger.error(f"A critical error occurred in generate_response for {user_identifier}: {e}", exc_info=True)
             return "An internal error occurred while processing your request.", ResponseType.DEV_COMMAND, ticket_to_log
