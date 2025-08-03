@@ -122,7 +122,6 @@ class ChatSystem:
     ) -> Tuple[str, ResponseType, Optional[int]]:
         """
         Orchestrates response generation, returning the response, its type, and any relevant ticket ID.
-        NOTE: This method is now LOG-AGNOSTIC. The calling interface is responsible for logging.
         """
         command_result = await self.bot_logic.preprocess_message(persona_name, user_identifier, message)
         if command_result:
@@ -136,7 +135,6 @@ class ChatSystem:
             if not persona:
                 return "Error: Persona not found.", ResponseType.DEV_COMMAND, None
 
-            # --- CONTEXT GATHERING ---
             is_ticket_channel = self._should_create_ticket(channel, message)
             ticket_id_for_context = None
             customer_id = None
@@ -144,37 +142,67 @@ class ChatSystem:
 
             if is_ticket_channel:
                 try:
-                    customer_id, zammad_email = await self._get_or_create_zammad_user(user_identifier, channel, user_display_name)
+                    customer_id, zammad_email = await self._get_or_create_zammad_user(user_identifier, channel,
+                                                                                      user_display_name)
                     if customer_id:
                         ticket_id_for_context = self._find_ticket_id_in_message(message)
                         if not ticket_id_for_context:
                             ticket_id_for_context = await self._find_active_ticket_for_user(customer_id)
                 except Exception as zammad_error:
-                    logger.error(f"A Zammad API error occurred during user/ticket search: {zammad_error}", exc_info=True)
+                    logger.error(f"A Zammad API error occurred during user/ticket search: {zammad_error}",
+                                 exc_info=True)
 
-            effective_limit = persona.get_context_length() if persona.get_context_length() is not None else history_limit
-            interaction_history = []
-            system_context_message = None
-            memory_type = persona.get_memory_type()
+            # --- START OF FIX: CORRECT LIMIT PRECEDENCE LOGIC ---
+            persona_limit = persona.get_context_length()
 
-            # Priority 1: Ticket History
-            if ticket_id_for_context:
-                interaction_history = self.memory_manager.get_ticket_history(ticket_id_for_context, effective_limit)
-                system_context_message = f"This conversation is part of Zammad ticket #{ticket_id_for_context}. All messages are related to this ticket."
-            # Priority 2: Persona Override for "personal" mode
-            elif memory_type == "personal":
-                interaction_history = self.memory_manager.get_personal_history(user_identifier, persona_name, effective_limit)
-            # Priority 3 (Default): Channel History for "auto" and "channel" modes
+            # Step 1: Determine the base limit. The persona's setting takes precedence if it's a positive number.
+            # Otherwise, fall back to the limit from the function call.
+            if persona_limit and persona_limit > 0:
+                base_limit = persona_limit
             else:
-                interaction_history = self.memory_manager.get_channel_history(channel, effective_limit)
+                base_limit = history_limit
+
+            # Step 2: Apply the history_limit as a cap, if it's provided.
+            # The effective limit cannot be greater than the per-call limit.
+            effective_limit = base_limit
+            if history_limit is not None and base_limit is not None:
+                effective_limit = min(base_limit, history_limit)
+            # --- END OF FIX ---
+
+            memory_type = persona.get_memory_type()
+            raw_history = []
+            system_context_message = None
+
+            if ticket_id_for_context:
+                raw_history = self.memory_manager.get_ticket_history(ticket_id_for_context, effective_limit)
+                system_context_message = f"This conversation is part of Zammad ticket #{ticket_id_for_context}."
+            elif memory_type == "personal":
+                raw_history = self.memory_manager.get_personal_history(user_identifier, persona_name, effective_limit)
+            else:  # 'auto' or 'channel'
+                raw_history = self.memory_manager.get_channel_history(channel, effective_limit)
+
+            final_history_for_llm = []
+            if raw_history:
+                for msg in raw_history:
+                    author_role = msg.get('author_role')
+                    author_name = msg.get('author_name')
+                    content = msg.get('content', '')
+
+                    if author_role == 'user':
+                        final_history_for_llm.append({'role': 'user', 'content': content})
+                    elif author_role == 'assistant':
+                        if author_name == persona_name:
+                            final_history_for_llm.append({'role': 'assistant', 'content': content})
+                        else:
+                            formatted_content = f"{author_name}: {content}"
+                            final_history_for_llm.append({'role': 'user', 'content': formatted_content})
 
             if system_context_message:
-                interaction_history.insert(0, {"role": "system", "content": system_context_message})
+                final_history_for_llm.insert(0, {"role": "system", "content": system_context_message})
 
-            context_object = {"persona_prompt": persona.get_prompt(), "history": interaction_history,
+            context_object = {"persona_prompt": persona.get_prompt(), "history": final_history_for_llm,
                               "current_message": {"text": message, "image_url": image_url}}
 
-            # --- ZAMMAD TICKET ACTIONS ---
             if is_ticket_channel and customer_id:
                 ticket_to_log = ticket_id_for_context
                 try:
@@ -182,33 +210,33 @@ class ChatSystem:
                         await asyncio.to_thread(self.zammad_client.add_article_to_ticket, ticket_id=ticket_to_log,
                                                 body=message, impersonate_email=zammad_email)
                     else:
-                        ticket_title_name = user_display_name if user_display_name else user_identifier.split('<')[0].strip()
+                        ticket_title_name = user_display_name if user_display_name else user_identifier.split('<')[
+                            0].strip()
                         title = f"New request from {ticket_title_name} via {channel}"
                         new_ticket = await asyncio.to_thread(self.zammad_client.create_ticket, title=title,
-                                                               group='Users', customer_id=customer_id)
+                                                             group='Users', customer_id=customer_id)
                         if new_ticket and new_ticket.get('id'):
                             ticket_to_log = new_ticket['id']
                             await asyncio.to_thread(self.zammad_client.add_article_to_ticket,
                                                     ticket_id=ticket_to_log, body=message,
                                                     impersonate_email=zammad_email)
-                            logger.info(f"Created new Zammad ticket #{ticket_to_log} and added initial article.")
                         else:
                             logger.error("Zammad client returned a null ticket object after creation attempt.")
                 except Exception as zammad_error:
-                    logger.error(f"A Zammad API error occurred during ticket action processing: {zammad_error}", exc_info=True)
+                    logger.error(f"A Zammad API error occurred during ticket action processing: {zammad_error}",
+                                 exc_info=True)
 
-            # --- LLM GENERATION ---
             reply_content, api_payload = await self.text_engine.generate_response(persona.get_config_for_engine(),
                                                                                   context_object)
             self.last_api_requests[user_identifier][persona_name] = api_payload
 
-            # --- FINAL ZAMMAD UPDATE ---
             if is_ticket_channel and ticket_to_log:
                 try:
                     await asyncio.to_thread(self.zammad_client.add_article_to_ticket, ticket_id=ticket_to_log,
                                             body=reply_content)
                 except Exception as e:
-                    logger.error(f"Failed to add bot reply to Zammad ticket #{ticket_to_log}. Error: {e}", exc_info=True)
+                    logger.error(f"Failed to add bot reply to Zammad ticket #{ticket_to_log}. Error: {e}",
+                                 exc_info=True)
 
             return reply_content, ResponseType.LLM_GENERATION, ticket_to_log
 

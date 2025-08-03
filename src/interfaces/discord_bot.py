@@ -132,23 +132,29 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                             user_identifier=user_identifier,
                             persona_name=active_persona_name,
                             channel=channel_name,
-                            role='user',
+                            author_role='user',
+                            author_name=user_display_name,
                             content=cleaned_message,
                             timestamp=message.created_at,
                             platform_message_id=str(message.id),
                             zammad_ticket_id=ticket_id
                         )
 
-                        chunks = split_string_by_limit(response_text, DISCORD_CHAR_LIMIT)
+                        # Check if the persona's name should be prepended to the chat message
+                        persona = chat_system.personas[active_persona_name]
+                        final_reply_text = response_text
+                        if persona.should_display_name_in_chat():
+                            final_reply_text = f"**{active_persona_name}:** {response_text}"
+
+                        chunks = split_string_by_limit(final_reply_text, DISCORD_CHAR_LIMIT)
                         last_reply_message = None
                         for chunk in chunks:
                             last_reply_message = await message.channel.send(chunk)
 
-                        # Log the bot's full response, but use the timestamp and ID of the last chunk
+                        # Log the bot's full, original response (not the formatted one)
                         if last_reply_message:
                             cleansed_reply = cleanse_message_for_history(response_text)
                             bot_timestamp = last_reply_message.created_at
-                            # Ensure bot timestamp is after user's for strict ordering
                             if bot_timestamp <= message.created_at:
                                 bot_timestamp = message.created_at + timedelta(microseconds=1)
 
@@ -157,7 +163,8 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                                 user_identifier=user_identifier,
                                 persona_name=active_persona_name,
                                 channel=channel_name,
-                                role='assistant',
+                                author_role='assistant',
+                                author_name=active_persona_name,
                                 content=cleansed_reply,
                                 timestamp=bot_timestamp,
                                 platform_message_id=str(last_reply_message.id),
