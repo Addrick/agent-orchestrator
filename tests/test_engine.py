@@ -138,51 +138,58 @@ class TestOpenAI:
 class TestAnthropic:
     @pytest.mark.asyncio
     @patch('src.engine.time.sleep', MagicMock())
-    @patch('anthropic.Anthropic')
-    async def test_retry_on_5xx_error_succeeds(self, mock_anthropic_client, text_engine, anthropic_config,
-                                               base_context):
-        mock_client = mock_anthropic_client.return_value.messages
+    @patch('src.engine.TextEngine._get_anthropic_client')
+    async def test_retry_on_5xx_error_succeeds(self, mock_get_client, text_engine, anthropic_config, base_context):
+        mock_client_instance = MagicMock()
+        mock_get_client.return_value = mock_client_instance
+        mock_create = mock_client_instance.messages.create
+
         mock_response_503 = MagicMock()
         mock_response_503.status_code = 503
         error_503 = anthropic.APIStatusError("Service unavailable", response=mock_response_503, body=None)
 
         mock_success = MagicMock()
         mock_success.content = [MagicMock(text="Claude success")]
-        mock_client.create.side_effect = [error_503, mock_success]
+        mock_create.side_effect = [error_503, mock_success]
 
         response, _ = await text_engine.generate_response(anthropic_config, base_context)
 
         assert response == "Claude success"
-        assert mock_client.create.call_count == 2
+        assert mock_create.call_count == 2
 
     @pytest.mark.asyncio
     @patch('src.engine.time.sleep', MagicMock())
-    @patch('anthropic.Anthropic')
-    async def test_retry_fails_raises_custom_error(self, mock_anthropic_client, text_engine, anthropic_config,
-                                                   base_context):
-        mock_client = mock_anthropic_client.return_value.messages
+    @patch('src.engine.TextEngine._get_anthropic_client')
+    async def test_retry_fails_raises_custom_error(self, mock_get_client, text_engine, anthropic_config, base_context):
+        mock_client_instance = MagicMock()
+        mock_get_client.return_value = mock_client_instance
+        mock_create = mock_client_instance.messages.create
+
         mock_response_503 = MagicMock()
         mock_response_503.status_code = 503
         error_503 = anthropic.APIStatusError("Service unavailable", response=mock_response_503, body=None)
-        mock_client.create.side_effect = [error_503, error_503]
+        mock_create.side_effect = [error_503, error_503]
 
         with pytest.raises(LLMCommunicationError, match="Anthropic API is unavailable after retry."):
             await text_engine.generate_response(anthropic_config, base_context)
-        assert mock_client.create.call_count == 2
+        assert mock_create.call_count == 2
 
     @pytest.mark.asyncio
     @patch('src.engine.time.sleep', MagicMock())
-    @patch('anthropic.Anthropic')
-    async def test_4xx_error_does_not_retry(self, mock_anthropic_client, text_engine, anthropic_config, base_context):
-        mock_client = mock_anthropic_client.return_value.messages
+    @patch('src.engine.TextEngine._get_anthropic_client')
+    async def test_4xx_error_does_not_retry(self, mock_get_client, text_engine, anthropic_config, base_context):
+        mock_client_instance = MagicMock()
+        mock_get_client.return_value = mock_client_instance
+        mock_create = mock_client_instance.messages.create
+
         mock_response_401 = MagicMock()
         mock_response_401.status_code = 401
         error_401 = anthropic.APIStatusError("Unauthorized", response=mock_response_401, body=None)
-        mock_client.create.side_effect = error_401
+        mock_create.side_effect = error_401
 
         with pytest.raises(LLMCommunicationError, match="Anthropic API returned a client error"):
             await text_engine.generate_response(anthropic_config, base_context)
-        mock_client.create.assert_called_once()
+        mock_create.assert_called_once()
 
 
 class TestLocalModel:
@@ -190,13 +197,11 @@ class TestLocalModel:
     @patch('src.engine.time.sleep', MagicMock())
     @patch('aiohttp.ClientSession')
     async def test_retry_on_client_error_succeeds(self, mock_session, text_engine, local_config, base_context):
-        # This mock structure correctly simulates the nested async context managers
         mock_session_cm = AsyncMock()
         mock_session_instance = AsyncMock()
         mock_session_cm.__aenter__.return_value = mock_session_instance
         mock_session.return_value = mock_session_cm
 
-        # Make session.post a regular mock that returns an async context manager
         mock_session_instance.post = MagicMock()
 
         mock_response = AsyncMock()
