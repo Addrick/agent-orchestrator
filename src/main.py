@@ -58,16 +58,6 @@ async def main():
         zammad_client=zammad_client
     )
 
-    # 5. Optionally update the model list on startup
-    if UPDATE_MODELS_ON_STARTUP:
-        logger.info("Updating available models from APIs...")
-        # Run the blocking network calls in a separate thread to avoid blocking the event loop
-        updated_models = await asyncio.to_thread(get_model_list, update=True)
-        if updated_models:
-            bot.models_available = updated_models
-            logger.info("Model list updated successfully.")
-        else:
-            logger.error("Failed to update model list.")
 
     tasks = []
 
@@ -90,6 +80,13 @@ async def main():
         logger.info("Initializing local terminal interface...")
         from src.interfaces.local_terminal import run_terminal_interface
         task = asyncio.create_task(run_terminal_interface(bot))
+        tasks.append(task)
+
+    # 5. Optionally update the model list on startup
+    if UPDATE_MODELS_ON_STARTUP:
+        logger.info("Updating available models from APIs...")
+        # Run the blocking network calls in a separate thread to avoid blocking the event loop
+        task = asyncio.to_thread(get_model_list, update=True)
         tasks.append(task)
 
     if not tasks:

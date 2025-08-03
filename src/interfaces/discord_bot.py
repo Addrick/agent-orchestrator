@@ -3,15 +3,16 @@
 import logging
 import re
 import discord
+import asyncio
 import typing
+from datetime import timedelta
 from typing import Optional
 
 from config.global_config import DISCORD_CHAR_LIMIT, DISCORD_STATUS_LIMIT, CHAT_LOG_LOCATION, DISCORD_DEBUG_CHANNEL
-from src.utils.message_utils import split_string_by_limit
+from src.utils.message_utils import split_string_by_limit, cleanse_message_for_history
 from src.chat_system import ChatSystem, ResponseType
 
 logger = logging.getLogger(__name__)
-
 
 
 class CustomDiscordBot(discord.Client):
@@ -62,15 +63,27 @@ async def _send_dev_response(channel: discord.TextChannel, msg: str):
 def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
     intents = discord.Intents.default()
     intents.message_content = True
+    intents.messages = True  # Required for on_message_delete
     client = CustomDiscordBot(chat_system, intents=intents)
 
     @client.event
     async def on_ready():
         logger.info(f'Logged in as {client.user}!')
-        # Import here to avoid circular dependency at module level
-        from src.chat_system import ResponseType
-        client.response_type_enum = ResponseType
         await reset_discord_status(client, chat_system)
+
+    @client.event
+    async def on_message_delete(message: discord.Message):
+        if message.author == client.user:
+            return
+
+        # Use asyncio.to_thread to run the synchronous DB call in a separate thread
+        success = await asyncio.to_thread(
+            chat_system.memory_manager.suppress_message_by_platform_id, str(message.id)
+        )
+        if success:
+            logger.info(f"Suppressed deleted message {message.id} from LLM context.")
+        else:
+            logger.debug(f"Message {message.id} was deleted, but not found in local DB to suppress.")
 
     @client.event
     async def on_message(message: discord.Message):
@@ -97,24 +110,66 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                 user_identifier = str(message.author.id)
                 channel_name = message.channel.name
                 image_url = await get_image_url(message)
-                user_display_name = message.author.display_name # Get display name for Zammad title/articles
+                user_display_name = message.author.display_name
 
-                response_text, response_type = await chat_system.generate_response(
+                response_text, response_type, ticket_id = await chat_system.generate_response(
                     persona_name=active_persona_name,
                     user_identifier=user_identifier,
                     channel=channel_name,
                     message=cleaned_message,
                     image_url=image_url,
                     history_limit=20,
-                    user_display_name=user_display_name # Pass new parameter
+                    user_display_name=user_display_name
                 )
 
                 if response_text:
                     if response_type == ResponseType.DEV_COMMAND:
                         await _send_dev_response(message.channel, response_text)
                     else:
-                        for chunk in split_string_by_limit(response_text, DISCORD_CHAR_LIMIT):
-                            await message.channel.send(chunk)
+                        # Log the user's message first
+                        await asyncio.to_thread(
+                            chat_system.memory_manager.log_message,
+                            user_identifier=user_identifier,
+                            persona_name=active_persona_name,
+                            channel=channel_name,
+                            author_role='user',
+                            author_name=user_display_name,
+                            content=cleaned_message,
+                            timestamp=message.created_at,
+                            platform_message_id=str(message.id),
+                            zammad_ticket_id=ticket_id
+                        )
+
+                        # Check if the persona's name should be prepended to the chat message
+                        persona = chat_system.personas[active_persona_name]
+                        final_reply_text = response_text
+                        if persona.should_display_name_in_chat():
+                            final_reply_text = f"**{active_persona_name}:** {response_text}"
+
+                        chunks = split_string_by_limit(final_reply_text, DISCORD_CHAR_LIMIT)
+                        last_reply_message = None
+                        for chunk in chunks:
+                            last_reply_message = await message.channel.send(chunk)
+
+                        # Log the bot's full, original response (not the formatted one)
+                        if last_reply_message:
+                            cleansed_reply = cleanse_message_for_history(response_text)
+                            bot_timestamp = last_reply_message.created_at
+                            if bot_timestamp <= message.created_at:
+                                bot_timestamp = message.created_at + timedelta(microseconds=1)
+
+                            await asyncio.to_thread(
+                                chat_system.memory_manager.log_message,
+                                user_identifier=user_identifier,
+                                persona_name=active_persona_name,
+                                channel=channel_name,
+                                author_role='assistant',
+                                author_name=active_persona_name,
+                                content=cleansed_reply,
+                                timestamp=bot_timestamp,
+                                platform_message_id=str(last_reply_message.id),
+                                zammad_ticket_id=ticket_id
+                            )
                 else:
                     await message.channel.send("Sorry, I encountered an error and couldn't generate a response.")
 

@@ -48,6 +48,8 @@ class BotLogic:
             'temp': self._set_temp,
             'top_p': self._set_top_p,
             'top_k': self._set_top_k,
+            'memory': self._set_memory_type,
+            'display_name': self._set_display_name,
         }
 
     async def preprocess_message(self, persona_name: str, user_identifier: str, message: str) -> Optional[
@@ -83,7 +85,7 @@ class BotLogic:
                                                                   "goodbye (end conversation), \n"
                                                                   "remember <+prompt>, \n"
                                                                   "what prompt/model/models (google/openai/anthropic)/personas/context/tokens/temp, \n"
-                                                                  "set prompt/model/context/tokens/temp, \n"
+                                                                  "set prompt/model/context/tokens/temp/memory/display_name, \n"
                                                                   "add <persona>, \n"
                                                                   "delete <persona>, \n"
                                                                   "detail, \n"
@@ -92,35 +94,56 @@ class BotLogic:
                                                                   "dump_last")
         return help_msg, False
 
-    def _handle_remember(self, args: list, persona: Persona, user_identifier: str) -> Tuple[str, bool]:
+    def _handle_remember(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[
+        None, bool]:
         if not args:
-            return "Error: 'remember' requires text to add to the prompt.", False
+            return None, False
         text_to_add = ' '.join(args)
         persona.append_to_prompt(' ' + text_to_add)
         return f'Prompt for {persona.get_name()} updated.', True
 
-    def _handle_add(self, args: list, persona: Persona, user_identifier: str) -> Tuple[str, bool]:
+    def _handle_add(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[None, bool]:
         if not args:
-            return "Error: 'add' requires a name for the new persona.", False
+            return None, False  # Invalid syntax, fall through to LLM
         new_persona_name = args[0]
+
+        if new_persona_name in self.chat_system.personas:
+            return f"Error: Persona '{new_persona_name}' already exists.", False
+
         prompt_args = args[1:]
         prompt = ' '.join(prompt_args) if prompt_args else 'you are in character as ' + new_persona_name
+
+        new_persona = Persona(
+            persona_name=new_persona_name,
+            model_name=DEFAULT_MODEL_NAME,
+            prompt=prompt
+        )
+        self.chat_system.personas[new_persona_name] = new_persona
         return f"Added '{new_persona_name}' with prompt: '{prompt}'", True
 
-    def _handle_delete(self, args: list, persona: Persona, user_identifier: str) -> Tuple[str, bool]:
+    def _handle_delete(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[
+        None, bool]:
         if not args:
-            return "Error: 'delete' requires the name of the persona to delete.", False
+            return None, False  # Invalid syntax, fall through to LLM
         persona_to_delete = args[0]
-        return f"Error: Persona '{persona_to_delete}' not found.", False
 
-    def _handle_detail(self, args: list, persona: Persona, user_identifier: str) -> Tuple[str, bool]:
+        if persona_to_delete not in self.chat_system.personas:
+            return f"Error: Persona '{persona_to_delete}' not found.", False
+
+        del self.chat_system.personas[persona_to_delete]
+        return f"Deleted persona '{persona_to_delete}'.", True
+
+    def _handle_detail(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[
+        None, bool]:
         if args:
-            return "Error: 'detail' command does not take any arguments.", False
+            return None, False
         details = (
             f"Details for Persona: {persona.get_name()}\n"
             f"----------------------------------------\n"
             f"Model: {persona.get_model_name() or 'default'}\n"
             f"Context Length: {persona.get_context_length()}\n"
+            f"Memory Type: {persona.get_memory_type()}\n"
+            f"Display Name in Chat: {persona.should_display_name_in_chat()}\n"
             f"Response Token Limit: {persona.get_response_token_limit() or 'default'}\n"
             f"Generation Parameters:\n"
             f"  - Temperature: {persona.get_temperature() or 'default'}\n"
@@ -133,7 +156,7 @@ class BotLogic:
 
     def _handle_what(self, args: list, persona: Persona, user_identifier: str) -> Tuple[Optional[str], bool]:
         if not args:
-            return "Error: 'what' command requires a sub-command.", False
+            return None, False
         sub_command = args[0]
         handler = self.what_handlers.get(sub_command)
         if handler:
@@ -271,19 +294,50 @@ class BotLogic:
             persona.set_top_k(None)
             return f"Non-numeric Top K '{top_k_str}' provided. The default Top K will be used for {persona.get_name()}.", True
 
-    def _handle_start_conversation(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[None, bool]:
+    def _set_memory_type(self, args: list, persona: Persona) -> tuple[str, bool] | tuple[None, bool]:
+        try:
+            new_type = args[1].lower()
+        except IndexError:
+            return "Error: Please specify a memory type (auto, personal, channel).", False
+
+        if persona.set_memory_type(new_type):
+            return f"Memory type for {persona.get_name()} set to '{new_type}'.", True
+        else:
+            return f"Error: Invalid memory type '{new_type}'. Must be auto, personal, or channel.", False
+
+    def _set_display_name(self, args: list, persona: Persona) -> tuple[str, bool] | tuple[None, bool]:
+        try:
+            value_str = args[1].lower()
+        except IndexError:
+            return "Error: Please specify 'on' or 'off' for the display name.", False
+
+        if value_str in ['true', 'on', 'yes', '1']:
+            new_value = True
+        elif value_str in ['false', 'off', 'no', '0']:
+            new_value = False
+        else:
+            return f"Error: Invalid value '{value_str}'. Please use 'on' or 'off'.", False
+
+        persona.set_display_name_in_chat(new_value)
+        status = "enabled" if new_value else "disabled"
+        return f"Displaying name in chat for {persona.get_name()} is now {status}.", True
+
+    def _handle_start_conversation(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | \
+                                                                                                tuple[None, bool]:
         if args:
             return None, False
         persona.set_context_length(0)
         return f"{persona.get_name()}: Hello! Starting new conversation...", True
 
-    def _handle_stop_conversation(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[None, bool]:
+    def _handle_stop_conversation(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[
+        None, bool]:
         if args:
             return None, False
         persona.set_context_length(DEFAULT_CONTEXT_LIMIT)
         return f"{persona.get_name()}: Goodbye! Resetting context.", True
 
-    def _handle_dump_last(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[None, bool]:
+    def _handle_dump_last(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[
+        None, bool]:
         if args:
             return None, False
 
@@ -293,9 +347,7 @@ class BotLogic:
         if not last_request:
             return f"{persona_name}: No previous request to dump for your session with this persona.", False
 
-        # Create a pretty-printed JSON string
         pretty_json = json.dumps(last_request, indent=2, sort_keys=True)
-        # For display purposes, un-escape newlines so they render as line breaks in Discord
         display_json = pretty_json.replace('\\n', '\n')
 
         return f"{persona_name}: Last API Request Payload\n{display_json}", False
@@ -305,7 +357,8 @@ class BotLogic:
             return None, False
         return 'Personas saved.', True
 
-    def _handle_update_models(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[None, bool]:
+    def _handle_update_models(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[
+        None, bool]:
         if args:
             return None, False
         self.chat_system.models_available = get_model_list(update=True)
