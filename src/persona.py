@@ -1,3 +1,5 @@
+# src/persona.py
+
 import logging
 from typing import Optional, Dict, Any
 
@@ -21,7 +23,9 @@ class Persona:
             context_length: Optional[int] = global_config.DEFAULT_CONTEXT_LIMIT,
             temperature: Optional[float] = None,
             top_p: Optional[float] = None,
-            top_k: Optional[int] = None
+            top_k: Optional[int] = None,
+            memory_type: str = "auto",
+            display_name_in_chat: bool = False
     ) -> None:
         self._name: str = persona_name
         self._model_name: str = model_name
@@ -33,6 +37,8 @@ class Persona:
         self._temperature: Optional[float] = temperature
         self._top_p: Optional[float] = top_p
         self._top_k: Optional[int] = top_k
+        self._memory_type: str = memory_type if memory_type in ["auto", "personal", "channel"] else "auto"
+        self._display_name_in_chat: bool = display_name_in_chat
 
     # --- Getters ---
 
@@ -59,6 +65,12 @@ class Persona:
 
     def get_top_k(self) -> Optional[int]:
         return self._top_k
+
+    def get_memory_type(self) -> str:
+        return self._memory_type
+
+    def should_display_name_in_chat(self) -> bool:
+        return self._display_name_in_chat
 
     # --- Setters ---
 
@@ -139,6 +151,21 @@ class Persona:
             self._top_k = None
             logger.info(f"Invalid top_k value provided: '{new_top_k}'. Must be an integer. Setting to None.")
         return self._top_k
+
+    def set_memory_type(self, new_type: str) -> bool:
+        """Sets the memory type. Returns True if valid, False otherwise."""
+        valid_types = ["auto", "personal", "channel"]
+        if new_type in valid_types:
+            self._memory_type = new_type
+            logger.info(f"Persona '{self._name}' memory type set to '{new_type}'.")
+            return True
+        logger.warning(f"Invalid memory type '{new_type}' provided for persona '{self._name}'. No change made.")
+        return False
+
+    def set_display_name_in_chat(self, new_value: bool) -> None:
+        """Sets whether the persona's name should be displayed in chat replies."""
+        self._display_name_in_chat = new_value
+        logger.info(f"Persona '{self._name}' display_name_in_chat set to {new_value}.")
 
     # --- Utility Methods ---
 

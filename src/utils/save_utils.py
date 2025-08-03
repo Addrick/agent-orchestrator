@@ -1,3 +1,5 @@
+# src/utils/save_utils.py
+
 import json
 import logging
 import os
@@ -73,6 +75,8 @@ def to_dict(personas):
             "temperature": persona.get_temperature(),
             "top_p": persona.get_top_p(),
             "top_k": persona.get_top_k(),
+            "memory_type": persona.get_memory_type(),
+            "display_name_in_chat": persona.should_display_name_in_chat(),
         }
         persona_list.append(persona_json)
     return persona_list
@@ -109,6 +113,8 @@ def load_personas_from_file(file_path=PERSONA_SAVE_FILE):
                 temperature=new_persona.get("temperature"),
                 top_p=new_persona.get("top_p"),
                 top_k=new_persona.get("top_k"),
+                memory_type=new_persona.get("memory_type", "auto"),
+                display_name_in_chat=new_persona.get("display_name_in_chat", False),
             )
         return personas
     except json.JSONDecodeError as e:
@@ -117,4 +123,3 @@ def load_personas_from_file(file_path=PERSONA_SAVE_FILE):
     except Exception as e:
         logger.error(f"An unexpected error occurred while loading personas from '{file_path}': {e}", exc_info=True)
         return None
-    

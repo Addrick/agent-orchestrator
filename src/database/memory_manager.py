@@ -3,7 +3,7 @@
 import sqlite3
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Optional
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -30,24 +30,13 @@ DATABASE_FILE = DB_DIR / "user_memory.db"
 
 class MemoryManager:
     def __init__(self, db_path: Optional[str] = None) -> None:
-        """
-        Initializes the MemoryManager.
-        If db_path is None, it falls back to the DATABASE_FILE constant.
-        """
         self.db_path = db_path if db_path is not None else str(DATABASE_FILE)
         self._conn: Optional[sqlite3.Connection] = None
         if self.db_path != ':memory:':
             DB_DIR.mkdir(parents=True, exist_ok=True)
 
     def _get_connection(self) -> sqlite3.Connection:
-        """
-        Returns a single, persistent database connection.
-        Creates the connection on the first call.
-        """
         if self._conn is None:
-            # check_same_thread=False is required for this connection to be used
-            # across different threads, which is what `asyncio.to_thread` does and
-            # what happens in our pytest integration tests.
             self._conn = sqlite3.connect(
                 self.db_path,
                 detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
@@ -58,63 +47,117 @@ class MemoryManager:
         return self._conn
 
     def close(self) -> None:
-        """Explicitly closes the database connection. Important for test cleanup."""
         if self._conn:
             self._conn.close()
             self._conn = None
             logger.info(f"Database connection to '{self.db_path}' closed.")
 
     def create_schema(self) -> None:
-        """Creates the user interactions table if it doesn't exist."""
         schema_sql = """
         CREATE TABLE IF NOT EXISTS User_Interactions (
             interaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_identifier TEXT NOT NULL,
+            persona_name TEXT NOT NULL,
             channel TEXT NOT NULL,
+            author_role TEXT NOT NULL CHECK(author_role IN ('user', 'assistant', 'system')),
+            author_name TEXT,
+            content TEXT,
             timestamp TIMESTAMP NOT NULL,
-            user_message TEXT,
-            bot_response TEXT,
-            zammad_ticket_id INTEGER
+            zammad_ticket_id INTEGER,
+            platform_message_id TEXT
         );
-        CREATE INDEX IF NOT EXISTS idx_user_identifier_timestamp
-        ON User_Interactions (user_identifier, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_channel_timestamp
+        ON User_Interactions (channel, timestamp);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_platform_message_id
+        ON User_Interactions (platform_message_id);
+
+        CREATE TABLE IF NOT EXISTS Suppressed_Interactions (
+            suppression_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            interaction_id INTEGER NOT NULL UNIQUE,
+            suppressed_at TIMESTAMP NOT NULL,
+            FOREIGN KEY (interaction_id) REFERENCES User_Interactions(interaction_id) ON DELETE CASCADE
+        );
         """
         conn = self._get_connection()
         conn.executescript(schema_sql)
         conn.commit()
-        logging.info("User memory database schema created or verified successfully.")
 
-    def log_interaction(self, user_identifier: str, channel: str, user_message: str, bot_response: str,
-                        zammad_ticket_id: Optional[int] = None) -> None:
-        """Logs a complete user-bot interaction."""
-        now = datetime.now()
+    def log_message(self, user_identifier: str, persona_name: str, channel: str,
+                    author_role: str, author_name: Optional[str], content: str,
+                    timestamp: datetime, platform_message_id: Optional[str] = None,
+                    zammad_ticket_id: Optional[int] = None) -> None:
         conn = self._get_connection()
         conn.execute(
             """
             INSERT INTO User_Interactions 
-            (user_identifier, channel, timestamp, user_message, bot_response, zammad_ticket_id)
-            VALUES (?, ?, ?, ?, ?, ?)
+            (user_identifier, persona_name, channel, author_role, author_name, content, 
+             timestamp, zammad_ticket_id, platform_message_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (user_identifier, channel, now, user_message, bot_response, zammad_ticket_id)
+            (user_identifier, persona_name, channel, author_role, author_name, content,
+             timestamp, zammad_ticket_id, platform_message_id)
         )
         conn.commit()
 
-    def get_history(self, user_identifier: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Retrieves the most recent interactions for a given user."""
-        query = """
-            SELECT user_message, bot_response FROM User_Interactions
-            WHERE user_identifier = :user_identifier
-            ORDER BY timestamp DESC
-        """
-        params = {'user_identifier': user_identifier}
-
-        if isinstance(limit, int) and limit > 0:
-            query += " LIMIT :limit"
-            params['limit'] = limit
-
+    def suppress_message_by_platform_id(self, platform_message_id: str) -> bool:
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.execute(query, params)
-        # We want chronological order for the prompt, so we reverse the DESC query result
-        rows = cursor.fetchall()
-        return [dict(row) for row in reversed(rows)]
+        cursor.execute("SELECT interaction_id FROM User_Interactions WHERE platform_message_id = ?",
+                       (platform_message_id,))
+        row = cursor.fetchone()
+        if not row: return False
+        interaction_id = row['interaction_id']
+        now = datetime.now()
+        try:
+            cursor.execute("INSERT INTO Suppressed_Interactions (interaction_id, suppressed_at) VALUES (?, ?)",
+                           (interaction_id, now))
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def _execute_history_query(self, base_query: str, params: list, limit: Optional[int]) -> List[Dict[str, Any]]:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute("SELECT interaction_id FROM Suppressed_Interactions")
+            suppressed_ids = [row['interaction_id'] for row in cursor.fetchall()]
+
+            query = base_query
+            query_params = params
+
+            if suppressed_ids:
+                placeholders = ', '.join('?' for _ in suppressed_ids)
+                query += f" AND interaction_id NOT IN ({placeholders})"
+                query_params.extend(suppressed_ids)
+
+            query += " ORDER BY timestamp DESC"
+
+            # THE FIX: Correctly handle the limit parameter.
+            if isinstance(limit, int):
+                query += " LIMIT ?"
+                query_params.append(limit)
+
+            cursor.execute(query, query_params)
+            rows = cursor.fetchall()
+            return [dict(row) for row in reversed(rows)]
+        except sqlite3.Error as e:
+            logger.error(f"FATAL SQLITE ERROR in history query: {e}", exc_info=True)
+            return []
+
+    def get_personal_history(self, user_identifier: str, persona_name: str, limit: Optional[int] = None) -> List[
+        Dict[str, Any]]:
+        query = "SELECT author_role, author_name, content FROM User_Interactions WHERE user_identifier = ? AND persona_name = ?"
+        params = [user_identifier, persona_name]
+        return self._execute_history_query(query, params, limit)
+
+    def get_ticket_history(self, ticket_id: int, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        query = "SELECT author_role, author_name, content FROM User_Interactions WHERE zammad_ticket_id = ?"
+        params = [ticket_id]
+        return self._execute_history_query(query, params, limit)
+
+    def get_channel_history(self, channel: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        query = "SELECT author_role, author_name, content FROM User_Interactions WHERE channel = ?"
+        params = [channel]
+        return self._execute_history_query(query, params, limit)
