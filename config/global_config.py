@@ -44,6 +44,7 @@ DEFAULT_WELCOME_REQUEST = 'Welcome to the chat room, please describe your typica
 
 UPDATE_MODELS_ON_STARTUP = True
 
+GEMINI_EMPTY_RESPONSE_RETRIES = 2  # Number of times to retry on a valid but empty response
 
 PERSONA_SAVE_FILE = '../config/personas'
 TEST_PERSONA_SAVE_FILE = TEST_DATABASE_DIR = os.path.join(ROOT_DIR, 'tests', 'test_personas')
