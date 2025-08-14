@@ -18,12 +18,29 @@ from src.utils.model_utils import get_model_list
 
 load_dotenv('.env')
 
-# Configure logging
+
+# --- CONFIGURE LOGGING ---
+class NoReconnectTracebackFilter(logging.Filter):
+    """A custom logging filter to suppress tracebacks for specific reconnect errors."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Check if the log is from the specific discord.client logger and contains the reconnect message
+        if record.name == 'discord.client' and 'Attempting a reconnect' in record.getMessage():
+            # If it matches, clear the exception info so no traceback is printed
+            record.exc_info = 'Discord disconnected, attempting to reconnect...'
+            record.exc_text = None
+        return True
+
+
 LOG_FORMAT = '%(asctime)s - [%(levelname)s] - [%(name)s:%(funcName)s:%(lineno)d] - %(message)s'
 logging.basicConfig(level=logging.INFO,
                     stream=sys.stdout,
                     format='%(asctime)s [%(levelname)s][%(name)s:%(lineno)d]: %(message)s',
                     datefmt='[%Y-%m-%d] %H:%M:%S')
+
+root_logger = logging.getLogger()
+for handler in root_logger.handlers:
+    handler.addFilter(NoReconnectTracebackFilter())
 
 logging.getLogger('google_genai').setLevel(logging.WARNING)
 logging.getLogger('discord').setLevel(logging.WARNING)

@@ -152,7 +152,25 @@ class ChatSystem:
                     logger.error(f"A Zammad API error occurred during user/ticket search: {zammad_error}",
                                  exc_info=True)
 
-            effective_limit = persona.get_context_length() if persona.get_context_length() else history_limit
+            persona_limit = persona.get_context_length()
+            interface_limit = history_limit
+
+            # Rule 1 & 2: Start with the persona's setting if it's explicitly set (even to 0).
+            # Otherwise, fall back to the per-call/interface limit.
+            if persona_limit is not None:
+                effective_limit = persona_limit
+            else:
+                effective_limit = interface_limit
+
+            # Rule 3: Enforce the cap. The final limit cannot be greater than the interface limit,
+            # unless the interface limit is not set (None).
+            if interface_limit is not None:
+                if effective_limit is None:
+                    effective_limit = interface_limit
+                else:
+                    effective_limit = min(effective_limit, interface_limit)
+            # --- END OF FIX ---
+
             memory_type = persona.get_memory_type()
             raw_history = []
             system_context_message = None
