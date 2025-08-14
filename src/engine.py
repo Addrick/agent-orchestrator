@@ -34,7 +34,7 @@ class TextEngine:
         # --- Google Client (matching original implementation) ---
         self.google_client: Optional[genai.client.AsyncClient] = None
         self.google_search_tool: Optional[Tool] = None
-        self.google_tool_config: Optional[Dict[str, Any]] = None
+        # self.google_tool_config is now built dynamically
         self.google_safety_settings: Optional[List[Dict[str, str]]] = [
             {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
             {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -79,7 +79,7 @@ class TextEngine:
         client = genai.client.BaseApiClient(api_key=api_key)
         self.google_client = genai.client.AsyncClient(client)
         self.google_search_tool = Tool(google_search=GoogleSearch())
-        self.google_tool_config = {"function_calling_config": {"mode": "AUTO"}}
+        # self.google_tool_config is removed from here
         logger.info("Google AI Studio client initialized.")
 
     async def generate_response(self, persona_config: dict, context_object: Dict[str, Any]) -> Tuple[
@@ -164,7 +164,8 @@ class TextEngine:
             logger.error(f"An unexpected Anthropic error occurred: {e}", exc_info=True)
             raise LLMCommunicationError(f"An unexpected error occurred with the Anthropic API.") from e
 
-    async def _generate_google_response(self, config: dict, context: Dict[str, Any]) -> Tuple[str, Dict]:
+    async def _generate_google_response(self, config: dict, context: Dict[str, Any],
+                                        tools: Optional[List[Dict]] = None) -> Tuple[str, Dict]:
         """Builds and sends a request to the Google API using the original client structure."""
         try:
             self._initialize_google_client()
@@ -179,11 +180,16 @@ class TextEngine:
                            f"### Current Message to Respond To: ###\n{message}")
 
         content_config_for_api = {
-            'tools': [self.google_search_tool],
-            'tool_config': self.google_tool_config,
+            'tools': [self.google_search_tool],  # Retain Google Search as a default tool
             'response_modalities': ["TEXT"],
             'safety_settings': self.google_safety_settings
         }
+
+        # THE FIX: Conditionally add tool_config only if tools are provided.
+        if tools:
+            content_config_for_api['tool_config'] = {"function_calling_config": {"mode": "AUTO"}}
+            # In the future, we would add the 'tools' list itself here too.
+
         if isinstance(config.get("max_output_tokens"), int):
             if config.get("max_output_tokens") >= 100:
                 content_config_for_api['max_output_tokens'] = config.get("max_output_tokens")
@@ -220,8 +226,6 @@ class TextEngine:
             except Exception as retry_e:
                 logger.error(f"Google API failed on retry: {retry_e}", exc_info=True)
                 raise LLMCommunicationError(f"An error occurred with Google API after retry: {retry_e}") from retry_e
-
-        # --- Normal processing continues below if either attempt succeeds ---
 
         if response_obj.prompt_feedback and response_obj.prompt_feedback.block_reason:
             block_reason = response_obj.prompt_feedback.block_reason.name
