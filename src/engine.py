@@ -8,6 +8,7 @@ from typing import Dict, Any, Optional, Tuple, List
 
 from dotenv import load_dotenv
 
+from config.global_config import GEMINI_EMPTY_RESPONSE_RETRIES
 # --- Provider-specific imports ---
 import aiohttp
 import anthropic
@@ -166,7 +167,7 @@ class TextEngine:
 
     async def _generate_google_response(self, config: dict, context: Dict[str, Any],
                                         tools: Optional[List[Dict]] = None) -> Tuple[str, Dict]:
-        """Builds and sends a request to the Google API using the original client structure."""
+        """Builds and sends a request to the Google API, with retries for empty responses."""
         try:
             self._initialize_google_client()
         except ValueError as e:
@@ -180,19 +181,14 @@ class TextEngine:
                            f"### Current Message to Respond To: ###\n{message}")
 
         content_config_for_api = {
-            'tools': [self.google_search_tool],  # Retain Google Search as a default tool
+            'tools': [self.google_search_tool],
             'response_modalities': ["TEXT"],
             'safety_settings': self.google_safety_settings
         }
-
-        # THE FIX: Conditionally add tool_config only if tools are provided.
         if tools:
             content_config_for_api['tool_config'] = {"function_calling_config": {"mode": "AUTO"}}
-            # In the future, we would add the 'tools' list itself here too.
-
-        if isinstance(config.get("max_output_tokens"), int):
-            if config.get("max_output_tokens") >= 100:
-                content_config_for_api['max_output_tokens'] = config.get("max_output_tokens")
+        if isinstance(config.get("max_output_tokens"), int) and config.get("max_output_tokens") >= 100:
+            content_config_for_api['max_output_tokens'] = config.get("max_output_tokens")
         if isinstance(config.get("temperature"), (int, float)):
             content_config_for_api['temperature'] = config.get("temperature")
         if isinstance(config.get("top_p"), (int, float)):
@@ -200,68 +196,65 @@ class TextEngine:
         if isinstance(config.get("top_k"), (int, float)):
             content_config_for_api['top_k'] = config.get("top_k")
 
-        config_for_dumping = json.loads(json.dumps(content_config_for_api, default=str))
-
         api_params_for_dumping = {
             'model': config["model_name"],
             'contents': request_content,
-            'config': config_for_dumping
+            'config': json.loads(json.dumps(content_config_for_api, default=str))
         }
 
-        try:
-            response_obj = await self.google_client.models.generate_content(
-                model=config["model_name"],
-                contents=request_content,
-                config=GenerateContentConfig(**content_config_for_api)
-            )
-        except Exception as e:
-            logger.warning(f"Google API error: {e}. Retrying once...")
-            time.sleep(1)
+        response_obj = None
+        for attempt in range(GEMINI_EMPTY_RESPONSE_RETRIES + 1):
             try:
                 response_obj = await self.google_client.models.generate_content(
                     model=config["model_name"],
                     contents=request_content,
                     config=GenerateContentConfig(**content_config_for_api)
                 )
-            except Exception as retry_e:
-                logger.error(f"Google API failed on retry: {retry_e}", exc_info=True)
-                raise LLMCommunicationError(f"An error occurred with Google API after retry: {retry_e}") from retry_e
+            except Exception as e:
+                logger.warning(f"Google API error (Attempt {attempt + 1}): {e}. Retrying once...")
+                time.sleep(1)
+                if attempt == 0:  # Only one retry on connection error
+                    try:
+                        response_obj = await self.google_client.models.generate_content(
+                            model=config["model_name"],
+                            contents=request_content,
+                            config=GenerateContentConfig(**content_config_for_api)
+                        )
+                    except Exception as retry_e:
+                        logger.error(f"Google API failed on retry: {retry_e}", exc_info=True)
+                        raise LLMCommunicationError(
+                            f"An error occurred with Google API after retry: {retry_e}") from retry_e
+                else:  # Final attempt failed
+                    raise LLMCommunicationError(f"An error occurred with Google API after retry: {e}") from e
 
-        if response_obj.prompt_feedback and response_obj.prompt_feedback.block_reason:
-            block_reason = response_obj.prompt_feedback.block_reason.name
-            raise LLMCommunicationError(f"Response blocked by Google due to {block_reason}.")
+            if response_obj.prompt_feedback and response_obj.prompt_feedback.block_reason:
+                raise LLMCommunicationError(
+                    f"Response blocked by Google due to {response_obj.prompt_feedback.block_reason.name}.")
 
-        base_text_from_response = ""
-        candidate = None
-        if response_obj.candidates:
-            candidate = response_obj.candidates[0]
-            if candidate.content and candidate.content.parts:
-                for part in candidate.content.parts:
-                    if hasattr(part, 'text') and part.text:
-                        base_text_from_response += part.text
+            base_text_from_response = "".join(
+                part.text for part in response_obj.candidates[0].content.parts if hasattr(part, 'text') and part.text)
 
-        final_text_content = base_text_from_response
-        search_query_display = ""
-        citations_display = ""
+            if base_text_from_response.strip():
+                # Success: we got content
+                final_text_content, search_query_display, citations_display = _process_grounding_metadata(
+                    base_text_from_response, response_obj.candidates[0].grounding_metadata, logger
+                )
+                if search_query_display: final_text_content += search_query_display
+                if citations_display: final_text_content += citations_display
+                return final_text_content.strip(), api_params_for_dumping
 
-        if candidate and candidate.grounding_metadata:
-            metadata = candidate.grounding_metadata
-            if hasattr(metadata, 'grounding_chunks') and hasattr(metadata, 'grounding_supports'):
-                final_text_content, search_query_display, citations_display = \
-                    _process_grounding_metadata(base_text_from_response, metadata, logger)
+            if attempt < GEMINI_EMPTY_RESPONSE_RETRIES:
+                logger.warning(f"Google returned an empty response (Attempt {attempt + 1}). Retrying...")
+                time.sleep(0.5)
 
-        if not final_text_content.strip() and not search_query_display and not citations_display:
-            finish_reason_str = "Unknown"
-            if candidate and candidate.finish_reason:
-                finish_reason_str = str(candidate.finish_reason.name)
-            raise LLMCommunicationError(f"Google returned an empty response. Stop reason: {finish_reason_str}")
+        # If the loop finishes, all retries were empty
+        logger.error(f"Google returned an empty response after {GEMINI_EMPTY_RESPONSE_RETRIES + 1} attempts.")
+        finish_reason_str = "Unknown"
+        if response_obj.candidates and response_obj.candidates[0].finish_reason:
+            finish_reason_str = str(response_obj.candidates[0].finish_reason.name)
 
-        if search_query_display:
-            final_text_content += search_query_display
-        if citations_display:
-            final_text_content += citations_display
-
-        return final_text_content.strip(), api_params_for_dumping
+        return (f"Google returned an empty response after all retries.\n"
+                f"Final stop reason given: {finish_reason_str}"), api_params_for_dumping
 
     async def _generate_local_response(self, config: dict, context: Dict[str, Any]) -> Tuple[str, Dict]:
         url = 'http://localhost:5001/api/v1/generate'
