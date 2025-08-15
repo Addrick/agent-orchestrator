@@ -44,7 +44,13 @@ DEFAULT_WELCOME_REQUEST = 'Welcome to the chat room, please describe your typica
 
 UPDATE_MODELS_ON_STARTUP = True
 
+
 GEMINI_EMPTY_RESPONSE_RETRIES = 2  # Number of times to retry on a valid but empty response
+# The number of times to retry any LLM provider on a valid but empty response
+EMPTY_RESPONSE_RETRIES = 2
+# The short delay (in seconds) between empty response retries
+EMPTY_RESPONSE_RETRY_DELAY = 0.5
+
 
 PERSONA_SAVE_FILE = '../config/personas'
 TEST_PERSONA_SAVE_FILE = TEST_DATABASE_DIR = os.path.join(ROOT_DIR, 'tests', 'test_personas')

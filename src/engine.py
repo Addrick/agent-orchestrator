@@ -8,7 +8,7 @@ from typing import Dict, Any, Optional, Tuple, List
 
 from dotenv import load_dotenv
 
-from config.global_config import GEMINI_EMPTY_RESPONSE_RETRIES
+from config.global_config import EMPTY_RESPONSE_RETRIES, EMPTY_RESPONSE_RETRY_DELAY
 # --- Provider-specific imports ---
 import aiohttp
 import anthropic
@@ -80,28 +80,44 @@ class TextEngine:
         client = genai.client.BaseApiClient(api_key=api_key)
         self.google_client = genai.client.AsyncClient(client)
         self.google_search_tool = Tool(google_search=GoogleSearch())
-        # self.google_tool_config is removed from here
         logger.info("Google AI Studio client initialized.")
 
     async def generate_response(self, persona_config: dict, context_object: Dict[str, Any]) -> Tuple[
         str, Optional[Dict]]:
         """
-        Routes the generation request and returns the text response AND the API payload.
+        Routes the generation request and retries on empty responses.
         Returns: (response_string, api_payload_dictionary_or_None)
         """
         model_name = persona_config.get("model_name", "")
-        if model_name.startswith("gpt"):
-            return await self._generate_openai_response(persona_config, context_object)
-        elif "claude" in model_name:
-            return await self._generate_anthropic_response(persona_config, context_object)
-        elif "gemini" in model_name:
-            return await self._generate_google_response(persona_config, context_object)
-        elif model_name == 'local':
-            return await self._generate_local_response(persona_config, context_object)
-        else:
-            error_msg = f"Error: Model '{model_name}' is not supported."
-            logger.error(f"Unknown model provider for model_name: {model_name}")
-            return error_msg, None
+
+        for attempt in range(EMPTY_RESPONSE_RETRIES + 1):
+            response_text = ""
+            api_payload = None
+
+            if model_name.startswith("gpt"):
+                response_text, api_payload = await self._generate_openai_response(persona_config, context_object)
+            elif "claude" in model_name:
+                response_text, api_payload = await self._generate_anthropic_response(persona_config, context_object)
+            elif "gemini" in model_name:
+                response_text, api_payload = await self._generate_google_response(persona_config, context_object)
+            elif model_name == 'local':
+                response_text, api_payload = await self._generate_local_response(persona_config, context_object)
+            else:
+                error_msg = f"Error: Model '{model_name}' is not supported."
+                logger.error(f"Unknown model provider for model_name: {model_name}")
+                return error_msg, None
+
+            if response_text and response_text.strip():
+                return response_text, api_payload
+
+            # If we are here, the response was empty.
+            if attempt < EMPTY_RESPONSE_RETRIES:
+                logger.warning(f"LLM returned an empty response (Attempt {attempt + 1}). Retrying...")
+                time.sleep(EMPTY_RESPONSE_RETRY_DELAY)
+
+        # If the loop finishes, all retries resulted in empty responses.
+        logger.error(f"LLM returned an empty response after {EMPTY_RESPONSE_RETRIES + 1} attempts.")
+        raise LLMCommunicationError(f"LLM provider returned an empty response after all retries.")
 
     async def _generate_openai_response(self, config: dict, context: Dict[str, Any]) -> Tuple[str, Dict]:
         client = await self._get_openai_client()
@@ -118,7 +134,8 @@ class TextEngine:
 
         try:
             completion = await client.chat.completions.create(**api_params)
-            return completion.choices[0].message.content, api_params
+            response_content = completion.choices[0].message.content or ""
+            return response_content, api_params
         except (APIStatusError, APITimeoutError) as e:
             is_5xx_error = isinstance(e, APIStatusError) and 500 <= e.status_code < 600
             if is_5xx_error or isinstance(e, APITimeoutError):
@@ -126,11 +143,12 @@ class TextEngine:
                 time.sleep(1)
                 try:
                     completion = await client.chat.completions.create(**api_params)
-                    return completion.choices[0].message.content, api_params
+                    response_content = completion.choices[0].message.content or ""
+                    return response_content, api_params
                 except Exception as retry_e:
                     logger.error(f"OpenAI API failed on retry: {retry_e}")
                     raise LLMCommunicationError(f"OpenAI API is unavailable after retry.") from retry_e
-            else:  # Not a 5xx error, so don't retry.
+            else:
                 logger.error(f"OpenAI API client error: {e}", exc_info=True)
                 raise LLMCommunicationError(f"OpenAI API returned a client error: {e}") from e
         except Exception as e:
@@ -147,14 +165,16 @@ class TextEngine:
         api_params = {k: v for k, v in api_params.items() if v is not None}
         try:
             response = client.messages.create(**api_params)
-            return response.content[0].text, api_params
+            response_content = response.content[0].text or ""
+            return response_content, api_params
         except anthropic.APIStatusError as e:
             if 500 <= e.status_code < 600:
                 logger.warning(f"Anthropic API server error: {e}. Retrying once...")
                 time.sleep(1)
                 try:
                     response = client.messages.create(**api_params)
-                    return response.content[0].text, api_params
+                    response_content = response.content[0].text or ""
+                    return response_content, api_params
                 except Exception as retry_e:
                     logger.error(f"Anthropic API failed on retry: {retry_e}")
                     raise LLMCommunicationError(f"Anthropic API is unavailable after retry.") from retry_e
@@ -167,7 +187,6 @@ class TextEngine:
 
     async def _generate_google_response(self, config: dict, context: Dict[str, Any],
                                         tools: Optional[List[Dict]] = None) -> Tuple[str, Dict]:
-        """Builds and sends a request to the Google API, with retries for empty responses."""
         try:
             self._initialize_google_client()
         except ValueError as e:
@@ -202,59 +221,42 @@ class TextEngine:
             'config': json.loads(json.dumps(content_config_for_api, default=str))
         }
 
-        response_obj = None
-        for attempt in range(GEMINI_EMPTY_RESPONSE_RETRIES + 1):
+        try:
+            response_obj = await self.google_client.models.generate_content(
+                model=config["model_name"],
+                contents=request_content,
+                config=GenerateContentConfig(**content_config_for_api)
+            )
+        except Exception as e:
+            logger.warning(f"Google API error: {e}. Retrying once...")
+            time.sleep(1)
             try:
                 response_obj = await self.google_client.models.generate_content(
                     model=config["model_name"],
                     contents=request_content,
                     config=GenerateContentConfig(**content_config_for_api)
                 )
-            except Exception as e:
-                logger.warning(f"Google API error (Attempt {attempt + 1}): {e}. Retrying once...")
-                time.sleep(1)
-                if attempt == 0:  # Only one retry on connection error
-                    try:
-                        response_obj = await self.google_client.models.generate_content(
-                            model=config["model_name"],
-                            contents=request_content,
-                            config=GenerateContentConfig(**content_config_for_api)
-                        )
-                    except Exception as retry_e:
-                        logger.error(f"Google API failed on retry: {retry_e}", exc_info=True)
-                        raise LLMCommunicationError(
-                            f"An error occurred with Google API after retry: {retry_e}") from retry_e
-                else:  # Final attempt failed
-                    raise LLMCommunicationError(f"An error occurred with Google API after retry: {e}") from e
+            except Exception as retry_e:
+                logger.error(f"Google API failed on retry: {retry_e}", exc_info=True)
+                raise LLMCommunicationError(f"An error occurred with Google API after retry: {retry_e}") from retry_e
 
-            if response_obj.prompt_feedback and response_obj.prompt_feedback.block_reason:
-                raise LLMCommunicationError(
-                    f"Response blocked by Google due to {response_obj.prompt_feedback.block_reason.name}.")
+        if response_obj.prompt_feedback and response_obj.prompt_feedback.block_reason:
+            raise LLMCommunicationError(
+                f"Response blocked by Google due to {response_obj.prompt_feedback.block_reason.name}.")
 
-            base_text_from_response = "".join(
-                part.text for part in response_obj.candidates[0].content.parts if hasattr(part, 'text') and part.text)
+        base_text_from_response = "".join(
+            part.text for part in response_obj.candidates[0].content.parts if hasattr(part, 'text') and part.text)
 
-            if base_text_from_response.strip():
-                # Success: we got content
-                final_text_content, search_query_display, citations_display = _process_grounding_metadata(
-                    base_text_from_response, response_obj.candidates[0].grounding_metadata, logger
-                )
-                if search_query_display: final_text_content += search_query_display
-                if citations_display: final_text_content += citations_display
-                return final_text_content.strip(), api_params_for_dumping
+        # This now returns a potentially empty string to be handled by the main loop.
+        if not base_text_from_response.strip():
+            return "", api_params_for_dumping
 
-            if attempt < GEMINI_EMPTY_RESPONSE_RETRIES:
-                logger.warning(f"Google returned an empty response (Attempt {attempt + 1}). Retrying...")
-                time.sleep(0.5)
-
-        # If the loop finishes, all retries were empty
-        logger.error(f"Google returned an empty response after {GEMINI_EMPTY_RESPONSE_RETRIES + 1} attempts.")
-        finish_reason_str = "Unknown"
-        if response_obj.candidates and response_obj.candidates[0].finish_reason:
-            finish_reason_str = str(response_obj.candidates[0].finish_reason.name)
-
-        return (f"Google returned an empty response after all retries.\n"
-                f"Final stop reason given: {finish_reason_str}"), api_params_for_dumping
+        final_text_content, search_query_display, citations_display = _process_grounding_metadata(
+            base_text_from_response, response_obj.candidates[0].grounding_metadata, logger
+        )
+        if search_query_display: final_text_content += search_query_display
+        if citations_display: final_text_content += citations_display
+        return final_text_content.strip(), api_params_for_dumping
 
     async def _generate_local_response(self, config: dict, context: Dict[str, Any]) -> Tuple[str, Dict]:
         url = 'http://localhost:5001/api/v1/generate'
@@ -270,7 +272,8 @@ class TextEngine:
                 async with session.post(url, json=payload) as response:
                     response.raise_for_status()
                     data = await response.json()
-                    return data['results'][0]['text'].strip(), payload
+                    response_text = data.get('results', [{}])[0].get('text', '')
+                    return response_text.strip(), payload
 
         try:
             return await do_request()
