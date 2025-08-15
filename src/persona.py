@@ -31,7 +31,8 @@ class Persona:
         self._model_name: str = model_name
         self._prompt: str = prompt
         self._response_token_limit: Optional[int] = token_limit
-        self._context_length: Optional[int] = context_length
+        # THE FIX: Ensure context_length is never None. Default to global if not provided.
+        self._context_length: int = context_length if context_length is not None else global_config.DEFAULT_CONTEXT_LIMIT
 
         # Model-specific generation parameters
         self._temperature: Optional[float] = temperature
@@ -54,7 +55,7 @@ class Persona:
     def get_response_token_limit(self) -> Optional[int]:
         return self._response_token_limit
 
-    def get_context_length(self) -> Optional[int]:
+    def get_context_length(self) -> int:
         return self._context_length
 
     def get_temperature(self) -> Optional[float]:
@@ -100,17 +101,17 @@ class Persona:
             logger.info(f"Non-integer token limit provided: '{new_limit}'. No limit set (this will use provider default).")
         return self._response_token_limit
 
-    def set_context_length(self, new_length: Any) -> Optional[int]:
+    def set_context_length(self, new_length: Any) -> int:
         """
-        Sets the context length. Returns the integer value if successful,
-        or None if the input is invalid (in which case the length is also set to None).
+        Sets the context length. Returns the integer value.
+        Defaults to the global default if the input is invalid.
         """
         try:
             self._context_length = int(new_length)
             logger.info(f"Persona '{self._name}' context length set to {self._context_length}.")
         except (ValueError, TypeError):
-            self._context_length = None
-            logger.info(f"Invalid context length provided: '{new_length}'. Must be an integer. Setting to None.")
+            self._context_length = global_config.DEFAULT_CONTEXT_LIMIT
+            logger.info(f"Invalid context length provided: '{new_length}'. Setting to default value: {self._context_length}.")
         return self._context_length
 
     def set_temperature(self, new_temp: Any) -> Optional[float]:

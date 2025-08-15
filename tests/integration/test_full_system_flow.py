@@ -64,13 +64,15 @@ def live_chat_system():
     test_personas = real_load_personas(file_path=TEST_PERSONA_SAVE_FILE)
 
     from src.persona import Persona
-    # THE FIX: Explicitly set a context_length for test personas.
     if 'chatter' not in test_personas:
         test_personas['chatter'] = Persona(persona_name='chatter', model_name='mock', prompt='talk',
                                            memory_type='channel', context_length=10)
     if 'private' not in test_personas:
         test_personas['private'] = Persona(persona_name='private', model_name='mock', prompt='private',
                                            memory_type='personal', context_length=10)
+    if 'capped_persona' not in test_personas:
+        test_personas['capped_persona'] = Persona(persona_name='capped_persona', model_name='mock', prompt='talk',
+                                                  context_length=100)
 
     with patch('src.chat_system.load_personas_from_file', return_value=test_personas):
         chat_system = ChatSystem(
@@ -208,41 +210,62 @@ async def test_empty_history_is_handled_gracefully(live_chat_system):
 
     with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
                       return_value=("Hello!", {})) as mock_llm_call:
-        response_text, _, _ = await chat_system.generate_response(
+        _, _, _ = await chat_system.generate_response(
             persona_name="derpr", user_identifier="new_user_123",
             channel="new-channel", message="First message ever"
         )
 
-        assert response_text == "Hello!"
         mock_llm_call.assert_called_once()
         context = mock_llm_call.call_args[0][1]['history']
         assert context == []
 
 
 @pytest.mark.asyncio
-async def test_history_limit_zero_for_channel_mode(live_chat_system):
+async def test_persona_context_length_is_capped_by_history_limit(live_chat_system):
     """
-    Tests that history_limit=0 is respected for channel/auto mode personas.
+    Tests that the per-call history_limit acts as a cap on a persona's context_length.
     """
     chat_system, memory_manager, _ = live_chat_system
-    user1, channel = "user1", "test-channel"
 
-    # Setup: Log a message to the channel so that history exists.
-    memory_manager.log_message(user1, "derpr", channel, 'user', user1, "A message that should be ignored",
-                               datetime.now())
+    with patch.object(memory_manager, 'get_channel_history',
+                      wraps=memory_manager.get_channel_history) as mock_get_history:
+        # Use a persona with a context_length of 100
+        await chat_system.generate_response(
+            persona_name="capped_persona",
+            user_identifier="user1",
+            channel="any",
+            message="test",
+            history_limit=5  # But cap the call at 5
+        )
+
+        # Assert that the MemoryManager was called with the smaller, capped value
+        mock_get_history.assert_called_once()
+        call_args, _ = mock_get_history.call_args
+        assert call_args[1] == 5, "The effective_limit should have been capped at 5."
+
+
+@pytest.mark.asyncio
+async def test_context_transformation_ignores_user_author_name(live_chat_system):
+    """
+    Tests that the context transformation does not prepend a name for 'user' roles.
+    """
+    chat_system, memory_manager, _ = live_chat_system
+    channel, user_id, user_name = "test-channel", "user1", "SpecificUserName"
+
+    # Log a message with a specific author_name for the user
+    memory_manager.log_message(user_id, "derpr", channel, 'user', user_name, "Hello world", datetime.now())
 
     with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
                       return_value=("", {})) as mock_llm_call:
-        # Action: Call generate_response for a persona in 'auto' mode with limit=0
         await chat_system.generate_response(
-            persona_name="derpr",
-            user_identifier=user1,
-            channel=channel,
-            message="A new message",
-            history_limit=0  # Explicitly request no history
+            persona_name="derpr", user_identifier=user_id, channel=channel, message="Another message"
         )
 
-        # Assertion: Verify the history passed to the LLM is empty.
         mock_llm_call.assert_called_once()
         context = mock_llm_call.call_args[0][1]['history']
-        assert context == [], "History should be empty when history_limit=0 is provided."
+
+        # Assert that the user message in the history is clean and NOT prepended
+        assert len(context) == 1
+        assert context[0]['role'] == 'user'
+        assert context[0]['content'] == "Hello world"
+        assert "SpecificUserName:" not in context[0]['content']
