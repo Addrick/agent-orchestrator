@@ -7,6 +7,8 @@ import anthropic
 import aiohttp
 
 from src.engine import TextEngine, LLMCommunicationError
+from config.global_config import GEMINI_EMPTY_RESPONSE_RETRIES
+from google.genai.types import Tool, GoogleSearch
 
 
 # A common set of configs and contexts for all tests
@@ -190,6 +192,62 @@ class TestAnthropic:
         with pytest.raises(LLMCommunicationError, match="Anthropic API returned a client error"):
             await text_engine.generate_response(anthropic_config, base_context)
         mock_create.assert_called_once()
+
+
+class TestGoogle:
+    @pytest.mark.asyncio
+    @patch('src.engine.time.sleep', MagicMock())
+    @patch('src.engine.TextEngine._initialize_google_client')
+    async def test_retry_on_empty_response_succeeds(self, mock_init_google, text_engine, google_config, base_context):
+        mock_init_google.return_value = None
+        text_engine.google_search_tool = Tool(google_search=GoogleSearch())
+
+        mock_generate_content = AsyncMock()
+        text_engine.google_client = MagicMock()
+        text_engine.google_client.models.generate_content = mock_generate_content
+
+        empty_response = MagicMock(prompt_feedback=None,
+                                   candidates=[MagicMock(content=MagicMock(parts=[]), grounding_metadata=None)])
+        success_response = MagicMock(prompt_feedback=None, candidates=[
+            MagicMock(content=MagicMock(parts=[MagicMock(text="Google success")]), grounding_metadata=None)])
+        mock_generate_content.side_effect = [empty_response, success_response]
+
+        response, _ = await text_engine.generate_response(google_config, base_context)
+
+        assert response == "Google success"
+        assert mock_generate_content.call_count == 2
+
+    @pytest.mark.asyncio
+    @patch('src.engine.time.sleep', MagicMock())
+    @patch('src.engine.TextEngine._initialize_google_client')
+    async def test_retry_on_empty_response_fails(self, mock_init_google, text_engine, google_config, base_context):
+        mock_init_google.return_value = None
+        text_engine.google_search_tool = Tool(google_search=GoogleSearch())
+
+        mock_generate_content = AsyncMock()
+        text_engine.google_client = MagicMock()
+        text_engine.google_client.models.generate_content = mock_generate_content
+
+        # THE FIX: Create a mock object that has a .name attribute.
+        mock_finish_reason = MagicMock()
+        mock_finish_reason.name = "STOP"
+        empty_response = MagicMock(
+            prompt_feedback=None,
+            candidates=[
+                MagicMock(
+                    content=MagicMock(parts=[]),
+                    finish_reason=mock_finish_reason,  # Use the mock object here
+                    grounding_metadata=None
+                )
+            ]
+        )
+        mock_generate_content.return_value = empty_response
+
+        response, _ = await text_engine.generate_response(google_config, base_context)
+
+        assert "Google returned an empty response after all retries" in response
+        assert "Final stop reason given: STOP" in response
+        assert mock_generate_content.call_count == GEMINI_EMPTY_RESPONSE_RETRIES + 1
 
 
 class TestLocalModel:
