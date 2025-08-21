@@ -5,6 +5,7 @@ import requests
 import logging
 from dotenv import load_dotenv
 from typing import Optional, List, Dict, Any
+from requests.exceptions import RequestException
 
 # Load environment variables from a .env file if it exists
 load_dotenv()

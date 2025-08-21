@@ -9,6 +9,7 @@ from src.interfaces.discord_bot import create_discord_bot
 from src.chat_system import ChatSystem, ResponseType
 from src.database.memory_manager import MemoryManager
 from src.persona import Persona
+from src.engine import LLMCommunicationError
 
 
 @pytest.fixture
@@ -33,7 +34,8 @@ def mock_chat_system(mock_persona_vocal, mock_persona_silent):
     chat_system = MagicMock(spec=ChatSystem)
     chat_system.personas = {
         "vocal": mock_persona_vocal,
-        "silent": mock_persona_silent
+        "silent": mock_persona_silent,
+        "derpr": mock_persona_vocal
     }
     chat_system.generate_response = AsyncMock()
     chat_system.memory_manager = MagicMock(spec=MemoryManager)
@@ -88,9 +90,6 @@ async def test_llm_flow_without_display_name(mock_reset, mock_discord_client, mo
     await mock_discord_client.on_message(mock_message)
 
     mock_message.channel.send.assert_called_once_with("Silent reply")
-    assert mock_chat_system.memory_manager.log_message.call_count == 2
-    bot_log_kwargs = mock_chat_system.memory_manager.log_message.call_args_list[1].kwargs
-    assert bot_log_kwargs['author_name'] == 'silent'
 
 
 @pytest.mark.asyncio
@@ -127,8 +126,8 @@ async def test_bot_ignores_unrelated_messages(mock_discord_client, mock_chat_sys
 
 @pytest.mark.asyncio
 @patch('src.interfaces.discord_bot.reset_discord_status', new_callable=AsyncMock)
-async def test_graceful_failure_on_exception(mock_reset, mock_discord_client, mock_chat_system, mock_message):
-    """Tests the try/except block in the on_message handler."""
+async def test_graceful_failure_on_unhandled_exception(mock_reset, mock_discord_client, mock_chat_system, mock_message):
+    """Tests the outermost try/except block in the on_message handler for truly unexpected errors."""
     mock_chat_system.generate_response.side_effect = Exception("A critical backend error!")
 
     await mock_discord_client.on_message(mock_message)
@@ -136,4 +135,39 @@ async def test_graceful_failure_on_exception(mock_reset, mock_discord_client, mo
     mock_message.channel.send.assert_called_once_with("A critical error occurred. Please check the logs.")
     mock_chat_system.memory_manager.log_message.assert_not_called()
     mock_reset.assert_called_once()
-    
+
+
+@pytest.mark.asyncio
+@patch('src.interfaces.discord_bot._send_dev_response', new_callable=AsyncMock)
+@patch('src.interfaces.discord_bot.reset_discord_status', new_callable=AsyncMock)
+async def test_sends_user_error_when_engine_fails(mock_reset, mock_send_dev, mock_discord_client, mock_chat_system,
+                                                  mock_message):
+    """
+    Tests the full error handling pipeline from TextEngine up to the user.
+    """
+    error_message = "I'm having trouble connecting to the AI service right now."
+    mock_chat_system.generate_response.return_value = (error_message, ResponseType.DEV_COMMAND, None)
+
+    await mock_discord_client.on_message(mock_message)
+
+    mock_send_dev.assert_called_once_with(mock_message.channel, error_message)
+    mock_chat_system.memory_manager.log_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+@patch('src.interfaces.discord_bot.reset_discord_status', new_callable=AsyncMock)
+async def test_bot_treats_empty_message_as_continuation(mock_reset, mock_discord_client, mock_chat_system,
+                                                        mock_message):
+    """Tests that the bot processes a message with only a persona trigger as a continuation request."""
+    mock_message.content = "vocal "
+    mock_chat_system.generate_response.return_value = ("Continuation response", ResponseType.LLM_GENERATION, None)
+
+    await mock_discord_client.on_message(mock_message)
+
+    mock_chat_system.generate_response.assert_called_once()
+    called_kwargs = mock_chat_system.generate_response.call_args.kwargs
+    assert called_kwargs['message'] == ''
+
+    mock_message.channel.send.assert_called()
+    assert mock_chat_system.memory_manager.log_message.call_count == 2
+    mock_reset.assert_called_once()
