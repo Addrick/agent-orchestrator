@@ -87,6 +87,7 @@ class TextEngine:
         """
         Routes the generation request and retries on empty responses.
         Returns: (response_string, api_payload_dictionary_or_None)
+        Raises: LLMCommunicationError if all retries fail or produce empty responses.
         """
         model_name = persona_config.get("model_name", "")
 
@@ -103,19 +104,15 @@ class TextEngine:
             elif model_name == 'local':
                 response_text, api_payload = await self._generate_local_response(persona_config, context_object)
             else:
-                error_msg = f"Error: Model '{model_name}' is not supported."
-                logger.error(f"Unknown model provider for model_name: {model_name}")
-                return error_msg, None
+                raise LLMCommunicationError(f"Error: Model '{model_name}' is not supported.")
 
             if response_text and response_text.strip():
                 return response_text, api_payload
 
-            # If we are here, the response was empty.
             if attempt < EMPTY_RESPONSE_RETRIES:
                 logger.warning(f"LLM returned an empty response (Attempt {attempt + 1}). Retrying...")
                 time.sleep(EMPTY_RESPONSE_RETRY_DELAY)
 
-        # If the loop finishes, all retries resulted in empty responses.
         logger.error(f"LLM returned an empty response after {EMPTY_RESPONSE_RETRIES + 1} attempts.")
         raise LLMCommunicationError(f"LLM provider returned an empty response after all retries.")
 
@@ -190,7 +187,7 @@ class TextEngine:
         try:
             self._initialize_google_client()
         except ValueError as e:
-            return f"Error: Google not configured: {e}", {}
+            raise LLMCommunicationError(f"Error: Google not configured: {e}") from e
 
         history_str = "\n".join([f"{item['role']}: {item['content']}" for item in context['history']])
         prompt = context['persona_prompt']
@@ -247,7 +244,6 @@ class TextEngine:
         base_text_from_response = "".join(
             part.text for part in response_obj.candidates[0].content.parts if hasattr(part, 'text') and part.text)
 
-        # This now returns a potentially empty string to be handled by the main loop.
         if not base_text_from_response.strip():
             return "", api_params_for_dumping
 

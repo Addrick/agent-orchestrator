@@ -121,27 +121,17 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                     user_display_name=user_display_name
                 )
 
-                # Log the user's message as soon as the interaction starts.
-                if response_type != ResponseType.DEV_COMMAND:
-                    await asyncio.to_thread(
-                        chat_system.memory_manager.log_message,
-                        user_identifier=user_identifier,
-                        persona_name=active_persona_name,
-                        channel=channel_name,
-                        author_role='user',
-                        author_name=user_display_name,
-                        content=cleaned_message,
-                        timestamp=message.created_at,
-                        platform_message_id=str(message.id),
-                        zammad_ticket_id=ticket_id
-                    )
-
                 if response_type == ResponseType.DEV_COMMAND:
                     await _send_dev_response(message.channel, response_text)
+                elif response_text and response_text.strip():  # Should always be true now, but a good safeguard.
+                    # Log the user's message now that we know it's a valid interaction
+                    await asyncio.to_thread(
+                        chat_system.memory_manager.log_message,
+                        user_identifier=user_identifier, persona_name=active_persona_name, channel=channel_name,
+                        author_role='user', author_name=user_display_name, content=cleaned_message,
+                        timestamp=message.created_at, platform_message_id=str(message.id), zammad_ticket_id=ticket_id
+                    )
 
-                # The TextEngine now guarantees a non-empty response or raises an exception,
-                # which is handled by the ChatSystem. This logic is now simpler.
-                elif response_type == ResponseType.LLM_GENERATION:
                     persona = chat_system.personas[active_persona_name]
                     final_reply_text = response_text
                     if persona.should_display_name_in_chat():
@@ -160,16 +150,14 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
 
                         await asyncio.to_thread(
                             chat_system.memory_manager.log_message,
-                            user_identifier=user_identifier,
-                            persona_name=active_persona_name,
-                            channel=channel_name,
-                            author_role='assistant',
-                            author_name=active_persona_name,
-                            content=cleansed_reply,
-                            timestamp=bot_timestamp,
-                            platform_message_id=str(last_reply_message.id),
+                            user_identifier=user_identifier, persona_name=active_persona_name, channel=channel_name,
+                            author_role='assistant', author_name=active_persona_name, content=cleansed_reply,
+                            timestamp=bot_timestamp, platform_message_id=str(last_reply_message.id),
                             zammad_ticket_id=ticket_id
                         )
+                else:
+                    logger.error(
+                        f"ChatSystem returned a response_type of LLM_GENERATION but an empty response text. This should not happen.")
 
             await reset_discord_status(client, chat_system)
 

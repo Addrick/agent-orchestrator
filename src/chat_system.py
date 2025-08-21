@@ -152,17 +152,17 @@ class ChatSystem:
                     logger.error(f"A Zammad API error occurred during user/ticket search: {zammad_error}",
                                  exc_info=True)
 
-            # --- START OF FIX: SIMPLIFIED LIMIT LOGIC ---
-            persona_limit = persona.get_context_length()  # This is now guaranteed to be an int
+            persona_limit = persona.get_context_length()
             interface_limit = history_limit
-
-            # The effective limit is the smaller of the persona's setting or the interface's cap.
-            # If the interface provides no cap (None), use the persona's setting directly.
-            if interface_limit is None:
+            if persona_limit is not None:
                 effective_limit = persona_limit
             else:
-                effective_limit = min(persona_limit, interface_limit)
-            # --- END OF FIX ---
+                effective_limit = interface_limit
+            if interface_limit is not None:
+                if effective_limit is None:
+                    effective_limit = interface_limit
+                else:
+                    effective_limit = min(effective_limit, interface_limit)
 
             memory_type = persona.get_memory_type()
             raw_history = []
@@ -237,7 +237,11 @@ class ChatSystem:
 
         except LLMCommunicationError as e:
             logger.error(f"A recoverable LLM communication error occurred for {user_identifier}: {e}")
-            return "I'm having trouble connecting to the AI service right now. Please try your request again in a moment.", ResponseType.DEV_COMMAND, ticket_to_log
+            if "empty response after all retries" in str(e):
+                user_facing_error = "I'm not sure how to continue. Could you please rephrase your request or provide more details?"
+            else:
+                user_facing_error = "I'm having trouble connecting to the AI service right now. Please try your request again in a moment."
+            return user_facing_error, ResponseType.DEV_COMMAND, ticket_to_log
         except Exception as e:
             logger.error(f"A critical error occurred in generate_response for {user_identifier}: {e}", exc_info=True)
             return "An internal error occurred while processing your request.", ResponseType.DEV_COMMAND, ticket_to_log
