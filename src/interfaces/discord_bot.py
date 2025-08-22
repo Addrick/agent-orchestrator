@@ -15,6 +15,21 @@ from src.chat_system import ChatSystem, ResponseType
 logger = logging.getLogger(__name__)
 
 
+class ReconnectLogHandler(logging.Handler):
+    """
+    A custom logging handler that intercepts the malformed "reconnect" error
+    from discord.py, logs it cleanly at the INFO level, and stops it from
+    propagating to the root logger where it would crash the debugger.
+    """
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.name == 'discord.client' and record.getMessage().startswith('Attempting a reconnect'):
+            # Log a clean, informative message from our own application instead.
+            logger.info("Discord client is attempting to reconnect.")
+            # By not calling super().emit(record), we effectively stop this specific
+            # log record from being processed further by this handler's formatters/stream.
+            # The propagation flag on the logger will stop it from going to the root.
+
+
 class CustomDiscordBot(discord.Client):
     def __init__(self, chat_system: 'ChatSystem', *args, **kwargs):
         super().__init__(*args, **kwargs)
