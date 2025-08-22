@@ -241,14 +241,21 @@ class TextEngine:
             raise LLMCommunicationError(
                 f"Response blocked by Google due to {response_obj.prompt_feedback.block_reason.name}.")
 
-        base_text_from_response = "".join(
-            part.text for part in response_obj.candidates[0].content.parts if hasattr(part, 'text') and part.text)
+        base_text_from_response = ""
+        candidate = None
+        if response_obj.candidates:
+            candidate = response_obj.candidates[0]
+            # THE FIX: Add robust, nested checks before accessing .parts
+            if candidate.content and candidate.content.parts:
+                base_text_from_response = "".join(
+                    part.text for part in candidate.content.parts if hasattr(part, 'text') and part.text
+                )
 
         if not base_text_from_response.strip():
             return "", api_params_for_dumping
 
         final_text_content, search_query_display, citations_display = _process_grounding_metadata(
-            base_text_from_response, response_obj.candidates[0].grounding_metadata, logger
+            base_text_from_response, candidate.grounding_metadata if candidate else None, logger
         )
         if search_query_display: final_text_content += search_query_display
         if citations_display: final_text_content += citations_display
