@@ -8,10 +8,12 @@ import typing
 from datetime import timedelta
 from typing import Optional
 
-from config.global_config import DISCORD_CHAR_LIMIT, DISCORD_STATUS_LIMIT, CHAT_LOG_LOCATION, DISCORD_DEBUG_CHANNEL
+from config.global_config import DISCORD_CHAR_LIMIT, DISCORD_STATUS_LIMIT, CHAT_LOG_LOCATION, DISCORD_DEBUG_CHANNEL, \
+    AMBIENT_LOGGING_CHANNELS
 from src.utils.message_utils import split_string_by_limit, cleanse_message_for_history
 from src.chat_system import ChatSystem, ResponseType
 
+# THE FIX: Initialize the logger at the top of the module.
 logger = logging.getLogger(__name__)
 
 
@@ -21,13 +23,11 @@ class ReconnectLogHandler(logging.Handler):
     from discord.py, logs it cleanly at the INFO level, and stops it from
     propagating to the root logger where it would crash the debugger.
     """
+
     def emit(self, record: logging.LogRecord) -> None:
         if record.name == 'discord.client' and record.getMessage().startswith('Attempting a reconnect'):
             # Log a clean, informative message from our own application instead.
             logger.info("Discord client is attempting to reconnect.")
-            # By not calling super().emit(record), we effectively stop this specific
-            # log record from being processed further by this handler's formatters/stream.
-            # The propagation flag on the logger will stop it from going to the root.
 
 
 class CustomDiscordBot(discord.Client):
@@ -81,6 +81,10 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
     intents.messages = True  # Required for on_message_delete
     client = CustomDiscordBot(chat_system, intents=intents)
 
+    discord_client_logger = logging.getLogger('discord.client')
+    discord_client_logger.addHandler(ReconnectLogHandler())
+    discord_client_logger.propagate = False
+
     @client.event
     async def on_ready():
         logger.info(f'Logged in as {client.user}!')
@@ -106,7 +110,6 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
 
         active_persona_name: Optional[str] = None
         cleaned_message: str = message.content
-
         for name in chat_system.personas.keys():
             if message.content.lower().startswith(f"{name.lower()} "):
                 active_persona_name = name
@@ -116,69 +119,74 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                 active_persona_name = name
                 break
 
-        if not active_persona_name:
-            return
-
-        try:
-            async with message.channel.typing():
-                user_identifier = str(message.author.id)
-                channel_name = message.channel.name
-                image_url = await get_image_url(message)
-                user_display_name = message.author.display_name
-
-                response_text, response_type, ticket_id = await chat_system.generate_response(
-                    persona_name=active_persona_name,
-                    user_identifier=user_identifier,
-                    channel=channel_name,
-                    message=cleaned_message,
-                    image_url=image_url,
-                    history_limit=20,
-                    user_display_name=user_display_name
-                )
-
-                if response_type == ResponseType.DEV_COMMAND:
-                    await _send_dev_response(message.channel, response_text)
-                elif response_text and response_text.strip():  # Should always be true now, but a good safeguard.
-                    # Log the user's message now that we know it's a valid interaction
-                    await asyncio.to_thread(
-                        chat_system.memory_manager.log_message,
-                        user_identifier=user_identifier, persona_name=active_persona_name, channel=channel_name,
-                        author_role='user', author_name=user_display_name, content=cleaned_message,
-                        timestamp=message.created_at, platform_message_id=str(message.id), zammad_ticket_id=ticket_id
+        if active_persona_name:
+            try:
+                async with message.channel.typing():
+                    response_text, response_type, ticket_id = await chat_system.generate_response(
+                        persona_name=active_persona_name,
+                        user_identifier=str(message.author.id),
+                        channel=message.channel.name,
+                        message=cleaned_message,
+                        image_url=await get_image_url(message),
+                        history_limit=20,
+                        user_display_name=message.author.display_name
                     )
 
-                    persona = chat_system.personas[active_persona_name]
-                    final_reply_text = response_text
-                    if persona.should_display_name_in_chat():
-                        final_reply_text = f"**{active_persona_name}:** {response_text}"
-
-                    chunks = split_string_by_limit(final_reply_text, DISCORD_CHAR_LIMIT)
-                    last_reply_message = None
-                    for chunk in chunks:
-                        last_reply_message = await message.channel.send(chunk)
-
-                    if last_reply_message:
-                        cleansed_reply = cleanse_message_for_history(response_text)
-                        bot_timestamp = last_reply_message.created_at
-                        if bot_timestamp <= message.created_at:
-                            bot_timestamp = message.created_at + timedelta(microseconds=1)
-
+                    if response_type == ResponseType.DEV_COMMAND:
+                        await _send_dev_response(message.channel, response_text)
+                    elif response_text and response_text.strip():
                         await asyncio.to_thread(
                             chat_system.memory_manager.log_message,
-                            user_identifier=user_identifier, persona_name=active_persona_name, channel=channel_name,
-                            author_role='assistant', author_name=active_persona_name, content=cleansed_reply,
-                            timestamp=bot_timestamp, platform_message_id=str(last_reply_message.id),
+                            user_identifier=str(message.author.id), persona_name=active_persona_name,
+                            channel=message.channel.name,
+                            author_role='user', author_name=message.author.display_name, content=cleaned_message,
+                            timestamp=message.created_at, platform_message_id=str(message.id),
                             zammad_ticket_id=ticket_id
                         )
-                else:
-                    logger.error(
-                        f"ChatSystem returned a response_type of LLM_GENERATION but an empty response text. This should not happen.")
 
-            await reset_discord_status(client, chat_system)
+                        persona = chat_system.personas[active_persona_name]
+                        final_reply_text = response_text
+                        if persona.should_display_name_in_chat():
+                            final_reply_text = f"**{active_persona_name}:** {response_text}"
 
-        except Exception as e:
-            logger.error(f"An unexpected error occurred in on_message: {e}", exc_info=True)
-            await message.channel.send("A critical error occurred. Please check the logs.")
-            await reset_discord_status(client, chat_system)
+                        chunks = split_string_by_limit(final_reply_text, DISCORD_CHAR_LIMIT)
+                        last_reply_message = None
+                        for chunk in chunks:
+                            last_reply_message = await message.channel.send(chunk)
+
+                        if last_reply_message:
+                            bot_timestamp = last_reply_message.created_at
+                            if bot_timestamp <= message.created_at: bot_timestamp = message.created_at + timedelta(
+                                microseconds=1)
+                            await asyncio.to_thread(
+                                chat_system.memory_manager.log_message,
+                                user_identifier=str(message.author.id), persona_name=active_persona_name,
+                                channel=message.channel.name,
+                                author_role='assistant', author_name=active_persona_name,
+                                content=cleanse_message_for_history(response_text),
+                                timestamp=bot_timestamp, platform_message_id=str(last_reply_message.id),
+                                zammad_ticket_id=ticket_id
+                            )
+                await reset_discord_status(client, chat_system)
+                return
+            except Exception as e:
+                logger.error(f"An unexpected error occurred in on_message: {e}", exc_info=True)
+                await message.channel.send("A critical error occurred. Please check the logs.")
+                await reset_discord_status(client, chat_system)
+                return
+
+        is_ambient_channel = message.channel.name.lower() in [c.lower() for c in AMBIENT_LOGGING_CHANNELS]
+        if is_ambient_channel:
+            await asyncio.to_thread(
+                chat_system.memory_manager.log_message,
+                user_identifier=str(message.author.id),
+                persona_name="ambient",
+                channel=message.channel.name,
+                author_role='user',
+                author_name=message.author.display_name,
+                content=message.content,
+                timestamp=message.created_at,
+                platform_message_id=str(message.id)
+            )
 
     return client

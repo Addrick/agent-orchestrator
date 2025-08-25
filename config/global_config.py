@@ -15,7 +15,7 @@ DISCORD_STATUS_LIMIT = 128
 DISCORD_LOGGER = False
 DISCORD_DEBUG_CHANNEL = 1222358674127982622
 DEFAULT_CONVERSATIONAL_PAUSE_LIMIT = 21600 # time in seconds to determine if a message in context is too far back from the previous
-
+AMBIENT_LOGGING_CHANNELS = ['general', 'derp']
 #
 GMAIL_BOT = 0
 # --- GMAIL BOT CONFIG ---
