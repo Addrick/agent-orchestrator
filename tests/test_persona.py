@@ -34,12 +34,10 @@ def test_persona_initialization_with_all_values(base_persona_args):
     p = Persona(
         **base_persona_args,
         context_length=10,
-        memory_type="personal",
         display_name_in_chat=True
     )
     assert p.get_name() == "tester"
     assert p.get_context_length() == 10
-    assert p.get_memory_type() == "personal"
     assert p.should_display_name_in_chat() is True
 
 def test_persona_initialization_defaults_context_length(base_persona_args):
@@ -81,13 +79,6 @@ def test_set_context_length_invalid(persona):
 
 # --- Setter Tests for Other Attributes ---
 
-def test_set_memory_type(persona):
-    """Tests the setter for memory_type."""
-    assert persona.get_memory_type() == "auto"
-    assert persona.set_memory_type("personal") is True
-    assert persona.get_memory_type() == "personal"
-    assert persona.set_memory_type("invalid_type") is False
-    assert persona.get_memory_type() == "personal"
 
 def test_set_display_name(persona):
     """Tests the setter for display_name_in_chat."""

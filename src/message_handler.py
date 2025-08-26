@@ -48,7 +48,6 @@ class BotLogic:
             'temp': self._set_temp,
             'top_p': self._set_top_p,
             'top_k': self._set_top_k,
-            'memory': self._set_memory_type,
             'display_name': self._set_display_name,
         }
 
@@ -85,7 +84,7 @@ class BotLogic:
                                                                   "goodbye (end conversation), \n"
                                                                   "remember <+prompt>, \n"
                                                                   "what prompt/model/models (google/openai/anthropic)/personas/context/tokens/temp, \n"
-                                                                  "set prompt/model/context/tokens/temp/memory/display_name, \n"
+                                                                  "set prompt/model/context/tokens/temp/display_name, \n"
                                                                   "add <persona>, \n"
                                                                   "delete <persona>, \n"
                                                                   "detail, \n"
@@ -94,8 +93,7 @@ class BotLogic:
                                                                   "dump_last")
         return help_msg, False
 
-    def _handle_remember(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[
-        None, bool]:
+    def _handle_remember(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[None, bool]:
         if not args:
             return None, False
         text_to_add = ' '.join(args)
@@ -104,7 +102,7 @@ class BotLogic:
 
     def _handle_add(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[None, bool]:
         if not args:
-            return None, False  # Invalid syntax, fall through to LLM
+            return None, False # Invalid syntax, fall through to LLM
         new_persona_name = args[0]
 
         if new_persona_name in self.chat_system.personas:
@@ -121,10 +119,9 @@ class BotLogic:
         self.chat_system.personas[new_persona_name] = new_persona
         return f"Added '{new_persona_name}' with prompt: '{prompt}'", True
 
-    def _handle_delete(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[
-        None, bool]:
+    def _handle_delete(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[None, bool]:
         if not args:
-            return None, False  # Invalid syntax, fall through to LLM
+            return None, False # Invalid syntax, fall through to LLM
         persona_to_delete = args[0]
 
         if persona_to_delete not in self.chat_system.personas:
@@ -133,8 +130,7 @@ class BotLogic:
         del self.chat_system.personas[persona_to_delete]
         return f"Deleted persona '{persona_to_delete}'.", True
 
-    def _handle_detail(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[
-        None, bool]:
+    def _handle_detail(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[None, bool]:
         if args:
             return None, False
         details = (
@@ -142,7 +138,6 @@ class BotLogic:
             f"----------------------------------------\n"
             f"Model: {persona.get_model_name() or 'default'}\n"
             f"Context Length: {persona.get_context_length()}\n"
-            f"Memory Type: {persona.get_memory_type()}\n"
             f"Display Name in Chat: {persona.should_display_name_in_chat()}\n"
             f"Response Token Limit: {persona.get_response_token_limit() or 'default'}\n"
             f"Generation Parameters:\n"
@@ -294,17 +289,6 @@ class BotLogic:
             persona.set_top_k(None)
             return f"Non-numeric Top K '{top_k_str}' provided. The default Top K will be used for {persona.get_name()}.", True
 
-    def _set_memory_type(self, args: list, persona: Persona) -> tuple[str, bool] | tuple[None, bool]:
-        try:
-            new_type = args[1].lower()
-        except IndexError:
-            return "Error: Please specify a memory type (auto, personal, channel).", False
-
-        if persona.set_memory_type(new_type):
-            return f"Memory type for {persona.get_name()} set to '{new_type}'.", True
-        else:
-            return f"Error: Invalid memory type '{new_type}'. Must be auto, personal, or channel.", False
-
     def _set_display_name(self, args: list, persona: Persona) -> tuple[str, bool] | tuple[None, bool]:
         try:
             value_str = args[1].lower()
@@ -322,22 +306,19 @@ class BotLogic:
         status = "enabled" if new_value else "disabled"
         return f"Displaying name in chat for {persona.get_name()} is now {status}.", True
 
-    def _handle_start_conversation(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | \
-                                                                                                tuple[None, bool]:
+    def _handle_start_conversation(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[None, bool]:
         if args:
             return None, False
         persona.set_context_length(0)
         return f"{persona.get_name()}: Hello! Starting new conversation...", True
 
-    def _handle_stop_conversation(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[
-        None, bool]:
+    def _handle_stop_conversation(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[None, bool]:
         if args:
             return None, False
         persona.set_context_length(DEFAULT_CONTEXT_LIMIT)
         return f"{persona.get_name()}: Goodbye! Resetting context.", True
 
-    def _handle_dump_last(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[
-        None, bool]:
+    def _handle_dump_last(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[None, bool]:
         if args:
             return None, False
 
@@ -357,8 +338,7 @@ class BotLogic:
             return None, False
         return 'Personas saved.', True
 
-    def _handle_update_models(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[
-        None, bool]:
+    def _handle_update_models(self, args: list, persona: Persona, user_identifier: str) -> tuple[str, bool] | tuple[None, bool]:
         if args:
             return None, False
         self.chat_system.models_available = get_model_list(update=True)
