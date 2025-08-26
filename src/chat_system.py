@@ -52,7 +52,6 @@ class ChatSystem:
     async def _find_active_ticket_for_user(self, customer_id: int) -> Optional[int]:
         """Finds the most recently updated open or new ticket for a given Zammad user ID."""
         try:
-            # A ticket can be in 'new' or 'open' state to be considered active.
             query = f"customer_id:{customer_id} AND state.name:(open OR new)"
             search_results = await asyncio.to_thread(
                 self.zammad_client.search_tickets,
@@ -154,26 +153,21 @@ class ChatSystem:
 
             persona_limit = persona.get_context_length()
             interface_limit = history_limit
-            if persona_limit is not None:
+            if interface_limit is None:
                 effective_limit = persona_limit
             else:
-                effective_limit = interface_limit
-            if interface_limit is not None:
-                if effective_limit is None:
-                    effective_limit = interface_limit
-                else:
-                    effective_limit = min(effective_limit, interface_limit)
+                effective_limit = min(persona_limit, interface_limit)
 
-            memory_type = persona.get_memory_type()
             raw_history = []
             system_context_message = None
+            memory_mode_used = None
 
             if ticket_id_for_context:
+                memory_mode_used = "ticket"
                 raw_history = self.memory_manager.get_ticket_history(ticket_id_for_context, effective_limit)
                 system_context_message = f"This conversation is part of Zammad ticket #{ticket_id_for_context}."
-            elif memory_type == "personal":
-                raw_history = self.memory_manager.get_personal_history(user_identifier, persona_name, effective_limit)
-            else:  # 'auto' or 'channel'
+            else:
+                memory_mode_used = "channel"
                 raw_history = self.memory_manager.get_channel_history(channel, effective_limit)
 
             final_history_for_llm = []
@@ -184,7 +178,12 @@ class ChatSystem:
                     content = msg.get('content', '')
 
                     if author_role == 'user':
-                        final_history_for_llm.append({'role': 'user', 'content': content})
+                        # THE FIX: Only prepend the name if we are in channel mode.
+                        if memory_mode_used == "channel" and author_name:
+                            formatted_content = f"{author_name}: {content}"
+                            final_history_for_llm.append({'role': 'user', 'content': formatted_content})
+                        else:
+                            final_history_for_llm.append({'role': 'user', 'content': content})
                     elif author_role == 'assistant':
                         if author_name == persona_name:
                             final_history_for_llm.append({'role': 'assistant', 'content': content})
