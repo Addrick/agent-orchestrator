@@ -3,8 +3,9 @@
 import os
 import sys
 import logging
-from git import Repo
+from git import Repo, Diff, IndexFile
 import psutil
+from typing import List, Union
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +16,7 @@ For use with remote development and redeployment
 """
 
 
-def update_app():
+def update_app() -> str:
     # Path to local repository
     repo_path = os.environ.get("REPO_PATH")
     if not repo_path:
@@ -34,20 +35,23 @@ def update_app():
         logger.warning("Pull successful. Changed files:")
         # Get the changes after the pull
         # changes = repo.git.diff('HEAD@{1}', 'HEAD')
-        diff_index = repo.index.diff(None)
-        for diff_added in diff_index.iter_change_type('A'):
+        diff_index: IndexFile = repo.index
+        diffs: List[Diff] = diff_index.diff(None)
+        for diff_added in diffs.iter_change_type('A'):
             logger.warning(f"Added: {diff_added.b_path}")
-        for diff_modified in diff_index.iter_change_type('M'):
+        for diff_modified in diffs.iter_change_type('M'):
             logger.warning(f"Modified: {diff_modified.b_path}")
-        for diff_deleted in diff_index.iter_change_type('D'):
+        for diff_deleted in diffs.iter_change_type('D'):
             logger.warning(f"Deleted: {diff_deleted.b_path}")
-        return f"Pull successful, {diff_index.iter_change_type('M')} files modified."
+
+        modified_files_count = len(list(diffs.iter_change_type('M')))
+        return f"Pull successful, {modified_files_count} files modified."
 
     else:
         return "Pull failed."
 
 
-def restart_app():
+def restart_app() -> None:
     """Restarts the current program, with file objects and descriptors
        cleanup
     """
@@ -55,8 +59,9 @@ def restart_app():
 
     try:
         p = psutil.Process(os.getpid())
-        for handler in p.open_files() + p.connections():
-            if handler.fd:
+        open_items: List[Union[psutil.Process, psutil.Connection]] = p.open_files() + p.connections()
+        for handler in open_items:
+            if hasattr(handler, 'fd') and handler.fd:
                 os.close(handler.fd)
     except Exception as e:
         logger.error(e)
@@ -65,6 +70,6 @@ def restart_app():
     os.execl(python, python, "\"{}\"".format(sys.argv[0]))
 
 
-def stop_app():
+def stop_app() -> None:
     print("Stopping the program...")
     sys.exit()

@@ -3,23 +3,25 @@
 import json
 import logging
 import os
+from typing import Dict, Any, Optional, List, cast
 from config.global_config import PERSONA_SAVE_FILE
 
 logger = logging.getLogger(__name__)
 
 
-def load_models_from_file(file_path=PERSONA_SAVE_FILE):
+def load_models_from_file(file_path: str = PERSONA_SAVE_FILE) -> Optional[Dict[str, Any]]:
     if not os.path.exists(file_path):
         logger.warning(f"File '{file_path}' does not exist.")
         return None
     with open(file_path, "r") as file:
-        data = json.load(file)
-        return data.get('models', {})
+        data: Dict[str, Any] = json.load(file)
+        return cast(Optional[Dict[str, Any]], data.get('models', {}))
 
 
-def save_models_to_file(models_dict, file_path_override=None):
+def save_models_to_file(models_dict: Dict[str, Any], file_path_override: Optional[str] = None) -> None:
     """Save the models dictionary to the JSON file."""
-    save_file = file_path_override if file_path_override is not None else PERSONA_SAVE_FILE
+    save_file: str = file_path_override if file_path_override is not None else PERSONA_SAVE_FILE
+    save_data: Dict[str, Any]
     try:
         with open(save_file, 'r') as file:
             save_data = json.load(file)
@@ -33,19 +35,20 @@ def save_models_to_file(models_dict, file_path_override=None):
     logger.debug(f"Updated model save to {save_file}.")
 
 
-def save_personas_to_file(personas, file_path_override=None):
+def save_personas_to_file(personas: Dict[str, Any], file_path_override: Optional[str] = None) -> None:
     """Save all personas to the JSON file."""
     save_file = file_path_override if file_path_override is not None else PERSONA_SAVE_FILE
 
     # Ensure the directory exists
-    save_dir = os.path.dirname(save_file)
+    save_dir: str = os.path.dirname(save_file)
     if save_dir:
         os.makedirs(save_dir, exist_ok=True)
 
+    save_data: Dict[str, Any]
     try:
         with open(save_file, 'r') as file:
             # Handle empty file case
-            content = file.read()
+            content: str = file.read()
             if not content:
                 save_data = {"personas": [], "models": {}}
             else:
@@ -54,7 +57,7 @@ def save_personas_to_file(personas, file_path_override=None):
         # If file doesn't exist or is corrupt, start with a default structure
         save_data = {"personas": [], "models": {}}
 
-    persona_dict = to_dict(personas)
+    persona_dict: List[Dict[str, Any]] = to_dict(personas)
     save_data['personas'] = persona_dict
 
     with open(save_file, 'w') as file:
@@ -62,11 +65,11 @@ def save_personas_to_file(personas, file_path_override=None):
     logger.debug(f"Updated persona save to {save_file}.")
 
 
-def to_dict(personas):
+def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Convert a dictionary of Persona objects to a list of dictionaries for JSON serialization."""
-    persona_list = []
+    persona_list: List[Dict[str, Any]] = []
     for persona_name, persona in personas.items():
-        persona_json = {
+        persona_json: Dict[str, Any] = {
             "name": persona.get_name(),
             "prompt": persona.get_prompt(),
             "model_name": persona.get_model_name(),
@@ -81,7 +84,7 @@ def to_dict(personas):
     return persona_list
 
 
-def load_personas_from_file(file_path=PERSONA_SAVE_FILE):
+def load_personas_from_file(file_path: str = PERSONA_SAVE_FILE) -> Optional[Dict[str, Any]]:
     from src.persona import Persona
     """Load personas from a JSON-formatted file into a dictionary."""
     if not os.path.exists(file_path):
@@ -93,12 +96,12 @@ def load_personas_from_file(file_path=PERSONA_SAVE_FILE):
             if not content:
                 logger.warning(f"File '{file_path}' is empty.")
                 return {}  # Return an empty dict if file is empty
-            persona_data = json.loads(content)
+            persona_data: Dict[str, Any] = json.loads(content)
 
-        personas = {}
+        personas: Dict[str, Persona] = {}
         # Ensure 'personas' key exists and is a list
         for new_persona in persona_data.get('personas', []):
-            name = new_persona.get("name")
+            name: Optional[str] = new_persona.get("name")
             if not name:
                 logger.warning(f"Skipping persona with no name in '{file_path}'.")
                 continue

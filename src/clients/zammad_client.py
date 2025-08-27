@@ -20,7 +20,7 @@ class ZammadClient:
     actions like creating users and tickets.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """
         Initializes the ZammadClient.
 
@@ -29,20 +29,20 @@ class ZammadClient:
         Raises:
             ValueError: If ZAMMAD_URL or ZAMMAD_API_TOKEN are not set in the environment.
         """
-        self.api_url = os.environ.get("ZAMMAD_URL")
-        self.api_token = os.environ.get("ZAMMAD_API_KEY")
+        self.api_url: Optional[str] = os.environ.get("ZAMMAD_URL")
+        self.api_token: Optional[str] = os.environ.get("ZAMMAD_API_KEY")
 
         if not self.api_url or not self.api_token:
             raise ValueError("ZAMMAD_URL and ZAMMAD_API_KEY must be set in .env")
 
         # Prepare the authentication header for all subsequent requests
-        self.base_headers = {
+        self.base_headers: Dict[str, str] = {
             'Authorization': f'Token token={self.api_token}',
             'Content-Type': 'application/json'
         }
 
     def _make_request(self, method: str, endpoint: str, params: Optional[Dict[str, Any]] = None,
-                      impersonate_email: Optional[str] = None, **kwargs):
+                      impersonate_email: Optional[str] = None, **kwargs: Any) -> Any:
         """
         A private helper method to make authenticated requests to the Zammad API.
         """
@@ -67,11 +67,11 @@ class ZammadClient:
     # --- Ticket Methods ---
 
     def create_ticket(self, title: str, group: str, customer_id: int, article_body: Optional[str] = None,
-                      tags: Optional[List[str]] = None) -> dict:
+                      tags: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         Creates a new ticket in Zammad. If article_body is omitted, creates an empty ticket.
         """
-        payload = {
+        payload: Dict[str, Any] = {
             "title": title,
             "group": group,
             "customer_id": customer_id,
@@ -90,14 +90,14 @@ class ZammadClient:
         """
         Deletes a ticket from Zammad.
         """
-        return self._make_request('delete', f'tickets/{ticket_id}')
+        self._make_request('delete', f'tickets/{ticket_id}')
 
     def add_article_to_ticket(self, ticket_id: int, body: str, internal: bool = False,
-                              impersonate_email: Optional[str] = None) -> dict:
+                              impersonate_email: Optional[str] = None) -> Dict[str, Any]:
         """
         Adds a new article (a message or note) to an existing ticket.
         """
-        payload = {
+        payload: Dict[str, Any] = {
             "ticket_id": ticket_id,
             "body": body,
             "type": "note",
@@ -106,11 +106,11 @@ class ZammadClient:
         return self._make_request('post', 'ticket_articles', json=payload, impersonate_email=impersonate_email)
 
     def search_tickets(self, query: str, limit: int = 50, sort_by: Optional[str] = None,
-                       order_by: Optional[str] = 'desc') -> list:
+                       order_by: Optional[str] = 'desc') -> List[Dict[str, Any]]:
         """
         Searches for tickets by a query string with optional sorting.
         """
-        params = {'query': query, 'limit': limit}
+        params: Dict[str, Any] = {'query': query, 'limit': limit}
         if sort_by:
             params['sort_by'] = sort_by
             params['order_by'] = order_by
@@ -118,17 +118,17 @@ class ZammadClient:
 
     # --- User Methods ---
 
-    def get_self(self) -> dict:
+    def get_self(self) -> Dict[str, Any]:
         """
         Retrieves the user object associated with the API token.
         """
         return self._make_request('get', 'users/me')
 
-    def create_user(self, email: str, firstname: str, lastname: str, note: Optional[str] = None) -> dict:
+    def create_user(self, email: str, firstname: str, lastname: str, note: Optional[str] = None) -> Dict[str, Any]:
         """
         Creates a new customer user.
         """
-        payload = {
+        payload: Dict[str, Any] = {
             "firstname": firstname,
             "lastname": lastname,
             "email": email,
@@ -143,11 +143,12 @@ class ZammadClient:
         """
         Deletes a user from Zammad.
         """
-        return self._make_request('delete', f'users/{user_id}')
+        self._make_request('delete', f'users/{user_id}')
 
-    def search_user(self, query: str) -> list:
+    def search_user(self, query: str) -> List[Dict[str, Any]]:
         """
         Searches for users by a query string.
         """
         params = {'query': query}
         return self._make_request('get', 'users/search', params=params)
+    

@@ -4,19 +4,19 @@ import asyncio
 import json
 import logging
 import re
-from typing import Dict, Any, Optional, Tuple
 from collections import defaultdict
 from enum import Enum, auto
+from typing import Any, Coroutine, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
-from src.database.memory_manager import MemoryManager
-from src.clients.zammad_client import ZammadClient
 from config.global_config import SUPPORT_CHANNELS
-from src.engine import TextEngine, LLMCommunicationError
+from src.clients.zammad_client import ZammadClient
+from src.database.memory_manager import MemoryManager
+from src.engine import LLMCommunicationError, TextEngine
 from src.message_handler import BotLogic
 from src.persona import Persona
 from src.utils.model_utils import get_model_list
-from src.utils.save_utils import save_personas_to_file, load_personas_from_file
+from src.utils.save_utils import load_personas_from_file, save_personas_to_file
 
 logger = logging.getLogger(__name__)
 
@@ -29,14 +29,14 @@ class ResponseType(Enum):
 
 class ChatSystem:
     def __init__(self, memory_manager: MemoryManager, text_engine: TextEngine, zammad_client: ZammadClient) -> None:
-        self.personas: Dict[str, Persona] = load_personas_from_file()
+        self.personas: Dict[str, Persona] = load_personas_from_file() or {}
         self.memory_manager: MemoryManager = memory_manager
         self.text_engine: TextEngine = text_engine
         self.zammad_client: ZammadClient = zammad_client
         self.bot_logic: BotLogic = BotLogic(self)
         self.last_api_requests: Dict[str, Dict[str, Optional[Dict[str, Any]]]] = defaultdict(dict)
-        self.models_available: Dict[str, Any] = get_model_list()
-        self.background_tasks = set()
+        self.models_available: Dict[str, Any] = get_model_list() or {}
+        self.background_tasks: Set[Coroutine[Any, Any, Any]] = set()
 
     def _should_create_ticket(self, channel: str, message: str) -> bool:
         """Determines if an interaction should generate a Zammad ticket."""
@@ -53,7 +53,7 @@ class ChatSystem:
         """Finds the most recently updated open or new ticket for a given Zammad user ID."""
         try:
             query = f"customer_id:{customer_id} AND state.name:(open OR new)"
-            search_results = await asyncio.to_thread(
+            search_results: List[Dict[str, Any]] = await asyncio.to_thread(
                 self.zammad_client.search_tickets,
                 query=query,
                 sort_by='updated_at',
@@ -73,20 +73,24 @@ class ChatSystem:
         Finds a Zammad user by email or creates one. Uses display name for better user creation.
         Returns a tuple of (Zammad user ID, Zammad-registered email).
         """
-        email_match = re.search(r'<(.+?)>', user_identifier)
-        is_real_email = email_match is not None
+        email_match: Optional[re.Match[str]] = re.search(r'<(.+?)>', user_identifier)
+        is_real_email: bool = email_match is not None
+
+        email: str
+        firstname: str
+        lastname: str
+        note: Optional[str]
 
         if is_real_email:
             email = email_match.group(1)
-            name_part = user_display_name if user_display_name else user_identifier.split('<')[0].strip()
-            name_parts = name_part.split()
+            name_part: str = user_display_name if user_display_name else user_identifier.split('<')[0].strip()
+            name_parts: List[str] = name_part.split()
             firstname = name_parts[0] if name_parts else "Unknown"
             lastname = ' '.join(name_parts[1:]) if len(name_parts) > 1 else "User"
             note = None
         else:
-            domain = urlparse(self.zammad_client.api_url).hostname
+            domain: str = urlparse(self.zammad_client.api_url).hostname or "local.host"
             email = f"{channel.lower()}-{user_identifier}@{domain}"
-            # Use the display name for a more human-readable name in Zammad
             name_parts = user_display_name.split() if user_display_name else [f"{channel.capitalize()} User",
                                                                               user_identifier]
             firstname = name_parts[0]
@@ -122,22 +126,23 @@ class ChatSystem:
         """
         Orchestrates response generation, returning the response, its type, and any relevant ticket ID.
         """
-        command_result = await self.bot_logic.preprocess_message(persona_name, user_identifier, message)
+        command_result: Optional[Dict[str, Any]] = await self.bot_logic.preprocess_message(persona_name,
+                                                                                           user_identifier, message)
         if command_result:
             if command_result.get("mutated", False):
                 save_personas_to_file(self.personas)
             return command_result["response"], ResponseType.DEV_COMMAND, None
 
-        ticket_to_log = None
+        ticket_to_log: Optional[int] = None
         try:
-            persona = self.personas.get(persona_name)
+            persona: Optional[Persona] = self.personas.get(persona_name)
             if not persona:
                 return "Error: Persona not found.", ResponseType.DEV_COMMAND, None
 
-            is_ticket_channel = self._should_create_ticket(channel, message)
-            ticket_id_for_context = None
-            customer_id = None
-            zammad_email = None
+            is_ticket_channel: bool = self._should_create_ticket(channel, message)
+            ticket_id_for_context: Optional[int] = None
+            customer_id: Optional[int] = None
+            zammad_email: Optional[str] = None
 
             if is_ticket_channel:
                 try:
@@ -151,16 +156,17 @@ class ChatSystem:
                     logger.error(f"A Zammad API error occurred during user/ticket search: {zammad_error}",
                                  exc_info=True)
 
-            persona_limit = persona.get_context_length()
-            interface_limit = history_limit
+            persona_limit: int = persona.get_context_length()
+            interface_limit: Optional[int] = history_limit
+            effective_limit: Optional[int]
             if interface_limit is None:
                 effective_limit = persona_limit
             else:
                 effective_limit = min(persona_limit, interface_limit)
 
-            raw_history = []
-            system_context_message = None
-            memory_mode_used = None
+            raw_history: List[Dict[str, Any]] = []
+            system_context_message: Optional[str] = None
+            memory_mode_used: Optional[str] = None
 
             if ticket_id_for_context:
                 memory_mode_used = "ticket"
@@ -170,17 +176,16 @@ class ChatSystem:
                 memory_mode_used = "channel"
                 raw_history = self.memory_manager.get_channel_history(channel, effective_limit)
 
-            final_history_for_llm = []
+            final_history_for_llm: List[Dict[str, Any]] = []
             if raw_history:
                 for msg in raw_history:
-                    author_role = msg.get('author_role')
-                    author_name = msg.get('author_name')
-                    content = msg.get('content', '')
+                    author_role: Optional[str] = msg.get('author_role')
+                    author_name: Optional[str] = msg.get('author_name')
+                    content: str = msg.get('content', '')
 
                     if author_role == 'user':
-                        # THE FIX: Only prepend the name if we are in channel mode.
                         if memory_mode_used == "channel" and author_name:
-                            formatted_content = f"{author_name}: {content}"
+                            formatted_content: str = f"{author_name}: {content}"
                             final_history_for_llm.append({'role': 'user', 'content': formatted_content})
                         else:
                             final_history_for_llm.append({'role': 'user', 'content': content})
@@ -194,8 +199,8 @@ class ChatSystem:
             if system_context_message:
                 final_history_for_llm.insert(0, {"role": "system", "content": system_context_message})
 
-            context_object = {"persona_prompt": persona.get_prompt(), "history": final_history_for_llm,
-                              "current_message": {"text": message, "image_url": image_url}}
+            context_object: Dict[str, Any] = {"persona_prompt": persona.get_prompt(), "history": final_history_for_llm,
+                                              "current_message": {"text": message, "image_url": image_url}}
 
             if is_ticket_channel and customer_id:
                 ticket_to_log = ticket_id_for_context
@@ -204,11 +209,12 @@ class ChatSystem:
                         await asyncio.to_thread(self.zammad_client.add_article_to_ticket, ticket_id=ticket_to_log,
                                                 body=message, impersonate_email=zammad_email)
                     else:
-                        ticket_title_name = user_display_name if user_display_name else user_identifier.split('<')[
+                        ticket_title_name: str = user_display_name if user_display_name else user_identifier.split('<')[
                             0].strip()
-                        title = f"New request from {ticket_title_name} via {channel}"
-                        new_ticket = await asyncio.to_thread(self.zammad_client.create_ticket, title=title,
-                                                             group='Users', customer_id=customer_id)
+                        title: str = f"New request from {ticket_title_name} via {channel}"
+                        new_ticket: Dict[str, Any] = await asyncio.to_thread(self.zammad_client.create_ticket,
+                                                                             title=title,
+                                                                             group='Users', customer_id=customer_id)
                         if new_ticket and new_ticket.get('id'):
                             ticket_to_log = new_ticket['id']
                             await asyncio.to_thread(self.zammad_client.add_article_to_ticket,
@@ -222,7 +228,8 @@ class ChatSystem:
 
             reply_content, api_payload = await self.text_engine.generate_response(persona.get_config_for_engine(),
                                                                                   context_object)
-            self.last_api_requests[user_identifier][persona_name] = api_payload
+            if api_payload:
+                self.last_api_requests[user_identifier][persona_name] = api_payload
 
             if is_ticket_channel and ticket_to_log:
                 try:
@@ -236,6 +243,7 @@ class ChatSystem:
 
         except LLMCommunicationError as e:
             logger.error(f"A recoverable LLM communication error occurred for {user_identifier}: {e}")
+            user_facing_error: str
             if "empty response after all retries" in str(e):
                 user_facing_error = "I'm not sure how to continue. Could you please rephrase your request or provide more details?"
             else:
