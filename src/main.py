@@ -93,12 +93,6 @@ async def main():
         task = asyncio.create_task(gmail_bot.start())
         tasks.append(task)
 
-    if not tasks:
-        logger.info("Initializing local terminal interface...")
-        from src.interfaces.local_terminal import run_terminal_interface
-        task = asyncio.create_task(run_terminal_interface(bot))
-        tasks.append(task)
-
     # 5. Optionally update the model list on startup
     if UPDATE_MODELS_ON_STARTUP:
         logger.info("Updating available models from APIs...")
