@@ -1,11 +1,18 @@
 # src/persona.py
 
 import logging
-from typing import Optional, Dict, Any
+from enum import Enum, auto
+from typing import Optional, Dict, Any, List
 
 from config import global_config
 
 logger = logging.getLogger(__name__)
+
+
+class ExecutionMode(Enum):
+    """Defines the autonomy level for a persona's tool-use capabilities."""
+    SILENT_ANALYSIS = auto()
+    ASSISTED_DISPATCH = auto()
 
 
 class Persona:
@@ -24,13 +31,17 @@ class Persona:
             temperature: Optional[float] = None,
             top_p: Optional[float] = None,
             top_k: Optional[int] = None,
-            display_name_in_chat: bool = False
+            display_name_in_chat: bool = False,
+            execution_mode: ExecutionMode = ExecutionMode.SILENT_ANALYSIS,
+            enabled_tools: Optional[List[str]] = None
     ) -> None:
         self._name: str = persona_name
         self._model_name: str = model_name
         self._prompt: str = prompt
         self._response_token_limit: Optional[int] = token_limit
         self._context_length: int = context_length if context_length is not None else global_config.DEFAULT_CONTEXT_LIMIT
+        self._execution_mode: ExecutionMode = execution_mode
+        self._enabled_tools: List[str] = enabled_tools if enabled_tools is not None else []
 
         # Model-specific generation parameters
         self._temperature: Optional[float] = temperature
@@ -66,6 +77,13 @@ class Persona:
 
     def should_display_name_in_chat(self) -> bool:
         return self._display_name_in_chat
+
+    def get_execution_mode(self) -> ExecutionMode:
+        return self._execution_mode
+
+    def get_enabled_tools(self) -> List[str]:
+        """Returns the list of tool names this persona is allowed to use."""
+        return self._enabled_tools
 
     # --- Setters ---
 
@@ -151,6 +169,29 @@ class Persona:
         """Sets whether the persona's name should be displayed in chat replies."""
         self._display_name_in_chat = new_value
         logger.info(f"Persona '{self._name}' display_name_in_chat set to {new_value}.")
+
+    def set_execution_mode(self, new_mode: Any) -> None:
+        """Sets the execution mode from a string or an ExecutionMode member."""
+        if isinstance(new_mode, ExecutionMode):
+            self._execution_mode = new_mode
+        elif isinstance(new_mode, str):
+            try:
+                self._execution_mode = ExecutionMode[new_mode.upper()]
+            except KeyError:
+                logger.warning(f"Invalid execution mode string: '{new_mode}'. No change made.")
+                return
+        else:
+            logger.warning(f"Invalid type for execution mode: {type(new_mode)}. No change made.")
+            return
+        logger.info(f"Persona '{self._name}' execution mode set to {self._execution_mode.name}.")
+
+    def set_enabled_tools(self, new_tools: List[str]) -> None:
+        """Sets the list of tools the persona is allowed to use."""
+        if not isinstance(new_tools, list):
+            logger.warning(f"Invalid type for enabled tools: {type(new_tools)}. Must be a list. No change made.")
+            return
+        self._enabled_tools = new_tools
+        logger.info(f"Persona '{self._name}' enabled tools set to: {self._enabled_tools}")
 
     # --- Utility Methods ---
 

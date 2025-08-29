@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import time
-from typing import Dict, Any, Optional, Tuple, List, Set
+from typing import Dict, Any, Optional, Tuple, List
 
 from dotenv import load_dotenv
 
@@ -14,7 +14,9 @@ import aiohttp
 import anthropic
 from openai import AsyncOpenAI, APIStatusError, APITimeoutError
 from google import genai
-from google.genai.types import GenerateContentConfig, Tool, GoogleSearch, Candidate, GroundingMetadata
+from google.genai.types import GenerateContentConfig, Tool, GoogleSearch, Candidate, FunctionDeclaration, Part
+
+from src.utils.google_utils import process_grounding_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -82,41 +84,58 @@ class TextEngine:
         self.google_search_tool = Tool(google_search=GoogleSearch())
         logger.info("Google AI Studio client initialized.")
 
-    async def generate_response(self, persona_config: Dict[str, Any], context_object: Dict[str, Any]) -> Tuple[
-        str, Optional[Dict[str, Any]]]:
+    async def generate_response(self, persona_config: Dict[str, Any], context_object: Dict[str, Any],
+                                tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
+        Dict[str, Any], Optional[Dict[str, Any]]]:
         """
         Routes the generation request and retries on empty responses.
-        Returns: (response_string, api_payload_dictionary_or_None)
-        Raises: LLMCommunicationError if all retries fail or produce empty responses.
+        Returns: A tuple containing:
+                 1. A structured dictionary:
+                    - {'type': 'text', 'content': '...'} for a text response.
+                    - {'type': 'tool_calls', 'calls': [{'id': '...', 'name': '...', 'arguments': {...}}]} for a tool call.
+                 2. The API payload dictionary for debugging, or None.
+        Raises: LLMCommunicationError if all retries fail or produce empty/invalid responses.
         """
         model_name: str = persona_config.get("model_name", "")
 
         for attempt in range(EMPTY_RESPONSE_RETRIES + 1):
-            response_text: str = ""
+            result: Dict[str, Any] = {}
             api_payload: Optional[Dict[str, Any]] = None
 
-            if model_name.startswith("gpt"):
-                response_text, api_payload = await self._generate_openai_response(persona_config, context_object)
-            elif "claude" in model_name:
-                response_text, api_payload = await self._generate_anthropic_response(persona_config, context_object)
-            elif "gemini" in model_name:
-                response_text, api_payload = await self._generate_google_response(persona_config, context_object)
-            elif model_name == 'local':
-                response_text, api_payload = await self._generate_local_response(persona_config, context_object)
-            else:
-                raise LLMCommunicationError(f"Error: Model '{model_name}' is not supported.")
+            try:
+                if model_name.startswith("gpt"):
+                    result, api_payload = await self._generate_openai_response(persona_config, context_object, tools)
+                elif "claude" in model_name:
+                    result, api_payload = await self._generate_anthropic_response(persona_config, context_object, tools)
+                elif "gemini" in model_name:
+                    result, api_payload = await self._generate_google_response(persona_config, context_object, tools)
+                elif model_name == 'local':
+                    result, api_payload = await self._generate_local_response(persona_config, context_object, tools)
+                else:
+                    raise LLMCommunicationError(f"Error: Model '{model_name}' is not supported.")
 
-            if response_text and response_text.strip():
-                return response_text, api_payload
+                # Validate the response structure and content
+                if result.get('type') == 'text' and result.get('content', '').strip():
+                    return result, api_payload
+                if result.get('type') == 'tool_calls' and result.get('calls'):
+                    return result, api_payload
+
+            except LLMCommunicationError as e:
+                # Re-raise critical errors immediately without retry
+                if attempt >= EMPTY_RESPONSE_RETRIES:
+                    raise
+                logger.warning(f"LLM communication error (Attempt {attempt + 1}). Retrying... Error: {e}")
 
             if attempt < EMPTY_RESPONSE_RETRIES:
-                logger.warning(f"LLM returned an empty response (Attempt {attempt + 1}). Retrying...")
+                logger.warning(f"LLM returned an empty or invalid response (Attempt {attempt + 1}). Retrying...")
                 time.sleep(EMPTY_RESPONSE_RETRY_DELAY)
 
-        logger.error(f"LLM returned an empty response after {EMPTY_RESPONSE_RETRIES + 1} attempts.")
-        raise LLMCommunicationError(f"LLM provider returned an empty response after all retries.")
+        logger.error(f"LLM returned an empty or invalid response after {EMPTY_RESPONSE_RETRIES + 1} attempts.")
+        raise LLMCommunicationError(f"LLM provider returned an empty or invalid response after all retries.")
 
-    async def _generate_openai_response(self, config: Dict[str, Any], context: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    async def _generate_openai_response(self, config: Dict[str, Any], context: Dict[str, Any],
+                                        tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
+        Dict[str, Any], Dict[str, Any]]:
         client = await self._get_openai_client()
         messages: List[Dict[str, Any]] = [{"role": "system", "content": context["persona_prompt"]}]
         messages.extend(context["history"])
@@ -124,272 +143,189 @@ class TextEngine:
         if context["current_message"].get("image_url"):
             content_parts.append({"type": "image_url", "image_url": {"url": context["current_message"]["image_url"]}})
         messages.append({"role": "user", "content": content_parts})
+
         api_params: Dict[str, Any] = {"model": config["model_name"], "messages": messages,
-                      "max_tokens": config.get("max_output_tokens"), "temperature": config.get("temperature"),
-                      "top_p": config.get("top_p")}
+                                      "max_tokens": config.get("max_output_tokens"),
+                                      "temperature": config.get("temperature"),
+                                      "top_p": config.get("top_p")}
+        if tools:
+            api_params["tools"] = tools
+            api_params["tool_choice"] = "auto"
         api_params = {k: v for k, v in api_params.items() if v is not None}
 
         try:
             completion = await client.chat.completions.create(**api_params)
-            response_content: str = completion.choices[0].message.content or ""
-            return response_content, api_params
-        except (APIStatusError, APITimeoutError) as e:
-            is_5xx_error = isinstance(e, APIStatusError) and 500 <= e.status_code < 600
-            if is_5xx_error or isinstance(e, APITimeoutError):
-                logger.warning(f"OpenAI API server error/timeout: {e}. Retrying once...")
-                time.sleep(1)
-                try:
-                    completion = await client.chat.completions.create(**api_params)
-                    response_content = completion.choices[0].message.content or ""
-                    return response_content, api_params
-                except Exception as retry_e:
-                    logger.error(f"OpenAI API failed on retry: {retry_e}")
-                    raise LLMCommunicationError(f"OpenAI API is unavailable after retry.") from retry_e
+            response_message = completion.choices[0].message
+
+            if response_message.tool_calls:
+                tool_calls: List[Dict[str, Any]] = []
+                for call in response_message.tool_calls:
+                    try:
+                        arguments = json.loads(call.function.arguments)
+                        tool_calls.append(
+                            {"id": call.id, "name": call.function.name, "arguments": arguments}
+                        )
+                    except json.JSONDecodeError:
+                        logger.error(f"Failed to parse tool call arguments: {call.function.arguments}")
+                        continue
+                return {"type": "tool_calls", "calls": tool_calls}, api_params
             else:
-                logger.error(f"OpenAI API client error: {e}", exc_info=True)
-                raise LLMCommunicationError(f"OpenAI API returned a client error: {e}") from e
+                response_content: str = response_message.content or ""
+                return {"type": "text", "content": response_content}, api_params
+
+        except (APIStatusError, APITimeoutError) as e:
+            logger.error(f"OpenAI API error: {e}", exc_info=True)
+            raise LLMCommunicationError(f"OpenAI API returned an error: {e}") from e
         except Exception as e:
             logger.error(f"An unexpected OpenAI error occurred: {e}", exc_info=True)
             raise LLMCommunicationError(f"An unexpected error occurred with the OpenAI API.") from e
 
-    async def _generate_anthropic_response(self, config: Dict[str, Any], context: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    async def _generate_anthropic_response(self, config: Dict[str, Any], context: Dict[str, Any],
+                                           tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
+        Dict[str, Any], Dict[str, Any]]:
         client = self._get_anthropic_client()
         history = [msg for msg in context["history"] if msg["role"] != "system"]
         history.append({"role": "user", "content": context["current_message"]["text"]})
-        api_params: Dict[str, Any] = {"model": config["model_name"], "system": context["persona_prompt"], "messages": history,
-                      "max_tokens": config["max_output_tokens"], "temperature": config.get("temperature"),
-                      "top_p": config.get("top_p"), "top_k": config.get("top_k")}
+
+        api_params: Dict[str, Any] = {"model": config["model_name"], "system": context["persona_prompt"],
+                                      "messages": history,
+                                      "max_tokens": config["max_output_tokens"],
+                                      "temperature": config.get("temperature"),
+                                      "top_p": config.get("top_p"), "top_k": config.get("top_k")}
+        if tools:
+            api_params["tools"] = tools
         api_params = {k: v for k, v in api_params.items() if v is not None}
+
         try:
             response = client.messages.create(**api_params)
-            response_content: str = response.content[0].text or ""
-            return response_content, api_params
-        except anthropic.APIStatusError as e:
-            if 500 <= e.status_code < 600:
-                logger.warning(f"Anthropic API server error: {e}. Retrying once...")
-                time.sleep(1)
-                try:
-                    response = client.messages.create(**api_params)
-                    response_content = response.content[0].text or ""
-                    return response_content, api_params
-                except Exception as retry_e:
-                    logger.error(f"Anthropic API failed on retry: {retry_e}")
-                    raise LLMCommunicationError(f"Anthropic API is unavailable after retry.") from retry_e
+
+            if response.stop_reason == "tool_use":
+                tool_calls: List[Dict[str, Any]] = []
+                for content_block in response.content:
+                    if content_block.type == 'tool_use':
+                        tool_calls.append({
+                            "id": content_block.id,
+                            "name": content_block.name,
+                            "arguments": content_block.input
+                        })
+                return {"type": "tool_calls", "calls": tool_calls}, api_params
             else:
-                logger.error(f"Anthropic API client error: {e}", exc_info=True)
-                raise LLMCommunicationError(f"Anthropic API returned a client error: {e}") from e
+                response_content: str = response.content[0].text or ""
+                return {"type": "text", "content": response_content}, api_params
+
+        except anthropic.APIError as e:
+            logger.error(f"Anthropic API error: {e}", exc_info=True)
+            raise LLMCommunicationError(f"Anthropic API returned an error: {e}") from e
         except Exception as e:
             logger.error(f"An unexpected Anthropic error occurred: {e}", exc_info=True)
             raise LLMCommunicationError(f"An unexpected error occurred with the Anthropic API.") from e
 
     async def _generate_google_response(self, config: Dict[str, Any], context: Dict[str, Any],
-                                        tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[str, Dict[str, Any]]:
+                                        tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
+        Dict[str, Any], Dict[str, Any]]:
         try:
             self._initialize_google_client()
-        except ValueError as e:
+            assert self.google_client is not None and self.google_search_tool is not None
+        except (ValueError, AssertionError) as e:
             raise LLMCommunicationError(f"Error: Google not configured: {e}") from e
 
-        history_str: str = "\n".join([f"{item['role']}: {item['content']}" for item in context['history']])
-        prompt: str = context['persona_prompt']
-        message: str = context['current_message']['text']
-        request_content: str = (f"### Instructions: ###\n{prompt}\n\n"
-                                f"### Conversation History: ###\n{history_str}\n\n"
-                                f"### Current Message to Respond To: ###\n{message}")
+        history_for_api = []
+        for item in context['history']:
+            role = 'model' if item['role'] == 'assistant' else 'user'
+            if item['role'] == 'tool':
+                # FIX: Use keyword argument unpacking for Part constructor
+                history_for_api.append({'role': 'tool', 'parts': [Part(**{
+                    'function_response': {'name': item['name'], 'response': json.loads(item['content'])}})]})
+            elif item.get('tool_calls'):
+                # FIX: Use keyword argument unpacking for Part constructor
+                parts = [Part(**{'function_call': {'name': call['name'], 'args': call['arguments']}}) for call
+                         in item['tool_calls']]
+                history_for_api.append({'role': 'model', 'parts': parts})
+            else:
+                history_for_api.append({'role': role, 'parts': [{'text': item['content']}]})
 
-        content_config_for_api: Dict[str, Any] = {
-            'tools': [self.google_search_tool],
-            'response_modalities': ["TEXT"],
-            'safety_settings': self.google_safety_settings
-        }
+        final_user_message = (f"### Instructions: ###\n{context['persona_prompt']}\n\n"
+                              f"### Current Message to Respond To: ###\n{context['current_message']['text']}")
+        history_for_api.append({'role': 'user', 'parts': [{'text': final_user_message}]})
+
+        content_config_for_api: Dict[str, Any] = {"safety_settings": self.google_safety_settings}
+
+        api_tools: List[Tool] = []
         if tools:
+            converted_tools = [Tool(function_declarations=[FunctionDeclaration(**t['function'])])
+                               for t in tools if t.get('type') == 'function' and t.get('function')]
+            api_tools.extend(converted_tools)
             content_config_for_api['tool_config'] = {"function_calling_config": {"mode": "AUTO"}}
-        if isinstance(config.get("max_output_tokens"), int) and config.get("max_output_tokens") >= 100:
-            content_config_for_api['max_output_tokens'] = config.get("max_output_tokens")
-        if isinstance(config.get("temperature"), (int, float)):
-            content_config_for_api['temperature'] = config.get("temperature")
-        if isinstance(config.get("top_p"), (int, float)):
-            content_config_for_api['top_p'] = config.get("top_p")
-        if isinstance(config.get("top_k"), (int, float)):
-            content_config_for_api['top_k'] = config.get("top_k")
+        else:
+            api_tools.append(self.google_search_tool)
+
+        content_config_for_api['tools'] = api_tools
+
+        if isinstance(config.get("max_output_tokens"), int): content_config_for_api['max_output_tokens'] = config.get("max_output_tokens")
+        if isinstance(config.get("temperature"), (int, float)): content_config_for_api['temperature'] = config.get("temperature")
+        if isinstance(config.get("top_p"), (int, float)): content_config_for_api['top_p'] = config.get("top_p")
+        if isinstance(config.get("top_k"), (int, float)): content_config_for_api['top_k'] = config.get("top_k")
 
         api_params_for_dumping: Dict[str, Any] = {
-            'model': config["model_name"],
-            'contents': request_content,
+            'model': config["model_name"], 'contents': history_for_api,
             'config': json.loads(json.dumps(content_config_for_api, default=str))
         }
 
         try:
-            assert self.google_client is not None
             response_obj = await self.google_client.models.generate_content(
-                model=config["model_name"],
-                contents=request_content,
+                model=f'models/{config["model_name"]}',
+                contents=history_for_api,
                 config=GenerateContentConfig(**content_config_for_api)
             )
         except Exception as e:
-            logger.warning(f"Google API error: {e}. Retrying once...")
-            time.sleep(1)
-            try:
-                assert self.google_client is not None
-                response_obj = await self.google_client.models.generate_content(
-                    model=config["model_name"],
-                    contents=request_content,
-                    config=GenerateContentConfig(**content_config_for_api)
-                )
-            except Exception as retry_e:
-                logger.error(f"Google API failed on retry: {retry_e}", exc_info=True)
-                raise LLMCommunicationError(f"An error occurred with Google API after retry: {retry_e}") from retry_e
+            logger.error(f"Google API error: {e}", exc_info=True)
+            raise LLMCommunicationError(f"An error occurred with Google API: {e}") from e
 
         if response_obj.prompt_feedback and response_obj.prompt_feedback.block_reason:
-            raise LLMCommunicationError(
-                f"Response blocked by Google due to {response_obj.prompt_feedback.block_reason.name}.")
+            raise LLMCommunicationError(f"Response blocked by Google due to {response_obj.prompt_feedback.block_reason.name}.")
 
-        base_text_from_response: str = ""
-        candidate: Optional[Candidate] = None
-        if response_obj.candidates:
-            candidate = response_obj.candidates[0]
-            # THE FIX: Add robust, nested checks before accessing .parts
-            if candidate.content and candidate.content.parts:
-                base_text_from_response = "".join(
-                    part.text for part in candidate.content.parts if hasattr(part, 'text') and part.text
-                )
+        candidate: Optional[Candidate] = response_obj.candidates[0] if response_obj.candidates else None
+        if not candidate or not candidate.content or not candidate.content.parts:
+            return {}, api_params_for_dumping
 
-        if not base_text_from_response.strip():
-            return "", api_params_for_dumping
+        tool_calls: List[Dict[str, Any]] = []
+        for i, part in enumerate(candidate.content.parts):
+            if part.function_call:
+                arguments = {k: v for k, v in part.function_call.args.items()}
+                tool_calls.append({"id": f"call_{part.function_call.name}_{i}", "name": part.function_call.name, "arguments": arguments})
+        if tool_calls:
+            return {"type": "tool_calls", "calls": tool_calls}, api_params_for_dumping
 
-        final_text_content, search_query_display, citations_display = _process_grounding_metadata(
-            base_text_from_response, candidate.grounding_metadata if candidate else None, logger
+        base_text_from_response = "".join(part.text for part in candidate.content.parts if hasattr(part, 'text') and part.text)
+        final_text_content, search_query_display, citations_display = process_grounding_metadata(
+            base_text_from_response, candidate.grounding_metadata, logger
         )
         if search_query_display: final_text_content += search_query_display
         if citations_display: final_text_content += citations_display
-        return final_text_content.strip(), api_params_for_dumping
 
-    async def _generate_local_response(self, config: Dict[str, Any], context: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+        return {"type": "text", "content": final_text_content.strip()}, api_params_for_dumping
+
+    async def _generate_local_response(self, config: Dict[str, Any], context: Dict[str, Any],
+                                       tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
+        Dict[str, Any], Dict[str, Any]]:
         url: str = 'http://localhost:5001/api/v1/generate'
         history_str: str = "\n".join([f"{msg['role']}: {msg['content']}" for msg in context['history']])
         full_prompt: str = f"{history_str}\nuser: {context['current_message']['text']}\nassistant:"
-        payload: Dict[str, Any] = {"max_length": config["max_output_tokens"], "temperature": config.get("temperature", 0.7),
-                   "top_p": config.get("top_p", 0.9), "top_k": config.get("top_k", 40),
-                   "memory": context["persona_prompt"], "prompt": full_prompt}
+        payload: Dict[str, Any] = {"max_length": config["max_output_tokens"],
+                                   "temperature": config.get("temperature", 0.7),
+                                   "top_p": config.get("top_p", 0.9), "top_k": config.get("top_k", 40),
+                                   "memory": context["persona_prompt"], "prompt": full_prompt}
         payload = {k: v for k, v in payload.items() if v is not None}
 
-        async def do_request() -> Tuple[str, Dict[str, Any]]:
+        try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=600)) as session:
                 async with session.post(url, json=payload) as response:
                     response.raise_for_status()
                     data = await response.json()
                     response_text: str = data.get('results', [{}])[0].get('text', '')
-                    return response_text.strip(), payload
-
-        try:
-            return await do_request()
+                    return {"type": "text", "content": response_text.strip()}, payload
         except aiohttp.ClientError as e:
-            logger.warning(f"Local model connection error: {e}. Retrying once...")
-            time.sleep(1)
-            try:
-                return await do_request()
-            except Exception as retry_e:
-                logger.error(f"Local model failed on retry: {retry_e}", exc_info=True)
-                raise LLMCommunicationError("Could not connect to local model after retry.") from retry_e
+            logger.error(f"Local model connection error: {e}", exc_info=True)
+            raise LLMCommunicationError("Could not connect to local model.") from e
 
 
-def _process_grounding_metadata(base_text_from_response: str, metadata: Optional[GroundingMetadata],
-                                logger: logging.Logger) -> Tuple[str, str, str]:
-    """Processes grounding metadata to insert citations and list sources."""
-    if not (metadata and metadata.grounding_chunks and metadata.grounding_supports):
-        return base_text_from_response, "", ""
-
-    insertion_points_map: Dict[int, Set[int]] = {}
-    current_search_cursor: int = 0
-
-    processed_sources: Dict[str, Dict[str, Any]] = {}
-    source_id_counter: int = 1
-    chunk_idx_to_source_id_map: Dict[int, int] = {}
-
-    for chunk_index, chunk in enumerate(metadata.grounding_chunks):
-        if chunk.web and chunk.web.uri:
-            uri: str = chunk.web.uri
-            title: str = chunk.web.title or uri
-            if uri not in processed_sources:
-                processed_sources[uri] = {'id': source_id_counter, 'title': title, 'url': uri}
-                source_id_counter += 1
-            chunk_idx_to_source_id_map[chunk_index] = processed_sources[uri]['id']
-
-    segments_to_cite: List[Dict[str, Any]] = []
-    for support in metadata.grounding_supports:
-        s_text: str = support.segment.text
-        s_start_hint: int = support.segment.start_index if support.segment.start_index is not None else 0
-
-        supporting_source_ids: Set[int] = set()
-        if support.grounding_chunk_indices:
-            for c_idx in support.grounding_chunk_indices:
-                if c_idx in chunk_idx_to_source_id_map:
-                    supporting_source_ids.add(chunk_idx_to_source_id_map[c_idx])
-
-        if s_text and supporting_source_ids:
-            segments_to_cite.append({
-                "start_hint": s_start_hint,
-                "text": s_text,
-                "citations": sorted(list(supporting_source_ids))
-            })
-
-    segments_to_cite.sort(key=lambda s: s["start_hint"])
-
-    for segment_data in segments_to_cite:
-        segment_text: str = segment_data["text"]
-        citation_ids_for_segment: List[int] = segment_data["citations"]
-
-        found_index: int = base_text_from_response.find(segment_text, current_search_cursor)
-        if found_index == -1:
-            alt_found_index: int = base_text_from_response.find(segment_text, 0)
-            if alt_found_index != -1:
-                found_index = alt_found_index
-            else:
-                continue
-
-        insertion_location: int = found_index + len(segment_text)
-
-        if citation_ids_for_segment:
-            if insertion_location not in insertion_points_map:
-                insertion_points_map[insertion_location] = set()
-            insertion_points_map[insertion_location].update(citation_ids_for_segment)
-
-        current_search_cursor = max(current_search_cursor, insertion_location)
-
-    text_with_citations: str = base_text_from_response
-    if insertion_points_map:
-        modified_text_parts: List[str] = []
-        last_slice_end: int = 0
-        for loc in sorted(insertion_points_map.keys()):
-            modified_text_parts.append(base_text_from_response[last_slice_end:loc])
-
-            hyperlinked_citation_parts: List[str] = []
-            sorted_citation_ids_at_loc: List[int] = sorted(list(insertion_points_map[loc]))
-
-            for src_id in sorted_citation_ids_at_loc:
-                source_info: Optional[Dict[str, Any]] = next(
-                    (s_info for s_info in processed_sources.values() if s_info['id'] == src_id),
-                    None)
-                if source_info:
-                    hyperlinked_citation_parts.append(f"[{src_id}](<{source_info['url']}>)")
-
-            citation_str_to_insert: str = ""
-            if hyperlinked_citation_parts:
-                citation_str_to_insert = f" [{', '.join(hyperlinked_citation_parts)}]"
-
-            modified_text_parts.append(citation_str_to_insert)
-            last_slice_end = loc
-        modified_text_parts.append(base_text_from_response[last_slice_end:])
-        text_with_citations = "".join(modified_text_parts)
-
-    citations_text_list_str: str = ""
-    if processed_sources:
-        citations_text_list_str = "\n\nSources:\n"
-        ordered_sources_for_display: List[Dict[str, Any]] = sorted(processed_sources.values(), key=lambda s: s['id'])
-        for src_info in ordered_sources_for_display:
-            citations_text_list_str += f"{src_info['id']}. {src_info['title']}\n"
-
-    search_query_text_str: str = ""
-    if metadata.web_search_queries:
-        search_query_text_str = f"\n\nSearch Query: {', '.join(metadata.web_search_queries)}"
-
-    return text_with_citations, search_query_text_str, citations_text_list_str

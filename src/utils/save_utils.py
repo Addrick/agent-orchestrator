@@ -79,13 +79,14 @@ def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
             "top_p": persona.get_top_p(),
             "top_k": persona.get_top_k(),
             "display_name_in_chat": persona.should_display_name_in_chat(),
+            "execution_mode": persona.get_execution_mode().name,
         }
         persona_list.append(persona_json)
     return persona_list
 
 
 def load_personas_from_file(file_path: str = PERSONA_SAVE_FILE) -> Optional[Dict[str, Any]]:
-    from src.persona import Persona
+    from src.persona import Persona, ExecutionMode
     """Load personas from a JSON-formatted file into a dictionary."""
     if not os.path.exists(file_path):
         logger.warning(f"File '{file_path}' does not exist.")
@@ -106,6 +107,16 @@ def load_personas_from_file(file_path: str = PERSONA_SAVE_FILE) -> Optional[Dict
                 logger.warning(f"Skipping persona with no name in '{file_path}'.")
                 continue
 
+            # Handle loading execution_mode
+            execution_mode_str: Optional[str] = new_persona.get("execution_mode")
+            execution_mode: ExecutionMode = ExecutionMode.SILENT_ANALYSIS
+            if execution_mode_str and isinstance(execution_mode_str, str):
+                try:
+                    execution_mode = ExecutionMode[execution_mode_str.upper()]
+                except KeyError:
+                    logger.warning(f"Invalid execution_mode '{execution_mode_str}' for persona '{name}'. "
+                                   f"Defaulting to SILENT_ANALYSIS.")
+
             personas[name] = Persona(
                 persona_name=name,
                 model_name=new_persona.get("model_name"),
@@ -116,6 +127,7 @@ def load_personas_from_file(file_path: str = PERSONA_SAVE_FILE) -> Optional[Dict
                 top_p=new_persona.get("top_p"),
                 top_k=new_persona.get("top_k"),
                 display_name_in_chat=new_persona.get("display_name_in_chat", False),
+                execution_mode=execution_mode
             )
         return personas
     except json.JSONDecodeError as e:

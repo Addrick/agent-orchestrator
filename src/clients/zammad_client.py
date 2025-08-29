@@ -105,6 +105,13 @@ class ZammadClient:
         }
         return self._make_request('post', 'ticket_articles', json=payload, impersonate_email=impersonate_email)
 
+    def update_ticket(self, ticket_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Updates an existing ticket with the given payload.
+        Example payload: {'state': 'closed'}
+        """
+        return self._make_request('put', f'tickets/{ticket_id}', json=payload)
+
     def search_tickets(self, query: str, limit: int = 50, sort_by: Optional[str] = None,
                        order_by: Optional[str] = 'desc') -> List[Dict[str, Any]]:
         """
@@ -151,4 +158,3 @@ class ZammadClient:
         """
         params = {'query': query}
         return self._make_request('get', 'users/search', params=params)
-    
