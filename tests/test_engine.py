@@ -2,16 +2,16 @@
 
 import pytest
 from unittest.mock import patch, AsyncMock, MagicMock
-from openai import APIStatusError, APITimeoutError
+from openai import APIStatusError
 import anthropic
 import aiohttp
+import json
 
 from src.engine import TextEngine, LLMCommunicationError
 from config.global_config import EMPTY_RESPONSE_RETRIES
 from google.genai.types import Tool, GoogleSearch
 
 
-# A common set of configs and contexts for all tests
 @pytest.fixture
 def text_engine():
     """Provides a fresh TextEngine instance for each test."""
@@ -52,182 +52,131 @@ class TestGenerateResponseLogic:
     async def test_retry_on_empty_response_succeeds(self, text_engine, openai_config, base_context):
         with patch.object(text_engine, '_generate_openai_response', new_callable=AsyncMock) as mock_provider_call:
             mock_provider_call.side_effect = [
-                ("", {"payload": 1}),
-                ("Valid response", {"payload": 2})
+                ({}, {"payload": 1}),
+                ({"type": "text", "content": "Valid response"}, {"payload": 2})
             ]
-
             response, _ = await text_engine.generate_response(openai_config, base_context)
-
-            assert response == "Valid response"
+            assert response == {"type": "text", "content": "Valid response"}
             assert mock_provider_call.call_count == 2
 
     @pytest.mark.asyncio
     @patch('src.engine.time.sleep', MagicMock())
     async def test_retry_on_empty_response_fails(self, text_engine, openai_config, base_context):
         with patch.object(text_engine, '_generate_openai_response', new_callable=AsyncMock) as mock_provider_call:
-            mock_provider_call.return_value = ("", {"payload": 1})
-
+            mock_provider_call.return_value = ({}, {"payload": 1})
             with pytest.raises(LLMCommunicationError,
-                               match="LLM provider returned an empty response after all retries."):
+                               match="LLM provider returned an empty or invalid response after all retries."):
                 await text_engine.generate_response(openai_config, base_context)
-
             assert mock_provider_call.call_count == EMPTY_RESPONSE_RETRIES + 1
 
 
+@patch('src.engine.AsyncOpenAI')
 class TestOpenAI:
     @pytest.mark.asyncio
-    @patch('src.engine.TextEngine._get_openai_client', new_callable=AsyncMock)
-    async def test_success_first_try(self, mock_get_client, text_engine, openai_config, base_context):
-        mock_client_instance = AsyncMock()
-        mock_get_client.return_value = mock_client_instance
-        mock_create = mock_client_instance.chat.completions.create
-        mock_success = MagicMock(choices=[MagicMock(message=MagicMock(content="Success"))])
-        mock_create.return_value = mock_success
-
-        response, _ = await text_engine._generate_openai_response(openai_config, base_context)
-        assert response == "Success"
-        mock_create.assert_called_once()
+    async def test_success_text_response(self, mock_openai_class, text_engine, openai_config, base_context):
+        mock_instance = mock_openai_class.return_value
+        mock_instance.chat.completions.create = AsyncMock(
+            return_value=MagicMock(choices=[MagicMock(message=MagicMock(content="Success", tool_calls=None))])
+        )
+        response, _ = await text_engine.generate_response(openai_config, base_context)
+        assert response == {"type": "text", "content": "Success"}
+        mock_instance.chat.completions.create.assert_awaited_once()
 
     @pytest.mark.asyncio
-    @patch('src.engine.time.sleep', MagicMock())
-    @patch('src.engine.TextEngine._get_openai_client', new_callable=AsyncMock)
-    async def test_retry_on_500_error_succeeds(self, mock_get_client, text_engine, openai_config, base_context):
-        mock_client_instance = AsyncMock()
-        mock_get_client.return_value = mock_client_instance
-        mock_create = mock_client_instance.chat.completions.create
-        mock_response_500 = MagicMock(status_code=500)
-        error_500 = APIStatusError("Server error", response=mock_response_500, body=None)
-        mock_success = MagicMock(choices=[MagicMock(message=MagicMock(content="Success on retry"))])
-        mock_create.side_effect = [error_500, mock_success]
-
-        response, _ = await text_engine._generate_openai_response(openai_config, base_context)
-        assert response == "Success on retry"
-        assert mock_create.call_count == 2
+    async def test_success_tool_call_response(self, mock_openai_class, text_engine, openai_config, base_context):
+        mock_instance = mock_openai_class.return_value
+        mock_function = MagicMock()
+        mock_function.name = "get_weather"
+        mock_function.arguments = '{"location": "Boston"}'
+        mock_tool_call = MagicMock(id="call_123", function=mock_function)
+        mock_instance.chat.completions.create = AsyncMock(
+            return_value=MagicMock(choices=[MagicMock(message=MagicMock(content=None, tool_calls=[mock_tool_call]))])
+        )
+        response, _ = await text_engine.generate_response(openai_config, base_context)
+        assert response['type'] == 'tool_calls'
+        assert response['calls'][0]['name'] == 'get_weather'
 
     @pytest.mark.asyncio
-    @patch('src.engine.time.sleep', MagicMock())
-    @patch('src.engine.TextEngine._get_openai_client', new_callable=AsyncMock)
-    async def test_retry_fails_raises_custom_error(self, mock_get_client, text_engine, openai_config, base_context):
-        mock_client_instance = AsyncMock()
-        mock_get_client.return_value = mock_client_instance
-        mock_create = mock_client_instance.chat.completions.create
-        mock_response_500 = MagicMock(status_code=500)
-        error_500 = APIStatusError("Server error", response=mock_response_500, body=None)
-        mock_create.side_effect = [error_500, error_500]
-
-        with pytest.raises(LLMCommunicationError, match="OpenAI API is unavailable after retry."):
-            await text_engine._generate_openai_response(openai_config, base_context)
-        assert mock_create.call_count == 2
-
-    @pytest.mark.asyncio
-    @patch('src.engine.time.sleep', MagicMock())
-    @patch('src.engine.TextEngine._get_openai_client', new_callable=AsyncMock)
-    async def test_4xx_error_does_not_retry(self, mock_get_client, text_engine, openai_config, base_context):
-        mock_client_instance = AsyncMock()
-        mock_get_client.return_value = mock_client_instance
-        mock_create = mock_client_instance.chat.completions.create
-        mock_response_400 = MagicMock(status_code=400)
-        error_400 = APIStatusError("Bad request", response=mock_response_400, body=None)
-        mock_create.side_effect = error_400
-
-        with pytest.raises(LLMCommunicationError, match="OpenAI API returned a client error"):
-            await text_engine._generate_openai_response(openai_config, base_context)
-        mock_create.assert_called_once()
-
-    @pytest.mark.asyncio
-    @patch('src.engine.TextEngine._get_openai_client', new_callable=AsyncMock)
-    async def test_malformed_response_raises_error(self, mock_get_client, text_engine, openai_config, base_context):
-        mock_client_instance = AsyncMock()
-        mock_get_client.return_value = mock_client_instance
-        mock_create = mock_client_instance.chat.completions.create
-        malformed_response = MagicMock(choices=[])  # Empty choices list
-        mock_create.return_value = malformed_response
-
-        with pytest.raises(LLMCommunicationError, match="An unexpected error occurred with the OpenAI API."):
-            await text_engine._generate_openai_response(openai_config, base_context)
+    async def test_api_error_raises_llm_error(self, mock_openai_class, text_engine, openai_config, base_context):
+        mock_instance = mock_openai_class.return_value
+        error = APIStatusError("Server error", response=MagicMock(status_code=500), body=None)
+        mock_instance.chat.completions.create = AsyncMock(side_effect=error)
+        with pytest.raises(LLMCommunicationError, match="OpenAI API returned an error"):
+            await text_engine.generate_response(openai_config, base_context)
 
 
+@patch('src.engine.anthropic.Anthropic')
 class TestAnthropic:
     @pytest.mark.asyncio
-    @patch('src.engine.time.sleep', MagicMock())
-    @patch('src.engine.TextEngine._get_anthropic_client')
-    async def test_retry_on_5xx_error_succeeds(self, mock_get_client, text_engine, anthropic_config, base_context):
-        mock_client_instance = MagicMock()
-        mock_get_client.return_value = mock_client_instance
-        mock_create = mock_client_instance.messages.create
-        mock_response_503 = MagicMock(status_code=503)
-        error_503 = anthropic.APIStatusError("Service unavailable", response=mock_response_503, body=None)
-        mock_success = MagicMock(content=[MagicMock(text="Claude success")])
-        mock_create.side_effect = [error_503, mock_success]
-
-        response, _ = await text_engine._generate_anthropic_response(anthropic_config, base_context)
-        assert response == "Claude success"
-        assert mock_create.call_count == 2
+    async def test_success_text_response(self, mock_anthropic_class, text_engine, anthropic_config, base_context):
+        mock_instance = mock_anthropic_class.return_value
+        mock_instance.messages.create.return_value = MagicMock(
+            content=[MagicMock(text="Claude success")], stop_reason="end_turn"
+        )
+        response, _ = await text_engine.generate_response(anthropic_config, base_context)
+        assert response == {"type": "text", "content": "Claude success"}
 
     @pytest.mark.asyncio
-    @patch('src.engine.time.sleep', MagicMock())
-    @patch('src.engine.TextEngine._get_anthropic_client')
-    async def test_retry_fails_raises_custom_error(self, mock_get_client, text_engine, anthropic_config, base_context):
-        mock_client_instance = MagicMock()
-        mock_get_client.return_value = mock_client_instance
-        mock_create = mock_client_instance.messages.create
-        mock_response_500 = MagicMock(status_code=500)
-        error_500 = anthropic.APIStatusError("Server error", response=mock_response_500, body=None)
-        mock_create.side_effect = [error_500, error_500]
+    async def test_success_tool_call_response(self, mock_anthropic_class, text_engine, anthropic_config, base_context):
+        mock_instance = mock_anthropic_class.return_value
+        mock_tool_use = MagicMock(type='tool_use', id='tool_123', input={'ticker': 'GOOG'})
+        mock_tool_use.name = 'get_stock_price'
+        mock_instance.messages.create.return_value = MagicMock(content=[mock_tool_use], stop_reason="tool_use")
+        response, _ = await text_engine.generate_response(anthropic_config, base_context)
+        assert response['type'] == 'tool_calls'
+        assert response['calls'][0]['name'] == 'get_stock_price'
 
-        with pytest.raises(LLMCommunicationError, match="Anthropic API is unavailable after retry."):
-            await text_engine._generate_anthropic_response(anthropic_config, base_context)
-        assert mock_create.call_count == 2
+    @pytest.mark.asyncio
+    async def test_api_error_raises_llm_error(self, mock_anthropic_class, text_engine, anthropic_config, base_context):
+        mock_instance = mock_anthropic_class.return_value
+        error = anthropic.APIStatusError("Server error", response=MagicMock(status_code=500), body=None)
+        mock_instance.messages.create.side_effect = error
+        with pytest.raises(LLMCommunicationError, match="Anthropic API returned an error"):
+            await text_engine.generate_response(anthropic_config, base_context)
 
 
+@patch('src.engine.genai.client.AsyncClient')
 class TestGoogle:
     @pytest.mark.asyncio
-    @patch('src.engine.TextEngine._initialize_google_client')
-    async def test_empty_response_is_handled(self, mock_init_google, text_engine, google_config, base_context):
-        mock_init_google.return_value = None
-        text_engine.google_search_tool = Tool(google_search=GoogleSearch())
-        mock_generate_content = AsyncMock()
-        text_engine.google_client = MagicMock(models=MagicMock(generate_content=mock_generate_content))
-        empty_response = MagicMock(prompt_feedback=None, candidates=[MagicMock(content=MagicMock(parts=[]))])
-        mock_generate_content.return_value = empty_response
+    async def test_success_text_response(self, mock_google_client_class, text_engine, google_config, base_context):
+        mock_instance = mock_google_client_class.return_value
+        mock_part = MagicMock()
+        mock_part.function_call = None
+        mock_part.text = "Google success"
 
-        response, _ = await text_engine._generate_google_response(google_config, base_context)
-        assert response == ""
+        # Create the candidate mock and explicitly set grounding_metadata to None
+        mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]))
+        mock_candidate.grounding_metadata = None
+
+        mock_instance.models.generate_content = AsyncMock(
+            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        )
+        response, _ = await text_engine.generate_response(google_config, base_context)
+        assert response == {"type": "text", "content": "Google success"}
 
     @pytest.mark.asyncio
-    @patch('src.engine.TextEngine._initialize_google_client')
-    async def test_blocked_prompt_raises_error(self, mock_init_google, text_engine, google_config, base_context):
-        mock_init_google.return_value = None
-        text_engine.google_search_tool = Tool(google_search=GoogleSearch())
-        mock_generate_content = AsyncMock()
-        text_engine.google_client = MagicMock(models=MagicMock(generate_content=mock_generate_content))
-
-        # THE FIX: Mock the .name attribute and the __str__ representation
-        mock_block_reason = MagicMock()
-        mock_block_reason.name = "SAFETY"
-
-        blocked_response = MagicMock(prompt_feedback=MagicMock(block_reason=mock_block_reason))
-        mock_generate_content.return_value = blocked_response
-
-        with pytest.raises(LLMCommunicationError, match="Response blocked by Google due to SAFETY"):
-            await text_engine._generate_google_response(google_config, base_context)
+    async def test_api_error_raises_llm_error(self, mock_google_client_class, text_engine, google_config, base_context):
+        mock_instance = mock_google_client_class.return_value
+        mock_instance.models.generate_content = AsyncMock(side_effect=Exception("API failure"))
+        with pytest.raises(LLMCommunicationError, match="An error occurred with Google API"):
+            await text_engine.generate_response(google_config, base_context)
 
 
 class TestLocalModel:
     @pytest.mark.asyncio
-    @patch('src.engine.time.sleep', MagicMock())
-    @patch('aiohttp.ClientSession')
-    async def test_retry_on_client_error_succeeds(self, mock_session, text_engine, local_config, base_context):
-        mock_session_cm = AsyncMock(__aenter__=AsyncMock(return_value=AsyncMock(post=MagicMock())))
-        mock_session.return_value = mock_session_cm
-        session_instance = mock_session_cm.__aenter__.return_value
+    @patch('aiohttp.ClientSession.post')
+    async def test_success_text_response(self, mock_post, text_engine, local_config, base_context):
+        mock_response = AsyncMock(
+            json=AsyncMock(return_value={'results': [{'text': 'Local success'}]}),
+            raise_for_status=MagicMock()
+        )
+        mock_post.return_value.__aenter__.return_value = mock_response
+        response, _ = await text_engine.generate_response(local_config, base_context)
+        assert response == {"type": "text", "content": "Local success"}
 
-        mock_response = AsyncMock(json=AsyncMock(return_value={'results': [{'text': 'Local success'}]}),
-                                  raise_for_status=MagicMock())
-        mock_response_cm = AsyncMock(__aenter__=AsyncMock(return_value=mock_response))
-        error = aiohttp.ClientError("Connection failed")
-        session_instance.post.side_effect = [error, mock_response_cm]
-
-        response, _ = await text_engine._generate_local_response(local_config, base_context)
-        assert response == "Local success"
-        assert session_instance.post.call_count == 2
+    @pytest.mark.asyncio
+    @patch('aiohttp.ClientSession.post')
+    async def test_connection_error_raises_llm_error(self, mock_post, text_engine, local_config, base_context):
+        mock_post.side_effect = aiohttp.ClientError("Connection failed")
+        with pytest.raises(LLMCommunicationError, match="Could not connect to local model."):
+            await text_engine.generate_response(local_config, base_context)

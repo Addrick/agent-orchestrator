@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from config.global_config import (DEFAULT_CONTEXT_LIMIT, DEFAULT_MODEL_NAME,
                                   DEFAULT_PERSONA)
-from src.persona import Persona
+from src.persona import Persona, ExecutionMode
 from src.utils import model_utils
 from src.utils.model_utils import get_model_list
 
@@ -42,6 +42,8 @@ class BotLogic:
             'context': self._what_context,
             'tokens': self._what_tokens,
             'temp': self._what_temp,
+            'execution_mode': self._what_execution_mode,
+            'tools': self._what_tools,
         }
         self.set_handlers = {
             'prompt': self._set_prompt,
@@ -53,6 +55,8 @@ class BotLogic:
             'top_p': self._set_top_p,
             'top_k': self._set_top_k,
             'display_name': self._set_display_name,
+            'execution_mode': self._set_execution_mode,
+            'tools': self._set_tools,
         }
 
     async def preprocess_message(self, persona_name: str, user_identifier: str, message: str) -> Optional[
@@ -85,20 +89,20 @@ class BotLogic:
         if args:
             return None, False
         help_msg: str = ("Talk to a specific persona by starting your message with their name. \n \n"
-                    "Currently active personas: \n" +
-                    ', '.join(self.chat_system.personas.keys()) + "\n\n"
-                                                                  "Bot commands: \n"
-                                                                  "hello (start new conversation), \n"
-                                                                  "goodbye (end conversation), \n"
-                                                                  "remember <+prompt>, \n"
-                                                                  "what prompt/model/models (google/openai/anthropic)/personas/context/tokens/temp, \n"
-                                                                  "set prompt/model/context/tokens/temp/display_name, \n"
-                                                                  "add <persona>, \n"
-                                                                  "delete <persona>, \n"
-                                                                  "detail, \n"
-                                                                  "save, \n"
-                                                                  "update_models, \n"
-                                                                  "dump_last")
+                         "Currently active personas: \n" +
+                         ', '.join(self.chat_system.personas.keys()) + "\n\n"
+                                                                       "Bot commands: \n"
+                                                                       "hello (start new conversation), \n"
+                                                                       "goodbye (end conversation), \n"
+                                                                       "remember <+prompt>, \n"
+                                                                       "what prompt/model/models (google/openai/anthropic)/personas/context/tokens/temp/execution_mode/tools, \n"
+                                                                       "set prompt/model/context/tokens/temp/display_name/execution_mode/tools, \n"
+                                                                       "add <persona>, \n"
+                                                                       "delete <persona>, \n"
+                                                                       "detail, \n"
+                                                                       "save, \n"
+                                                                       "update_models, \n"
+                                                                       "dump_last")
         return help_msg, False
 
     def _handle_remember(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[Optional[str], bool]:
@@ -141,10 +145,21 @@ class BotLogic:
     def _handle_detail(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[Optional[str], bool]:
         if args:
             return None, False
+
+        enabled_tools = persona.get_enabled_tools()
+        if enabled_tools == ['*']:
+            tools_display = "All"
+        elif not enabled_tools:
+            tools_display = "None"
+        else:
+            tools_display = ", ".join(enabled_tools)
+
         details: str = (
             f"Details for Persona: {persona.get_name()}\n"
             f"----------------------------------------\n"
             f"Model: {persona.get_model_name() or 'default'}\n"
+            f"Execution Mode: {persona.get_execution_mode().name}\n"
+            f"Enabled Tools: {tools_display}\n"
             f"Context Length: {persona.get_context_length()}\n"
             f"Display Name in Chat: {persona.should_display_name_in_chat()}\n"
             f"Response Token Limit: {persona.get_response_token_limit() or 'default'}\n"
@@ -196,6 +211,24 @@ class BotLogic:
 
     def _what_temp(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
         return f"Temperature for {persona.get_name()} is set to {persona.get_temperature() or 'default'}.", False
+
+    def _what_execution_mode(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
+        return f"Execution mode for '{persona.get_name()}' is set to {persona.get_execution_mode().name}.", False
+
+    def _what_tools(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
+        all_tool_defs = self.chat_system.tool_manager.get_tool_definitions()
+        all_tool_names = {tool['function']['name'] for tool in all_tool_defs}
+        enabled_tools = persona.get_enabled_tools()
+
+        response_lines = ["Available Tools & Status for " + persona.get_name() + ":"]
+        if not all_tool_names:
+            return "No tools are currently available in the system.", False
+
+        for tool_name in sorted(list(all_tool_names)):
+            status = "[ENABLED]" if enabled_tools == ['*'] or tool_name in enabled_tools else "[DISABLED]"
+            response_lines.append(f"- {tool_name} {status}")
+
+        return "\n".join(response_lines), False
 
     def _handle_set(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[Optional[str], bool]:
         if not args:
@@ -324,13 +357,54 @@ class BotLogic:
         status: str = "enabled" if new_value else "disabled"
         return f"Displaying name in chat for {persona.get_name()} is now {status}.", True
 
-    def _handle_start_conversation(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[Optional[str], bool]:
+    def _set_execution_mode(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
+        try:
+            mode_str = args[1].upper()
+        except IndexError:
+            valid_modes = ", ".join([e.name.lower() for e in ExecutionMode])
+            return f"Error: Please specify an execution mode. Valid modes are: {valid_modes}.", False
+
+        try:
+            # This will raise KeyError if the mode is invalid
+            ExecutionMode[mode_str]
+            persona.set_execution_mode(mode_str)
+            return f"Execution mode for {persona.get_name()} set to '{mode_str}'.", True
+        except KeyError:
+            valid_modes = ", ".join([e.name.lower() for e in ExecutionMode])
+            return f"Error: Invalid execution mode '{args[1]}'. Valid modes are: {valid_modes}.", False
+
+    def _set_tools(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
+        if len(args) < 2:
+            return "Usage: set tools <all|none|tool_name_1> [tool_name_2]...", False
+
+        all_tool_defs = self.chat_system.tool_manager.get_tool_definitions()
+        available_tool_names = {tool['function']['name'] for tool in all_tool_defs}
+
+        mode = args[1].lower()
+        if mode == 'all':
+            persona.set_enabled_tools(['*'])
+            return f"All tools have been enabled for {persona.get_name()}.", True
+        elif mode == 'none':
+            persona.set_enabled_tools([])
+            return f"All tools have been disabled for {persona.get_name()}.", True
+        else:
+            tools_to_set = args[1:]
+            invalid_tools = [name for name in tools_to_set if name not in available_tool_names]
+            if invalid_tools:
+                return f"Error: The following tools are not valid: {', '.join(invalid_tools)}", False
+
+            persona.set_enabled_tools(tools_to_set)
+            return f"Enabled tools for {persona.get_name()} set to: {', '.join(tools_to_set)}", True
+
+    def _handle_start_conversation(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[
+        Optional[str], bool]:
         if args:
             return None, False
         persona.set_context_length(0)
         return f"{persona.get_name()}: Hello! Starting new conversation...", True
 
-    def _handle_stop_conversation(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[Optional[str], bool]:
+    def _handle_stop_conversation(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[
+        Optional[str], bool]:
         if args:
             return None, False
         persona.set_context_length(DEFAULT_CONTEXT_LIMIT)
@@ -341,7 +415,8 @@ class BotLogic:
             return "Usage: dump_last", False
 
         persona_name: str = persona.get_name()
-        last_request: Optional[Dict[str, Any]] = self.chat_system.last_api_requests.get(user_identifier, {}).get(persona_name)
+        last_request: Optional[Dict[str, Any]] = self.chat_system.last_api_requests.get(user_identifier, {}).get(
+            persona_name)
 
         if not last_request:
             return f"{persona_name}: No previous request to dump for your session with this persona.", False

@@ -14,11 +14,14 @@ from src.clients.zammad_client import ZammadClient
 from src.database.memory_manager import MemoryManager
 from src.engine import LLMCommunicationError, TextEngine
 from src.message_handler import BotLogic
-from src.persona import Persona
+from src.persona import Persona, ExecutionMode
+from src.tools.tool_manager import ToolManager
 from src.utils.model_utils import get_model_list
 from src.utils.save_utils import load_personas_from_file, save_personas_to_file
 
 logger = logging.getLogger(__name__)
+
+MAX_TOOL_CALLS = 5
 
 
 class ResponseType(Enum):
@@ -33,6 +36,7 @@ class ChatSystem:
         self.memory_manager: MemoryManager = memory_manager
         self.text_engine: TextEngine = text_engine
         self.zammad_client: ZammadClient = zammad_client
+        self.tool_manager: ToolManager = ToolManager(zammad_client)
         self.bot_logic: BotLogic = BotLogic(self)
         self.last_api_requests: Dict[str, Dict[str, Optional[Dict[str, Any]]]] = defaultdict(dict)
         self.models_available: Dict[str, Any] = get_model_list() or {}
@@ -113,6 +117,29 @@ class ChatSystem:
             logger.error(f"Error getting or creating Zammad user for '{user_identifier}': {e}", exc_info=True)
             return None, None
 
+    def _format_raw_history_for_llm(self, raw_history: List[Dict[str, Any]], memory_mode: str,
+                                    persona_name: str) -> List[Dict[str, Any]]:
+        """Formats database history records into a list of messages for the LLM."""
+        final_history: List[Dict[str, Any]] = []
+        for msg in raw_history:
+            author_role: Optional[str] = msg.get('author_role')
+            author_name: Optional[str] = msg.get('author_name')
+            content: str = msg.get('content', '')
+
+            if author_role == 'user':
+                if memory_mode == "channel" and author_name:
+                    formatted_content: str = f"{author_name}: {content}"
+                    final_history.append({'role': 'user', 'content': formatted_content})
+                else:
+                    final_history.append({'role': 'user', 'content': content})
+            elif author_role == 'assistant':
+                if author_name == persona_name:
+                    final_history.append({'role': 'assistant', 'content': content})
+                else:
+                    formatted_content = f"{author_name}: {content}"
+                    final_history.append({'role': 'user', 'content': formatted_content})
+        return final_history
+
     async def generate_response(
             self,
             persona_name: str,
@@ -124,131 +151,137 @@ class ChatSystem:
             user_display_name: Optional[str] = None
     ) -> Tuple[str, ResponseType, Optional[int]]:
         """
-        Orchestrates response generation, returning the response, its type, and any relevant ticket ID.
+        Orchestrates response generation, including the tool-use loop,
+        returning the response, its type, and any relevant ticket ID.
         """
+        # 1. Handle dev commands first
         command_result: Optional[Dict[str, Any]] = await self.bot_logic.preprocess_message(persona_name,
                                                                                            user_identifier, message)
         if command_result:
+            # Autosave if a command mutated the persona state
             if command_result.get("mutated", False):
                 save_personas_to_file(self.personas)
             return command_result["response"], ResponseType.DEV_COMMAND, None
 
         ticket_to_log: Optional[int] = None
         try:
+            # 2. Initial Setup
             persona: Optional[Persona] = self.personas.get(persona_name)
             if not persona:
                 return "Error: Persona not found.", ResponseType.DEV_COMMAND, None
 
+            # 3. Zammad and Context Setup
             is_ticket_channel: bool = self._should_create_ticket(channel, message)
-            ticket_id_for_context: Optional[int] = None
             customer_id: Optional[int] = None
             zammad_email: Optional[str] = None
-
             if is_ticket_channel:
-                try:
-                    customer_id, zammad_email = await self._get_or_create_zammad_user(user_identifier, channel,
-                                                                                      user_display_name)
-                    if customer_id:
-                        ticket_id_for_context = self._find_ticket_id_in_message(message)
-                        if not ticket_id_for_context:
-                            ticket_id_for_context = await self._find_active_ticket_for_user(customer_id)
-                except Exception as zammad_error:
-                    logger.error(f"A Zammad API error occurred during user/ticket search: {zammad_error}",
-                                 exc_info=True)
+                customer_id, zammad_email = await self._get_or_create_zammad_user(user_identifier, channel,
+                                                                                  user_display_name)
+                if customer_id:
+                    ticket_to_log = self._find_ticket_id_in_message(message)
+                    if not ticket_to_log:
+                        ticket_to_log = await self._find_active_ticket_for_user(customer_id)
 
+            # 4. History Retrieval and Formatting
             persona_limit: int = persona.get_context_length()
-            interface_limit: Optional[int] = history_limit
-            effective_limit: Optional[int]
-            if interface_limit is None:
-                effective_limit = persona_limit
-            else:
-                effective_limit = min(persona_limit, interface_limit)
+            effective_limit: int = min(persona_limit, history_limit) if history_limit is not None else persona_limit
 
-            raw_history: List[Dict[str, Any]] = []
+            raw_history: List[Dict[str, Any]]
             system_context_message: Optional[str] = None
-            memory_mode_used: Optional[str] = None
-
-            if ticket_id_for_context:
-                memory_mode_used = "ticket"
-                raw_history = self.memory_manager.get_ticket_history(ticket_id_for_context, effective_limit)
-                system_context_message = f"This conversation is part of Zammad ticket #{ticket_id_for_context}."
+            memory_mode: str
+            if ticket_to_log:
+                memory_mode = "ticket"
+                raw_history = self.memory_manager.get_ticket_history(ticket_to_log, effective_limit)
+                system_context_message = f"This conversation is part of Zammad ticket #{ticket_to_log}."
             else:
-                memory_mode_used = "channel"
+                memory_mode = "channel"
                 raw_history = self.memory_manager.get_channel_history(channel, effective_limit)
 
-            final_history_for_llm: List[Dict[str, Any]] = []
-            if raw_history:
-                for msg in raw_history:
-                    author_role: Optional[str] = msg.get('author_role')
-                    author_name: Optional[str] = msg.get('author_name')
-                    content: str = msg.get('content', '')
-
-                    if author_role == 'user':
-                        if memory_mode_used == "channel" and author_name:
-                            formatted_content: str = f"{author_name}: {content}"
-                            final_history_for_llm.append({'role': 'user', 'content': formatted_content})
-                        else:
-                            final_history_for_llm.append({'role': 'user', 'content': content})
-                    elif author_role == 'assistant':
-                        if author_name == persona_name:
-                            final_history_for_llm.append({'role': 'assistant', 'content': content})
-                        else:
-                            formatted_content = f"{author_name}: {content}"
-                            final_history_for_llm.append({'role': 'user', 'content': formatted_content})
-
+            conversation_history: List[Dict[str, Any]] = self._format_raw_history_for_llm(raw_history, memory_mode,
+                                                                                          persona_name)
             if system_context_message:
-                final_history_for_llm.insert(0, {"role": "system", "content": system_context_message})
+                conversation_history.insert(0, {"role": "system", "content": system_context_message})
 
-            context_object: Dict[str, Any] = {"persona_prompt": persona.get_prompt(), "history": final_history_for_llm,
-                                              "current_message": {"text": message, "image_url": image_url}}
+            # 5. Tool Filtering
+            all_tools = self.tool_manager.get_tool_definitions()
+            enabled_tool_names = persona.get_enabled_tools()
+            tools_for_llm: List[Dict[str, Any]] = []
+            if enabled_tool_names == ['*']:
+                tools_for_llm = all_tools
+            elif enabled_tool_names:
+                tools_for_llm = [tool for tool in all_tools if
+                                 tool.get('function', {}).get('name') in enabled_tool_names]
 
+            # 6. Log Initial User Message to Zammad
             if is_ticket_channel and customer_id:
-                ticket_to_log = ticket_id_for_context
-                try:
-                    if ticket_to_log:
-                        await asyncio.to_thread(self.zammad_client.add_article_to_ticket, ticket_id=ticket_to_log,
-                                                body=message, impersonate_email=zammad_email)
-                    else:
-                        ticket_title_name: str = user_display_name if user_display_name else user_identifier.split('<')[
-                            0].strip()
-                        title: str = f"New request from {ticket_title_name} via {channel}"
-                        new_ticket: Dict[str, Any] = await asyncio.to_thread(self.zammad_client.create_ticket,
-                                                                             title=title,
-                                                                             group='Users', customer_id=customer_id)
-                        if new_ticket and new_ticket.get('id'):
-                            ticket_to_log = new_ticket['id']
-                            await asyncio.to_thread(self.zammad_client.add_article_to_ticket,
-                                                    ticket_id=ticket_to_log, body=message,
-                                                    impersonate_email=zammad_email)
-                        else:
-                            logger.error("Zammad client returned a null ticket object after creation attempt.")
-                except Exception as zammad_error:
-                    logger.error(f"A Zammad API error occurred during ticket action processing: {zammad_error}",
-                                 exc_info=True)
-
-            reply_content, api_payload = await self.text_engine.generate_response(persona.get_config_for_engine(),
-                                                                                  context_object)
-            if api_payload:
-                self.last_api_requests[user_identifier][persona_name] = api_payload
-
-            if is_ticket_channel and ticket_to_log:
-                try:
+                if not ticket_to_log:
+                    title = f"New request from {user_display_name or user_identifier} via {channel}"
+                    new_ticket = await asyncio.to_thread(self.zammad_client.create_ticket, title=title,
+                                                         group='Users', customer_id=customer_id, article_body=message)
+                    ticket_to_log = new_ticket.get('id') if new_ticket else None
+                else:
                     await asyncio.to_thread(self.zammad_client.add_article_to_ticket, ticket_id=ticket_to_log,
-                                            body=reply_content)
-                except Exception as e:
-                    logger.error(f"Failed to add bot reply to Zammad ticket #{ticket_to_log}. Error: {e}",
-                                 exc_info=True)
+                                            body=message, impersonate_email=zammad_email)
 
-            return reply_content, ResponseType.LLM_GENERATION, ticket_to_log
+            # 7. Start the Tool-Use Loop
+            current_message_content = {"text": message, "image_url": image_url}
+            for i in range(MAX_TOOL_CALLS):
+                context_object: Dict[str, Any] = {
+                    "persona_prompt": persona.get_prompt(),
+                    "history": conversation_history,
+                    "current_message": current_message_content
+                }
+                llm_response, api_payload = await self.text_engine.generate_response(
+                    persona.get_config_for_engine(), context_object, tools=tools_for_llm
+                )
+                if api_payload: self.last_api_requests[user_identifier][persona_name] = api_payload
+
+                if llm_response.get("type") == "text":
+                    final_text = llm_response.get("content", "")
+                    if is_ticket_channel and ticket_to_log:
+                        await asyncio.to_thread(self.zammad_client.add_article_to_ticket, ticket_id=ticket_to_log,
+                                                body=final_text)
+                    return final_text, ResponseType.LLM_GENERATION, ticket_to_log
+
+                elif llm_response.get("type") == "tool_calls":
+                    calls = llm_response.get("calls", [])
+                    conversation_history.append({"role": "assistant", "tool_calls": calls})
+                    current_message_content = {"text": "", "image_url": None}  # Subsequent calls have no new user text
+
+                    for call in calls:
+                        tool_name = call.get("name")
+                        tool_args = call.get("arguments", {})
+                        tool_result: Dict[str, Any]
+
+                        if persona.get_execution_mode() == ExecutionMode.SILENT_ANALYSIS:
+                            log_body = (f"SILENT ANALYSIS: Persona '{persona_name}' intended to call tool '{tool_name}' "
+                                        f"with arguments: {json.dumps(tool_args)}")
+                            logger.info(log_body)
+                            if ticket_to_log:
+                                await asyncio.to_thread(self.zammad_client.add_article_to_ticket,
+                                                        ticket_id=ticket_to_log, body=log_body, internal=True)
+                            tool_result = {"status": "success", "action": "simulated and logged"}
+                        else:  # ASSISTED_DISPATCH
+                            tool_result = await self.tool_manager.execute_tool(tool_name, **tool_args)
+
+                        conversation_history.append({
+                            "role": "tool",
+                            "tool_call_id": call.get("id"),
+                            "name": tool_name,
+                            "content": json.dumps(tool_result)
+                        })
+                else:
+                    raise LLMCommunicationError("LLM returned an invalid response structure.")
+
+            # 8. Handle Loop Termination
+            logger.error(f"Exceeded max tool calls ({MAX_TOOL_CALLS}) for user {user_identifier}.")
+            return "I seem to be stuck in a loop. Could you please clarify your request?", ResponseType.DEV_COMMAND, ticket_to_log
 
         except LLMCommunicationError as e:
             logger.error(f"A recoverable LLM communication error occurred for {user_identifier}: {e}")
-            user_facing_error: str
-            if "empty response after all retries" in str(e):
-                user_facing_error = "I'm not sure how to continue. Could you please rephrase your request or provide more details?"
-            else:
-                user_facing_error = "I'm having trouble connecting to the AI service right now. Please try your request again in a moment."
-            return user_facing_error, ResponseType.DEV_COMMAND, ticket_to_log
+            error_msg = ("I'm not sure how to continue. Could you please rephrase?" if "empty response" in str(e) else
+                         "I'm having trouble connecting to the AI service right now. Please try again in a moment.")
+            return error_msg, ResponseType.DEV_COMMAND, ticket_to_log
         except Exception as e:
             logger.error(f"A critical error occurred in generate_response for {user_identifier}: {e}", exc_info=True)
             return "An internal error occurred while processing your request.", ResponseType.DEV_COMMAND, ticket_to_log
