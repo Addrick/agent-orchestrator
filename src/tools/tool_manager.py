@@ -33,6 +33,8 @@ class ToolManager:
             "update_ticket": self._update_ticket,
             "add_note_to_ticket": self._add_note_to_ticket,
             "search_tickets": self._search_tickets,
+            "create_ticket": self._create_ticket,
+            "search_user": self._search_user,
         }
 
     def get_tool_definitions(self) -> List[Dict[str, Any]]:
@@ -67,23 +69,40 @@ class ToolManager:
 
     # --- Tool Implementation Methods ---
 
-    async def _get_ticket_details(self, ticket_id: int) -> Dict[str, Any]:
+    async def _get_ticket_details(self, ticket_number: int) -> Dict[str, Any]:
         """
-        Implementation for the 'get_ticket_details' tool.
+        Implementation for the 'get_ticket_details' tool. It translates the user-facing
+        ticket number into the internal ticket ID before fetching.
+        """
+        logger.info(f"Executing tool: get_ticket_details for ticket_number={ticket_number}")
 
-        Note: The current ZammadClient can only retrieve a ticket summary via search,
-        not the full article history. This implementation provides the best available
-        data from the existing client.
-        """
-        search_result = await asyncio.to_thread(
-            self.zammad_client.search_tickets, query=f"id:{ticket_id}"
+        # Step 1: Search for the ticket by its number to find its internal ID.
+        search_query = f"number:{ticket_number}"
+        search_results = await asyncio.to_thread(
+            self.zammad_client.search_tickets, query=search_query
         )
-        if not search_result:
-            raise ValueError(f"Ticket with ID {ticket_id} not found.")
-        return search_result[0]
+
+        if not search_results:
+            raise ValueError(f"No ticket found with number {ticket_number}.")
+
+        # Extract the correct internal ID from the search result.
+        ticket_id = search_results[0]['id']
+        logger.info(f"Found ticket ID {ticket_id} for ticket number {ticket_number}.")
+
+        # Step 2: Use the correct ID to get the full ticket details.
+        ticket = await asyncio.to_thread(
+            self.zammad_client.get_ticket, ticket_id=ticket_id
+        )
+
+        if not ticket:
+            # This case is unlikely if the search succeeded, but it's good practice.
+            raise ValueError(f"Could not retrieve details for ticket ID {ticket_id} after finding it.")
+
+        return ticket
 
     async def _update_ticket(self, ticket_id: int, **kwargs: Any) -> Dict[str, Any]:
         """Implementation for the 'update_ticket' tool."""
+        logger.info(f"Executing tool: update_ticket on ticket_id={ticket_id} with args={kwargs}")
         payload: Dict[str, Any] = {}
         valid_args = ["state", "priority", "owner_id", "tags"]
 
@@ -103,6 +122,7 @@ class ToolManager:
 
     async def _add_note_to_ticket(self, ticket_id: int, body: str, internal: bool = False) -> Dict[str, Any]:
         """Implementation for the 'add_note_to_ticket' tool."""
+        logger.info(f"Executing tool: add_note_to_ticket on ticket_id={ticket_id}")
         return await asyncio.to_thread(
             self.zammad_client.add_article_to_ticket,
             ticket_id=ticket_id,
@@ -112,6 +132,27 @@ class ToolManager:
 
     async def _search_tickets(self, query: str) -> List[Dict[str, Any]]:
         """Implementation for the 'search_tickets' tool."""
+        logger.info(f"Executing tool: search_tickets with query='{query}'")
         return await asyncio.to_thread(
             self.zammad_client.search_tickets, query=query
+        )
+
+    async def _create_ticket(self, title: str, body: str, customer_id: Optional[int] = None) -> Dict[str, Any]:
+        """Implementation for the 'create_ticket' tool."""
+        logger.info(f"Executing tool: create_ticket with title='{title}' for customer_id={customer_id}")
+        if not customer_id:
+            raise ValueError("create_ticket requires a customer_id, which was not provided by the system.")
+        return await asyncio.to_thread(
+            self.zammad_client.create_ticket,
+            title=title,
+            group='Users',
+            customer_id=customer_id,
+            article_body=body
+        )
+
+    async def _search_user(self, query: str) -> List[Dict[str, Any]]:
+        """Implementation for the 'search_user' tool."""
+        logger.info(f"Executing tool: search_user with query='{query}'")
+        return await asyncio.to_thread(
+            self.zammad_client.search_user, query=query
         )

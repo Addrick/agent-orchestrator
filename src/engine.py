@@ -14,8 +14,8 @@ import aiohttp
 import anthropic
 from openai import AsyncOpenAI, APIStatusError, APITimeoutError
 from google import genai
-from google.genai.types import GenerateContentConfig, Tool, GoogleSearch, Candidate, FunctionDeclaration, Part
-
+from google.genai.types import GenerateContentConfig, Tool, GoogleSearch, Candidate, GroundingMetadata, \
+    FunctionDeclaration, Part
 from src.utils.google_utils import process_grounding_metadata
 
 logger = logging.getLogger(__name__)
@@ -157,6 +157,9 @@ class TextEngine:
             completion = await client.chat.completions.create(**api_params)
             response_message = completion.choices[0].message
 
+            if "tools" in api_params:
+                api_params["tools"] = [tool.get("function", {}).get("name", "unknown") for tool in api_params["tools"]]
+
             if response_message.tool_calls:
                 tool_calls: List[Dict[str, Any]] = []
                 for call in response_message.tool_calls:
@@ -199,6 +202,9 @@ class TextEngine:
         try:
             response = client.messages.create(**api_params)
 
+            if "tools" in api_params:
+                api_params["tools"] = [tool.get("name", "unknown") for tool in api_params["tools"]]
+
             if response.stop_reason == "tool_use":
                 tool_calls: List[Dict[str, Any]] = []
                 for content_block in response.content:
@@ -233,11 +239,9 @@ class TextEngine:
         for item in context['history']:
             role = 'model' if item['role'] == 'assistant' else 'user'
             if item['role'] == 'tool':
-                # FIX: Use keyword argument unpacking for Part constructor
                 history_for_api.append({'role': 'tool', 'parts': [Part(**{
                     'function_response': {'name': item['name'], 'response': json.loads(item['content'])}})]})
             elif item.get('tool_calls'):
-                # FIX: Use keyword argument unpacking for Part constructor
                 parts = [Part(**{'function_call': {'name': call['name'], 'args': call['arguments']}}) for call
                          in item['tool_calls']]
                 history_for_api.append({'role': 'model', 'parts': parts})
@@ -261,14 +265,26 @@ class TextEngine:
 
         content_config_for_api['tools'] = api_tools
 
-        if isinstance(config.get("max_output_tokens"), int): content_config_for_api['max_output_tokens'] = config.get("max_output_tokens")
-        if isinstance(config.get("temperature"), (int, float)): content_config_for_api['temperature'] = config.get("temperature")
+        if isinstance(config.get("max_output_tokens"), int): content_config_for_api['max_output_tokens'] = config.get(
+            "max_output_tokens")
+        if isinstance(config.get("temperature"), (int, float)): content_config_for_api['temperature'] = config.get(
+            "temperature")
         if isinstance(config.get("top_p"), (int, float)): content_config_for_api['top_p'] = config.get("top_p")
         if isinstance(config.get("top_k"), (int, float)): content_config_for_api['top_k'] = config.get("top_k")
 
-        api_params_for_dumping: Dict[str, Any] = {
+        dump_config = content_config_for_api.copy()
+        if 'tools' in dump_config:
+            tool_names = []
+            for t in dump_config['tools']:
+                if t.function_declarations:
+                    tool_names.extend([d.name for d in t.function_declarations])
+                else:
+                    tool_names.append("google_search")
+            dump_config['tools'] = tool_names
+
+        api_params_for_dumping = {
             'model': config["model_name"], 'contents': history_for_api,
-            'config': json.loads(json.dumps(content_config_for_api, default=str))
+            'config': json.loads(json.dumps(dump_config, default=str))
         }
 
         try:
@@ -282,7 +298,8 @@ class TextEngine:
             raise LLMCommunicationError(f"An error occurred with Google API: {e}") from e
 
         if response_obj.prompt_feedback and response_obj.prompt_feedback.block_reason:
-            raise LLMCommunicationError(f"Response blocked by Google due to {response_obj.prompt_feedback.block_reason.name}.")
+            raise LLMCommunicationError(
+                f"Response blocked by Google due to {response_obj.prompt_feedback.block_reason.name}.")
 
         candidate: Optional[Candidate] = response_obj.candidates[0] if response_obj.candidates else None
         if not candidate or not candidate.content or not candidate.content.parts:
@@ -292,11 +309,13 @@ class TextEngine:
         for i, part in enumerate(candidate.content.parts):
             if part.function_call:
                 arguments = {k: v for k, v in part.function_call.args.items()}
-                tool_calls.append({"id": f"call_{part.function_call.name}_{i}", "name": part.function_call.name, "arguments": arguments})
+                tool_calls.append({"id": f"call_{part.function_call.name}_{i}", "name": part.function_call.name,
+                                   "arguments": arguments})
         if tool_calls:
             return {"type": "tool_calls", "calls": tool_calls}, api_params_for_dumping
 
-        base_text_from_response = "".join(part.text for part in candidate.content.parts if hasattr(part, 'text') and part.text)
+        base_text_from_response = "".join(
+            part.text for part in candidate.content.parts if hasattr(part, 'text') and part.text)
         final_text_content, search_query_display, citations_display = process_grounding_metadata(
             base_text_from_response, candidate.grounding_metadata, logger
         )
@@ -327,5 +346,3 @@ class TextEngine:
         except aiohttp.ClientError as e:
             logger.error(f"Local model connection error: {e}", exc_info=True)
             raise LLMCommunicationError("Could not connect to local model.") from e
-
-

@@ -80,6 +80,7 @@ def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
             "top_k": persona.get_top_k(),
             "display_name_in_chat": persona.should_display_name_in_chat(),
             "execution_mode": persona.get_execution_mode().name,
+            "enabled_tools": persona.get_enabled_tools(),
         }
         persona_list.append(persona_json)
     return persona_list
@@ -127,7 +128,8 @@ def load_personas_from_file(file_path: str = PERSONA_SAVE_FILE) -> Optional[Dict
                 top_p=new_persona.get("top_p"),
                 top_k=new_persona.get("top_k"),
                 display_name_in_chat=new_persona.get("display_name_in_chat", False),
-                execution_mode=execution_mode
+                execution_mode=execution_mode,
+                enabled_tools=new_persona.get("enabled_tools", [])  # Default to empty list
             )
         return personas
     except json.JSONDecodeError as e:

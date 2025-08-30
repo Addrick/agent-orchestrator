@@ -20,16 +20,16 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "get_ticket_details",
-            "description": "Retrieves the complete details and article history for a specific Zammad ticket.",
+            "description": "Retrieves the complete details for a specific Zammad ticket using its user-facing ticket number.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "ticket_id": {
+                    "ticket_number": {
                         "type": "integer",
-                        "description": "The unique numerical ID of the ticket to retrieve.",
+                        "description": "The user-facing number of the ticket (e.g., 53515).",
                     },
                 },
-                "required": ["ticket_id"],
+                "required": ["ticket_number"],
             },
         },
     },
@@ -107,6 +107,44 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
                         "type": "string",
                         "description": "The search query string. Examples: 'state.name:open AND priority:\"3 high\"', 'customer.email:example@email.com'",
                     },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_ticket",
+            "description": "Creates a new Zammad ticket. Requires a title and a body for the first article. The system will automatically associate it with the current user.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "The title of the new ticket."
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "The content of the first message in the ticket."
+                    }
+                },
+                "required": ["title", "body"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_user",
+            "description": "Searches for a Zammad user by a query string (e.g., email address or last name).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query, e.g., 'john.doe@example.com'."
+                    }
                 },
                 "required": ["query"],
             },

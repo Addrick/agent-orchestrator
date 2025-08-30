@@ -154,23 +154,19 @@ class ChatSystem:
         Orchestrates response generation, including the tool-use loop,
         returning the response, its type, and any relevant ticket ID.
         """
-        # 1. Handle dev commands first
         command_result: Optional[Dict[str, Any]] = await self.bot_logic.preprocess_message(persona_name,
                                                                                            user_identifier, message)
         if command_result:
-            # Autosave if a command mutated the persona state
             if command_result.get("mutated", False):
                 save_personas_to_file(self.personas)
             return command_result["response"], ResponseType.DEV_COMMAND, None
 
         ticket_to_log: Optional[int] = None
         try:
-            # 2. Initial Setup
             persona: Optional[Persona] = self.personas.get(persona_name)
             if not persona:
                 return "Error: Persona not found.", ResponseType.DEV_COMMAND, None
 
-            # 3. Zammad and Context Setup
             is_ticket_channel: bool = self._should_create_ticket(channel, message)
             customer_id: Optional[int] = None
             zammad_email: Optional[str] = None
@@ -182,7 +178,6 @@ class ChatSystem:
                     if not ticket_to_log:
                         ticket_to_log = await self._find_active_ticket_for_user(customer_id)
 
-            # 4. History Retrieval and Formatting
             persona_limit: int = persona.get_context_length()
             effective_limit: int = min(persona_limit, history_limit) if history_limit is not None else persona_limit
 
@@ -202,7 +197,6 @@ class ChatSystem:
             if system_context_message:
                 conversation_history.insert(0, {"role": "system", "content": system_context_message})
 
-            # 5. Tool Filtering
             all_tools = self.tool_manager.get_tool_definitions()
             enabled_tool_names = persona.get_enabled_tools()
             tools_for_llm: List[Dict[str, Any]] = []
@@ -212,24 +206,24 @@ class ChatSystem:
                 tools_for_llm = [tool for tool in all_tools if
                                  tool.get('function', {}).get('name') in enabled_tool_names]
 
-            # 6. Log Initial User Message to Zammad
-            if is_ticket_channel and customer_id:
-                if not ticket_to_log:
+            if is_ticket_channel and customer_id and not ticket_to_log:
+                if not any(tool['function']['name'] == 'create_ticket' for tool in tools_for_llm):
                     title = f"New request from {user_display_name or user_identifier} via {channel}"
                     new_ticket = await asyncio.to_thread(self.zammad_client.create_ticket, title=title,
                                                          group='Users', customer_id=customer_id, article_body=message)
                     ticket_to_log = new_ticket.get('id') if new_ticket else None
-                else:
-                    await asyncio.to_thread(self.zammad_client.add_article_to_ticket, ticket_id=ticket_to_log,
-                                            body=message, impersonate_email=zammad_email)
+            elif is_ticket_channel and ticket_to_log:
+                await asyncio.to_thread(self.zammad_client.add_article_to_ticket, ticket_id=ticket_to_log,
+                                        body=message, impersonate_email=zammad_email)
 
-            # 7. Start the Tool-Use Loop
-            current_message_content = {"text": message, "image_url": image_url}
+            # --- Start of the Refactored Tool-Use Loop ---
+            conversation_history.append({"role": "user", "content": message})
+
             for i in range(MAX_TOOL_CALLS):
                 context_object: Dict[str, Any] = {
                     "persona_prompt": persona.get_prompt(),
                     "history": conversation_history,
-                    "current_message": current_message_content
+                    "current_message": {"text": "", "image_url": image_url if i == 0 else None}
                 }
                 llm_response, api_payload = await self.text_engine.generate_response(
                     persona.get_config_for_engine(), context_object, tools=tools_for_llm
@@ -246,7 +240,6 @@ class ChatSystem:
                 elif llm_response.get("type") == "tool_calls":
                     calls = llm_response.get("calls", [])
                     conversation_history.append({"role": "assistant", "tool_calls": calls})
-                    current_message_content = {"text": "", "image_url": None}  # Subsequent calls have no new user text
 
                     for call in calls:
                         tool_name = call.get("name")
@@ -254,15 +247,22 @@ class ChatSystem:
                         tool_result: Dict[str, Any]
 
                         if persona.get_execution_mode() == ExecutionMode.SILENT_ANALYSIS:
-                            log_body = (f"SILENT ANALYSIS: Persona '{persona_name}' intended to call tool '{tool_name}' "
-                                        f"with arguments: {json.dumps(tool_args)}")
+                            log_body = (
+                                f"SILENT ANALYSIS: Persona '{persona_name}' intended to call tool '{tool_name}' "
+                                f"with arguments: {json.dumps(tool_args)}")
                             logger.info(log_body)
                             if ticket_to_log:
                                 await asyncio.to_thread(self.zammad_client.add_article_to_ticket,
                                                         ticket_id=ticket_to_log, body=log_body, internal=True)
                             tool_result = {"status": "success", "action": "simulated and logged"}
                         else:  # ASSISTED_DISPATCH
+                            if tool_name == 'create_ticket' and customer_id:
+                                tool_args['customer_id'] = customer_id
+
                             tool_result = await self.tool_manager.execute_tool(tool_name, **tool_args)
+
+                            if tool_name == 'create_ticket' and tool_result.get('result', {}).get('id'):
+                                ticket_to_log = tool_result['result']['id']
 
                         conversation_history.append({
                             "role": "tool",
@@ -273,7 +273,6 @@ class ChatSystem:
                 else:
                     raise LLMCommunicationError("LLM returned an invalid response structure.")
 
-            # 8. Handle Loop Termination
             logger.error(f"Exceeded max tool calls ({MAX_TOOL_CALLS}) for user {user_identifier}.")
             return "I seem to be stuck in a loop. Could you please clarify your request?", ResponseType.DEV_COMMAND, ticket_to_log
 

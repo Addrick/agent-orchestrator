@@ -95,11 +95,13 @@ async def test_new_ticket_creation_flow(live_chat_system, managed_zammad_user):
 
     try:
         mock_user_return = (user_info["id"], PERSISTENT_TEST_USER_EMAIL)
+        # Mock the text engine to return a text response, not a tool call
+        mock_llm_response = ({'type': 'text', 'content': 'Mock reply'}, {})
         with patch.object(chat_system, '_get_or_create_zammad_user', new_callable=AsyncMock,
                           return_value=mock_user_return), \
                 patch.object(chat_system, '_find_active_ticket_for_user', new_callable=AsyncMock, return_value=None), \
                 patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
-                             return_value=("Mock reply", {})):
+                             return_value=mock_llm_response):
 
             _, _, ticket_id = await chat_system.generate_response(
                 persona_name="derpr", user_identifier=user_info["identifier"], channel="gmail",
@@ -109,7 +111,9 @@ async def test_new_ticket_creation_flow(live_chat_system, managed_zammad_user):
             assert ticket_id is not None
             created_ticket_id = ticket_id
 
-            ticket_data = zammad_client._make_request('get', f'tickets/{created_ticket_id}')
+            # Use the direct get_ticket method for verification
+            ticket_data = zammad_client.get_ticket(created_ticket_id)
+            # FIX: Access the top-level customer_id key
             assert ticket_data['customer_id'] == user_info["id"]
     finally:
         if created_ticket_id:
@@ -130,16 +134,17 @@ async def test_context_transformation_and_multi_user_differentiation(live_chat_s
                                datetime.now())
 
     with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
-                      return_value=("", {})) as mock_llm_call:
+                      return_value=({'type': 'text', 'content': ''}, {})) as mock_llm_call:
         await chat_system.generate_response(
             persona_name="derpr", user_identifier=user1_id, channel=channel, message="My turn"
         )
 
         context = mock_llm_call.call_args[0][1]['history']
-        assert len(context) == 3
+        assert len(context) == 4
         assert context[0] == {'role': 'user', 'content': 'UserOne: Hello from user one'}
         assert context[1] == {'role': 'user', 'content': 'UserTwo: Hello from user two'}
         assert context[2] == {'role': 'user', 'content': 'chatter: Reply from chatter bot'}
+        assert context[3] == {'role': 'user', 'content': 'My turn'}
 
 
 @pytest.mark.asyncio
@@ -158,13 +163,14 @@ async def test_ticket_history_priority_over_channel_history(live_chat_system, ma
                                    "This is a general channel message.", datetime.now())
         with patch.object(chat_system, '_find_active_ticket_for_user', new_callable=AsyncMock, return_value=ticket_id), \
                 patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
-                             return_value=("", {})) as mock_llm_call:
+                             return_value=({'type': 'text', 'content': ''}, {})) as mock_llm_call:
             await chat_system.generate_response(
                 persona_name="derpr", user_identifier=user_info['identifier'], channel="gmail", message="Follow up"
             )
             context = mock_llm_call.call_args[0][1]['history']
-            assert len(context) == 2
+            assert len(context) == 3
             assert "This is a ticket message." in context[1]['content']
+            assert "Follow up" in context[2]['content']
     finally:
         if ticket_id:
             zammad_client.delete_ticket(ticket_id)
@@ -183,12 +189,12 @@ async def test_end_to_end_message_suppression(live_chat_system):
     memory_manager.log_message(user_id, "derpr", channel, 'user', user_id, "Message 3", datetime.now(), "p12")
     assert memory_manager.suppress_message_by_platform_id("p11_suppress") is True
     with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
-                      return_value=("", {})) as mock_llm_call:
+                      return_value=({'type': 'text', 'content': ''}, {})) as mock_llm_call:
         await chat_system.generate_response(
             persona_name="derpr", user_identifier=user_id, channel=channel, message="Final message"
         )
         context = mock_llm_call.call_args[0][1]['history']
-        assert len(context) == 2
+        assert len(context) == 3
         assert "Message to suppress" not in [msg['content'] for msg in context]
 
 
@@ -220,13 +226,13 @@ async def test_context_transformation_ignores_user_author_name(live_chat_system,
                                    datetime.now(), zammad_ticket_id=ticket_id)
         with patch.object(chat_system, '_find_active_ticket_for_user', new_callable=AsyncMock, return_value=ticket_id), \
                 patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
-                             return_value=("", {})) as mock_llm_call:
+                             return_value=({'type': 'text', 'content': ''}, {})) as mock_llm_call:
             await chat_system.generate_response(
                 persona_name="derpr", user_identifier=user_info['identifier'], channel="gmail",
                 message="Another message"
             )
             context = mock_llm_call.call_args[0][1]['history']
-            assert len(context) == 2  # System prompt + 1 message
+            assert len(context) == 3  # System prompt + 1 DB message + 1 current message
             assert context[1]['content'] == "Hello world"
             assert "SpecificUserName:" not in context[1]['content']
     finally:
@@ -241,13 +247,14 @@ async def test_empty_history_is_handled_gracefully(live_chat_system):
     """
     chat_system, _, _ = live_chat_system
     with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
-                      return_value=("Hello!", {})) as mock_llm_call:
+                      return_value=({'type': 'text', 'content': 'Hello!'}, {})) as mock_llm_call:
         _, _, _ = await chat_system.generate_response(
             persona_name="derpr", user_identifier="new_user_123",
             channel="new-channel", message="First message ever"
         )
         context = mock_llm_call.call_args[0][1]['history']
-        assert context == []
+        assert len(context) == 1
+        assert context[0] == {'role': 'user', 'content': 'First message ever'}
 
 
 @pytest.mark.asyncio
@@ -260,10 +267,11 @@ async def test_history_limit_zero_for_channel_mode(live_chat_system):
     memory_manager.log_message(user1, "derpr", channel, 'user', user1, "A message that should be ignored",
                                datetime.now())
     with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
-                      return_value=("", {})) as mock_llm_call:
+                      return_value=({'type': 'text', 'content': ''}, {})) as mock_llm_call:
         await chat_system.generate_response(
             persona_name="derpr", user_identifier=user1, channel=channel,
             message="A new message", history_limit=0
         )
         context = mock_llm_call.call_args[0][1]['history']
-        assert context == [], "History should be empty when history_limit=0 is provided."
+        assert len(context) == 1
+        assert context[0] == {'role': 'user', 'content': 'A new message'}
