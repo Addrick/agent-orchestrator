@@ -66,6 +66,12 @@ class ZammadClient:
 
     # --- Ticket Methods ---
 
+    def get_ticket(self, ticket_id: int) -> Dict[str, Any]:
+        """
+        Retrieves a single ticket by its ID, including all articles and related objects.
+        """
+        return self._make_request('get', f'tickets/{ticket_id}?expand=true')
+
     def create_ticket(self, title: str, group: str, customer_id: int, article_body: Optional[str] = None,
                       tags: Optional[List[str]] = None) -> Dict[str, Any]:
         """
