@@ -9,7 +9,7 @@ from datetime import timedelta, datetime
 from typing import Optional, List, Any, Coroutine, Set
 
 from config.global_config import DISCORD_CHAR_LIMIT, DISCORD_STATUS_LIMIT, CHAT_LOG_LOCATION, DISCORD_DEBUG_CHANNEL, \
-    AMBIENT_LOGGING_CHANNELS
+    AMBIENT_LOGGING_CHANNELS, GLOBAL_CONTEXT_LIMIT
 from src.utils.message_utils import split_string_by_limit, cleanse_message_for_history
 from src.chat_system import ChatSystem, ResponseType
 from src.persona import Persona
@@ -135,7 +135,7 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                         channel=message.channel.name if isinstance(message.channel, discord.abc.GuildChannel) else "DM",
                         message=cleaned_message,
                         image_url=await get_image_url(message),
-                        history_limit=20,
+                        history_limit=GLOBAL_CONTEXT_LIMIT,
                         user_display_name=message.author.display_name
                     )
 

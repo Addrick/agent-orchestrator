@@ -142,7 +142,7 @@ class GmailInterface:
                 channel="gmail",
                 message=full_message,
                 image_url=None,
-                history_limit=20,
+                history_limit=GLOBAL_CONTEXT_LIMIT,
                 user_display_name=user_display_name  # Pass new parameter
             )
 

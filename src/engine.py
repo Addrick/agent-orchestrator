@@ -8,6 +8,7 @@ from typing import Dict, Any, Optional, Tuple, List
 
 from dotenv import load_dotenv
 
+from config import global_config
 from config.global_config import EMPTY_RESPONSE_RETRIES, EMPTY_RESPONSE_RETRY_DELAY
 # --- Provider-specific imports ---
 import aiohttp
@@ -137,28 +138,46 @@ class TextEngine:
                                         tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
         Dict[str, Any], Dict[str, Any]]:
         client = await self._get_openai_client()
-        messages: List[Dict[str, Any]] = [{"role": "system", "content": context["persona_prompt"]}]
-        messages.extend(context["history"])
-        content_parts: List[Dict[str, Any]] = [{"type": "text", "text": context["current_message"]["text"]}]
-        if context["current_message"].get("image_url"):
-            content_parts.append({"type": "image_url", "image_url": {"url": context["current_message"]["image_url"]}})
-        messages.append({"role": "user", "content": content_parts})
+        messages: List[Dict[str, Any]] = []
+        # The first message might be a system prompt from chat_system
+        if context["history"] and context["history"][0]["role"] == "system":
+            messages.append(context["history"][0])
+            history_to_process = context["history"][1:]
+        else:
+            messages.append({"role": "system", "content": context["persona_prompt"]})
+            history_to_process = context["history"]
 
-        api_params: Dict[str, Any] = {"model": config["model_name"], "messages": messages,
-                                      "max_tokens": config.get("max_output_tokens"),
-                                      "temperature": config.get("temperature"),
-                                      "top_p": config.get("top_p")}
+        messages.extend(history_to_process)
+
+        # The 'current_message' is now only for the very first turn's image URL
+        if context["current_message"].get("image_url"):
+            last_message = messages[-1]
+            if last_message['role'] == 'user':
+                if isinstance(last_message['content'], str):
+                    last_message['content'] = [{"type": "text", "text": last_message['content']}]
+                last_message['content'].append(
+                    {"type": "image_url", "image_url": {"url": context["current_message"]["image_url"]}})
+
+        api_params: Dict[str, Any] = {
+            "model": config["model_name"],
+            "messages": messages,
+            "max_tokens": config.get("max_output_tokens") or global_config.DEFAULT_TOKEN_LIMIT,
+            "temperature": config.get("temperature"),
+            "top_p": config.get("top_p")
+        }
         if tools:
             api_params["tools"] = tools
             api_params["tool_choice"] = "auto"
-        api_params = {k: v for k, v in api_params.items() if v is not None}
+
+        api_params = {k: v for k, v in api_params.items() if v is not None or k == "max_tokens"}
 
         try:
             completion = await client.chat.completions.create(**api_params)
             response_message = completion.choices[0].message
 
             if "tools" in api_params:
-                api_params["tools"] = [tool.get("function", {}).get("name", "unknown") for tool in api_params["tools"]]
+                api_params["tools"] = [tool.get("function", {}).get("name", "unknown") for tool in
+                                       api_params.get("tools", [])]
 
             if response_message.tool_calls:
                 tool_calls: List[Dict[str, Any]] = []
@@ -187,23 +206,32 @@ class TextEngine:
                                            tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
         Dict[str, Any], Dict[str, Any]]:
         client = self._get_anthropic_client()
-        history = [msg for msg in context["history"] if msg["role"] != "system"]
-        history.append({"role": "user", "content": context["current_message"]["text"]})
 
-        api_params: Dict[str, Any] = {"model": config["model_name"], "system": context["persona_prompt"],
-                                      "messages": history,
-                                      "max_tokens": config["max_output_tokens"],
-                                      "temperature": config.get("temperature"),
-                                      "top_p": config.get("top_p"), "top_k": config.get("top_k")}
+        system_prompt = context["persona_prompt"]
+        history = context["history"]
+        if history and history[0]["role"] == "system":
+            system_prompt = f"{system_prompt}\n\n{history[0]['content']}"
+            history = history[1:]
+
+        api_params: Dict[str, Any] = {
+            "model": config["model_name"],
+            "system": system_prompt,
+            "messages": history,
+            "max_tokens": config.get("max_output_tokens") or global_config.DEFAULT_TOKEN_LIMIT,
+            "temperature": config.get("temperature"),
+            "top_p": config.get("top_p"),
+            "top_k": config.get("top_k")
+        }
         if tools:
             api_params["tools"] = tools
-        api_params = {k: v for k, v in api_params.items() if v is not None}
+
+        api_params = {k: v for k, v in api_params.items() if v is not None or k == "max_tokens"}
 
         try:
             response = client.messages.create(**api_params)
 
             if "tools" in api_params:
-                api_params["tools"] = [tool.get("name", "unknown") for tool in api_params["tools"]]
+                api_params["tools"] = [tool.get("name", "unknown") for tool in api_params.get("tools", [])]
 
             if response.stop_reason == "tool_use":
                 tool_calls: List[Dict[str, Any]] = []
@@ -235,22 +263,45 @@ class TextEngine:
         except (ValueError, AssertionError) as e:
             raise LLMCommunicationError(f"Error: Google not configured: {e}") from e
 
+        # FIX 1: Use the history directly, do not create a special "current_message" prompt.
+        # The system prompt is now the first message in the history.
         history_for_api = []
-        for item in context['history']:
-            role = 'model' if item['role'] == 'assistant' else 'user'
-            if item['role'] == 'tool':
-                history_for_api.append({'role': 'tool', 'parts': [Part(**{
-                    'function_response': {'name': item['name'], 'response': json.loads(item['content'])}})]})
-            elif item.get('tool_calls'):
-                parts = [Part(**{'function_call': {'name': call['name'], 'args': call['arguments']}}) for call
-                         in item['tool_calls']]
-                history_for_api.append({'role': 'model', 'parts': parts})
-            else:
-                history_for_api.append({'role': role, 'parts': [{'text': item['content']}]})
+        serializable_history = []  # For dump_last
 
-        final_user_message = (f"### Instructions: ###\n{context['persona_prompt']}\n\n"
-                              f"### Current Message to Respond To: ###\n{context['current_message']['text']}")
-        history_for_api.append({'role': 'user', 'parts': [{'text': final_user_message}]})
+        # Use persona prompt as the first part of the first user message, as per Gemini best practices
+        # unless a system prompt is already injected.
+        system_prompt = context["persona_prompt"]
+        history_to_process = context["history"]
+        if history_to_process and history_to_process[0]["role"] == "system":
+            system_prompt = f"{system_prompt}\n\n{history_to_process[0]['content']}"
+            history_to_process = history_to_process[1:]
+
+        first_turn = True
+        for item in history_to_process:
+            role = 'model' if item['role'] == 'assistant' else 'user'
+
+            # Create a dictionary representation for serializable_history
+            serializable_item = item.copy()
+
+            if item['role'] == 'tool':
+                part_dict = {'function_response': {'name': item['name'], 'response': json.loads(item['content'])}}
+                history_for_api.append({'role': 'tool', 'parts': [Part(**part_dict)]})
+                serializable_item['parts'] = [part_dict]
+            elif item.get('tool_calls'):
+                parts_list = [{'function_call': {'name': call['name'], 'args': call['arguments']}} for call in
+                              item['tool_calls']]
+                history_for_api.append({'role': 'model', 'parts': [Part(**p) for p in parts_list]})
+                serializable_item['parts'] = parts_list
+            else:
+                content_text = item['content']
+                if first_turn and role == 'user':
+                    content_text = f"{system_prompt}\n\n### Conversation:\n{content_text}"
+                    first_turn = False
+                part_dict = {'text': content_text}
+                history_for_api.append({'role': role, 'parts': [Part(**part_dict)]})
+                serializable_item['parts'] = [part_dict]
+
+            serializable_history.append(serializable_item)
 
         content_config_for_api: Dict[str, Any] = {"safety_settings": self.google_safety_settings}
 
@@ -262,28 +313,24 @@ class TextEngine:
             content_config_for_api['tool_config'] = {"function_calling_config": {"mode": "AUTO"}}
         else:
             api_tools.append(self.google_search_tool)
-
         content_config_for_api['tools'] = api_tools
 
-        if isinstance(config.get("max_output_tokens"), int): content_config_for_api['max_output_tokens'] = config.get(
-            "max_output_tokens")
+        content_config_for_api['max_output_tokens'] = config.get(
+            "max_output_tokens") or global_config.DEFAULT_TOKEN_LIMIT
         if isinstance(config.get("temperature"), (int, float)): content_config_for_api['temperature'] = config.get(
             "temperature")
         if isinstance(config.get("top_p"), (int, float)): content_config_for_api['top_p'] = config.get("top_p")
         if isinstance(config.get("top_k"), (int, float)): content_config_for_api['top_k'] = config.get("top_k")
 
+        # FIX 2: Use the fully serializable history for the dump payload
         dump_config = content_config_for_api.copy()
         if 'tools' in dump_config:
-            tool_names = []
-            for t in dump_config['tools']:
-                if t.function_declarations:
-                    tool_names.extend([d.name for d in t.function_declarations])
-                else:
-                    tool_names.append("google_search")
+            tool_names = ["google_search" if not t.function_declarations else d.name for t in dump_config['tools'] for d
+                          in t.function_declarations]
             dump_config['tools'] = tool_names
 
         api_params_for_dumping = {
-            'model': config["model_name"], 'contents': history_for_api,
+            'model': config["model_name"], 'contents': serializable_history,
             'config': json.loads(json.dumps(dump_config, default=str))
         }
 
@@ -330,11 +377,16 @@ class TextEngine:
         url: str = 'http://localhost:5001/api/v1/generate'
         history_str: str = "\n".join([f"{msg['role']}: {msg['content']}" for msg in context['history']])
         full_prompt: str = f"{history_str}\nuser: {context['current_message']['text']}\nassistant:"
-        payload: Dict[str, Any] = {"max_length": config["max_output_tokens"],
-                                   "temperature": config.get("temperature", 0.7),
-                                   "top_p": config.get("top_p", 0.9), "top_k": config.get("top_k", 40),
-                                   "memory": context["persona_prompt"], "prompt": full_prompt}
-        payload = {k: v for k, v in payload.items() if v is not None}
+
+        payload: Dict[str, Any] = {
+            "max_length": config.get("max_output_tokens") or global_config.DEFAULT_TOKEN_LIMIT,
+            "temperature": config.get("temperature"),
+            "top_p": config.get("top_p"),
+            "top_k": config.get("top_k"),
+            "memory": context["persona_prompt"],
+            "prompt": full_prompt
+        }
+        payload = {k: v for k, v in payload.items() if v is not None or k == "max_length"}
 
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=600)) as session:
