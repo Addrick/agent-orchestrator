@@ -139,7 +139,6 @@ class TextEngine:
         Dict[str, Any], Dict[str, Any]]:
         client = await self._get_openai_client()
         messages: List[Dict[str, Any]] = []
-        # The first message might be a system prompt from chat_system
         if context["history"] and context["history"][0]["role"] == "system":
             messages.append(context["history"][0])
             history_to_process = context["history"][1:]
@@ -149,7 +148,6 @@ class TextEngine:
 
         messages.extend(history_to_process)
 
-        # The 'current_message' is now only for the very first turn's image URL
         if context["current_message"].get("image_url"):
             last_message = messages[-1]
             if last_message['role'] == 'user':
@@ -263,13 +261,9 @@ class TextEngine:
         except (ValueError, AssertionError) as e:
             raise LLMCommunicationError(f"Error: Google not configured: {e}") from e
 
-        # FIX 1: Use the history directly, do not create a special "current_message" prompt.
-        # The system prompt is now the first message in the history.
         history_for_api = []
-        serializable_history = []  # For dump_last
+        serializable_history = []
 
-        # Use persona prompt as the first part of the first user message, as per Gemini best practices
-        # unless a system prompt is already injected.
         system_prompt = context["persona_prompt"]
         history_to_process = context["history"]
         if history_to_process and history_to_process[0]["role"] == "system":
@@ -280,7 +274,6 @@ class TextEngine:
         for item in history_to_process:
             role = 'model' if item['role'] == 'assistant' else 'user'
 
-            # Create a dictionary representation for serializable_history
             serializable_item = item.copy()
 
             if item['role'] == 'tool':
@@ -322,11 +315,15 @@ class TextEngine:
         if isinstance(config.get("top_p"), (int, float)): content_config_for_api['top_p'] = config.get("top_p")
         if isinstance(config.get("top_k"), (int, float)): content_config_for_api['top_k'] = config.get("top_k")
 
-        # FIX 2: Use the fully serializable history for the dump payload
         dump_config = content_config_for_api.copy()
+        # FIX: Replace faulty list comprehension with a robust for loop.
         if 'tools' in dump_config:
-            tool_names = ["google_search" if not t.function_declarations else d.name for t in dump_config['tools'] for d
-                          in t.function_declarations]
+            tool_names = []
+            for t in dump_config['tools']:
+                if t.function_declarations:
+                    tool_names.extend([d.name for d in t.function_declarations])
+                else:  # This handles the google_search_tool case
+                    tool_names.append("google_search")
             dump_config['tools'] = tool_names
 
         api_params_for_dumping = {
