@@ -152,6 +152,12 @@ class ZammadClient:
             payload['note'] = note
         return self._make_request('post', 'users', json=payload)
 
+    def update_user(self, user_id: int, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Updates an existing user with the given payload.
+        """
+        return self._make_request('put', f'users/{user_id}', json=payload)
+
     def delete_user(self, user_id: int) -> None:
         """
         Deletes a user from Zammad.
