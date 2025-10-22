@@ -15,6 +15,16 @@ class ExecutionMode(Enum):
     ASSISTED_DISPATCH = auto()
 
 
+class MemoryMode(Enum):
+    """Defines the strategy for retrieving conversation history."""
+    HIERARCHICAL = auto()  # Smart default (Ticket > Channel > Server > Personal)
+    CHANNEL_ISOLATED = auto()  # Only this specific channel
+    SERVER_WIDE = auto()  # All channels in this server
+    PERSONAL = auto()  # This user, across all servers/channels
+    GLOBAL = auto()  # All messages this persona has ever seen, anywhere
+    TICKET_ISOLATED = auto()  # Only ticket context
+
+
 class Persona:
     """
     A data class to hold settings and state for a specific LLM persona.
@@ -33,7 +43,8 @@ class Persona:
             top_k: Optional[int] = None,
             display_name_in_chat: bool = False,
             execution_mode: ExecutionMode = ExecutionMode.SILENT_ANALYSIS,
-            enabled_tools: Optional[List[str]] = None
+            enabled_tools: Optional[List[str]] = None,
+            memory_mode: MemoryMode = MemoryMode.HIERARCHICAL
     ) -> None:
         self._name: str = persona_name
         self._model_name: str = model_name
@@ -42,6 +53,7 @@ class Persona:
         self._context_length: int = context_length if context_length is not None else global_config.DEFAULT_CONTEXT_LIMIT
         self._execution_mode: ExecutionMode = execution_mode
         self._enabled_tools: List[str] = enabled_tools if enabled_tools is not None else []
+        self._memory_mode: MemoryMode = memory_mode
         self._temp_context_override: Optional[int] = None
 
         # Model-specific generation parameters
@@ -96,6 +108,10 @@ class Persona:
     def get_enabled_tools(self) -> List[str]:
         """Returns the list of tool names this persona is allowed to use."""
         return self._enabled_tools
+
+    def get_memory_mode(self) -> MemoryMode:
+        """Returns the persona's current memory retrieval strategy."""
+        return self._memory_mode
 
     # --- Setters ---
 
@@ -206,6 +222,21 @@ class Persona:
             return
         self._enabled_tools = new_tools
         logger.info(f"Persona '{self._name}' enabled tools set to: {self._enabled_tools}")
+
+    def set_memory_mode(self, new_mode: Any) -> None:
+        """Sets the memory retrieval strategy from a string or a MemoryMode member."""
+        if isinstance(new_mode, MemoryMode):
+            self._memory_mode = new_mode
+        elif isinstance(new_mode, str):
+            try:
+                self._memory_mode = MemoryMode[new_mode.upper()]
+            except KeyError:
+                logger.warning(f"Invalid memory mode string: '{new_mode}'. No change made.")
+                return
+        else:
+            logger.warning(f"Invalid type for memory mode: {type(new_mode)}. No change made.")
+            return
+        logger.info(f"Persona '{self._name}' memory mode set to {self._memory_mode.name}.")
 
     # --- Conversation State Methods ---
 

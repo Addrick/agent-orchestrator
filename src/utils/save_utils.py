@@ -73,7 +73,7 @@ def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
             "name": persona.get_name(),
             "prompt": persona.get_prompt(),
             "model_name": persona.get_model_name(),
-            "context_limit": persona.get_context_length(),
+            "context_limit": persona._context_length, # Save the base value, not the dynamic one
             "token_limit": persona.get_response_token_limit(),
             "temperature": persona.get_temperature(),
             "top_p": persona.get_top_p(),
@@ -81,13 +81,14 @@ def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
             "display_name_in_chat": persona.should_display_name_in_chat(),
             "execution_mode": persona.get_execution_mode().name,
             "enabled_tools": persona.get_enabled_tools(),
+            "memory_mode": persona.get_memory_mode().name,
         }
         persona_list.append(persona_json)
     return persona_list
 
 
 def load_personas_from_file(file_path: str = PERSONA_SAVE_FILE) -> Optional[Dict[str, Any]]:
-    from src.persona import Persona, ExecutionMode
+    from src.persona import Persona, ExecutionMode, MemoryMode
     """Load personas from a JSON-formatted file into a dictionary."""
     if not os.path.exists(file_path):
         logger.warning(f"File '{file_path}' does not exist.")
@@ -118,6 +119,16 @@ def load_personas_from_file(file_path: str = PERSONA_SAVE_FILE) -> Optional[Dict
                     logger.warning(f"Invalid execution_mode '{execution_mode_str}' for persona '{name}'. "
                                    f"Defaulting to SILENT_ANALYSIS.")
 
+            # Handle loading memory_mode
+            memory_mode_str: Optional[str] = new_persona.get("memory_mode")
+            memory_mode: MemoryMode = MemoryMode.HIERARCHICAL # New safe default
+            if memory_mode_str and isinstance(memory_mode_str, str):
+                try:
+                    memory_mode = MemoryMode[memory_mode_str.upper()]
+                except KeyError:
+                    logger.warning(f"Invalid memory_mode '{memory_mode_str}' for persona '{name}'. "
+                                   f"Defaulting to HIERARCHICAL.")
+
             personas[name] = Persona(
                 persona_name=name,
                 model_name=new_persona.get("model_name"),
@@ -129,7 +140,8 @@ def load_personas_from_file(file_path: str = PERSONA_SAVE_FILE) -> Optional[Dict
                 top_k=new_persona.get("top_k"),
                 display_name_in_chat=new_persona.get("display_name_in_chat", False),
                 execution_mode=execution_mode,
-                enabled_tools=new_persona.get("enabled_tools", [])  # Default to empty list
+                enabled_tools=new_persona.get("enabled_tools", []),
+                memory_mode=memory_mode
             )
         return personas
     except json.JSONDecodeError as e:

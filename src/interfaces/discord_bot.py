@@ -129,11 +129,15 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                     response_text: str
                     response_type: ResponseType
                     ticket_id: Optional[int]
+
+                    server_id: Optional[str] = str(message.guild.id) if message.guild else None
+
                     response_text, response_type, ticket_id = await chat_system.generate_response(
                         persona_name=active_persona_name,
                         user_identifier=str(message.author.id),
                         channel=message.channel.name if isinstance(message.channel, discord.abc.GuildChannel) else "DM",
                         message=cleaned_message,
+                        server_id=server_id,
                         image_url=await get_image_url(message),
                         history_limit=GLOBAL_CONTEXT_LIMIT,
                         user_display_name=message.author.display_name
@@ -149,7 +153,7 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                                                                        discord.abc.GuildChannel) else "DM",
                             author_role='user', author_name=message.author.display_name, content=cleaned_message,
                             timestamp=message.created_at, platform_message_id=str(message.id),
-                            zammad_ticket_id=ticket_id
+                            zammad_ticket_id=ticket_id, server_id=server_id
                         )
 
                         persona: Persona = chat_system.personas[active_persona_name]
@@ -174,7 +178,7 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                                 author_role='assistant', author_name=active_persona_name,
                                 content=cleanse_message_for_history(response_text),
                                 timestamp=bot_timestamp, platform_message_id=str(last_reply_message.id),
-                                zammad_ticket_id=ticket_id
+                                zammad_ticket_id=ticket_id, server_id=server_id
                             )
                 await reset_discord_status(client, chat_system)
                 return
@@ -187,6 +191,7 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
         is_ambient_channel = isinstance(message.channel, discord.abc.GuildChannel) and message.channel.name.lower() in [
             c.lower() for c in AMBIENT_LOGGING_CHANNELS]
         if is_ambient_channel:
+            server_id = str(message.guild.id) if message.guild else None
             await asyncio.to_thread(
                 chat_system.memory_manager.log_message,
                 user_identifier=str(message.author.id),
@@ -196,7 +201,8 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                 author_name=message.author.display_name,
                 content=message.content,
                 timestamp=message.created_at,
-                platform_message_id=str(message.id)
+                platform_message_id=str(message.id),
+                server_id=server_id
             )
 
     return client
