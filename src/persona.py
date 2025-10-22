@@ -42,6 +42,7 @@ class Persona:
         self._context_length: int = context_length if context_length is not None else global_config.DEFAULT_CONTEXT_LIMIT
         self._execution_mode: ExecutionMode = execution_mode
         self._enabled_tools: List[str] = enabled_tools if enabled_tools is not None else []
+        self._temp_context_override: Optional[int] = None
 
         # Model-specific generation parameters
         self._temperature: Optional[float] = temperature
@@ -64,6 +65,17 @@ class Persona:
         return self._response_token_limit
 
     def get_context_length(self) -> int:
+        """
+        Returns the effective context length. If a temporary override is active
+        (from a 'hello' command), it returns the override value and increments it
+        for the next turn. Otherwise, it returns the default context length.
+        """
+        if self._temp_context_override is not None:
+            current_limit = self._temp_context_override
+            # Increment by 2 for the user message and the assistant's reply.
+            self._temp_context_override += 2
+            return current_limit
+
         return self._context_length
 
     def get_temperature(self) -> Optional[float]:
@@ -110,20 +122,22 @@ class Persona:
             logger.info(f"Persona '{self._name}' response token limit set to {self._response_token_limit}.")
         except (ValueError, TypeError):
             self._response_token_limit = None
-            logger.info(f"Non-integer token limit provided: '{new_limit}'. No limit set (this will use provider default).")
+            logger.info(
+                f"Non-integer token limit provided: '{new_limit}'. No limit set (this will use provider default).")
         return self._response_token_limit
 
     def set_context_length(self, new_length: Any) -> int:
         """
-        Sets the context length. Returns the integer value.
-        Defaults to the global default if the input is invalid.
+        Sets the static default context length and disables any active dynamic context override.
         """
+        self.end_new_conversation()  # Ensure dynamic mode is off when setting a static length.
         try:
             self._context_length = int(new_length)
             logger.info(f"Persona '{self._name}' context length set to {self._context_length}.")
         except (ValueError, TypeError):
             self._context_length = global_config.DEFAULT_CONTEXT_LIMIT
-            logger.info(f"Invalid context length provided: '{new_length}'. Setting to default value: {self._context_length}.")
+            logger.info(
+                f"Invalid context length provided: '{new_length}'. Setting to default value: {self._context_length}.")
         return self._context_length
 
     def set_temperature(self, new_temp: Any) -> Optional[float]:
@@ -192,6 +206,32 @@ class Persona:
             return
         self._enabled_tools = new_tools
         logger.info(f"Persona '{self._name}' enabled tools set to: {self._enabled_tools}")
+
+    # --- Conversation State Methods ---
+
+    def start_new_conversation(self, start_value: int = 0) -> None:
+        """Initiates a 'fresh start' mode by setting a temporary context override."""
+        self._temp_context_override = start_value
+        logger.info(f"Persona '{self._name}' starting new conversation with temporary context at size {start_value}.")
+
+    def end_new_conversation(self) -> None:
+        """Ends the 'fresh start' mode and reverts to the default context length."""
+        if self.is_in_dynamic_context():
+            self._temp_context_override = None
+            logger.info(f"Persona '{self._name}' ending temporary context, reverting to default.")
+
+    def is_in_dynamic_context(self) -> bool:
+        """Returns True if the persona is in a temporary, dynamic context conversation."""
+        return self._temp_context_override is not None
+
+    def get_current_effective_context_length(self) -> int:
+        """
+        Returns the next context value that will be used, without incrementing the counter.
+        Useful for inspecting state with the 'detail' command.
+        """
+        if self._temp_context_override is not None:
+            return self._temp_context_override
+        return self._context_length
 
     # --- Utility Methods ---
 

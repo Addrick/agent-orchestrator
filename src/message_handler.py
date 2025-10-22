@@ -24,7 +24,6 @@ class BotLogic:
             'help': self._handle_help,
             'update_models': self._handle_update_models,
             'remember': self._handle_remember,
-            'save': self._handle_save,
             'add': self._handle_add,
             'delete': self._handle_delete,
             'detail': self._handle_detail,
@@ -100,7 +99,6 @@ class BotLogic:
                                                                        "add <persona>, \n"
                                                                        "delete <persona>, \n"
                                                                        "detail, \n"
-                                                                       "save, \n"
                                                                        "update_models, \n"
                                                                        "dump_last")
         return help_msg, False
@@ -154,13 +152,20 @@ class BotLogic:
         else:
             tools_display = ", ".join(enabled_tools)
 
+        context_display: str
+        if persona.is_in_dynamic_context():
+            next_limit = persona.get_current_effective_context_length()
+            context_display = f"{next_limit} (Dynamic, will grow on next message)"
+        else:
+            context_display = str(persona.get_current_effective_context_length())
+
         details: str = (
             f"Details for Persona: {persona.get_name()}\n"
             f"----------------------------------------\n"
             f"Model: {persona.get_model_name() or 'default'}\n"
             f"Execution Mode: {persona.get_execution_mode().name}\n"
             f"Enabled Tools: {tools_display}\n"
-            f"Context Length: {persona.get_context_length()}\n"
+            f"Context Length: {context_display}\n"
             f"Display Name in Chat: {persona.should_display_name_in_chat()}\n"
             f"Response Token Limit: {persona.get_response_token_limit() or 'default'}\n"
             f"Generation Parameters:\n"
@@ -204,7 +209,7 @@ class BotLogic:
         return f"Available personas are: {list(self.chat_system.personas.keys())}", False
 
     def _what_context(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        return f"{persona.get_name()} currently looks back {persona.get_context_length()} previous messages.", False
+        return f"{persona.get_name()} default context length is {persona._context_length}.", False
 
     def _what_tokens(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
         return f"{persona.get_name()} is limited to {persona.get_response_token_limit()} response tokens.", False
@@ -279,18 +284,30 @@ class BotLogic:
             return f"Non-numeric token limit '{limit_str}' provided. The default token limit will be used for {persona.get_name()}.", True
 
     def _set_context(self, args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
-        limit_str: str
-        try:
-            limit_str = args[1]
-            context_limit: int = int(limit_str)
-            persona.set_context_length(context_limit)
-            return f"Set context limit for {persona.get_name()} to '{context_limit}'.", True
-        except IndexError:
-            return None, False
-        except ValueError:
-            limit_str = args[1]
-            persona.set_context_length(None)
-            return f"Non-numeric context limit '{limit_str}' provided. The default context length will be used for {persona.get_name()}.", True
+        if len(args) < 2:
+            return "Usage: set context <number|dynamic> [start_value]", False
+
+        mode = args[1].lower()
+        if mode == 'dynamic':
+            start_value: int
+            if len(args) > 2:
+                try:
+                    start_value = int(args[2])
+                except ValueError:
+                    return f"Error: Invalid start value '{args[2]}'. Must be an integer.", False
+            else:
+                # If no start value is given, use the current effective context length.
+                start_value = persona.get_current_effective_context_length()
+
+            persona.start_new_conversation(start_value)
+            return f"Dynamic context mode enabled for {persona.get_name()}, starting at size {start_value}.", True
+        else:
+            try:
+                context_limit = int(mode)
+                persona.set_context_length(context_limit)
+                return f"Set static context limit for {persona.get_name()} to '{context_limit}'.", True
+            except ValueError:
+                return f"Error: Invalid context command '{mode}'. Use a number or 'dynamic'.", False
 
     def _set_temp(self, args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
         temp_str: str
@@ -400,14 +417,14 @@ class BotLogic:
         Optional[str], bool]:
         if args:
             return None, False
-        persona.set_context_length(0)
+        persona.start_new_conversation()
         return f"{persona.get_name()}: Hello! Starting new conversation...", True
 
     def _handle_stop_conversation(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[
         Optional[str], bool]:
         if args:
             return None, False
-        persona.set_context_length(DEFAULT_CONTEXT_LIMIT)
+        persona.end_new_conversation()
         return f"{persona.get_name()}: Goodbye! Resetting context.", True
 
     def _handle_dump_last(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[str, bool]:
@@ -425,11 +442,6 @@ class BotLogic:
         display_json: str = pretty_json.replace('\\n', '\n')
 
         return f"{persona_name}: Last API Request Payload\n{display_json}", False
-
-    def _handle_save(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[Optional[str], bool]:
-        if args:
-            return None, False
-        return 'Personas saved.', True
 
     def _handle_update_models(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[str, bool]:
         if args:
