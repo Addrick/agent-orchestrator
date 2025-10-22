@@ -14,7 +14,7 @@ from src.clients.zammad_client import ZammadClient
 from src.database.memory_manager import MemoryManager
 from src.engine import LLMCommunicationError, TextEngine
 from src.message_handler import BotLogic
-from src.persona import Persona, ExecutionMode
+from src.persona import Persona, ExecutionMode, MemoryMode
 from src.tools.tool_manager import ToolManager
 from src.utils.model_utils import get_model_list
 from src.utils.save_utils import load_personas_from_file, save_personas_to_file
@@ -122,13 +122,13 @@ class ChatSystem:
         """Formats database history records into a list of messages for the LLM."""
         final_history: List[Dict[str, Any]] = []
         for msg in raw_history:
-            author_role: Optional[str] = msg.get('author_role')
-            author_name: Optional[str] = msg.get('author_name')
-            content: str = msg.get('content', '')
+            author_role = msg.get('author_role')
+            author_name = msg.get('author_name')
+            content = msg.get('content', '')
 
             if author_role == 'user':
-                if memory_mode == "channel" and author_name:
-                    formatted_content: str = f"{author_name}: {content}"
+                if memory_mode in ("channel", "server", "global") and author_name:
+                    formatted_content = f"{author_name}: {content}"
                     final_history.append({'role': 'user', 'content': formatted_content})
                 else:
                     final_history.append({'role': 'user', 'content': content})
@@ -136,6 +136,7 @@ class ChatSystem:
                 if author_name == persona_name:
                     final_history.append({'role': 'assistant', 'content': content})
                 else:
+                    # Treat other assistants' messages as if they were users in a multi-user chat
                     formatted_content = f"{author_name}: {content}"
                     final_history.append({'role': 'user', 'content': formatted_content})
         return final_history
@@ -146,6 +147,7 @@ class ChatSystem:
             user_identifier: str,
             channel: str,
             message: str,
+            server_id: Optional[str] = None,
             image_url: Optional[str] = None,
             history_limit: Optional[int] = None,
             user_display_name: Optional[str] = None
@@ -178,21 +180,50 @@ class ChatSystem:
                     if not ticket_to_log:
                         ticket_to_log = await self._find_active_ticket_for_user(customer_id)
 
-            persona_limit: int = persona.get_context_length()
-            effective_limit: int = min(persona_limit, history_limit) if history_limit is not None else persona_limit
+            effective_limit: int = persona.get_context_length()
+            if history_limit is not None:
+                effective_limit = min(effective_limit, history_limit)
 
-            raw_history: List[Dict[str, Any]]
+            mode = persona.get_memory_mode()
+            raw_history: List[Dict[str, Any]] = []
+            memory_mode_used = "none"
             system_context_message: Optional[str] = None
-            memory_mode: str
-            if ticket_to_log:
-                memory_mode = "ticket"
-                raw_history = self.memory_manager.get_ticket_history(ticket_to_log, effective_limit)
-                system_context_message = f"This conversation is part of Zammad ticket #{ticket_to_log}."
-            else:
-                memory_mode = "channel"
-                raw_history = self.memory_manager.get_channel_history(channel, effective_limit)
 
-            conversation_history: List[Dict[str, Any]] = self._format_raw_history_for_llm(raw_history, memory_mode,
+            if mode == MemoryMode.HIERARCHICAL:
+                if ticket_to_log:
+                    memory_mode_used = "ticket"
+                    raw_history = self.memory_manager.get_ticket_history(ticket_to_log, effective_limit)
+                if not raw_history and channel:
+                    memory_mode_used = "channel"
+                    raw_history = self.memory_manager.get_channel_history(channel, persona_name, server_id,
+                                                                          effective_limit)
+                if not raw_history and server_id:
+                    memory_mode_used = "server"
+                    raw_history = self.memory_manager.get_server_history(server_id, persona_name, effective_limit)
+                if not raw_history:
+                    memory_mode_used = "personal"
+                    raw_history = self.memory_manager.get_personal_history(user_identifier, persona_name,
+                                                                           effective_limit)
+            elif mode == MemoryMode.CHANNEL_ISOLATED:
+                memory_mode_used = "channel"
+                raw_history = self.memory_manager.get_channel_history(channel, persona_name, server_id, effective_limit)
+            elif mode == MemoryMode.SERVER_WIDE and server_id:
+                memory_mode_used = "server"
+                raw_history = self.memory_manager.get_server_history(server_id, persona_name, effective_limit)
+            elif mode == MemoryMode.PERSONAL:
+                memory_mode_used = "personal"
+                raw_history = self.memory_manager.get_personal_history(user_identifier, persona_name, effective_limit)
+            elif mode == MemoryMode.GLOBAL:
+                memory_mode_used = "global"
+                raw_history = self.memory_manager.get_global_history(persona_name, effective_limit)
+            elif mode == MemoryMode.TICKET_ISOLATED and ticket_to_log:
+                memory_mode_used = "ticket"
+                raw_history = self.memory_manager.get_ticket_history(ticket_to_log, effective_limit)
+
+            if memory_mode_used == "ticket" and ticket_to_log:
+                system_context_message = f"This conversation is part of Zammad ticket #{ticket_to_log}."
+
+            conversation_history: List[Dict[str, Any]] = self._format_raw_history_for_llm(raw_history, memory_mode_used,
                                                                                           persona_name)
             if system_context_message:
                 conversation_history.insert(0, {"role": "system", "content": system_context_message})
@@ -255,9 +286,9 @@ class ChatSystem:
                                                         ticket_id=ticket_to_log, body=log_body, internal=True)
                             tool_result = {"status": "success", "action": "simulated and logged"}
                         else:  # ASSISTED_DISPATCH
-                            # FIX: Inject the customer_id for the create_ticket tool.
-                            if tool_name == 'create_ticket' and customer_id:
-                                tool_args['customer_id'] = customer_id
+                            if tool_name == 'create_ticket':
+                                if 'customer_id' not in tool_args and customer_id:
+                                    tool_args['customer_id'] = customer_id
 
                             tool_result = await self.tool_manager.execute_tool(tool_name, **tool_args)
 

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from config.global_config import (DEFAULT_CONTEXT_LIMIT, DEFAULT_MODEL_NAME,
                                   DEFAULT_PERSONA)
-from src.persona import Persona, ExecutionMode
+from src.persona import Persona, ExecutionMode, MemoryMode
 from src.utils import model_utils
 from src.utils.model_utils import get_model_list
 
@@ -43,6 +43,7 @@ class BotLogic:
             'temp': self._what_temp,
             'execution_mode': self._what_execution_mode,
             'tools': self._what_tools,
+            'memory_mode': self._what_memory_mode,
         }
         self.set_handlers = {
             'prompt': self._set_prompt,
@@ -56,6 +57,7 @@ class BotLogic:
             'display_name': self._set_display_name,
             'execution_mode': self._set_execution_mode,
             'tools': self._set_tools,
+            'memory_mode': self._set_memory_mode,
         }
 
     async def preprocess_message(self, persona_name: str, user_identifier: str, message: str) -> Optional[
@@ -94,8 +96,8 @@ class BotLogic:
                                                                        "hello (start new conversation), \n"
                                                                        "goodbye (end conversation), \n"
                                                                        "remember <+prompt>, \n"
-                                                                       "what prompt/model/models (google/openai/anthropic)/personas/context/tokens/temp/execution_mode/tools, \n"
-                                                                       "set prompt/model/context/tokens/temp/display_name/execution_mode/tools, \n"
+                                                                       "what prompt/model/models/personas/context/tokens/temp/execution_mode/tools/memory_mode, \n"
+                                                                       "set prompt/model/context/tokens/temp/display_name/execution_mode/tools/memory_mode, \n"
                                                                        "add <persona>, \n"
                                                                        "delete <persona>, \n"
                                                                        "detail, \n"
@@ -163,6 +165,7 @@ class BotLogic:
             f"Details for Persona: {persona.get_name()}\n"
             f"----------------------------------------\n"
             f"Model: {persona.get_model_name() or 'default'}\n"
+            f"Memory Mode: {persona.get_memory_mode().name}\n"
             f"Execution Mode: {persona.get_execution_mode().name}\n"
             f"Enabled Tools: {tools_display}\n"
             f"Context Length: {context_display}\n"
@@ -235,6 +238,10 @@ class BotLogic:
 
         return "\n".join(response_lines), False
 
+    def _what_memory_mode(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
+        valid_modes = ", ".join([e.name.lower() for e in MemoryMode])
+        return f"Memory mode for '{persona.get_name()}' is {persona.get_memory_mode().name.lower()}.\nValid modes are: {valid_modes}.", False
+
     def _handle_set(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[Optional[str], bool]:
         if not args:
             return None, False
@@ -283,7 +290,7 @@ class BotLogic:
             persona.set_response_token_limit(None)
             return f"Non-numeric token limit '{limit_str}' provided. The default token limit will be used for {persona.get_name()}.", True
 
-    def _set_context(self, args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
+    def _set_context(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
         if len(args) < 2:
             return "Usage: set context <number|dynamic> [start_value]", False
 
@@ -296,7 +303,6 @@ class BotLogic:
                 except ValueError:
                     return f"Error: Invalid start value '{args[2]}'. Must be an integer.", False
             else:
-                # If no start value is given, use the current effective context length.
                 start_value = persona.get_current_effective_context_length()
 
             persona.start_new_conversation(start_value)
@@ -382,7 +388,6 @@ class BotLogic:
             return f"Error: Please specify an execution mode. Valid modes are: {valid_modes}.", False
 
         try:
-            # This will raise KeyError if the mode is invalid
             ExecutionMode[mode_str]
             persona.set_execution_mode(mode_str)
             return f"Execution mode for {persona.get_name()} set to '{mode_str}'.", True
@@ -412,6 +417,21 @@ class BotLogic:
 
             persona.set_enabled_tools(tools_to_set)
             return f"Enabled tools for {persona.get_name()} set to: {', '.join(tools_to_set)}", True
+
+    def _set_memory_mode(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
+        try:
+            mode_str = args[1].upper()
+        except IndexError:
+            valid_modes = ", ".join([e.name.lower() for e in MemoryMode])
+            return f"Error: Please specify a memory mode. Valid modes are: {valid_modes}.", False
+
+        try:
+            MemoryMode[mode_str]
+            persona.set_memory_mode(mode_str)
+            return f"Memory mode for {persona.get_name()} set to '{mode_str}'.", True
+        except KeyError:
+            valid_modes = ", ".join([e.name.lower() for e in MemoryMode])
+            return f"Error: Invalid memory mode '{args[1]}'. Valid modes are: {valid_modes}.", False
 
     def _handle_start_conversation(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[
         Optional[str], bool]:
