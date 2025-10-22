@@ -1,4 +1,4 @@
-# tests/engine/test_engine.py
+# tests/test_engine.py
 
 import pytest
 from unittest.mock import patch, AsyncMock, MagicMock
@@ -73,7 +73,9 @@ class TestGenerateResponseLogic:
 @patch('src.engine.AsyncOpenAI')
 class TestOpenAI:
     @pytest.mark.asyncio
-    async def test_success_text_response(self, mock_openai_class, text_engine, openai_config, base_context):
+    async def test_success_text_response(self, mock_openai_class, text_engine, openai_config, base_context,
+                                         monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_openai_class.return_value
         mock_instance.chat.completions.create = AsyncMock(
             return_value=MagicMock(choices=[MagicMock(message=MagicMock(content="Success", tool_calls=None))])
@@ -83,7 +85,9 @@ class TestOpenAI:
         mock_instance.chat.completions.create.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_success_tool_call_response(self, mock_openai_class, text_engine, openai_config, base_context):
+    async def test_success_tool_call_response(self, mock_openai_class, text_engine, openai_config, base_context,
+                                              monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_openai_class.return_value
         mock_function = MagicMock()
         mock_function.name = "get_weather"
@@ -97,7 +101,9 @@ class TestOpenAI:
         assert response['calls'][0]['name'] == 'get_weather'
 
     @pytest.mark.asyncio
-    async def test_api_error_raises_llm_error(self, mock_openai_class, text_engine, openai_config, base_context):
+    async def test_api_error_raises_llm_error(self, mock_openai_class, text_engine, openai_config, base_context,
+                                              monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_openai_class.return_value
         error = APIStatusError("Server error", response=MagicMock(status_code=500), body=None)
         mock_instance.chat.completions.create = AsyncMock(side_effect=error)
@@ -108,7 +114,9 @@ class TestOpenAI:
 @patch('src.engine.anthropic.Anthropic')
 class TestAnthropic:
     @pytest.mark.asyncio
-    async def test_success_text_response(self, mock_anthropic_class, text_engine, anthropic_config, base_context):
+    async def test_success_text_response(self, mock_anthropic_class, text_engine, anthropic_config, base_context,
+                                         monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_anthropic_class.return_value
         mock_instance.messages.create.return_value = MagicMock(
             content=[MagicMock(text="Claude success")], stop_reason="end_turn"
@@ -117,7 +125,9 @@ class TestAnthropic:
         assert response == {"type": "text", "content": "Claude success"}
 
     @pytest.mark.asyncio
-    async def test_success_tool_call_response(self, mock_anthropic_class, text_engine, anthropic_config, base_context):
+    async def test_success_tool_call_response(self, mock_anthropic_class, text_engine, anthropic_config, base_context,
+                                              monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_anthropic_class.return_value
         mock_tool_use = MagicMock(type='tool_use', id='tool_123', input={'ticker': 'GOOG'})
         mock_tool_use.name = 'get_stock_price'
@@ -127,7 +137,9 @@ class TestAnthropic:
         assert response['calls'][0]['name'] == 'get_stock_price'
 
     @pytest.mark.asyncio
-    async def test_api_error_raises_llm_error(self, mock_anthropic_class, text_engine, anthropic_config, base_context):
+    async def test_api_error_raises_llm_error(self, mock_anthropic_class, text_engine, anthropic_config, base_context,
+                                              monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_anthropic_class.return_value
         error = anthropic.APIStatusError("Server error", response=MagicMock(status_code=500), body=None)
         mock_instance.messages.create.side_effect = error
@@ -138,13 +150,14 @@ class TestAnthropic:
 @patch('src.engine.genai.client.AsyncClient')
 class TestGoogle:
     @pytest.mark.asyncio
-    async def test_success_text_response(self, mock_google_client_class, text_engine, google_config, base_context):
+    async def test_success_text_response(self, mock_google_client_class, text_engine, google_config, base_context,
+                                         monkeypatch):
+        monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_google_client_class.return_value
         mock_part = MagicMock()
         mock_part.function_call = None
         mock_part.text = "Google success"
 
-        # Create the candidate mock and explicitly set grounding_metadata to None
         mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]))
         mock_candidate.grounding_metadata = None
 
@@ -155,7 +168,9 @@ class TestGoogle:
         assert response == {"type": "text", "content": "Google success"}
 
     @pytest.mark.asyncio
-    async def test_api_error_raises_llm_error(self, mock_google_client_class, text_engine, google_config, base_context):
+    async def test_api_error_raises_llm_error(self, mock_google_client_class, text_engine, google_config, base_context,
+                                              monkeypatch):
+        monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_google_client_class.return_value
         mock_instance.models.generate_content = AsyncMock(side_effect=Exception("API failure"))
         with pytest.raises(LLMCommunicationError, match="An error occurred with Google API"):
