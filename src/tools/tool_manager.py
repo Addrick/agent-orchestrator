@@ -35,6 +35,9 @@ class ToolManager:
             "search_tickets": self._search_tickets,
             "create_ticket": self._create_ticket,
             "search_user": self._search_user,
+            "create_user": self._create_user,
+            "update_user": self._update_user,
+            "delete_user": self._delete_user,
         }
 
     def get_tool_definitions(self) -> List[Dict[str, Any]]:
@@ -156,3 +159,28 @@ class ToolManager:
         return await asyncio.to_thread(
             self.zammad_client.search_user, query=query
         )
+
+    async def _create_user(self, firstname: str, lastname: str, email: str, note: Optional[str] = None) -> Dict[str, Any]:
+        """Implementation for the 'create_user' tool."""
+        logger.info(f"Executing tool: create_user with email='{email}'")
+        return await asyncio.to_thread(
+            self.zammad_client.create_user,
+            firstname=firstname, lastname=lastname, email=email, note=note
+        )
+
+    async def _update_user(self, user_id: int, **kwargs: Any) -> Dict[str, Any]:
+        """Implementation for the 'update_user' tool."""
+        logger.info(f"Executing tool: update_user on user_id={user_id} with args={kwargs}")
+        valid_args = ["firstname", "lastname", "email", "active", "note"]
+        payload = {k: v for k, v in kwargs.items() if k in valid_args}
+        if not payload:
+            raise ValueError("No valid update parameters provided for update_user.")
+        return await asyncio.to_thread(
+            self.zammad_client.update_user, user_id=user_id, payload=payload
+        )
+
+    async def _delete_user(self, user_id: int) -> Dict[str, str]:
+        """Implementation for the 'delete_user' tool."""
+        logger.info(f"Executing tool: delete_user on user_id={user_id}")
+        await asyncio.to_thread(self.zammad_client.delete_user, user_id=user_id)
+        return {"status": "success", "message": f"User {user_id} deleted."}

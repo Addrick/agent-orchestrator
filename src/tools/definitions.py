@@ -37,13 +37,13 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "update_ticket",
-            "description": "Updates one or more properties of an existing Zammad ticket.",
+            "description": "Updates one or more properties of an existing Zammad ticket. Requires the ticket's internal ID. All other fields are optional.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "ticket_id": {
                         "type": "integer",
-                        "description": "The unique numerical ID of the ticket to update.",
+                        "description": "The unique internal numerical ID of the ticket to update.",
                     },
                     "state": {
                         "type": "string",
@@ -73,13 +73,13 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "add_note_to_ticket",
-            "description": "Adds a new article (a note or comment) to an existing Zammad ticket.",
+            "description": "Adds a new article (a note or comment) to an existing Zammad ticket. Requires the ticket's internal ID and the note's body.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "ticket_id": {
                         "type": "integer",
-                        "description": "The unique numerical ID of the ticket to add a note to.",
+                        "description": "The unique internal numerical ID of the ticket to add a note to.",
                     },
                     "body": {
                         "type": "string",
@@ -116,7 +116,7 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "create_ticket",
-            "description": "Creates a new Zammad ticket. Requires a title and a body for the first article. The system will automatically associate it with the current user.",
+            "description": "Creates a new Zammad ticket. Requires a title and a body. If 'customer_id' is omitted, the ticket is created for the current user. Use the 'search_user' tool to find the ID for a different user.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -127,6 +127,10 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
                     "body": {
                         "type": "string",
                         "description": "The content of the first message in the ticket."
+                    },
+                    "customer_id": {
+                        "type": "integer",
+                        "description": "Optional. The internal ID of the user to create the ticket for. If omitted, the ticket will be created for the user sending the current message."
                     }
                 },
                 "required": ["title", "body"],
@@ -147,6 +151,56 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
                     }
                 },
                 "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_user",
+            "description": "Creates a new customer user in Zammad. The 'firstname', 'lastname', and 'email' parameters are all required. The 'note' is optional.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "firstname": {"type": "string", "description": "The user's first name."},
+                    "lastname": {"type": "string", "description": "The user's last name."},
+                    "email": {"type": "string", "description": "The user's unique email address."},
+                    "note": {"type": "string", "description": "An optional note about the user."},
+                },
+                "required": ["firstname", "lastname", "email"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_user",
+            "description": "Updates an existing user in Zammad. The 'user_id' is required to identify the user. All other parameters are optional. Use the 'search_user' tool first to find the 'user_id' if you don't have it.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "integer", "description": "The unique internal ID of the user to update."},
+                    "firstname": {"type": "string", "description": "The user's new first name."},
+                    "lastname": {"type": "string", "description": "The user's new last name."},
+                    "email": {"type": "string", "description": "The user's new unique email address."},
+                    "active": {"type": "boolean", "description": "Set to false to deactivate the user, true to reactivate."},
+                    "note": {"type": "string", "description": "A new note to add to the user. This will overwrite any existing note."},
+                },
+                "required": ["user_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_user",
+            "description": "Deletes a user from Zammad. This is a destructive and irreversible action. Requires the unique 'user_id'. Use the 'search_user' tool to find the 'user_id' first to ensure you are deleting the correct user.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "integer", "description": "The unique internal ID of the user to delete."},
+                },
+                "required": ["user_id"],
             },
         },
     },

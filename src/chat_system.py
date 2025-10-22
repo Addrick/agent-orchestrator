@@ -216,7 +216,6 @@ class ChatSystem:
                 await asyncio.to_thread(self.zammad_client.add_article_to_ticket, ticket_id=ticket_to_log,
                                         body=message, impersonate_email=zammad_email)
 
-            # --- Start of the Refactored Tool-Use Loop ---
             conversation_history.append({"role": "user", "content": message})
 
             for i in range(MAX_TOOL_CALLS):
@@ -256,6 +255,7 @@ class ChatSystem:
                                                         ticket_id=ticket_to_log, body=log_body, internal=True)
                             tool_result = {"status": "success", "action": "simulated and logged"}
                         else:  # ASSISTED_DISPATCH
+                            # FIX: Inject the customer_id for the create_ticket tool.
                             if tool_name == 'create_ticket' and customer_id:
                                 tool_args['customer_id'] = customer_id
 
