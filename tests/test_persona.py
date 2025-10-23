@@ -70,7 +70,7 @@ def test_set_context_length_zero(persona):
 def test_set_context_length_invalid(persona):
     """
     Tests that setting an invalid context length (e.g., a string) causes it to
-    revert to the global default. This is the fix for the failing test.
+    revert to the global default.
     """
     persona.set_context_length(99) # Start with a known value
     result = persona.set_context_length("invalid_string")
