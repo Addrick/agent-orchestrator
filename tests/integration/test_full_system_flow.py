@@ -202,15 +202,23 @@ async def test_ticket_history_is_used_when_mode_is_ticket(mock_should_create, li
     user_info = managed_zammad_user
     ticket_id = None
     try:
-        ticket_data = zammad_client.create_ticket(title="Test", group="Users", customer_id=user_info['id'])
+        # Create a ticket with an initial article to ensure it is indexed by Zammad search.
+        ticket_data = zammad_client.create_ticket(
+            title="Test",
+            group="Users",
+            customer_id=user_info['id'],
+            article_body="Initial article. This message exists ONLY in Zammad."
+        )
         ticket_id = ticket_data['id']
         ticket_number = ticket_data['number']
 
+        # Wait for the ticket to become searchable by its number
         await _wait_for_search(
             search_func=lambda: zammad_client.search_tickets(query=f"number:{ticket_number}"),
             assertion_func=lambda results: len(results) == 1 and results[0]['id'] == ticket_id
         )
 
+        # This message is logged to the local DB and should appear in the context.
         memory_manager.log_message(user_info['identifier'], "test_persona", "support", 'user', "User", "msg1",
                                    datetime.now(), zammad_ticket_id=ticket_id)
         with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
@@ -219,9 +227,13 @@ async def test_ticket_history_is_used_when_mode_is_ticket(mock_should_create, li
                 "test_persona", user_info['identifier'], "support", f"Follow up for [Ticket#{ticket_number}]"
             )
             context = mock_llm_call.call_args[0][1]['history']
+
+            # Expected history: system msg, msg1 from local DB, current msg.
+            # The initial article is NOT included as it was never logged to MemoryManager.
             assert len(context) == 3
             assert "part of Zammad ticket" in context[0]['content']
             assert context[1]['content'] == "User: msg1"
+            assert context[2]['role'] == 'user'
     finally:
         if ticket_id:
             zammad_client.delete_ticket(ticket_id)
