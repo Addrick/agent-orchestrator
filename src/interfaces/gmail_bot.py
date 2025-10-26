@@ -136,7 +136,7 @@ class GmailInterface:
             active_persona_name = self._get_persona_from_recipient(recipient)
             full_message = f"Subject: {subject}\n\n{user_input}"
 
-            response_text, response_type = await self.chat_system.generate_response(
+            response_text, response_type, ticket_id = await self.chat_system.generate_response(
                 persona_name=active_persona_name,
                 user_identifier=sender_email,  # Pass parsed email as identifier
                 channel="gmail",

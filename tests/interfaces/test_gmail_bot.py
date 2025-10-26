@@ -18,7 +18,9 @@ from src.chat_system import ChatSystem, ResponseType
 def mock_chat_system() -> MagicMock:
     """Fixture for a mocked ChatSystem."""
     chat_system = MagicMock(spec=ChatSystem)
-    chat_system.generate_response = AsyncMock(return_value=("Test reply", ResponseType.LLM_GENERATION))
+    # FIX: Update the mock to return a 3-item tuple, which is the correct signature.
+    # A default ticket_id of None is a sensible default.
+    chat_system.generate_response = AsyncMock(return_value=("Test reply", ResponseType.LLM_GENERATION, None))
     return chat_system
 
 
@@ -127,6 +129,41 @@ def _create_mock_email_data(from_email: str, to_email: str) -> dict:
                 {'name': 'Message-ID', 'value': '<test_message_id@mail.gmail.com>'}
             ],
             'body': {'data': encoded_body}}}
+
+
+@pytest.mark.asyncio
+@patch('src.interfaces.gmail_bot.BLOCK_EXTERNAL_SENDER_REPLIES', False)
+async def test_handle_specific_message_unpacks_response_correctly(gmail_interface: GmailInterface,
+                                                                  mock_chat_system: MagicMock):
+    """
+    Tests that the 3-item tuple from generate_response is correctly unpacked.
+    This specifically catches the bug where generate_response returns 3 values but the caller expects 2,
+    which would raise a ValueError.
+    """
+    # 1. Setup
+    mock_service = MagicMock()
+    msg_data = _create_mock_email_data("test@example.com", "support-persona@example.com")
+
+    # Configure the mock to return the specific 3-item tuple that caused the bug
+    mock_chat_system.generate_response.return_value = ("A detailed response.", ResponseType.LLM_GENERATION, 54321)
+
+    with patch('src.interfaces.gmail_bot.asyncio.to_thread', new_callable=AsyncMock) as mock_to_thread, \
+            patch.object(gmail_interface, '_send_reply', new_callable=AsyncMock) as mock_send_reply:
+        # Simulate the async calls inside the method
+        mock_to_thread.side_effect = [
+            msg_data,  # First call to get the message data
+            None  # Second call to mark the message as read
+        ]
+
+        # 2. Action: Call the method under test
+        # If the bug exists, this line will raise a ValueError. Pytest will catch it and fail the test.
+        await gmail_interface._handle_specific_message(mock_service, 'test_msg_id')
+
+        # 3. Assertions: If the test reaches here, the unpacking was successful.
+        # We also check that the subsequent logic was executed correctly.
+        mock_chat_system.generate_response.assert_called_once()
+        mock_send_reply.assert_called_once()
+        mock_service.users().messages().modify.assert_called_once()
 
 
 @pytest.mark.asyncio
