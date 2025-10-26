@@ -100,13 +100,13 @@ def test_get_channel_history(mem_manager):
     channel_a, channel_b = "channel-a", "channel-b"
     persona_name = "p"
 
-    mem_manager.log_message("user1", persona_name, channel_a, "user", "Human", "Msg A1", datetime.now())
+    mem_manager.log_message("user1", persona_name, channel_a, "user", "Human", "Msg A1", datetime.now(), server_id=None)
     time.sleep(0.01)
-    mem_manager.log_message("user2", persona_name, channel_b, "user", "Human", "Msg B1", datetime.now())
+    mem_manager.log_message("user2", persona_name, channel_b, "user", "Human", "Msg B1", datetime.now(), server_id=None)
     time.sleep(0.01)
-    mem_manager.log_message("user2", persona_name, channel_a, "user", "Human", "Msg A2", datetime.now())
+    mem_manager.log_message("user2", persona_name, channel_a, "user", "Human", "Msg A2", datetime.now(), server_id=None)
 
-    history_a = mem_manager.get_channel_history(channel_a, persona_name)
+    history_a = mem_manager.get_channel_history(channel_a, persona_name, server_id=None)
     assert len(history_a) == 2
     assert history_a[0]['content'] == "Msg A1"
     assert history_a[1]['content'] == "Msg A2"
@@ -118,20 +118,18 @@ def test_channel_history_limit_and_suppression(mem_manager):
     persona_name = "p"
     for i in range(5):
         mem_manager.log_message("user", persona_name, channel, "user", "Human", f"Msg {i}", datetime.now(),
-                                platform_message_id=f"p_{i}")
+                                platform_message_id=f"p_{i}", server_id=None)
         time.sleep(0.01)
 
     mem_manager.suppress_message_by_platform_id("p_2")
 
-    history = mem_manager.get_channel_history(channel, persona_name, limit=3)
+    history = mem_manager.get_channel_history(channel, persona_name, server_id=None, limit=3)
     assert len(history) == 3
     contents = {msg['content'] for msg in history}
     assert contents == {"Msg 1", "Msg 3", "Msg 4"}
     assert "Msg 2" not in contents
     assert "Msg 0" not in contents
 
-
-# --- New Expanded Coverage Tests ---
 
 def test_get_channel_history_isolates_by_server_id(mem_manager):
     """Tests that get_channel_history separates same-named channels by server_id."""
