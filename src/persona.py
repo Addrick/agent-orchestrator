@@ -17,12 +17,11 @@ class ExecutionMode(Enum):
 
 class MemoryMode(Enum):
     """Defines the strategy for retrieving conversation history."""
-    HIERARCHICAL = auto()  # Smart default (Ticket > Channel > Server > Personal)
-    CHANNEL_ISOLATED = auto()  # Only this specific channel
-    SERVER_WIDE = auto()  # All channels in this server
-    PERSONAL = auto()  # This user, across all servers/channels
-    GLOBAL = auto()  # All messages this persona has ever seen, anywhere
-    TICKET_ISOLATED = auto()  # Only ticket context
+    CHANNEL_ISOLATED = auto()
+    SERVER_WIDE = auto()
+    PERSONAL = auto()
+    GLOBAL = auto()
+    TICKET_ISOLATED = auto()
 
 
 class Persona:
@@ -44,7 +43,7 @@ class Persona:
             display_name_in_chat: bool = False,
             execution_mode: ExecutionMode = ExecutionMode.SILENT_ANALYSIS,
             enabled_tools: Optional[List[str]] = None,
-            memory_mode: MemoryMode = MemoryMode.HIERARCHICAL
+            memory_mode: MemoryMode = MemoryMode.CHANNEL_ISOLATED
     ) -> None:
         self._name: str = persona_name
         self._model_name: str = model_name
@@ -88,6 +87,10 @@ class Persona:
             self._temp_context_override += 2
             return current_limit
 
+        return self._context_length
+
+    def get_base_context_length(self) -> int:
+        """Returns the persona's static, default context length."""
         return self._context_length
 
     def get_temperature(self) -> Optional[float]:
