@@ -78,8 +78,7 @@ class MemoryManager:
             content TEXT,
             timestamp TIMESTAMP NOT NULL,
             zammad_ticket_id INTEGER,
-            platform_message_id TEXT,
-            server_id TEXT
+            platform_message_id TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_channel_timestamp
         ON User_Interactions (channel, timestamp);
@@ -206,8 +205,7 @@ class MemoryManager:
         query = "SELECT author_role, author_name, content FROM User_Interactions WHERE channel = ? AND persona_name = ?"
         params: List[Any] = [channel, persona_name]
 
-        # This if/else block is the corrected logic that fixes the bug.
-        if server_id is not None:
+        if server_id:
             query += " AND server_id = ?"
             params.append(server_id)
         else:
