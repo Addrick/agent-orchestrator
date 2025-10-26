@@ -4,6 +4,7 @@ import asyncio
 import os
 import sys
 import logging
+from typing import Optional, Dict, Any
 
 from src.chat_system import ChatSystem
 from src.engine import TextEngine
@@ -47,6 +48,17 @@ logging.getLogger('discord').setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
+async def update_models_and_sync_bot(bot: ChatSystem) -> None:
+    """Fetches the latest model list and updates the live ChatSystem instance."""
+    logger.info("Updating available models from APIs...")
+    new_models: Optional[Dict[str, Any]] = await asyncio.to_thread(get_model_list, update=True)
+    if new_models:
+        bot.models_available = new_models
+        logger.info("ChatSystem's model list has been synchronized with the latest update.")
+    else:
+        logger.warning("Failed to fetch new model list; ChatSystem may have stale data.")
+
+
 async def main():
     """Main asynchronous function to initialize and run the application."""
     print("Starting application...")
@@ -75,7 +87,6 @@ async def main():
         zammad_client=zammad_client
     )
 
-
     tasks = []
 
     # --- Initialize Interfaces ---
@@ -95,9 +106,7 @@ async def main():
 
     # 5. Optionally update the model list on startup
     if UPDATE_MODELS_ON_STARTUP:
-        logger.info("Updating available models from APIs...")
-        # Run the blocking network calls in a separate thread to avoid blocking the event loop
-        task = asyncio.to_thread(get_model_list, update=True)
+        task = asyncio.create_task(update_models_and_sync_bot(bot))
         tasks.append(task)
 
     if not tasks:
