@@ -167,7 +167,7 @@ class TextEngine:
             api_params["tools"] = tools
             api_params["tool_choice"] = "auto"
 
-        api_params = {k: v for k, v in api_params.items() if v is not None or k == "max_tokens"}
+        api_params = {k: v for k, v in api_params.items() if v is not None}
 
         try:
             completion = await client.chat.completions.create(**api_params)
@@ -223,7 +223,7 @@ class TextEngine:
         if tools:
             api_params["tools"] = tools
 
-        api_params = {k: v for k, v in api_params.items() if v is not None or k == "max_tokens"}
+        api_params = {k: v for k, v in api_params.items() if v is not None}
 
         try:
             response = client.messages.create(**api_params)
@@ -316,13 +316,12 @@ class TextEngine:
         if isinstance(config.get("top_k"), (int, float)): content_config_for_api['top_k'] = config.get("top_k")
 
         dump_config = content_config_for_api.copy()
-        # FIX: Replace faulty list comprehension with a robust for loop.
         if 'tools' in dump_config:
             tool_names = []
             for t in dump_config['tools']:
-                if t.function_declarations:
+                if hasattr(t, 'function_declarations') and t.function_declarations:
                     tool_names.extend([d.name for d in t.function_declarations])
-                else:  # This handles the google_search_tool case
+                elif hasattr(t, 'google_search') and t.google_search is not None:
                     tool_names.append("google_search")
             dump_config['tools'] = tool_names
 
@@ -333,7 +332,7 @@ class TextEngine:
 
         try:
             response_obj = await self.google_client.models.generate_content(
-                model=f'models/{config["model_name"]}',
+                model=config["model_name"],
                 contents=history_for_api,
                 config=GenerateContentConfig(**content_config_for_api)
             )
@@ -383,7 +382,7 @@ class TextEngine:
             "memory": context["persona_prompt"],
             "prompt": full_prompt
         }
-        payload = {k: v for k, v in payload.items() if v is not None or k == "max_length"}
+        payload = {k: v for k, v in payload.items() if v is not None}
 
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=600)) as session:
