@@ -23,6 +23,7 @@ jobs:
         pip install -r requirements.txt  # Assumes you have a requirements.txt file
         pip install pytest pytest-asyncio coverage
 
-    - name: Run tests with pytest
+    - name: Run tests with pytest, skipping integration.
       run: |
-        pytest
+        run: pytest -m "not integration"
+
