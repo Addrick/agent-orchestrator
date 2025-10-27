@@ -49,7 +49,7 @@ class Persona:
         self._model_name: str = model_name
         self._prompt: str = prompt
         self._response_token_limit: int = global_config.DEFAULT_TOKEN_LIMIT
-        self.set_response_token_limit(token_limit)
+        self._set_and_sanitize_token_limit(token_limit)  # Silent call to private method
         self._context_length: int = context_length if context_length is not None else global_config.DEFAULT_CONTEXT_LIMIT
         self._execution_mode: ExecutionMode = execution_mode
         self._enabled_tools: List[str] = enabled_tools if enabled_tools is not None else []
@@ -119,6 +119,33 @@ class Persona:
 
     # --- Setters ---
 
+    def _set_and_sanitize_token_limit(self, new_limit: Any) -> None:
+        """
+        Private method to handle the core logic of setting the token limit. No logging.
+        """
+        try:
+            parsed_limit = int(new_limit)
+            if parsed_limit < 100:
+                self._response_token_limit = 100
+                logger.debug(f"Warning: low token limit {parsed_limit} provided, clamping to 100.")
+            else:
+                self._response_token_limit = parsed_limit
+        except (ValueError, TypeError):
+            self._response_token_limit = global_config.DEFAULT_TOKEN_LIMIT
+
+    def set_response_token_limit(self, new_limit: Any) -> int:
+        """
+        Public setter for token limit. Logs the change and returns the final value.
+        """
+        original_value = self._response_token_limit
+        self._set_and_sanitize_token_limit(new_limit)
+        if self._response_token_limit != original_value:
+            logger.info(f"Persona '{self._name}' response token limit set to {self._response_token_limit}.")
+        else:
+            logger.info(
+                f"Invalid or no token limit provided: '{new_limit}'. Using value: {self._response_token_limit}.")
+        return self._response_token_limit
+
     def set_model_name(self, new_model_name: str) -> None:
         """Sets the model name for the persona."""
         self._model_name = str(new_model_name)
@@ -128,25 +155,6 @@ class Persona:
         """Sets the persona's base prompt."""
         self._prompt = str(new_prompt)
         logger.info(f"Persona '{self._name}' prompt has been updated.")
-
-    def set_response_token_limit(self, new_limit: Any) -> int:
-        """
-        Sets the response token limit. Returns the integer value.
-        Invalid inputs will cause it to use the global default.
-        """
-        try:
-            parsed_limit = int(new_limit)
-            if parsed_limit < 100:
-                self._response_token_limit = 100
-                logger.warning(f"Warning: very low token response limit received, setting value to 100.")
-            else:
-                self._response_token_limit = parsed_limit
-            logger.info(f"Persona '{self._name}' response token limit set to {self._response_token_limit}.")
-        except (ValueError, TypeError):
-            self._response_token_limit = global_config.DEFAULT_TOKEN_LIMIT
-            logger.info(
-                f"Invalid or no token limit provided: '{new_limit}'. Setting to default: {self._response_token_limit}.")
-        return self._response_token_limit
 
     def set_context_length(self, new_length: Any) -> int:
         """
