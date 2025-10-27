@@ -10,7 +10,8 @@ from src.persona import Persona, MemoryMode
 from src.engine import TextEngine
 from src.clients.zammad_client import ZammadClient
 
-
+# Mark all tests in this file as 'integration'.
+pytestmark = pytest.mark.integration
 @pytest.fixture
 def mem_test_system():
     """Provides a ChatSystem with a real, in-memory MemoryManager and mocked dependencies."""
