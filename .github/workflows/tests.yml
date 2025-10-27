@@ -24,6 +24,5 @@ jobs:
         pip install pytest pytest-asyncio coverage
 
     - name: Run tests with pytest, skipping integration.
-      run: |
-        run: pytest -m "not integration"
+      run: pytest -m "not integration"
 
