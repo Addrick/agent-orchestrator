@@ -76,7 +76,14 @@ async def test_prompt_modified_for_unsupported_models(chat_system, mock_text_eng
     )
     chat_system.personas["test_persona"] = persona
 
-    with patch.object(mock_text_engine, 'model_supports_images', return_value=False):
+    # Since the logic is now in the engine, we need to use a real engine and mock its internal call
+    real_engine = TextEngine()
+    with patch.object(real_engine, '_generate_openai_response', new_callable=AsyncMock) as mock_openai_call, \
+            patch.object(real_engine, 'model_supports_images', return_value=False):
+
+        mock_openai_call.return_value = ({"type": "text", "content": "Test response"}, {})
+        chat_system.text_engine = real_engine
+
         await chat_system.generate_response(
             persona_name="test_persona",
             user_identifier="user1",
@@ -85,8 +92,8 @@ async def test_prompt_modified_for_unsupported_models(chat_system, mock_text_eng
             image_url="http://example.com/image.png"
         )
 
-        mock_text_engine.generate_response.assert_called_once()
-        call_args = mock_text_engine.generate_response.call_args[0]
-        context_object = call_args[1]
-        assert "user has attached an image that you cannot see" in context_object["persona_prompt"]
-        assert context_object["current_message"]["image_url"] is None
+    mock_openai_call.assert_called_once()
+    call_args = mock_openai_call.call_args[0]
+    context_object = call_args[1]
+    assert "user has attached an image that you cannot see" in context_object["persona_prompt"]
+    assert context_object["current_message"]["image_url"] is None

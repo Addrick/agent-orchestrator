@@ -114,6 +114,11 @@ class TextEngine:
         """
         model_name: str = persona_config.get("model_name", "")
 
+        if context_object["current_message"].get("image_url") and not self.model_supports_images(model_name):
+            logger.info(f"Model {model_name} does not support images. Modifying prompt.")
+            context_object["persona_prompt"] += "\n\n[System note: The user has attached an image that you cannot see. Please inform them of this fact in your response.]"
+            context_object["current_message"]["image_url"] = None
+
         for attempt in range(EMPTY_RESPONSE_RETRIES + 1):
             result: Dict[str, Any] = {}
             api_payload: Optional[Dict[str, Any]] = None
