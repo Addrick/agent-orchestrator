@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from config import global_config
 from config.global_config import EMPTY_RESPONSE_RETRIES, EMPTY_RESPONSE_RETRY_DELAY
 # --- Provider-specific imports ---
+import base64
 import aiohttp
 import anthropic
 from openai import AsyncOpenAI, APIStatusError, APITimeoutError
@@ -225,6 +226,35 @@ class TextEngine:
             system_prompt = f"{system_prompt}\n\n{history[0]['content']}"
             history = history[1:]
 
+        # Handle image URL in the last user message
+        if context["current_message"].get("image_url"):
+            last_message = history[-1]
+            if last_message['role'] == 'user':
+                if isinstance(last_message['content'], str):
+                    last_message['content'] = [{"type": "text", "text": last_message['content']}]
+
+                try:
+                    image_url = context["current_message"]["image_url"]
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(image_url) as resp:
+                            resp.raise_for_status()
+                            image_bytes = await resp.read()
+                            mime_type = resp.content_type
+
+                    if mime_type not in ['image/jpeg', 'image/png', 'image/webp', 'image/gif']:
+                        logger.warning(f"Unsupported image MIME type '{mime_type}' for Claude. Skipping image.")
+                    else:
+                        last_message['content'].append({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": mime_type,
+                                "data": base64.b64encode(image_bytes).decode('utf-8'),
+                            },
+                        })
+                except aiohttp.ClientError as e:
+                    logger.error(f"Failed to download image from {image_url}: {e}")
+
         api_params: Dict[str, Any] = {
             "model": config["model_name"],
             "system": system_prompt,
@@ -304,10 +334,31 @@ class TextEngine:
                 if first_turn and role == 'user':
                     content_text = f"{system_prompt}\n\n### Conversation:\n{content_text}"
                     first_turn = False
-                part_dict = {'text': content_text}
-                history_for_api.append({'role': role, 'parts': [Part(**part_dict)]})
-                serializable_item['parts'] = [part_dict]
 
+                parts_for_api = [Part(text=content_text)]
+                serializable_parts = [{'text': content_text}]
+
+                # Handle image URL in the last user message
+                if context["current_message"].get("image_url") and role == 'user' and item is history_to_process[-1]:
+                    try:
+                        image_url = context["current_message"]["image_url"]
+                        # Asynchronously fetch the image
+                        async with aiohttp.ClientSession() as session:
+                            async with session.get(image_url) as resp:
+                                resp.raise_for_status()
+                                image_bytes = await resp.read()
+                                mime_type = resp.content_type
+
+                        if mime_type not in ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif']:
+                            logger.warning(f"Unsupported image MIME type '{mime_type}'. Skipping image.")
+                        else:
+                            parts_for_api.append(Part(inline_data={'data': image_bytes, 'mime_type': mime_type}))
+                            serializable_parts.append({'inline_data': {'mime_type': mime_type, 'data': '...bytes...'}})
+                    except aiohttp.ClientError as e:
+                        logger.error(f"Failed to download image from {image_url}: {e}")
+
+                history_for_api.append({'role': role, 'parts': parts_for_api})
+                serializable_item['parts'] = serializable_parts
             serializable_history.append(serializable_item)
 
         content_config_for_api: Dict[str, Any] = {"safety_settings": self.google_safety_settings}
