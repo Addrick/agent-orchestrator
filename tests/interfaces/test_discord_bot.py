@@ -176,3 +176,20 @@ async def test_bot_treats_empty_message_as_continuation(mock_reset, mock_discord
     mock_message.channel.send.assert_called()
     assert mock_chat_system.memory_manager.log_message.call_count == 2
     mock_reset.assert_called_once()
+
+
+@pytest.mark.asyncio
+@patch('src.interfaces.discord_bot.reset_discord_status', new_callable=AsyncMock)
+async def test_image_url_is_extracted_and_passed(mock_reset, mock_discord_client, mock_chat_system, mock_message):
+    """Tests that an image URL is correctly extracted from an attachment and passed to the chat system."""
+    mock_attachment = MagicMock(spec=discord.Attachment)
+    mock_attachment.content_type = 'image/png'
+    mock_attachment.url = 'http://example.com/test_image.png'
+    mock_message.attachments = [mock_attachment]
+    mock_message.content = "vocal check out this image"
+
+    await mock_discord_client.on_message(mock_message)
+
+    mock_chat_system.generate_response.assert_called_once()
+    called_kwargs = mock_chat_system.generate_response.call_args.kwargs
+    assert called_kwargs['image_url'] == 'http://example.com/test_image.png'
