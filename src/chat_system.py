@@ -313,7 +313,7 @@ class ChatSystem:
         except LLMCommunicationError as e:
             logger.error(f"A recoverable LLM communication error occurred for {user_identifier}: {e}")
             error_msg = ("I'm not sure how to continue. Could you please rephrase?" if "empty response" in str(e) else
-                         "I'm having trouble connecting to the AI service right now. Please try again in a moment.")
+                         "Error while generating a response: " + str(e))
             return error_msg, ResponseType.DEV_COMMAND, ticket_to_log
         except Exception as e:
             logger.error(f"A critical error occurred in generate_response for {user_identifier}: {e}", exc_info=True)
