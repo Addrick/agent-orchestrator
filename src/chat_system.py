@@ -252,25 +252,11 @@ class ChatSystem:
 
             conversation_history.append({"role": "user", "content": message})
 
-            effective_prompt = persona.get_prompt()
-            effective_image_url = image_url
-
-            # --- Temporary Diagnostic Logging ---
-            model_name_for_check = persona.get_model_name()
-            supports_images = self.text_engine.model_supports_images(model_name_for_check)
-            logger.info(f"Image Check: URL='{image_url}', Model='{model_name_for_check}', Supports Images='{supports_images}'")
-            # --- End Temporary Logging ---
-
-            if image_url and not supports_images:
-                logger.info(f"Model {model_name_for_check} does not support images. Modifying prompt for persona {persona_name}.")
-                effective_prompt += "\n\n[System note: The user has attached an image that you cannot see. Please inform them of this fact in your response.]"
-                effective_image_url = None
-
             for i in range(MAX_TOOL_CALLS):
                 context_object: Dict[str, Any] = {
-                    "persona_prompt": effective_prompt,
+                    "persona_prompt": persona.get_prompt(),
                     "history": conversation_history,
-                    "current_message": {"text": "", "image_url": effective_image_url if i == 0 else None}
+                    "current_message": {"text": "", "image_url": image_url if i == 0 else None}
                 }
                 llm_response, api_payload = await self.text_engine.generate_response(
                     persona.get_config_for_engine(), context_object, tools=tools_for_llm
