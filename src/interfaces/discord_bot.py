@@ -94,9 +94,6 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
 
     @client.event
     async def on_message_delete(message: discord.Message) -> None:
-        if message.author == client.user:
-            return
-
         success: bool = await asyncio.to_thread(
             chat_system.memory_manager.suppress_message_by_platform_id, str(message.id)
         )
