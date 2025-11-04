@@ -252,11 +252,18 @@ class ChatSystem:
 
             conversation_history.append({"role": "user", "content": message})
 
+            effective_prompt = persona.get_prompt()
+            effective_image_url = image_url
+            if image_url and not self.text_engine.model_supports_images(persona.get_model_name()):
+                logger.info(f"Model {persona.get_model_name()} does not support images. Modifying prompt for persona {persona_name}.")
+                effective_prompt += "\n\n[System note: The user has attached an image that you cannot see. Please inform them of this fact in your response.]"
+                effective_image_url = None
+
             for i in range(MAX_TOOL_CALLS):
                 context_object: Dict[str, Any] = {
-                    "persona_prompt": persona.get_prompt(),
+                    "persona_prompt": effective_prompt,
                     "history": conversation_history,
-                    "current_message": {"text": "", "image_url": image_url if i == 0 else None}
+                    "current_message": {"text": "", "image_url": effective_image_url if i == 0 else None}
                 }
                 llm_response, api_payload = await self.text_engine.generate_response(
                     persona.get_config_for_engine(), context_object, tools=tools_for_llm

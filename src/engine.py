@@ -56,6 +56,20 @@ class TextEngine:
         else:
             logger.warning(".env file not found, API keys must be in environment.")
 
+    def model_supports_images(self, model_name: str) -> bool:
+        """Checks if a model is known to support image inputs."""
+        model_name = model_name.lower()
+        # OpenAI: gpt-4, gpt-4o, o1, etc.
+        if 'gpt-4' in model_name or model_name.startswith('o1'):
+            return True
+        # Anthropic: claude-3, claude-4, etc.
+        if 'claude-3' in model_name or 'claude-4' in model_name:
+            return True
+        # Google: gemini models
+        if 'gemini' in model_name:
+            return True
+        return False
+
     async def _get_openai_client(self) -> AsyncOpenAI:
         """Initializes and returns the OpenAI client."""
         if self.openai_client is None:
