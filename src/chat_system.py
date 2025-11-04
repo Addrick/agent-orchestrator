@@ -254,8 +254,15 @@ class ChatSystem:
 
             effective_prompt = persona.get_prompt()
             effective_image_url = image_url
-            if image_url and not self.text_engine.model_supports_images(persona.get_model_name()):
-                logger.info(f"Model {persona.get_model_name()} does not support images. Modifying prompt for persona {persona_name}.")
+
+            # --- Temporary Diagnostic Logging ---
+            model_name_for_check = persona.get_model_name()
+            supports_images = self.text_engine.model_supports_images(model_name_for_check)
+            logger.info(f"Image Check: URL='{image_url}', Model='{model_name_for_check}', Supports Images='{supports_images}'")
+            # --- End Temporary Logging ---
+
+            if image_url and not supports_images:
+                logger.info(f"Model {model_name_for_check} does not support images. Modifying prompt for persona {persona_name}.")
                 effective_prompt += "\n\n[System note: The user has attached an image that you cannot see. Please inform them of this fact in your response.]"
                 effective_image_url = None
 
