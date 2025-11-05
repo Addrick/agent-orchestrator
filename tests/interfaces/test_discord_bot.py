@@ -4,6 +4,8 @@ import pytest
 import discord
 from unittest.mock import MagicMock, AsyncMock, patch, PropertyMock
 from datetime import datetime
+import io
+from discord import File
 
 from src.interfaces.discord_bot import create_discord_bot
 from src.chat_system import ChatSystem, ResponseType
@@ -176,3 +178,41 @@ async def test_bot_treats_empty_message_as_continuation(mock_reset, mock_discord
     mock_message.channel.send.assert_called()
     assert mock_chat_system.memory_manager.log_message.call_count == 2
     mock_reset.assert_called_once()
+
+
+@pytest.mark.asyncio
+@patch('src.interfaces.discord_bot.reset_discord_status', new_callable=AsyncMock)
+async def test_file_response_flow(mock_reset, mock_discord_client, mock_chat_system, mock_message):
+    """Tests that a FILE_RESPONSE from the dev command triggers a file upload."""
+    # 1. Setup
+    mock_message.content = "vocal dump context"
+    file_content = "This is the content of the dump file."
+
+    # Configure generate_response to return our special string
+    mock_chat_system.generate_response.return_value = (
+        f"FILE_RESPONSE::dump.txt::{file_content}",
+        ResponseType.DEV_COMMAND,
+        None
+    )
+
+    # 2. Action
+    await mock_discord_client.on_message(mock_message)  # type: ignore
+
+    # 3. Assertions
+    # Check that channel.send was called
+    mock_message.channel.send.assert_called_once()
+
+    # Check the arguments passed to channel.send
+    call_args, call_kwargs = mock_message.channel.send.call_args
+
+    # The first positional arg should be the message content
+    assert call_args[0] == "Here is the context dump:"
+
+    # The 'file' keyword argument should be a discord.File object
+    sent_file = call_kwargs.get('file')
+    assert isinstance(sent_file, File)
+    assert sent_file.filename == "dump.txt"
+
+    # Verify the content of the file buffer
+    sent_file.fp.seek(0)
+    assert sent_file.fp.read() == file_content

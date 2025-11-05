@@ -32,6 +32,7 @@ class BotLogic:
             'hello': self._handle_start_conversation,
             'goodbye': self._handle_stop_conversation,
             'dump_last': self._handle_dump_last,
+            'dump_context': self._handle_dump_context,
         }
         self.what_handlers = {
             'prompt': self._what_prompt,
@@ -102,7 +103,8 @@ class BotLogic:
                                                                        "delete <persona>, \n"
                                                                        "detail, \n"
                                                                        "update_models, \n"
-                                                                       "dump_last")
+                                                                       "dump_last, \n"
+                                                                       "dump_context")
         return help_msg, False
 
     def _handle_remember(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[Optional[str], bool]:
@@ -458,10 +460,90 @@ class BotLogic:
         if not last_request:
             return f"{persona_name}: No previous request to dump for your session with this persona.", False
 
-        pretty_json: str = json.dumps(last_request, indent=2, sort_keys=True)
-        display_json: str = pretty_json.replace('\\n', '\n')
+        # Extract key information from the payload for a concise summary
+        model_name = last_request.get('model', 'N/A')
+        config = last_request.get('config', {})
+        contents = last_request.get('contents', [])
+        history_count = len(contents) - 1 if contents else 0
+        current_message_count = 1 if contents else 0
+        total_messages = history_count + current_message_count
 
-        return f"{persona_name}: Last API Request Payload\n{display_json}", False
+        # Check if a system prompt was included based on the formatting logic for Google's API
+        system_prompt_included = "No"
+        if contents and "### Conversation:" in contents[0].get('parts', [{}])[0].get('text', ''):
+            system_prompt_included = "Yes"
+
+        # Extract generation parameters
+        temp = config.get('temperature', 'default')
+        max_tokens = config.get('max_output_tokens', 'default')
+        # Format tool names for readability
+        tools_list = config.get('tools', [])
+        tools = ", ".join(tools_list) if tools_list else "None"
+
+        # Assemble the formatted summary string
+        summary = (
+            f"{persona_name}: Summary of Last API Request\n"
+            f"----------------------------------------\n"
+            f"Model Used: {model_name}\n"
+            f"Context Sent:\n"
+            f"  - Total Messages: {total_messages} ({history_count} from history + {current_message_count} current)\n"
+            f"  - Memory Mode Used: {persona.get_memory_mode().name.lower()}\n"
+            f"  - System Prompt Included: {system_prompt_included}\n"
+            f"Generation Params:\n"
+            f"  - Temperature: {temp}\n"
+            f"  - Max Output Tokens: {max_tokens}\n"
+            f"  - Tools Available: {tools}\n"
+            f"----------------------------------------\n"
+            f"Tip: Use `dump context` to see the exact history file sent to the model."
+        )
+        return summary, False
+
+    def _handle_dump_context(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[Optional[str], bool]:
+        """
+        Generates a detailed text file containing the full context of the last API call,
+        including persona configuration and the exact conversation history sent to the model.
+        """
+        if args:
+            return "Usage: dump_context", False
+
+        persona_name = persona.get_name()
+        last_request = self.chat_system.last_api_requests.get(user_identifier, {}).get(persona_name)
+
+        if not last_request:
+            return f"{persona_name}: No previous request to analyze.", False
+
+        # Start building the detailed context string
+        output_lines = [f"--- Context Dump for {persona_name} ---"]
+
+        # Add persona details for a comprehensive debugging view
+        output_lines.append("\n--- Persona Configuration ---")
+        output_lines.append(f"Model: {persona.get_model_name()}")
+        output_lines.append(f"Memory Mode: {persona.get_memory_mode().name}")
+        output_lines.append(f"Execution Mode: {persona.get_execution_mode().name}")
+        output_lines.append(f"Context Length Setting: {persona.get_base_context_length()}")
+        output_lines.append(f"Temp: {persona.get_temperature()}, Top P: {persona.get_top_p()}, Top K: {persona.get_top_k()}")
+
+        # Add the conversation history from the API payload
+        output_lines.append("\n--- Conversation History Sent to Model ---")
+        contents = last_request.get('contents', [])
+        if not contents:
+            output_lines.append("No conversation history was sent.")
+        else:
+            for i, item in enumerate(contents):
+                role = item.get('role', 'unknown').upper()
+                # Safely access potentially nested content
+                content_text = '[NO TEXT CONTENT]'
+                parts = item.get('parts', [])
+                if parts and isinstance(parts, list) and isinstance(parts[0], dict):
+                    content_text = parts[0].get('text', content_text)
+
+                output_lines.append(f"\n[Message {i + 1} - ROLE: {role}]")
+                output_lines.append(content_text)
+                output_lines.append("-" * 20)
+
+        # Use a special prefix to signal to the Discord interface that this is a file response.
+        # Format: "FILE_RESPONSE::filename.txt::file_content"
+        return f"FILE_RESPONSE::{'context_dump.txt'}::{'\n'.join(output_lines)}", False
 
     def _handle_update_models(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[str, bool]:
         if args:
