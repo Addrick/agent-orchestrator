@@ -5,6 +5,7 @@ import re
 import discord
 import asyncio
 import typing
+import io  # Added for in-memory file handling
 from datetime import timedelta, datetime
 from typing import Optional, List, Any, Coroutine, Set
 
@@ -140,7 +141,19 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                         user_display_name=message.author.display_name
                     )
 
-                    if response_type == ResponseType.DEV_COMMAND:
+                    if response_text and response_text.startswith("FILE_RESPONSE::"):
+                        # Handle special responses that are meant to be sent as file attachments.
+                        # The format is "FILE_RESPONSE::filename.txt::file_content"
+                        parts = response_text.split("::", 2)
+                        filename = parts[1]
+                        file_content = parts[2]
+
+                        # Create a file-like object in memory to send to Discord
+                        file_buffer = io.StringIO(file_content)
+                        discord_file = discord.File(fp=file_buffer, filename=filename)
+                        await message.channel.send(f"Here is the context dump:", file=discord_file)
+
+                    elif response_type == ResponseType.DEV_COMMAND:
                         await _send_dev_response(message.channel, response_text)
                     elif response_text and response_text.strip():
                         await asyncio.to_thread(
