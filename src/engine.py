@@ -347,6 +347,7 @@ class TextEngine:
                 if context["current_message"].get("image_url") and role == 'user' and item is history_to_process[-1]:
                     try:
                         image_url = context["current_message"]["image_url"]
+                        # Asynchronously fetch the image
                         async with aiohttp.ClientSession() as session:
                             async with session.get(image_url) as resp:
                                 resp.raise_for_status()

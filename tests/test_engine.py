@@ -146,6 +146,35 @@ class TestAnthropic:
             await text_engine.generate_response(anthropic_config, base_context)
 
 
+    @pytest.mark.asyncio
+    @patch('aiohttp.ClientSession.get')
+    async def test_image_url_passed_to_anthropic(self, mock_get, mock_anthropic_class, text_engine, anthropic_config,
+                                                 base_context, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy_key_for_testing")
+
+        # Mock the image download
+        mock_response = AsyncMock()
+        mock_response.read.return_value = b'imagedata'
+        mock_response.content_type = 'image/png'
+        mock_get.return_value.__aenter__.return_value = mock_response
+
+        # Mock the Claude API response
+        mock_instance = mock_anthropic_class.return_value
+        mock_instance.messages.create.return_value = MagicMock(
+            content=[MagicMock(text="Image received")], stop_reason="end_turn"
+        )
+
+        base_context["current_message"]["image_url"] = "http://example.com/image.png"
+        base_context["history"] = [{"role": "user", "content": "Check this out"}]
+
+        await text_engine.generate_response(anthropic_config, base_context)
+
+        # Verify that the image was included in the API call
+        call_args = mock_instance.messages.create.call_args[1]
+        assert call_args['messages'][-1]['content'][-1]['type'] == 'image'
+        assert call_args['messages'][-1]['content'][-1]['source']['data'] == base64.b64encode(b'imagedata').decode('utf-8')
+
+
 @patch('src.engine.genai.client.AsyncClient')
 class TestGoogle:
     @pytest.mark.asyncio
@@ -194,6 +223,40 @@ class TestGoogle:
         mock_instance.models.generate_content.side_effect = Exception("API failure")
         with pytest.raises(LLMCommunicationError, match="An error occurred with Google API"):
             await text_engine.generate_response(google_config, base_context)
+
+
+    @pytest.mark.asyncio
+    @patch('aiohttp.ClientSession.get')
+    async def test_image_url_passed_to_google(self, mock_get, mock_google_client_class, text_engine, google_config,
+                                              base_context, monkeypatch):
+        monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy_key_for_testing")
+
+        # Mock the image download
+        mock_response = AsyncMock()
+        mock_response.read.return_value = b'imagedata'
+        mock_response.content_type = 'image/jpeg'
+        mock_get.return_value.__aenter__.return_value = mock_response
+
+        # Mock the Gemini API response
+        mock_instance = mock_google_client_class.return_value
+        mock_part = MagicMock()
+        mock_part.function_call = None
+        mock_part.text = "Image received"
+        mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]))
+        mock_candidate.grounding_metadata = None
+        mock_instance.models.generate_content = AsyncMock(
+            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        )
+
+        base_context["current_message"]["image_url"] = "http://example.com/image.jpg"
+        base_context["history"] = [{"role": "user", "content": "Check this out"}]
+
+        await text_engine.generate_response(google_config, base_context)
+
+        # Verify that the image was included in the API call
+        call_args = mock_instance.models.generate_content.call_args[1]
+        assert len(call_args['contents'][-1]['parts']) == 2
+        assert call_args['contents'][-1]['parts'][-1].inline_data.data == b'imagedata'
 
 
 class TestLocalModel:
