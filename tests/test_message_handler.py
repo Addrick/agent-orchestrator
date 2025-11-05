@@ -132,3 +132,43 @@ def test_set_context_command_variations(bot_logic, mock_chat_system_with_state):
     assert persona.is_in_dynamic_context() is True
     assert persona.get_context_length() == 12
     assert persona.get_context_length() == 14
+
+
+@pytest.mark.asyncio
+async def test_handle_dump_context_returns_file_response_format(bot_logic, mock_chat_system_with_state):
+    """
+    Tests that the dump_context command returns the special FILE_RESPONSE string
+    and correctly formats the context into a string.
+    """
+    # 1. Setup a mock API payload
+    user_identifier = "user1"
+    persona_name = "derpr"
+    mock_payload = {
+        'model': 'test-model',
+        'config': {},
+        'contents': [
+            {'role': 'user', 'parts': [{'text': 'Hello there'}]},
+            {'role': 'assistant', 'parts': [{'text': 'General Kenobi'}]}
+        ]
+    }
+    mock_chat_system_with_state.last_api_requests = {user_identifier: {persona_name: mock_payload}}
+    current_persona = mock_chat_system_with_state.personas[persona_name]
+
+    # 2. Action
+    # Note: We are testing the private method directly here for simplicity,
+    # as preprocess_message would just route to it.
+    response, mutated = bot_logic._handle_dump_context(args=[], persona=current_persona,
+                                                       user_identifier=user_identifier)
+
+    # 3. Assertions
+    assert mutated is False
+    assert response.startswith("FILE_RESPONSE::context_dump.txt::")
+
+    # Check that key parts of the context are in the file content string
+    file_content = response.split("::", 2)[2]
+    assert "--- Context Dump for derpr ---" in file_content
+    assert "--- Conversation History Sent to Model ---" in file_content
+    assert "[Message 1 - ROLE: USER]" in file_content
+    assert "Hello there" in file_content
+    assert "[Message 2 - ROLE: ASSISTANT]" in file_content
+    assert "General Kenobi" in file_content
