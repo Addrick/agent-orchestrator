@@ -1,3 +1,4 @@
 stuff/
 .huggingface/
 /.venv/
+__pycache__/

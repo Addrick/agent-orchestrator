@@ -134,7 +134,7 @@ async def test_generate_response_handles_llm_communication_error(chat_system_wit
     system, _, text_engine_mock, _, _, _ = chat_system_with_mocks
     text_engine_mock.generate_response.side_effect = LLMCommunicationError("API is down")
     response, _, _ = await system.generate_response("test_persona", "user", "channel", "test")
-    assert "I'm having trouble connecting" in response
+    assert "Error while generating a response:" in response
 
 
 @pytest.mark.asyncio
