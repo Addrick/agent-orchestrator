@@ -167,7 +167,7 @@ async def test_handle_dump_context_returns_file_response_format(bot_logic, mock_
     # Check that key parts of the context are in the file content string
     file_content = response.split("::", 2)[2]
     assert "--- Context Dump for derpr ---" in file_content
-    assert "--- Conversation History Sent to Model ---" in file_content
+    assert "--- Context Sent to Model ---" in file_content
     assert "[Message 1 - ROLE: USER]" in file_content
     assert "Hello there" in file_content
     assert "[Message 2 - ROLE: ASSISTANT]" in file_content
