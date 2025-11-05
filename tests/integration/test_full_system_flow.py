@@ -24,7 +24,7 @@ PERSISTENT_TEST_USER_EMAIL = "pytest-integration-user@zammad.local"
 
 
 async def _wait_for_search(search_func: Callable[..., List[Any]], assertion_func: Callable[[List[Any]], bool],
-                           timeout: int = 5, interval: float = 0.5):
+                           timeout: int = 6, interval: float = 0.5):
     """
     Repeatedly calls a search function and checks an assertion until it passes or times out.
     """

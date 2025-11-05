@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from config import global_config
 from config.global_config import EMPTY_RESPONSE_RETRIES, EMPTY_RESPONSE_RETRY_DELAY
 # --- Provider-specific imports ---
+import base64
 import aiohttp
 import anthropic
 from openai import AsyncOpenAI, APIStatusError, APITimeoutError
@@ -56,6 +57,20 @@ class TextEngine:
         else:
             logger.warning(".env file not found, API keys must be in environment.")
 
+    def model_supports_images(self, model_name: str) -> bool:
+        """Checks if a model is known to support image inputs."""
+        model_name = model_name.lower()
+        # OpenAI: gpt-4, gpt-4o, o1, etc.
+        if 'gpt-4' in model_name or model_name.startswith('o1'):
+            return True
+        # Anthropic: claude-3, claude-4, etc.
+        if 'claude-3' in model_name or 'claude-4' in model_name:
+            return True
+        # Google: gemini models
+        if 'gemini' in model_name:
+            return True
+        return False
+
     async def _get_openai_client(self) -> AsyncOpenAI:
         """Initializes and returns the OpenAI client."""
         if self.openai_client is None:
@@ -98,6 +113,11 @@ class TextEngine:
         Raises: LLMCommunicationError if all retries fail or produce empty/invalid responses.
         """
         model_name: str = persona_config.get("model_name", "")
+
+        if context_object["current_message"].get("image_url") and not self.model_supports_images(model_name):
+            logger.info(f"Model {model_name} does not support images. Modifying prompt.")
+            context_object["persona_prompt"] += "\n\n[System note: The user has attached an image that you cannot see. Please inform them of this fact in your response.]"
+            context_object["current_message"]["image_url"] = None
 
         for attempt in range(EMPTY_RESPONSE_RETRIES + 1):
             result: Dict[str, Any] = {}
@@ -211,6 +231,35 @@ class TextEngine:
             system_prompt = f"{system_prompt}\n\n{history[0]['content']}"
             history = history[1:]
 
+        # Handle image URL in the last user message
+        if context["current_message"].get("image_url"):
+            last_message = history[-1]
+            if last_message['role'] == 'user':
+                if isinstance(last_message['content'], str):
+                    last_message['content'] = [{"type": "text", "text": last_message['content']}]
+
+                try:
+                    image_url = context["current_message"]["image_url"]
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(image_url) as resp:
+                            resp.raise_for_status()
+                            image_bytes = await resp.read()
+                            mime_type = resp.content_type
+
+                    if mime_type not in ['image/jpeg', 'image/png', 'image/webp', 'image/gif']:
+                        logger.warning(f"Unsupported image MIME type '{mime_type}' for Claude. Skipping image.")
+                    else:
+                        last_message['content'].append({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": mime_type,
+                                "data": base64.b64encode(image_bytes).decode('utf-8'),
+                            },
+                        })
+                except aiohttp.ClientError as e:
+                    logger.error(f"Failed to download image from {image_url}: {e}")
+
         api_params: Dict[str, Any] = {
             "model": config["model_name"],
             "system": system_prompt,
@@ -255,14 +304,14 @@ class TextEngine:
     async def _generate_google_response(self, config: Dict[str, Any], context: Dict[str, Any],
                                         tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
         Dict[str, Any], Dict[str, Any]]:
+        """
+        Generates a response using the Google Gemini API, now using the native system prompt format.
+        """
         try:
             self._initialize_google_client()
             assert self.google_client is not None and self.google_search_tool is not None
         except (ValueError, AssertionError) as e:
             raise LLMCommunicationError(f"Error: Google not configured: {e}") from e
-
-        history_for_api = []
-        serializable_history = []
 
         system_prompt = context["persona_prompt"]
         history_to_process = context["history"]
@@ -270,10 +319,14 @@ class TextEngine:
             system_prompt = f"{system_prompt}\n\n{history_to_process[0]['content']}"
             history_to_process = history_to_process[1:]
 
-        first_turn = True
+        # Use the native 'system' instruction format for the Gemini API.
+        # This is a role-less entry at the start of the conversation history.
+        history_for_api = [{'parts': [Part(text=system_prompt)]}]
+        # Create a serializable version for dumping/logging that includes a 'system' role for clarity.
+        serializable_history = [{'role': 'system', 'parts': [{'text': system_prompt}]}]
+
         for item in history_to_process:
             role = 'model' if item['role'] == 'assistant' else 'user'
-
             serializable_item = item.copy()
 
             if item['role'] == 'tool':
@@ -287,13 +340,29 @@ class TextEngine:
                 serializable_item['parts'] = parts_list
             else:
                 content_text = item['content']
-                if first_turn and role == 'user':
-                    content_text = f"{system_prompt}\n\n### Conversation:\n{content_text}"
-                    first_turn = False
-                part_dict = {'text': content_text}
-                history_for_api.append({'role': role, 'parts': [Part(**part_dict)]})
-                serializable_item['parts'] = [part_dict]
+                parts_for_api = [Part(text=content_text)]
+                serializable_parts = [{'text': content_text}]
 
+                # Handle image URL in the last user message
+                if context["current_message"].get("image_url") and role == 'user' and item is history_to_process[-1]:
+                    try:
+                        image_url = context["current_message"]["image_url"]
+                        async with aiohttp.ClientSession() as session:
+                            async with session.get(image_url) as resp:
+                                resp.raise_for_status()
+                                image_bytes = await resp.read()
+                                mime_type = resp.content_type
+
+                        if mime_type not in ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif']:
+                            logger.warning(f"Unsupported image MIME type '{mime_type}'. Skipping image.")
+                        else:
+                            parts_for_api.append(Part(inline_data={'data': image_bytes, 'mime_type': mime_type}))
+                            serializable_parts.append({'inline_data': {'mime_type': mime_type, 'data': '...bytes...'}})
+                    except aiohttp.ClientError as e:
+                        logger.error(f"Failed to download image from {image_url}: {e}")
+
+                history_for_api.append({'role': role, 'parts': parts_for_api})
+                serializable_item['parts'] = serializable_parts
             serializable_history.append(serializable_item)
 
         content_config_for_api: Dict[str, Any] = {"safety_settings": self.google_safety_settings}
@@ -367,30 +436,43 @@ class TextEngine:
 
         return {"type": "text", "content": final_text_content.strip()}, api_params_for_dumping
 
+    async def _get_local_client(self) -> AsyncOpenAI:
+        """
+        Creates a new AsyncOpenAI client configured to point to a local,
+        OpenAI-compatible API endpoint (like KoboldCPP or Ollama).
+        """
+        # This could be made configurable in global_config.py in the future
+        local_api_url = "http://localhost:5001/v1"
+        return AsyncOpenAI(base_url=local_api_url, api_key="not-required")
+
     async def _generate_local_response(self, config: Dict[str, Any], context: Dict[str, Any],
                                        tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
         Dict[str, Any], Dict[str, Any]]:
-        url: str = 'http://localhost:5001/api/v1/generate'
-        history_str: str = "\n".join([f"{msg['role']}: {msg['content']}" for msg in context['history']])
-        full_prompt: str = f"{history_str}\nuser: {context['current_message']['text']}\nassistant:"
+        """
+        Generates a response from a local model by reusing the standard OpenAI
+        API format. This standardizes local model integration.
+        """
+        local_client = await self._get_local_client()
 
-        payload: Dict[str, Any] = {
-            "max_length": config.get("max_output_tokens") or global_config.DEFAULT_TOKEN_LIMIT,
-            "temperature": config.get("temperature"),
-            "top_p": config.get("top_p"),
-            "top_k": config.get("top_k"),
-            "memory": context["persona_prompt"],
-            "prompt": full_prompt
-        }
-        payload = {k: v for k, v in payload.items() if v is not None}
+        # Temporarily swap the main OpenAI client with our special local client
+        original_openai_client = self.openai_client
+        self.openai_client = local_client
 
         try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=600)) as session:
-                async with session.post(url, json=payload) as response:
-                    response.raise_for_status()
-                    data = await response.json()
-                    response_text: str = data.get('results', [{}])[0].get('text', '')
-                    return {"type": "text", "content": response_text.strip()}, payload
-        except aiohttp.ClientError as e:
-            logger.error(f"Local model connection error: {e}", exc_info=True)
-            raise LLMCommunicationError("Could not connect to local model.") from e
+            # Most local servers ignore the model name in the payload and use whatever is loaded.
+            # We provide a placeholder for consistency.
+            config['model_name'] = 'local-model'
+            # We can now call our standard, well-tested OpenAI method!
+            return await self._generate_openai_response(config, context, tools)
+        except (APIStatusError, APITimeoutError) as e:
+            logger.error(f"Local OpenAI-compatible API error: {e}", exc_info=True)
+            # Raise with a specific "Local API" message
+            raise LLMCommunicationError(f"Local API returned an error: {e}") from e
+        except Exception as e:
+            logger.error(f"An unexpected local API error occurred: {e}", exc_info=True)
+            # Raise with a specific "Local API" message
+            raise LLMCommunicationError("An unexpected error occurred with the Local API.") from e
+        finally:
+            # CRITICAL: Always restore the original client to avoid breaking
+            # subsequent calls to the actual OpenAI API.
+            self.openai_client = original_openai_client

@@ -460,35 +460,39 @@ class BotLogic:
         if not last_request:
             return f"{persona_name}: No previous request to dump for your session with this persona.", False
 
-        # Extract key information from the payload for a concise summary
-        model_name = last_request.get('model', 'N/A')
+        # --- Finalized Summary Logic for Standardized Payloads ---
+        model_name = last_request.get('model', last_request.get('model_name', 'N/A'))
+
+        # Check for a system prompt to correctly count conversational turns
+        has_system_prompt = False
+        history_list = last_request.get('contents', last_request.get('messages', []))
+        if last_request.get('system') or (history_list and history_list[0].get('role') == 'system'):
+            has_system_prompt = True
+
+        # Count conversational turns (excluding any system prompt)
+        conversational_turns = 0
+        if history_list:
+            # Subtract 1 from the total length if a system prompt was the first item in the list
+            conversational_turns = len(history_list) - 1 if has_system_prompt else len(history_list)
+
+        # Extract generation parameters from potentially different locations
         config = last_request.get('config', {})
-        contents = last_request.get('contents', [])
-        history_count = len(contents) - 1 if contents else 0
-        current_message_count = 1 if contents else 0
-        total_messages = history_count + current_message_count
+        temp = config.get('temperature', last_request.get('temperature', 'default'))
+        max_tokens = config.get('max_output_tokens', last_request.get('max_length', 'default'))
 
-        # Check if a system prompt was included based on the formatting logic for Google's API
-        system_prompt_included = "No"
-        if contents and "### Conversation:" in contents[0].get('parts', [{}])[0].get('text', ''):
-            system_prompt_included = "Yes"
-
-        # Extract generation parameters
-        temp = config.get('temperature', 'default')
-        max_tokens = config.get('max_output_tokens', 'default')
-        # Format tool names for readability
+        # Safely get and format tool names
         tools_list = config.get('tools', [])
+        if tools_list and isinstance(tools_list[0], dict):  # Handle OpenAI format
+            tools_list = [t.get('function', {}).get('name', 'unknown') for t in tools_list]
         tools = ", ".join(tools_list) if tools_list else "None"
 
-        # Assemble the formatted summary string
         summary = (
             f"{persona_name}: Summary of Last API Request\n"
             f"----------------------------------------\n"
             f"Model Used: {model_name}\n"
             f"Context Sent:\n"
-            f"  - Total Messages: {total_messages} ({history_count} from history + {current_message_count} current)\n"
+            f"  - Context Messages: {conversational_turns}\n"
             f"  - Memory Mode Used: {persona.get_memory_mode().name.lower()}\n"
-            f"  - System Prompt Included: {system_prompt_included}\n"
             f"Generation Params:\n"
             f"  - Temperature: {temp}\n"
             f"  - Max Output Tokens: {max_tokens}\n"
@@ -498,10 +502,21 @@ class BotLogic:
         )
         return summary, False
 
-    def _handle_dump_context(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[Optional[str], bool]:
+        # In src/message_handler.py
+
+    def _handle_dump_context(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[
+        Optional[str], bool]:
         """
-        Generates a detailed text file containing the full context of the last API call,
-        including persona configuration and the exact conversation history sent to the model.
+        Generates a detailed text file containing the full context of the last API call.
+
+        This includes the persona's configuration and the exact prompt and message
+        history sent to the model, with the system prompt clearly separated from
+        the conversational messages.
+
+        Returns:
+            A specially formatted string that signals to the Discord interface
+            to create and upload a file, or an error message.
+            Format: "FILE_RESPONSE::filename.txt::file_content"
         """
         if args:
             return "Usage: dump_context", False
@@ -512,38 +527,57 @@ class BotLogic:
         if not last_request:
             return f"{persona_name}: No previous request to analyze.", False
 
-        # Start building the detailed context string
         output_lines = [f"--- Context Dump for {persona_name} ---"]
 
-        # Add persona details for a comprehensive debugging view
+        # Append the persona's current configuration for a comprehensive debugging view.
         output_lines.append("\n--- Persona Configuration ---")
         output_lines.append(f"Model: {persona.get_model_name()}")
         output_lines.append(f"Memory Mode: {persona.get_memory_mode().name}")
         output_lines.append(f"Execution Mode: {persona.get_execution_mode().name}")
         output_lines.append(f"Context Length Setting: {persona.get_base_context_length()}")
-        output_lines.append(f"Temp: {persona.get_temperature()}, Top P: {persona.get_top_p()}, Top K: {persona.get_top_k()}")
+        output_lines.append(
+            f"Temp: {persona.get_temperature()}, Top P: {persona.get_top_p()}, Top K: {persona.get_top_k()}")
 
-        # Add the conversation history from the API payload
-        output_lines.append("\n--- Conversation History Sent to Model ---")
-        contents = last_request.get('contents', [])
+        output_lines.append("\n--- Context Sent to Model ---")
+        # The history payload can be under 'contents' (Google) or 'messages' (OpenAI).
+        contents = last_request.get('contents', last_request.get('messages', []))
+
         if not contents:
-            output_lines.append("No conversation history was sent.")
+            output_lines.append("No content was sent to the model.")
         else:
-            for i, item in enumerate(contents):
-                role = item.get('role', 'unknown').upper()
-                # Safely access potentially nested content
-                content_text = '[NO TEXT CONTENT]'
-                parts = item.get('parts', [])
-                if parts and isinstance(parts, list) and isinstance(parts[0], dict):
-                    content_text = parts[0].get('text', content_text)
-
-                output_lines.append(f"\n[Message {i + 1} - ROLE: {role}]")
-                output_lines.append(content_text)
+            conversation_history = contents
+            # Check if the first entry is a system prompt and handle it as a special case
+            # to distinguish it from conversational turns.
+            if contents and contents[0].get('role') == 'system':
+                system_prompt_content = contents[0].get('parts', [{}])[0].get('text', '[NO TEXT CONTENT]')
+                output_lines.append("\n[System Prompt]")
+                output_lines.append(system_prompt_content)
                 output_lines.append("-" * 20)
+                # The rest of the list is the actual conversation.
+                conversation_history = contents[1:]
 
-        # Use a special prefix to signal to the Discord interface that this is a file response.
-        # Format: "FILE_RESPONSE::filename.txt::file_content"
-        return f"FILE_RESPONSE::{'context_dump.txt'}::{'\n'.join(output_lines)}", False
+            # Loop through the remaining conversational messages.
+            if not conversation_history:
+                output_lines.append("\nNo conversational messages were sent (only a system prompt).")
+            else:
+                for i, item in enumerate(conversation_history):
+                    role = item.get('role', 'unknown').upper()
+
+                    # Safely access potentially nested content from different API formats.
+                    content_text = '[NO TEXT CONTENT]'
+                    parts = item.get('parts', [])
+                    if parts and isinstance(parts, list) and isinstance(parts[0], dict):
+                        content_text = parts[0].get('text', content_text)
+
+                    # Number messages starting from 1 for readability.
+                    output_lines.append(f"\n[Message {i + 1} - ROLE: {role}]")
+                    output_lines.append(content_text)
+                    output_lines.append("-" * 20)
+
+        # Return a specially formatted string. The Discord interface is configured
+        # to parse this format and upload the content as a file attachment.
+        file_content = "\n".join(output_lines)
+        return f"FILE_RESPONSE::context_dump.txt::{file_content}", False
 
     def _handle_update_models(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[str, bool]:
         if args:
