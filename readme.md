@@ -1,37 +1,117 @@
-derpr: an easily extensible chat-based LLM request system
-This is a personal project that has had an ever-expanding feature scope so it requires a bit of setup, primarily 
-creating an api_keys.py file under \stuff and adding the relevant keys there as required. System is planned for overhaul
-once I'm happier with the core feature set. 
+---
+
+# Production-Ready LLM Orchestration Engine (`derpr-python`)
+
+This project is a complete, end-to-end AI chatbot system designed for real-world application. It functions as a provider-agnostic orchestration engine, capable of integrating with multiple LLM providers, external services, and user interfaces to solve complex business problems like automated IT service dispatch. It is architected for reliability, scalability, and ease of maintenance.
+
+---
+
+## Core Features
+
+*   **Provider-Agnostic LLM Engine:** A standardized interface abstracts the unique request/response schemas of multiple providers, including OpenAI, Google (Vertex AI & Gemini API), Anthropic, and local OpenAI-compatible servers (e.g., Llama.cpp, Ollama). This allows for seamless model switching and performance comparison.
+
+*   **Asynchronous & Modular Architecture:** Built on `asyncio`, the system is fully non-blocking. It uses dependency injection to decouple core logic from external interfaces (Discord, Gmail) and services, ensuring high performance and maintainability.
+
+*   **Robust Tool Integration:** Features a multi-step tool execution loop, enabling the LLM to perform complex, agentic tasks by chaining API calls (e.g., search user, create ticket, add note) and feeding the results back into its context for subsequent reasoning.
+
+*   **Multi-Modal Memory System:** A stateful persona management system provides precise, contextually-aware conversational history to the LLM using multiple retrieval strategies (e.g., ticket-isolated, channel-wide, personal history) from a persistent SQLite database.
+
+*   **Comprehensive Testing Suite:** The project is validated by a multi-layered testing strategy using Pytest, including isolated unit tests with mocks and high-fidelity integration tests that run against a live Zammad ticketing instance to ensure verifiably correct behavior.
+
+*   **Multi-Interface Support:** The decoupled design allows the core engine to connect to various front-ends, with current implementations for Discord and the Gmail API.
+
+## Architecture
+
+The system is designed with a clear separation of concerns, allowing for independent development and testing of its core components.
+
+```mermaid
+graph TD
+    subgraph User Interfaces
+        UI1[Discord]
+        UI2[Gmail API]
+    end
+
+    subgraph Core System
+        CS[Chat System Core]
+        MM["Memory Manager\n(SQLite)"]
+        TM[Tool Manager]
+        LLME[LLM Orchestration Engine]
+    end
+
+    subgraph External Services
+        Zammad[Zammad Ticketing API]
+        OpenAI[OpenAI API]
+        Google["Google Cloud APIs\n(Vertex AI / Gemini)"]
+        Anthropic[Anthropic API]
+        Local[Local Inference Server]
+    end
+
+    UI1 & UI2 -->|User Input| CS
+    CS -->|Generate Response| LLME
+    CS -->|Get History| MM
+    CS -->|Execute Tools| TM
+    CS -->|Log Messages| MM
+    CS -->|Bot Reply| UI1 & UI2
+
+    LLME -->|API Calls| OpenAI
+    LLME -->|API Calls| Google
+    LLME -->|API Calls| Anthropic
+    LLME -->|API Calls| Local
+
+    TM -->|API Calls| Zammad
+```
+
+## Tech Stack
+
+| Category      | Technologies                                                                          |
+|---------------|---------------------------------------------------------------------------------------|
+| **Backend**   | Python 3.10+, `asyncio`                                                               |
+| **Database**  | SQLite                                                                                |
+| **LLM APIs**  | OpenAI, Google Cloud (Vertex AI, Gemini), Anthropic, OpenAI-compatible local servers  |
+| **DevOps**    | Docker, Docker Compose, CI/CD (GitHub Actions)                                        |
+| **Testing**   | Pytest, `pytest-asyncio`, `unittest.mock`                                             |
+| **Core Libs** | `aiohttp`, `google-generativeai`, `google-api-python-client`, `anthropic`, `openai`   |
 
 
-Current features:
-- supports OpenAI, Anthropic, Google and local koboldcpp inference (change model on the fly)
-- supports multiple requests asynchronously
-- handles 'personas', which contain various tools for customizing response habits:
-  - prompt: basic personality information for agent
-  - model: determines which language engine to query
-  - context limit: number of previous discord messages read and included in requests as chat history, system commands are not included (ie changing context length)
-  - token limit: number of tokens the model is allowed to generate on response
-- address different personas by beginning your message with their name (todo: also replies)
-- persona will always reply to a channel with a name matching the persona
-- 'derpr help' will give a list of active personas and commands for addressing the persona handler system directly.
+---
 
-Bot commands are simple text statements to accommodate eventual speech support. Below are current commands and they are 
-listed when you ask any persona 'help':
+## Getting Started
 
-hello (start new conversation), - dynamically increases context window to include all messages in conversation after 'hello'
-goodbye (end conversation), - exits conversation, returns context window to default
-remember <+prompt>, - adds information to end of prompt
-what prompt/model/personas/context/tokens, - returns current value for desired parameter
-set prompt/model/context/tokens, - sets value for specified parameter. Models must exactly match an available model from 'what models'
-add <persona> <prompt>, - adds new persona with default parameters
-delete <persona>, - deletes persona
-save, - write changes to prompts/parameters to file for preservation across restarts (sometimes called automatically, like on creating new persona) WIP
-update_models, - query services to retrieve an up-to-date list of available models (Anthropic does not support this)
-dump_last - dumps a raw json of the previous request sent to the system to view parameters and history/context for debugging
+### Prerequisites
 
-start_koboldcpp, - starts koboldcpp service. Buggy, WIP
-stop_koboldcpp, - stops koboldcpp service. Buggy WIP
-check_koboldcpp, - usually doesn't work, WIP
-query_generation, - request dump of partially generated response from koboldcpp during generation
-restart_app, - restart koboldcpp, WIP
+*   Python 3.10+
+*   Docker and Docker Compose
+*   Access to the various service APIs you intend to use.
+
+### Setup & Installation
+
+1.  **Clone the repository:**
+    ```bash
+    git clone https://github.com/addrick/derpr-python.git
+    cd derpr-python
+    ```
+
+2.  **Create a virtual environment (recommended):**
+    ```bash
+    python -m venv venv
+    source venv/bin/activate  # On Windows, use `venv\Scripts\activate`
+    ```
+
+3.  **Install dependencies:**
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+4.  **Configure your environment:**
+    Create a file named `.env` in the root of the project by copying the example file.
+    ```bash
+    cp .env.example .env
+    ```
+    Now, edit the `.env` file and fill in your API keys and other configuration details.
+
+    Once online, you can use 'help' for a list of commands:
+    
+
+pytest
+```
+_Note: The integration test suite (`tests/integration`) requires a live, configured Zammad instance to run successfully._
