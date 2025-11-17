@@ -80,7 +80,6 @@ graph TD
 ### Prerequisites
 
 *   Python 3.10+
-*   Docker and Docker Compose
 *   Access to the various service APIs you intend to use.
 
 ### Setup & Installation
