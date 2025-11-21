@@ -38,7 +38,7 @@ def save_models_to_file(models_dict: Dict[str, Any], file_path_override: Optiona
             save_data = json.load(file)
     except (FileNotFoundError, json.JSONDecodeError):
         # If file doesn't exist or is empty/corrupt, start with a default structure
-        save_data = {"personas.json": [], "models": {}}
+        save_data = {"personas": [], "models": {}}
 
     save_data['models'] = models_dict
     with open(save_file, 'w') as file:
@@ -47,7 +47,7 @@ def save_models_to_file(models_dict: Dict[str, Any], file_path_override: Optiona
 
 
 def save_personas_to_file(personas: Dict[str, Any], file_path_override: Optional[str] = None) -> None:
-    """Save all personas.json to the JSON file."""
+    """Save all personas to the JSON file."""
     save_file = file_path_override or _get_persona_save_file_path()
 
     # Ensure the directory exists
@@ -61,15 +61,15 @@ def save_personas_to_file(personas: Dict[str, Any], file_path_override: Optional
             # Handle empty file case
             content: str = file.read()
             if not content:
-                save_data = {"personas.json": [], "models": {}}
+                save_data = {"personas": [], "models": {}}
             else:
                 save_data = json.loads(content)
     except (FileNotFoundError, json.JSONDecodeError):
         # If file doesn't exist or is corrupt, start with a default structure
-        save_data = {"personas.json": [], "models": {}}
+        save_data = {"personas": [], "models": {}}
 
     persona_dict: List[Dict[str, Any]] = to_dict(personas)
-    save_data['personas.json'] = persona_dict
+    save_data['personas'] = persona_dict
 
     with open(save_file, 'w') as file:
         json.dump(save_data, file, indent=4)
@@ -101,7 +101,7 @@ def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def load_personas_from_file(file_path_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
     from src.persona import Persona, ExecutionMode, MemoryMode
-    """Load personas.json from a JSON-formatted file into a dictionary."""
+    """Load personas from a JSON-formatted file into a dictionary."""
     file_path = file_path_override or _get_persona_save_file_path()
     if not os.path.exists(file_path):
         logger.warning(f"File '{file_path}' does not exist.")
@@ -115,8 +115,8 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
             persona_data: Dict[str, Any] = json.loads(content)
 
         personas: Dict[str, Persona] = {}
-        # Ensure 'personas.json' key exists and is a list
-        for new_persona in persona_data.get('personas.json', []):
+        # Ensure 'personas' key exists and is a list
+        for new_persona in persona_data.get('personas', []):
             name: Optional[str] = new_persona.get("name")
             if not name:
                 logger.warning(f"Skipping persona with no name in '{file_path}'.")
@@ -161,5 +161,5 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
         logger.error(f"Error decoding JSON file '{file_path}': {str(e)}")
         return None
     except Exception as e:
-        logger.error(f"An unexpected error occurred while loading personas.json from '{file_path}': {e}", exc_info=True)
+        logger.error(f"An unexpected error occurred while loading personas from '{file_path}': {e}", exc_info=True)
         return None
