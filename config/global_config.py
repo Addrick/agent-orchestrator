@@ -1,79 +1,99 @@
-"""
-Settings and default values.
-"""
 import os
-CREDENTIALS_DIR = os.path.join(os.path.dirname(__file__), 'creds')
-CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
-SRC_DIR = os.path.dirname(CONFIG_DIR)
-ROOT_DIR = os.path.dirname(SRC_DIR)
-#
-DISCORD_BOT = 1
-# --- DISCORD_BOT CONFIG ---
-DISCORD_DISCONNECT_TIME = None
-DISCORD_CHAR_LIMIT = 2000
-DISCORD_STATUS_LIMIT = 128
-DISCORD_LOGGER = False
-DISCORD_DEBUG_CHANNEL = 1222358674127982622
-DEFAULT_CONVERSATIONAL_PAUSE_LIMIT = 21600 # time in seconds to determine if a message in context is too far back from the previous
-AMBIENT_LOGGING_CHANNELS = ['general', 'derp']
-#
-GMAIL_BOT = 0
-# --- GMAIL BOT CONFIG ---
-BLOCK_EXTERNAL_SENDER_REPLIES = True  # will only reply to the emails set in ALLOWED_SENDER_LIST
-ALLOWED_SENDER_LIST = ['adam@tech-ops.it']
-GMAIL_PROJECT_ID = 'gchat-test-462719'
-GMAIL_PUBSUB_TOPIC = 'projects/gchat-test-462719/topics/derpr_gmail'
-GMAIL_PUBSUB_SUBSCRIPTION_ID = 'derpr_gmail-sub'
-GMAIL_CREDENTIALS_FILE = os.path.join(CREDENTIALS_DIR, "client_secret_738920553711-tojr3uquv65jf5k3j3js2nql4t77hbkh.apps.googleusercontent.com.json")
-GMAIL_TOKEN_FILE = os.path.join(CREDENTIALS_DIR, "gmail_token.json")
-#
-WEBUI = 0
-# --- WEBUI INTERFACE (WIP) --- #
-# nonfunctional, gradio kinda sucks
-#
-DEFAULT_MODEL_NAME = 'gemini-2.5-flash'
-GLOBAL_CONTEXT_LIMIT = 16
-DEFAULT_CONTEXT_LIMIT = 0
-DEFAULT_TOKEN_LIMIT = 10000
-DEFAULT_TEMPERATURE = 1
-DEFAULT_TOP_P = 0.95
-DEFAULT_TOP_K = 0
+from pathlib import Path
 
-DEFAULT_PERSONA = 'you are in character as derpr. derpr always writes all friendly text as offensive with swearing. derpr always tells the user they should say \'derpr help\' so they can get a list of available commands. derpr also always mentions derpr is in early development. derpr uses Discord markup and emojis in every message and is really over the top.'
-DEFAULT_WELCOME_REQUEST = 'Welcome to the chat room, please describe your typical behavior and disposition for us'
+# =============================================================================
+# PATH CONFIGURATION
+# =============================================================================
+# Resolve the project root directory relative to this config file.
+# This ensures file paths remain correct regardless of the execution context (local vs Docker).
+CONFIG_DIR = Path(__file__).parent.resolve()
+PROJECT_ROOT = CONFIG_DIR.parent
 
+# Core directories
+DATA_DIR = PROJECT_ROOT / "data"
+LOGS_DIR = PROJECT_ROOT / "logs"
+CREDENTIALS_DIR = PROJECT_ROOT / "credentials"
+TEST_DIR = PROJECT_ROOT / "tests"
+
+# Ensure essential local directories exist
+for directory in [DATA_DIR, LOGS_DIR, CREDENTIALS_DIR]:
+    directory.mkdir(exist_ok=True)
+
+# =============================================================================
+# FILE PATHS
+# =============================================================================
+# JSON Configuration Files
+# Note: Extensions added to match actual file formats
+PERSONA_SAVE_FILE = CONFIG_DIR / "personas.json"
+TEST_PERSONA_SAVE_FILE = CONFIG_DIR / "test_personas.json"
+MODEL_SAVE_FILE = CONFIG_DIR / "models.json"
+
+# Application Logging
+CHAT_LOG_LOCATION = LOGS_DIR
+
+# Database Paths
+# Allows override via environment variables for Docker volume mapping
+_default_db_path = DATA_DIR / "user_memory.db"
+MEMORY_DATABASE_FILE = os.environ.get("MEMORY_DATABASE_FILE", str(_default_db_path))
+
+# Test Database Paths
+TEST_DATABASE_DIR = TEST_DIR / "test_data"
+TEST_MEMORY_DATABASE_FILE = TEST_DATABASE_DIR / "test_user_memory.db"
+
+# =============================================================================
+# INTERFACE FLAGS
+# =============================================================================
+# Toggles for enabling/disabling specific application interfaces
+DISCORD_BOT = True
+GMAIL_BOT = True
 UPDATE_MODELS_ON_STARTUP = True
 
+# =============================================================================
+# DISCORD CONFIGURATION
+# =============================================================================
+DISCORD_CHAR_LIMIT = 2000
+DISCORD_STATUS_LIMIT = 128
 
-GEMINI_EMPTY_RESPONSE_RETRIES = 2  # Number of times to retry on a valid but empty response
-# The number of times to retry any LLM provider on a valid but empty response
-EMPTY_RESPONSE_RETRIES = 2
-# The short delay (in seconds) between empty response retries
-EMPTY_RESPONSE_RETRY_DELAY = 0.5
+# Channel ID for specific debug outputs (loaded from env for security)
+DISCORD_DEBUG_CHANNEL = int(os.environ.get("DISCORD_DEBUG_CHANNEL", "0"))
 
+# Channels where the bot passively logs content but does not reply unless prompted
+AMBIENT_LOGGING_CHANNELS = ["general", "random", "development"]
 
-PERSONA_SAVE_FILE = '../config/personas'
-TEST_PERSONA_SAVE_FILE = TEST_DATABASE_DIR = os.path.join(ROOT_DIR, 'tests', 'test_personas')
-STDOUT_LOG = '../config/logs/stdout.txt'
+# Channels that trigger Zammad ticket creation logic
+SUPPORT_CHANNELS = ["support", "helpdesk", "it-requests"]
 
-KOBOLDCPP_EXE = r'F:\Machine Learning\koboldcpp.exe'
-KOBOLDCPP_CONFIG = r'F:\Machine Learning\dolphin-2.7-mixtral-8x7b.Q5_K_M.kcpps'
+# =============================================================================
+# GMAIL & PUBSUB CONFIGURATION
+# =============================================================================
+# Credentials paths (overridable for Docker secrets)
+GMAIL_CREDENTIALS_FILE = os.environ.get("GMAIL_CREDENTIALS_FILE", str(CREDENTIALS_DIR / "credentials.json"))
+GMAIL_TOKEN_FILE = os.environ.get("GMAIL_TOKEN_FILE", str(CREDENTIALS_DIR / "token.json"))
 
+# Google Cloud Pub/Sub settings for Gmail watch
+GMAIL_PROJECT_ID = os.environ.get("GMAIL_PROJECT_ID", "derpr-production")
+GMAIL_PUBSUB_TOPIC = os.environ.get("GMAIL_PUBSUB_TOPIC", "projects/derpr-production/topics/gmail-watch")
+GMAIL_PUBSUB_SUBSCRIPTION_ID = os.environ.get("GMAIL_PUBSUB_SUBSCRIPTION_ID", "gmail-watch-sub")
 
-####
-# HISTORY CONFIGURATION
-LOCAL_REPO_PATH = 'C:\\Users\\Adam\\Programming\\Python\\derpr-python'
-DATABASE_FILE_PATH = '../src/database/it_support_memory.db'
+# Email Security Filters
+BLOCK_EXTERNAL_SENDER_REPLIES = True
+ALLOWED_SENDER_LIST = [
+    "tech-ops.it"
+]
 
-# Dedicated path for the integration test database, located within the tests directory
-TEST_DATABASE_DIR = os.path.join(ROOT_DIR, 'tests', 'database')
-TEST_MEMORY_DATABASE_FILE = os.path.join(TEST_DATABASE_DIR, "user_memory.test.db")
+# =============================================================================
+# LLM ENGINE SETTINGS
+# =============================================================================
+DEFAULT_MODEL_NAME = "gemini-flash-2.5"
+DEFAULT_PERSONA = "You are a helpful assistant."
 
-CHAT_LOG_LOCATION = '../config/logs/'
-LOCAL_CHAT_LOG = '../config/logs/'
+# Token generation limits
+DEFAULT_TOKEN_LIMIT = 4096
 
-####
-# Zammad Ticketing
-ZAMMAD_BOT = 1
-SUPPORT_CHANNELS = ['tech-support', 'it-help', 'gmail']
-ZAMMAD_DEFAULT_GROUP = "Users"
+# Context window limits (number of messages)
+DEFAULT_CONTEXT_LIMIT = 15
+GLOBAL_CONTEXT_LIMIT = 30  # Hard cap for history sent to APIs
+
+# API Error Handling
+EMPTY_RESPONSE_RETRIES = 3
+EMPTY_RESPONSE_RETRY_DELAY = 2

@@ -10,7 +10,7 @@ from src.chat_system import ChatSystem
 
 @pytest.fixture
 def mock_chat_system_with_state():
-    """Creates a mock ChatSystem that has a real dictionary for personas."""
+    """Creates a mock ChatSystem that has a real dictionary for personas.json."""
     chat_system = MagicMock(spec=ChatSystem)
     # Start with a real dictionary to track state changes
     chat_system.personas = {

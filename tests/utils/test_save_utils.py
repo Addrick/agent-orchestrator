@@ -38,10 +38,10 @@ def temp_save_file(tmp_path: Path) -> Path:
 
 def test_save_and_load_personas(temp_save_file: Path, mock_personas: dict):
     """Tests saving persona data to a file and loading it back."""
-    # Save the personas
+    # Save the personas.json
     save_utils.save_personas_to_file(mock_personas, file_path_override=str(temp_save_file))
 
-    # Load the personas
+    # Load the personas.json
     loaded_personas = save_utils.load_personas_from_file(file_path_override=str(temp_save_file))
 
     assert loaded_personas is not None
@@ -108,8 +108,8 @@ def test_save_uses_test_file_in_pytest_env(mock_personas: dict):
         # 3. Verify content of the test file
         with open(TEST_PERSONA_SAVE_FILE, 'r') as f:
             data = json.load(f)
-        assert len(data['personas']) == 2
-        assert data['personas'][0]['name'] == 'p1'
+        assert len(data['personas.json']) == 2
+        assert data['personas.json'][0]['name'] == 'p1'
 
     finally:
         # --- Teardown: Clean up ONLY the test file ---

@@ -1,0 +1,21 @@
+services:
+  chatbot:
+    build: .
+    container_name: chatbot_production
+    restart: unless-stopped
+    # Pass environment variables from your local .env file
+    env_file:
+      - .env
+    environment:
+      # Override the DB path to point to the persistent volume
+      - MEMORY_DATABASE_FILE=/app/data/user_memory.db
+      # If you are running on Linux/AWS, you might need to set the Repo path for your git-pull logic
+      # Though usually, in Docker, we prefer rebuilding the image over git-pulling inside.
+      - REPO_PATH=/app
+    volumes:
+      # Persist the SQLite database and other data
+      - ./data:/app/data
+      # Persist Gmail credentials (token.json) so you don't have to re-auth
+      - ./credentials:/app/credentials
+      # Optional: Mount logs if you write to files
+      - ./logs:/app/logs
