@@ -17,7 +17,8 @@ def _get_persona_save_file_path() -> str:
     Determines the correct persona file path based on the execution context.
     If running under pytest, uses the test-specific file. Otherwise, uses production.
     """
-    if os.getenv('PYTEST_CURRENT_TEST'):
+    if 'PYTEST_CURRENT_TEST' in os.environ:
+        # This ensures that during tests, we always write to the designated test file.
         return TEST_PERSONA_SAVE_FILE
     return PERSONA_SAVE_FILE
 
