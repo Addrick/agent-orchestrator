@@ -303,5 +303,5 @@ class TestLocalModel:
     async def test_connection_error_raises_llm_error(self, mock_async_openai, text_engine, local_config, base_context):
         mock_client_instance = mock_async_openai.return_value
         mock_client_instance.chat.completions.create.side_effect = APIConnectionError(request=MagicMock())
-        with pytest.raises(LLMCommunicationError, match="An unexpected error occurred with the Local API."):
+        with pytest.raises(LLMCommunicationError, match="Local API returned an error"):
             await text_engine.generate_response(local_config, base_context)
