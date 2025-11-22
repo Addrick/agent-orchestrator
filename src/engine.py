@@ -25,7 +25,10 @@ logger = logging.getLogger(__name__)
 
 class LLMCommunicationError(Exception):
     """Custom exception for when the TextEngine cannot communicate with an LLM provider."""
-    pass
+
+    def __init__(self, message: str, api_payload: Optional[Dict[str, Any]] = None):
+        super().__init__(message)
+        self.api_payload = api_payload
 
 
 class TextEngine:
@@ -215,10 +218,11 @@ class TextEngine:
 
         except (APIStatusError, APITimeoutError) as e:
             logger.error(f"OpenAI API error: {e}", exc_info=True)
-            raise LLMCommunicationError(f"OpenAI API returned an error: {e}") from e
+            raise LLMCommunicationError(f"OpenAI API returned an error: {e}", api_payload=api_params) from e
         except Exception as e:
             logger.error(f"An unexpected OpenAI error occurred: {e}", exc_info=True)
-            raise LLMCommunicationError(f"An unexpected error occurred with the OpenAI API.") from e
+            raise LLMCommunicationError(f"An unexpected error occurred with the OpenAI API.",
+                                        api_payload=api_params) from e
 
     async def _generate_anthropic_response(self, config: Dict[str, Any], context: Dict[str, Any],
                                            tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
@@ -296,10 +300,11 @@ class TextEngine:
 
         except anthropic.APIError as e:
             logger.error(f"Anthropic API error: {e}", exc_info=True)
-            raise LLMCommunicationError(f"Anthropic API returned an error: {e}") from e
+            raise LLMCommunicationError(f"Anthropic API returned an error: {e}", api_payload=api_params) from e
         except Exception as e:
             logger.error(f"An unexpected Anthropic error occurred: {e}", exc_info=True)
-            raise LLMCommunicationError(f"An unexpected error occurred with the Anthropic API.") from e
+            raise LLMCommunicationError(f"An unexpected error occurred with the Anthropic API.",
+                                        api_payload=api_params) from e
 
     async def _generate_google_response(self, config: Dict[str, Any], context: Dict[str, Any],
                                         tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
@@ -408,7 +413,8 @@ class TextEngine:
             )
         except Exception as e:
             logger.error(f"Google API error: {e}", exc_info=True)
-            raise LLMCommunicationError(f"An error occurred with Google API: {e}") from e
+            raise LLMCommunicationError(f"An error occurred with Google API: {e}",
+                                        api_payload=api_params_for_dumping) from e
 
         if response_obj.prompt_feedback and response_obj.prompt_feedback.block_reason:
             raise LLMCommunicationError(
@@ -465,13 +471,13 @@ class TextEngine:
             config['model_name'] = 'local-model'
             # We can now call our standard, well-tested OpenAI method!
             return await self._generate_openai_response(config, context, tools)
-        except (APIStatusError, APITimeoutError) as e:
+        except LLMCommunicationError as e:
             logger.error(f"Local OpenAI-compatible API error: {e}", exc_info=True)
-            # Raise with a specific "Local API" message
-            raise LLMCommunicationError(f"Local API returned an error: {e}") from e
+            # Re-raise with a more specific "Local API" message, but preserving the original payload.
+            raise LLMCommunicationError(f"Local API returned an error: {e}", api_payload=e.api_payload) from e
         except Exception as e:
             logger.error(f"An unexpected local API error occurred: {e}", exc_info=True)
-            # Raise with a specific "Local API" message
+            # This will catch errors before the API call is made (e.g., client init)
             raise LLMCommunicationError("An unexpected error occurred with the Local API.") from e
         finally:
             # CRITICAL: Always restore the original client to avoid breaking
