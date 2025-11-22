@@ -125,7 +125,7 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
     # --- PERSISTENCE INITIALIZATION (MIGRATION) ---
     # If we are loading the main database (no override) and it doesn't exist yet:
     if not file_path_override and not target_path.exists():
-        default_source = CONFIG_DIR / "personas.json"
+        default_source = CONFIG_DIR / "default_personas.json"
 
         if default_source.exists():
             logger.info(f"First-run detected. Seeding database from defaults: {default_source} -> {target_path}")
