@@ -12,7 +12,7 @@ env:
 
 jobs:
   # JOB 1: Run Tests
-  tests:
+  test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
