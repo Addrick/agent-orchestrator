@@ -9,7 +9,7 @@ from enum import Enum, auto
 from typing import Any, Coroutine, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
-from config.global_config import SUPPORT_CHANNELS
+from config.global_config import SUPPORT_CHANNELS, MAX_TOOL_CALLS
 from src.clients.zammad_client import ZammadClient
 from src.database.memory_manager import MemoryManager
 from src.engine import LLMCommunicationError, TextEngine
@@ -20,8 +20,6 @@ from src.utils.model_utils import get_model_list
 from src.utils.save_utils import load_personas_from_file, save_personas_to_file
 
 logger = logging.getLogger(__name__)
-
-MAX_TOOL_CALLS = 5
 
 
 class ResponseType(Enum):
