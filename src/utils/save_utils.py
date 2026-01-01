@@ -3,8 +3,11 @@
 import json
 import logging
 import os
+import shutil
+from pathlib import Path
 from typing import Dict, Any, Optional, List, cast
-from config.global_config import PERSONA_SAVE_FILE, TEST_PERSONA_SAVE_FILE
+
+from config.global_config import PERSONA_SAVE_FILE, TEST_PERSONA_SAVE_FILE, CONFIG_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +17,8 @@ def _get_persona_save_file_path() -> str:
     Determines the correct persona file path based on the execution context.
     If running under pytest, uses the test-specific file. Otherwise, uses production.
     """
-    if os.getenv('PYTEST_CURRENT_TEST'):
+    if 'PYTEST_CURRENT_TEST' in os.environ:
+        # This ensures that during tests, we always write to the designated test file.
         return TEST_PERSONA_SAVE_FILE
     return PERSONA_SAVE_FILE
 
@@ -99,49 +103,84 @@ def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
     return persona_list
 
 
+
 def load_personas_from_file(file_path_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Load personas from a JSON-formatted file into a dictionary of Persona objects.
+
+    Auto-Seeding Logic:
+    If the target persistent file (in /data) does not exist, this function will
+    attempt to seed it by copying the default configuration from the application
+    code (in /config). This ensures the bot starts with 'Factory Defaults' on
+    a fresh deployment.
+    """
     from src.persona import Persona, ExecutionMode, MemoryMode
-    """Load personas from a JSON-formatted file into a dictionary."""
-    file_path = file_path_override or _get_persona_save_file_path()
-    if not os.path.exists(file_path):
-        logger.warning(f"File '{file_path}' does not exist.")
+
+    # Determine the target file path
+    if file_path_override:
+        target_path = Path(file_path_override)
+    else:
+        # This typically points to data/personas.json via global_config
+        target_path = _get_persona_save_file_path()
+
+    # --- PERSISTENCE INITIALIZATION (MIGRATION) ---
+    # If we are loading the main database (no override) and it doesn't exist yet:
+    if not file_path_override and not target_path.exists():
+        default_source = CONFIG_DIR / "default_personas.json"
+
+        if default_source.exists():
+            logger.info(f"First-run detected. Seeding database from defaults: {default_source} -> {target_path}")
+            try:
+                # Ensure the parent directory (data/) exists before copying
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(default_source, target_path)
+            except Exception as e:
+                logger.error(f"Failed to seed persona database: {e}")
+                return None
+        else:
+            logger.warning(f"No default persona file found at {default_source}. Starting with empty state.")
+
+    # --- FILE LOADING ---
+    if not target_path.exists():
+        logger.warning(f"Persona file '{target_path}' does not exist.")
         return None
+
     try:
-        with open(file_path, "r") as file:
+        with open(target_path, "r", encoding='utf-8') as file:
             content = file.read()
             if not content:
-                logger.warning(f"File '{file_path}' is empty.")
-                return {}  # Return an empty dict if file is empty
+                logger.warning(f"File '{target_path}' is empty.")
+                return {}
             persona_data: Dict[str, Any] = json.loads(content)
 
         personas: Dict[str, Persona] = {}
-        # Ensure 'personas' key exists and is a list
+
+        # Iterate through the JSON list and instantiate Persona objects
         for new_persona in persona_data.get('personas', []):
             name: Optional[str] = new_persona.get("name")
             if not name:
-                logger.warning(f"Skipping persona with no name in '{file_path}'.")
+                logger.warning(f"Skipping malformed persona entry (missing name) in '{target_path}'.")
                 continue
 
-            # Handle loading execution_mode
+            # Parse Execution Mode (Default: SILENT_ANALYSIS)
             execution_mode_str: Optional[str] = new_persona.get("execution_mode")
             execution_mode: ExecutionMode = ExecutionMode.SILENT_ANALYSIS
             if execution_mode_str and isinstance(execution_mode_str, str):
                 try:
                     execution_mode = ExecutionMode[execution_mode_str.upper()]
                 except KeyError:
-                    logger.warning(f"Invalid execution_mode '{execution_mode_str}' for persona '{name}'. "
-                                   f"Defaulting to SILENT_ANALYSIS.")
+                    logger.warning(f"Invalid execution_mode '{execution_mode_str}' for '{name}'. Defaulting to SILENT_ANALYSIS.")
 
-            # Handle loading memory_mode
+            # Parse Memory Mode (Default: CHANNEL_ISOLATED)
             memory_mode_str: Optional[str] = new_persona.get("memory_mode")
             memory_mode: MemoryMode = MemoryMode.CHANNEL_ISOLATED
             if memory_mode_str and isinstance(memory_mode_str, str):
                 try:
                     memory_mode = MemoryMode[memory_mode_str.upper()]
                 except KeyError:
-                    logger.warning(f"Invalid memory_mode '{memory_mode_str}' for persona '{name}'. "
-                                   f"Defaulting to CHANNEL_ISOLATED.")
+                    logger.warning(f"Invalid memory_mode '{memory_mode_str}' for '{name}'. Defaulting to CHANNEL_ISOLATED.")
 
+            # Create the Persona instance
             personas[name] = Persona(
                 persona_name=name,
                 model_name=new_persona.get("model_name"),
@@ -156,10 +195,12 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
                 enabled_tools=new_persona.get("enabled_tools", []),
                 memory_mode=memory_mode
             )
+
         return personas
+
     except json.JSONDecodeError as e:
-        logger.error(f"Error decoding JSON file '{file_path}': {str(e)}")
+        logger.error(f"Corrupt JSON in file '{target_path}': {str(e)}")
         return None
     except Exception as e:
-        logger.error(f"An unexpected error occurred while loading personas from '{file_path}': {e}", exc_info=True)
+        logger.error(f"Critical error loading personas from '{target_path}': {e}", exc_info=True)
         return None

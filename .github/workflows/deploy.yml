@@ -1,0 +1,103 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "master", "main" ]
+  pull_request:
+    branches: [ "master", "main" ]
+
+env:
+  # Use your actual image name here
+  IMAGE_NAME: ghcr.io/addrick/derpr-python
+
+jobs:
+  # JOB 1: Run Tests
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12"] # Or your target Python version
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt  # Assumes you have a requirements.txt file
+          pip install pytest pytest-asyncio coverage
+
+      - name: Run tests with pytest, skipping integration.
+        run: pytest -m "not integration"
+
+
+
+  # JOB 2: Build & Push Docker Image
+  # Only runs if 'test' passes and we are pushing to main (not PRs)
+  build-and-push:
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Log in to the Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_PAT }}
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE_NAME }}:latest
+
+  # JOB 3: Deploy to AWS
+  # Only runs if build-and-push succeeds
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            # 1. Log into the registry on the server
+            # We pass the PAT specifically to ensure the server has pull rights
+            echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+            # 2. Pull the new image
+            docker pull ${{ env.IMAGE_NAME }}:latest
+
+            # 3. Stop and remove the old container
+            # '|| true' prevents the script from crashing if the container is already stopped
+            docker stop chatbot || true
+            docker rm chatbot || true
+
+            # 4. Run the new container
+            # We reuse the .env file already sitting on the server
+            docker run -d \
+              --name chatbot \
+              --restart unless-stopped \
+              --env-file .env \
+              -v /home/ubuntu/data:/app/data \
+              ${{ env.IMAGE_NAME }}:latest
+            
+            # 5. Cleanup unused images to save disk space on the micro instance
+            docker image prune -f

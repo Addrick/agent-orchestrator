@@ -57,7 +57,7 @@ def live_chat_system():
 
     text_engine = TextEngine()
 
-    # Programmatically create personas for a self-contained test environment
+    # Programmatically create personas.json for a self-contained test environment
     test_personas = {
         "test_persona": Persona(
             persona_name="test_persona", model_name="mock_model", prompt="You are a test persona.",

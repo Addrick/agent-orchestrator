@@ -138,6 +138,29 @@ async def test_generate_response_handles_llm_communication_error(chat_system_wit
 
 
 @pytest.mark.asyncio
+async def test_generate_response_stores_payload_on_llm_error(chat_system_with_mocks):
+    """
+    Ensures that if the LLM raises an error, the prepared API payload is
+    still stored for debugging purposes via `dump_last`.
+    """
+    system, _, text_engine_mock, _, _, _ = chat_system_with_mocks
+    failed_payload = {"model": "mock_model", "messages": ["This is the context"]}
+    # Configure the mock TextEngine to raise an error that includes the payload
+    text_engine_mock.generate_response.side_effect = LLMCommunicationError(
+        "API is down",
+        api_payload=failed_payload
+    )
+
+    # We don't need the response, just to trigger the error handling
+    await system.generate_response("test_persona", "user123", "channel", "test message")
+
+    # Assert that the payload from the exception was stored
+    assert "user123" in system.last_api_requests
+    assert "test_persona" in system.last_api_requests["user123"]
+    assert system.last_api_requests["user123"]["test_persona"] == failed_payload
+
+
+@pytest.mark.asyncio
 async def test_generate_response_handles_generic_exception(chat_system_with_mocks):
     system, memory_manager, _, _, _, _ = chat_system_with_mocks
     memory_manager.get_channel_history.side_effect = Exception("DB is locked")

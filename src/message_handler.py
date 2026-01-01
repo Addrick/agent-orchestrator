@@ -38,7 +38,7 @@ class BotLogic:
             'prompt': self._what_prompt,
             'model': self._what_model,
             'models': self._what_models,
-            'personas': self._what_personas,
+            'personas.json': self._what_personas,
             'context': self._what_context,
             'tokens': self._what_tokens,
             'temp': self._what_temp,
@@ -91,13 +91,13 @@ class BotLogic:
         if args:
             return None, False
         help_msg: str = ("Talk to a specific persona by starting your message with their name. \n \n"
-                         "Currently active personas: \n" +
+                         "Currently active personas.json: \n" +
                          ', '.join(self.chat_system.personas.keys()) + "\n\n"
                                                                        "Bot commands: \n"
                                                                        "hello (start new conversation), \n"
                                                                        "goodbye (end conversation), \n"
                                                                        "remember <+prompt>, \n"
-                                                                       "what prompt/model/models/personas/context/tokens/temp/execution_mode/tools/memory_mode, \n"
+                                                                       "what prompt/model/models/personas.json/context/tokens/temp/execution_mode/tools/memory_mode, \n"
                                                                        "set prompt/model/context/tokens/temp/display_name/execution_mode/tools/memory_mode, \n"
                                                                        "add <persona>, \n"
                                                                        "delete <persona>, \n"
@@ -211,7 +211,7 @@ class BotLogic:
         return None, False
 
     def _what_personas(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        return f"Available personas are: {list(self.chat_system.personas.keys())}", False
+        return f"Available personas.json are: {list(self.chat_system.personas.keys())}", False
 
     def _what_context(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
         return f"{persona.get_name()} default context length is {persona._context_length}.", False
