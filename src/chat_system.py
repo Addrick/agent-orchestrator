@@ -150,7 +150,7 @@ class ChatSystem:
                 if author_name == persona_name:
                     final_history.append({'role': 'assistant', 'content': content})
                 else:
-                    # In a group chat, messages from other personas are treated as user messages
+                    # In a group chat, messages from other personas.json are treated as user messages
                     formatted_content = f"{author_name}: {content}"
                     final_history.append({'role': 'user', 'content': formatted_content})
         return final_history
@@ -310,6 +310,8 @@ class ChatSystem:
 
         except LLMCommunicationError as e:
             logger.error(f"A recoverable LLM communication error occurred for {user_identifier}: {e}")
+            if e.api_payload:
+                self.last_api_requests[user_identifier][persona_name] = e.api_payload
             error_msg = ("I'm not sure how to continue. Could you please rephrase?" if "empty response" in str(e) else
                          "Error while generating a response: " + str(e))
             return error_msg, ResponseType.DEV_COMMAND, ticket_to_log

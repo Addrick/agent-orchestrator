@@ -68,8 +68,8 @@ async def main():
 
     # --- ARCHITECTURE INITIALIZATION ---
     # 1. Initialize the user memory database
-    memory_db_path = os.environ.get("MEMORY_DATABASE_FILE")
-    memory_manager = MemoryManager(db_path=memory_db_path)
+    logger.info(f"Initializing database at: {MEMORY_DATABASE_FILE}")
+    memory_manager = MemoryManager(db_path=MEMORY_DATABASE_FILE)
     logger.info("Setting up user memory database schema...")
     memory_manager.create_schema()
     logger.info("User memory database setup complete.")
