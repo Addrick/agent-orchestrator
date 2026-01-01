@@ -4,3 +4,4 @@ stuff/
 .idea/
 __pycache__/
 data/
+config/personas
