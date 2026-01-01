@@ -115,47 +115,22 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
     a fresh deployment.
     """
     from src.persona import Persona, ExecutionMode, MemoryMode
-
-    # Determine the target file path
-    if file_path_override:
-        target_path = Path(file_path_override)
-    else:
-        # This typically points to data/personas.json via global_config
-        target_path = _get_persona_save_file_path()
-
-    # --- PERSISTENCE INITIALIZATION (MIGRATION) ---
-    # If we are loading the main database (no override) and it doesn't exist yet:
-    if not file_path_override and not target_path.exists():
-        default_source = CONFIG_DIR / "default_personas.json"
-
-        if default_source.exists():
-            logger.info(f"First-run detected. Seeding database from defaults: {default_source} -> {target_path}")
-            try:
-                # Ensure the parent directory (data/) exists before copying
-                target_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(default_source, target_path)
-            except Exception as e:
-                logger.error(f"Failed to seed persona database: {e}")
-                return None
-        else:
-            logger.warning(f"No default persona file found at {default_source}. Starting with empty state.")
-
-    # --- FILE LOADING ---
-    if not target_path.exists():
-        logger.warning(f"Persona file '{target_path}' does not exist.")
+    """Load personas from a JSON-formatted file into a dictionary."""
+    file_path = file_path_override or _get_persona_save_file_path()
+    if not os.path.exists(file_path):
+        logger.warning(f"File '{file_path}' does not exist.")
         return None
 
     try:
-        with open(target_path, "r", encoding='utf-8') as file:
+        with open(file_path, "r") as file:
             content = file.read()
             if not content:
-                logger.warning(f"File '{target_path}' is empty.")
-                return {}
+                logger.warning(f"File '{file_path}' is empty.")
+                return {}  # Return an empty dict if file is empty
             persona_data: Dict[str, Any] = json.loads(content)
 
         personas: Dict[str, Persona] = {}
-
-        # Iterate through the JSON list and instantiate Persona objects
+        # Ensure 'personas' key exists and is a list
         for new_persona in persona_data.get('personas', []):
             name: Optional[str] = new_persona.get("name")
             if not name:
