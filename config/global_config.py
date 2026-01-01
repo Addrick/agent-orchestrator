@@ -64,7 +64,7 @@ KOBOLDCPP_CONFIG = r'F:\Machine Learning\dolphin-2.7-mixtral-8x7b.Q5_K_M.kcpps'
 ####
 # HISTORY CONFIGURATION
 LOCAL_REPO_PATH = 'C:\\Users\\Adam\\Programming\\Python\\derpr-python'
-DATABASE_FILE_PATH = '../src/database/it_support_memory.db'
+MEMORY_DATABASE_FILE = '../src/database/it_support_memory.db'
 
 # Dedicated path for the integration test database, located within the tests directory
 TEST_DATABASE_DIR = os.path.join(ROOT_DIR, 'tests', 'database')
