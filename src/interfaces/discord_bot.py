@@ -141,12 +141,11 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                 active_persona_name = name
                 cleaned_message = message.content[len(name) + 1:].lstrip()
                 break
-        if active_persona_name is None and isinstance(message.channel, discord.abc.GuildChannel):
+        if active_persona_name is None:
             for name in chat_system.personas.keys():
-                if message.channel.name.lower().startswith(name.lower()):
+                if isinstance(message.channel, discord.abc.GuildChannel) and message.channel.name.lower().startswith(name.lower()):
                     active_persona_name = name
                     break
-                break
 
         if active_persona_name:
             try:
