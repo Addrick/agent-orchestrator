@@ -265,7 +265,7 @@ async def test_dev_command_creates_thread(mock_reset, mock_discord_client, mock_
 
     await mock_discord_client.on_message(mock_message)
 
-    mock_message.create_thread.assert_called_once_with(name="SYSTEM", auto_archive_duration=60)
+    mock_message.create_thread.assert_called_once_with(name="DERPBOT", auto_archive_duration=60)
     mock_thread.send.assert_called_once()
     assert "```" in mock_thread.send.call_args[0][0]  # Verify code block formatting
 
