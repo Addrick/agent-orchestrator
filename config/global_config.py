@@ -92,6 +92,7 @@ ALLOWED_SENDER_LIST = [
 # LLM ENGINE SETTINGS
 # =============================================================================
 DEFAULT_MODEL_NAME = "gemini-2.5-flash"
+DEFAULT_ULTRAFAST_MODEL_NAME = "gemini-2.0-flash-lite"
 DEFAULT_PERSONA = "You are a helpful assistant."
 
 # Token generation limits
@@ -104,3 +105,9 @@ GLOBAL_CONTEXT_LIMIT = 30  # Hard cap for history sent to APIs
 # API Error Handling
 EMPTY_RESPONSE_RETRIES = 3
 EMPTY_RESPONSE_RETRY_DELAY = 2
+
+# =============================================================================
+# INTERNAL HELPER PERSONAS
+# =============================================================================
+# Persona name for model selection helper
+MODEL_SELECTOR_PERSONA_NAME = "model_selector"

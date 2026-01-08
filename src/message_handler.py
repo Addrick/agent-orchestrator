@@ -5,8 +5,13 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
-from config.global_config import (DEFAULT_CONTEXT_LIMIT, DEFAULT_MODEL_NAME,
-                                  DEFAULT_PERSONA)
+from config.global_config import (
+    DEFAULT_CONTEXT_LIMIT,
+    DEFAULT_MODEL_NAME,
+    DEFAULT_PERSONA,
+    MODEL_SELECTOR_PERSONA_NAME
+)
+
 from src.persona import Persona, ExecutionMode, MemoryMode
 from src.utils import model_utils
 from src.utils.model_utils import get_model_list
@@ -61,8 +66,12 @@ class BotLogic:
             'memory_mode': self._set_memory_mode,
         }
 
-    async def preprocess_message(self, persona_name: str, user_identifier: str, message: str) -> Optional[
-        Dict[str, Any]]:
+    async def preprocess_message(
+            self,
+            persona_name: str,
+            user_identifier: str,
+            message: str
+    ) -> Optional[Dict[str, Any]]:
         split_args: List[str] = re.split(r'[ ]', message.lower())
         command: str
         args: List[str]
@@ -81,7 +90,13 @@ class BotLogic:
 
         response: Optional[str]
         mutated: bool
-        response, mutated = handler(args, current_persona, user_identifier)
+
+        # Only 'set' is async currently
+        if command == 'set':
+            response, mutated = await handler(args, current_persona, user_identifier)
+        else:
+            response, mutated = handler(args, current_persona, user_identifier)
+
         if response is None:
             return None
 
@@ -106,6 +121,56 @@ class BotLogic:
                                                                        "dump_last, \n"
                                                                        "dump_context")
         return help_msg, False
+
+    async def _query_llm_for_model_selection(self, user_query: str) -> Optional[str]:
+        """
+        Query model selector persona to find best matching model.
+        Returns model name if successful, None if persona unavailable or parsing fails.
+        """
+        try:
+            # Get the model selector persona
+            selector_persona = self.chat_system.personas.get(MODEL_SELECTOR_PERSONA_NAME)
+
+            if not selector_persona:
+                logger.warning(f"Model selector persona '{MODEL_SELECTOR_PERSONA_NAME}' not found")
+                return None
+
+            # Build available models list
+            models_str = json.dumps(self.chat_system.models_available, indent=2)
+
+            # Construct query message
+            user_message = f"Available models:\n{models_str}\n\nUser query: {user_query}\n\nSelected model:"
+
+            # Build context for text_engine
+            context = {
+                "persona_prompt": selector_persona.get_prompt(),
+                "history": [],
+                "current_message": {"text": user_message, "image_url": None}
+            }
+
+            # Call text_engine with persona's config
+            response, _ = await self.chat_system.text_engine.generate_response(
+                persona_config=selector_persona.get_config_for_engine(),
+                context_object=context,
+                tools=None
+            )
+
+            if response.get("type") == "text":
+                model_name = response.get("content", "").strip()
+
+                # Validate response
+                if model_name == "DEFAULT":
+                    return None
+
+                # Check if returned model exists
+                if model_utils.check_model_available(model_name):
+                    return model_name
+
+            return None
+
+        except Exception as e:
+            logger.error(f"Error during LLM model selection: {e}", exc_info=True)
+            return None
 
     def _handle_remember(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[Optional[str], bool]:
         if not args:
@@ -244,13 +309,25 @@ class BotLogic:
         valid_modes = ", ".join([e.name.lower() for e in MemoryMode])
         return f"Memory mode for '{persona.get_name()}' is {persona.get_memory_mode().name.lower()}.\nValid modes are: {valid_modes}.", False
 
-    def _handle_set(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[Optional[str], bool]:
+    async def _handle_set(
+            self,
+            args: List[str],
+            persona: Persona,
+            user_identifier: str
+    ) -> Tuple[Optional[str], bool]:
         if not args:
             return None, False
+
         sub_command: str = args[0]
         handler = self.set_handlers.get(sub_command)
+
         if handler:
-            return handler(args, persona)
+            # Only 'model' is async currently
+            if sub_command == 'model':
+                return await handler(args, persona)
+            else:
+                return handler(args, persona)
+
         return f"Error: Unknown 'set' command: {sub_command}", False
 
     def _set_prompt(self, args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
@@ -264,19 +341,32 @@ class BotLogic:
         persona.set_prompt(DEFAULT_PERSONA)
         return f"Prompt for {persona.get_name()} reset to default.", True
 
-    def _set_model(self, args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
+    async def _set_model(self, args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
         model_name: str
         try:
             model_name = args[1]
         except IndexError:
             return None, False
+
+        # Handle 'default' keyword
         if model_name == 'default':
             model_name = DEFAULT_MODEL_NAME
+
+        # Try exact match first (fast path)
         if model_utils.check_model_available(model_name):
             persona.set_model_name(model_name)
             return f"Model for {persona.get_name()} set to '{model_name}'.", True
-        else:
-            return f"Error: Model '{model_name}' does not exist.", False
+
+        # Try LLM-assisted selection
+        selected_model = await self._query_llm_for_model_selection(model_name)
+
+        if selected_model:
+            persona.set_model_name(selected_model)
+            return f"Model for {persona.get_name()} set to '{selected_model}' (matched from '{model_name}').", True
+
+        # Fallback to default
+        persona.set_model_name(DEFAULT_MODEL_NAME)
+        return f"Could not find '{model_name}'. Model for {persona.get_name()} set to default: '{DEFAULT_MODEL_NAME}'.", True
 
     def _set_tokens(self, args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
         limit_str: str
