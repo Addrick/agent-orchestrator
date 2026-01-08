@@ -70,7 +70,7 @@ async def _send_dev_response(channel: discord.abc.Messageable, msg: str, origina
     try:
         # Create thread from the original message
         thread = await original_message.create_thread(
-            name="SYSTEM",
+            name="DERPBOT",
             auto_archive_duration=60
         )
 
@@ -81,7 +81,8 @@ async def _send_dev_response(channel: discord.abc.Messageable, msg: str, origina
         chunks: List[str] = split_string_by_limit(formatted_msg, limit)
         for chunk in chunks:
             try:
-                await thread.send(f"```{lang_hint}\n{chunk}```")
+                # After creating the thread, send messages with silent=True
+                await thread.send(f"```{lang_hint}\n{chunk}```", silent=True)
             except discord.HTTPException as e:
                 logger.error(f"An error occurred sending a dev response to thread: {e}")
     except discord.HTTPException as e:
