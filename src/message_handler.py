@@ -358,7 +358,8 @@ class BotLogic:
             return f"Model for {persona.get_name()} set to '{model_name}'.", True
 
         # Try LLM-assisted selection
-        selected_model = await self._query_llm_for_model_selection(model_name)
+        model = " ".join(args)
+        selected_model = await self._query_llm_for_model_selection(model)
 
         if selected_model:
             persona.set_model_name(selected_model)
