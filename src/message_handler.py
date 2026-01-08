@@ -363,11 +363,11 @@ class BotLogic:
 
         if selected_model:
             persona.set_model_name(selected_model)
-            return f"Model for {persona.get_name()} set to '{selected_model}' (matched from '{model_name}').", True
+            return f"Model for {persona.get_name()} set to '{selected_model}' (matched from '{model}').", True
 
         # Fallback to default
         persona.set_model_name(DEFAULT_MODEL_NAME)
-        return f"Could not find '{model_name}'. Model for {persona.get_name()} set to default: '{DEFAULT_MODEL_NAME}'.", True
+        return f"Could not find '{model}'. Model for {persona.get_name()} set to default: '{DEFAULT_MODEL_NAME}'.", True
 
     def _set_tokens(self, args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
         limit_str: str
