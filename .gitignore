@@ -5,3 +5,6 @@ stuff/
 __pycache__/
 data/
 config/personas
+*.pyc
+
+.env
