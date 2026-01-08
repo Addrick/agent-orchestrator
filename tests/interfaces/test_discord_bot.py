@@ -103,7 +103,7 @@ async def test_dev_command_flow(mock_reset, mock_send_dev, mock_discord_client, 
     mock_chat_system.generate_response.return_value = ("Dev output", ResponseType.DEV_COMMAND, None)
     await mock_discord_client.on_message(mock_message)
 
-    mock_send_dev.assert_called_once_with(mock_message.channel, "Dev output")
+    mock_send_dev.assert_called_once_with(mock_message.channel, "Dev output", mock_message)
     mock_chat_system.memory_manager.log_message.assert_not_called()
     mock_reset.assert_called_once()
 
@@ -233,3 +233,57 @@ async def test_image_url_is_extracted_and_passed(mock_reset, mock_discord_client
     mock_chat_system.generate_response.assert_called_once()
     called_kwargs = mock_chat_system.generate_response.call_args.kwargs
     assert called_kwargs['image_url'] == 'http://example.com/test_image.png'
+
+
+@pytest.mark.asyncio
+async def test_bot_ignores_thread_messages(mock_discord_client, mock_chat_system, mock_message):
+    """Tests that the bot ignores all messages sent in threads."""
+    # Make the channel a thread
+    mock_thread = AsyncMock(spec=discord.Thread)
+    mock_thread.name = "SYSTEM"
+    mock_thread.parent = mock_message.channel
+    mock_message.channel = mock_thread
+    mock_message.content = "vocal hello in thread"
+
+    await mock_discord_client.on_message(mock_message)
+
+    # Bot should not process the message at all
+    mock_chat_system.generate_response.assert_not_called()
+    mock_chat_system.memory_manager.log_message.assert_not_called()
+    mock_thread.send.assert_not_called()
+
+
+@pytest.mark.asyncio
+@patch('src.interfaces.discord_bot.reset_discord_status', new_callable=AsyncMock)
+async def test_dev_command_creates_thread(mock_reset, mock_discord_client, mock_chat_system, mock_message):
+    """Tests that dev commands create a thread and send responses there."""
+    mock_message.content = "vocal help"
+    mock_chat_system.generate_response.return_value = ("Dev output", ResponseType.DEV_COMMAND, None)
+
+    mock_thread = AsyncMock(spec=discord.Thread)
+    mock_message.create_thread = AsyncMock(return_value=mock_thread)
+
+    await mock_discord_client.on_message(mock_message)
+
+    mock_message.create_thread.assert_called_once_with(name="SYSTEM", auto_archive_duration=60)
+    mock_thread.send.assert_called_once()
+    assert "```" in mock_thread.send.call_args[0][0]  # Verify code block formatting
+
+
+@pytest.mark.asyncio
+@patch('src.interfaces.discord_bot.reset_discord_status', new_callable=AsyncMock)
+async def test_dev_command_thread_creation_failure_fallback(mock_reset, mock_discord_client, mock_chat_system,
+                                                            mock_message):
+    """Tests that if thread creation fails, dev response falls back to channel posting."""
+    mock_message.content = "vocal help"
+    mock_chat_system.generate_response.return_value = ("Dev output", ResponseType.DEV_COMMAND, None)
+
+    # Simulate thread creation failure
+    mock_message.create_thread = AsyncMock(side_effect=discord.HTTPException(MagicMock(), "Thread creation failed"))
+
+    await mock_discord_client.on_message(mock_message)
+
+    # Should fall back to sending to the channel
+    mock_message.channel.send.assert_called()
+    # Verify it's wrapped in code blocks (fallback behavior)
+    assert "```" in mock_message.channel.send.call_args[0][0]

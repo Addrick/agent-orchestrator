@@ -65,17 +65,37 @@ async def reset_discord_status(client: discord.Client, chat_system: 'ChatSystem'
     await client.change_presence(activity=activity)
 
 
-async def _send_dev_response(channel: discord.abc.Messageable, msg: str) -> None:
-    formatted_msg: str = re.sub('```', '`\u200B``', msg)
-    lang_hint: str = "json" if "Last API Request Payload" in msg else ""
-    limit: int = DISCORD_CHAR_LIMIT - (len(lang_hint) + 8)
-    chunks: List[str] = split_string_by_limit(formatted_msg, limit)
-    for chunk in chunks:
-        try:
-            await channel.send(f"```{lang_hint}\n{chunk}```")
-        except discord.HTTPException as e:
-            logger.error(f"An error occurred sending a dev response: {e}")
-            pass
+async def _send_dev_response(channel: discord.abc.Messageable, msg: str, original_message: discord.Message) -> None:
+    """Send dev response in a thread attached to the original message."""
+    try:
+        # Create thread from the original message
+        thread = await original_message.create_thread(
+            name="SYSTEM",
+            auto_archive_duration=60
+        )
+
+        # Send chunks to the thread
+        formatted_msg: str = re.sub('```', '`\u200B``', msg)
+        lang_hint: str = "json" if "Last API Request Payload" in msg else ""
+        limit: int = DISCORD_CHAR_LIMIT - (len(lang_hint) + 8)
+        chunks: List[str] = split_string_by_limit(formatted_msg, limit)
+        for chunk in chunks:
+            try:
+                await thread.send(f"```{lang_hint}\n{chunk}```")
+            except discord.HTTPException as e:
+                logger.error(f"An error occurred sending a dev response to thread: {e}")
+    except discord.HTTPException as e:
+        # Fallback: if thread creation fails, send to channel (original behavior)
+        logger.error(f"Failed to create thread for dev response: {e}. Falling back to channel.")
+        formatted_msg: str = re.sub('```', '`\u200B``', msg)
+        lang_hint: str = "json" if "Last API Request Payload" in msg else ""
+        limit: int = DISCORD_CHAR_LIMIT - (len(lang_hint) + 8)
+        chunks: List[str] = split_string_by_limit(formatted_msg, limit)
+        for chunk in chunks:
+            try:
+                await channel.send(f"```{lang_hint}\n{chunk}```")
+            except discord.HTTPException as e2:
+                logger.error(f"An error occurred sending a dev response: {e2}")
 
 
 def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
@@ -107,6 +127,10 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
     async def on_message(message: discord.Message) -> None:
         if message.author == client.user or (
                 isinstance(message.channel, discord.abc.GuildChannel) and message.channel.id == DISCORD_DEBUG_CHANNEL):
+            return
+
+        # Skip processing messages in threads
+        if isinstance(message.channel, discord.Thread):
             return
 
         active_persona_name: Optional[str] = None
@@ -154,7 +178,7 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                         await message.channel.send(f"Here is the context dump:", file=discord_file)
 
                     elif response_type == ResponseType.DEV_COMMAND:
-                        await _send_dev_response(message.channel, response_text)
+                        await _send_dev_response(message.channel, response_text, message)
                     elif response_text and response_text.strip():
                         await asyncio.to_thread(
                             chat_system.memory_manager.log_message,
