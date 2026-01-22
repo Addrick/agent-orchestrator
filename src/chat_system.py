@@ -150,7 +150,7 @@ class ChatSystem:
                 if author_name == persona_name:
                     final_history.append({'role': 'assistant', 'content': content})
                 else:
-                    # In a group chat, messages from other personas.json are treated as user messages
+                    # In a group chat, messages from other personas.json.json are treated as user messages
                     formatted_content = f"{author_name}: {content}"
                     final_history.append({'role': 'user', 'content': formatted_content})
         return final_history

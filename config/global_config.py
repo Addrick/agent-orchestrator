@@ -23,7 +23,7 @@ for directory in [DATA_DIR, LOGS_DIR, CREDENTIALS_DIR]:
 # FILE PATHS
 # =============================================================================
 # JSON Configuration Files
-PERSONA_SAVE_FILE = DATA_DIR / "personas.json"
+PERSONA_SAVE_FILE = DATA_DIR / "personas.json.json"
 TEST_PERSONA_SAVE_FILE = DATA_DIR / "test_personas.json"
 MODEL_SAVE_FILE = CONFIG_DIR / "models.json"
 DEFAULT_PERSONA_SAVE_FILE = CONFIG_DIR / "default_personas.json"
