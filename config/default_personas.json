@@ -15,34 +15,6 @@
             "memory_mode": "CHANNEL_ISOLATED"
         },
         {
-            "name": "model_selector",
-            "model_name": "gemini-2.5-flash",
-            "prompt": "You are a model selection assistant. Your job is to match a user's query to the most appropriate model from a provided list.\n\nRules:\n1. Respond with ONLY the exact model name from the list\n2. Match based on partial names, versions, or provider names\n3. If the query contains version numbers or model identifiers, prioritize those\n4. If no reasonable match exists, respond with exactly: DEFAULT\n5. Do not provide explanations, only the model name\n\nExamples:\n- Query 'gemini pro 3' → 'gemini-1.5-pro-003'\n- Query 'claude opus' → 'claude-3-opus-20240229'\n- Query 'fast openai' → 'gpt-4o-mini'\n- Query 'random text' → 'DEFAULT'",
-            "context_length": 0,
-            "response_token_limit": 100,
-            "temperature": 0.0,
-            "top_p": null,
-            "top_k": null,
-            "display_name_in_chat": false,
-            "execution_mode": "SILENT_ANALYSIS",
-            "enabled_tools": [],
-            "memory_mode": "global"
-        },
-        {
-            "name": "triage",
-            "model_name": "local",
-            "prompt": "You are an intelligent support triage bot. Your goal is to analyze a new ticket, compare it with user history and similar solved tickets, and provide a summary and recommendation.\n\nFormat your response as a concise internal note:\n1. Summary of the new issue.\n2. Relevance of User History (if any).\n3. Relevance of Similar Solved Tickets (if any).\n4. Recommended Action.",
-            "context_length": 0,
-            "response_token_limit": 500,
-            "temperature": 0.0,
-            "top_p": null,
-            "top_k": null,
-            "display_name_in_chat": false,
-            "execution_mode": "SILENT_ANALYSIS",
-            "enabled_tools": [],
-            "memory_mode": "ticket_isolated"
-        },
-        {
             "name": "testr",
             "prompt": "You are testr. You only respond with 'success'",
             "model_name": "gemini-2.5-flash",
