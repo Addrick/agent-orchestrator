@@ -111,3 +111,15 @@ EMPTY_RESPONSE_RETRY_DELAY = 2
 # =============================================================================
 # Persona name for model selection helper
 MODEL_SELECTOR_PERSONA_NAME = "model_selector"
+
+# =============================================================================
+# --- Zammad Bot Configuration ---
+# =============================================================================
+ZAMMAD_BOT_ENABLED = False
+ZAMMAD_POLL_INTERVAL = 10
+ZAMMAD_TRIAGE_TAG = "ai_triaged"
+TRIAGE_PERSONA_NAME = "triage"
+
+# --- Local LLM Configuration ---
+# Defaulting to your LAN IP as requested for the test setup
+LOCAL_LLM_URL = "http://omen:5001/v1"
