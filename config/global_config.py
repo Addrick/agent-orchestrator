@@ -27,6 +27,7 @@ PERSONA_SAVE_FILE = DATA_DIR / "personas.json.json"
 TEST_PERSONA_SAVE_FILE = DATA_DIR / "test_personas.json"
 MODEL_SAVE_FILE = CONFIG_DIR / "models.json"
 DEFAULT_PERSONA_SAVE_FILE = CONFIG_DIR / "default_personas.json"
+SYSTEM_PERSONA_FILE = os.path.join(CONFIG_DIR, 'system_personas.json')
 
 # Application Logging
 CHAT_LOG_LOCATION = LOGS_DIR
@@ -122,7 +123,9 @@ TRIAGE_PERSONA_NAME = "triage"
 TRIAGE_GLOBAL_HISTORY_COUNT = 5
 TRIAGE_USER_HISTORY_COUNT = 3
 TRIAGE_MAX_CONTEXT_CHARS = 100000  # ~25k tokens
-
+TRIAGE_SCOUT_NAME = "triage_scout"
+TRIAGE_SUMMARIZER_NAME = "triage_summarizer"
+TRIAGE_ANALYST_NAME = "triage_analyst"
 # =============================================================================
 # --- Local LLM Configuration ---
 # =============================================================================
