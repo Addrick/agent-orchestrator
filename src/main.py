@@ -13,6 +13,7 @@ from src.clients.zammad_client import ZammadClient
 
 from src.interfaces.discord_bot import create_discord_bot
 from src.interfaces.gmail_bot import create_gmail_bot
+from src.interfaces.zammad_bot import create_zammad_bot  # Added import
 from config.global_config import *
 from dotenv import load_dotenv
 from src.utils.model_utils import get_model_list
@@ -102,6 +103,12 @@ async def main():
         logger.info("Initializing Gmail bot...")
         gmail_bot = create_gmail_bot(bot)
         task = asyncio.create_task(gmail_bot.start())
+        tasks.append(task)
+
+    if ZAMMAD_BOT_ENABLED:
+        logger.info("Initializing Zammad bot...")
+        zammad_bot = create_zammad_bot(bot)
+        task = asyncio.create_task(zammad_bot.start())
         tasks.append(task)
 
     # 5. Optionally update the model list on startup
