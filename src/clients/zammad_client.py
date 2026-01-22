@@ -72,6 +72,12 @@ class ZammadClient:
         """
         return self._make_request('get', f'tickets/{ticket_id}?expand=true')
 
+    def get_ticket_articles(self, ticket_id: int) -> List[Dict[str, Any]]:
+        """
+        Retrieves all articles for a given ticket.
+        """
+        return self._make_request('get', f'ticket_articles/by_ticket/{ticket_id}')
+
     def create_ticket(self, title: str, group: str, customer_id: int, article_body: Optional[str] = None,
                       tags: Optional[List[str]] = None) -> Dict[str, Any]:
         """
@@ -170,3 +176,4 @@ class ZammadClient:
         """
         params = {'query': query}
         return self._make_request('get', 'users/search', params=params)
+    
