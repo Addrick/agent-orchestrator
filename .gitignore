@@ -4,7 +4,7 @@ stuff/
 .idea/
 __pycache__/
 data/
-config/personas
+config/personas.json
 *.pyc
 
 .env

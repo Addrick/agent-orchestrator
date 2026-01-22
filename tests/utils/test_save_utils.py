@@ -108,8 +108,8 @@ def test_save_uses_test_file_in_pytest_env(mock_personas: dict):
         # 3. Verify content of the test file
         with open(TEST_PERSONA_SAVE_FILE, 'r') as f:
             data = json.load(f)
-        assert len(data['personas']) == 2
-        assert data['personas'][0]['name'] == 'p1'
+        assert len(data['personas.json']) == 2
+        assert data['personas.json'][0]['name'] == 'p1'
 
     finally:
         # --- Teardown: Clean up ONLY the test file ---
@@ -128,7 +128,7 @@ def test_load_persona_attributes_integrity(tmp_path):
     # 1. Create a temporary JSON file with specific test values
     test_file = tmp_path / "integrity_test.json"
     test_data = {
-        "personas": [
+        "personas.json": [
             {
                 "name": "integrity_bot",
                 "model_name": "gpt-4-test-variant",
