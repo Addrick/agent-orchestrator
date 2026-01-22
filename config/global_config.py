@@ -119,7 +119,11 @@ ZAMMAD_BOT_ENABLED = False
 ZAMMAD_POLL_INTERVAL = 10
 ZAMMAD_TRIAGE_TAG = "ai_triaged"
 TRIAGE_PERSONA_NAME = "triage"
+TRIAGE_GLOBAL_HISTORY_COUNT = 5
+TRIAGE_USER_HISTORY_COUNT = 3
+TRIAGE_MAX_CONTEXT_CHARS = 100000  # ~25k tokens
 
+# =============================================================================
 # --- Local LLM Configuration ---
-# Defaulting to your LAN IP as requested for the test setup
+# =============================================================================
 LOCAL_LLM_URL = "http://omen:5001/v1"
