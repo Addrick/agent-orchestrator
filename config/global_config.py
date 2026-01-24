@@ -118,14 +118,20 @@ MODEL_SELECTOR_PERSONA_NAME = "model_selector"
 # =============================================================================
 ZAMMAD_BOT_ENABLED = False
 ZAMMAD_POLL_INTERVAL = 10
-ZAMMAD_TRIAGE_TAG = "ai_triaged"
-TRIAGE_PERSONA_NAME = "triage"
+ZAMMAD_TRIAGE_TAG = "autotriaged"
 TRIAGE_GLOBAL_HISTORY_COUNT = 5
 TRIAGE_USER_HISTORY_COUNT = 3
 TRIAGE_MAX_CONTEXT_CHARS = 100000  # ~25k tokens
+
 TRIAGE_SCOUT_NAME = "triage_scout"
 TRIAGE_SUMMARIZER_NAME = "triage_summarizer"
 TRIAGE_ANALYST_NAME = "triage_analyst"
+TRIAGE_FILTER_NAME = "triage_filter"
+
+
+ZAMMAD_BOT_EMAIL = "autotriage@bot.local"
+ZAMMAD_BOT_FIRSTNAME = "autotriage"
+ZAMMAD_BOT_LASTNAME = "LLM"
 # =============================================================================
 # --- Local LLM Configuration ---
 # =============================================================================
