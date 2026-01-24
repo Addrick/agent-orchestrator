@@ -7,7 +7,7 @@ import shutil
 from pathlib import Path
 from typing import Dict, Any, Optional, List, cast
 
-from config.global_config import PERSONA_SAVE_FILE, TEST_PERSONA_SAVE_FILE, CONFIG_DIR
+from config.global_config import PERSONA_SAVE_FILE, TEST_PERSONA_SAVE_FILE, CONFIG_DIR, SYSTEM_PERSONA_FILE
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ def save_models_to_file(models_dict: Dict[str, Any], file_path_override: Optiona
 
 
 def save_personas_to_file(personas: Dict[str, Any], file_path_override: Optional[str] = None) -> None:
-    """Save all personas.json to the JSON file."""
+    """Save all personas to the JSON file."""
     save_file = file_path_override or _get_persona_save_file_path()
 
     # Ensure the directory exists
@@ -73,6 +73,7 @@ def save_personas_to_file(personas: Dict[str, Any], file_path_override: Optional
         save_data = {"personas.json": [], "models": {}}
 
     persona_dict: List[Dict[str, Any]] = to_dict(personas)
+    # FIX: Use 'personas.json' key to match existing schema and tests
     save_data['personas.json'] = persona_dict
 
     with open(save_file, 'w') as file:
@@ -89,7 +90,7 @@ def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
             "name": persona.get_name(),
             "prompt": persona.get_prompt(),
             "model_name": persona.get_model_name(),
-            "context_length": persona.get_base_context_length(), # Save the base value, not the dynamic one
+            "context_length": persona.get_base_context_length(),  # Save the base value, not the dynamic one
             "token_limit": persona.get_response_token_limit(),
             "temperature": persona.get_temperature(),
             "top_p": persona.get_top_p(),
@@ -103,10 +104,9 @@ def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
     return persona_list
 
 
-
 def load_personas_from_file(file_path_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
-    Load personas.json from a JSON-formatted file into a dictionary of Persona objects.
+    Load personas from a JSON-formatted file into a dictionary of Persona objects.
 
     Auto-Seeding Logic:
     If the target persistent file (in /data) does not exist, this function will
@@ -115,7 +115,7 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
     a fresh deployment.
     """
     from src.persona import Persona, ExecutionMode, MemoryMode
-    """Load personas.json from a JSON-formatted file into a dictionary."""
+    """Load personas from a JSON-formatted file into a dictionary."""
     file_path = file_path_override or _get_persona_save_file_path()
     if not os.path.exists(file_path):
         logger.warning(f"File '{file_path}' does not exist.")
@@ -134,7 +134,7 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
         for new_persona in persona_data.get('personas.json', []):
             name: Optional[str] = new_persona.get("name")
             if not name:
-                logger.warning(f"Skipping malformed persona entry (missing name) in '{target_path}'.")
+                logger.warning(f"Skipping malformed persona entry (missing name) in '{file_path}'.")
                 continue
 
             # Parse Execution Mode (Default: SILENT_ANALYSIS)
@@ -144,7 +144,8 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
                 try:
                     execution_mode = ExecutionMode[execution_mode_str.upper()]
                 except KeyError:
-                    logger.warning(f"Invalid execution_mode '{execution_mode_str}' for '{name}'. Defaulting to SILENT_ANALYSIS.")
+                    logger.warning(
+                        f"Invalid execution_mode '{execution_mode_str}' for '{name}'. Defaulting to SILENT_ANALYSIS.")
 
             # Parse Memory Mode (Default: CHANNEL_ISOLATED)
             memory_mode_str: Optional[str] = new_persona.get("memory_mode")
@@ -153,7 +154,8 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
                 try:
                     memory_mode = MemoryMode[memory_mode_str.upper()]
                 except KeyError:
-                    logger.warning(f"Invalid memory_mode '{memory_mode_str}' for '{name}'. Defaulting to CHANNEL_ISOLATED.")
+                    logger.warning(
+                        f"Invalid memory_mode '{memory_mode_str}' for '{name}'. Defaulting to CHANNEL_ISOLATED.")
 
             # Create the Persona instance
             personas[name] = Persona(
@@ -174,8 +176,80 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
         return personas
 
     except json.JSONDecodeError as e:
-        logger.error(f"Corrupt JSON in file '{target_path}': {str(e)}")
+        logger.error(f"Corrupt JSON in file '{file_path}': {str(e)}")
         return None
     except Exception as e:
-        logger.error(f"Critical error loading personas.json from '{target_path}': {e}", exc_info=True)
+        logger.error(f"Critical error loading personas from '{file_path}': {e}", exc_info=True)
         return None
+
+
+def load_system_personas_from_file() -> Dict[str, Any]:
+    """
+    Load system personas from the dedicated system configuration file.
+    These are infrastructure agents required for bot functionality.
+    """
+    from src.persona import Persona, ExecutionMode, MemoryMode
+
+    file_path = SYSTEM_PERSONA_FILE
+    if not os.path.exists(file_path):
+        logger.error(f"System persona file not found at '{file_path}'. Bot functionality may be degraded.")
+        return {}
+
+    try:
+        with open(file_path, "r") as file:
+            content = file.read()
+            if not content:
+                return {}
+            data = json.loads(content)
+
+        # FIX: Handle if it's a list or a dict with "personas.json" key
+        persona_list = data if isinstance(data, list) else data.get('personas.json', [])
+
+        personas: Dict[str, Persona] = {}
+
+        for new_persona in persona_list:
+            name: Optional[str] = new_persona.get("name")
+            if not name:
+                continue
+
+            # Parse Execution Mode
+            execution_mode_str: Optional[str] = new_persona.get("execution_mode")
+            execution_mode: ExecutionMode = ExecutionMode.SILENT_ANALYSIS
+            if execution_mode_str and isinstance(execution_mode_str, str):
+                try:
+                    execution_mode = ExecutionMode[execution_mode_str.upper()]
+                except KeyError:
+                    pass
+
+            # Parse Memory Mode
+            memory_mode_str: Optional[str] = new_persona.get("memory_mode")
+            memory_mode: MemoryMode = MemoryMode.TICKET_ISOLATED  # Default for system agents
+            if memory_mode_str and isinstance(memory_mode_str, str):
+                try:
+                    memory_mode = MemoryMode[memory_mode_str.upper()]
+                except KeyError:
+                    pass
+
+            personas[name] = Persona(
+                persona_name=name,
+                model_name=new_persona.get("model_name", "local"),
+                prompt=new_persona.get("prompt", ""),
+                token_limit=new_persona.get("response_token_limit"),
+                context_length=new_persona.get("context_length", 0),
+                temperature=new_persona.get("temperature"),
+                top_p=new_persona.get("top_p"),
+                top_k=new_persona.get("top_k"),
+                display_name_in_chat=new_persona.get("display_name_in_chat", False),
+                execution_mode=execution_mode,
+                enabled_tools=new_persona.get("enabled_tools", []),
+                memory_mode=memory_mode
+            )
+
+        return personas
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Corrupt JSON in system persona file '{file_path}': {str(e)}")
+        return {}
+    except Exception as e:
+        logger.error(f"Critical error loading system personas: {e}", exc_info=True)
+        return {}
