@@ -124,6 +124,30 @@ class ZammadClient:
         """
         return self._make_request('put', f'tickets/{ticket_id}', json=payload)
 
+    def add_tag(self, ticket_id: int, tag: str) -> Dict[str, Any]:
+        """
+        Adds a tag to a ticket using the Tags API.
+        """
+        payload = {
+            "object": "Ticket",
+            "o_id": ticket_id,
+            "item": tag
+        }
+        return self._make_request('post', 'tags/add', json=payload)
+
+    def get_tags(self, ticket_id: int) -> List[str]:
+        """
+        Retrieves tags for a specific ticket using the Tags API.
+        """
+        params = {
+            "object": "Ticket",
+            "o_id": ticket_id
+        }
+        response = self._make_request('get', 'tags', params=params)
+        if response and 'tags' in response:
+            return response['tags']
+        return []
+
     def search_tickets(self, query: str, limit: int = 50, sort_by: Optional[str] = None,
                        order_by: Optional[str] = 'desc') -> List[Dict[str, Any]]:
         """
@@ -143,15 +167,15 @@ class ZammadClient:
         """
         return self._make_request('get', 'users/me')
 
-    def create_user(self, email: str, firstname: str, lastname: str, note: Optional[str] = None) -> Dict[str, Any]:
+    def create_user(self, email: str, firstname: str, lastname: str, note: Optional[str] = None, roles: Optional[List[str]] = None) -> Dict[str, Any]:
         """
-        Creates a new customer user.
+        Creates a new user. Defaults to 'Customer' role if not specified.
         """
         payload: Dict[str, Any] = {
             "firstname": firstname,
             "lastname": lastname,
             "email": email,
-            "roles": ["Customer"],
+            "roles": roles if roles else ["Customer"],
             "active": True
         }
         if note:
@@ -176,4 +200,3 @@ class ZammadClient:
         """
         params = {'query': query}
         return self._make_request('get', 'users/search', params=params)
-    
