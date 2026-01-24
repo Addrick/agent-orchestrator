@@ -42,6 +42,20 @@
       "enabled_tools": [],
       "memory_mode": "global"
     },
+        {
+      "name": "triage_filter",
+      "model_name": "local",
+      "prompt": "You are a technical support relevance classifier. Your job is to determine if a 'Historical Ticket' is relevant to a 'New Ticket'.\nIf the historical ticket describes the same root cause, error message, or system as the new ticket, respond with RELEVANT.\nIf they are unrelated (different systems, different errors), respond with IRRELEVANT.\nRespond with ONLY the single word.",
+      "context_length": 0,
+      "response_token_limit": 5,
+      "temperature": 0.0,
+      "top_p": null,
+      "top_k": null,
+      "display_name_in_chat": false,
+      "execution_mode": "SILENT_ANALYSIS",
+      "enabled_tools": [],
+      "memory_mode": "global"
+    },
     {
       "name": "triage_summarizer",
       "model_name": "local",
