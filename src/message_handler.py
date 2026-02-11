@@ -128,25 +128,25 @@ class BotLogic:
         Returns model name if successful, None if persona unavailable or parsing fails.
         """
         try:
-            # Get the model selector persona
-            selector_persona = self.chat_system.personas.get(MODEL_SELECTOR_PERSONA_NAME)
-
-            if not selector_persona:
-                logger.warning(f"Model selector persona '{MODEL_SELECTOR_PERSONA_NAME}' not found")
-                return None
+            # # Get the model selector persona
+            # selector_persona = self.chat_system.personas.get(MODEL_SELECTOR_PERSONA_NAME)
+            #
+            # if not selector_persona:
+            #     logger.warning(f"Model selector persona '{MODEL_SELECTOR_PERSONA_NAME}' not found")
+            #     return None
 
             # Build available models list
             models_str = json.dumps(self.chat_system.models_available, indent=2)
 
             # Construct query message
             user_message = f"Available models:\n{models_str}\n\nUser query: {user_query}\n\nSelected model:"
-
-            # Build context for text_engine
-            context = {
-                "persona_prompt": selector_persona.get_prompt(),
-                "history": [],
-                "current_message": {"text": user_message, "image_url": None}
-            }
+            #
+            # # Build context for text_engine
+            # context = {
+            #     "persona_prompt": selector_persona.get_prompt(),
+            #     "history": [],
+            #     "current_message": {"text": user_message, "image_url": None}
+            # }
 
             response_text, response_type, ticket_id = await self.chat_system.generate_response(
                 persona_name=MODEL_SELECTOR_PERSONA_NAME,
@@ -159,8 +159,8 @@ class BotLogic:
                 user_display_name="n/a"
             )
 
-            if response_text.get("type") == "text":
-                model_name = response_text.get("content", "").strip()
+            if response_text:
+                model_name = response_text.strip()
 
                 # Validate response
                 if model_name == "DEFAULT":
