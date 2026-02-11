@@ -148,15 +148,19 @@ class BotLogic:
                 "current_message": {"text": user_message, "image_url": None}
             }
 
-            # Call text_engine with persona's config
-            response, _ = await self.chat_system.text_engine.generate_response(
-                persona_config=selector_persona.get_config_for_engine(),
-                context_object=context,
-                tools=None
+            response_text, response_type, ticket_id = await self.chat_system.generate_response(
+                persona_name=MODEL_SELECTOR_PERSONA_NAME,
+                user_identifier="n/a",
+                channel="model_selector_query",
+                message=user_message,
+                server_id="model_selector_query",
+                image_url=None,
+                history_limit=0,
+                user_display_name="n/a"
             )
 
-            if response.get("type") == "text":
-                model_name = response.get("content", "").strip()
+            if response_text.get("type") == "text":
+                model_name = response_text.get("content", "").strip()
 
                 # Validate response
                 if model_name == "DEFAULT":
