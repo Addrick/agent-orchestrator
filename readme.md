@@ -1,6 +1,6 @@
 ---
 
-# Production-Ready LLM Orchestration Engine (`derpr-python`)
+# Production-Ready LLM Orchestration Engine
 
 This project is a complete, end-to-end AI chatbot system designed for real-world application. It functions as a provider-agnostic orchestration engine, capable of integrating with multiple LLM providers, external services, and user interfaces to solve complex business problems like automated IT service dispatch. It is architected for reliability, scalability, and ease of maintenance.
 
