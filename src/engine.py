@@ -131,7 +131,7 @@ class TextEngine:
                     result, api_payload = await self._generate_openai_response(persona_config, context_object, tools)
                 elif "claude" in model_name:
                     result, api_payload = await self._generate_anthropic_response(persona_config, context_object, tools)
-                elif "gemini" or "gemma" in model_name:
+                elif "gemini" in model_name or "gemma" in model_name:
                     result, api_payload = await self._generate_google_response(persona_config, context_object, tools)
                 elif model_name == 'local':
                     result, api_payload = await self._generate_local_response(persona_config, context_object, tools)
