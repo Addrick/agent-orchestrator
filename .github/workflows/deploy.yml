@@ -9,6 +9,7 @@ on:
 env:
   # Use your actual image name here
   IMAGE_NAME: ghcr.io/addrick/derpr-python
+  GOOGLE_GENERATIVEAI_API_KEY: ${{secrets.GOOGLE_GENERATIVEAI_API_KEY}}
 
 jobs:
   # JOB 1: Run Tests
