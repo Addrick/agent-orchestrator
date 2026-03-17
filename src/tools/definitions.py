@@ -15,7 +15,46 @@ The actual implementation of these tools is handled by the ToolManager.
 
 # A list containing all tool definitions.
 # The ToolManager will expose these to the ChatSystem.
+#
+# Special tool types:
+#   "google_grounding" — Not a callable function. Signals the engine to enable
+#                        Google's native grounding feature for Gemini models.
+#                        Has no effect on other providers or Gemma models.
 ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
+    {
+        "type": "google_grounding",
+        "function": {
+            "name": "google_grounding_search",
+            "description": "Enables Google's native Search grounding feature for Gemini models. "
+                           "Allows the model to retrieve up-to-date information from the web to "
+                           "support its responses. Has no effect on non-Gemini models. "
+                           "Subject to Google grounding API costs and rate limits.",
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Searches the web for information using DuckDuckGo. Returns titles, "
+                           "URLs, and summaries for the most relevant results. Compatible with "
+                           "all model providers.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query.",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum number of results to return (default: 5).",
+                        "default": 5,
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
