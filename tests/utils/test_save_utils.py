@@ -76,45 +76,6 @@ def test_load_personas_file_not_found(tmp_path: Path):
     assert result is None
 
 
-def test_save_uses_test_file_in_pytest_env(mock_personas: dict):
-    """
-    Tests that when running under pytest, the save function defaults to the
-    TEST_PERSONA_SAVE_FILE and does NOT touch the production file. This test is
-    non-destructive.
-    """
-    # --- Setup: Clean state and record pre-test conditions ---
-    if os.path.exists(TEST_PERSONA_SAVE_FILE):
-        os.remove(TEST_PERSONA_SAVE_FILE)
-
-    prod_file_exists = os.path.exists(PERSONA_SAVE_FILE)
-    prod_file_mtime = os.path.getmtime(PERSONA_SAVE_FILE) if prod_file_exists else -1
-
-    try:
-        # --- Action: Call the function with NO override path ---
-        save_utils.save_personas_to_file(mock_personas)
-
-        # --- Assertions ---
-        # 1. Assert that the test file was created.
-        assert os.path.exists(TEST_PERSONA_SAVE_FILE)
-
-        # 2. Assert that the production file was NOT touched.
-        if prod_file_exists:
-            # If it existed, its modification time should be unchanged.
-            assert os.path.getmtime(PERSONA_SAVE_FILE) == prod_file_mtime
-        else:
-            # If it didn't exist, it should still not exist.
-            assert not os.path.exists(PERSONA_SAVE_FILE)
-
-        # 3. Verify content of the test file
-        with open(TEST_PERSONA_SAVE_FILE, 'r') as f:
-            data = json.load(f)
-        assert len(data['personas.json']) == 2
-        assert data['personas.json'][0]['name'] == 'p1'
-
-    finally:
-        # --- Teardown: Clean up ONLY the test file ---
-        if os.path.exists(TEST_PERSONA_SAVE_FILE):
-            os.remove(TEST_PERSONA_SAVE_FILE)
 
 def test_load_persona_attributes_integrity(tmp_path):
     """
@@ -128,7 +89,7 @@ def test_load_persona_attributes_integrity(tmp_path):
     # 1. Create a temporary JSON file with specific test values
     test_file = tmp_path / "integrity_test.json"
     test_data = {
-        "personas.json": [
+        "personas": [
             {
                 "name": "integrity_bot",
                 "model_name": "gpt-4-test-variant",

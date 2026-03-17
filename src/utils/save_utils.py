@@ -13,22 +13,8 @@ logger = logging.getLogger(__name__)
 
 
 def _get_persona_save_file_path() -> str:
-    """
-    Returns the persona save file path from global config.
-    Includes a safety lock to prevent overwriting production data during tests.
-    """
-    file_path = global_config.PERSONA_SAVE_FILE
-
-    # # --- SAFETY LOCK ---
-    # is_pytest = "PYTEST_CURRENT_TEST" in os.environ
-    # is_default_path = str(file_path).endswith(os.path.join('data', 'personas.json'))
-    #
-    # if is_pytest and is_default_path:
-    #     raise ValueError(
-    #         f"TEST SAFETY LOCK: Attempting to use production persona file "
-    #         f"({file_path}) during a pytest run. conftest.py should have overridden this."
-    #     )
-    return file_path
+    """Returns the persona save file path from global config."""
+    return global_config.PERSONA_SAVE_FILE
 
 
 def load_models_from_file(file_path_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -126,7 +112,11 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
     file_path = file_path_override or _get_persona_save_file_path()
 
     # --- AUTO-SEEDING LOGIC ---
+    # Only seed from defaults when using the standard path, not an explicit override.
     if not os.path.exists(file_path):
+        if file_path_override:
+            logger.warning(f"File '{file_path}' does not exist.")
+            return None
         default_file = os.path.join(global_config.CONFIG_DIR, 'default_personas.json')
         if os.path.exists(default_file):
             logger.info(f"Auto-seeding personas from {default_file} to {file_path}")
