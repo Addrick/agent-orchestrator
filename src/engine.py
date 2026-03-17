@@ -32,9 +32,11 @@ logger = logging.getLogger(__name__)
 class LLMCommunicationError(Exception):
     """Custom exception for when the TextEngine cannot communicate with an LLM provider."""
 
-    def __init__(self, message: str, api_payload: Optional[Dict[str, Any]] = None):
+    def __init__(self, message: str, api_payload: Optional[Dict[str, Any]] = None,
+                 rate_limited: bool = False):
         super().__init__(message)
         self.api_payload = api_payload
+        self.rate_limited = rate_limited
 
 
 class TextEngine:
@@ -168,7 +170,9 @@ class TextEngine:
                     return result, api_payload
 
             except LLMCommunicationError as e:
-                # Re-raise critical errors immediately without retry
+                if e.rate_limited:
+                    logger.warning(f"Rate limit (429) hit for model '{model_name}'. Aborting retries.")
+                    raise
                 if attempt >= EMPTY_RESPONSE_RETRIES:
                     raise
                 logger.warning(f"LLM communication error (Attempt {attempt + 1}). Retrying... Error: {e}")
@@ -240,8 +244,10 @@ class TextEngine:
                 return {"type": "text", "content": response_content}, api_params
 
         except (APIStatusError, APITimeoutError) as e:
+            rate_limited = isinstance(e, APIStatusError) and e.status_code == 429
             logger.error(f"OpenAI API error: {e}", exc_info=True)
-            raise LLMCommunicationError(f"OpenAI API returned an error: {e}", api_payload=api_params) from e
+            raise LLMCommunicationError(f"OpenAI API returned an error: {e}", api_payload=api_params,
+                                        rate_limited=rate_limited) from e
         except Exception as e:
             logger.error(f"An unexpected OpenAI error occurred: {e}", exc_info=True)
             raise LLMCommunicationError(f"An unexpected error occurred with the OpenAI API.",
@@ -322,8 +328,10 @@ class TextEngine:
                 return {"type": "text", "content": response_content}, api_params
 
         except anthropic.APIError as e:
+            rate_limited = hasattr(e, 'status_code') and e.status_code == 429
             logger.error(f"Anthropic API error: {e}", exc_info=True)
-            raise LLMCommunicationError(f"Anthropic API returned an error: {e}", api_payload=api_params) from e
+            raise LLMCommunicationError(f"Anthropic API returned an error: {e}", api_payload=api_params,
+                                        rate_limited=rate_limited) from e
         except Exception as e:
             logger.error(f"An unexpected Anthropic error occurred: {e}", exc_info=True)
             raise LLMCommunicationError(f"An unexpected error occurred with the Anthropic API.",
@@ -435,9 +443,10 @@ class TextEngine:
                 config=GenerateContentConfig(**content_config_for_api)
             )
         except Exception as e:
+            rate_limited = '429' in str(e) or 'RESOURCE_EXHAUSTED' in str(e)
             logger.error(f"Google API error: {e}", exc_info=True)
             raise LLMCommunicationError(f"An error occurred with Google API: {e}",
-                                        api_payload=api_params_for_dumping) from e
+                                        api_payload=api_params_for_dumping, rate_limited=rate_limited) from e
 
         if response_obj.prompt_feedback and response_obj.prompt_feedback.block_reason:
             raise LLMCommunicationError(
