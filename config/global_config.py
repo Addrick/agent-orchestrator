@@ -142,13 +142,17 @@ LOCAL_LLM_URL = "http://omen:5001/v1"
 # =============================================================================
 # All limits are overridable via environment variables so they can be adjusted
 # without a redeploy if a provider quietly changes their quotas.
+# Note: Google Search Grounding has a separate quota not tracked here —
+# the 429 short-circuit handles grounding overruns.
 #
-# Google (gemini-3.1-flash-lite-preview, paid tier as of 2026-03):
-#   Actual limits: 15 RPM, 250K TPM, 500 RPD
-#   Configured conservatively below actuals to leave headroom.
-RATE_LIMIT_GOOGLE_RPM = int(os.environ.get("RATE_LIMIT_GOOGLE_RPM", "10"))
-RATE_LIMIT_GOOGLE_RPD = int(os.environ.get("RATE_LIMIT_GOOGLE_RPD", "450"))
+# Gemini 2.5 (confirmed 2026-03): 5 RPM, 20 RPD
+RATE_LIMIT_GEMINI_25_RPM = int(os.environ.get("RATE_LIMIT_GEMINI_25_RPM", "5"))
+RATE_LIMIT_GEMINI_25_RPD = int(os.environ.get("RATE_LIMIT_GEMINI_25_RPD", "20"))
+# Gemini 3.1 (confirmed 2026-03): 15 RPM  (other gemini-3.x models have quota 0)
+RATE_LIMIT_GEMINI_3_RPM  = int(os.environ.get("RATE_LIMIT_GEMINI_3_RPM",  "15"))
+# Gemma free tier (confirmed 2026-03): 30 RPM
+RATE_LIMIT_GEMMA_RPM     = int(os.environ.get("RATE_LIMIT_GEMMA_RPM",     "30"))
 
 # OpenAI and Anthropic — set generously; adjust if you hit 429s on those providers.
-RATE_LIMIT_OPENAI_RPM     = int(os.environ.get("RATE_LIMIT_OPENAI_RPM",     "60"))
-RATE_LIMIT_ANTHROPIC_RPM  = int(os.environ.get("RATE_LIMIT_ANTHROPIC_RPM",  "50"))
+RATE_LIMIT_OPENAI_RPM    = int(os.environ.get("RATE_LIMIT_OPENAI_RPM",    "60"))
+RATE_LIMIT_ANTHROPIC_RPM = int(os.environ.get("RATE_LIMIT_ANTHROPIC_RPM", "50"))
