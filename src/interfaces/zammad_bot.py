@@ -403,3 +403,7 @@ class ZammadBot:
         except Exception as e:
             print(f"[ZammadBot] Critical Error: {e}")
             logger.error(f"Error processing ticket {ticket_id}: {e}", exc_info=True)
+
+
+def create_zammad_bot(chat_system: ChatSystem) -> ZammadBot:
+    return ZammadBot(chat_system)
