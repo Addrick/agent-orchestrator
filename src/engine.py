@@ -8,8 +8,14 @@ from typing import Dict, Any, Optional, Tuple, List
 
 from dotenv import load_dotenv
 
+from aiolimiter import AsyncLimiter
+
 from config import global_config
-from config.global_config import EMPTY_RESPONSE_RETRIES, EMPTY_RESPONSE_RETRY_DELAY
+from config.global_config import (
+    EMPTY_RESPONSE_RETRIES, EMPTY_RESPONSE_RETRY_DELAY,
+    RATE_LIMIT_GOOGLE_RPM, RATE_LIMIT_GOOGLE_RPD,
+    RATE_LIMIT_OPENAI_RPM, RATE_LIMIT_ANTHROPIC_RPM,
+)
 # --- Provider-specific imports ---
 import base64
 import aiohttp
@@ -49,6 +55,19 @@ class TextEngine:
             {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
             {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
         ]
+
+        # --- Per-provider rate limiters ---
+        # Google has both an RPM and an RPD cap; both must be satisfied.
+        self._google_rpm_limiter = AsyncLimiter(max_rate=RATE_LIMIT_GOOGLE_RPM, time_period=60)
+        self._google_rpd_limiter = AsyncLimiter(max_rate=RATE_LIMIT_GOOGLE_RPD, time_period=86400)
+        self._openai_limiter     = AsyncLimiter(max_rate=RATE_LIMIT_OPENAI_RPM,    time_period=60)
+        self._anthropic_limiter  = AsyncLimiter(max_rate=RATE_LIMIT_ANTHROPIC_RPM, time_period=60)
+        logger.info(
+            f"Rate limiters initialised — "
+            f"Google: {RATE_LIMIT_GOOGLE_RPM} RPM / {RATE_LIMIT_GOOGLE_RPD} RPD | "
+            f"OpenAI: {RATE_LIMIT_OPENAI_RPM} RPM | "
+            f"Anthropic: {RATE_LIMIT_ANTHROPIC_RPM} RPM"
+        )
 
         self._initialize_env()
 
@@ -128,11 +147,15 @@ class TextEngine:
 
             try:
                 if model_name.startswith("gpt"):
-                    result, api_payload = await self._generate_openai_response(persona_config, context_object, tools)
+                    async with self._openai_limiter:
+                        result, api_payload = await self._generate_openai_response(persona_config, context_object, tools)
                 elif "claude" in model_name:
-                    result, api_payload = await self._generate_anthropic_response(persona_config, context_object, tools)
+                    async with self._anthropic_limiter:
+                        result, api_payload = await self._generate_anthropic_response(persona_config, context_object, tools)
                 elif "gemini" in model_name or "gemma" in model_name:
-                    result, api_payload = await self._generate_google_response(persona_config, context_object, tools)
+                    async with self._google_rpm_limiter:
+                        async with self._google_rpd_limiter:
+                            result, api_payload = await self._generate_google_response(persona_config, context_object, tools)
                 elif model_name == 'local':
                     result, api_payload = await self._generate_local_response(persona_config, context_object, tools)
                 else:
