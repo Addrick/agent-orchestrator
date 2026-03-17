@@ -21,7 +21,7 @@ def _get_persona_save_file_path() -> str:
 
     # --- SAFETY LOCK ---
     is_pytest = "PYTEST_CURRENT_TEST" in os.environ
-    is_default_path = file_path.endswith(os.path.join('data', 'personas.json'))
+    is_default_path = str(file_path).endswith(os.path.join('data', 'personas.json'))
 
     if is_pytest and is_default_path:
         raise ValueError(
