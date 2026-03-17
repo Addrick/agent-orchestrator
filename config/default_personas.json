@@ -11,7 +11,7 @@
             "top_k": null,
             "display_name_in_chat": false,
             "execution_mode": "SILENT_ANALYSIS",
-            "enabled_tools": [],
+            "enabled_tools": ["google_grounding_search"],
             "memory_mode": "CHANNEL_ISOLATED"
         },
         {
@@ -39,7 +39,7 @@
             "top_k": null,
             "display_name_in_chat": false,
             "execution_mode": "SILENT_ANALYSIS",
-            "enabled_tools": [],
+            "enabled_tools": ["google_grounding_search"],
             "memory_mode": "CHANNEL_ISOLATED"
         },
         {
