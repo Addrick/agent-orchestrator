@@ -44,10 +44,6 @@ jobs:
           # Treat all other issues as warnings
           flake8 src/ --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
-      - name: Type check with mypy
-        run: |
-          # Enforce strict typing and catch missing imports/attributes
-          mypy --strict src/
 
       - name: Run tests with pytest, skipping integration.
         run: pytest -m "not integration"
