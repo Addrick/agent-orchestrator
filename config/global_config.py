@@ -23,10 +23,11 @@ for directory in [DATA_DIR, LOGS_DIR, CREDENTIALS_DIR]:
 # FILE PATHS
 # =============================================================================
 # JSON Configuration Files
-PERSONA_SAVE_FILE = DATA_DIR / "personas.json"
+PERSONA_SAVE_FILE = DATA_DIR / "personas.json.json"
 TEST_PERSONA_SAVE_FILE = DATA_DIR / "test_personas.json"
 MODEL_SAVE_FILE = CONFIG_DIR / "models.json"
 DEFAULT_PERSONA_SAVE_FILE = CONFIG_DIR / "default_personas.json"
+SYSTEM_PERSONA_FILE = os.path.join(CONFIG_DIR, 'system_personas.json')
 
 # Application Logging
 CHAT_LOG_LOCATION = LOGS_DIR
@@ -111,3 +112,27 @@ EMPTY_RESPONSE_RETRY_DELAY = 2
 # =============================================================================
 # Persona name for model selection helper
 MODEL_SELECTOR_PERSONA_NAME = "model_selector"
+
+# =============================================================================
+# --- Zammad Bot Configuration ---
+# =============================================================================
+ZAMMAD_BOT_ENABLED = False
+ZAMMAD_POLL_INTERVAL = 10
+ZAMMAD_TRIAGE_TAG = "autotriaged"
+TRIAGE_GLOBAL_HISTORY_COUNT = 5
+TRIAGE_USER_HISTORY_COUNT = 3
+TRIAGE_MAX_CONTEXT_CHARS = 100000  # ~25k tokens
+
+TRIAGE_SCOUT_NAME = "triage_scout"
+TRIAGE_SUMMARIZER_NAME = "triage_summarizer"
+TRIAGE_ANALYST_NAME = "triage_analyst"
+TRIAGE_FILTER_NAME = "triage_filter"
+
+
+ZAMMAD_BOT_EMAIL = "autotriage@bot.local"
+ZAMMAD_BOT_FIRSTNAME = "autotriage"
+ZAMMAD_BOT_LASTNAME = "LLM"
+# =============================================================================
+# --- Local LLM Configuration ---
+# =============================================================================
+LOCAL_LLM_URL = "http://omen:5001/v1"
