@@ -91,8 +91,8 @@ ALLOWED_SENDER_LIST = [
 # =============================================================================
 # LLM ENGINE SETTINGS
 # =============================================================================
-DEFAULT_MODEL_NAME = "gemini-2.5-flash"
-DEFAULT_ULTRAFAST_MODEL_NAME = "gemini-2.0-flash-lite"
+DEFAULT_MODEL_NAME = "gemini-3.1-flash-lite-preview"
+DEFAULT_ULTRAFAST_MODEL_NAME = "gemini-3.1-flash-lite-preview"
 DEFAULT_PERSONA = "You are a helpful assistant."
 
 # Token generation limits
