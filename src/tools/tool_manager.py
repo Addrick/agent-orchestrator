@@ -38,6 +38,7 @@ class ToolManager:
             "create_user": self._create_user,
             "update_user": self._update_user,
             "delete_user": self._delete_user,
+            "web_search": self._web_search,
         }
 
     def get_tool_definitions(self) -> List[Dict[str, Any]]:
@@ -184,3 +185,15 @@ class ToolManager:
         logger.info(f"Executing tool: delete_user on user_id={user_id}")
         await asyncio.to_thread(self.zammad_client.delete_user, user_id=user_id)
         return {"status": "success", "message": f"User {user_id} deleted."}
+
+    async def _web_search(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
+        """Implementation for the 'web_search' tool using DuckDuckGo."""
+        logger.info(f"Executing tool: web_search with query='{query}', max_results={max_results}")
+        from duckduckgo_search import DDGS
+
+        def _sync_search() -> List[Dict[str, Any]]:
+            with DDGS() as ddgs:
+                return list(ddgs.text(query, max_results=max_results))
+
+        raw = await asyncio.to_thread(_sync_search)
+        return [{"title": r["title"], "url": r["href"], "summary": r["body"]} for r in raw]

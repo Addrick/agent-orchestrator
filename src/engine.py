@@ -406,13 +406,15 @@ class TextEngine:
 
         api_tools: List[Tool] = []
         if tools:
-            converted_tools = [Tool(function_declarations=[FunctionDeclaration(**t['function'])])
-                               for t in tools if t.get('type') == 'function' and t.get('function')]
-            api_tools.extend(converted_tools)
-            content_config_for_api['tool_config'] = {"function_calling_config": {"mode": "AUTO"}}
-        else:
-            api_tools.append(self.google_search_tool)
-        content_config_for_api['tools'] = api_tools
+            if any(t.get('type') == 'google_grounding' for t in tools):
+                api_tools.append(self.google_search_tool)
+            function_tools = [t for t in tools if t.get('type') == 'function' and t.get('function')]
+            if function_tools:
+                api_tools.extend([Tool(function_declarations=[FunctionDeclaration(**t['function'])])
+                                   for t in function_tools])
+                content_config_for_api['tool_config'] = {"function_calling_config": {"mode": "AUTO"}}
+        if api_tools:
+            content_config_for_api['tools'] = api_tools
 
         content_config_for_api['max_output_tokens'] = config.get(
             "max_output_tokens") or global_config.DEFAULT_TOKEN_LIMIT
