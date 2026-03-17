@@ -448,8 +448,8 @@ class TextEngine:
         Creates a new AsyncOpenAI client configured to point to a local,
         OpenAI-compatible API endpoint (like KoboldCPP or Ollama).
         """
-        # This could be made configurable in global_config.py in the future
-        local_api_url = "http://localhost:5001/v1"
+        # Use the configured URL from global_config or env
+        local_api_url = os.environ.get("LOCAL_LLM_URL", global_config.LOCAL_LLM_URL)
         return AsyncOpenAI(base_url=local_api_url, api_key="not-required")
 
     async def _generate_local_response(self, config: Dict[str, Any], context: Dict[str, Any],
