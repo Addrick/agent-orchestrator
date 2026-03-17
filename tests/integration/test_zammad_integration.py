@@ -3,22 +3,18 @@
 import pytest
 import asyncio
 import time
-import os
 from typing import Callable, List, Any
-from datetime import datetime
 import requests
-from unittest.mock import MagicMock, AsyncMock, patch
+from unittest.mock import MagicMock, patch
 from src.clients.zammad_client import ZammadClient
 from src.interfaces.zammad_bot import ZammadBot
 from src.chat_system import ChatSystem
 from src.engine import TextEngine
-from src.persona import Persona, ExecutionMode, MemoryMode
 from config.global_config import (
     TRIAGE_SCOUT_NAME,
     TRIAGE_SUMMARIZER_NAME,
     TRIAGE_ANALYST_NAME,
     TRIAGE_FILTER_NAME,
-    LOCAL_LLM_URL,
     ZAMMAD_TRIAGE_TAG,
     ZAMMAD_BOT_EMAIL,
     ZAMMAD_BOT_FIRSTNAME,
@@ -45,6 +41,28 @@ FALLBACK_TITLE = "[Test] Fallback Check"
 FILTER_RELEVANT_TITLE = "[Test] Printer Paper Jam"
 FILTER_IRRELEVANT_TITLE = "[Test] Printer 3D Model Request"
 FILTER_NEW_TITLE = "[Test] Printer is stuck"
+
+
+async def _mock_llm_generate(persona_config, context_object, tools=None):
+    """
+    Deterministic stand-in for TextEngine.generate_response used across all
+    integration tests.  Dispatches on the persona_prompt so each pipeline
+    stage gets a plausible, structurally-valid response without touching the
+    real API.
+    """
+    sys_prompt = context_object.get('persona_prompt', '')
+
+    if 'keyword extraction' in sys_prompt:
+        return {"type": "text", "content": "network error connectivity"}, {}
+
+    if 'summarization' in sys_prompt:
+        return {"type": "text", "content": "Mock summary: ticket describes a technical issue requiring investigation."}, {}
+
+    if 'relevance classifier' in sys_prompt:
+        return {"type": "text", "content": "RELEVANT"}, {}
+
+    # Analyst (and any unrecognised persona)
+    return {"type": "text", "content": "Mock triage: Issue noted. No similar history found. Recommend standard investigation procedure."}, {}
 
 
 async def _wait_for_search(search_func: Callable[..., List[Any]], assertion_func: Callable[[List[Any]], bool],
@@ -88,68 +106,6 @@ async def wait_for_tag(zammad_client, ticket_id, tag, timeout=10):
         await asyncio.sleep(1)
 
     pytest.fail(f"Tag '{tag}' not found on ticket {ticket_id} after {timeout}s. Current tags: {current_tags}")
-
-
-def check_local_llm_health():
-    """
-    Checks if the Local LLM (KoboldCPP) is reachable and has a model loaded.
-    Returns True if healthy, False otherwise.
-    """
-    try:
-        url = f"{LOCAL_LLM_URL}/models"
-        response = requests.get(url, timeout=2)
-        if response.status_code == 200:
-            return True
-
-        url = f"{LOCAL_LLM_URL.replace('/v1', '')}/api/v1/model"
-        response = requests.get(url, timeout=2)
-        if response.status_code == 200:
-            return True
-
-    except Exception as e:
-        print(f"Local LLM Health Check Failed: {e}")
-    return False
-
-
-def setup_test_personas(chat_system: ChatSystem):
-    """
-    Injects the required system personas into the ChatSystem,
-    configured to use the LOCAL model for integration testing.
-    """
-    base_config = {
-        "model_name": "local",
-        "execution_mode": ExecutionMode.SILENT_ANALYSIS,
-        "memory_mode": MemoryMode.TICKET_ISOLATED,
-        "enabled_tools": [],
-        "context_length": 0,
-        "temperature": 0.0
-    }
-
-    chat_system.personas[TRIAGE_SCOUT_NAME] = Persona(
-        persona_name=TRIAGE_SCOUT_NAME,
-        prompt="You are a keyword extraction tool.",
-        token_limit=50,
-        **base_config
-    )
-    chat_system.personas[TRIAGE_SUMMARIZER_NAME] = Persona(
-        persona_name=TRIAGE_SUMMARIZER_NAME,
-        prompt="You are a summarization tool.",
-        token_limit=150,
-        **base_config
-    )
-    chat_system.personas[TRIAGE_ANALYST_NAME] = Persona(
-        persona_name=TRIAGE_ANALYST_NAME,
-        prompt="You are a support triage assistant.",
-        token_limit=600,
-        **base_config
-    )
-    # Added Filter Persona
-    chat_system.personas[TRIAGE_FILTER_NAME] = Persona(
-        persona_name=TRIAGE_FILTER_NAME,
-        prompt="You are a relevance classifier. Respond RELEVANT or IRRELEVANT.",
-        token_limit=10,
-        **base_config
-    )
 
 
 @pytest.fixture(scope="module")
@@ -222,12 +178,9 @@ def managed_test_user(zammad_client: ZammadClient) -> int:
 @pytest.mark.asyncio
 async def test_zammad_bot_end_to_end_real_flow(zammad_client: ZammadClient, managed_test_user: int, bot_identity):
     """
-    TRUE INTEGRATION TEST: Zammad <-> Bot <-> Local LLM (KoboldCPP).
-    Verifies the Happy Path with History.
+    Verifies the Happy Path with History: bot finds a related closed ticket,
+    runs the full triage pipeline, and posts a note on the new ticket.
     """
-    if not check_local_llm_health():
-        pytest.skip(f"Local LLM at {LOCAL_LLM_URL} is not reachable. Skipping real integration test.")
-
     solved_ticket_id = None
     new_ticket_id = None
 
@@ -261,55 +214,32 @@ async def test_zammad_bot_end_to_end_real_flow(zammad_client: ZammadClient, mana
             article_body="The engines are making a loud humming sound and the warp core seems unstable."
         )
         new_ticket_id = new_ticket['id']
-        print(f"\n[INFO] Created Real LLM Test Ticket ID: {new_ticket_id}")
+        print(f"\n[INFO] Created Test Ticket ID: {new_ticket_id}")
 
-        # 4. Setup Bot
+        # 4. Setup Bot and Run
         memory_manager = MagicMock()
         text_engine = TextEngine()
         chat_system = ChatSystem(memory_manager, text_engine, zammad_client)
-
         bot = ZammadBot(chat_system)
-        setup_test_personas(chat_system)
 
-        # 5. Spy and Run
-        captured_interactions = []
-        real_generate = text_engine.generate_response
+        # Scout returns keywords that match the history ticket's title/body so it
+        # is actually retrieved and included in the triage note.
+        async def mock_e2e_generate(persona_config, context_object, tools=None):
+            if 'keyword extraction' in context_object.get('persona_prompt', ''):
+                return {"type": "text", "content": "warp core dilithium"}, {}
+            return await _mock_llm_generate(persona_config, context_object, tools)
 
-        async def spy_generate_response(*args, **kwargs):
-            result = await real_generate(*args, **kwargs)
-            captured_interactions.append({"args": args, "kwargs": kwargs, "result": result})
-            return result
-
-        with patch.object(text_engine, 'generate_response', side_effect=spy_generate_response):
+        with patch.object(text_engine, 'generate_response', side_effect=mock_e2e_generate):
             await bot._process_ticket(new_ticket_id)
 
-            # Capture Prompt
-            if len(captured_interactions) >= 2:
-                last_interaction = captured_interactions[-1]
-                history_list = last_interaction['kwargs']['context_object']['history']
-                raw_prompt = history_list[-1]['content'] if history_list else "NO PROMPT FOUND"
-
-                raw_response_obj = last_interaction['result'][0]
-                raw_response_content = raw_response_obj.get('content', 'NO CONTENT')
-
-                dump_body = (
-                    f"[TEST APPARATUS - AI TRIAGE REQUEST DUMP]\n\n"
-                    f"--- PROMPT SENT TO LLM ---\n{raw_prompt}\n\n"
-                    f"--- RAW RESPONSE FROM LLM ---\n{raw_response_content}"
-                )
-
-                zammad_client.add_article_to_ticket(
-                    ticket_id=new_ticket_id,
-                    body=dump_body,
-                    internal=True
-                )
-
-        # 6. Verify
+        # 5. Verify note was posted and the history ticket is referenced in it
         articles = zammad_client.get_ticket_articles(new_ticket_id)
         ai_note = next((a for a in articles if a['internal'] is True and "[ AI TRIAGE CONTEXT DUMP ]" in a['body']),
                        None)
         assert ai_note is not None, "Bot failed to post the triage note."
-        print(f"\n[VISUAL INSPECTION] Real LLM Note:\n{ai_note['body'][:300]}...")
+        assert f"{REAL_HISTORY_TITLE} (Ticket #{solved_ticket_id})" in ai_note['body'], \
+            "History ticket should have been found and listed in the triage note."
+        print(f"\n[VERIFY] Triage note posted. Excerpt:\n{ai_note['body'][:300]}...")
 
     finally:
         print("\n[CLEANUP] Closing test tickets...")
@@ -322,12 +252,8 @@ async def test_zammad_bot_clean_slate(zammad_client: ZammadClient, managed_test_
     """
     Verifies behavior when NO history exists.
     """
-    if not check_local_llm_health():
-        pytest.skip("Local LLM unreachable.")
-
     new_ticket_id = None
     try:
-        # Create Ticket with unique title
         new_ticket = zammad_client.create_ticket(
             title=CLEAN_SLATE_TITLE,
             group="Users",
@@ -336,15 +262,13 @@ async def test_zammad_bot_clean_slate(zammad_client: ZammadClient, managed_test_
         )
         new_ticket_id = new_ticket['id']
 
-        # Setup Bot
         memory_manager = MagicMock()
         text_engine = TextEngine()
         chat_system = ChatSystem(memory_manager, text_engine, zammad_client)
-
         bot = ZammadBot(chat_system)
-        setup_test_personas(chat_system)
 
-        await bot._process_ticket(new_ticket_id)
+        with patch.object(text_engine, 'generate_response', side_effect=_mock_llm_generate):
+            await bot._process_ticket(new_ticket_id)
 
         articles = zammad_client.get_ticket_articles(new_ticket_id)
         ai_note = next((a for a in articles if a['internal'] is True and "[ AI TRIAGE CONTEXT DUMP ]" in a['body']),
@@ -364,9 +288,6 @@ async def test_zammad_bot_adaptive_compression(zammad_client: ZammadClient, mana
     """
     Verifies the Adaptive Compression logic.
     """
-    if not check_local_llm_health():
-        pytest.skip("Local LLM unreachable.")
-
     solved_ticket_id = None
     new_ticket_id = None
 
@@ -399,12 +320,11 @@ async def test_zammad_bot_adaptive_compression(zammad_client: ZammadClient, mana
         memory_manager = MagicMock()
         text_engine = TextEngine()
         chat_system = ChatSystem(memory_manager, text_engine, zammad_client)
-
         bot = ZammadBot(chat_system)
-        setup_test_personas(chat_system)
 
-        with patch('src.interfaces.zammad_bot.TRIAGE_MAX_CONTEXT_CHARS', 1000):
-            await bot._process_ticket(new_ticket_id)
+        with patch.object(text_engine, 'generate_response', side_effect=_mock_llm_generate):
+            with patch('src.interfaces.zammad_bot.TRIAGE_MAX_CONTEXT_CHARS', 1000):
+                await bot._process_ticket(new_ticket_id)
 
         articles = zammad_client.get_ticket_articles(new_ticket_id)
         ai_note = next((a for a in articles if a['internal'] is True and "[ AI TRIAGE CONTEXT DUMP ]" in a['body']),
@@ -423,9 +343,6 @@ async def test_zammad_bot_idempotency(zammad_client: ZammadClient, managed_test_
     """
     Verifies that tickets are tagged and not re-processed.
     """
-    if not check_local_llm_health():
-        pytest.skip("Local LLM unreachable.")
-
     new_ticket_id = None
     try:
         new_ticket = zammad_client.create_ticket(
@@ -439,11 +356,10 @@ async def test_zammad_bot_idempotency(zammad_client: ZammadClient, managed_test_
         memory_manager = MagicMock()
         text_engine = TextEngine()
         chat_system = ChatSystem(memory_manager, text_engine, zammad_client)
-
         bot = ZammadBot(chat_system)
-        setup_test_personas(chat_system)
 
-        await bot._process_ticket(new_ticket_id)
+        with patch.object(text_engine, 'generate_response', side_effect=_mock_llm_generate):
+            await bot._process_ticket(new_ticket_id)
 
         await wait_for_tag(zammad_client, new_ticket_id, ZAMMAD_TRIAGE_TAG)
 
@@ -464,9 +380,6 @@ async def test_zammad_bot_impersonation_fallback(zammad_client: ZammadClient, ma
     Verifies that if impersonation fails (e.g. invalid user), the bot falls back
     to posting as the API token owner.
     """
-    if not check_local_llm_health():
-        pytest.skip("Local LLM unreachable.")
-
     ticket_id = None
     try:
         # 1. Create Ticket
@@ -482,13 +395,12 @@ async def test_zammad_bot_impersonation_fallback(zammad_client: ZammadClient, ma
         memory_manager = MagicMock()
         text_engine = TextEngine()
         chat_system = ChatSystem(memory_manager, text_engine, zammad_client)
-
         bot = ZammadBot(chat_system)
-        setup_test_personas(chat_system)
 
         # 3. Run with Invalid Email to force impersonation failure
-        with patch("src.interfaces.zammad_bot.ZAMMAD_BOT_EMAIL", "nonexistent_ghost@example.com"):
-            await bot._process_ticket(ticket_id)
+        with patch.object(text_engine, 'generate_response', side_effect=_mock_llm_generate):
+            with patch("src.interfaces.zammad_bot.ZAMMAD_BOT_EMAIL", "nonexistent_ghost@example.com"):
+                await bot._process_ticket(ticket_id)
 
         # 4. Verify Tag (Success implies fallback worked)
         await wait_for_tag(zammad_client, ticket_id, ZAMMAD_TRIAGE_TAG)
@@ -512,10 +424,9 @@ async def test_zammad_bot_impersonation_fallback(zammad_client: ZammadClient, ma
 async def test_zammad_bot_filtering_logic(zammad_client: ZammadClient, managed_test_user: int, bot_identity):
     """
     Verifies that the 'triage_filter' persona correctly filters out irrelevant tickets.
+    The filter mock returns content-aware RELEVANT/IRRELEVANT decisions; all other
+    pipeline stages use the shared mock.
     """
-    if not check_local_llm_health():
-        pytest.skip("Local LLM unreachable.")
-
     relevant_id = None
     irrelevant_id = None
     new_ticket_id = None
@@ -558,36 +469,23 @@ async def test_zammad_bot_filtering_logic(zammad_client: ZammadClient, managed_t
         )
         new_ticket_id = new_ticket['id']
 
-        # 4. Setup Bot with Mocked Filter
+        # 4. Setup Bot
         memory_manager = MagicMock()
         text_engine = TextEngine()
         chat_system = ChatSystem(memory_manager, text_engine, zammad_client)
-
         bot = ZammadBot(chat_system)
-        setup_test_personas(chat_system)
-
-        # Mock the LLM ONLY for the filtering step to ensure deterministic behavior for this test
-        # We use side_effect to return different values based on the prompt
-        real_generate = text_engine.generate_response
 
         async def mock_filter_generate(persona_config, context_object, tools=None):
-            prompt = context_object['history'][0]['content']
             sys_prompt = context_object.get('persona_prompt', '')
-
-            # Mock Scout to ensure we get "Printer" keyword
-            if "keyword extraction" in sys_prompt:
+            if 'keyword extraction' in sys_prompt:
                 return {"type": "text", "content": "Printer"}, {}
-
-            # Mock Filter
-            if "relevance classifier" in sys_prompt:
-                prompt_lower = prompt.lower()
-                if "paper jam" in prompt_lower:
+            if 'relevance classifier' in sys_prompt:
+                prompt_lower = context_object['history'][0]['content'].lower()
+                if 'paper jam' in prompt_lower:
                     return {"type": "text", "content": "RELEVANT"}, {}
-                if "3d model" in prompt_lower:
+                if '3d model' in prompt_lower:
                     return {"type": "text", "content": "IRRELEVANT"}, {}
-
-            # Fallback to real LLM for other steps (Analyst)
-            return await real_generate(persona_config, context_object, tools)
+            return await _mock_llm_generate(persona_config, context_object, tools)
 
         with patch.object(text_engine, 'generate_response', side_effect=mock_filter_generate):
             await bot._process_ticket(new_ticket_id)
@@ -603,14 +501,9 @@ async def test_zammad_bot_filtering_logic(zammad_client: ZammadClient, managed_t
         # Relevant ticket should be listed normally
         assert f"{FILTER_RELEVANT_TITLE} (Ticket #{relevant_id})" in body
 
-        # Irrelevant ticket should be missing from Global Matches (since we filter global)
-        # Or if it was picked up as User History, it should be marked irrelevant.
-        # Since we created both as the same user, they appear in User History.
-        # Logic: User History -> Collapse to title if irrelevant.
-
-        # Check User History Section
+        # Irrelevant ticket should be absent from global matches or marked irrelevant in user history
         assert f"{FILTER_IRRELEVANT_TITLE} (Ticket #{irrelevant_id}) (Irrelevant)" in body or \
-               f"{FILTER_IRRELEVANT_TITLE} (Ticket #{irrelevant_id})" not in body  # If global logic applied
+               f"{FILTER_IRRELEVANT_TITLE} (Ticket #{irrelevant_id})" not in body
 
     finally:
         if relevant_id: zammad_client.update_ticket(relevant_id, {'state': 'closed'})

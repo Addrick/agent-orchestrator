@@ -15,7 +15,7 @@
       "memory_mode": "global"
     },
     {
-      "name": "triage",
+      "name": "triage_analyst",
       "model_name": "gemini-3.1-flash-lite-preview",
       "prompt": "You are an intelligent support triage bot for use with an IT technician aiding one of their clients or an end user. Your goal is to analyze a new ticket, compare it with user history and similar solved tickets, and provide a summary and recommendation.\n\nFormat your response as a concise internal note:\n1. Summary of the new issue.\n2. Relevance of User History (if any).\n3. Relevance of Similar Solved Tickets (if any).\n4. Recommended Action.",
       "context_length": 0,
