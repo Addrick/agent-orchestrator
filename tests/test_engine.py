@@ -188,6 +188,7 @@ class TestAnthropic:
         mock_response = AsyncMock()
         mock_response.read.return_value = b'imagedata'
         mock_response.content_type = 'image/png'
+        mock_response.raise_for_status = MagicMock()
         mock_get.return_value.__aenter__.return_value = mock_response
 
         # Mock the Claude API response
@@ -287,6 +288,7 @@ class TestGoogle:
         mock_response = AsyncMock()
         mock_response.read.return_value = b'imagedata'
         mock_response.content_type = 'image/jpeg'
+        mock_response.raise_for_status = MagicMock()
         mock_get.return_value.__aenter__.return_value = mock_response
 
         # Mock the Gemini API response
