@@ -136,3 +136,19 @@ ZAMMAD_BOT_LASTNAME = "LLM"
 # --- Local LLM Configuration ---
 # =============================================================================
 LOCAL_LLM_URL = "http://omen:5001/v1"
+
+# =============================================================================
+# --- API Rate Limiting ---
+# =============================================================================
+# All limits are overridable via environment variables so they can be adjusted
+# without a redeploy if a provider quietly changes their quotas.
+#
+# Google (gemini-3.1-flash-lite-preview, paid tier as of 2026-03):
+#   Actual limits: 15 RPM, 250K TPM, 500 RPD
+#   Configured conservatively below actuals to leave headroom.
+RATE_LIMIT_GOOGLE_RPM = int(os.environ.get("RATE_LIMIT_GOOGLE_RPM", "10"))
+RATE_LIMIT_GOOGLE_RPD = int(os.environ.get("RATE_LIMIT_GOOGLE_RPD", "450"))
+
+# OpenAI and Anthropic — set generously; adjust if you hit 429s on those providers.
+RATE_LIMIT_OPENAI_RPM     = int(os.environ.get("RATE_LIMIT_OPENAI_RPM",     "60"))
+RATE_LIMIT_ANTHROPIC_RPM  = int(os.environ.get("RATE_LIMIT_ANTHROPIC_RPM",  "50"))
