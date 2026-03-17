@@ -4,9 +4,9 @@ name: CI/CD Pipeline
 
 on:
   push:
-    branches: [ "master"]
+    branches: [ "master" ]
   pull_request:
-    branches:[ "master"]
+    branches:[ "master" ]
 
 env:
   # Use your actual image name here
