@@ -7,20 +7,28 @@ import shutil
 from pathlib import Path
 from typing import Dict, Any, Optional, List, cast
 
-from config.global_config import PERSONA_SAVE_FILE, TEST_PERSONA_SAVE_FILE, CONFIG_DIR, SYSTEM_PERSONA_FILE
+from config import global_config
 
 logger = logging.getLogger(__name__)
 
 
 def _get_persona_save_file_path() -> str:
     """
-    Determines the correct persona file path based on the execution context.
-    If running under pytest, uses the test-specific file. Otherwise, uses production.
+    Returns the persona save file path from global config.
+    Includes a safety lock to prevent overwriting production data during tests.
     """
-    if 'PYTEST_CURRENT_TEST' in os.environ:
-        # This ensures that during tests, we always write to the designated test file.
-        return TEST_PERSONA_SAVE_FILE
-    return PERSONA_SAVE_FILE
+    file_path = global_config.PERSONA_SAVE_FILE
+
+    # --- SAFETY LOCK ---
+    is_pytest = "PYTEST_CURRENT_TEST" in os.environ
+    is_default_path = file_path.endswith(os.path.join('data', 'personas.json'))
+
+    if is_pytest and is_default_path:
+        raise ValueError(
+            f"TEST SAFETY LOCK: Attempting to use production persona file "
+            f"({file_path}) during a pytest run. conftest.py should have overridden this."
+        )
+    return file_path
 
 
 def load_models_from_file(file_path_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -42,7 +50,7 @@ def save_models_to_file(models_dict: Dict[str, Any], file_path_override: Optiona
             save_data = json.load(file)
     except (FileNotFoundError, json.JSONDecodeError):
         # If file doesn't exist or is empty/corrupt, start with a default structure
-        save_data = {"personas.json": [], "models": {}}
+        save_data = {"personas": [], "models": {}}
 
     save_data['models'] = models_dict
     with open(save_file, 'w') as file:
@@ -65,16 +73,15 @@ def save_personas_to_file(personas: Dict[str, Any], file_path_override: Optional
             # Handle empty file case
             content: str = file.read()
             if not content:
-                save_data = {"personas.json": [], "models": {}}
+                save_data = {"personas": [], "models": {}}
             else:
                 save_data = json.loads(content)
     except (FileNotFoundError, json.JSONDecodeError):
         # If file doesn't exist or is corrupt, start with a default structure
-        save_data = {"personas.json": [], "models": {}}
+        save_data = {"personas": [], "models": {}}
 
     persona_dict: List[Dict[str, Any]] = to_dict(personas)
-    # FIX: Use 'personas.json' key to match existing schema and tests
-    save_data['personas.json'] = persona_dict
+    save_data['personas'] = persona_dict
 
     with open(save_file, 'w') as file:
         json.dump(save_data, file, indent=4)
@@ -115,11 +122,19 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
     a fresh deployment.
     """
     from src.persona import Persona, ExecutionMode, MemoryMode
-    """Load personas from a JSON-formatted file into a dictionary."""
+
     file_path = file_path_override or _get_persona_save_file_path()
+
+    # --- AUTO-SEEDING LOGIC ---
     if not os.path.exists(file_path):
-        logger.warning(f"File '{file_path}' does not exist.")
-        return None
+        default_file = os.path.join(global_config.CONFIG_DIR, 'default_personas.json')
+        if os.path.exists(default_file):
+            logger.info(f"Auto-seeding personas from {default_file} to {file_path}")
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            shutil.copy(default_file, file_path)
+        else:
+            logger.warning(f"File '{file_path}' does not exist and no default_personas.json found to seed.")
+            return None
 
     try:
         with open(file_path, "r") as file:
@@ -130,8 +145,7 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
             persona_data: Dict[str, Any] = json.loads(content)
 
         personas: Dict[str, Persona] = {}
-        # Ensure 'personas.json' key exists and is a list
-        for new_persona in persona_data.get('personas.json', []):
+        for new_persona in persona_data.get('personas', []):
             name: Optional[str] = new_persona.get("name")
             if not name:
                 logger.warning(f"Skipping malformed persona entry (missing name) in '{file_path}'.")
@@ -190,7 +204,7 @@ def load_system_personas_from_file() -> Dict[str, Any]:
     """
     from src.persona import Persona, ExecutionMode, MemoryMode
 
-    file_path = SYSTEM_PERSONA_FILE
+    file_path = global_config.SYSTEM_PERSONA_FILE
     if not os.path.exists(file_path):
         logger.error(f"System persona file not found at '{file_path}'. Bot functionality may be degraded.")
         return {}
@@ -202,8 +216,7 @@ def load_system_personas_from_file() -> Dict[str, Any]:
                 return {}
             data = json.loads(content)
 
-        # FIX: Handle if it's a list or a dict with "personas.json" key
-        persona_list = data if isinstance(data, list) else data.get('personas.json', [])
+        persona_list = data if isinstance(data, list) else data.get('personas', [])
 
         personas: Dict[str, Persona] = {}
 
