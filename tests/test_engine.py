@@ -74,6 +74,16 @@ class TestGenerateResponseLogic:
             await text_engine.generate_response(openai_config, base_context)
         assert mock_provider_call.call_count == EMPTY_RESPONSE_RETRIES + 1
 
+    @pytest.mark.asyncio
+    @patch('src.engine.TextEngine._generate_openai_response', new_callable=AsyncMock)
+    async def test_no_retry_on_rate_limit_error(self, mock_provider_call, text_engine, openai_config, base_context):
+        """429 errors must abort immediately without consuming retry budget."""
+        mock_provider_call.side_effect = LLMCommunicationError("Rate limited", rate_limited=True)
+        with pytest.raises(LLMCommunicationError) as exc_info:
+            await text_engine.generate_response(openai_config, base_context)
+        assert exc_info.value.rate_limited is True
+        assert mock_provider_call.call_count == 1
+
 
 @patch('src.engine.AsyncOpenAI')
 class TestOpenAI:
@@ -112,6 +122,17 @@ class TestOpenAI:
         with pytest.raises(LLMCommunicationError, match="OpenAI API returned an error"):
             await text_engine.generate_response(openai_config, base_context)
 
+    @pytest.mark.asyncio
+    async def test_429_sets_rate_limited_flag(self, mock_openai_class, text_engine, openai_config, base_context, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "dummy_key_for_testing")
+        mock_instance = mock_openai_class.return_value
+        error = APIStatusError("Rate limit exceeded", response=MagicMock(status_code=429), body=None)
+        mock_instance.chat.completions.create.side_effect = error
+        with pytest.raises(LLMCommunicationError) as exc_info:
+            await text_engine.generate_response(openai_config, base_context)
+        assert exc_info.value.rate_limited is True
+        assert mock_instance.chat.completions.create.call_count == 1
+
 
 @patch('src.engine.anthropic.Anthropic')
 class TestAnthropic:
@@ -144,6 +165,17 @@ class TestAnthropic:
         mock_instance.messages.create.side_effect = error
         with pytest.raises(LLMCommunicationError, match="Anthropic API returned an error"):
             await text_engine.generate_response(anthropic_config, base_context)
+
+    @pytest.mark.asyncio
+    async def test_429_sets_rate_limited_flag(self, mock_anthropic_class, text_engine, anthropic_config, base_context, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy_key_for_testing")
+        mock_instance = mock_anthropic_class.return_value
+        error = anthropic.APIStatusError("Rate limit exceeded", response=MagicMock(status_code=429), body=None)
+        mock_instance.messages.create.side_effect = error
+        with pytest.raises(LLMCommunicationError) as exc_info:
+            await text_engine.generate_response(anthropic_config, base_context)
+        assert exc_info.value.rate_limited is True
+        assert mock_instance.messages.create.call_count == 1
 
 
     @pytest.mark.asyncio
@@ -223,6 +255,26 @@ class TestGoogle:
         mock_instance.models.generate_content.side_effect = Exception("API failure")
         with pytest.raises(LLMCommunicationError, match="An error occurred with Google API"):
             await text_engine.generate_response(google_config, base_context)
+
+    @pytest.mark.asyncio
+    async def test_429_sets_rate_limited_flag(self, mock_google_client_class, text_engine, google_config, base_context, monkeypatch):
+        monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy_key_for_testing")
+        mock_instance = mock_google_client_class.return_value
+        mock_instance.models.generate_content.side_effect = Exception("429 quota exceeded")
+        with pytest.raises(LLMCommunicationError) as exc_info:
+            await text_engine.generate_response(google_config, base_context)
+        assert exc_info.value.rate_limited is True
+        assert mock_instance.models.generate_content.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_resource_exhausted_sets_rate_limited_flag(self, mock_google_client_class, text_engine, google_config, base_context, monkeypatch):
+        monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy_key_for_testing")
+        mock_instance = mock_google_client_class.return_value
+        mock_instance.models.generate_content.side_effect = Exception("RESOURCE_EXHAUSTED: daily limit reached")
+        with pytest.raises(LLMCommunicationError) as exc_info:
+            await text_engine.generate_response(google_config, base_context)
+        assert exc_info.value.rate_limited is True
+        assert mock_instance.models.generate_content.call_count == 1
 
 
     @pytest.mark.asyncio
