@@ -13,7 +13,9 @@ from aiolimiter import AsyncLimiter
 from config import global_config
 from config.global_config import (
     EMPTY_RESPONSE_RETRIES, EMPTY_RESPONSE_RETRY_DELAY,
-    RATE_LIMIT_GOOGLE_RPM, RATE_LIMIT_GOOGLE_RPD,
+    RATE_LIMIT_GEMINI_25_RPM, RATE_LIMIT_GEMINI_25_RPD,
+    RATE_LIMIT_GEMINI_3_RPM,
+    RATE_LIMIT_GEMMA_RPM,
     RATE_LIMIT_OPENAI_RPM, RATE_LIMIT_ANTHROPIC_RPM,
 )
 # --- Provider-specific imports ---
@@ -59,14 +61,17 @@ class TextEngine:
         ]
 
         # --- Per-provider rate limiters ---
-        # Google has both an RPM and an RPD cap; both must be satisfied.
-        self._google_rpm_limiter = AsyncLimiter(max_rate=RATE_LIMIT_GOOGLE_RPM, time_period=60)
-        self._google_rpd_limiter = AsyncLimiter(max_rate=RATE_LIMIT_GOOGLE_RPD, time_period=86400)
-        self._openai_limiter     = AsyncLimiter(max_rate=RATE_LIMIT_OPENAI_RPM,    time_period=60)
-        self._anthropic_limiter  = AsyncLimiter(max_rate=RATE_LIMIT_ANTHROPIC_RPM, time_period=60)
+        self._gemini_25_rpm_limiter = AsyncLimiter(max_rate=RATE_LIMIT_GEMINI_25_RPM, time_period=60)
+        self._gemini_25_rpd_limiter = AsyncLimiter(max_rate=RATE_LIMIT_GEMINI_25_RPD, time_period=86400)
+        self._gemini_3_rpm_limiter  = AsyncLimiter(max_rate=RATE_LIMIT_GEMINI_3_RPM,  time_period=60)
+        self._gemma_rpm_limiter     = AsyncLimiter(max_rate=RATE_LIMIT_GEMMA_RPM,     time_period=60)
+        self._openai_limiter        = AsyncLimiter(max_rate=RATE_LIMIT_OPENAI_RPM,    time_period=60)
+        self._anthropic_limiter     = AsyncLimiter(max_rate=RATE_LIMIT_ANTHROPIC_RPM, time_period=60)
         logger.info(
             f"Rate limiters initialised — "
-            f"Google: {RATE_LIMIT_GOOGLE_RPM} RPM / {RATE_LIMIT_GOOGLE_RPD} RPD | "
+            f"Gemini 2.5: {RATE_LIMIT_GEMINI_25_RPM} RPM / {RATE_LIMIT_GEMINI_25_RPD} RPD | "
+            f"Gemini 3.1: {RATE_LIMIT_GEMINI_3_RPM} RPM | "
+            f"Gemma: {RATE_LIMIT_GEMMA_RPM} RPM | "
             f"OpenAI: {RATE_LIMIT_OPENAI_RPM} RPM | "
             f"Anthropic: {RATE_LIMIT_ANTHROPIC_RPM} RPM"
         )
@@ -154,9 +159,15 @@ class TextEngine:
                 elif "claude" in model_name:
                     async with self._anthropic_limiter:
                         result, api_payload = await self._generate_anthropic_response(persona_config, context_object, tools)
-                elif "gemini" in model_name or "gemma" in model_name:
-                    async with self._google_rpm_limiter:
-                        async with self._google_rpd_limiter:
+                elif "gemma" in model_name:
+                    async with self._gemma_rpm_limiter:
+                        result, api_payload = await self._generate_google_response(persona_config, context_object, tools)
+                elif "gemini-3.1" in model_name:
+                    async with self._gemini_3_rpm_limiter:
+                        result, api_payload = await self._generate_google_response(persona_config, context_object, tools)
+                elif "gemini" in model_name:
+                    async with self._gemini_25_rpm_limiter:
+                        async with self._gemini_25_rpd_limiter:
                             result, api_payload = await self._generate_google_response(persona_config, context_object, tools)
                 elif model_name == 'local':
                     result, api_payload = await self._generate_local_response(persona_config, context_object, tools)
