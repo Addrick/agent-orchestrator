@@ -279,6 +279,75 @@ class TestGoogle:
 
 
     @pytest.mark.asyncio
+    async def test_no_tools_passes_nothing_to_api(self, mock_google_client_class, text_engine, google_config, base_context, monkeypatch):
+        """No tools enabled → no tools key sent to API (required for Gemma compatibility)."""
+        monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy_key_for_testing")
+        mock_instance = mock_google_client_class.return_value
+        mock_part = MagicMock(text="ok", function_call=None)
+        mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
+        mock_instance.models.generate_content = AsyncMock(
+            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        )
+        await text_engine.generate_response(google_config, base_context, tools=[])
+        config = mock_instance.models.generate_content.call_args.kwargs['config']
+        assert not config.tools
+
+    @pytest.mark.asyncio
+    async def test_grounding_tool_injects_google_search(self, mock_google_client_class, text_engine, google_config, base_context, monkeypatch):
+        """google_grounding_search in tools → GoogleSearch Tool injected into API config."""
+        monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy_key_for_testing")
+        mock_instance = mock_google_client_class.return_value
+        mock_part = MagicMock(text="ok", function_call=None)
+        mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
+        mock_instance.models.generate_content = AsyncMock(
+            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        )
+        grounding_tools = [{"type": "google_grounding", "function": {"name": "google_grounding_search"}}]
+        await text_engine.generate_response(google_config, base_context, tools=grounding_tools)
+        config = mock_instance.models.generate_content.call_args.kwargs['config']
+        assert config.tools
+        assert any(hasattr(t, 'google_search') and t.google_search is not None for t in config.tools)
+
+    @pytest.mark.asyncio
+    async def test_function_tool_without_grounding(self, mock_google_client_class, text_engine, google_config, base_context, monkeypatch):
+        """Function tool alone → function declarations present, no google_search injected."""
+        monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy_key_for_testing")
+        mock_instance = mock_google_client_class.return_value
+        mock_function_call = MagicMock(name="do_thing", args={})
+        mock_part = MagicMock(text=None, function_call=mock_function_call)
+        mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
+        mock_instance.models.generate_content = AsyncMock(
+            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        )
+        function_tools = [{"type": "function", "function": {"name": "do_thing", "description": "does a thing", "parameters": {"type": "object", "properties": {}}}}]
+        await text_engine.generate_response(google_config, base_context, tools=function_tools)
+        config = mock_instance.models.generate_content.call_args.kwargs['config']
+        assert config.tools
+        assert not any(hasattr(t, 'google_search') and t.google_search is not None for t in config.tools)
+        assert any(hasattr(t, 'function_declarations') and t.function_declarations for t in config.tools)
+
+    @pytest.mark.asyncio
+    async def test_grounding_and_function_tools_combined(self, mock_google_client_class, text_engine, google_config, base_context, monkeypatch):
+        """Both grounding and function tools → both present in API config."""
+        monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy_key_for_testing")
+        mock_instance = mock_google_client_class.return_value
+        mock_function_call = MagicMock(name="do_thing", args={})
+        mock_part = MagicMock(text=None, function_call=mock_function_call)
+        mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
+        mock_instance.models.generate_content = AsyncMock(
+            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        )
+        mixed_tools = [
+            {"type": "google_grounding", "function": {"name": "google_grounding_search"}},
+            {"type": "function", "function": {"name": "do_thing", "description": "does a thing", "parameters": {"type": "object", "properties": {}}}},
+        ]
+        await text_engine.generate_response(google_config, base_context, tools=mixed_tools)
+        config = mock_instance.models.generate_content.call_args.kwargs['config']
+        assert config.tools
+        assert any(hasattr(t, 'google_search') and t.google_search is not None for t in config.tools)
+        assert any(hasattr(t, 'function_declarations') and t.function_declarations for t in config.tools)
+
+    @pytest.mark.asyncio
     @patch('aiohttp.ClientSession.get')
     async def test_image_url_passed_to_google(self, mock_get, mock_google_client_class, text_engine, google_config,
                                               base_context, monkeypatch):
@@ -359,3 +428,37 @@ class TestLocalModel:
         mock_client_instance.chat.completions.create.side_effect = APIConnectionError(request=MagicMock())
         with pytest.raises(LLMCommunicationError, match="Local API returned an error"):
             await text_engine.generate_response(local_config, base_context)
+
+
+class TestWebSearch:
+    @pytest.mark.asyncio
+    @patch('duckduckgo_search.DDGS')
+    async def test_web_search_returns_formatted_results(self, mock_ddgs_class):
+        from src.tools.tool_manager import ToolManager
+        mock_ddgs_instance = MagicMock()
+        mock_ddgs_class.return_value.__enter__ = MagicMock(return_value=mock_ddgs_instance)
+        mock_ddgs_class.return_value.__exit__ = MagicMock(return_value=False)
+        mock_ddgs_instance.text.return_value = [
+            {"title": "Result One", "href": "http://example.com/1", "body": "Summary one."},
+            {"title": "Result Two", "href": "http://example.com/2", "body": "Summary two."},
+        ]
+        manager = ToolManager(MagicMock())
+        result = await manager.execute_tool("web_search", query="test query")
+        assert "result" in result
+        assert result["result"] == [
+            {"title": "Result One", "url": "http://example.com/1", "summary": "Summary one."},
+            {"title": "Result Two", "url": "http://example.com/2", "summary": "Summary two."},
+        ]
+        mock_ddgs_instance.text.assert_called_once_with("test query", max_results=5)
+
+    @pytest.mark.asyncio
+    @patch('duckduckgo_search.DDGS')
+    async def test_web_search_respects_max_results(self, mock_ddgs_class):
+        from src.tools.tool_manager import ToolManager
+        mock_ddgs_instance = MagicMock()
+        mock_ddgs_class.return_value.__enter__ = MagicMock(return_value=mock_ddgs_instance)
+        mock_ddgs_class.return_value.__exit__ = MagicMock(return_value=False)
+        mock_ddgs_instance.text.return_value = []
+        manager = ToolManager(MagicMock())
+        await manager.execute_tool("web_search", query="test", max_results=3)
+        mock_ddgs_instance.text.assert_called_once_with("test", max_results=3)
