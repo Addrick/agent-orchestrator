@@ -62,6 +62,8 @@ EMPTY_RESPONSE_RETRIES = 2
 EMPTY_RESPONSE_RETRY_DELAY = 0.5
 # Tool use limit to avoid infinite loops
 MAX_TOOL_CALLS = 5
+# Max cached API request payloads (for dump commands); FIFO eviction beyond this
+MAX_CACHED_API_REQUESTS = 128
 # Channel ID for specific debug outputs (loaded from env for security)
 DISCORD_DEBUG_CHANNEL = int(os.environ.get("DISCORD_DEBUG_CHANNEL", "0"))
 

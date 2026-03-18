@@ -107,7 +107,7 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
     code (in /config). This ensures the bot starts with 'Factory Defaults' on
     a fresh deployment.
     """
-    from src.persona import Persona, ExecutionMode, MemoryMode
+    from src.persona import Persona
 
     file_path = file_path_override or _get_persona_save_file_path()
 
@@ -141,27 +141,6 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
                 logger.warning(f"Skipping malformed persona entry (missing name) in '{file_path}'.")
                 continue
 
-            # Parse Execution Mode (Default: SILENT_ANALYSIS)
-            execution_mode_str: Optional[str] = new_persona.get("execution_mode")
-            execution_mode: ExecutionMode = ExecutionMode.SILENT_ANALYSIS
-            if execution_mode_str and isinstance(execution_mode_str, str):
-                try:
-                    execution_mode = ExecutionMode[execution_mode_str.upper()]
-                except KeyError:
-                    logger.warning(
-                        f"Invalid execution_mode '{execution_mode_str}' for '{name}'. Defaulting to SILENT_ANALYSIS.")
-
-            # Parse Memory Mode (Default: CHANNEL_ISOLATED)
-            memory_mode_str: Optional[str] = new_persona.get("memory_mode")
-            memory_mode: MemoryMode = MemoryMode.CHANNEL_ISOLATED
-            if memory_mode_str and isinstance(memory_mode_str, str):
-                try:
-                    memory_mode = MemoryMode[memory_mode_str.upper()]
-                except KeyError:
-                    logger.warning(
-                        f"Invalid memory_mode '{memory_mode_str}' for '{name}'. Defaulting to CHANNEL_ISOLATED.")
-
-            # Create the Persona instance
             personas[name] = Persona(
                 persona_name=name,
                 model_name=new_persona.get("model_name"),
@@ -172,9 +151,9 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
                 top_p=new_persona.get("top_p"),
                 top_k=new_persona.get("top_k"),
                 display_name_in_chat=new_persona.get("display_name_in_chat", False),
-                execution_mode=execution_mode,
+                execution_mode=new_persona.get("execution_mode"),
                 enabled_tools=new_persona.get("enabled_tools", []),
-                memory_mode=memory_mode
+                memory_mode=new_persona.get("memory_mode")
             )
 
         return personas
@@ -192,7 +171,7 @@ def load_system_personas_from_file() -> Dict[str, Any]:
     Load system personas from the dedicated system configuration file.
     These are infrastructure agents required for bot functionality.
     """
-    from src.persona import Persona, ExecutionMode, MemoryMode
+    from src.persona import Persona
 
     file_path = global_config.SYSTEM_PERSONA_FILE
     if not os.path.exists(file_path):
@@ -215,24 +194,6 @@ def load_system_personas_from_file() -> Dict[str, Any]:
             if not name:
                 continue
 
-            # Parse Execution Mode
-            execution_mode_str: Optional[str] = new_persona.get("execution_mode")
-            execution_mode: ExecutionMode = ExecutionMode.SILENT_ANALYSIS
-            if execution_mode_str and isinstance(execution_mode_str, str):
-                try:
-                    execution_mode = ExecutionMode[execution_mode_str.upper()]
-                except KeyError:
-                    pass
-
-            # Parse Memory Mode
-            memory_mode_str: Optional[str] = new_persona.get("memory_mode")
-            memory_mode: MemoryMode = MemoryMode.TICKET_ISOLATED  # Default for system agents
-            if memory_mode_str and isinstance(memory_mode_str, str):
-                try:
-                    memory_mode = MemoryMode[memory_mode_str.upper()]
-                except KeyError:
-                    pass
-
             personas[name] = Persona(
                 persona_name=name,
                 model_name=new_persona.get("model_name", "local"),
@@ -243,9 +204,9 @@ def load_system_personas_from_file() -> Dict[str, Any]:
                 top_p=new_persona.get("top_p"),
                 top_k=new_persona.get("top_k"),
                 display_name_in_chat=new_persona.get("display_name_in_chat", False),
-                execution_mode=execution_mode,
+                execution_mode=new_persona.get("execution_mode"),
                 enabled_tools=new_persona.get("enabled_tools", []),
-                memory_mode=memory_mode
+                memory_mode=new_persona.get("memory_mode", "TICKET_ISOLATED")
             )
 
         return personas

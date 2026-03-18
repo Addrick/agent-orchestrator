@@ -446,7 +446,7 @@ class TextEngine:
 
         api_params_for_dumping = {
             'model': config["model_name"], 'contents': serializable_history,
-            'config': json.loads(json.dumps(dump_config, default=str))
+            'config': dump_config
         }
 
         try:
