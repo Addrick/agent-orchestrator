@@ -244,3 +244,17 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         },
     },
 ]
+
+# Tools that modify state and require confirmation in CONFIRM execution mode.
+# Read-only tools (search, get_details) are auto-executed without confirmation.
+WRITE_TOOLS = {
+    'update_ticket', 'add_note_to_ticket', 'create_ticket',
+    'create_user', 'update_user', 'delete_user',
+}
+
+# All Zammad-specific tools. Filtered out for personas with zammad_aware=False.
+ZAMMAD_TOOLS = {
+    'get_ticket_details', 'update_ticket', 'add_note_to_ticket',
+    'create_ticket', 'search_tickets', 'search_user',
+    'create_user', 'update_user', 'delete_user',
+}
