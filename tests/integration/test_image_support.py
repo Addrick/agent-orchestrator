@@ -1,13 +1,10 @@
 # tests/integration/test_image_support.py
 
-import sys
-import os
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-import unittest
 from unittest.mock import MagicMock, AsyncMock, patch
 
 import pytest
+
+pytestmark = pytest.mark.integration
 from src.chat_system import ChatSystem, ResponseType
 from src.engine import TextEngine
 from src.persona import Persona, MemoryMode

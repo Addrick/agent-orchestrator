@@ -8,3 +8,4 @@ config/personas.json
 *.pyc
 
 .env
+.env.test

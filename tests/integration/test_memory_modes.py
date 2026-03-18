@@ -34,8 +34,11 @@ def mem_test_system():
 
 
 @pytest.fixture
-def real_test_system():
-    """Provides a ChatSystem with REAL, integrated components using an in-memory DB."""
+def real_test_system(monkeypatch):
+    """Provides a ChatSystem with REAL, integrated components using an in-memory DB.
+    Sets dummy Zammad env vars since the two tests using this fixture patch requests.request."""
+    monkeypatch.setenv("ZAMMAD_URL", "http://zammad.test")
+    monkeypatch.setenv("ZAMMAD_API_KEY", "fake-token-for-tests")
     memory_manager = MemoryManager(db_path=":memory:")
     memory_manager.create_schema()
     text_engine = TextEngine()
