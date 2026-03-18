@@ -156,13 +156,8 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                         save_personas_to_file(chat_system.personas)
                     response_text = command_result["response"]
                     success = await _send_dev_response(message.channel, response_text, message)
-                    if not success:
-                        reaction = '❌'
-                    elif mutated:
-                        reaction = '✅'
-                    else:
-                        reaction = 'ℹ️'
-                    await message.add_reaction(reaction)
+                    if mutated or not success:
+                        await message.add_reaction('✅' if success else '❌')
                     await reset_discord_status(client, chat_system)
                     return
 
