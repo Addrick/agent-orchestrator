@@ -283,7 +283,7 @@ class BotLogic:
         return f"Available personas are: {list(self.chat_system.personas.keys())}", False
 
     def _what_context(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        return f"{persona.get_name()} default context length is {persona._context_length}.", False
+        return f"{persona.get_name()} default context length is {persona.get_base_context_length()}.", False
 
     def _what_tokens(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
         return f"{persona.get_name()} is limited to {persona.get_response_token_limit()} response tokens.", False
