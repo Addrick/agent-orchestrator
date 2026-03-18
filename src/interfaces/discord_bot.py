@@ -138,13 +138,9 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
 
         if active_persona_name:
             try:
+                server_id: Optional[str] = str(message.guild.id) if message.guild else None
+
                 async with message.channel.typing():
-                    response_text: str
-                    response_type: ResponseType
-                    ticket_id: Optional[int]
-
-                    server_id: Optional[str] = str(message.guild.id) if message.guild else None
-
                     response_text, response_type, ticket_id = await chat_system.generate_response(
                         persona_name=active_persona_name,
                         user_identifier=str(message.author.id),
@@ -156,89 +152,89 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                         user_display_name=message.author.display_name
                     )
 
-                    if response_text and response_text.startswith("FILE_RESPONSE::"):
-                        # Handle special responses that are meant to be sent as file attachments.
-                        # The format is "FILE_RESPONSE::filename.txt::file_content"
-                        parts = response_text.split("::", 2)
-                        filename = parts[1]
-                        file_content = parts[2]
+                if response_text and response_text.startswith("FILE_RESPONSE::"):
+                    # Handle special responses that are meant to be sent as file attachments.
+                    # The format is "FILE_RESPONSE::filename.txt::file_content"
+                    parts = response_text.split("::", 2)
+                    filename = parts[1]
+                    file_content = parts[2]
 
-                        # Create a file-like object in memory to send to Discord
-                        file_buffer = io.StringIO(file_content)
-                        discord_file = discord.File(fp=file_buffer, filename=filename)
-                        await message.channel.send(f"Here is the context dump:", file=discord_file)
+                    # Create a file-like object in memory to send to Discord
+                    file_buffer = io.StringIO(file_content)
+                    discord_file = discord.File(fp=file_buffer, filename=filename)
+                    await message.channel.send(f"Here is the context dump:", file=discord_file)
 
-                    elif response_type == ResponseType.DEV_COMMAND:
-                        await _send_dev_response(message.channel, response_text, message)
+                elif response_type == ResponseType.DEV_COMMAND:
+                    await _send_dev_response(message.channel, response_text, message)
 
-                    elif response_type == ResponseType.PENDING_CONFIRMATION:
-                        confirm_msg = await message.channel.send(response_text)
-                        await confirm_msg.add_reaction('✅')
-                        await confirm_msg.add_reaction('❌')
+                elif response_type == ResponseType.PENDING_CONFIRMATION:
+                    confirm_msg = await message.channel.send(response_text)
+                    await confirm_msg.add_reaction('✅')
+                    await confirm_msg.add_reaction('❌')
 
-                        def reaction_check(reaction: discord.Reaction, user: discord.User) -> bool:
-                            return (user == message.author
-                                    and reaction.message.id == confirm_msg.id
-                                    and str(reaction.emoji) in ('✅', '❌'))
+                    def reaction_check(reaction: discord.Reaction, user: discord.User) -> bool:
+                        return (user == message.author
+                                and reaction.message.id == confirm_msg.id
+                                and str(reaction.emoji) in ('✅', '❌'))
 
-                        try:
-                            reaction, _ = await client.wait_for(
-                                'reaction_add', timeout=PENDING_CONFIRMATION_TIMEOUT, check=reaction_check
-                            )
-                            approved = str(reaction.emoji) == '✅'
-                        except asyncio.TimeoutError:
-                            approved = False
-                            await confirm_msg.edit(content=response_text + "\n\n*(Confirmation timed out)*")
+                    try:
+                        reaction, _ = await client.wait_for(
+                            'reaction_add', timeout=PENDING_CONFIRMATION_TIMEOUT, check=reaction_check
+                        )
+                        approved = str(reaction.emoji) == '✅'
+                    except asyncio.TimeoutError:
+                        approved = False
+                        await confirm_msg.edit(content=response_text + "\n\n*(Confirmation timed out)*")
 
-                        try:
-                            await confirm_msg.clear_reactions()
-                        except discord.HTTPException:
-                            pass
+                    try:
+                        await confirm_msg.clear_reactions()
+                    except discord.HTTPException:
+                        pass
 
-                        async with message.channel.typing():
-                            final_text, final_type, ticket_id = await chat_system.resume_pending_confirmation(
-                                str(message.author.id), active_persona_name, approved=approved
-                            )
-                        if final_text and final_text.strip():
-                            chunks = split_string_by_limit(final_text, DISCORD_CHAR_LIMIT)
-                            for chunk in chunks:
-                                await message.channel.send(chunk)
+                    async with message.channel.typing():
+                        final_text, final_type, ticket_id = await chat_system.resume_pending_confirmation(
+                            str(message.author.id), active_persona_name, approved=approved
+                        )
+                    if final_text and final_text.strip():
+                        chunks = split_string_by_limit(final_text, DISCORD_CHAR_LIMIT)
+                        for chunk in chunks:
+                            await message.channel.send(chunk)
 
-                    elif response_text and response_text.strip():
+                elif response_text and response_text.strip():
+                    await asyncio.to_thread(
+                        chat_system.memory_manager.log_message,
+                        user_identifier=str(message.author.id), persona_name=active_persona_name,
+                        channel=message.channel.name if isinstance(message.channel,
+                                                                   discord.abc.GuildChannel) else "DM",
+                        author_role='user', author_name=message.author.display_name, content=cleaned_message,
+                        timestamp=message.created_at, platform_message_id=str(message.id),
+                        zammad_ticket_id=ticket_id, server_id=server_id
+                    )
+
+                    persona: Persona = chat_system.personas[active_persona_name]
+                    final_reply_text: str = response_text
+                    if persona.should_display_name_in_chat():
+                        final_reply_text = f"**{active_persona_name}:** {response_text}"
+
+                    chunks = split_string_by_limit(final_reply_text, DISCORD_CHAR_LIMIT)
+                    last_reply_message: Optional[discord.Message] = None
+                    for chunk in chunks:
+                        last_reply_message = await message.channel.send(chunk)
+
+                    if last_reply_message:
+                        bot_timestamp: datetime = last_reply_message.created_at
+                        if bot_timestamp <= message.created_at: bot_timestamp = message.created_at + timedelta(
+                            microseconds=1)
                         await asyncio.to_thread(
                             chat_system.memory_manager.log_message,
                             user_identifier=str(message.author.id), persona_name=active_persona_name,
                             channel=message.channel.name if isinstance(message.channel,
                                                                        discord.abc.GuildChannel) else "DM",
-                            author_role='user', author_name=message.author.display_name, content=cleaned_message,
-                            timestamp=message.created_at, platform_message_id=str(message.id),
+                            author_role='assistant', author_name=active_persona_name,
+                            content=cleanse_message_for_history(response_text),
+                            timestamp=bot_timestamp, platform_message_id=str(last_reply_message.id),
                             zammad_ticket_id=ticket_id, server_id=server_id
                         )
-
-                        persona: Persona = chat_system.personas[active_persona_name]
-                        final_reply_text: str = response_text
-                        if persona.should_display_name_in_chat():
-                            final_reply_text = f"**{active_persona_name}:** {response_text}"
-
-                        chunks = split_string_by_limit(final_reply_text, DISCORD_CHAR_LIMIT)
-                        last_reply_message: Optional[discord.Message] = None
-                        for chunk in chunks:
-                            last_reply_message = await message.channel.send(chunk)
-
-                        if last_reply_message:
-                            bot_timestamp: datetime = last_reply_message.created_at
-                            if bot_timestamp <= message.created_at: bot_timestamp = message.created_at + timedelta(
-                                microseconds=1)
-                            await asyncio.to_thread(
-                                chat_system.memory_manager.log_message,
-                                user_identifier=str(message.author.id), persona_name=active_persona_name,
-                                channel=message.channel.name if isinstance(message.channel,
-                                                                           discord.abc.GuildChannel) else "DM",
-                                author_role='assistant', author_name=active_persona_name,
-                                content=cleanse_message_for_history(response_text),
-                                timestamp=bot_timestamp, platform_message_id=str(last_reply_message.id),
-                                zammad_ticket_id=ticket_id, server_id=server_id
-                            )
                 await reset_discord_status(client, chat_system)
                 return
             except Exception as e:
