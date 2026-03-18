@@ -9,7 +9,8 @@ from config.global_config import (
     DEFAULT_CONTEXT_LIMIT,
     DEFAULT_MODEL_NAME,
     DEFAULT_PERSONA,
-    MODEL_SELECTOR_PERSONA_NAME
+    MODEL_SELECTOR_PERSONA_NAME,
+    TOOL_SELECTOR_PERSONA_NAME
 )
 
 from src.persona import Persona, ExecutionMode, MemoryMode
@@ -176,6 +177,39 @@ class BotLogic:
             logger.error(f"Error during LLM model selection: {e}", exc_info=True)
             return None
 
+    async def _query_llm_for_tool_selection(self, user_query: str, available_tools: List[str]) -> Optional[str]:
+        """
+        Query tool selector persona to find best matching tool name.
+        Returns exact tool name if successful, None if persona unavailable or no match.
+        """
+        try:
+            tools_str = "\n".join(available_tools)
+            user_message = f"Available tools:\n{tools_str}\n\nUser query: {user_query}\n\nMatched tool:"
+
+            response_text, _, _ = await self.chat_system.generate_response(
+                persona_name=TOOL_SELECTOR_PERSONA_NAME,
+                user_identifier="n/a",
+                channel="tool_selector_query",
+                message=user_message,
+                server_id="tool_selector_query",
+                image_url=None,
+                history_limit=0,
+                user_display_name="n/a"
+            )
+
+            if response_text:
+                tool_name = response_text.strip()
+                if tool_name == "NONE":
+                    return None
+                if tool_name in available_tools:
+                    return tool_name
+
+            return None
+
+        except Exception as e:
+            logger.error(f"Error during LLM tool selection: {e}", exc_info=True)
+            return None
+
     def _handle_remember(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[Optional[str], bool]:
         if not args:
             return None, False
@@ -326,8 +360,7 @@ class BotLogic:
         handler = self.set_handlers.get(sub_command)
 
         if handler:
-            # Only 'model' is async currently
-            if sub_command == 'model':
+            if sub_command in ('model', 'tools'):
                 return await handler(args, persona)
             else:
                 return handler(args, persona)
@@ -492,28 +525,82 @@ class BotLogic:
             valid_modes = ", ".join([e.name.lower() for e in ExecutionMode])
             return f"Error: Invalid execution mode '{args[1]}'. Valid modes are: {valid_modes}.", False
 
-    def _set_tools(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
+    async def _set_tools(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
         if len(args) < 2:
-            return "Usage: set tools <all|none|tool_name_1> [tool_name_2]...", False
+            return "Usage: set tools <all|none|tool_name_1> [tool_name_2]... (prefix with - to exclude)", False
 
         all_tool_defs = self.chat_system.tool_manager.get_tool_definitions()
-        available_tool_names = {tool['function']['name'] for tool in all_tool_defs}
+        available_tool_names = sorted(tool['function']['name'] for tool in all_tool_defs)
+        available_set = set(available_tool_names)
 
-        mode = args[1].lower()
-        if mode == 'all':
-            persona.set_enabled_tools(['*'])
-            return f"All tools have been enabled for {persona.get_name()}.", True
-        elif mode == 'none':
+        raw_args = args[1:]
+        # Check for 'all' or 'none' keywords
+        use_all = raw_args[0].lower() == 'all'
+        use_none = raw_args[0].lower() == 'none'
+
+        if use_none:
             persona.set_enabled_tools([])
             return f"All tools have been disabled for {persona.get_name()}.", True
-        else:
-            tools_to_set = args[1:]
-            invalid_tools = [name for name in tools_to_set if name not in available_tool_names]
-            if invalid_tools:
-                return f"Error: The following tools are not valid: {', '.join(invalid_tools)}", False
 
-            persona.set_enabled_tools(tools_to_set)
-            return f"Enabled tools for {persona.get_name()} set to: {', '.join(tools_to_set)}", True
+        # Split into includes and excludes
+        include_names = []
+        exclude_names = []
+        names_to_process = raw_args[1:] if use_all else raw_args
+
+        for name in names_to_process:
+            if name.startswith('-'):
+                exclude_names.append(name[1:])
+            else:
+                if use_all:
+                    # bare names after 'all' without '-' are errors
+                    return f"Error: Use '-' prefix to exclude tools when using 'all'. Example: set tools all -{name}", False
+                include_names.append(name)
+
+        # Excludes without 'all' and without includes is an error
+        if exclude_names and not use_all and not include_names:
+            return "Error: Exclude syntax requires 'all' as a base. Usage: set tools all -tool_name", False
+
+        # Resolve each name: exact match first, then fuzzy LLM
+        resolved_includes = []
+        resolved_excludes = []
+        fuzzy_matches = []
+
+        async def resolve_tool_name(name: str) -> Optional[str]:
+            if name in available_set:
+                return name
+            resolved = await self._query_llm_for_tool_selection(name, available_tool_names)
+            if resolved:
+                fuzzy_matches.append(f"'{name}' -> '{resolved}'")
+            return resolved
+
+        for name in include_names:
+            resolved = await resolve_tool_name(name)
+            if not resolved:
+                return f"Error: Could not match tool '{name}'. Available: {', '.join(available_tool_names)}", False
+            resolved_includes.append(resolved)
+
+        for name in exclude_names:
+            resolved = await resolve_tool_name(name)
+            if not resolved:
+                return f"Error: Could not match excluded tool '{name}'. Available: {', '.join(available_tool_names)}", False
+            resolved_excludes.append(resolved)
+
+        # Build final tool set
+        if use_all:
+            if resolved_excludes:
+                final_tools = [t for t in available_tool_names if t not in set(resolved_excludes)]
+                persona.set_enabled_tools(final_tools)
+                fuzzy_note = f" (fuzzy: {', '.join(fuzzy_matches)})" if fuzzy_matches else ""
+                return (f"All tools enabled for {persona.get_name()} except: "
+                        f"{', '.join(resolved_excludes)}.{fuzzy_note}"), True
+            else:
+                persona.set_enabled_tools(['*'])
+                return f"All tools have been enabled for {persona.get_name()}.", True
+        else:
+            persona.set_enabled_tools(resolved_includes)
+            fuzzy_note = f" (fuzzy: {', '.join(fuzzy_matches)})" if fuzzy_matches else ""
+            return (f"Enabled tools for {persona.get_name()} set to: "
+                    f"{', '.join(resolved_includes)}.{fuzzy_note}"), True
 
     def _set_memory_mode(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
         try:
