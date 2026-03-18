@@ -60,7 +60,8 @@ def mock_message():
     author = MagicMock(id=123, display_name="TestAuthor")
     message = MagicMock(
         id=1001, author=author, content="vocal hello there", channel=channel,
-        attachments=[], created_at=datetime.utcnow()
+        attachments=[], created_at=datetime.utcnow(),
+        add_reaction=AsyncMock()
     )
     mock_bot_reply = AsyncMock(spec=discord.Message)
     mock_bot_reply.id = 2002

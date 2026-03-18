@@ -65,8 +65,8 @@ async def reset_discord_status(client: discord.Client, chat_system: 'ChatSystem'
     await client.change_presence(activity=activity)
 
 
-async def _send_dev_response(channel: discord.abc.Messageable, msg: str, original_message: discord.Message) -> None:
-    """Send dev response in a thread attached to the original message."""
+async def _send_dev_response(channel: discord.abc.Messageable, msg: str, original_message: discord.Message) -> bool:
+    """Send dev response in a thread attached to the original message. Returns True on success."""
     formatted_msg: str = re.sub('```', '`\u200B``', msg)
     lang_hint: str = "json" if "Last API Request Payload" in msg else ""
     limit: int = DISCORD_CHAR_LIMIT - (len(lang_hint) + 8)
@@ -79,6 +79,8 @@ async def _send_dev_response(channel: discord.abc.Messageable, msg: str, origina
                 await thread.send(f"```{lang_hint}\n{chunk}```", silent=True)
             except discord.HTTPException as e:
                 logger.error(f"An error occurred sending a dev response to thread: {e}")
+                return False
+        return True
     except discord.HTTPException as e:
         logger.error(f"Failed to create thread for dev response: {e}. Falling back to channel.")
         for chunk in chunks:
@@ -86,6 +88,8 @@ async def _send_dev_response(channel: discord.abc.Messageable, msg: str, origina
                 await channel.send(f"```{lang_hint}\n{chunk}```")
             except discord.HTTPException as e2:
                 logger.error(f"An error occurred sending a dev response: {e2}")
+                return False
+        return True
 
 
 def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
@@ -164,8 +168,15 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                     discord_file = discord.File(fp=file_buffer, filename=filename)
                     await message.channel.send(f"Here is the context dump:", file=discord_file)
 
-                elif response_type == ResponseType.DEV_COMMAND:
-                    await _send_dev_response(message.channel, response_text, message)
+                elif response_type in (ResponseType.DEV_COMMAND, ResponseType.DEV_COMMAND_INFO):
+                    success = await _send_dev_response(message.channel, response_text, message)
+                    if not success:
+                        reaction = '❌'
+                    elif response_type == ResponseType.DEV_COMMAND:
+                        reaction = '✅'
+                    else:
+                        reaction = 'ℹ️'
+                    await message.add_reaction(reaction)
 
                 elif response_type == ResponseType.PENDING_CONFIRMATION:
                     confirm_msg = await message.channel.send(response_text)
