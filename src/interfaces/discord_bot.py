@@ -10,7 +10,7 @@ from datetime import timedelta, datetime
 from typing import Optional, List, Any, Coroutine, Set
 
 from config.global_config import DISCORD_CHAR_LIMIT, DISCORD_STATUS_LIMIT, CHAT_LOG_LOCATION, DISCORD_DEBUG_CHANNEL, \
-    AMBIENT_LOGGING_CHANNELS, GLOBAL_CONTEXT_LIMIT
+    AMBIENT_LOGGING_CHANNELS, GLOBAL_CONTEXT_LIMIT, PENDING_CONFIRMATION_TIMEOUT
 from src.utils.message_utils import split_string_by_limit, cleanse_message_for_history
 from src.chat_system import ChatSystem, ResponseType
 from src.persona import Persona
@@ -170,6 +170,40 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
 
                     elif response_type == ResponseType.DEV_COMMAND:
                         await _send_dev_response(message.channel, response_text, message)
+
+                    elif response_type == ResponseType.PENDING_CONFIRMATION:
+                        confirm_msg = await message.channel.send(response_text)
+                        await confirm_msg.add_reaction('✅')
+                        await confirm_msg.add_reaction('❌')
+
+                        def reaction_check(reaction: discord.Reaction, user: discord.User) -> bool:
+                            return (user == message.author
+                                    and reaction.message.id == confirm_msg.id
+                                    and str(reaction.emoji) in ('✅', '❌'))
+
+                        try:
+                            reaction, _ = await client.wait_for(
+                                'reaction_add', timeout=PENDING_CONFIRMATION_TIMEOUT, check=reaction_check
+                            )
+                            approved = str(reaction.emoji) == '✅'
+                        except asyncio.TimeoutError:
+                            approved = False
+                            await confirm_msg.edit(content=response_text + "\n\n*(Confirmation timed out)*")
+
+                        try:
+                            await confirm_msg.clear_reactions()
+                        except discord.HTTPException:
+                            pass
+
+                        async with message.channel.typing():
+                            final_text, final_type, ticket_id = await chat_system.resume_pending_confirmation(
+                                str(message.author.id), active_persona_name, approved=approved
+                            )
+                        if final_text and final_text.strip():
+                            chunks = split_string_by_limit(final_text, DISCORD_CHAR_LIMIT)
+                            for chunk in chunks:
+                                await message.channel.send(chunk)
+
                     elif response_text and response_text.strip():
                         await asyncio.to_thread(
                             chat_system.memory_manager.log_message,

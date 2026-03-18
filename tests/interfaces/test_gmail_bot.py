@@ -18,6 +18,7 @@ from src.chat_system import ChatSystem, ResponseType
 def mock_chat_system() -> MagicMock:
     """Fixture for a mocked ChatSystem."""
     chat_system = MagicMock(spec=ChatSystem)
+    chat_system.personas = {}
     # FIX: Update the mock to return a 3-item tuple, which is the correct signature.
     # A default ticket_id of None is a sensible default.
     chat_system.generate_response = AsyncMock(return_value=("Test reply", ResponseType.LLM_GENERATION, None))
