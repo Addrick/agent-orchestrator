@@ -34,7 +34,6 @@ class NoReconnectTracebackFilter(logging.Filter):
         return True
 
 
-LOG_FORMAT = '%(asctime)s - [%(levelname)s] - [%(name)s:%(funcName)s:%(lineno)d] - %(message)s'
 logging.basicConfig(level=logging.INFO,
                     stream=sys.stdout,
                     format='%(asctime)s [%(levelname)s][%(name)s:%(lineno)d]: %(message)s',

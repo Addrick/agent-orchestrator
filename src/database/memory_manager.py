@@ -100,7 +100,7 @@ class MemoryManager:
 
         if 'server_id' not in columns:
             conn.execute("ALTER TABLE User_Interactions ADD COLUMN server_id TEXT")
-            logging.info("Added 'server_id' column to User_Interactions table.")
+            logger.info("Added 'server_id' column to User_Interactions table.")
 
         # Create any new indexes that might be needed for the new column
         conn.execute("""
@@ -109,7 +109,7 @@ class MemoryManager:
         """)
 
         conn.commit()
-        logging.info("User memory database schema created or verified successfully.")
+        logger.info("User memory database schema created or verified successfully.")
 
     def log_message(self, user_identifier: str, persona_name: str, channel: str,
                     author_role: str, author_name: Optional[str], content: str,
@@ -148,12 +148,16 @@ class MemoryManager:
         except sqlite3.IntegrityError:
             return False
 
+    def _get_suppressed_ids(self) -> List[int]:
+        cursor = self._get_connection().cursor()
+        cursor.execute("SELECT interaction_id FROM Suppressed_Interactions")
+        return [row['interaction_id'] for row in cursor.fetchall()]
+
     def get_personal_history(self, user_identifier: str, persona_name: str, limit: Optional[int] = None) -> List[
         Dict[str, Any]]:
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT interaction_id FROM Suppressed_Interactions")
-        suppressed_ids: List[int] = [row['interaction_id'] for row in cursor.fetchall()]
+        suppressed_ids = self._get_suppressed_ids()
 
         query = "SELECT author_role, author_name, content FROM User_Interactions WHERE user_identifier = ? AND persona_name = ?"
         params: List[Any] = [user_identifier, persona_name]
@@ -175,8 +179,7 @@ class MemoryManager:
     def get_ticket_history(self, ticket_id: int, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT interaction_id FROM Suppressed_Interactions")
-        suppressed_ids: List[int] = [row['interaction_id'] for row in cursor.fetchall()]
+        suppressed_ids = self._get_suppressed_ids()
 
         query = "SELECT author_role, author_name, content FROM User_Interactions WHERE zammad_ticket_id = ?"
         params: List[Any] = [ticket_id]
@@ -199,8 +202,7 @@ class MemoryManager:
                             limit: Optional[int] = None) -> List[Dict[str, Any]]:
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT interaction_id FROM Suppressed_Interactions")
-        suppressed_ids: List[int] = [row['interaction_id'] for row in cursor.fetchall()]
+        suppressed_ids = self._get_suppressed_ids()
 
         query = "SELECT author_role, author_name, content FROM User_Interactions WHERE channel = ? AND persona_name = ?"
         params: List[Any] = [channel, persona_name]
@@ -229,8 +231,7 @@ class MemoryManager:
         Dict[str, Any]]:
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT interaction_id FROM Suppressed_Interactions")
-        suppressed_ids: List[int] = [row['interaction_id'] for row in cursor.fetchall()]
+        suppressed_ids = self._get_suppressed_ids()
 
         query = "SELECT author_role, author_name, content FROM User_Interactions WHERE server_id = ? AND persona_name = ?"
         params: List[Any] = [server_id, persona_name]
@@ -252,8 +253,7 @@ class MemoryManager:
     def get_global_history(self, persona_name: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT interaction_id FROM Suppressed_Interactions")
-        suppressed_ids: List[int] = [row['interaction_id'] for row in cursor.fetchall()]
+        suppressed_ids = self._get_suppressed_ids()
 
         query = "SELECT author_role, author_name, content FROM User_Interactions WHERE persona_name = ?"
         params: List[Any] = [persona_name]

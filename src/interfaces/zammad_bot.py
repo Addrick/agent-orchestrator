@@ -101,6 +101,14 @@ class ZammadBot:
                 break
             await self._process_ticket(ticket['id'])
 
+    @staticmethod
+    def _build_llm_context(persona: Persona, prompt: str) -> Dict[str, Any]:
+        return {
+            "persona_prompt": persona.get_prompt(),
+            "history": [{"role": "user", "content": prompt}],
+            "current_message": {"text": prompt, "image_url": None}
+        }
+
     async def _get_search_keywords(self, title: str, body: str) -> Optional[str]:
         """
         Uses the 'triage_scout' persona to extract technical search keywords.
@@ -118,11 +126,7 @@ class ZammadBot:
         try:
             response, _ = await self.chat_system.text_engine.generate_response(
                 persona_config=persona.get_config_for_engine(),
-                context_object={
-                    "persona_prompt": persona.get_prompt(),
-                    "history": [{"role": "user", "content": prompt}],
-                    "current_message": {"text": prompt, "image_url": None}
-                },
+                context_object=self._build_llm_context(persona, prompt),
                 tools=None
             )
 
@@ -154,11 +158,7 @@ class ZammadBot:
         try:
             response, _ = await self.chat_system.text_engine.generate_response(
                 persona_config=persona.get_config_for_engine(),
-                context_object={
-                    "persona_prompt": persona.get_prompt(),
-                    "history": [{"role": "user", "content": prompt}],
-                    "current_message": {"text": prompt, "image_url": None}
-                },
+                context_object=self._build_llm_context(persona, prompt),
                 tools=None
             )
             if response.get('type') == 'text':
@@ -185,11 +185,7 @@ class ZammadBot:
         try:
             response, _ = await self.chat_system.text_engine.generate_response(
                 persona_config=persona.get_config_for_engine(),
-                context_object={
-                    "persona_prompt": persona.get_prompt(),
-                    "history": [{"role": "user", "content": prompt}],
-                    "current_message": {"text": prompt, "image_url": None}
-                },
+                context_object=self._build_llm_context(persona, prompt),
                 tools=None
             )
 
