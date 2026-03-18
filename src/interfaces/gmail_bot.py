@@ -18,6 +18,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from config.global_config import *
+from src.persona import ExecutionMode
 
 # Forward declaration for type hinting
 if typing.TYPE_CHECKING:
@@ -134,17 +135,31 @@ class GmailInterface:
                 return
 
             active_persona_name = self._get_persona_from_recipient(recipient)
+            persona = self.chat_system.personas.get(active_persona_name)
+            original_mode = None
+            if persona and persona.get_execution_mode() == ExecutionMode.CONFIRM:
+                logger.warning(
+                    f"Persona '{active_persona_name}' is in CONFIRM mode but Gmail has no interactive "
+                    f"confirmation. Temporarily overriding to AUTONOMOUS for this request."
+                )
+                original_mode = ExecutionMode.CONFIRM
+                persona.set_execution_mode(ExecutionMode.AUTONOMOUS)
+
             full_message = f"Subject: {subject}\n\n{user_input}"
 
-            response_text, response_type, ticket_id = await self.chat_system.generate_response(
-                persona_name=active_persona_name,
-                user_identifier=sender_email,  # Pass parsed email as identifier
-                channel="gmail",
-                message=full_message,
-                image_url=None,
-                history_limit=GLOBAL_CONTEXT_LIMIT,
-                user_display_name=user_display_name  # Pass new parameter
-            )
+            try:
+                response_text, response_type, ticket_id = await self.chat_system.generate_response(
+                    persona_name=active_persona_name,
+                    user_identifier=sender_email,  # Pass parsed email as identifier
+                    channel="gmail",
+                    message=full_message,
+                    image_url=None,
+                    history_limit=GLOBAL_CONTEXT_LIMIT,
+                    user_display_name=user_display_name  # Pass new parameter
+                )
+            finally:
+                if original_mode is not None:
+                    persona.set_execution_mode(original_mode)
 
             if response_text:
                 await self._send_reply(service, to=sender_header_value, subject=subject, body=response_text,
