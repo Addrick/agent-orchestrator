@@ -13,7 +13,7 @@ from typing import Callable, Coroutine, Any, List
 # Mark all tests in this file as 'integration'.
 pytestmark = pytest.mark.integration
 
-from src.chat_system import ChatSystem
+from src.chat_system import ChatSystem, ResponseType
 from src.database.memory_manager import MemoryManager
 from src.engine import TextEngine
 from src.clients.zammad_client import ZammadClient
@@ -104,10 +104,12 @@ def managed_zammad_user(live_chat_system):
 
 
 @pytest.mark.asyncio
-@patch('src.chat_system.ChatSystem._should_create_ticket', return_value=True)
-async def test_tool_driven_ticket_creation_flow(mock_should_create, live_chat_system, managed_zammad_user):
+async def test_tool_driven_ticket_creation_flow(live_chat_system, managed_zammad_user):
+    """AUTONOMOUS mode: LLM returns create_ticket tool call → tool executes → ticket created in Zammad."""
     chat_system, _, zammad_client = live_chat_system
-    chat_system.personas['test_persona'].set_execution_mode(ExecutionMode.ASSISTED_DISPATCH)
+    persona = chat_system.personas['test_persona']
+    persona.set_execution_mode(ExecutionMode.AUTONOMOUS)
+    persona.set_zammad_aware(True)
     user_info = managed_zammad_user
     created_ticket_id = None
     try:
@@ -130,9 +132,10 @@ async def test_tool_driven_ticket_creation_flow(mock_should_create, live_chat_sy
 
 
 @pytest.mark.asyncio
-@patch('src.chat_system.ChatSystem._should_create_ticket', return_value=True)
-async def test_zammad_user_creation_for_non_email_identifier(mock_should_create, live_chat_system):
+async def test_zammad_user_creation_for_non_email_identifier(live_chat_system):
+    """zammad_aware persona: non-email user identifier triggers lazy Zammad user creation."""
     chat_system, _, zammad_client = live_chat_system
+    chat_system.personas['test_persona'].set_zammad_aware(True)
     # Use a static, predictable identifier to prevent creating numerous orphaned users on failure
     static_user_identifier = "pytest_user_to_delete"
     expected_email = f"support-{static_user_identifier}@{urlparse(zammad_client.api_url).hostname}"
@@ -194,11 +197,12 @@ async def test_dynamic_context_ignores_dev_commands(live_chat_system):
 
 
 @pytest.mark.asyncio
-@patch('src.chat_system.ChatSystem._should_create_ticket', return_value=True)
-async def test_ticket_history_is_used_when_mode_is_ticket(mock_should_create, live_chat_system, managed_zammad_user):
+async def test_ticket_history_is_used_when_mode_is_ticket(live_chat_system, managed_zammad_user):
+    """TICKET_ISOLATED mode with zammad_aware: history is scoped to a specific Zammad ticket."""
     chat_system, memory_manager, zammad_client = live_chat_system
     persona = chat_system.personas['test_persona']
     persona.set_memory_mode(MemoryMode.TICKET_ISOLATED)
+    persona.set_zammad_aware(True)
     user_info = managed_zammad_user
     ticket_id = None
     try:
@@ -286,11 +290,12 @@ async def test_persona_context_length_is_capped_by_history_limit(live_chat_syste
 
 
 @pytest.mark.asyncio
-@patch('src.chat_system.ChatSystem._should_create_ticket', return_value=True)
-async def test_context_transformation_in_ticket_mode(mock_should_create, live_chat_system, managed_zammad_user):
+async def test_context_transformation_in_ticket_mode(live_chat_system, managed_zammad_user):
+    """TICKET_ISOLATED mode: history includes username-prefixed messages from the ticket."""
     chat_system, memory_manager, zammad_client = live_chat_system
     persona = chat_system.personas['test_persona']
     persona.set_memory_mode(MemoryMode.TICKET_ISOLATED)
+    persona.set_zammad_aware(True)
     user_info = managed_zammad_user
     ticket_id = None
     try:
@@ -339,3 +344,167 @@ async def test_history_limit_zero_for_channel_mode(live_chat_system):
         context = mock_llm_call.call_args[0][1]['history']
         assert len(context) == 1
         assert context[0] == {'role': 'user', 'content': 'A new message'}
+
+
+# =============================================================================
+# CONFIRM MODE INTEGRATION TESTS
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_confirm_mode_pends_write_tools(live_chat_system, managed_zammad_user):
+    """CONFIRM mode: write tool calls are pended, not executed immediately."""
+    chat_system, _, zammad_client = live_chat_system
+    persona = chat_system.personas['test_persona']
+    persona.set_execution_mode(ExecutionMode.CONFIRM)
+    persona.set_zammad_aware(True)
+    user_info = managed_zammad_user
+
+    tool_call = ({'type': 'tool_calls', 'calls': [
+        {'id': 'call_1', 'name': 'create_ticket', 'arguments': {'title': 'Pending Ticket', 'body': 'test'}}]}, {})
+    with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
+                      side_effect=[tool_call]):
+        response, response_type, ticket_id = await chat_system.generate_response(
+            "test_persona", user_info["identifier"], "support", "Create a ticket"
+        )
+        assert response_type == ResponseType.PENDING_CONFIRMATION
+        assert "create_ticket" in response
+        assert (user_info["identifier"], "test_persona") in chat_system._pending_confirmations
+        # Tool was NOT executed — no ticket should exist with this title
+        results = zammad_client.search_tickets(query="title:\"Pending Ticket\"")
+        assert len(results) == 0
+
+
+@pytest.mark.asyncio
+async def test_confirm_mode_resume_approved_creates_ticket(live_chat_system, managed_zammad_user):
+    """CONFIRM mode approved: pended write tool executes and creates a real Zammad ticket."""
+    chat_system, _, zammad_client = live_chat_system
+    persona = chat_system.personas['test_persona']
+    persona.set_execution_mode(ExecutionMode.CONFIRM)
+    persona.set_zammad_aware(True)
+    user_info = managed_zammad_user
+    created_ticket_id = None
+
+    try:
+        tool_call = ({'type': 'tool_calls', 'calls': [
+            {'id': 'call_1', 'name': 'create_ticket',
+             'arguments': {'title': 'Approved Ticket', 'body': 'approved body'}}]}, {})
+        final_text = ({'type': 'text', 'content': 'Ticket created successfully.'}, {})
+
+        with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
+                          side_effect=[tool_call]):
+            await chat_system.generate_response(
+                "test_persona", user_info["identifier"], "support", "Create a ticket"
+            )
+
+        # Now approve
+        with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
+                          return_value=final_text):
+            response, response_type, ticket_id = await chat_system.resume_pending_confirmation(
+                user_info["identifier"], "test_persona", approved=True
+            )
+            assert response_type == ResponseType.LLM_GENERATION
+            assert ticket_id is not None
+            created_ticket_id = ticket_id
+
+            ticket_data = zammad_client.get_ticket(created_ticket_id)
+            assert ticket_data['title'] == 'Approved Ticket'
+    finally:
+        if created_ticket_id:
+            zammad_client.delete_ticket(created_ticket_id)
+
+
+@pytest.mark.asyncio
+async def test_confirm_mode_resume_denied_skips_tool(live_chat_system, managed_zammad_user):
+    """CONFIRM mode denied: write tool is not executed, LLM receives denial feedback."""
+    chat_system, _, zammad_client = live_chat_system
+    persona = chat_system.personas['test_persona']
+    persona.set_execution_mode(ExecutionMode.CONFIRM)
+    persona.set_zammad_aware(True)
+    user_info = managed_zammad_user
+
+    tool_call = ({'type': 'tool_calls', 'calls': [
+        {'id': 'call_1', 'name': 'create_ticket',
+         'arguments': {'title': 'Denied Ticket', 'body': 'should not exist'}}]}, {})
+    denial_response = ({'type': 'text', 'content': 'Understood, I will not create the ticket.'}, {})
+
+    with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
+                      side_effect=[tool_call]):
+        await chat_system.generate_response(
+            "test_persona", user_info["identifier"], "support", "Create a ticket"
+        )
+
+    with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
+                      return_value=denial_response):
+        response, response_type, _ = await chat_system.resume_pending_confirmation(
+            user_info["identifier"], "test_persona", approved=False
+        )
+        assert response_type == ResponseType.LLM_GENERATION
+        assert "not create" in response.lower() or "denied" in response.lower() or len(response) > 0
+
+    # No ticket should have been created
+    results = zammad_client.search_tickets(query="title:\"Denied Ticket\"")
+    assert len(results) == 0
+
+
+@pytest.mark.asyncio
+async def test_confirm_mode_auto_executes_read_only_tools(live_chat_system):
+    """CONFIRM mode: read-only tools execute immediately without pending confirmation."""
+    chat_system, _, _ = live_chat_system
+    persona = chat_system.personas['test_persona']
+    persona.set_execution_mode(ExecutionMode.CONFIRM)
+    persona.set_zammad_aware(True)
+
+    # LLM returns a read-only tool call (search_tickets), then a text response
+    tool_call = ({'type': 'tool_calls', 'calls': [
+        {'id': 'call_1', 'name': 'search_tickets', 'arguments': {'query': 'state.name:open'}}]}, {})
+    final_text = ({'type': 'text', 'content': 'Found some tickets.'}, {})
+
+    with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
+                      side_effect=[tool_call, final_text]):
+        response, response_type, _ = await chat_system.generate_response(
+            "test_persona", "user1", "channel", "Search for open tickets"
+        )
+        assert response_type == ResponseType.LLM_GENERATION
+        assert response == 'Found some tickets.'
+        # No pending confirmation should be stored
+        assert ("user1", "test_persona") not in chat_system._pending_confirmations
+
+
+# =============================================================================
+# ZAMMAD_AWARE TOOL FILTERING TESTS
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_zammad_aware_false_excludes_zammad_tools(live_chat_system):
+    """zammad_aware=False: Zammad tools are filtered out of tools_for_llm even with enabled_tools=['*']."""
+    chat_system, _, _ = live_chat_system
+    persona = chat_system.personas['test_persona']
+    persona.set_zammad_aware(False)  # default, explicit for clarity
+
+    zammad_tool_names = {'get_ticket_details', 'update_ticket', 'add_note_to_ticket',
+                         'create_ticket', 'search_tickets', 'search_user', 'create_user',
+                         'update_user', 'delete_user'}
+
+    with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
+                      return_value=({'type': 'text', 'content': 'ok'}, {})) as mock_llm_call:
+        await chat_system.generate_response("test_persona", "user1", "channel", "test")
+        tools_passed = mock_llm_call.call_args.kwargs.get('tools', [])
+        tool_names_passed = {t.get('function', {}).get('name') for t in tools_passed}
+        assert tool_names_passed.isdisjoint(zammad_tool_names), \
+            f"Zammad tools should be excluded but found: {tool_names_passed & zammad_tool_names}"
+
+
+@pytest.mark.asyncio
+async def test_zammad_aware_true_includes_zammad_tools(live_chat_system):
+    """zammad_aware=True: Zammad tools are included in tools_for_llm."""
+    chat_system, _, _ = live_chat_system
+    persona = chat_system.personas['test_persona']
+    persona.set_zammad_aware(True)
+
+    with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
+                      return_value=({'type': 'text', 'content': 'ok'}, {})) as mock_llm_call:
+        await chat_system.generate_response("test_persona", "user1", "channel", "test")
+        tools_passed = mock_llm_call.call_args.kwargs.get('tools', [])
+        tool_names_passed = {t.get('function', {}).get('name') for t in tools_passed}
+        assert 'create_ticket' in tool_names_passed
+        assert 'search_tickets' in tool_names_passed

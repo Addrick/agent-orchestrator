@@ -64,14 +64,13 @@ EMPTY_RESPONSE_RETRY_DELAY = 0.5
 MAX_TOOL_CALLS = 5
 # Max cached API request payloads (for dump commands); FIFO eviction beyond this
 MAX_CACHED_API_REQUESTS = 128
+# Seconds before a pending tool confirmation expires (CONFIRM execution mode)
+PENDING_CONFIRMATION_TIMEOUT = 300
 # Channel ID for specific debug outputs (loaded from env for security)
 DISCORD_DEBUG_CHANNEL = int(os.environ.get("DISCORD_DEBUG_CHANNEL", "0"))
 
 # Channels where the bot passively logs content but does not reply unless prompted
 AMBIENT_LOGGING_CHANNELS = ["general", "random", "development"]
-
-# Channels that trigger Zammad ticket creation logic
-SUPPORT_CHANNELS = ["support", "helpdesk", "it-requests"]
 
 # =============================================================================
 # GMAIL & PUBSUB CONFIGURATION
