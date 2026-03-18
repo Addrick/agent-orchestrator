@@ -41,6 +41,8 @@ def mock_chat_system(mock_persona_vocal, mock_persona_silent):
     }
     chat_system.generate_response = AsyncMock()
     chat_system.memory_manager = MagicMock(spec=MemoryManager)
+    chat_system.bot_logic = MagicMock()
+    chat_system.bot_logic.preprocess_message = AsyncMock(return_value=None)
     return chat_system
 
 
@@ -99,13 +101,16 @@ async def test_llm_flow_without_display_name(mock_reset, mock_discord_client, mo
 @patch('src.interfaces.discord_bot._send_dev_response', new_callable=AsyncMock)
 @patch('src.interfaces.discord_bot.reset_discord_status', new_callable=AsyncMock)
 async def test_dev_command_flow(mock_reset, mock_send_dev, mock_discord_client, mock_chat_system, mock_message):
-    """Tests that dev commands are handled correctly and do not trigger user message logging."""
+    """Tests that dev commands are handled via preprocess_message without typing or LLM call."""
     mock_message.content = "vocal help"
-    mock_chat_system.generate_response.return_value = ("Dev output", ResponseType.DEV_COMMAND, None)
+    mock_chat_system.bot_logic.preprocess_message.return_value = {"response": "Dev output", "mutated": False}
+    mock_send_dev.return_value = True
     await mock_discord_client.on_message(mock_message)
 
     mock_send_dev.assert_called_once_with(mock_message.channel, "Dev output", mock_message)
+    mock_chat_system.generate_response.assert_not_called()
     mock_chat_system.memory_manager.log_message.assert_not_called()
+    mock_message.add_reaction.assert_called_once_with('ℹ️')
     mock_reset.assert_called_once()
 
 
@@ -259,7 +264,7 @@ async def test_bot_ignores_thread_messages(mock_discord_client, mock_chat_system
 async def test_dev_command_creates_thread(mock_reset, mock_discord_client, mock_chat_system, mock_message):
     """Tests that dev commands create a thread and send responses there."""
     mock_message.content = "vocal help"
-    mock_chat_system.generate_response.return_value = ("Dev output", ResponseType.DEV_COMMAND, None)
+    mock_chat_system.bot_logic.preprocess_message.return_value = {"response": "Dev output", "mutated": False}
 
     mock_thread = AsyncMock(spec=discord.Thread)
     mock_message.create_thread = AsyncMock(return_value=mock_thread)
@@ -269,6 +274,7 @@ async def test_dev_command_creates_thread(mock_reset, mock_discord_client, mock_
     mock_message.create_thread.assert_called_once_with(name="DERPBOT", auto_archive_duration=60)
     mock_thread.send.assert_called_once()
     assert "```" in mock_thread.send.call_args[0][0]  # Verify code block formatting
+    mock_chat_system.generate_response.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -277,7 +283,7 @@ async def test_dev_command_thread_creation_failure_fallback(mock_reset, mock_dis
                                                             mock_message):
     """Tests that if thread creation fails, dev response falls back to channel posting."""
     mock_message.content = "vocal help"
-    mock_chat_system.generate_response.return_value = ("Dev output", ResponseType.DEV_COMMAND, None)
+    mock_chat_system.bot_logic.preprocess_message.return_value = {"response": "Dev output", "mutated": False}
 
     # Simulate thread creation failure
     mock_message.create_thread = AsyncMock(side_effect=discord.HTTPException(MagicMock(), "Thread creation failed"))

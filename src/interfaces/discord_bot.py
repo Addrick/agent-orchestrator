@@ -12,6 +12,7 @@ from typing import Optional, List, Any, Coroutine, Set
 from config.global_config import DISCORD_CHAR_LIMIT, DISCORD_STATUS_LIMIT, CHAT_LOG_LOCATION, DISCORD_DEBUG_CHANNEL, \
     AMBIENT_LOGGING_CHANNELS, GLOBAL_CONTEXT_LIMIT, PENDING_CONFIRMATION_TIMEOUT
 from src.utils.message_utils import split_string_by_limit, cleanse_message_for_history
+from src.utils.save_utils import save_personas_to_file
 from src.chat_system import ChatSystem, ResponseType
 from src.persona import Persona
 
@@ -144,6 +145,27 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
             try:
                 server_id: Optional[str] = str(message.guild.id) if message.guild else None
 
+                # Handle dev commands before entering typing context since they
+                # resolve instantly and typing can only be cleared by a channel message.
+                command_result = await chat_system.bot_logic.preprocess_message(
+                    active_persona_name, str(message.author.id), cleaned_message
+                )
+                if command_result:
+                    mutated = command_result.get("mutated", False)
+                    if mutated:
+                        save_personas_to_file(chat_system.personas)
+                    response_text = command_result["response"]
+                    success = await _send_dev_response(message.channel, response_text, message)
+                    if not success:
+                        reaction = '❌'
+                    elif mutated:
+                        reaction = '✅'
+                    else:
+                        reaction = 'ℹ️'
+                    await message.add_reaction(reaction)
+                    await reset_discord_status(client, chat_system)
+                    return
+
                 async with message.channel.typing():
                     response_text, response_type, ticket_id = await chat_system.generate_response(
                         persona_name=active_persona_name,
@@ -167,16 +189,6 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                     file_buffer = io.StringIO(file_content)
                     discord_file = discord.File(fp=file_buffer, filename=filename)
                     await message.channel.send(f"Here is the context dump:", file=discord_file)
-
-                elif response_type in (ResponseType.DEV_COMMAND, ResponseType.DEV_COMMAND_INFO):
-                    success = await _send_dev_response(message.channel, response_text, message)
-                    if not success:
-                        reaction = '❌'
-                    elif response_type == ResponseType.DEV_COMMAND:
-                        reaction = '✅'
-                    else:
-                        reaction = 'ℹ️'
-                    await message.add_reaction(reaction)
 
                 elif response_type == ResponseType.PENDING_CONFIRMATION:
                     confirm_msg = await message.channel.send(response_text)
