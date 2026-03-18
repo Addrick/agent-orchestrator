@@ -327,6 +327,86 @@ class TestGoogle:
         assert any(hasattr(t, 'function_declarations') and t.function_declarations for t in config.tools)
 
     @pytest.mark.asyncio
+    async def test_thought_signature_preserved_in_tool_calls(self, mock_google_client_class, text_engine, google_config,
+                                                             base_context, monkeypatch):
+        """Gemini 3.1 thinking models attach thought_signature to function call parts; it must be captured."""
+        monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy_key_for_testing")
+        mock_instance = mock_google_client_class.return_value
+
+        mock_function_call = MagicMock()
+        mock_function_call.name = "web_search"
+        mock_function_call.args = {'query': 'test'}
+
+        mock_part = MagicMock(text=None, function_call=mock_function_call)
+        mock_part.thought_signature = b'sig_abc123'
+        mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
+        mock_instance.models.generate_content = AsyncMock(
+            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        )
+
+        response, _ = await text_engine.generate_response(google_config, base_context, tools=[
+            {"type": "function", "function": {"name": "web_search"}}])
+
+        assert response['type'] == 'tool_calls'
+        assert response['calls'][0]['thought_signature'] == b'sig_abc123'
+
+    @pytest.mark.asyncio
+    async def test_thought_signature_echoed_in_history(self, mock_google_client_class, text_engine, google_config,
+                                                       base_context, monkeypatch):
+        """When tool calls with thought_signature are in history, the signature must be echoed back to the API."""
+        monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy_key_for_testing")
+        mock_instance = mock_google_client_class.return_value
+
+        mock_part = MagicMock(text="Done", function_call=None)
+        mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
+        mock_instance.models.generate_content = AsyncMock(
+            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        )
+
+        # Simulate history with a tool call that has a thought_signature
+        base_context["history"] = [
+            {"role": "user", "content": "Search for test"},
+            {"role": "assistant", "tool_calls": [
+                {"id": "call_1", "name": "web_search", "arguments": {"query": "test"},
+                 "thought_signature": b'sig_abc123'}
+            ]},
+            {"role": "tool", "tool_call_id": "call_1", "name": "web_search",
+             "content": '{"result": "found"}'},
+        ]
+
+        await text_engine.generate_response(google_config, base_context)
+
+        call_args = mock_instance.models.generate_content.call_args[1]
+        # The model turn (index 2: system, user, model, tool, ...) should have thought_signature
+        model_turn = call_args['contents'][2]
+        assert model_turn['role'] == 'model'
+        assert model_turn['parts'][0].thought_signature == b'sig_abc123'
+
+    @pytest.mark.asyncio
+    async def test_no_thought_signature_when_absent(self, mock_google_client_class, text_engine, google_config,
+                                                     base_context, monkeypatch):
+        """Non-thinking models don't produce thought_signature; calls should omit it."""
+        monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy_key_for_testing")
+        mock_instance = mock_google_client_class.return_value
+
+        mock_function_call = MagicMock()
+        mock_function_call.name = "web_search"
+        mock_function_call.args = {'query': 'test'}
+
+        mock_part = MagicMock(text=None, function_call=mock_function_call)
+        mock_part.thought_signature = None
+        mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
+        mock_instance.models.generate_content = AsyncMock(
+            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        )
+
+        response, _ = await text_engine.generate_response(google_config, base_context, tools=[
+            {"type": "function", "function": {"name": "web_search"}}])
+
+        assert response['type'] == 'tool_calls'
+        assert 'thought_signature' not in response['calls'][0]
+
+    @pytest.mark.asyncio
     async def test_grounding_and_function_tools_combined(self, mock_google_client_class, text_engine, google_config, base_context, monkeypatch):
         """Both grounding and function tools → both present in API config."""
         monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy_key_for_testing")

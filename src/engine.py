@@ -381,10 +381,20 @@ class TextEngine:
                 history_for_api.append({'role': 'tool', 'parts': [Part(**part_dict)]})
                 serializable_item['parts'] = [part_dict]
             elif item.get('tool_calls'):
-                parts_list = [{'function_call': {'name': call['name'], 'args': call['arguments']}} for call in
-                              item['tool_calls']]
-                history_for_api.append({'role': 'model', 'parts': [Part(**p) for p in parts_list]})
-                serializable_item['parts'] = parts_list
+                api_parts = []
+                serializable_parts = []
+                for call in item['tool_calls']:
+                    part_kwargs: Dict[str, Any] = {
+                        'function_call': {'name': call['name'], 'args': call['arguments']}
+                    }
+                    ser_part: Dict[str, Any] = {'function_call': part_kwargs['function_call']}
+                    if call.get('thought_signature') is not None:
+                        part_kwargs['thought_signature'] = call['thought_signature']
+                        ser_part['thought_signature'] = '...present...'
+                    api_parts.append(Part(**part_kwargs))
+                    serializable_parts.append(ser_part)
+                history_for_api.append({'role': 'model', 'parts': api_parts})
+                serializable_item['parts'] = serializable_parts
             else:
                 content_text = item['content']
                 parts_for_api = [Part(text=content_text)]
@@ -473,8 +483,16 @@ class TextEngine:
         for i, part in enumerate(candidate.content.parts):
             if part.function_call:
                 arguments = {k: v for k, v in part.function_call.args.items()}
-                tool_calls.append({"id": f"call_{part.function_call.name}_{i}", "name": part.function_call.name,
-                                   "arguments": arguments})
+                call_dict: Dict[str, Any] = {
+                    "id": f"call_{part.function_call.name}_{i}",
+                    "name": part.function_call.name,
+                    "arguments": arguments,
+                }
+                # Thinking models (e.g. Gemini 3.1) attach thought signatures
+                # to function call parts; the API requires them echoed back.
+                if getattr(part, 'thought_signature', None) is not None:
+                    call_dict["thought_signature"] = part.thought_signature
+                tool_calls.append(call_dict)
         if tool_calls:
             return {"type": "tool_calls", "calls": tool_calls}, api_params_for_dumping
 
