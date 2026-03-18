@@ -1,10 +1,11 @@
-# tests/integration/test_zammad_integration.py
+# tests/live/test_zammad_live.py
+#
+# Moved from tests/integration/test_zammad_integration.py.
+# These tests require a live Zammad instance.
 
 import pytest
 import asyncio
 import time
-from typing import Callable, List, Any
-import requests
 from unittest.mock import MagicMock, patch
 from src.clients.zammad_client import ZammadClient
 from src.interfaces.zammad_bot import ZammadBot
@@ -21,8 +22,9 @@ from config.global_config import (
     ZAMMAD_BOT_LASTNAME
 )
 
-# Mark all tests in this file as 'integration'.
-pytestmark = pytest.mark.integration
+from tests.live.conftest import wait_for_search, wait_for_tag
+
+pytestmark = pytest.mark.zammad_live
 
 TEST_USER_EMAIL = "pytest-lifecycle-user@zammad.local"
 
@@ -63,78 +65,6 @@ async def _mock_llm_generate(persona_config, context_object, tools=None):
 
     # Analyst (and any unrecognised persona)
     return {"type": "text", "content": "Mock triage: Issue noted. No similar history found. Recommend standard investigation procedure."}, {}
-
-
-async def _wait_for_search(search_func: Callable[..., List[Any]], assertion_func: Callable[[List[Any]], bool],
-                           timeout: int = 30, interval: float = 1.0):
-    """
-    Repeatedly calls a search function and checks an assertion until it passes or times out.
-    Includes debug printing to help diagnose indexing issues.
-    """
-    start_time = time.time()
-    last_results = []
-    while time.time() - start_time < timeout:
-        try:
-            results = await asyncio.to_thread(search_func)
-            last_results = results
-            if assertion_func(results):
-                return  # Success
-        except Exception as e:
-            print(f"Search failed with error: {e}")
-
-        await asyncio.sleep(interval)
-
-    # Debug output on failure
-    print(f"DEBUG: Timeout reached. Last search results ({len(last_results)}): {last_results}")
-    pytest.fail(f"Search assertion did not pass within {timeout} seconds.")
-
-
-async def wait_for_tag(zammad_client, ticket_id, tag, timeout=10):
-    """
-    Polls the ticket tags using the dedicated tags endpoint until the specified tag appears.
-    """
-    start = time.time()
-    current_tags = []
-    while time.time() - start < timeout:
-        try:
-            current_tags = await asyncio.to_thread(zammad_client.get_tags, ticket_id)
-            if tag in current_tags:
-                return  # Success
-        except Exception as e:
-            print(f"Error fetching ticket tags: {e}")
-
-        await asyncio.sleep(1)
-
-    pytest.fail(f"Tag '{tag}' not found on ticket {ticket_id} after {timeout}s. Current tags: {current_tags}")
-
-
-@pytest.fixture(scope="module")
-def zammad_client():
-    try:
-        client = ZammadClient()
-        client.get_self()
-        return client
-    except (ValueError, requests.exceptions.RequestException) as e:
-        pytest.skip(f"Skipping Zammad integration tests: Cannot connect. Error: {e}")
-
-
-@pytest.fixture(scope="module")
-def bot_identity(zammad_client):
-    """
-    Ensures the Zammad Bot user exists for the tests.
-    """
-    users = zammad_client.search_user(f"email:{ZAMMAD_BOT_EMAIL}")
-    if not users:
-        print(f"\n[SETUP] Creating Bot User: {ZAMMAD_BOT_EMAIL}")
-        zammad_client.create_user(
-            email=ZAMMAD_BOT_EMAIL,
-            firstname=ZAMMAD_BOT_FIRSTNAME,
-            lastname=ZAMMAD_BOT_LASTNAME,
-            roles=["Agent"]
-        )
-    else:
-        print(f"\n[SETUP] Bot User found: {ZAMMAD_BOT_EMAIL}")
-    return ZAMMAD_BOT_EMAIL
 
 
 @pytest.fixture(scope="module")
@@ -185,7 +115,6 @@ async def test_zammad_bot_end_to_end_real_flow(zammad_client: ZammadClient, mana
     new_ticket_id = None
 
     try:
-        # 1. Create History Ticket
         solved_ticket = zammad_client.create_ticket(
             title=REAL_HISTORY_TITLE,
             group="Users",
@@ -198,15 +127,12 @@ async def test_zammad_bot_end_to_end_real_flow(zammad_client: ZammadClient, mana
                                             internal=False)
         zammad_client.update_ticket(solved_ticket_id, {'state': 'closed'})
 
-        # 2. Wait for Indexing
-        await _wait_for_search(
+        await wait_for_search(
             search_func=lambda: zammad_client.search_tickets(
                 query=f'title:"Warp" AND title:"Core" AND state.name:closed'),
             assertion_func=lambda results: any(t['id'] == solved_ticket_id for t in results),
-            timeout=30
         )
 
-        # 3. Create New Ticket
         new_ticket = zammad_client.create_ticket(
             title=REAL_NEW_TITLE,
             group="Users",
@@ -216,14 +142,11 @@ async def test_zammad_bot_end_to_end_real_flow(zammad_client: ZammadClient, mana
         new_ticket_id = new_ticket['id']
         print(f"\n[INFO] Created Test Ticket ID: {new_ticket_id}")
 
-        # 4. Setup Bot and Run
         memory_manager = MagicMock()
         text_engine = TextEngine()
         chat_system = ChatSystem(memory_manager, text_engine, zammad_client)
         bot = ZammadBot(chat_system)
 
-        # Scout returns keywords that match the history ticket's title/body so it
-        # is actually retrieved and included in the triage note.
         async def mock_e2e_generate(persona_config, context_object, tools=None):
             if 'keyword extraction' in context_object.get('persona_prompt', ''):
                 return {"type": "text", "content": "warp core dilithium"}, {}
@@ -232,7 +155,6 @@ async def test_zammad_bot_end_to_end_real_flow(zammad_client: ZammadClient, mana
         with patch.object(text_engine, 'generate_response', side_effect=mock_e2e_generate):
             await bot._process_ticket(new_ticket_id)
 
-        # 5. Verify note was posted and the history ticket is referenced in it
         articles = zammad_client.get_ticket_articles(new_ticket_id)
         ai_note = next((a for a in articles if a['internal'] is True and "[ AI TRIAGE CONTEXT DUMP ]" in a['body']),
                        None)
@@ -249,9 +171,7 @@ async def test_zammad_bot_end_to_end_real_flow(zammad_client: ZammadClient, mana
 
 @pytest.mark.asyncio
 async def test_zammad_bot_clean_slate(zammad_client: ZammadClient, managed_test_user: int, bot_identity):
-    """
-    Verifies behavior when NO history exists.
-    """
+    """Verifies behavior when NO history exists."""
     new_ticket_id = None
     try:
         new_ticket = zammad_client.create_ticket(
@@ -285,9 +205,7 @@ async def test_zammad_bot_clean_slate(zammad_client: ZammadClient, managed_test_
 
 @pytest.mark.asyncio
 async def test_zammad_bot_adaptive_compression(zammad_client: ZammadClient, managed_test_user: int, bot_identity):
-    """
-    Verifies the Adaptive Compression logic.
-    """
+    """Verifies the Adaptive Compression logic."""
     solved_ticket_id = None
     new_ticket_id = None
 
@@ -302,11 +220,10 @@ async def test_zammad_bot_adaptive_compression(zammad_client: ZammadClient, mana
         solved_ticket_id = solved_ticket['id']
         zammad_client.update_ticket(solved_ticket_id, {'state': 'closed'})
 
-        await _wait_for_search(
+        await wait_for_search(
             search_func=lambda: zammad_client.search_tickets(
                 query=f'title:"Long" AND title:"History" AND state.name:closed'),
             assertion_func=lambda results: any(t['id'] == solved_ticket_id for t in results),
-            timeout=30
         )
 
         new_ticket = zammad_client.create_ticket(
@@ -340,9 +257,7 @@ async def test_zammad_bot_adaptive_compression(zammad_client: ZammadClient, mana
 
 @pytest.mark.asyncio
 async def test_zammad_bot_idempotency(zammad_client: ZammadClient, managed_test_user: int, bot_identity):
-    """
-    Verifies that tickets are tagged and not re-processed.
-    """
+    """Verifies that tickets are tagged and not re-processed."""
     new_ticket_id = None
     try:
         new_ticket = zammad_client.create_ticket(
@@ -364,7 +279,7 @@ async def test_zammad_bot_idempotency(zammad_client: ZammadClient, managed_test_
         await wait_for_tag(zammad_client, new_ticket_id, ZAMMAD_TRIAGE_TAG)
 
         query = f"state.name:new AND NOT tags:{ZAMMAD_TRIAGE_TAG}"
-        await _wait_for_search(
+        await wait_for_search(
             search_func=lambda: zammad_client.search_tickets(query),
             assertion_func=lambda results: not any(t['id'] == new_ticket_id for t in results),
             timeout=20
@@ -382,7 +297,6 @@ async def test_zammad_bot_impersonation_fallback(zammad_client: ZammadClient, ma
     """
     ticket_id = None
     try:
-        # 1. Create Ticket
         ticket = zammad_client.create_ticket(
             title=FALLBACK_TITLE,
             group="Users",
@@ -391,27 +305,22 @@ async def test_zammad_bot_impersonation_fallback(zammad_client: ZammadClient, ma
         )
         ticket_id = ticket['id']
 
-        # 2. Setup Bot
         memory_manager = MagicMock()
         text_engine = TextEngine()
         chat_system = ChatSystem(memory_manager, text_engine, zammad_client)
         bot = ZammadBot(chat_system)
 
-        # 3. Run with Invalid Email to force impersonation failure
         with patch.object(text_engine, 'generate_response', side_effect=_mock_llm_generate):
             with patch("src.interfaces.zammad_bot.ZAMMAD_BOT_EMAIL", "nonexistent_ghost@example.com"):
                 await bot._process_ticket(ticket_id)
 
-        # 4. Verify Tag (Success implies fallback worked)
         await wait_for_tag(zammad_client, ticket_id, ZAMMAD_TRIAGE_TAG)
 
-        # 5. Verify Note Exists
         articles = zammad_client.get_ticket_articles(ticket_id)
         ai_note = next((a for a in articles if a['internal'] is True and "[ AI TRIAGE CONTEXT DUMP ]" in a['body']),
                        None)
         assert ai_note is not None, "Fallback failed to post note."
 
-        # 6. Verify Author is API Token Owner (Self)
         myself = zammad_client.get_self()
         assert ai_note['created_by_id'] == myself['id']
         print(f"\n[FALLBACK TEST] Note posted successfully by ID {ai_note['created_by_id']} (API Owner).")
@@ -424,15 +333,12 @@ async def test_zammad_bot_impersonation_fallback(zammad_client: ZammadClient, ma
 async def test_zammad_bot_filtering_logic(zammad_client: ZammadClient, managed_test_user: int, bot_identity):
     """
     Verifies that the 'triage_filter' persona correctly filters out irrelevant tickets.
-    The filter mock returns content-aware RELEVANT/IRRELEVANT decisions; all other
-    pipeline stages use the shared mock.
     """
     relevant_id = None
     irrelevant_id = None
     new_ticket_id = None
 
     try:
-        # 1. Create Relevant History
         t1 = zammad_client.create_ticket(
             title=FILTER_RELEVANT_TITLE,
             group="Users",
@@ -442,7 +348,6 @@ async def test_zammad_bot_filtering_logic(zammad_client: ZammadClient, managed_t
         relevant_id = t1['id']
         zammad_client.update_ticket(relevant_id, {'state': 'closed'})
 
-        # 2. Create Irrelevant History (Shares keyword 'Printer')
         t2 = zammad_client.create_ticket(
             title=FILTER_IRRELEVANT_TITLE,
             group="Users",
@@ -452,15 +357,12 @@ async def test_zammad_bot_filtering_logic(zammad_client: ZammadClient, managed_t
         irrelevant_id = t2['id']
         zammad_client.update_ticket(irrelevant_id, {'state': 'closed'})
 
-        # Wait for Indexing
-        await _wait_for_search(
+        await wait_for_search(
             search_func=lambda: zammad_client.search_tickets(query=f'title:"Printer" AND state.name:closed'),
             assertion_func=lambda results: any(t['id'] == relevant_id for t in results) and any(
                 t['id'] == irrelevant_id for t in results),
-            timeout=30
         )
 
-        # 3. Create New Ticket
         new_ticket = zammad_client.create_ticket(
             title=FILTER_NEW_TITLE,
             group="Users",
@@ -469,7 +371,6 @@ async def test_zammad_bot_filtering_logic(zammad_client: ZammadClient, managed_t
         )
         new_ticket_id = new_ticket['id']
 
-        # 4. Setup Bot
         memory_manager = MagicMock()
         text_engine = TextEngine()
         chat_system = ChatSystem(memory_manager, text_engine, zammad_client)
@@ -490,18 +391,13 @@ async def test_zammad_bot_filtering_logic(zammad_client: ZammadClient, managed_t
         with patch.object(text_engine, 'generate_response', side_effect=mock_filter_generate):
             await bot._process_ticket(new_ticket_id)
 
-        # 5. Verify
         articles = zammad_client.get_ticket_articles(new_ticket_id)
         ai_note = next((a for a in articles if a['internal'] is True and "[ AI TRIAGE CONTEXT DUMP ]" in a['body']),
                        None)
         assert ai_note is not None
 
         body = ai_note['body']
-
-        # Relevant ticket should be listed normally
         assert f"{FILTER_RELEVANT_TITLE} (Ticket #{relevant_id})" in body
-
-        # Irrelevant ticket should be absent from global matches or marked irrelevant in user history
         assert f"{FILTER_IRRELEVANT_TITLE} (Ticket #{irrelevant_id}) (Irrelevant)" in body or \
                f"{FILTER_IRRELEVANT_TITLE} (Ticket #{irrelevant_id})" not in body
 
