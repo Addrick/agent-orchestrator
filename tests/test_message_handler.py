@@ -277,3 +277,117 @@ async def test_set_tools_bare_name_after_all_returns_error(bot_logic_with_tools,
     result = await bot_logic_with_tools.preprocess_message("derpr", "user1", "set tools all web_search")
     assert result["mutated"] is False
     assert "'-' prefix" in result["response"]
+
+
+# --- Handler completeness tests ---
+# These ensure that every configurable Persona property is exposed via
+# the detail, what, and set commands. If a new set_*/get_* method is
+# added to Persona without updating the handlers, these tests fail.
+
+# Maps Persona setter method names → expected command name in set_handlers.
+# When you add a new set_* to Persona, add it here too — the test will
+# tell you if you forget.
+_SETTER_TO_COMMAND = {
+    'set_prompt': 'prompt',
+    'set_model_name': 'model',
+    'set_response_token_limit': 'tokens',
+    'set_context_length': 'context',
+    'set_temperature': 'temp',
+    'set_top_p': 'top_p',
+    'set_top_k': 'top_k',
+    'set_display_name_in_chat': 'display_name',
+    'set_execution_mode': 'execution_mode',
+    'set_enabled_tools': 'tools',
+    'set_memory_mode': 'memory_mode',
+    'set_zammad_aware': 'zammad_aware',
+}
+
+# Maps Persona getter method names → expected command name in what_handlers.
+# Not every getter needs a what command (e.g. get_name), so only include
+# properties that users should be able to query.
+_GETTER_TO_COMMAND = {
+    'get_prompt': 'prompt',
+    'get_model_name': 'model',
+    'get_response_token_limit': 'tokens',
+    'get_context_length': 'context',
+    'get_temperature': 'temp',
+    'get_top_p': 'top_p',
+    'get_top_k': 'top_k',
+    'get_execution_mode': 'execution_mode',
+    'get_enabled_tools': 'tools',
+    'get_memory_mode': 'memory_mode',
+    'get_zammad_aware': 'zammad_aware',
+}
+
+# Getters that intentionally have no what command (internal/derived values).
+_GETTER_EXCEPTIONS = {
+    'get_name',
+    'get_base_context_length',
+    'get_current_effective_context_length',
+    'get_config_for_engine',
+}
+
+
+def test_all_persona_setters_have_commands(bot_logic):
+    """Every set_* method on Persona must map to a set command."""
+    persona_setters = {
+        name for name in dir(Persona)
+        if name.startswith('set_') and callable(getattr(Persona, name))
+    }
+
+    unmapped = persona_setters - set(_SETTER_TO_COMMAND.keys())
+    assert not unmapped, (
+        f"Persona has set_* methods with no entry in _SETTER_TO_COMMAND (and thus no 'set' command): {unmapped}. "
+        f"Add them to _SETTER_TO_COMMAND in this test AND to set_handlers in BotLogic."
+    )
+
+    for setter_name, command_name in _SETTER_TO_COMMAND.items():
+        assert command_name in bot_logic.set_handlers, (
+            f"Persona.{setter_name}() exists but 'set {command_name}' is not in set_handlers"
+        )
+
+
+def test_all_persona_getters_have_what_commands(bot_logic):
+    """Every get_* method on Persona (except known exceptions) must map to a what command."""
+    persona_getters = {
+        name for name in dir(Persona)
+        if name.startswith('get_') and callable(getattr(Persona, name))
+    }
+
+    expected_getters = persona_getters - _GETTER_EXCEPTIONS
+    unmapped = expected_getters - set(_GETTER_TO_COMMAND.keys())
+    assert not unmapped, (
+        f"Persona has get_* methods with no entry in _GETTER_TO_COMMAND or _GETTER_EXCEPTIONS: {unmapped}. "
+        f"Add them to _GETTER_TO_COMMAND (if queryable) or _GETTER_EXCEPTIONS (if internal)."
+    )
+
+    for getter_name, command_name in _GETTER_TO_COMMAND.items():
+        assert command_name in bot_logic.what_handlers, (
+            f"Persona.{getter_name}() exists but 'what {command_name}' is not in what_handlers"
+        )
+
+
+@pytest.mark.asyncio
+async def test_detail_shows_all_properties(bot_logic):
+    """The detail command output must mention every user-facing persona property."""
+    result = await bot_logic.preprocess_message("derpr", "user1", "detail")
+    detail_text = result["response"].lower()
+
+    # Each entry is a substring that must appear in the detail output.
+    required_fields = [
+        "model:",
+        "memory mode:",
+        "execution mode:",
+        "zammad aware:",
+        "enabled tools:",
+        "context length:",
+        "display name",
+        "response token limit:",
+        "temperature:",
+        "top p:",
+        "top k:",
+    ]
+    missing = [f for f in required_fields if f.lower() not in detail_text]
+    assert not missing, (
+        f"detail command is missing these fields: {missing}\n\nFull output:\n{result['response']}"
+    )
