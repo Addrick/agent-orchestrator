@@ -9,7 +9,7 @@ from enum import Enum, auto
 from typing import Any, Coroutine, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
-from config.global_config import SUPPORT_CHANNELS, MAX_TOOL_CALLS
+from config.global_config import SUPPORT_CHANNELS, MAX_TOOL_CALLS, MAX_CACHED_API_REQUESTS
 from src.clients.zammad_client import ZammadClient
 from src.database.memory_manager import MemoryManager
 from src.engine import LLMCommunicationError, TextEngine
@@ -39,6 +39,14 @@ class ChatSystem:
         self.last_api_requests: Dict[str, Dict[str, Optional[Dict[str, Any]]]] = defaultdict(dict)
         self.models_available: Dict[str, Any] = get_model_list() or {}
         self.background_tasks: Set[Coroutine[Any, Any, Any]] = set()
+
+    def _store_api_request(self, user_identifier: str, persona_name: str,
+                           payload: Dict[str, Any]) -> None:
+        """Stores the last API request payload, evicting the oldest user entry if over capacity."""
+        self.last_api_requests[user_identifier][persona_name] = payload
+        if len(self.last_api_requests) > MAX_CACHED_API_REQUESTS:
+            oldest_key = next(iter(self.last_api_requests))
+            del self.last_api_requests[oldest_key]
 
     def _should_create_ticket(self, channel: str, message: str) -> bool:
         """Determines if an interaction should generate a Zammad ticket."""
@@ -259,7 +267,7 @@ class ChatSystem:
                 llm_response, api_payload = await self.text_engine.generate_response(
                     persona.get_config_for_engine(), context_object, tools=tools_for_llm
                 )
-                if api_payload: self.last_api_requests[user_identifier][persona_name] = api_payload
+                if api_payload: self._store_api_request(user_identifier, persona_name, api_payload)
 
                 if llm_response.get("type") == "text":
                     final_text = llm_response.get("content", "")
@@ -311,7 +319,7 @@ class ChatSystem:
         except LLMCommunicationError as e:
             logger.error(f"A recoverable LLM communication error occurred for {user_identifier}: {e}")
             if e.api_payload:
-                self.last_api_requests[user_identifier][persona_name] = e.api_payload
+                self._store_api_request(user_identifier, persona_name, e.api_payload)
             error_msg = ("I'm not sure how to continue. Could you please rephrase?" if "empty response" in str(e) else
                          "Error while generating a response: " + str(e))
             return error_msg, ResponseType.DEV_COMMAND, ticket_to_log
