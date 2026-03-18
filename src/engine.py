@@ -3,7 +3,7 @@
 import json
 import logging
 import os
-import time
+import asyncio
 from typing import Dict, Any, Optional, Tuple, List
 
 from dotenv import load_dotenv
@@ -190,7 +190,7 @@ class TextEngine:
 
             if attempt < EMPTY_RESPONSE_RETRIES:
                 logger.warning(f"LLM returned an empty or invalid response (Attempt {attempt + 1}). Retrying...")
-                time.sleep(EMPTY_RESPONSE_RETRY_DELAY)
+                await asyncio.sleep(EMPTY_RESPONSE_RETRY_DELAY)
 
         logger.error(f"LLM returned an empty or invalid response after {EMPTY_RESPONSE_RETRIES + 1} attempts.")
         raise LLMCommunicationError(f"LLM provider returned an empty or invalid response after all retries.")
