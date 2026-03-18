@@ -54,9 +54,9 @@ def local_config():
 
 class TestGenerateResponseLogic:
     @pytest.mark.asyncio
-    @patch('src.engine.time.sleep', MagicMock())
+    @patch('src.engine.asyncio.sleep', new_callable=AsyncMock)
     @patch('src.engine.TextEngine._generate_openai_response', new_callable=AsyncMock)
-    async def test_retry_on_empty_response_succeeds(self, mock_provider_call, text_engine, openai_config, base_context):
+    async def test_retry_on_empty_response_succeeds(self, mock_provider_call, mock_sleep, text_engine, openai_config, base_context):
         mock_provider_call.side_effect = [
             ({}, {"payload": 1}),
             ({"type": "text", "content": "Valid response"}, {"payload": 2})
@@ -66,9 +66,9 @@ class TestGenerateResponseLogic:
         assert mock_provider_call.call_count == 2
 
     @pytest.mark.asyncio
-    @patch('src.engine.time.sleep', MagicMock())
+    @patch('src.engine.asyncio.sleep', new_callable=AsyncMock)
     @patch('src.engine.TextEngine._generate_openai_response', new_callable=AsyncMock)
-    async def test_retry_on_empty_response_fails(self, mock_provider_call, text_engine, openai_config, base_context):
+    async def test_retry_on_empty_response_fails(self, mock_provider_call, mock_sleep, text_engine, openai_config, base_context):
         mock_provider_call.return_value = ({}, {"payload": 1})
         with pytest.raises(LLMCommunicationError, match="LLM provider returned an empty or invalid response after all retries."):
             await text_engine.generate_response(openai_config, base_context)
