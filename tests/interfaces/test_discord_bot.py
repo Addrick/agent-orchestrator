@@ -110,7 +110,7 @@ async def test_dev_command_flow(mock_reset, mock_send_dev, mock_discord_client, 
     mock_send_dev.assert_called_once_with(mock_message.channel, "Dev output", mock_message)
     mock_chat_system.generate_response.assert_not_called()
     mock_chat_system.memory_manager.log_message.assert_not_called()
-    mock_message.add_reaction.assert_called_once_with('ℹ️')
+    mock_message.add_reaction.assert_not_called()
     mock_reset.assert_called_once()
 
 
