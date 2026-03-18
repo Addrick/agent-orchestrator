@@ -41,9 +41,9 @@ class Persona:
             top_p: Optional[float] = None,
             top_k: Optional[int] = None,
             display_name_in_chat: bool = False,
-            execution_mode: ExecutionMode = ExecutionMode.SILENT_ANALYSIS,
+            execution_mode: Any = ExecutionMode.SILENT_ANALYSIS,
             enabled_tools: Optional[List[str]] = None,
-            memory_mode: MemoryMode = MemoryMode.CHANNEL_ISOLATED
+            memory_mode: Any = MemoryMode.CHANNEL_ISOLATED
     ) -> None:
         self._name: str = persona_name
         self._model_name: str = model_name
@@ -51,9 +51,11 @@ class Persona:
         self._response_token_limit: int = global_config.DEFAULT_TOKEN_LIMIT
         self._set_and_sanitize_token_limit(token_limit)  # Silent call to private method
         self._context_length: int = context_length if context_length is not None else global_config.DEFAULT_CONTEXT_LIMIT
-        self._execution_mode: ExecutionMode = execution_mode
+        self._execution_mode: ExecutionMode = self._resolve_enum(
+            ExecutionMode, execution_mode, ExecutionMode.SILENT_ANALYSIS)
         self._enabled_tools: List[str] = enabled_tools if enabled_tools is not None else []
-        self._memory_mode: MemoryMode = memory_mode
+        self._memory_mode: MemoryMode = self._resolve_enum(
+            MemoryMode, memory_mode, MemoryMode.CHANNEL_ISOLATED)
         self._temp_context_override: Optional[int] = None
 
         # Model-specific generation parameters
@@ -116,6 +118,20 @@ class Persona:
     def get_memory_mode(self) -> MemoryMode:
         """Returns the persona's current memory retrieval strategy."""
         return self._memory_mode
+
+    # --- Private Helpers ---
+
+    @staticmethod
+    def _resolve_enum(enum_class, value, default):
+        """Accepts a string or enum member, returns a valid enum member or the default."""
+        if isinstance(value, enum_class):
+            return value
+        if isinstance(value, str):
+            try:
+                return enum_class[value.upper()]
+            except KeyError:
+                logger.warning(f"Invalid {enum_class.__name__} '{value}'. Defaulting to {default.name}.")
+        return default
 
     # --- Setters ---
 
