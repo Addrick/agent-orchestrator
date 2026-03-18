@@ -12,8 +12,6 @@ from src.engine import TextEngine, LLMCommunicationError
 from config.global_config import EMPTY_RESPONSE_RETRIES
 from google.genai.types import Tool, GoogleSearch
 
-pytestmark = pytest.mark.slow
-
 
 @pytest.fixture
 def text_engine():

@@ -1,187 +1,21 @@
 # tests/integration/test_full_system_flow.py
+#
+# Multi-component integration tests with mocked external services.
+# Zammad-dependent tests have been moved to tests/live/test_full_system_zammad.py.
 
 import pytest
-import os
-import time
-import asyncio
 from datetime import datetime
 from unittest.mock import patch, AsyncMock
-import random
-from urllib.parse import urlparse
-from typing import Callable, Coroutine, Any, List
-
-# Mark all tests in this file as 'integration'.
-pytestmark = pytest.mark.integration
 
 from src.chat_system import ChatSystem, ResponseType
-from src.database.memory_manager import MemoryManager
-from src.engine import TextEngine
-from src.clients.zammad_client import ZammadClient
-from config.global_config import TEST_MEMORY_DATABASE_FILE, TEST_DATABASE_DIR
-from src.persona import Persona, MemoryMode, ExecutionMode
+from src.persona import MemoryMode, ExecutionMode
 
-PERSISTENT_TEST_USER_EMAIL = "pytest-integration-user@zammad.local"
-
-
-async def _wait_for_search(search_func: Callable[..., List[Any]], assertion_func: Callable[[List[Any]], bool],
-                           timeout: int = 6, interval: float = 0.5):
-    """
-    Repeatedly calls a search function and checks an assertion until it passes or times out.
-    """
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        results = await asyncio.to_thread(search_func)
-        if assertion_func(results):
-            return  # Success
-        await asyncio.sleep(interval)
-    pytest.fail(f"Search assertion did not pass within {timeout} seconds.")
-
-
-@pytest.fixture(scope="function")
-def live_chat_system():
-    """
-    Sets up a self-contained, fully integrated ChatSystem instance for each test function.
-    """
-    db_path = f"{TEST_MEMORY_DATABASE_FILE}.{random.randint(1000, 9999)}"
-    if os.path.exists(db_path):
-        os.remove(db_path)
-
-    memory_manager = MemoryManager(db_path=db_path)
-    memory_manager.create_schema()
-
-    try:
-        zammad_client = ZammadClient()
-        zammad_client.get_self()
-    except Exception as e:
-        pytest.skip(f"Skipping integration tests: Zammad client setup failed. Error: {e}")
-
-    text_engine = TextEngine()
-
-    # Programmatically create personas.json for a self-contained test environment
-    test_personas = {
-        "test_persona": Persona(
-            persona_name="test_persona", model_name="mock_model", prompt="You are a test persona.",
-            enabled_tools=['*'], memory_mode=MemoryMode.CHANNEL_ISOLATED, context_length=10
-        ),
-        "capped_persona": Persona(
-            persona_name='capped_persona', model_name='mock', prompt='talk', context_length=100
-        )
-    }
-
-    with patch('src.chat_system.load_personas_from_file', return_value=test_personas):
-        chat_system = ChatSystem(
-            memory_manager=memory_manager, text_engine=text_engine, zammad_client=zammad_client
-        )
-
-    try:
-        yield chat_system, memory_manager, zammad_client
-    finally:
-        memory_manager.close()
-        time.sleep(0.1)
-        if os.path.exists(db_path):
-            try:
-                os.remove(db_path)
-            except PermissionError as e:
-                print(f"\n[TEARDOWN WARNING] Could not remove test database file: {e}")
-
-
-@pytest.fixture(scope="function")
-def managed_zammad_user(live_chat_system):
-    """Finds or creates a single persistent user for Zammad-related tests."""
-    _, _, zammad_client = live_chat_system
-    users = zammad_client.search_user(query=PERSISTENT_TEST_USER_EMAIL)
-    if users:
-        user_id = users[0]['id']
-    else:
-        user_data = zammad_client.create_user(email=PERSISTENT_TEST_USER_EMAIL, firstname="Pytest", lastname="User")
-        user_id = user_data['id']
-
-    tickets = zammad_client.search_tickets(query=f"customer_id:{user_id}")
-    for ticket in tickets:
-        zammad_client.delete_ticket(ticket['id'])
-
-    yield {"id": user_id, "identifier": f"Pytest User <{PERSISTENT_TEST_USER_EMAIL}>"}
+pytestmark = pytest.mark.integration
 
 
 @pytest.mark.asyncio
-async def test_tool_driven_ticket_creation_flow(live_chat_system, managed_zammad_user):
-    """AUTONOMOUS mode: LLM returns create_ticket tool call → tool executes → ticket created in Zammad."""
-    chat_system, _, zammad_client = live_chat_system
-    persona = chat_system.personas['test_persona']
-    persona.set_execution_mode(ExecutionMode.AUTONOMOUS)
-    persona.set_zammad_aware(True)
-    user_info = managed_zammad_user
-    created_ticket_id = None
-    try:
-        tool_call = ({'type': 'tool_calls', 'calls': [
-            {'name': 'create_ticket', 'arguments': {'title': 'New Problem', 'body': '..._body_...'}}]}, {})
-        final_text = ({'type': 'text', 'content': 'Ticket created.'}, {})
-        with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
-                          side_effect=[tool_call, final_text]):
-            _, _, ticket_id = await chat_system.generate_response(
-                "test_persona", user_info["identifier"], "support", "Help me"
-            )
-            assert ticket_id is not None
-            created_ticket_id = ticket_id
-            ticket_data = zammad_client.get_ticket(created_ticket_id)
-            assert ticket_data['customer_id'] == user_info["id"]
-            assert ticket_data['title'] == 'New Problem'
-    finally:
-        if created_ticket_id:
-            zammad_client.delete_ticket(created_ticket_id)
-
-
-@pytest.mark.asyncio
-async def test_zammad_user_creation_for_non_email_identifier(live_chat_system):
-    """zammad_aware persona: non-email user identifier triggers lazy Zammad user creation."""
-    chat_system, _, zammad_client = live_chat_system
-    chat_system.personas['test_persona'].set_zammad_aware(True)
-    # Use a static, predictable identifier to prevent creating numerous orphaned users on failure
-    static_user_identifier = "pytest_user_to_delete"
-    expected_email = f"support-{static_user_identifier}@{urlparse(zammad_client.api_url).hostname}"
-    created_zammad_user_id = None
-
-    try:
-        # Initial cleanup to ensure a clean slate from any previous failed runs
-        existing_users = zammad_client.search_user(query=expected_email)
-        for user in existing_users:
-            tickets = zammad_client.search_tickets(query=f"customer_id:{user['id']}")
-            for ticket in tickets:
-                zammad_client.delete_ticket(ticket['id'])
-            zammad_client.delete_user(user['id'])
-
-        # Main test logic
-        with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
-                          return_value=({'type': 'text', 'content': '...'}, {})):
-            await chat_system.generate_response(
-                "test_persona", static_user_identifier, "support", "test message", user_display_name="New Test User"
-            )
-
-        # Wait for the user to be indexed by Zammad search
-        await _wait_for_search(
-            search_func=lambda: zammad_client.search_user(query=expected_email),
-            assertion_func=lambda results: len(results) == 1
-        )
-        created_users = zammad_client.search_user(query=expected_email)
-        assert len(created_users) == 1
-        created_zammad_user_id = created_users[0]['id']
-
-    finally:
-        # Robust cleanup: delete dependent tickets first, then the user
-        if created_zammad_user_id:
-            tickets_to_delete = zammad_client.search_tickets(query=f"customer_id:{created_zammad_user_id}")
-            for ticket in tickets_to_delete:
-                zammad_client.delete_ticket(ticket['id'])
-
-            # Add a small delay to ensure ticket deletion is processed before user deletion
-            if tickets_to_delete:
-                time.sleep(1)
-
-            zammad_client.delete_user(created_zammad_user_id)
-
-@pytest.mark.asyncio
-async def test_dynamic_context_ignores_dev_commands(live_chat_system):
-    chat_system, memory_manager, _ = live_chat_system
+async def test_dynamic_context_ignores_dev_commands(mocked_chat_system):
+    chat_system, memory_manager, _ = mocked_chat_system
     persona = chat_system.personas['test_persona']
     with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
                       return_value=({'type': 'text', 'content': '...'}, {})):
@@ -197,55 +31,8 @@ async def test_dynamic_context_ignores_dev_commands(live_chat_system):
 
 
 @pytest.mark.asyncio
-async def test_ticket_history_is_used_when_mode_is_ticket(live_chat_system, managed_zammad_user):
-    """TICKET_ISOLATED mode with zammad_aware: history is scoped to a specific Zammad ticket."""
-    chat_system, memory_manager, zammad_client = live_chat_system
-    persona = chat_system.personas['test_persona']
-    persona.set_memory_mode(MemoryMode.TICKET_ISOLATED)
-    persona.set_zammad_aware(True)
-    user_info = managed_zammad_user
-    ticket_id = None
-    try:
-        # Create a ticket with an initial article to ensure it is indexed by Zammad search.
-        ticket_data = zammad_client.create_ticket(
-            title="Test",
-            group="Users",
-            customer_id=user_info['id'],
-            article_body="Initial article. This message exists ONLY in Zammad."
-        )
-        ticket_id = ticket_data['id']
-        ticket_number = ticket_data['number']
-
-        # Wait for the ticket to become searchable by its number
-        await _wait_for_search(
-            search_func=lambda: zammad_client.search_tickets(query=f"number:{ticket_number}"),
-            assertion_func=lambda results: len(results) == 1 and results[0]['id'] == ticket_id
-        )
-
-        # This message is logged to the local DB and should appear in the context.
-        memory_manager.log_message(user_info['identifier'], "test_persona", "support", 'user', "User", "msg1",
-                                   datetime.now(), zammad_ticket_id=ticket_id)
-        with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
-                          return_value=({'type': 'text', 'content': ''}, {})) as mock_llm_call:
-            await chat_system.generate_response(
-                "test_persona", user_info['identifier'], "support", f"Follow up for [Ticket#{ticket_number}]"
-            )
-            context = mock_llm_call.call_args[0][1]['history']
-
-            # Expected history: system msg, msg1 from local DB, current msg.
-            # The initial article is NOT included as it was never logged to MemoryManager.
-            assert len(context) == 3
-            assert "part of Zammad ticket" in context[0]['content']
-            assert context[1]['content'] == "User: msg1"
-            assert context[2]['role'] == 'user'
-    finally:
-        if ticket_id:
-            zammad_client.delete_ticket(ticket_id)
-
-
-@pytest.mark.asyncio
-async def test_context_transformation_and_multi_user_differentiation(live_chat_system):
-    chat_system, memory_manager, _ = live_chat_system
+async def test_context_transformation_and_multi_user_differentiation(mocked_chat_system):
+    chat_system, memory_manager, _ = mocked_chat_system
     persona = chat_system.personas['test_persona']
     persona.set_memory_mode(MemoryMode.CHANNEL_ISOLATED)
     channel, user1_id, server_id = "test-channel", "user1", "server1"
@@ -261,8 +48,8 @@ async def test_context_transformation_and_multi_user_differentiation(live_chat_s
 
 
 @pytest.mark.asyncio
-async def test_end_to_end_message_suppression(live_chat_system):
-    chat_system, memory_manager, _ = live_chat_system
+async def test_end_to_end_message_suppression(mocked_chat_system):
+    chat_system, memory_manager, _ = mocked_chat_system
     channel, user_id = "test-channel", "user1"
     memory_manager.log_message(user_id, "test_persona", channel, 'user', user_id, "Message 1", datetime.now(),
                                platform_message_id="p10")
@@ -280,8 +67,8 @@ async def test_end_to_end_message_suppression(live_chat_system):
 
 
 @pytest.mark.asyncio
-async def test_persona_context_length_is_capped_by_history_limit(live_chat_system):
-    chat_system, memory_manager, _ = live_chat_system
+async def test_persona_context_length_is_capped_by_history_limit(mocked_chat_system):
+    chat_system, memory_manager, _ = mocked_chat_system
     with patch.object(memory_manager, 'get_channel_history',
                       wraps=memory_manager.get_channel_history) as mock_get_history:
         await chat_system.generate_response("capped_persona", "user1", "any", "test", history_limit=5)
@@ -290,41 +77,8 @@ async def test_persona_context_length_is_capped_by_history_limit(live_chat_syste
 
 
 @pytest.mark.asyncio
-async def test_context_transformation_in_ticket_mode(live_chat_system, managed_zammad_user):
-    """TICKET_ISOLATED mode: history includes username-prefixed messages from the ticket."""
-    chat_system, memory_manager, zammad_client = live_chat_system
-    persona = chat_system.personas['test_persona']
-    persona.set_memory_mode(MemoryMode.TICKET_ISOLATED)
-    persona.set_zammad_aware(True)
-    user_info = managed_zammad_user
-    ticket_id = None
-    try:
-        ticket_data = zammad_client.create_ticket(title="Test", group="Users", customer_id=user_info['id'])
-        ticket_id = ticket_data['id']
-        ticket_number = ticket_data['number']
-
-        await _wait_for_search(
-            search_func=lambda: zammad_client.search_tickets(query=f"number:{ticket_number}"),
-            assertion_func=lambda results: len(results) == 1 and results[0]['id'] == ticket_id
-        )
-
-        memory_manager.log_message(user_info['identifier'], "test_persona", "support", 'user', "SpecificUserName",
-                                   "Hello world", datetime.now(), zammad_ticket_id=ticket_id)
-        with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
-                          return_value=({'type': 'text', 'content': ''}, {})) as mock_llm_call:
-            await chat_system.generate_response("test_persona", user_info['identifier'], "support",
-                                                f"Another for [Ticket#{ticket_data['number']}]")
-            context = mock_llm_call.call_args[0][1]['history']
-            assert len(context) == 3
-            assert context[1]['content'] == "SpecificUserName: Hello world"
-    finally:
-        if ticket_id:
-            zammad_client.delete_ticket(ticket_id)
-
-
-@pytest.mark.asyncio
-async def test_empty_history_is_handled_gracefully(live_chat_system):
-    chat_system, _, _ = live_chat_system
+async def test_empty_history_is_handled_gracefully(mocked_chat_system):
+    chat_system, _, _ = mocked_chat_system
     with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
                       return_value=({'type': 'text', 'content': 'Hello!'}, {})) as mock_llm_call:
         await chat_system.generate_response("test_persona", "new_user_123", "new-channel", "First message ever")
@@ -334,8 +88,8 @@ async def test_empty_history_is_handled_gracefully(live_chat_system):
 
 
 @pytest.mark.asyncio
-async def test_history_limit_zero_for_channel_mode(live_chat_system):
-    chat_system, memory_manager, _ = live_chat_system
+async def test_history_limit_zero_for_channel_mode(mocked_chat_system):
+    chat_system, memory_manager, _ = mocked_chat_system
     user1, channel = "user1", "test-channel"
     memory_manager.log_message(user1, "test_persona", channel, 'user', user1, "An ignored message", datetime.now())
     with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
@@ -351,110 +105,13 @@ async def test_history_limit_zero_for_channel_mode(live_chat_system):
 # =============================================================================
 
 @pytest.mark.asyncio
-async def test_confirm_mode_pends_write_tools(live_chat_system, managed_zammad_user):
-    """CONFIRM mode: write tool calls are pended, not executed immediately."""
-    chat_system, _, zammad_client = live_chat_system
-    persona = chat_system.personas['test_persona']
-    persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_zammad_aware(True)
-    user_info = managed_zammad_user
-
-    tool_call = ({'type': 'tool_calls', 'calls': [
-        {'id': 'call_1', 'name': 'create_ticket', 'arguments': {'title': 'Pending Ticket', 'body': 'test'}}]}, {})
-    with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
-                      side_effect=[tool_call]):
-        response, response_type, ticket_id = await chat_system.generate_response(
-            "test_persona", user_info["identifier"], "support", "Create a ticket"
-        )
-        assert response_type == ResponseType.PENDING_CONFIRMATION
-        assert "create_ticket" in response
-        assert (user_info["identifier"], "test_persona") in chat_system._pending_confirmations
-        # Tool was NOT executed — no ticket should exist with this title
-        results = zammad_client.search_tickets(query="title:\"Pending Ticket\"")
-        assert len(results) == 0
-
-
-@pytest.mark.asyncio
-async def test_confirm_mode_resume_approved_creates_ticket(live_chat_system, managed_zammad_user):
-    """CONFIRM mode approved: pended write tool executes and creates a real Zammad ticket."""
-    chat_system, _, zammad_client = live_chat_system
-    persona = chat_system.personas['test_persona']
-    persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_zammad_aware(True)
-    user_info = managed_zammad_user
-    created_ticket_id = None
-
-    try:
-        tool_call = ({'type': 'tool_calls', 'calls': [
-            {'id': 'call_1', 'name': 'create_ticket',
-             'arguments': {'title': 'Approved Ticket', 'body': 'approved body'}}]}, {})
-        final_text = ({'type': 'text', 'content': 'Ticket created successfully.'}, {})
-
-        with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
-                          side_effect=[tool_call]):
-            await chat_system.generate_response(
-                "test_persona", user_info["identifier"], "support", "Create a ticket"
-            )
-
-        # Now approve
-        with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
-                          return_value=final_text):
-            response, response_type, ticket_id = await chat_system.resume_pending_confirmation(
-                user_info["identifier"], "test_persona", approved=True
-            )
-            assert response_type == ResponseType.LLM_GENERATION
-            assert ticket_id is not None
-            created_ticket_id = ticket_id
-
-            ticket_data = zammad_client.get_ticket(created_ticket_id)
-            assert ticket_data['title'] == 'Approved Ticket'
-    finally:
-        if created_ticket_id:
-            zammad_client.delete_ticket(created_ticket_id)
-
-
-@pytest.mark.asyncio
-async def test_confirm_mode_resume_denied_skips_tool(live_chat_system, managed_zammad_user):
-    """CONFIRM mode denied: write tool is not executed, LLM receives denial feedback."""
-    chat_system, _, zammad_client = live_chat_system
-    persona = chat_system.personas['test_persona']
-    persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_zammad_aware(True)
-    user_info = managed_zammad_user
-
-    tool_call = ({'type': 'tool_calls', 'calls': [
-        {'id': 'call_1', 'name': 'create_ticket',
-         'arguments': {'title': 'Denied Ticket', 'body': 'should not exist'}}]}, {})
-    denial_response = ({'type': 'text', 'content': 'Understood, I will not create the ticket.'}, {})
-
-    with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
-                      side_effect=[tool_call]):
-        await chat_system.generate_response(
-            "test_persona", user_info["identifier"], "support", "Create a ticket"
-        )
-
-    with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
-                      return_value=denial_response):
-        response, response_type, _ = await chat_system.resume_pending_confirmation(
-            user_info["identifier"], "test_persona", approved=False
-        )
-        assert response_type == ResponseType.LLM_GENERATION
-        assert "not create" in response.lower() or "denied" in response.lower() or len(response) > 0
-
-    # No ticket should have been created
-    results = zammad_client.search_tickets(query="title:\"Denied Ticket\"")
-    assert len(results) == 0
-
-
-@pytest.mark.asyncio
-async def test_confirm_mode_auto_executes_read_only_tools(live_chat_system):
+async def test_confirm_mode_auto_executes_read_only_tools(mocked_chat_system):
     """CONFIRM mode: read-only tools execute immediately without pending confirmation."""
-    chat_system, _, _ = live_chat_system
+    chat_system, _, _ = mocked_chat_system
     persona = chat_system.personas['test_persona']
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_zammad_aware(True)
 
-    # LLM returns a read-only tool call (search_tickets), then a text response
     tool_call = ({'type': 'tool_calls', 'calls': [
         {'id': 'call_1', 'name': 'search_tickets', 'arguments': {'query': 'state.name:open'}}]}, {})
     final_text = ({'type': 'text', 'content': 'Found some tickets.'}, {})
@@ -466,7 +123,6 @@ async def test_confirm_mode_auto_executes_read_only_tools(live_chat_system):
         )
         assert response_type == ResponseType.LLM_GENERATION
         assert response == 'Found some tickets.'
-        # No pending confirmation should be stored
         assert ("user1", "test_persona") not in chat_system._pending_confirmations
 
 
@@ -475,11 +131,11 @@ async def test_confirm_mode_auto_executes_read_only_tools(live_chat_system):
 # =============================================================================
 
 @pytest.mark.asyncio
-async def test_zammad_aware_false_excludes_zammad_tools(live_chat_system):
+async def test_zammad_aware_false_excludes_zammad_tools(mocked_chat_system):
     """zammad_aware=False: Zammad tools are filtered out of tools_for_llm even with enabled_tools=['*']."""
-    chat_system, _, _ = live_chat_system
+    chat_system, _, _ = mocked_chat_system
     persona = chat_system.personas['test_persona']
-    persona.set_zammad_aware(False)  # default, explicit for clarity
+    persona.set_zammad_aware(False)
 
     zammad_tool_names = {'get_ticket_details', 'update_ticket', 'add_note_to_ticket',
                          'create_ticket', 'search_tickets', 'search_user', 'create_user',
@@ -495,9 +151,9 @@ async def test_zammad_aware_false_excludes_zammad_tools(live_chat_system):
 
 
 @pytest.mark.asyncio
-async def test_zammad_aware_true_includes_zammad_tools(live_chat_system):
+async def test_zammad_aware_true_includes_zammad_tools(mocked_chat_system):
     """zammad_aware=True: Zammad tools are included in tools_for_llm."""
-    chat_system, _, _ = live_chat_system
+    chat_system, _, _ = mocked_chat_system
     persona = chat_system.personas['test_persona']
     persona.set_zammad_aware(True)
 
