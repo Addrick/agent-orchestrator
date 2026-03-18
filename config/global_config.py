@@ -113,6 +113,8 @@ EMPTY_RESPONSE_RETRY_DELAY = 2
 # =============================================================================
 # Persona name for model selection helper
 MODEL_SELECTOR_PERSONA_NAME = "model_selector"
+# Persona name for tool selection helper
+TOOL_SELECTOR_PERSONA_NAME = "tool_selector"
 
 # =============================================================================
 # --- Zammad Bot Configuration ---

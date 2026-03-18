@@ -1,7 +1,7 @@
 # tests/test_message_handler.py
 
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, AsyncMock, patch
 
 from src.message_handler import BotLogic
 from src.persona import Persona
@@ -172,3 +172,108 @@ async def test_handle_dump_context_returns_file_response_format(bot_logic, mock_
     assert "Hello there" in file_content
     assert "[Message 2 - ROLE: ASSISTANT]" in file_content
     assert "General Kenobi" in file_content
+
+
+# --- Test Cases for Fuzzy Tool Selection & Exclude Syntax ---
+
+@pytest.fixture
+def bot_logic_with_tools(mock_chat_system_with_state):
+    """Creates a BotLogic with a mock tool manager that returns tool definitions."""
+    mock_tool_manager = MagicMock()
+    mock_tool_manager.get_tool_definitions.return_value = [
+        {"type": "function", "function": {"name": "web_search"}},
+        {"type": "google_grounding", "function": {"name": "google_grounding_search"}},
+        {"type": "function", "function": {"name": "create_ticket"}},
+        {"type": "function", "function": {"name": "search_tickets"}},
+    ]
+    mock_chat_system_with_state.tool_manager = mock_tool_manager
+    return BotLogic(mock_chat_system_with_state)
+
+
+@pytest.mark.asyncio
+async def test_set_tools_all(bot_logic_with_tools, mock_chat_system_with_state):
+    persona = mock_chat_system_with_state.personas["derpr"]
+    result = await bot_logic_with_tools.preprocess_message("derpr", "user1", "set tools all")
+    assert result["mutated"] is True
+    assert persona.get_enabled_tools() == ['*']
+
+
+@pytest.mark.asyncio
+async def test_set_tools_none(bot_logic_with_tools, mock_chat_system_with_state):
+    persona = mock_chat_system_with_state.personas["derpr"]
+    persona.set_enabled_tools(['*'])
+    result = await bot_logic_with_tools.preprocess_message("derpr", "user1", "set tools none")
+    assert result["mutated"] is True
+    assert persona.get_enabled_tools() == []
+
+
+@pytest.mark.asyncio
+async def test_set_tools_exact_names(bot_logic_with_tools, mock_chat_system_with_state):
+    persona = mock_chat_system_with_state.personas["derpr"]
+    result = await bot_logic_with_tools.preprocess_message("derpr", "user1", "set tools web_search create_ticket")
+    assert result["mutated"] is True
+    assert persona.get_enabled_tools() == ["web_search", "create_ticket"]
+
+
+@pytest.mark.asyncio
+async def test_set_tools_invalid_name_returns_error(bot_logic_with_tools, mock_chat_system_with_state):
+    """An unresolvable tool name should return an error."""
+    with patch.object(bot_logic_with_tools, '_query_llm_for_tool_selection', new_callable=AsyncMock, return_value=None):
+        result = await bot_logic_with_tools.preprocess_message("derpr", "user1", "set tools nonexistent_tool")
+    assert result["mutated"] is False
+    assert "Could not match" in result["response"]
+
+
+@pytest.mark.asyncio
+async def test_set_tools_all_with_excludes(bot_logic_with_tools, mock_chat_system_with_state):
+    persona = mock_chat_system_with_state.personas["derpr"]
+    result = await bot_logic_with_tools.preprocess_message(
+        "derpr", "user1", "set tools all -google_grounding_search -web_search"
+    )
+    assert result["mutated"] is True
+    enabled = persona.get_enabled_tools()
+    assert "google_grounding_search" not in enabled
+    assert "web_search" not in enabled
+    assert "create_ticket" in enabled
+    assert "search_tickets" in enabled
+
+
+@pytest.mark.asyncio
+async def test_set_tools_exclude_without_all_returns_error(bot_logic_with_tools, mock_chat_system_with_state):
+    result = await bot_logic_with_tools.preprocess_message("derpr", "user1", "set tools -web_search")
+    assert result["mutated"] is False
+    assert "requires 'all'" in result["response"]
+
+
+@pytest.mark.asyncio
+async def test_set_tools_fuzzy_match(bot_logic_with_tools, mock_chat_system_with_state):
+    """Fuzzy matching should resolve partial names via the LLM selector."""
+    persona = mock_chat_system_with_state.personas["derpr"]
+    with patch.object(bot_logic_with_tools, '_query_llm_for_tool_selection',
+                      new_callable=AsyncMock, return_value="google_grounding_search"):
+        result = await bot_logic_with_tools.preprocess_message("derpr", "user1", "set tools grounding")
+    assert result["mutated"] is True
+    assert persona.get_enabled_tools() == ["google_grounding_search"]
+    assert "fuzzy" in result["response"]
+
+
+@pytest.mark.asyncio
+async def test_set_tools_all_with_fuzzy_exclude(bot_logic_with_tools, mock_chat_system_with_state):
+    """Fuzzy matching should work for excludes too."""
+    persona = mock_chat_system_with_state.personas["derpr"]
+    with patch.object(bot_logic_with_tools, '_query_llm_for_tool_selection',
+                      new_callable=AsyncMock, return_value="google_grounding_search"):
+        result = await bot_logic_with_tools.preprocess_message("derpr", "user1", "set tools all -grounding")
+    assert result["mutated"] is True
+    enabled = persona.get_enabled_tools()
+    assert "google_grounding_search" not in enabled
+    assert "web_search" in enabled
+    assert "fuzzy" in result["response"]
+
+
+@pytest.mark.asyncio
+async def test_set_tools_bare_name_after_all_returns_error(bot_logic_with_tools, mock_chat_system_with_state):
+    """Bare names after 'all' (without '-') should return a usage error."""
+    result = await bot_logic_with_tools.preprocess_message("derpr", "user1", "set tools all web_search")
+    assert result["mutated"] is False
+    assert "'-' prefix" in result["response"]

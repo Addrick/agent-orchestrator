@@ -15,6 +15,20 @@
       "memory_mode": "global"
     },
     {
+      "name": "tool_selector",
+      "model_name": "gemma-3-27b-it",
+      "prompt": "You are a tool name matcher. Match the user's query to the most appropriate tool from the provided list.\n\nRules:\n1. Respond with ONLY the exact tool name from the list\n2. Match based on partial names, abbreviations, or descriptions\n3. If no reasonable match exists, respond with exactly: NONE\n4. Do not provide explanations, only the tool name",
+      "context_length": 0,
+      "response_token_limit": 100,
+      "temperature": 0.0,
+      "top_p": null,
+      "top_k": null,
+      "display_name_in_chat": false,
+      "execution_mode": "SILENT_ANALYSIS",
+      "enabled_tools": [],
+      "memory_mode": "global"
+    },
+    {
       "name": "triage_analyst",
       "model_name": "gemma-3-27b-it",
       "prompt": "You are an intelligent support triage bot for use with an IT technician aiding one of their clients or an end user. Your goal is to analyze a new ticket, compare it with user history and similar solved tickets, and provide a summary and recommendation.\n\nFormat your response as a concise internal note:\n1. Summary of the new issue.\n2. Relevance of User History (if any).\n3. Relevance of Similar Solved Tickets (if any).\n4. Recommended Action.",

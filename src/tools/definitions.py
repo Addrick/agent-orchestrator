@@ -245,6 +245,15 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     },
 ]
 
+# Model prefixes that do NOT support each tool.
+# Uses the same prefix logic as engine.py routing.
+# Tools not listed here are compatible with all providers.
+GROUNDING_INCOMPATIBLE_PREFIXES = {'gpt', 'claude', 'gemma', 'gemini-3.1', 'local', 'unknown'}
+
+MODEL_INCOMPATIBLE_TOOLS = {
+    'google_grounding_search': GROUNDING_INCOMPATIBLE_PREFIXES,
+}
+
 # Tools that modify state and require confirmation in CONFIRM execution mode.
 # Read-only tools (search, get_details) are auto-executed without confirmation.
 WRITE_TOOLS = {

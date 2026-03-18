@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock, patch, call
 import json
 
-from src.chat_system import ChatSystem, ResponseType
+from src.chat_system import ChatSystem, ResponseType, _get_model_prefix
 from src.database.memory_manager import MemoryManager
 from src.engine import TextEngine, LLMCommunicationError
 from src.clients.zammad_client import ZammadClient
@@ -343,3 +343,97 @@ async def test_resume_pending_confirmation_denied(chat_system_with_mocks):
     assert response_type == ResponseType.LLM_GENERATION
     tool_manager_mock.execute_tool.assert_not_called()
     assert "won't close" in response
+
+
+# --- Model Prefix Helper Tests ---
+
+@pytest.mark.parametrize("model_name, expected_prefix", [
+    ("gpt-4o", "gpt"),
+    ("gpt-3.5-turbo", "gpt"),
+    ("claude-3-opus-20240229", "claude"),
+    ("claude-3.5-sonnet", "claude"),
+    ("gemma-3-27b-it", "gemma"),
+    ("gemini-2.5-flash", "gemini"),
+    ("gemini-2.5-pro", "gemini"),
+    ("gemini-3.1-flash", "gemini-3.1"),
+    ("gemini-3.1-pro", "gemini-3.1"),
+    ("local", "local"),
+    ("some-unknown-model", "unknown"),
+])
+def test_get_model_prefix(model_name, expected_prefix):
+    assert _get_model_prefix(model_name) == expected_prefix
+
+
+# --- Model Compatibility Filter Tests ---
+
+@pytest.mark.asyncio
+async def test_grounding_filtered_for_non_gemini_25_models(chat_system_with_mocks):
+    """google_grounding_search should be filtered out for non-Gemini-2.5 models."""
+    system, _, text_engine_mock, _, persona, tool_manager_mock = chat_system_with_mocks
+    persona.set_enabled_tools(['*'])
+
+    grounding_tool = {
+        "type": "google_grounding",
+        "function": {"name": "google_grounding_search", "description": "Grounding"}
+    }
+    web_search_tool = {
+        "type": "function",
+        "function": {"name": "web_search", "description": "Web search", "parameters": {}}
+    }
+    tool_manager_mock.get_tool_definitions.return_value = [grounding_tool, web_search_tool]
+
+    # Test with GPT model — grounding should be filtered
+    persona.set_model_name("gpt-4o")
+    await system.generate_response("test_persona", "user", "channel", "test")
+    call_args = text_engine_mock.generate_response.call_args
+    tools_sent = call_args[1].get('tools', call_args[0][2] if len(call_args[0]) > 2 else [])
+    tool_names = [t['function']['name'] for t in tools_sent]
+    assert "google_grounding_search" not in tool_names
+    assert "web_search" in tool_names
+
+
+@pytest.mark.asyncio
+async def test_grounding_kept_for_gemini_25_models(chat_system_with_mocks):
+    """google_grounding_search should be kept for Gemini 2.5 models."""
+    system, _, text_engine_mock, _, persona, tool_manager_mock = chat_system_with_mocks
+    persona.set_enabled_tools(['*'])
+
+    grounding_tool = {
+        "type": "google_grounding",
+        "function": {"name": "google_grounding_search", "description": "Grounding"}
+    }
+    web_search_tool = {
+        "type": "function",
+        "function": {"name": "web_search", "description": "Web search", "parameters": {}}
+    }
+    tool_manager_mock.get_tool_definitions.return_value = [grounding_tool, web_search_tool]
+
+    persona.set_model_name("gemini-2.5-flash")
+    await system.generate_response("test_persona", "user", "channel", "test")
+    call_args = text_engine_mock.generate_response.call_args
+    tools_sent = call_args[1].get('tools', call_args[0][2] if len(call_args[0]) > 2 else [])
+    tool_names = [t['function']['name'] for t in tools_sent]
+    assert "google_grounding_search" in tool_names
+    assert "web_search" in tool_names
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [
+    "gpt-4o", "claude-3-opus-20240229", "gemma-3-27b-it", "gemini-3.1-flash", "local",
+])
+async def test_grounding_filtered_for_incompatible_models(chat_system_with_mocks, model_name):
+    """Grounding should be filtered for all incompatible model prefixes."""
+    system, _, text_engine_mock, _, persona, tool_manager_mock = chat_system_with_mocks
+    persona.set_enabled_tools(['*'])
+    persona.set_model_name(model_name)
+
+    grounding_tool = {
+        "type": "google_grounding",
+        "function": {"name": "google_grounding_search", "description": "Grounding"}
+    }
+    tool_manager_mock.get_tool_definitions.return_value = [grounding_tool]
+
+    await system.generate_response("test_persona", "user", "channel", "test")
+    call_args = text_engine_mock.generate_response.call_args
+    tools_sent = call_args[1].get('tools', call_args[0][2] if len(call_args[0]) > 2 else [])
+    assert len(tools_sent) == 0
