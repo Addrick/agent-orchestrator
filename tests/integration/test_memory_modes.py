@@ -234,11 +234,10 @@ async def test_channel_mode_in_non_server_context_integration(
 
 
 @pytest.mark.asyncio
-@patch('src.chat_system.ChatSystem._should_create_ticket', return_value=True)
 @patch('src.clients.zammad_client.requests.request')
 @patch('src.engine.AsyncOpenAI')
 async def test_ticket_isolated_mode_is_exclusive(
-        mock_async_openai, mock_requests_request, mock_should_create, real_test_system
+        mock_async_openai, mock_requests_request, real_test_system
 ):
     """
     Tests that TICKET_ISOLATED mode only uses ticket history and ignores other contexts
@@ -248,6 +247,7 @@ async def test_ticket_isolated_mode_is_exclusive(
     chat_system, memory_manager = real_test_system
     persona = chat_system.personas['test_persona']
     persona.set_memory_mode(MemoryMode.TICKET_ISOLATED)
+    persona.set_zammad_aware(True)
     persona.set_model_name('local')
 
     # 2. CONFIGURE PATCHES

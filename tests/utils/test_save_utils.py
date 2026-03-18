@@ -17,7 +17,7 @@ def mock_personas():
         model_name="test_model",
         prompt="prompt1",
         memory_mode=MemoryMode.PERSONAL,
-        execution_mode=ExecutionMode.ASSISTED_DISPATCH
+        execution_mode=ExecutionMode.CONFIRM
     )
     p2 = Persona(
         persona_name="p2",
@@ -98,7 +98,7 @@ def test_load_persona_attributes_integrity(tmp_path):
                 "token_limit": 500,
                 "temperature": 0.1,
                 "top_p": 0.9,
-                "execution_mode": "ASSISTED_DISPATCH",
+                "execution_mode": "CONFIRM",
                 "memory_mode": "TICKET_ISOLATED",
                 "enabled_tools": ["create_ticket"]
             }
@@ -119,6 +119,6 @@ def test_load_persona_attributes_integrity(tmp_path):
     assert p.get_response_token_limit() == 500
     assert p.get_temperature() == 0.1
     assert p.get_top_p() == 0.9
-    assert p.get_execution_mode() == ExecutionMode.ASSISTED_DISPATCH
+    assert p.get_execution_mode() == ExecutionMode.CONFIRM
     assert p.get_memory_mode() == MemoryMode.TICKET_ISOLATED
     assert p.get_enabled_tools() == ["create_ticket"]

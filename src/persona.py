@@ -11,8 +11,8 @@ logger = logging.getLogger(__name__)
 
 class ExecutionMode(Enum):
     """Defines the autonomy level for a persona's tool-use capabilities."""
-    SILENT_ANALYSIS = auto()
-    ASSISTED_DISPATCH = auto()
+    AUTONOMOUS = auto()       # Execute tools immediately
+    CONFIRM = auto()          # Present write-tools for user approval before executing
 
 
 class MemoryMode(Enum):
@@ -41,9 +41,10 @@ class Persona:
             top_p: Optional[float] = None,
             top_k: Optional[int] = None,
             display_name_in_chat: bool = False,
-            execution_mode: Any = ExecutionMode.SILENT_ANALYSIS,
+            execution_mode: Any = ExecutionMode.AUTONOMOUS,
             enabled_tools: Optional[List[str]] = None,
-            memory_mode: Any = MemoryMode.CHANNEL_ISOLATED
+            memory_mode: Any = MemoryMode.CHANNEL_ISOLATED,
+            zammad_aware: bool = False
     ) -> None:
         self._name: str = persona_name
         self._model_name: str = model_name
@@ -52,7 +53,7 @@ class Persona:
         self._set_and_sanitize_token_limit(token_limit)  # Silent call to private method
         self._context_length: int = context_length if context_length is not None else global_config.DEFAULT_CONTEXT_LIMIT
         self._execution_mode: ExecutionMode = self._resolve_enum(
-            ExecutionMode, execution_mode, ExecutionMode.SILENT_ANALYSIS)
+            ExecutionMode, execution_mode, ExecutionMode.AUTONOMOUS)
         self._enabled_tools: List[str] = enabled_tools if enabled_tools is not None else []
         self._memory_mode: MemoryMode = self._resolve_enum(
             MemoryMode, memory_mode, MemoryMode.CHANNEL_ISOLATED)
@@ -63,6 +64,7 @@ class Persona:
         self._top_p: Optional[float] = top_p
         self._top_k: Optional[int] = top_k
         self._display_name_in_chat: bool = display_name_in_chat
+        self._zammad_aware: bool = zammad_aware
 
     # --- Getters ---
 
@@ -114,6 +116,10 @@ class Persona:
     def get_enabled_tools(self) -> List[str]:
         """Returns the list of tool names this persona is allowed to use."""
         return self._enabled_tools
+
+    def get_zammad_aware(self) -> bool:
+        """Returns whether this persona is Zammad-aware (gets Zammad tools + ticket mirroring)."""
+        return self._zammad_aware
 
     def get_memory_mode(self) -> MemoryMode:
         """Returns the persona's current memory retrieval strategy."""
@@ -244,6 +250,11 @@ class Persona:
             logger.warning(f"Invalid type for execution mode: {type(new_mode)}. No change made.")
             return
         logger.info(f"Persona '{self._name}' execution mode set to {self._execution_mode.name}.")
+
+    def set_zammad_aware(self, value: bool) -> None:
+        """Sets whether this persona is Zammad-aware."""
+        self._zammad_aware = bool(value)
+        logger.info(f"Persona '{self._name}' zammad_aware set to {self._zammad_aware}.")
 
     def set_enabled_tools(self, new_tools: List[str]) -> None:
         """Sets the list of tools the persona is allowed to use."""

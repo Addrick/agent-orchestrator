@@ -92,6 +92,7 @@ def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
             "execution_mode": persona.get_execution_mode().name,
             "enabled_tools": persona.get_enabled_tools(),
             "memory_mode": persona.get_memory_mode().name,
+            "zammad_aware": persona.get_zammad_aware(),
         }
         persona_list.append(persona_json)
     return persona_list
@@ -153,7 +154,8 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
                 display_name_in_chat=new_persona.get("display_name_in_chat", False),
                 execution_mode=new_persona.get("execution_mode"),
                 enabled_tools=new_persona.get("enabled_tools", []),
-                memory_mode=new_persona.get("memory_mode")
+                memory_mode=new_persona.get("memory_mode"),
+                zammad_aware=new_persona.get("zammad_aware", False)
             )
 
         return personas
@@ -206,7 +208,8 @@ def load_system_personas_from_file() -> Dict[str, Any]:
                 display_name_in_chat=new_persona.get("display_name_in_chat", False),
                 execution_mode=new_persona.get("execution_mode"),
                 enabled_tools=new_persona.get("enabled_tools", []),
-                memory_mode=new_persona.get("memory_mode", "TICKET_ISOLATED")
+                memory_mode=new_persona.get("memory_mode", "TICKET_ISOLATED"),
+                zammad_aware=new_persona.get("zammad_aware", False)
             )
 
         return personas

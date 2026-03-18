@@ -4,12 +4,11 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock, patch, call
 import json
 
-from src.chat_system import ChatSystem
+from src.chat_system import ChatSystem, ResponseType
 from src.database.memory_manager import MemoryManager
 from src.engine import TextEngine, LLMCommunicationError
 from src.clients.zammad_client import ZammadClient
 from src.persona import Persona, ExecutionMode, MemoryMode
-from config.global_config import SUPPORT_CHANNELS
 
 
 @pytest.fixture
@@ -24,6 +23,7 @@ def chat_system_with_mocks():
     # Add the api_url attribute to make the mock a higher-fidelity representation
     mock_zammad_client.api_url = "http://zammad.local"
     mock_tool_manager = AsyncMock()
+    mock_tool_manager.get_tool_definitions = MagicMock(return_value=[])
 
     mock_text_engine.generate_response = AsyncMock(return_value=({'type': 'text', 'content': 'LLM Reply'}, {}))
 
@@ -44,18 +44,6 @@ def chat_system_with_mocks():
 
 
 # --- Unit Tests for Helper Methods ---
-
-@pytest.mark.parametrize("channel, expected", [
-    ("support", True),
-    ("SUPPORT", True),
-    ("general", False),
-    ("random-support-channel", False),
-])
-@patch('src.chat_system.SUPPORT_CHANNELS', ['support', 'helpdesk'])
-def test_should_create_ticket(channel, expected, chat_system_with_mocks):
-    system, _, _, _, _, _ = chat_system_with_mocks
-    assert system._should_create_ticket(channel, "any message") == expected
-
 
 @pytest.mark.parametrize("message, expected", [
     ("Help with [Ticket#12345]", 12345),
@@ -170,11 +158,12 @@ async def test_generate_response_handles_generic_exception(chat_system_with_mock
 
 @pytest.mark.asyncio
 async def test_generate_response_exits_after_max_tool_calls(chat_system_with_mocks):
-    system, _, text_engine_mock, _, persona, _ = chat_system_with_mocks
+    system, _, text_engine_mock, _, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_enabled_tools(['*'])
     tool_call = {'type': 'tool_calls', 'calls': [{'id': 'c1', 'name': 'test_tool', 'arguments': {}}]}
     # Make the text engine always return a tool call
     text_engine_mock.generate_response.return_value = (tool_call, {})
+    tool_manager_mock.execute_tool.return_value = {"result": "ok"}
     response, _, _ = await system.generate_response("test_persona", "user", "channel", "test")
     assert "stuck in a loop" in response
     # Called exactly MAX_TOOL_CALLS times
@@ -186,10 +175,10 @@ async def test_generate_response_exits_after_max_tool_calls(chat_system_with_moc
 @pytest.mark.asyncio
 async def test_ticket_mode_uses_id_from_message(chat_system_with_mocks):
     """Tests that an explicit ticket ID in a message is used."""
-    system, _, _, zammad_mock, _, _, = chat_system_with_mocks
+    system, _, _, zammad_mock, persona, _ = chat_system_with_mocks
+    persona.set_zammad_aware(True)
 
-    with patch.object(system, '_should_create_ticket', return_value=True), \
-            patch.object(system, '_get_or_create_zammad_user', new_callable=AsyncMock,
+    with patch.object(system, '_get_or_create_zammad_user', new_callable=AsyncMock,
                          return_value=(101, "user@example.com")), \
             patch.object(system, '_find_ticket_number_in_message', return_value=9999), \
             patch.object(system, '_get_ticket_id_from_number', new_callable=AsyncMock, return_value=999), \
@@ -203,29 +192,22 @@ async def test_ticket_mode_uses_id_from_message(chat_system_with_mocks):
 
 
 @pytest.mark.asyncio
-async def test_tool_use_in_silent_analysis_mode(chat_system_with_mocks):
-    """Tests that in SILENT_ANALYSIS, tool calls are logged as internal notes but not executed."""
-    system, _, text_engine_mock, zammad_mock, persona, tool_manager_mock = chat_system_with_mocks
-    persona.set_execution_mode(ExecutionMode.SILENT_ANALYSIS)
+async def test_tool_use_in_autonomous_mode(chat_system_with_mocks):
+    """Tests that in AUTONOMOUS mode, tool calls are executed immediately."""
+    system, _, text_engine_mock, _, persona, tool_manager_mock = chat_system_with_mocks
+    persona.set_execution_mode(ExecutionMode.AUTONOMOUS)
     persona.set_enabled_tools(['*'])
 
     tool_call = {'type': 'tool_calls',
                  'calls': [{'id': 'call_1', 'name': 'update_ticket', 'arguments': {'state': 'closed'}}]}
     final_response = {'type': 'text', 'content': 'I have closed the ticket.'}
     text_engine_mock.generate_response.side_effect = [(tool_call, {}), (final_response, {})]
+    tool_manager_mock.execute_tool.return_value = {"result": {"id": 123, "state": "closed"}}
 
-    with patch.object(system, '_should_create_ticket', return_value=True), \
-            patch.object(system, '_get_or_create_zammad_user', new_callable=AsyncMock,
-                         return_value=(101, "user@example.com")), \
-            patch.object(system, '_find_ticket_number_in_message', return_value=12345), \
-            patch.object(system, '_get_ticket_id_from_number', new_callable=AsyncMock, return_value=123):
-        await system.generate_response('test_persona', 'user', 'support', 'close ticket [Ticket#12345]')
+    response, _, _ = await system.generate_response('test_persona', 'user', 'channel', 'close ticket')
 
-    tool_manager_mock.execute_tool.assert_not_called()
-    log_note_call = call(ticket_id=123,
-                         body='SILENT ANALYSIS: Persona \'test_persona\' intended to call tool \'update_ticket\' with arguments: {"state": "closed"}',
-                         internal=True)
-    zammad_mock.add_article_to_ticket.assert_has_calls([log_note_call], any_order=True)
+    tool_manager_mock.execute_tool.assert_called_once_with('update_ticket', state='closed')
+    assert response == 'I have closed the ticket.'
 
 
 @pytest.mark.parametrize("history, mode, server_id, persona, expected_role, expected_content", [
@@ -249,3 +231,115 @@ def test_format_raw_history_for_llm(chat_system_with_mocks, history, mode, serve
     assert len(formatted) == 1
     assert formatted[0]['role'] == expected_role
     assert formatted[0]['content'] == expected_content
+
+
+# --- CONFIRM Mode Tests ---
+
+@pytest.mark.asyncio
+async def test_confirm_mode_returns_pending_for_write_tools(chat_system_with_mocks):
+    """In CONFIRM mode, write tool calls should return PENDING_CONFIRMATION instead of executing."""
+    system, _, text_engine_mock, _, persona, tool_manager_mock = chat_system_with_mocks
+    persona.set_execution_mode(ExecutionMode.CONFIRM)
+    persona.set_enabled_tools(['*'])
+
+    tool_call = {'type': 'tool_calls',
+                 'calls': [{'id': 'call_1', 'name': 'update_ticket', 'arguments': {'state': 'closed'}}]}
+    text_engine_mock.generate_response.return_value = (tool_call, {})
+
+    response, response_type, _ = await system.generate_response('test_persona', 'user', 'channel', 'close it')
+
+    assert response_type == ResponseType.PENDING_CONFIRMATION
+    assert 'update_ticket' in response
+    tool_manager_mock.execute_tool.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_confirm_mode_auto_executes_read_only_tools(chat_system_with_mocks):
+    """In CONFIRM mode, read-only tools should execute immediately without confirmation."""
+    system, _, text_engine_mock, _, persona, tool_manager_mock = chat_system_with_mocks
+    persona.set_execution_mode(ExecutionMode.CONFIRM)
+    persona.set_enabled_tools(['*'])
+
+    tool_call = {'type': 'tool_calls',
+                 'calls': [{'id': 'call_1', 'name': 'search_tickets', 'arguments': {'query': 'test'}}]}
+    final_response = {'type': 'text', 'content': 'Found 3 tickets.'}
+    text_engine_mock.generate_response.side_effect = [(tool_call, {}), (final_response, {})]
+    tool_manager_mock.execute_tool.return_value = {"result": [{"id": 1}, {"id": 2}, {"id": 3}]}
+
+    response, response_type, _ = await system.generate_response('test_persona', 'user', 'channel', 'search tickets')
+
+    assert response_type == ResponseType.LLM_GENERATION
+    assert response == 'Found 3 tickets.'
+    tool_manager_mock.execute_tool.assert_called_once_with('search_tickets', query='test')
+
+
+@pytest.mark.asyncio
+async def test_confirm_mode_mixed_tools_executes_reads_and_pends_writes(chat_system_with_mocks):
+    """In CONFIRM mode with mixed read+write tools, reads execute and writes pend."""
+    system, _, text_engine_mock, _, persona, tool_manager_mock = chat_system_with_mocks
+    persona.set_execution_mode(ExecutionMode.CONFIRM)
+    persona.set_enabled_tools(['*'])
+
+    tool_call = {'type': 'tool_calls',
+                 'calls': [
+                     {'id': 'call_1', 'name': 'search_tickets', 'arguments': {'query': 'test'}},
+                     {'id': 'call_2', 'name': 'update_ticket', 'arguments': {'ticket_id': 1, 'state': 'closed'}}
+                 ]}
+    text_engine_mock.generate_response.return_value = (tool_call, {})
+    tool_manager_mock.execute_tool.return_value = {"result": [{"id": 1}]}
+
+    response, response_type, _ = await system.generate_response('test_persona', 'user', 'channel', 'find and close')
+
+    assert response_type == ResponseType.PENDING_CONFIRMATION
+    assert 'update_ticket' in response
+    # Read tool was executed, write tool was not
+    tool_manager_mock.execute_tool.assert_called_once_with('search_tickets', query='test')
+
+
+@pytest.mark.asyncio
+async def test_resume_pending_confirmation_approved(chat_system_with_mocks):
+    """Approving a pending confirmation should execute the write tools and return the final response."""
+    system, _, text_engine_mock, _, persona, tool_manager_mock = chat_system_with_mocks
+    persona.set_execution_mode(ExecutionMode.CONFIRM)
+    persona.set_enabled_tools(['*'])
+
+    # First call: trigger pending confirmation
+    tool_call = {'type': 'tool_calls',
+                 'calls': [{'id': 'call_1', 'name': 'update_ticket', 'arguments': {'state': 'closed'}}]}
+    text_engine_mock.generate_response.return_value = (tool_call, {})
+    await system.generate_response('test_persona', 'user', 'channel', 'close it')
+
+    # Resume with approval
+    tool_manager_mock.execute_tool.return_value = {"result": {"id": 1, "state": "closed"}}
+    final_response = {'type': 'text', 'content': 'Done, ticket closed.'}
+    text_engine_mock.generate_response.return_value = (final_response, {})
+
+    response, response_type, _ = await system.resume_pending_confirmation('user', 'test_persona', approved=True)
+
+    assert response_type == ResponseType.LLM_GENERATION
+    assert response == 'Done, ticket closed.'
+    tool_manager_mock.execute_tool.assert_called_with('update_ticket', state='closed')
+
+
+@pytest.mark.asyncio
+async def test_resume_pending_confirmation_denied(chat_system_with_mocks):
+    """Denying a pending confirmation should feed denial to LLM and return its response."""
+    system, _, text_engine_mock, _, persona, tool_manager_mock = chat_system_with_mocks
+    persona.set_execution_mode(ExecutionMode.CONFIRM)
+    persona.set_enabled_tools(['*'])
+
+    # First call: trigger pending confirmation
+    tool_call = {'type': 'tool_calls',
+                 'calls': [{'id': 'call_1', 'name': 'update_ticket', 'arguments': {'state': 'closed'}}]}
+    text_engine_mock.generate_response.return_value = (tool_call, {})
+    await system.generate_response('test_persona', 'user', 'channel', 'close it')
+
+    # Resume with denial
+    final_response = {'type': 'text', 'content': 'Understood, I won\'t close the ticket.'}
+    text_engine_mock.generate_response.return_value = (final_response, {})
+
+    response, response_type, _ = await system.resume_pending_confirmation('user', 'test_persona', approved=False)
+
+    assert response_type == ResponseType.LLM_GENERATION
+    tool_manager_mock.execute_tool.assert_not_called()
+    assert "won't close" in response
