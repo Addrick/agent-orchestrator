@@ -27,9 +27,9 @@ The system is designed with a clear separation of concerns, allowing for indepen
 ```mermaid
 graph TD
     subgraph Interfaces
-        Discord[Discord Bot]
-        Gmail[Gmail Bot]
-        Zammad_Bot[Zammad Bot]
+        Discord["Discord Bot"]
+        Gmail["Gmail Bot"]
+        ZBot["Zammad Bot"]
     end
 
     subgraph Core
@@ -40,9 +40,9 @@ graph TD
     end
 
     subgraph Data & Tools
-        MM["MemoryManager\n(SQLite)"]
+        MM[MemoryManager]
         TM[ToolManager]
-        TDef[Tool Definitions]
+        TDef["Tool Definitions"]
         ZC[ZammadClient]
     end
 
@@ -53,36 +53,31 @@ graph TD
         MSU[message_utils]
     end
 
-    subgraph External Services
-        OpenAI[OpenAI API]
-        Google["Google APIs\n(Vertex AI / Gemini)"]
-        Anthropic[Anthropic API]
-        Local[Local Inference Server]
-        Zammad_API[Zammad Ticketing API]
-    end
-
-    Discord & Gmail & Zammad_Bot --> CS
-    CS --> BL
-    CS --> Engine
+    CS --> ZC
     CS --> MM
-    CS --> TM
+    CS --> Engine
+    CS --> BL
     CS --> Persona
+    CS --> TDef
+    CS --> TM
     CS --> MU
     CS --> SU
-    BL --> Persona
-    BL --> MU
     Engine --> GU
-    TM --> ZC
-    TM --> TDef
-    ZC --> Zammad_API
-    MU --> SU
+    Discord --> CS
+    Discord --> Persona
     Discord --> MSU
     Discord --> SU
-
-    Engine --> OpenAI
-    Engine --> Google
-    Engine --> Anthropic
-    Engine --> Local
+    Gmail --> CS
+    Gmail --> Persona
+    ZBot --> CS
+    ZBot --> Persona
+    ZBot --> SU
+    BL --> CS
+    BL --> Persona
+    BL --> MU
+    TM --> ZC
+    TM --> TDef
+    SU --> Persona
 ```
 
 ### Module Dependency Graph
