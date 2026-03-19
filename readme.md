@@ -87,7 +87,7 @@ graph TD
 
 ### Module Dependency Graph
 
-Auto-generated from source via [pydeps](https://github.com/thebjorn/pydeps). Updated on every push to `master`.
+Generated from source via [pydeps](https://github.com/thebjorn/pydeps) (`pydeps src --no-show`). Update when module structure changes.
 
 ![Module Dependencies](docs/architecture.svg)
 
