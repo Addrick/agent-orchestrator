@@ -61,6 +61,12 @@ graph TD
     TM -->|API Calls| Zammad
 ```
 
+### Module Dependency Graph
+
+Auto-generated from source via [pydeps](https://github.com/thebjorn/pydeps). Updated on every push to `master`.
+
+![Module Dependencies](docs/architecture.svg)
+
 ## Tech Stack
 
 | Category      | Technologies                                                                          |
