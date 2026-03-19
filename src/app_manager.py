@@ -3,7 +3,7 @@
 import os
 import sys
 import logging
-from git import Repo, Diff, IndexFile
+from git import Repo, Diff, DiffIndex, IndexFile
 import psutil
 from typing import List, Union
 
@@ -36,7 +36,7 @@ def update_app() -> str:
         # Get the changes after the pull
         # changes = repo.git.diff('HEAD@{1}', 'HEAD')
         diff_index: IndexFile = repo.index
-        diffs: List[Diff] = diff_index.diff(None)
+        diffs: DiffIndex[Diff] = diff_index.diff(None)
         for diff_added in diffs.iter_change_type('A'):
             logger.warning(f"Added: {diff_added.b_path}")
         for diff_modified in diffs.iter_change_type('M'):

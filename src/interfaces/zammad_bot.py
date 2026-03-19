@@ -266,7 +266,7 @@ class ZammadBot:
             # 4. Fetch Full Bodies for History
             history_data = []
 
-            async def fetch_body(t, source_type):
+            async def fetch_body(t: Dict[str, Any], source_type: str) -> Optional[Dict[str, Any]]:
                 try:
                     arts = await asyncio.to_thread(self.zammad_client.get_ticket_articles, ticket_id=t['id'])
                     body = "\n---\n".join([a.get('body', '') for a in arts]) if arts else "No content"

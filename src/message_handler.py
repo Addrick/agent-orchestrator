@@ -85,7 +85,7 @@ class BotLogic:
         except IndexError:
             return None
 
-        handler = self.command_handlers.get(command)
+        handler: Any = self.command_handlers.get(command)
         if not handler:
             return None
 
@@ -371,13 +371,15 @@ class BotLogic:
             return None, False
 
         sub_command: str = args[0]
-        handler = self.set_handlers.get(sub_command)
+        set_handler: Any = self.set_handlers.get(sub_command)
 
-        if handler:
+        if set_handler:
+            result: Tuple[Optional[str], bool]
             if sub_command in ('model', 'tools'):
-                return await handler(args, persona)
+                result = await set_handler(args, persona)
             else:
-                return handler(args, persona)
+                result = set_handler(args, persona)
+            return result
 
         return f"Error: Unknown 'set' command: {sub_command}", False
 

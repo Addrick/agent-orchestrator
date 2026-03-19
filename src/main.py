@@ -29,7 +29,7 @@ class NoReconnectTracebackFilter(logging.Filter):
         # Check if the log is from the specific discord.client logger and contains the reconnect message
         if record.name == 'discord.client' and 'Attempting a reconnect' in record.getMessage():
             # If it matches, clear the exception info so no traceback is printed
-            record.exc_info = 'Discord disconnected, attempting to reconnect...'
+            record.exc_info = None
             record.exc_text = None
         return True
 
@@ -59,7 +59,7 @@ async def update_models_and_sync_bot(bot: ChatSystem) -> None:
         logger.warning("Failed to fetch new model list; ChatSystem may have stale data.")
 
 
-async def main():
+async def main() -> None:
     """Main asynchronous function to initialize and run the application."""
     print("Starting application...")
     if not os.path.exists(CHAT_LOG_LOCATION):
@@ -95,8 +95,12 @@ async def main():
     if DISCORD_BOT:
         logger.info("Initializing Discord bot...")
         discord_bot = create_discord_bot(bot)
-        task = asyncio.create_task(discord_bot.start(os.environ.get("DISCORD_API_KEY")))
-        tasks.append(task)
+        discord_token = os.environ.get("DISCORD_API_KEY")
+        if not discord_token:
+            logger.error("DISCORD_API_KEY not set. Cannot start Discord bot.")
+        else:
+            task = asyncio.create_task(discord_bot.start(discord_token))
+            tasks.append(task)
 
     if GMAIL_BOT:
         logger.info("Initializing Gmail bot...")

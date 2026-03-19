@@ -11,8 +11,6 @@ logger = logging.getLogger(__name__)
 
 def cleanse_message_for_history(text: str) -> str:
     """Removes metadata like [ [1](<url>)] from text for cleaner LLM history."""
-    if not isinstance(text, str):
-        return ""
     # This regex removes a space, then the citation block, e.g., " [[1](<url>)]"
     # It also handles multiple citations like [[1](<url1>), [2](<url2>)]
     text = re.sub(r"\s\[\s?\[\d+\]\(<.+?>\)(,\s?\[\d+\]\(<.+?>\))*\s?\]", "", text)

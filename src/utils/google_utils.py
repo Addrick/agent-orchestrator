@@ -28,7 +28,9 @@ def process_grounding_metadata(base_text_from_response: str, metadata: Optional[
 
     segments_to_cite: List[Dict[str, Any]] = []
     for support in metadata.grounding_supports:
-        s_text: str = support.segment.text
+        if not support.segment:
+            continue
+        s_text: str = support.segment.text or ""
         s_start_hint: int = support.segment.start_index if support.segment.start_index is not None else 0
 
         supporting_source_ids: Set[int] = set()

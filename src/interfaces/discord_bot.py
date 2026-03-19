@@ -181,7 +181,7 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                     file_content = parts[2]
 
                     # Create a file-like object in memory to send to Discord
-                    file_buffer = io.StringIO(file_content)
+                    file_buffer = io.BytesIO(file_content.encode('utf-8'))
                     discord_file = discord.File(fp=file_buffer, filename=filename)
                     await message.channel.send(f"Here is the context dump:", file=discord_file)
 
@@ -261,9 +261,8 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                 await reset_discord_status(client, chat_system)
                 return
 
-        is_ambient_channel = isinstance(message.channel, discord.abc.GuildChannel) and message.channel.name.lower() in [
-            c.lower() for c in AMBIENT_LOGGING_CHANNELS]
-        if is_ambient_channel:
+        if isinstance(message.channel, discord.abc.GuildChannel) and message.channel.name.lower() in [
+                c.lower() for c in AMBIENT_LOGGING_CHANNELS]:
             server_id = str(message.guild.id) if message.guild else None
             await asyncio.to_thread(
                 chat_system.memory_manager.log_message,
