@@ -26,39 +26,63 @@ The system is designed with a clear separation of concerns, allowing for indepen
 
 ```mermaid
 graph TD
-    subgraph User Interfaces
-        UI1[Discord]
-        UI2[Gmail API]
+    subgraph Interfaces
+        Discord[Discord Bot]
+        Gmail[Gmail Bot]
+        Zammad_Bot[Zammad Bot]
     end
 
-    subgraph Core System
-        CS[Chat System Core]
-        MM["Memory Manager\n(SQLite)"]
-        TM[Tool Manager]
-        LLME[LLM Orchestration Engine]
+    subgraph Core
+        CS[ChatSystem]
+        BL[BotLogic]
+        Engine[TextEngine]
+        Persona[Persona]
+    end
+
+    subgraph Data & Tools
+        MM["MemoryManager\n(SQLite)"]
+        TM[ToolManager]
+        TDef[Tool Definitions]
+        ZC[ZammadClient]
+    end
+
+    subgraph Utils
+        GU[google_utils]
+        MU[model_utils]
+        SU[save_utils]
+        MSU[message_utils]
     end
 
     subgraph External Services
-        Zammad[Zammad Ticketing API]
         OpenAI[OpenAI API]
-        Google["Google Cloud APIs\n(Vertex AI / Gemini)"]
+        Google["Google APIs\n(Vertex AI / Gemini)"]
         Anthropic[Anthropic API]
         Local[Local Inference Server]
+        Zammad_API[Zammad Ticketing API]
     end
 
-    UI1 & UI2 -->|User Input| CS
-    CS -->|Generate Response| LLME
-    CS -->|Get History| MM
-    CS -->|Execute Tools| TM
-    CS -->|Log Messages| MM
-    CS -->|Bot Reply| UI1 & UI2
+    Discord & Gmail & Zammad_Bot --> CS
+    CS --> BL
+    CS --> Engine
+    CS --> MM
+    CS --> TM
+    CS --> Persona
+    CS --> MU
+    CS --> SU
+    BL --> Persona
+    BL --> MU
+    Engine --> GU
+    TM --> ZC
+    TM --> TDef
+    ZC --> Zammad_API
+    MU --> SU
+    Discord --> MSU
+    Discord --> SU
 
-    LLME -->|API Calls| OpenAI
-    LLME -->|API Calls| Google
-    LLME -->|API Calls| Anthropic
-    LLME -->|API Calls| Local
-
-    TM -->|API Calls| Zammad
+    Engine --> OpenAI
+    Engine --> Google
+    Engine --> Anthropic
+    Engine --> Local
 ```
 
 ### Module Dependency Graph
@@ -76,7 +100,7 @@ Auto-generated from source via [pydeps](https://github.com/thebjorn/pydeps). Upd
 | **LLM APIs**  | OpenAI, Google Cloud (Vertex AI, Gemini), Anthropic, OpenAI-compatible local servers  |
 | **DevOps**    | Docker, Docker Compose, CI/CD (GitHub Actions)                                        |
 | **Testing**   | Pytest, `pytest-asyncio`, `unittest.mock`                                             |
-| **Core Libs** | `aiohttp`, `google-generativeai`, `google-api-python-client`, `anthropic`, `openai`   |
+| **Core Libs** | `aiohttp`, `google-genai`, `google-api-python-client`, `anthropic`, `openai`             |
 
 
 ---
@@ -92,8 +116,8 @@ Auto-generated from source via [pydeps](https://github.com/thebjorn/pydeps). Upd
 
 1.  **Clone the repository:**
     ```bash
-    git clone https://github.com/addrick/derpr-python.git
-    cd derpr-python
+    git clone https://github.com/addrick/llm-orchestrator.git
+    cd llm-orchestrator
     ```
 
 2.  **Create a virtual environment (recommended):**
