@@ -221,7 +221,7 @@ async def test_file_response_flow(mock_reset, mock_discord_client, mock_chat_sys
 
     # Verify the content of the file buffer
     sent_file.fp.seek(0)
-    assert sent_file.fp.read() == file_content
+    assert sent_file.fp.read() == file_content.encode('utf-8')
 
 
 @pytest.mark.asyncio

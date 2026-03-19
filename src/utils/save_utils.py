@@ -5,14 +5,14 @@ import logging
 import os
 import shutil
 from pathlib import Path
-from typing import Dict, Any, Optional, List, cast
+from typing import Dict, Any, Optional, List
 
 from config import global_config
 
 logger = logging.getLogger(__name__)
 
 
-def _get_persona_save_file_path() -> str:
+def _get_persona_save_file_path() -> Path:
     """Returns the persona save file path from global config."""
     return global_config.PERSONA_SAVE_FILE
 
@@ -24,12 +24,13 @@ def load_models_from_file(file_path_override: Optional[str] = None) -> Optional[
         return None
     with open(file_path, "r") as file:
         data: Dict[str, Any] = json.load(file)
-        return cast(Optional[Dict[str, Any]], data.get('models', {}))
+        models: Optional[Dict[str, Any]] = data.get('models', {})
+        return models
 
 
 def save_models_to_file(models_dict: Dict[str, Any], file_path_override: Optional[str] = None) -> None:
     """Save the models dictionary to the JSON file."""
-    save_file: str = file_path_override or _get_persona_save_file_path()
+    save_file = file_path_override or _get_persona_save_file_path()
     save_data: Dict[str, Any]
     try:
         with open(save_file, 'r') as file:
@@ -49,7 +50,7 @@ def save_personas_to_file(personas: Dict[str, Any], file_path_override: Optional
     save_file = file_path_override or _get_persona_save_file_path()
 
     # Ensure the directory exists
-    save_dir: str = os.path.dirname(save_file)
+    save_dir = os.path.dirname(save_file)
     if save_dir:
         os.makedirs(save_dir, exist_ok=True)
 
