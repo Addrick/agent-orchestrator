@@ -115,3 +115,39 @@ jobs:
             
             # 5. Cleanup unused images to save disk space on the micro instance
             docker image prune -f
+
+  # JOB 4: Update Architecture Diagram
+  # Runs after deploy so it never delays deployment
+  update-diagram:
+    needs: deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Graphviz
+        run: sudo apt-get install -y graphviz
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pydeps
+
+      - name: Generate architecture diagram
+        run: pydeps src
+
+      - name: Commit updated diagram
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/architecture.svg
+          git diff --cached --quiet || git commit -m "Update architecture diagram [skip ci]"
+          git push
