@@ -98,7 +98,8 @@ class ChatSystem:
                 self.zammad_client.search_tickets, query=f"number:{ticket_number}"
             )
             if search_results:
-                return search_results[0]['id']
+                ticket_id: int = search_results[0]['id']
+                return ticket_id
             return None
         except Exception as e:
             logger.error(f"Error searching for ticket number {ticket_number}: {e}", exc_info=True)
@@ -115,7 +116,8 @@ class ChatSystem:
                 order_by='desc'
             )
             if search_results:
-                return search_results[0]['id']
+                ticket_id: int = search_results[0]['id']
+                return ticket_id
             return None
         except Exception as e:
             logger.error(f"Error searching for active tickets for customer {customer_id}: {e}", exc_info=True)
@@ -129,14 +131,13 @@ class ChatSystem:
         Returns a tuple of (Zammad user ID, Zammad-registered email).
         """
         email_match: Optional[re.Match[str]] = re.search(r'<(.+?)>', user_identifier)
-        is_real_email: bool = email_match is not None
 
         email: str
         firstname: str
         lastname: str
         note: Optional[str]
 
-        if is_real_email:
+        if email_match:
             email = email_match.group(1)
             name_part: str = user_display_name if user_display_name else user_identifier.split('<')[0].strip()
             name_parts: List[str] = name_part.split()
@@ -144,7 +145,7 @@ class ChatSystem:
             lastname = ' '.join(name_parts[1:]) if len(name_parts) > 1 else "User"
             note = None
         else:
-            domain: str = urlparse(self.zammad_client.api_url).hostname or "local.host"
+            domain = urlparse(self.zammad_client.api_url or "").hostname or "local.host"
             email = f"{channel.lower()}-{user_identifier}@{domain}"
             name_parts = user_display_name.split() if user_display_name else [f"{channel.capitalize()} User",
                                                                               user_identifier]
@@ -417,7 +418,7 @@ class ChatSystem:
         try:
             if approved:
                 for call_item in pending.write_calls:
-                    tool_name = call_item.get("name")
+                    tool_name: str = call_item.get("name", "")
                     tool_args = call_item.get("arguments", {})
 
                     if tool_name == 'create_ticket':

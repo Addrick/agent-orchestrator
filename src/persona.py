@@ -2,11 +2,13 @@
 
 import logging
 from enum import Enum, auto
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Type, TypeVar
 
 from config import global_config
 
 logger = logging.getLogger(__name__)
+
+E = TypeVar('E', bound=Enum)
 
 
 class ExecutionMode(Enum):
@@ -128,7 +130,7 @@ class Persona:
     # --- Private Helpers ---
 
     @staticmethod
-    def _resolve_enum(enum_class, value, default):
+    def _resolve_enum(enum_class: Type[E], value: Any, default: E) -> E:
         """Accepts a string or enum member, returns a valid enum member or the default."""
         if isinstance(value, enum_class):
             return value
@@ -258,9 +260,6 @@ class Persona:
 
     def set_enabled_tools(self, new_tools: List[str]) -> None:
         """Sets the list of tools the persona is allowed to use."""
-        if not isinstance(new_tools, list):
-            logger.warning(f"Invalid type for enabled tools: {type(new_tools)}. Must be a list. No change made.")
-            return
         self._enabled_tools = new_tools
         logger.info(f"Persona '{self._name}' enabled tools set to: {self._enabled_tools}")
 
