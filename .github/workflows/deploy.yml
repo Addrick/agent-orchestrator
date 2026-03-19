@@ -45,6 +45,9 @@ jobs:
           flake8 src/ --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
 
+      - name: Type check with mypy
+        run: mypy src/ --config-file mypy.ini
+
       - name: Run tests with pytest, skipping integration.
         run: pytest -m "not integration"
 
