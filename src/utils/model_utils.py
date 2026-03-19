@@ -21,16 +21,17 @@ def refresh_available_openai_models() -> List[str]:
 
 def refresh_available_google_models() -> List[str]:
     """
-    # Google
-    # a bit hacked together as actual generation requests are using the vertexai package which lacks an api call to list models
-    # instead uses google.generativeai which lists different models than what vertexai has available, TODO: find better way to list available Google models
+    # Uses the google-genai SDK (same as engine.py) to list available generative models.
     # vertexai models can be viewed at https://console.cloud.google.com/vertex-ai/model-garden
-    # model garden includes tons of shit, incl non-google models if I wanted to run them on google hardware I guess. Also fine tuning"""
-    import google.generativeai as genai
-    genai.configure(api_key=os.environ.get("GOOGLE_GENERATIVEAI_API_KEY"))
+    """
+    from google import genai
+
+    client = genai.Client(api_key=os.environ.get("GOOGLE_GENERATIVEAI_API_KEY"))
     google_models: List[str] = []
-    for model in genai.list_models():
-        if 'generateContent' in model.supported_generation_methods:  # remove non-genai models
+    for model in client.models.list():
+        if not model.name:
+            continue
+        if model.supported_actions and 'generateContent' in model.supported_actions:
             version_tag: str = model.name.split("-")[-1]
             if version_tag != '001' and version_tag != 'latest':
                 model_name: str = model.name.split("/")[-1]  # remove preceding 'models/' from name
