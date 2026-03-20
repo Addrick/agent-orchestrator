@@ -4,7 +4,8 @@ import json
 import logging
 import os
 import asyncio
-from typing import Dict, Any, Optional, Tuple, List
+from typing import Dict, Any, Optional, Tuple, List, Callable, AsyncIterator
+from contextlib import asynccontextmanager, AsyncExitStack
 
 from dotenv import load_dotenv
 
@@ -95,8 +96,8 @@ class TextEngine:
         # Anthropic: claude-3, claude-4, etc.
         if 'claude-3' in model_name or 'claude-4' in model_name:
             return True
-        # Google: gemini models
-        if 'gemini' in model_name:
+        # Google: gemini and gemma-3 models
+        if 'gemini' in model_name or 'gemma-3' in model_name:
             return True
         return False
 
@@ -129,6 +130,32 @@ class TextEngine:
         self.google_search_tool = Tool(google_search=GoogleSearch())
         logger.info("Google AI Studio client initialized.")
 
+    def _get_provider_route(self, model_name: str) -> Tuple[Callable, List[AsyncLimiter]]:
+        """Returns (handler_method, [limiters]) for the model name.
+        Raises LLMCommunicationError for unsupported models."""
+        if model_name.startswith("gpt"):
+            return self._generate_openai_response, [self._openai_limiter]
+        if "claude" in model_name:
+            return self._generate_anthropic_response, [self._anthropic_limiter]
+        if "gemma" in model_name:
+            return self._generate_google_response, [self._gemma_rpm_limiter]
+        if "gemini-3.1" in model_name:
+            return self._generate_google_response, [self._gemini_3_rpm_limiter]
+        if "gemini" in model_name:
+            return self._generate_google_response, [self._gemini_25_rpm_limiter, self._gemini_25_rpd_limiter]
+        if model_name == 'local':
+            return self._generate_local_response, []
+        raise LLMCommunicationError(f"Error: Model '{model_name}' is not supported.")
+
+    @staticmethod
+    @asynccontextmanager
+    async def _rate_limited(limiters: List[AsyncLimiter]) -> AsyncIterator[None]:
+        """Acquires all limiters in sequence via AsyncExitStack."""
+        async with AsyncExitStack() as stack:
+            for limiter in limiters:
+                await stack.enter_async_context(limiter)
+            yield
+
     async def generate_response(self, persona_config: Dict[str, Any], context_object: Dict[str, Any],
                                 tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
         Dict[str, Any], Optional[Dict[str, Any]]]:
@@ -145,34 +172,21 @@ class TextEngine:
 
         if context_object["current_message"].get("image_url") and not self.model_supports_images(model_name):
             logger.info(f"Model {model_name} does not support images. Modifying prompt.")
-            context_object["persona_prompt"] += "\n\n[System note: The user has attached an image that you cannot see. Please inform them of this fact in your response.]"
+            context_object["persona_prompt"] += (
+                "\n\n[System note: The user has attached an image that you cannot see."
+                " Please inform them of this fact in your response.]"
+            )
             context_object["current_message"]["image_url"] = None
+
+        handler, limiters = self._get_provider_route(model_name)
 
         for attempt in range(EMPTY_RESPONSE_RETRIES + 1):
             result: Dict[str, Any] = {}
             api_payload: Optional[Dict[str, Any]] = None
 
             try:
-                if model_name.startswith("gpt"):
-                    async with self._openai_limiter:
-                        result, api_payload = await self._generate_openai_response(persona_config, context_object, tools)
-                elif "claude" in model_name:
-                    async with self._anthropic_limiter:
-                        result, api_payload = await self._generate_anthropic_response(persona_config, context_object, tools)
-                elif "gemma" in model_name:
-                    async with self._gemma_rpm_limiter:
-                        result, api_payload = await self._generate_google_response(persona_config, context_object, tools)
-                elif "gemini-3.1" in model_name:
-                    async with self._gemini_3_rpm_limiter:
-                        result, api_payload = await self._generate_google_response(persona_config, context_object, tools)
-                elif "gemini" in model_name:
-                    async with self._gemini_25_rpm_limiter:
-                        async with self._gemini_25_rpd_limiter:
-                            result, api_payload = await self._generate_google_response(persona_config, context_object, tools)
-                elif model_name == 'local':
-                    result, api_payload = await self._generate_local_response(persona_config, context_object, tools)
-                else:
-                    raise LLMCommunicationError(f"Error: Model '{model_name}' is not supported.")
+                async with self._rate_limited(limiters):
+                    result, api_payload = await handler(persona_config, context_object, tools)
 
                 # Validate the response structure and content
                 if result.get('type') == 'text' and result.get('content', '').strip():
@@ -195,6 +209,29 @@ class TextEngine:
         logger.error(f"LLM returned an empty or invalid response after {EMPTY_RESPONSE_RETRIES + 1} attempts.")
         raise LLMCommunicationError("LLM provider returned an empty or invalid response after all retries.")
 
+    @staticmethod
+    def _parse_openai_tool_calls(raw_calls: list) -> List[Dict[str, Any]]:
+        """Parses OpenAI tool call objects into standardized dicts."""
+        tool_calls: List[Dict[str, Any]] = []
+        for call in raw_calls:
+            try:
+                arguments = json.loads(call.function.arguments)
+                tool_calls.append({"id": call.id, "name": call.function.name, "arguments": arguments})
+            except json.JSONDecodeError:
+                logger.error(f"Failed to parse tool call arguments: {call.function.arguments}")
+                continue
+        return tool_calls
+
+    @staticmethod
+    def _attach_openai_image(messages: List[Dict[str, Any]], image_url: str) -> None:
+        """Attaches an image URL to the last user message for OpenAI."""
+        last_message = messages[-1]
+        if last_message['role'] != 'user':
+            return
+        if isinstance(last_message['content'], str):
+            last_message['content'] = [{"type": "text", "text": last_message['content']}]
+        last_message['content'].append({"type": "image_url", "image_url": {"url": image_url}})
+
     async def _generate_openai_response(self, config: Dict[str, Any], context: Dict[str, Any],
                                         tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
         Dict[str, Any], Dict[str, Any]]:
@@ -210,12 +247,7 @@ class TextEngine:
         messages.extend(history_to_process)
 
         if context["current_message"].get("image_url"):
-            last_message = messages[-1]
-            if last_message['role'] == 'user':
-                if isinstance(last_message['content'], str):
-                    last_message['content'] = [{"type": "text", "text": last_message['content']}]
-                last_message['content'].append(
-                    {"type": "image_url", "image_url": {"url": context["current_message"]["image_url"]}})
+            self._attach_openai_image(messages, context["current_message"]["image_url"])
 
         api_params: Dict[str, Any] = {
             "model": config["model_name"],
@@ -239,16 +271,7 @@ class TextEngine:
                                        api_params.get("tools", [])]
 
             if response_message.tool_calls:
-                tool_calls: List[Dict[str, Any]] = []
-                for call in response_message.tool_calls:
-                    try:
-                        arguments = json.loads(call.function.arguments)
-                        tool_calls.append(
-                            {"id": call.id, "name": call.function.name, "arguments": arguments}
-                        )
-                    except json.JSONDecodeError:
-                        logger.error(f"Failed to parse tool call arguments: {call.function.arguments}")
-                        continue
+                tool_calls = self._parse_openai_tool_calls(response_message.tool_calls)
                 return {"type": "tool_calls", "calls": tool_calls}, api_params
             else:
                 response_content: str = response_message.content or ""
@@ -264,45 +287,38 @@ class TextEngine:
             raise LLMCommunicationError("An unexpected error occurred with the OpenAI API.",
                                         api_payload=api_params) from e
 
+    async def _attach_anthropic_image(self, messages: List[Dict[str, Any]], image_url: str) -> None:
+        """Downloads and attaches an image to the last user message for Anthropic."""
+        last_message = messages[-1]
+        if last_message['role'] != 'user':
+            return
+        if isinstance(last_message['content'], str):
+            last_message['content'] = [{"type": "text", "text": last_message['content']}]
+        try:
+            image_bytes, mime_type = await self._download_image(image_url)
+            if mime_type not in ['image/jpeg', 'image/png', 'image/webp', 'image/gif']:
+                logger.warning(f"Unsupported image MIME type '{mime_type}' for Claude. Skipping image.")
+            else:
+                last_message['content'].append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": mime_type,
+                        "data": base64.b64encode(image_bytes).decode('utf-8'),
+                    },
+                })
+        except aiohttp.ClientError as e:
+            logger.error(f"Failed to download image from {image_url}: {e}")
+
     async def _generate_anthropic_response(self, config: Dict[str, Any], context: Dict[str, Any],
                                            tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
         Dict[str, Any], Dict[str, Any]]:
         client = self._get_anthropic_client()
 
-        system_prompt = context["persona_prompt"]
-        history = context["history"]
-        if history and history[0]["role"] == "system":
-            system_prompt = f"{system_prompt}\n\n{history[0]['content']}"
-            history = history[1:]
+        system_prompt, history = self._extract_system_prompt(context)
 
-        # Handle image URL in the last user message
         if context["current_message"].get("image_url"):
-            last_message = history[-1]
-            if last_message['role'] == 'user':
-                if isinstance(last_message['content'], str):
-                    last_message['content'] = [{"type": "text", "text": last_message['content']}]
-
-                try:
-                    image_url = context["current_message"]["image_url"]
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(image_url) as resp:
-                            resp.raise_for_status()
-                            image_bytes = await resp.read()
-                            mime_type = resp.content_type
-
-                    if mime_type not in ['image/jpeg', 'image/png', 'image/webp', 'image/gif']:
-                        logger.warning(f"Unsupported image MIME type '{mime_type}' for Claude. Skipping image.")
-                    else:
-                        last_message['content'].append({
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": mime_type,
-                                "data": base64.b64encode(image_bytes).decode('utf-8'),
-                            },
-                        })
-                except aiohttp.ClientError as e:
-                    logger.error(f"Failed to download image from {image_url}: {e}")
+            await self._attach_anthropic_image(history, context["current_message"]["image_url"])
 
         api_params: Dict[str, Any] = {
             "model": config["model_name"],
@@ -348,31 +364,34 @@ class TextEngine:
             raise LLMCommunicationError("An unexpected error occurred with the Anthropic API.",
                                         api_payload=api_params) from e
 
-    async def _generate_google_response(self, config: Dict[str, Any], context: Dict[str, Any],
-                                        tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
-        Dict[str, Any], Dict[str, Any]]:
-        """
-        Generates a response using the Google Gemini API, now using the native system prompt format.
-        """
-        try:
-            self._initialize_google_client()
-            assert self.google_client is not None and self.google_search_tool is not None
-        except (ValueError, AssertionError) as e:
-            raise LLMCommunicationError(f"Error: Google not configured: {e}") from e
-
+    @staticmethod
+    def _extract_system_prompt(context: Dict[str, Any]) -> Tuple[str, List[Dict[str, Any]]]:
+        """Returns (merged_system_prompt, remaining_history)."""
         system_prompt = context["persona_prompt"]
-        history_to_process = context["history"]
-        if history_to_process and history_to_process[0]["role"] == "system":
-            system_prompt = f"{system_prompt}\n\n{history_to_process[0]['content']}"
-            history_to_process = history_to_process[1:]
+        history = context["history"]
+        if history and history[0]["role"] == "system":
+            system_prompt = f"{system_prompt}\n\n{history[0]['content']}"
+            history = history[1:]
+        return system_prompt, history
 
-        # Use the native 'system' instruction format for the Gemini API.
-        # This is a role-less entry at the start of the conversation history.
+    async def _download_image(self, image_url: str) -> Tuple[bytes, str]:
+        """Downloads image, returns (raw_bytes, mime_type).
+        Raises aiohttp.ClientError on failure."""
+        async with aiohttp.ClientSession() as session:
+            async with session.get(image_url) as resp:
+                resp.raise_for_status()
+                image_bytes = await resp.read()
+                mime_type = resp.content_type
+        return image_bytes, mime_type
+
+    async def _build_google_history(
+        self, system_prompt: str, history: List[Dict[str, Any]], image_url: Optional[str]
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Returns (history_for_api, serializable_history)."""
         history_for_api = [{'parts': [Part(text=system_prompt)]}]
-        # Create a serializable version for dumping/logging that includes a 'system' role for clarity.
         serializable_history = [{'role': 'system', 'parts': [{'text': system_prompt}]}]
 
-        for item in history_to_process:
+        for item in history:
             role = 'model' if item['role'] == 'assistant' else 'user'
             serializable_item = item.copy()
 
@@ -400,17 +419,9 @@ class TextEngine:
                 parts_for_api = [Part(text=content_text)]
                 serializable_parts = [{'text': content_text}]
 
-                # Handle image URL in the last user message
-                if context["current_message"].get("image_url") and role == 'user' and item is history_to_process[-1]:
+                if image_url and role == 'user' and item is history[-1]:
                     try:
-                        image_url = context["current_message"]["image_url"]
-                        # Asynchronously fetch the image
-                        async with aiohttp.ClientSession() as session:
-                            async with session.get(image_url) as resp:
-                                resp.raise_for_status()
-                                image_bytes = await resp.read()
-                                mime_type = resp.content_type
-
+                        image_bytes, mime_type = await self._download_image(image_url)
                         if mime_type not in ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif']:
                             logger.warning(f"Unsupported image MIME type '{mime_type}'. Skipping image.")
                         else:
@@ -423,28 +434,71 @@ class TextEngine:
                 serializable_item['parts'] = serializable_parts
             serializable_history.append(serializable_item)
 
-        content_config_for_api: Dict[str, Any] = {"safety_settings": self.google_safety_settings}
+        return history_for_api, serializable_history
 
+    def _build_google_tools(
+        self, tools: Optional[List[Dict[str, Any]]]
+    ) -> Tuple[List[Tool], Optional[Dict[str, Any]]]:
+        """Returns (api_tools, tool_config_or_none)."""
         api_tools: List[Tool] = []
+        tool_config = None
         if tools:
             if any(t.get('type') == 'google_grounding' for t in tools):
                 api_tools.append(self.google_search_tool)
             function_tools = [t for t in tools if t.get('type') == 'function' and t.get('function')]
             if function_tools:
                 api_tools.extend([Tool(function_declarations=[FunctionDeclaration(**t['function'])])
-                                   for t in function_tools])
-                content_config_for_api['tool_config'] = {"function_calling_config": {"mode": "AUTO"}}
-        if api_tools:
-            content_config_for_api['tools'] = api_tools
+                                  for t in function_tools])
+                tool_config = {"function_calling_config": {"mode": "AUTO"}}
+        return api_tools, tool_config
 
-        content_config_for_api['max_output_tokens'] = config.get(
-            "max_output_tokens") or global_config.DEFAULT_TOKEN_LIMIT
-        if isinstance(config.get("temperature"), (int, float)): content_config_for_api['temperature'] = config.get(
-            "temperature")
-        if isinstance(config.get("top_p"), (int, float)): content_config_for_api['top_p'] = config.get("top_p")
-        if isinstance(config.get("top_k"), (int, float)): content_config_for_api['top_k'] = config.get("top_k")
+    @staticmethod
+    def _parse_google_response(
+        response_obj: Any, api_params: Dict[str, Any]
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """Parses Google response into standard result format.
+        Raises LLMCommunicationError if response was blocked."""
+        if response_obj.prompt_feedback and response_obj.prompt_feedback.block_reason:
+            raise LLMCommunicationError(
+                f"Response blocked by Google due to {response_obj.prompt_feedback.block_reason.name}.")
 
-        dump_config = content_config_for_api.copy()
+        candidate: Optional[Candidate] = response_obj.candidates[0] if response_obj.candidates else None
+        if not candidate or not candidate.content or not candidate.content.parts:
+            return {}, api_params
+
+        tool_calls: List[Dict[str, Any]] = []
+        for i, part in enumerate(candidate.content.parts):
+            if part.function_call:
+                arguments = {k: v for k, v in part.function_call.args.items()}
+                call_dict: Dict[str, Any] = {
+                    "id": f"call_{part.function_call.name}_{i}",
+                    "name": part.function_call.name,
+                    "arguments": arguments,
+                }
+                if getattr(part, 'thought_signature', None) is not None:
+                    call_dict["thought_signature"] = part.thought_signature
+                tool_calls.append(call_dict)
+        if tool_calls:
+            return {"type": "tool_calls", "calls": tool_calls}, api_params
+
+        base_text_from_response = "".join(
+            part.text for part in candidate.content.parts if hasattr(part, 'text') and part.text)
+        final_text_content, search_query_display, citations_display = process_grounding_metadata(
+            base_text_from_response, candidate.grounding_metadata, logger
+        )
+        if search_query_display:
+            final_text_content += search_query_display
+        if citations_display:
+            final_text_content += citations_display
+
+        return {"type": "text", "content": final_text_content.strip()}, api_params
+
+    @staticmethod
+    def _build_google_dump_params(
+        model_name: str, content_config: Dict[str, Any], serializable_history: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Builds a serializable version of API params for logging."""
+        dump_config = content_config.copy()
         if 'tools' in dump_config:
             tool_names = []
             for t in dump_config['tools']:
@@ -453,11 +507,44 @@ class TextEngine:
                 elif hasattr(t, 'google_search') and t.google_search is not None:
                     tool_names.append("google_search")
             dump_config['tools'] = tool_names
+        return {'model': model_name, 'contents': serializable_history, 'config': dump_config}
 
-        api_params_for_dumping = {
-            'model': config["model_name"], 'contents': serializable_history,
-            'config': dump_config
-        }
+    async def _generate_google_response(self, config: Dict[str, Any], context: Dict[str, Any],
+                                        tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
+        Dict[str, Any], Dict[str, Any]]:
+        """Generates a response using the Google Gemini API."""
+        try:
+            self._initialize_google_client()
+            assert self.google_client is not None and self.google_search_tool is not None
+        except (ValueError, AssertionError) as e:
+            raise LLMCommunicationError(f"Error: Google not configured: {e}") from e
+
+        system_prompt, history_to_process = self._extract_system_prompt(context)
+        image_url = context["current_message"].get("image_url")
+        history_for_api, serializable_history = await self._build_google_history(
+            system_prompt, history_to_process, image_url
+        )
+
+        content_config_for_api: Dict[str, Any] = {"safety_settings": self.google_safety_settings}
+
+        api_tools, tool_config = self._build_google_tools(tools)
+        if tool_config:
+            content_config_for_api['tool_config'] = tool_config
+        if api_tools:
+            content_config_for_api['tools'] = api_tools
+
+        content_config_for_api['max_output_tokens'] = config.get(
+            "max_output_tokens") or global_config.DEFAULT_TOKEN_LIMIT
+        if isinstance(config.get("temperature"), (int, float)):
+            content_config_for_api['temperature'] = config.get("temperature")
+        if isinstance(config.get("top_p"), (int, float)):
+            content_config_for_api['top_p'] = config.get("top_p")
+        if isinstance(config.get("top_k"), (int, float)):
+            content_config_for_api['top_k'] = config.get("top_k")
+
+        api_params_for_dumping = self._build_google_dump_params(
+            config["model_name"], content_config_for_api, serializable_history
+        )
 
         try:
             response_obj = await self.google_client.models.generate_content(
@@ -471,40 +558,7 @@ class TextEngine:
             raise LLMCommunicationError(f"An error occurred with Google API: {e}",
                                         api_payload=api_params_for_dumping, rate_limited=rate_limited) from e
 
-        if response_obj.prompt_feedback and response_obj.prompt_feedback.block_reason:
-            raise LLMCommunicationError(
-                f"Response blocked by Google due to {response_obj.prompt_feedback.block_reason.name}.")
-
-        candidate: Optional[Candidate] = response_obj.candidates[0] if response_obj.candidates else None
-        if not candidate or not candidate.content or not candidate.content.parts:
-            return {}, api_params_for_dumping
-
-        tool_calls: List[Dict[str, Any]] = []
-        for i, part in enumerate(candidate.content.parts):
-            if part.function_call:
-                arguments = {k: v for k, v in part.function_call.args.items()}
-                call_dict: Dict[str, Any] = {
-                    "id": f"call_{part.function_call.name}_{i}",
-                    "name": part.function_call.name,
-                    "arguments": arguments,
-                }
-                # Thinking models (e.g. Gemini 3.1) attach thought signatures
-                # to function call parts; the API requires them echoed back.
-                if getattr(part, 'thought_signature', None) is not None:
-                    call_dict["thought_signature"] = part.thought_signature
-                tool_calls.append(call_dict)
-        if tool_calls:
-            return {"type": "tool_calls", "calls": tool_calls}, api_params_for_dumping
-
-        base_text_from_response = "".join(
-            part.text for part in candidate.content.parts if hasattr(part, 'text') and part.text)
-        final_text_content, search_query_display, citations_display = process_grounding_metadata(
-            base_text_from_response, candidate.grounding_metadata, logger
-        )
-        if search_query_display: final_text_content += search_query_display
-        if citations_display: final_text_content += citations_display
-
-        return {"type": "text", "content": final_text_content.strip()}, api_params_for_dumping
+        return self._parse_google_response(response_obj, api_params_for_dumping)
 
     async def _get_local_client(self) -> AsyncOpenAI:
         """
