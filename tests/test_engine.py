@@ -508,6 +508,256 @@ class TestLocalModel:
             await text_engine.generate_response(local_config, base_context)
 
 
+class TestProviderRouting:
+    """Tests for _get_provider_route and model routing edge cases."""
+
+    def test_unsupported_model_raises(self, text_engine):
+        with pytest.raises(LLMCommunicationError, match="not supported"):
+            text_engine._get_provider_route("unknown-model-v1")
+
+    @pytest.mark.asyncio
+    @patch('src.engine.TextEngine._generate_openai_response', new_callable=AsyncMock)
+    async def test_image_unsupported_model_modifies_prompt(self, mock_provider, text_engine, base_context):
+        """Models that don't support images get a system note appended and image_url cleared."""
+        base_context["current_message"]["image_url"] = "http://example.com/photo.png"
+        # gpt-3.5-turbo matches routing (starts with "gpt") but fails model_supports_images
+        config = {"model_name": "gpt-3.5-turbo"}
+
+        mock_provider.return_value = ({"type": "text", "content": "ok"}, {})
+        await text_engine.generate_response(config, base_context)
+
+        assert base_context["current_message"]["image_url"] is None
+        assert "cannot see" in base_context["persona_prompt"]
+
+
+@patch('src.engine.AsyncOpenAI')
+class TestOpenAIImage:
+    @pytest.mark.asyncio
+    async def test_image_url_passed_to_openai(self, mock_openai_class, text_engine,
+                                              openai_config, base_context, monkeypatch):
+        """OpenAI image attachment: URL is included as image_url content part."""
+        monkeypatch.setenv("OPENAI_API_KEY", "dummy_key_for_testing")
+        mock_instance = mock_openai_class.return_value
+        mock_instance.chat.completions.create = AsyncMock(
+            return_value=MagicMock(choices=[MagicMock(message=MagicMock(content="I see the image", tool_calls=None))])
+        )
+
+        base_context["current_message"]["image_url"] = "http://example.com/photo.png"
+        base_context["history"] = [{"role": "user", "content": "What's in this image?"}]
+
+        response, _ = await text_engine.generate_response(openai_config, base_context)
+        assert response == {"type": "text", "content": "I see the image"}
+
+        call_args = mock_instance.chat.completions.create.call_args[1]
+        last_msg = call_args['messages'][-1]
+        assert isinstance(last_msg['content'], list)
+        assert last_msg['content'][-1] == {"type": "image_url", "image_url": {"url": "http://example.com/photo.png"}}
+
+    @pytest.mark.asyncio
+    async def test_malformed_tool_call_json_skipped(self, mock_openai_class, text_engine,
+                                                    openai_config, base_context, monkeypatch):
+        """Tool calls with unparseable JSON arguments are skipped, not fatal."""
+        monkeypatch.setenv("OPENAI_API_KEY", "dummy_key_for_testing")
+        mock_instance = mock_openai_class.return_value
+
+        good_fn = MagicMock()
+        good_fn.name = "get_weather"
+        good_fn.arguments = '{"city": "NYC"}'
+        good_call = MagicMock(id="call_1", function=good_fn)
+
+        bad_fn = MagicMock()
+        bad_fn.name = "broken_tool"
+        bad_fn.arguments = '{not valid json'
+        bad_call = MagicMock(id="call_2", function=bad_fn)
+
+        mock_instance.chat.completions.create = AsyncMock(
+            return_value=MagicMock(choices=[MagicMock(message=MagicMock(content=None, tool_calls=[good_call, bad_call]))])
+        )
+
+        response, _ = await text_engine.generate_response(
+            openai_config, base_context, tools=[{"type": "function", "function": {"name": "get_weather"}}]
+        )
+        assert response['type'] == 'tool_calls'
+        assert len(response['calls']) == 1
+        assert response['calls'][0]['name'] == 'get_weather'
+
+
+@patch('src.engine.genai.client.AsyncClient')
+class TestGoogleEdgeCases:
+    @pytest.mark.asyncio
+    async def test_blocked_response_raises(self, mock_google_client_class, text_engine,
+                                           google_config, base_context, monkeypatch):
+        """Google prompt blocking raises LLMCommunicationError."""
+        monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy_key_for_testing")
+        mock_instance = mock_google_client_class.return_value
+
+        mock_block_reason = MagicMock()
+        mock_block_reason.name = "SAFETY"
+        mock_prompt_feedback = MagicMock(block_reason=mock_block_reason)
+
+        mock_instance.models.generate_content = AsyncMock(
+            return_value=MagicMock(prompt_feedback=mock_prompt_feedback, candidates=[])
+        )
+
+        with pytest.raises(LLMCommunicationError, match="blocked by Google.*SAFETY"):
+            await text_engine.generate_response(google_config, base_context)
+
+    @pytest.mark.asyncio
+    async def test_empty_candidate_returns_empty_and_retries(self, mock_google_client_class,
+                                                             text_engine, google_config,
+                                                             base_context, monkeypatch):
+        """Response with no candidates returns {} which triggers retry logic."""
+        monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy_key_for_testing")
+        mock_instance = mock_google_client_class.return_value
+        mock_instance.models.generate_content = AsyncMock(
+            return_value=MagicMock(prompt_feedback=None, candidates=[])
+        )
+
+        with pytest.raises(LLMCommunicationError, match="empty or invalid response after all retries"):
+            await text_engine.generate_response(google_config, base_context)
+
+    @pytest.mark.asyncio
+    @patch('aiohttp.ClientSession.get')
+    async def test_image_download_failure_gracefully_skipped(self, mock_get,
+                                                             mock_google_client_class, text_engine,
+                                                             google_config, base_context, monkeypatch):
+        """Failed image download doesn't crash — response is still generated without the image."""
+        monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy_key_for_testing")
+
+        mock_get.return_value.__aenter__.side_effect = aiohttp.ClientError("Connection refused")
+
+        mock_instance = mock_google_client_class.return_value
+        mock_part = MagicMock(text="Response without image", function_call=None)
+        mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
+        mock_instance.models.generate_content = AsyncMock(
+            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        )
+
+        base_context["current_message"]["image_url"] = "http://example.com/broken.png"
+        base_context["history"] = [{"role": "user", "content": "Look at this"}]
+
+        response, _ = await text_engine.generate_response(google_config, base_context)
+        assert response == {"type": "text", "content": "Response without image"}
+
+    @pytest.mark.asyncio
+    @patch('aiohttp.ClientSession.get')
+    async def test_unsupported_mime_type_skipped(self, mock_get,
+                                                 mock_google_client_class, text_engine,
+                                                 google_config, base_context, monkeypatch):
+        """Image with unsupported MIME type (e.g. BMP) is skipped, not attached."""
+        monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy_key_for_testing")
+
+        mock_response = AsyncMock()
+        mock_response.read.return_value = b'bmpdata'
+        mock_response.content_type = 'image/bmp'
+        mock_response.raise_for_status = MagicMock()
+        mock_get.return_value.__aenter__.return_value = mock_response
+
+        mock_instance = mock_google_client_class.return_value
+        mock_part = MagicMock(text="No image seen", function_call=None)
+        mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
+        mock_instance.models.generate_content = AsyncMock(
+            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        )
+
+        base_context["current_message"]["image_url"] = "http://example.com/image.bmp"
+        base_context["history"] = [{"role": "user", "content": "Check this BMP"}]
+
+        await text_engine.generate_response(google_config, base_context)
+
+        call_args = mock_instance.models.generate_content.call_args[1]
+        user_turn = call_args['contents'][-1]
+        assert len(user_turn['parts']) == 1  # text only, no image
+
+
+@patch('src.engine.anthropic.Anthropic')
+class TestAnthropicEdgeCases:
+    @pytest.mark.asyncio
+    @patch('aiohttp.ClientSession.get')
+    async def test_image_download_failure_gracefully_skipped(self, mock_get,
+                                                             mock_anthropic_class, text_engine,
+                                                             anthropic_config, base_context,
+                                                             monkeypatch):
+        """Failed image download for Anthropic doesn't crash."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy_key_for_testing")
+
+        mock_get.return_value.__aenter__.side_effect = aiohttp.ClientError("Timeout")
+
+        mock_instance = mock_anthropic_class.return_value
+        mock_instance.messages.create.return_value = MagicMock(
+            content=[MagicMock(text="Response without image")], stop_reason="end_turn"
+        )
+
+        base_context["current_message"]["image_url"] = "http://example.com/broken.png"
+        base_context["history"] = [{"role": "user", "content": "Look at this"}]
+
+        response, _ = await text_engine.generate_response(anthropic_config, base_context)
+        assert response == {"type": "text", "content": "Response without image"}
+
+    @pytest.mark.asyncio
+    @patch('aiohttp.ClientSession.get')
+    async def test_unsupported_mime_type_skipped(self, mock_get,
+                                                 mock_anthropic_class, text_engine,
+                                                 anthropic_config, base_context,
+                                                 monkeypatch):
+        """Image with unsupported MIME type for Anthropic is skipped."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy_key_for_testing")
+
+        mock_response = AsyncMock()
+        mock_response.read.return_value = b'tiffdata'
+        mock_response.content_type = 'image/tiff'
+        mock_response.raise_for_status = MagicMock()
+        mock_get.return_value.__aenter__.return_value = mock_response
+
+        mock_instance = mock_anthropic_class.return_value
+        mock_instance.messages.create.return_value = MagicMock(
+            content=[MagicMock(text="No image seen")], stop_reason="end_turn"
+        )
+
+        base_context["current_message"]["image_url"] = "http://example.com/image.tiff"
+        base_context["history"] = [{"role": "user", "content": "Check this TIFF"}]
+
+        response, _ = await text_engine.generate_response(anthropic_config, base_context)
+        assert response == {"type": "text", "content": "No image seen"}
+
+        # Verify no image block was sent
+        call_args = mock_instance.messages.create.call_args[1]
+        last_msg = call_args['messages'][-1]
+        # content was converted to list (text part) but no image part added
+        assert isinstance(last_msg['content'], list)
+        assert all(block.get('type') != 'image' for block in last_msg['content'])
+
+
+class TestExtractSystemPrompt:
+    def test_merges_system_message_from_history(self, text_engine):
+        context = {
+            "persona_prompt": "Base prompt",
+            "history": [
+                {"role": "system", "content": "Extra system context"},
+                {"role": "user", "content": "Hello"}
+            ]
+        }
+        prompt, history = text_engine._extract_system_prompt(context)
+        assert prompt == "Base prompt\n\nExtra system context"
+        assert len(history) == 1
+        assert history[0]["role"] == "user"
+
+    def test_no_system_message_returns_persona_prompt(self, text_engine):
+        context = {
+            "persona_prompt": "Base prompt",
+            "history": [{"role": "user", "content": "Hello"}]
+        }
+        prompt, history = text_engine._extract_system_prompt(context)
+        assert prompt == "Base prompt"
+        assert len(history) == 1
+
+    def test_empty_history(self, text_engine):
+        context = {"persona_prompt": "Base prompt", "history": []}
+        prompt, history = text_engine._extract_system_prompt(context)
+        assert prompt == "Base prompt"
+        assert history == []
+
+
 class TestWebSearch:
     @pytest.mark.asyncio
     @patch('duckduckgo_search.DDGS')
