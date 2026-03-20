@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from typing import Optional, List, Dict, Any
+from typing import Optional, Dict, Any
 
 from config.global_config import (
     ZAMMAD_POLL_INTERVAL,

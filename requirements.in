@@ -1,0 +1,25 @@
+# Runtime dependencies — what the application needs to run
+
+# LLM providers
+anthropic
+openai
+google-genai
+
+# Async / networking
+aiohttp
+aiolimiter
+
+# Bot interfaces
+discord.py
+google-auth
+google-auth-oauthlib
+google-cloud-pubsub
+google-api-python-client  # googleapiclient
+
+# Utilities
+GitPython
+psutil
+python-dotenv
+requests
+duckduckgo_search
+tenacity

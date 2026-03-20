@@ -74,7 +74,6 @@ def resolve_redirect_url(redirect_url: str, max_retries: int = 3, initial_delay:
             logger.debug(f"Resolved {redirect_url} to {response.url} with final status {response.status_code} using HEAD.")
             return response.url
 
-
         except requests.exceptions.RequestException as e:
             logger.debug(f"Request error resolving redirect {redirect_url} using HEAD: {e}")
             return redirect_url
