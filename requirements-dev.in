@@ -1,0 +1,18 @@
+# Development and testing dependencies
+-r requirements.in
+
+# Testing
+pytest
+pytest-asyncio
+pytest-env
+pytest-order
+coverage
+
+# Code quality
+flake8
+mypy
+types-requests
+
+# Architecture tooling
+pydeps
+import-linter

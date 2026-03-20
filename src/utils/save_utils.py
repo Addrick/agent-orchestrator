@@ -77,7 +77,6 @@ def save_personas_to_file(personas: Dict[str, Any], file_path_override: Optional
 
 def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Convert a dictionary of Persona objects to a list of dictionaries for JSON serialization."""
-    from src.persona import Persona
     persona_list: List[Dict[str, Any]] = []
     for persona_name, persona in personas.items():
         persona_json: Dict[str, Any] = {

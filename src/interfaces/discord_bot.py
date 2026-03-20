@@ -4,12 +4,11 @@ import logging
 import re
 import discord
 import asyncio
-import typing
-import io  # Added for in-memory file handling
+import io
 from datetime import timedelta, datetime
-from typing import Optional, List, Any, Coroutine, Set
+from typing import Optional, List, Any
 
-from config.global_config import DISCORD_CHAR_LIMIT, DISCORD_STATUS_LIMIT, CHAT_LOG_LOCATION, DISCORD_DEBUG_CHANNEL, \
+from config.global_config import DISCORD_CHAR_LIMIT, DISCORD_STATUS_LIMIT, DISCORD_DEBUG_CHANNEL, \
     AMBIENT_LOGGING_CHANNELS, GLOBAL_CONTEXT_LIMIT, PENDING_CONFIRMATION_TIMEOUT
 from src.utils.message_utils import split_string_by_limit, cleanse_message_for_history
 from src.utils.save_utils import save_personas_to_file
@@ -183,7 +182,7 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                     # Create a file-like object in memory to send to Discord
                     file_buffer = io.BytesIO(file_content.encode('utf-8'))
                     discord_file = discord.File(fp=file_buffer, filename=filename)
-                    await message.channel.send(f"Here is the context dump:", file=discord_file)
+                    await message.channel.send("Here is the context dump:", file=discord_file)
 
                 elif response_type == ResponseType.PENDING_CONFIRMATION:
                     confirm_msg = await message.channel.send(response_text)

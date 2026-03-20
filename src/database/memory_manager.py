@@ -120,8 +120,8 @@ class MemoryManager:
         conn = self._get_connection()
         conn.execute(
             """
-            INSERT INTO User_Interactions 
-            (user_identifier, persona_name, channel, author_role, author_name, content, 
+            INSERT INTO User_Interactions
+            (user_identifier, persona_name, channel, author_role, author_name, content,
              timestamp, zammad_ticket_id, platform_message_id, server_id)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
