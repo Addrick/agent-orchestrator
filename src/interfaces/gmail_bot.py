@@ -17,7 +17,17 @@ from google.cloud import pubsub_v1
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from config.global_config import *
+from config.global_config import (
+    ALLOWED_SENDER_LIST,
+    BLOCK_EXTERNAL_SENDER_REPLIES,
+    CREDENTIALS_DIR,
+    GLOBAL_CONTEXT_LIMIT,
+    GMAIL_CREDENTIALS_FILE,
+    GMAIL_PROJECT_ID,
+    GMAIL_PUBSUB_SUBSCRIPTION_ID,
+    GMAIL_PUBSUB_TOPIC,
+    GMAIL_TOKEN_FILE,
+)
 from src.persona import ExecutionMode
 
 # Forward declaration for type hinting

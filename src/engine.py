@@ -24,7 +24,7 @@ import aiohttp
 import anthropic
 from openai import AsyncOpenAI, APIStatusError, APITimeoutError
 from google import genai
-from google.genai.types import GenerateContentConfig, Tool, GoogleSearch, Candidate, GroundingMetadata, \
+from google.genai.types import GenerateContentConfig, Tool, GoogleSearch, Candidate, \
     FunctionDeclaration, Part
 from src.utils.google_utils import process_grounding_metadata
 
@@ -193,7 +193,7 @@ class TextEngine:
                 await asyncio.sleep(EMPTY_RESPONSE_RETRY_DELAY)
 
         logger.error(f"LLM returned an empty or invalid response after {EMPTY_RESPONSE_RETRIES + 1} attempts.")
-        raise LLMCommunicationError(f"LLM provider returned an empty or invalid response after all retries.")
+        raise LLMCommunicationError("LLM provider returned an empty or invalid response after all retries.")
 
     async def _generate_openai_response(self, config: Dict[str, Any], context: Dict[str, Any],
                                         tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
@@ -261,7 +261,7 @@ class TextEngine:
                                         rate_limited=rate_limited) from e
         except Exception as e:
             logger.error(f"An unexpected OpenAI error occurred: {e}", exc_info=True)
-            raise LLMCommunicationError(f"An unexpected error occurred with the OpenAI API.",
+            raise LLMCommunicationError("An unexpected error occurred with the OpenAI API.",
                                         api_payload=api_params) from e
 
     async def _generate_anthropic_response(self, config: Dict[str, Any], context: Dict[str, Any],
@@ -345,7 +345,7 @@ class TextEngine:
                                         rate_limited=rate_limited) from e
         except Exception as e:
             logger.error(f"An unexpected Anthropic error occurred: {e}", exc_info=True)
-            raise LLMCommunicationError(f"An unexpected error occurred with the Anthropic API.",
+            raise LLMCommunicationError("An unexpected error occurred with the Anthropic API.",
                                         api_payload=api_params) from e
 
     async def _generate_google_response(self, config: Dict[str, Any], context: Dict[str, Any],

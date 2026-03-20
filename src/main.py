@@ -14,7 +14,14 @@ from src.clients.zammad_client import ZammadClient
 from src.interfaces.discord_bot import create_discord_bot
 from src.interfaces.gmail_bot import create_gmail_bot
 from src.interfaces.zammad_bot import create_zammad_bot  # Added import
-from config.global_config import *
+from config.global_config import (
+    CHAT_LOG_LOCATION,
+    DISCORD_BOT,
+    GMAIL_BOT,
+    MEMORY_DATABASE_FILE,
+    UPDATE_MODELS_ON_STARTUP,
+    ZAMMAD_BOT_ENABLED,
+)
 from dotenv import load_dotenv
 from src.utils.model_utils import get_model_list
 

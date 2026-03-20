@@ -6,7 +6,6 @@ import re
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from config.global_config import (
-    DEFAULT_CONTEXT_LIMIT,
     DEFAULT_MODEL_NAME,
     DEFAULT_PERSONA,
     MODEL_SELECTOR_PERSONA_NAME,

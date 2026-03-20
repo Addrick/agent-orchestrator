@@ -3,7 +3,7 @@
 import pytest
 import discord
 from unittest.mock import MagicMock, AsyncMock, patch, PropertyMock
-from datetime import datetime
+from datetime import datetime, timezone
 import io
 from discord import File
 
@@ -62,12 +62,12 @@ def mock_message():
     author = MagicMock(id=123, display_name="TestAuthor")
     message = MagicMock(
         id=1001, author=author, content="vocal hello there", channel=channel,
-        attachments=[], created_at=datetime.utcnow(),
+        attachments=[], created_at=datetime.now(timezone.utc),
         add_reaction=AsyncMock()
     )
     mock_bot_reply = AsyncMock(spec=discord.Message)
     mock_bot_reply.id = 2002
-    mock_bot_reply.created_at = datetime.utcnow()
+    mock_bot_reply.created_at = datetime.now(timezone.utc)
     channel.send.return_value = mock_bot_reply
     return message
 
