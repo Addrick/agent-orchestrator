@@ -10,7 +10,7 @@
             "top_p": null,
             "top_k": null,
             "display_name_in_chat": false,
-            "execution_mode": "SILENT_ANALYSIS",
+            "execution_mode": "AUTONOMOUS",
             "enabled_tools": ["google_grounding_search"],
             "memory_mode": "CHANNEL_ISOLATED"
         },
@@ -24,7 +24,7 @@
             "top_p": null,
             "top_k": null,
             "display_name_in_chat": true,
-            "execution_mode": "SILENT_ANALYSIS",
+            "execution_mode": "AUTONOMOUS",
             "enabled_tools": [],
             "memory_mode": "CHANNEL_ISOLATED"
         },
@@ -38,7 +38,7 @@
             "top_p": null,
             "top_k": null,
             "display_name_in_chat": false,
-            "execution_mode": "SILENT_ANALYSIS",
+            "execution_mode": "AUTONOMOUS",
             "enabled_tools": ["google_grounding_search"],
             "memory_mode": "CHANNEL_ISOLATED"
         },
@@ -52,7 +52,7 @@
             "top_p": null,
             "top_k": null,
             "display_name_in_chat": false,
-            "execution_mode": "SILENT_ANALYSIS",
+            "execution_mode": "AUTONOMOUS",
             "enabled_tools": [],
             "memory_mode": "CHANNEL_ISOLATED"
         },
@@ -66,7 +66,7 @@
             "top_p": null,
             "top_k": null,
             "display_name_in_chat": false,
-            "execution_mode": "SILENT_ANALYSIS",
+            "execution_mode": "AUTONOMOUS",
             "enabled_tools": [],
             "memory_mode": "CHANNEL_ISOLATED"
         },
@@ -80,7 +80,7 @@
             "top_p": null,
             "top_k": null,
             "display_name_in_chat": false,
-            "execution_mode": "SILENT_ANALYSIS",
+            "execution_mode": "AUTONOMOUS",
             "enabled_tools": [
                 "*"
             ],
@@ -96,7 +96,7 @@
             "top_p": null,
             "top_k": null,
             "display_name_in_chat": false,
-            "execution_mode": "ASSISTED_DISPATCH",
+            "execution_mode": "CONFIRM",
             "enabled_tools": [
                 "*"
             ],

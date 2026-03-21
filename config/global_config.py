@@ -55,11 +55,6 @@ UPDATE_MODELS_ON_STARTUP = True
 DISCORD_CHAR_LIMIT = 2000
 DISCORD_STATUS_LIMIT = 128
 
-GEMINI_EMPTY_RESPONSE_RETRIES = 2  # Number of times to retry on a valid but empty response
-# The number of times to retry any LLM provider on a valid but empty response
-EMPTY_RESPONSE_RETRIES = 2
-# The short delay (in seconds) between empty response retries
-EMPTY_RESPONSE_RETRY_DELAY = 0.5
 # Tool use limit to avoid infinite loops
 MAX_TOOL_CALLS = 5
 # Max cached API request payloads (for dump commands); FIFO eviction beyond this

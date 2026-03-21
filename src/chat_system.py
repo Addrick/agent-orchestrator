@@ -19,7 +19,7 @@ from src.engine import LLMCommunicationError, TextEngine
 from src.message_handler import BotLogic
 from src.persona import Persona, ExecutionMode, MemoryMode
 from src.tools.definitions import WRITE_TOOLS, ZAMMAD_TOOLS, MODEL_INCOMPATIBLE_TOOLS
-from src.tools.tool_manager import ToolManager
+from src.tools.tool_manager import ToolManager, ZammadToolHandler, WebSearchHandler
 from src.utils.model_utils import get_model_list
 from src.utils.save_utils import load_personas_from_file, save_personas_to_file
 
@@ -92,12 +92,15 @@ class RequestContext:
 
 
 class ChatSystem:
-    def __init__(self, memory_manager: MemoryManager, text_engine: TextEngine, zammad_client: ZammadClient) -> None:
+    def __init__(self, memory_manager: MemoryManager, text_engine: TextEngine,
+                 zammad_client: ZammadClient) -> None:
         self.personas: Dict[str, Persona] = load_personas_from_file() or {}
         self.memory_manager: MemoryManager = memory_manager
         self.text_engine: TextEngine = text_engine
         self.zammad_client: ZammadClient = zammad_client
-        self.tool_manager: ToolManager = ToolManager(zammad_client)
+        self.tool_manager: ToolManager = ToolManager()
+        ZammadToolHandler(zammad_client).register(self.tool_manager)
+        WebSearchHandler().register(self.tool_manager)
         self.bot_logic: BotLogic = BotLogic(self)
         self.last_api_requests: Dict[str, Dict[str, Optional[Dict[str, Any]]]] = defaultdict(dict)
         self.models_available: Dict[str, Any] = get_model_list() or {}

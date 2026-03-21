@@ -2,6 +2,7 @@
 
 import sqlite3
 import logging
+import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from pathlib import Path
@@ -36,6 +37,7 @@ class MemoryManager:
         """
         self.db_path: str = db_path if db_path is not None else str(DATABASE_FILE)
         self._conn: Optional[sqlite3.Connection] = None
+        self._lock: threading.RLock = threading.RLock()
         if self.db_path != ':memory:':
             DB_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -63,53 +65,75 @@ class MemoryManager:
 
     def create_schema(self) -> None:
         """Creates the database schema and adds the server_id column if it doesn't exist."""
-        conn = self._get_connection()
-        cursor = conn.cursor()
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
 
-        # Step 1: Ensure the tables exist first.
-        schema_sql = """
-        CREATE TABLE IF NOT EXISTS User_Interactions (
-            interaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_identifier TEXT NOT NULL,
-            persona_name TEXT NOT NULL,
-            channel TEXT NOT NULL,
-            author_role TEXT NOT NULL CHECK(author_role IN ('user', 'assistant', 'system')),
-            author_name TEXT,
-            content TEXT,
-            timestamp TIMESTAMP NOT NULL,
-            zammad_ticket_id INTEGER,
-            platform_message_id TEXT
-        );
-        CREATE INDEX IF NOT EXISTS idx_channel_timestamp
-        ON User_Interactions (channel, timestamp);
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_platform_message_id
-        ON User_Interactions (platform_message_id);
+            # Step 1: Ensure the tables exist first.
+            schema_sql = """
+            CREATE TABLE IF NOT EXISTS User_Interactions (
+                interaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_identifier TEXT NOT NULL,
+                persona_name TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                author_role TEXT NOT NULL CHECK(author_role IN ('user', 'assistant', 'system')),
+                author_name TEXT,
+                content TEXT,
+                timestamp TIMESTAMP NOT NULL,
+                zammad_ticket_id INTEGER,
+                platform_message_id TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_channel_timestamp
+            ON User_Interactions (channel, timestamp);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_platform_message_id
+            ON User_Interactions (platform_message_id);
+            CREATE INDEX IF NOT EXISTS idx_zammad_ticket_id
+            ON User_Interactions (zammad_ticket_id);
+            CREATE INDEX IF NOT EXISTS idx_persona_timestamp
+            ON User_Interactions (persona_name, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_user_persona
+            ON User_Interactions (user_identifier, persona_name);
 
-        CREATE TABLE IF NOT EXISTS Suppressed_Interactions (
-            suppression_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            interaction_id INTEGER NOT NULL UNIQUE,
-            suppressed_at TIMESTAMP NOT NULL,
-            FOREIGN KEY (interaction_id) REFERENCES User_Interactions(interaction_id) ON DELETE CASCADE
-        );
-        """
-        conn.executescript(schema_sql)
+            CREATE TABLE IF NOT EXISTS Suppressed_Interactions (
+                suppression_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                interaction_id INTEGER NOT NULL UNIQUE,
+                suppressed_at TIMESTAMP NOT NULL,
+                FOREIGN KEY (interaction_id) REFERENCES User_Interactions(interaction_id) ON DELETE CASCADE
+            );
 
-        # Step 2: Now that the table is guaranteed to exist, check for and add the new column.
-        cursor.execute("PRAGMA table_info(User_Interactions)")
-        columns = [row['name'] for row in cursor.fetchall()]
+            CREATE TABLE IF NOT EXISTS Agent_Actions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_name TEXT NOT NULL,
+                action_type TEXT NOT NULL,
+                trigger_context TEXT,
+                action_payload TEXT,
+                outcome TEXT,
+                outcome_payload TEXT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_agent_name_timestamp
+            ON Agent_Actions (agent_name, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_agent_action_type
+            ON Agent_Actions (agent_name, action_type);
+            """
+            conn.executescript(schema_sql)
 
-        if 'server_id' not in columns:
-            conn.execute("ALTER TABLE User_Interactions ADD COLUMN server_id TEXT")
-            logger.info("Added 'server_id' column to User_Interactions table.")
+            # Step 2: Now that the table is guaranteed to exist, check for and add the new column.
+            cursor.execute("PRAGMA table_info(User_Interactions)")
+            columns = [row['name'] for row in cursor.fetchall()]
 
-        # Create any new indexes that might be needed for the new column
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_server_id_timestamp
-            ON User_Interactions (server_id, timestamp);
-        """)
+            if 'server_id' not in columns:
+                conn.execute("ALTER TABLE User_Interactions ADD COLUMN server_id TEXT")
+                logger.info("Added 'server_id' column to User_Interactions table.")
 
-        conn.commit()
-        logger.info("User memory database schema created or verified successfully.")
+            # Create any new indexes that might be needed for the new column
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_server_id_timestamp
+                ON User_Interactions (server_id, timestamp);
+            """)
+
+            conn.commit()
+            logger.info("User memory database schema created or verified successfully.")
 
     def log_message(self, user_identifier: str, persona_name: str, channel: str,
                     author_role: str, author_name: Optional[str], content: str,
@@ -117,157 +141,218 @@ class MemoryManager:
                     platform_message_id: Optional[str] = None,
                     zammad_ticket_id: Optional[int] = None) -> None:
         """Logs a single message with its author's role and name."""
-        conn = self._get_connection()
-        conn.execute(
-            """
-            INSERT INTO User_Interactions
-            (user_identifier, persona_name, channel, author_role, author_name, content,
-             timestamp, zammad_ticket_id, platform_message_id, server_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (user_identifier, persona_name, channel, author_role, author_name, content,
-             timestamp, zammad_ticket_id, platform_message_id, server_id)
-        )
-        conn.commit()
+        with self._lock:
+            conn = self._get_connection()
+            conn.execute(
+                """
+                INSERT INTO User_Interactions
+                (user_identifier, persona_name, channel, author_role, author_name, content,
+                 timestamp, zammad_ticket_id, platform_message_id, server_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (user_identifier, persona_name, channel, author_role, author_name, content,
+                 timestamp, zammad_ticket_id, platform_message_id, server_id)
+            )
+            conn.commit()
 
     def suppress_message_by_platform_id(self, platform_message_id: str) -> bool:
         """Flags a message to be ignored in future context based on its platform ID."""
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT interaction_id FROM User_Interactions WHERE platform_message_id = ?",
-                       (platform_message_id,))
-        row = cursor.fetchone()
-        if not row: return False
-        interaction_id = row['interaction_id']
-        now = datetime.now()
-        try:
-            cursor.execute("INSERT INTO Suppressed_Interactions (interaction_id, suppressed_at) VALUES (?, ?)",
-                           (interaction_id, now))
-            conn.commit()
-            return True
-        except sqlite3.IntegrityError:
-            return False
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT interaction_id FROM User_Interactions WHERE platform_message_id = ?",
+                           (platform_message_id,))
+            row = cursor.fetchone()
+            if not row:
+                return False
+            interaction_id = row['interaction_id']
+            now = datetime.now()
+            try:
+                cursor.execute("INSERT INTO Suppressed_Interactions (interaction_id, suppressed_at) VALUES (?, ?)",
+                               (interaction_id, now))
+                conn.commit()
+                return True
+            except sqlite3.IntegrityError:
+                return False
 
     def _get_suppressed_ids(self) -> List[int]:
+        """Must be called while self._lock is held."""
         cursor = self._get_connection().cursor()
         cursor.execute("SELECT interaction_id FROM Suppressed_Interactions")
         return [row['interaction_id'] for row in cursor.fetchall()]
 
-    def get_personal_history(self, user_identifier: str, persona_name: str, limit: Optional[int] = None) -> List[
-        Dict[str, Any]]:
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        suppressed_ids = self._get_suppressed_ids()
+    def get_personal_history(self, user_identifier: str, persona_name: str,
+                             limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            suppressed_ids = self._get_suppressed_ids()
 
-        query = "SELECT author_role, author_name, content FROM User_Interactions WHERE user_identifier = ? AND persona_name = ?"
-        params: List[Any] = [user_identifier, persona_name]
+            query = ("SELECT author_role, author_name, content FROM User_Interactions"
+                     " WHERE user_identifier = ? AND persona_name = ?")
+            params: List[Any] = [user_identifier, persona_name]
 
-        if suppressed_ids:
-            placeholders = ', '.join('?' for _ in suppressed_ids)
-            query += f" AND interaction_id NOT IN ({placeholders})"
-            params.extend(suppressed_ids)
+            if suppressed_ids:
+                placeholders = ', '.join('?' for _ in suppressed_ids)
+                query += f" AND interaction_id NOT IN ({placeholders})"
+                params.extend(suppressed_ids)
 
-        query += " ORDER BY timestamp DESC"
-        if isinstance(limit, int):
-            query += " LIMIT ?"
-            params.append(limit)
+            query += " ORDER BY timestamp DESC"
+            if isinstance(limit, int):
+                query += " LIMIT ?"
+                params.append(limit)
 
-        cursor.execute(query, params)
-        rows: List[sqlite3.Row] = cursor.fetchall()
-        return [dict(row) for row in reversed(rows)]
+            cursor.execute(query, params)
+            rows: List[sqlite3.Row] = cursor.fetchall()
+            return [dict(row) for row in reversed(rows)]
 
     def get_ticket_history(self, ticket_id: int, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        suppressed_ids = self._get_suppressed_ids()
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            suppressed_ids = self._get_suppressed_ids()
 
-        query = "SELECT author_role, author_name, content FROM User_Interactions WHERE zammad_ticket_id = ?"
-        params: List[Any] = [ticket_id]
+            query = ("SELECT author_role, author_name, content FROM User_Interactions"
+                     " WHERE zammad_ticket_id = ?")
+            params: List[Any] = [ticket_id]
 
-        if suppressed_ids:
-            placeholders = ', '.join('?' for _ in suppressed_ids)
-            query += f" AND interaction_id NOT IN ({placeholders})"
-            params.extend(suppressed_ids)
+            if suppressed_ids:
+                placeholders = ', '.join('?' for _ in suppressed_ids)
+                query += f" AND interaction_id NOT IN ({placeholders})"
+                params.extend(suppressed_ids)
 
-        query += " ORDER BY timestamp DESC"
-        if isinstance(limit, int):
-            query += " LIMIT ?"
-            params.append(limit)
+            query += " ORDER BY timestamp DESC"
+            if isinstance(limit, int):
+                query += " LIMIT ?"
+                params.append(limit)
 
-        cursor.execute(query, params)
-        rows: List[sqlite3.Row] = cursor.fetchall()
-        return [dict(row) for row in reversed(rows)]
+            cursor.execute(query, params)
+            rows: List[sqlite3.Row] = cursor.fetchall()
+            return [dict(row) for row in reversed(rows)]
 
     def get_channel_history(self, channel: str, persona_name: str, server_id: Optional[str] = None,
                             limit: Optional[int] = None) -> List[Dict[str, Any]]:
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        suppressed_ids = self._get_suppressed_ids()
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            suppressed_ids = self._get_suppressed_ids()
 
-        query = "SELECT author_role, author_name, content FROM User_Interactions WHERE channel = ? AND persona_name = ?"
-        params: List[Any] = [channel, persona_name]
+            query = ("SELECT author_role, author_name, content FROM User_Interactions"
+                     " WHERE channel = ? AND persona_name = ?")
+            params: List[Any] = [channel, persona_name]
 
-        if server_id:
-            query += " AND server_id = ?"
-            params.append(server_id)
-        else:
-            query += " AND server_id IS NULL"
+            if server_id:
+                query += " AND server_id = ?"
+                params.append(server_id)
+            else:
+                query += " AND server_id IS NULL"
 
-        if suppressed_ids:
-            placeholders = ', '.join('?' for _ in suppressed_ids)
-            query += f" AND interaction_id NOT IN ({placeholders})"
-            params.extend(suppressed_ids)
+            if suppressed_ids:
+                placeholders = ', '.join('?' for _ in suppressed_ids)
+                query += f" AND interaction_id NOT IN ({placeholders})"
+                params.extend(suppressed_ids)
 
-        query += " ORDER BY timestamp DESC"
-        if isinstance(limit, int):
-            query += " LIMIT ?"
-            params.append(limit)
+            query += " ORDER BY timestamp DESC"
+            if isinstance(limit, int):
+                query += " LIMIT ?"
+                params.append(limit)
 
-        cursor.execute(query, params)
-        rows: List[sqlite3.Row] = cursor.fetchall()
-        return [dict(row) for row in reversed(rows)]
+            cursor.execute(query, params)
+            rows: List[sqlite3.Row] = cursor.fetchall()
+            return [dict(row) for row in reversed(rows)]
 
-    def get_server_history(self, server_id: str, persona_name: str, limit: Optional[int] = None) -> List[
-        Dict[str, Any]]:
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        suppressed_ids = self._get_suppressed_ids()
+    def get_server_history(self, server_id: str, persona_name: str,
+                           limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            suppressed_ids = self._get_suppressed_ids()
 
-        query = "SELECT author_role, author_name, content FROM User_Interactions WHERE server_id = ? AND persona_name = ?"
-        params: List[Any] = [server_id, persona_name]
+            query = ("SELECT author_role, author_name, content FROM User_Interactions"
+                     " WHERE server_id = ? AND persona_name = ?")
+            params: List[Any] = [server_id, persona_name]
 
-        if suppressed_ids:
-            placeholders = ', '.join('?' for _ in suppressed_ids)
-            query += f" AND interaction_id NOT IN ({placeholders})"
-            params.extend(suppressed_ids)
+            if suppressed_ids:
+                placeholders = ', '.join('?' for _ in suppressed_ids)
+                query += f" AND interaction_id NOT IN ({placeholders})"
+                params.extend(suppressed_ids)
 
-        query += " ORDER BY timestamp DESC"
-        if isinstance(limit, int):
-            query += " LIMIT ?"
-            params.append(limit)
+            query += " ORDER BY timestamp DESC"
+            if isinstance(limit, int):
+                query += " LIMIT ?"
+                params.append(limit)
 
-        cursor.execute(query, params)
-        rows: List[sqlite3.Row] = cursor.fetchall()
-        return [dict(row) for row in reversed(rows)]
+            cursor.execute(query, params)
+            rows: List[sqlite3.Row] = cursor.fetchall()
+            return [dict(row) for row in reversed(rows)]
 
     def get_global_history(self, persona_name: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        suppressed_ids = self._get_suppressed_ids()
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            suppressed_ids = self._get_suppressed_ids()
 
-        query = "SELECT author_role, author_name, content FROM User_Interactions WHERE persona_name = ?"
-        params: List[Any] = [persona_name]
+            query = ("SELECT author_role, author_name, content FROM User_Interactions"
+                     " WHERE persona_name = ?")
+            params: List[Any] = [persona_name]
 
-        if suppressed_ids:
-            placeholders = ', '.join('?' for _ in suppressed_ids)
-            query += f" AND interaction_id NOT IN ({placeholders})"
-            params.extend(suppressed_ids)
+            if suppressed_ids:
+                placeholders = ', '.join('?' for _ in suppressed_ids)
+                query += f" AND interaction_id NOT IN ({placeholders})"
+                params.extend(suppressed_ids)
 
-        query += " ORDER BY timestamp DESC"
-        if isinstance(limit, int):
-            query += " LIMIT ?"
+            query += " ORDER BY timestamp DESC"
+            if isinstance(limit, int):
+                query += " LIMIT ?"
+                params.append(limit)
+
+            cursor.execute(query, params)
+            rows: List[sqlite3.Row] = cursor.fetchall()
+            return [dict(row) for row in reversed(rows)]
+
+    # --- Agent Action Methods ---
+
+    def log_agent_action(self, agent_name: str, action_type: str,
+                         trigger_context: Optional[str] = None,
+                         action_payload: Optional[str] = None,
+                         outcome: Optional[str] = None,
+                         outcome_payload: Optional[str] = None) -> int:
+        """Logs an agent action and returns the row id."""
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                """INSERT INTO Agent_Actions
+                   (agent_name, action_type, trigger_context, action_payload, outcome, outcome_payload)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (agent_name, action_type, trigger_context, action_payload, outcome, outcome_payload)
+            )
+            conn.commit()
+            return cursor.lastrowid  # type: ignore[return-value]
+
+    def update_agent_action_outcome(self, action_id: int, outcome: str,
+                                    outcome_payload: Optional[str] = None) -> None:
+        """Updates the outcome of a previously logged agent action."""
+        with self._lock:
+            conn = self._get_connection()
+            conn.execute(
+                "UPDATE Agent_Actions SET outcome = ?, outcome_payload = ? WHERE id = ?",
+                (outcome, outcome_payload, action_id)
+            )
+            conn.commit()
+
+    def get_agent_actions(self, agent_name: str, limit: int = 20,
+                          action_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Returns recent actions for an agent, newest first."""
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            query = "SELECT * FROM Agent_Actions WHERE agent_name = ?"
+            params: List[Any] = [agent_name]
+            if action_type:
+                query += " AND action_type = ?"
+                params.append(action_type)
+            query += " ORDER BY timestamp DESC LIMIT ?"
             params.append(limit)
-
-        cursor.execute(query, params)
-        rows: List[sqlite3.Row] = cursor.fetchall()
-        return [dict(row) for row in reversed(rows)]
+            cursor.execute(query, params)
+            return [dict(row) for row in cursor.fetchall()]
