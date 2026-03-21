@@ -65,14 +65,13 @@ class PendingConfirmation:
 
 class ChatSystem:
     def __init__(self, memory_manager: MemoryManager, text_engine: TextEngine,
-                 zammad_client: Optional[ZammadClient] = None) -> None:
+                 zammad_client: ZammadClient) -> None:
         self.personas: Dict[str, Persona] = load_personas_from_file() or {}
         self.memory_manager: MemoryManager = memory_manager
         self.text_engine: TextEngine = text_engine
-        self.zammad_client: Optional[ZammadClient] = zammad_client
+        self.zammad_client: ZammadClient = zammad_client
         self.tool_manager: ToolManager = ToolManager()
-        if zammad_client:
-            ZammadToolHandler(zammad_client).register(self.tool_manager)
+        ZammadToolHandler(zammad_client).register(self.tool_manager)
         WebSearchHandler().register(self.tool_manager)
         self.bot_logic: BotLogic = BotLogic(self)
         self.last_api_requests: Dict[str, Dict[str, Optional[Dict[str, Any]]]] = defaultdict(dict)
