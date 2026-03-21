@@ -71,5 +71,5 @@ def restart_app() -> None:
 
 
 def stop_app() -> None:
-    print("Stopping the program...")
+    logger.info("Stopping the program...")
     sys.exit()

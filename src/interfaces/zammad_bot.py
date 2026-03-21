@@ -271,7 +271,8 @@ class ZammadBot:
                     arts = await asyncio.to_thread(self.zammad_client.get_ticket_articles, ticket_id=t['id'])
                     body = "\n---\n".join([a.get('body', '') for a in arts]) if arts else "No content"
                     return {"id": t['id'], "title": t['title'], "body": body, "type": source_type}
-                except Exception:
+                except Exception as e:
+                    logger.warning(f"Failed to fetch articles for ticket {t['id']}: {e}")
                     return None
 
             tasks = [fetch_body(t, "Global") for t in global_tickets] + [fetch_body(t, "User") for t in user_tickets]
@@ -378,7 +379,6 @@ class ZammadBot:
                         impersonate_email=ZAMMAD_BOT_EMAIL
                     )
                 except Exception as e:
-                    print(f"[ZammadBot] Impersonation failed: {e}")
                     logger.warning(
                         f"Failed to post note as {ZAMMAD_BOT_EMAIL}: {e}. Falling back to API token identity.")
                     await asyncio.to_thread(
@@ -397,7 +397,6 @@ class ZammadBot:
                 logger.info(f"Ticket {ticket_id} triaged successfully.")
 
         except Exception as e:
-            print(f"[ZammadBot] Critical Error: {e}")
             logger.error(f"Error processing ticket {ticket_id}: {e}", exc_info=True)
 
 
