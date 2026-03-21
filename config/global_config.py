@@ -130,6 +130,15 @@ TRIAGE_FILTER_NAME = "triage_filter"
 ZAMMAD_BOT_EMAIL = "autotriage@bot.local"
 ZAMMAD_BOT_FIRSTNAME = "autotriage"
 ZAMMAD_BOT_LASTNAME = "LLM"
+
+# =============================================================================
+# --- Dispatch Agent Configuration ---
+# =============================================================================
+DISPATCH_ENABLED = False
+DISPATCH_POLL_INTERVAL = 30
+DISPATCH_TRIAGE_TAG = ZAMMAD_TRIAGE_TAG  # tickets must have this tag
+DISPATCH_DISPATCHED_TAG = "ai_dispatched"  # tag applied after dispatch
+DISPATCH_PERSONA_NAME = "dispatch_analyst"
 # =============================================================================
 # --- Local LLM Configuration ---
 # =============================================================================

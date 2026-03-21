@@ -83,6 +83,20 @@
       "execution_mode": "AUTONOMOUS",
       "enabled_tools": [],
       "memory_mode": "global"
+    },
+    {
+      "name": "dispatch_analyst",
+      "model_name": "gemma-3-27b-it",
+      "prompt": "You are a dispatch decision agent for an IT support system. Given a triaged ticket with its AI triage note, decide how to route it.\n\nRespond in this exact JSON format:\n{\n  \"priority\": \"low\" | \"medium\" | \"high\" | \"critical\",\n  \"notify_channel\": \"discord\" | \"zammad\",\n  \"summary\": \"One-sentence summary for the notification\",\n  \"reasoning\": \"Brief explanation of your routing decision\"\n}\n\nRouting guidelines:\n- Critical/high priority: hardware failures, security incidents, system outages → discord (immediate DM)\n- Medium priority: software issues, account problems, recurring issues → zammad (internal note)\n- Low priority: questions, how-to requests, minor issues → zammad (internal note)\n- If the triage note mentions a pattern of recurring issues for the user, escalate priority by one level\n\nRespond with ONLY the JSON object, no other text.",
+      "context_length": 0,
+      "response_token_limit": 300,
+      "temperature": 0.0,
+      "top_p": null,
+      "top_k": null,
+      "display_name_in_chat": false,
+      "execution_mode": "AUTONOMOUS",
+      "enabled_tools": [],
+      "memory_mode": "global"
     }
   ]
 }

@@ -110,7 +110,7 @@ async def test_confirm_mode_auto_executes_read_only_tools(mocked_chat_system):
     chat_system, _, _ = mocked_chat_system
     persona = chat_system.personas['test_persona']
     persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_zammad_aware(True)
+    persona.set_service_bindings(["zammad"])
 
     tool_call = ({'type': 'tool_calls', 'calls': [
         {'id': 'call_1', 'name': 'search_tickets', 'arguments': {'query': 'state.name:open'}}]}, {})
@@ -127,15 +127,15 @@ async def test_confirm_mode_auto_executes_read_only_tools(mocked_chat_system):
 
 
 # =============================================================================
-# ZAMMAD_AWARE TOOL FILTERING TESTS
+# SERVICE BINDING TOOL FILTERING TESTS
 # =============================================================================
 
 @pytest.mark.asyncio
-async def test_zammad_aware_false_excludes_zammad_tools(mocked_chat_system):
-    """zammad_aware=False: Zammad tools are filtered out of tools_for_llm even with enabled_tools=['*']."""
+async def test_no_service_bindings_excludes_service_tools(mocked_chat_system):
+    """No service_bindings: service-bound tools are filtered out even with enabled_tools=['*']."""
     chat_system, _, _ = mocked_chat_system
     persona = chat_system.personas['test_persona']
-    persona.set_zammad_aware(False)
+    persona.set_service_bindings([])
 
     zammad_tool_names = {'get_ticket_details', 'update_ticket', 'add_note_to_ticket',
                          'create_ticket', 'search_tickets', 'search_user', 'create_user',
@@ -151,11 +151,11 @@ async def test_zammad_aware_false_excludes_zammad_tools(mocked_chat_system):
 
 
 @pytest.mark.asyncio
-async def test_zammad_aware_true_includes_zammad_tools(mocked_chat_system):
-    """zammad_aware=True: Zammad tools are included in tools_for_llm."""
+async def test_zammad_service_binding_includes_zammad_tools(mocked_chat_system):
+    """service_bindings=["zammad"]: Zammad tools are included in tools_for_llm."""
     chat_system, _, _ = mocked_chat_system
     persona = chat_system.personas['test_persona']
-    persona.set_zammad_aware(True)
+    persona.set_service_bindings(["zammad"])
 
     with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
                       return_value=({'type': 'text', 'content': 'ok'}, {})) as mock_llm_call:

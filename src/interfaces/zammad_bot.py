@@ -18,50 +18,23 @@ from config.global_config import (
     ZAMMAD_BOT_FIRSTNAME,
     ZAMMAD_BOT_LASTNAME
 )
+from src.agents.base import AgentLoop
 from src.chat_system import ChatSystem
-from src.persona import Persona
-from src.utils.save_utils import load_system_personas_from_file
 
 logger = logging.getLogger(__name__)
 
 
-class ZammadBot:
-    def __init__(self, chat_system: ChatSystem):
-        self.chat_system = chat_system
+class ZammadBot(AgentLoop):
+
+    poll_interval: float = ZAMMAD_POLL_INTERVAL
+
+    def __init__(self, chat_system: ChatSystem) -> None:
+        super().__init__(chat_system)
+        if chat_system.zammad_client is None:
+            raise RuntimeError("ZammadBot requires a ZammadClient on ChatSystem")
         self.zammad_client = chat_system.zammad_client
-        self._shutdown_event = asyncio.Event()
 
-        # Load and inject system personas into the ChatSystem
-        system_personas = load_system_personas_from_file()
-        if system_personas:
-            self.chat_system.personas.update(system_personas)
-            logger.info(f"Injected {len(system_personas)} system personas into ChatSystem.")
-        else:
-            logger.warning("No system personas loaded. ZammadBot may fail if personas are missing.")
-
-    async def start(self) -> None:
-        """Starts the polling loop."""
-        logger.info("Zammad Bot started. Polling for new tickets...")
-
-        # Check if the bot's Zammad user exists (required for authoring notes)
-        await self._check_bot_identity()
-
-        while not self._shutdown_event.is_set():
-            try:
-                await self._poll()
-            except Exception as e:
-                logger.error(f"Error in Zammad polling loop: {e}", exc_info=True)
-
-            try:
-                await asyncio.wait_for(self._shutdown_event.wait(), timeout=ZAMMAD_POLL_INTERVAL)
-            except asyncio.TimeoutError:
-                continue  # Timeout reached, loop again
-
-    def stop(self) -> None:
-        """Signals the bot to stop polling."""
-        self._shutdown_event.set()
-
-    async def _check_bot_identity(self) -> None:
+    async def _on_start(self) -> None:
         """
         Checks if the Zammad user for the bot exists.
         Logs instructions if missing, as manual setup is required for permissions.
@@ -100,14 +73,6 @@ class ZammadBot:
             if self._shutdown_event.is_set():
                 break
             await self._process_ticket(ticket['id'])
-
-    @staticmethod
-    def _build_llm_context(persona: Persona, prompt: str) -> Dict[str, Any]:
-        return {
-            "persona_prompt": persona.get_prompt(),
-            "history": [{"role": "user", "content": prompt}],
-            "current_message": {"text": prompt, "image_url": None}
-        }
 
     async def _get_search_keywords(self, title: str, body: str) -> Optional[str]:
         """
