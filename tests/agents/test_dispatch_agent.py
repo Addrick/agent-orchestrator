@@ -16,8 +16,12 @@ def mock_chat_system():
     cs.memory_manager.log_agent_action = MagicMock(return_value=1)
     cs.memory_manager.update_agent_action_outcome = MagicMock()
     cs.personas = {}
-    cs.zammad_client = MagicMock()
     return cs
+
+
+@pytest.fixture
+def mock_zammad_client():
+    return MagicMock()
 
 
 @pytest.fixture
@@ -28,30 +32,22 @@ def notification_router():
 
 @pytest.fixture
 @patch('src.agents.base.load_system_personas_from_file', return_value={})
-def dispatch_agent(mock_load, mock_chat_system, notification_router):
-    return DispatchAgent(mock_chat_system, notification_router)
+def dispatch_agent(mock_load, mock_chat_system, mock_zammad_client, notification_router):
+    return DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
 
 
 class TestDispatchAgentInit:
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
-    def test_requires_zammad_client(self, mock_load):
-        cs = MagicMock()
-        cs.zammad_client = None
-        router = NotificationRouter()
-        with pytest.raises(RuntimeError, match="requires a ZammadClient"):
-            DispatchAgent(cs, router)
-
-    @patch('src.agents.base.load_system_personas_from_file', return_value={})
-    def test_init_stores_references(self, mock_load, mock_chat_system, notification_router):
-        agent = DispatchAgent(mock_chat_system, notification_router)
-        assert agent.zammad_client is mock_chat_system.zammad_client
+    def test_init_stores_references(self, mock_load, mock_chat_system, mock_zammad_client, notification_router):
+        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
+        assert agent.zammad_client is mock_zammad_client
         assert agent.notification_router is notification_router
 
 
 class TestExtractTriageNote:
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
-    def test_finds_triage_note(self, mock_load, mock_chat_system, notification_router):
-        agent = DispatchAgent(mock_chat_system, notification_router)
+    def test_finds_triage_note(self, mock_load, mock_chat_system, mock_zammad_client, notification_router):
+        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
         articles = [
             {"body": "User reported issue", "internal": False},
             {"body": "AI analysis\n[ AI TRIAGE CONTEXT DUMP ]\nKeywords: test", "internal": True},
@@ -60,8 +56,8 @@ class TestExtractTriageNote:
         assert "AI TRIAGE CONTEXT DUMP" in result
 
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
-    def test_finds_recommended_action_note(self, mock_load, mock_chat_system, notification_router):
-        agent = DispatchAgent(mock_chat_system, notification_router)
+    def test_finds_recommended_action_note(self, mock_load, mock_chat_system, mock_zammad_client, notification_router):
+        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
         articles = [
             {"body": "Recommended Action: escalate to admin", "internal": True},
         ]
@@ -69,8 +65,8 @@ class TestExtractTriageNote:
         assert "Recommended Action" in result
 
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
-    def test_fallback_to_last_article(self, mock_load, mock_chat_system, notification_router):
-        agent = DispatchAgent(mock_chat_system, notification_router)
+    def test_fallback_to_last_article(self, mock_load, mock_chat_system, mock_zammad_client, notification_router):
+        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
         articles = [
             {"body": "Just a regular message", "internal": False},
         ]
@@ -78,8 +74,8 @@ class TestExtractTriageNote:
         assert result == "Just a regular message"
 
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
-    def test_empty_articles(self, mock_load, mock_chat_system, notification_router):
-        agent = DispatchAgent(mock_chat_system, notification_router)
+    def test_empty_articles(self, mock_load, mock_chat_system, mock_zammad_client, notification_router):
+        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
         result = agent._extract_triage_note([])
         assert result == "No content"
 
@@ -87,16 +83,17 @@ class TestExtractTriageNote:
 class TestGetDispatchDecision:
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
     @pytest.mark.asyncio
-    async def test_missing_persona_returns_none(self, mock_load, mock_chat_system, notification_router):
-        agent = DispatchAgent(mock_chat_system, notification_router)
+    async def test_missing_persona_returns_none(self, mock_load, mock_chat_system, mock_zammad_client,
+                                                notification_router):
+        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
         # personas dict is empty, so dispatch_analyst won't be found
         result = await agent._get_dispatch_decision("Test Ticket", "Triage note")
         assert result is None
 
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
     @pytest.mark.asyncio
-    async def test_valid_llm_response(self, mock_load, mock_chat_system, notification_router):
-        agent = DispatchAgent(mock_chat_system, notification_router)
+    async def test_valid_llm_response(self, mock_load, mock_chat_system, mock_zammad_client, notification_router):
+        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
         mock_persona = MagicMock()
         mock_persona.get_prompt.return_value = "You are a dispatch agent."
         mock_persona.get_config_for_engine.return_value = {}
@@ -119,8 +116,9 @@ class TestGetDispatchDecision:
 
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
     @pytest.mark.asyncio
-    async def test_invalid_json_returns_none(self, mock_load, mock_chat_system, notification_router):
-        agent = DispatchAgent(mock_chat_system, notification_router)
+    async def test_invalid_json_returns_none(self, mock_load, mock_chat_system, mock_zammad_client,
+                                             notification_router):
+        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
         mock_persona = MagicMock()
         mock_persona.get_prompt.return_value = "prompt"
         mock_persona.get_config_for_engine.return_value = {}
@@ -135,8 +133,9 @@ class TestGetDispatchDecision:
 
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
     @pytest.mark.asyncio
-    async def test_non_text_response_returns_none(self, mock_load, mock_chat_system, notification_router):
-        agent = DispatchAgent(mock_chat_system, notification_router)
+    async def test_non_text_response_returns_none(self, mock_load, mock_chat_system, mock_zammad_client,
+                                                  notification_router):
+        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
         mock_persona = MagicMock()
         mock_persona.get_config_for_engine.return_value = {}
         mock_chat_system.personas["dispatch_analyst"] = mock_persona
@@ -152,17 +151,17 @@ class TestGetDispatchDecision:
 class TestDispatchTicket:
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
     @pytest.mark.asyncio
-    async def test_successful_dispatch(self, mock_load, mock_chat_system, notification_router):
-        agent = DispatchAgent(mock_chat_system, notification_router)
+    async def test_successful_dispatch(self, mock_load, mock_chat_system, mock_zammad_client, notification_router):
+        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
 
-        # Set up mocks
-        mock_chat_system.zammad_client.get_ticket = MagicMock(
+        # Set up mocks on the injected zammad_client
+        mock_zammad_client.get_ticket = MagicMock(
             return_value={"id": 42, "title": "Test Issue", "number": 10042}
         )
-        mock_chat_system.zammad_client.get_ticket_articles = MagicMock(
+        mock_zammad_client.get_ticket_articles = MagicMock(
             return_value=[{"body": "AI triage\n[ AI TRIAGE CONTEXT DUMP ]", "internal": True}]
         )
-        mock_chat_system.zammad_client.add_tag = MagicMock()
+        mock_zammad_client.add_tag = MagicMock()
 
         decision = {
             "priority": "medium",
@@ -177,20 +176,21 @@ class TestDispatchTicket:
         # Verify action logged
         mock_chat_system.memory_manager.log_agent_action.assert_called_once()
         # Verify ticket tagged
-        mock_chat_system.zammad_client.add_tag.assert_called_once()
+        mock_zammad_client.add_tag.assert_called_once()
         # Verify outcome updated to success
         update_call = mock_chat_system.memory_manager.update_agent_action_outcome.call_args
         assert update_call[0][1] == "success"
 
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
     @pytest.mark.asyncio
-    async def test_dispatch_with_no_decision(self, mock_load, mock_chat_system, notification_router):
-        agent = DispatchAgent(mock_chat_system, notification_router)
+    async def test_dispatch_with_no_decision(self, mock_load, mock_chat_system, mock_zammad_client,
+                                             notification_router):
+        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
 
-        mock_chat_system.zammad_client.get_ticket = MagicMock(
+        mock_zammad_client.get_ticket = MagicMock(
             return_value={"id": 42, "title": "Test", "number": 10042}
         )
-        mock_chat_system.zammad_client.get_ticket_articles = MagicMock(
+        mock_zammad_client.get_ticket_articles = MagicMock(
             return_value=[{"body": "content", "internal": False}]
         )
 
@@ -201,14 +201,14 @@ class TestDispatchTicket:
         # Should log failure, not tag
         update_call = mock_chat_system.memory_manager.update_agent_action_outcome.call_args
         assert update_call[0][1] == "failed"
-        mock_chat_system.zammad_client.add_tag.assert_not_called()
+        mock_zammad_client.add_tag.assert_not_called()
 
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
     @pytest.mark.asyncio
-    async def test_dispatch_error_logged(self, mock_load, mock_chat_system, notification_router):
-        agent = DispatchAgent(mock_chat_system, notification_router)
+    async def test_dispatch_error_logged(self, mock_load, mock_chat_system, mock_zammad_client, notification_router):
+        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
 
-        mock_chat_system.zammad_client.get_ticket = MagicMock(
+        mock_zammad_client.get_ticket = MagicMock(
             side_effect=RuntimeError("API down")
         )
 

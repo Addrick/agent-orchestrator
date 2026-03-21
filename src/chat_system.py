@@ -11,13 +11,12 @@ from typing import Any, Coroutine, Dict, List, Optional, Set, Tuple
 from config.global_config import MAX_TOOL_CALLS, MAX_CACHED_API_REQUESTS, \
     PENDING_CONFIRMATION_TIMEOUT
 from src.clients.service_integration import ServiceIntegration
-from src.clients.zammad_client import ZammadClient
 from src.database.memory_manager import MemoryManager
 from src.engine import LLMCommunicationError, TextEngine
 from src.message_handler import BotLogic
 from src.persona import Persona, ExecutionMode, MemoryMode
 from src.tools.definitions import WRITE_TOOLS, MODEL_INCOMPATIBLE_TOOLS
-from src.tools.tool_manager import ToolManager, ZammadToolHandler, WebSearchHandler
+from src.tools.tool_manager import ToolManager, WebSearchHandler
 from src.utils.model_utils import get_model_list
 from src.utils.save_utils import load_personas_from_file, save_personas_to_file
 
@@ -79,15 +78,11 @@ class RequestContext:
 
 
 class ChatSystem:
-    def __init__(self, memory_manager: MemoryManager, text_engine: TextEngine,
-                 zammad_client: Optional[ZammadClient] = None) -> None:
+    def __init__(self, memory_manager: MemoryManager, text_engine: TextEngine) -> None:
         self.personas: Dict[str, Persona] = load_personas_from_file() or {}
         self.memory_manager: MemoryManager = memory_manager
         self.text_engine: TextEngine = text_engine
-        self.zammad_client: Optional[ZammadClient] = zammad_client
         self.tool_manager: ToolManager = ToolManager()
-        if zammad_client is not None:
-            ZammadToolHandler(zammad_client).register(self.tool_manager)
         WebSearchHandler().register(self.tool_manager)
         self.bot_logic: BotLogic = BotLogic(self)
         self.last_api_requests: Dict[str, Dict[str, Optional[Dict[str, Any]]]] = defaultdict(dict)
@@ -97,8 +92,9 @@ class ChatSystem:
         self._services: Dict[str, ServiceIntegration] = {}
 
     def register_service(self, service: ServiceIntegration) -> None:
-        """Register a service integration by name."""
+        """Register a service integration and its tools."""
         self._services[service.name] = service
+        service.register_tools(self.tool_manager)
         logger.info(f"Registered service integration: {service.name}")
 
     def _store_api_request(self, user_identifier: str, persona_name: str,
@@ -135,6 +131,16 @@ class ChatSystem:
                     formatted_content = f"{author_name}: {content}"
                     final_history.append({'role': 'user', 'content': formatted_content})
         return final_history
+
+    def _get_tracking_id(self, service_data: Dict[str, Dict[str, Any]]) -> Optional[int]:
+        """Ask registered services for an external tracking ID (e.g. ticket ID)."""
+        for svc_name, svc_data in service_data.items():
+            service = self._services.get(svc_name)
+            if service:
+                tid = service.get_tracking_id(svc_data)
+                if tid is not None:
+                    return tid
+        return None
 
     async def _resolve_service_contexts(self, ctx: RequestContext) -> None:
         """Resolve context for each service the persona is bound to."""
@@ -214,7 +220,7 @@ class ChatSystem:
     ) -> Tuple[List[Dict[str, Any]], str]:
         """Dispatches history retrieval based on memory mode. Returns (raw_history, mode_label)."""
         if mode == MemoryMode.TICKET_ISOLATED:
-            ticket_id = service_data.get("zammad", {}).get("ticket_id")
+            ticket_id = self._get_tracking_id(service_data)
             if ticket_id:
                 return self.memory_manager.get_ticket_history(ticket_id, effective_limit), "ticket"
             return [], "ticket"
@@ -403,7 +409,7 @@ class ChatSystem:
         try:
             await self._prepare_request(ctx)
             response_text, response_type = await self._execute_request(ctx)
-            ticket_id = ctx.service_data.get("zammad", {}).get("ticket_id")
+            ticket_id = self._get_tracking_id(ctx.service_data)
             return response_text, response_type, ticket_id
 
         except LLMCommunicationError as e:
@@ -412,11 +418,11 @@ class ChatSystem:
                 self._store_api_request(user_identifier, persona_name, e.api_payload)
             error_msg = ("I'm not sure how to continue. Could you please rephrase?" if "empty response" in str(e) else
                          "Error while generating a response: " + str(e))
-            ticket_id = ctx.service_data.get("zammad", {}).get("ticket_id")
+            ticket_id = self._get_tracking_id(ctx.service_data)
             return error_msg, ResponseType.DEV_COMMAND, ticket_id
         except Exception as e:
             logger.error(f"A critical error occurred in generate_response for {user_identifier}: {e}", exc_info=True)
-            ticket_id = ctx.service_data.get("zammad", {}).get("ticket_id")
+            ticket_id = self._get_tracking_id(ctx.service_data)
             return ("An internal error occurred while processing your request.",
                     ResponseType.DEV_COMMAND, ticket_id)
 
@@ -459,11 +465,11 @@ class ChatSystem:
                 self._store_api_request(user_identifier, persona_name, api_payload)
 
             final_text = llm_response.get("content", "")
-            ticket_id = service_data.get("zammad", {}).get("ticket_id")
+            ticket_id = self._get_tracking_id(service_data)
             return final_text, ResponseType.LLM_GENERATION, ticket_id
 
         except Exception as e:
             logger.error(f"Error resuming pending confirmation for {user_identifier}: {e}", exc_info=True)
-            ticket_id = service_data.get("zammad", {}).get("ticket_id")
+            ticket_id = self._get_tracking_id(service_data)
             return ("An error occurred while processing the confirmed action.",
                     ResponseType.DEV_COMMAND, ticket_id)

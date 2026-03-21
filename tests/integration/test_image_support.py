@@ -16,11 +16,6 @@ def mock_memory_manager():
 
 
 @pytest.fixture
-def mock_zammad_client():
-    return MagicMock()
-
-
-@pytest.fixture
 def mock_text_engine():
     engine = MagicMock(spec=TextEngine)
     engine.generate_response = AsyncMock(return_value=({"type": "text", "content": "Test response"}, {}))
@@ -28,8 +23,8 @@ def mock_text_engine():
 
 
 @pytest.fixture
-def chat_system(mock_memory_manager, mock_text_engine, mock_zammad_client):
-    return ChatSystem(mock_memory_manager, mock_text_engine, mock_zammad_client)
+def chat_system(mock_memory_manager, mock_text_engine):
+    return ChatSystem(mock_memory_manager, mock_text_engine)
 
 
 @pytest.mark.asyncio

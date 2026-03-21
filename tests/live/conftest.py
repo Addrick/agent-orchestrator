@@ -149,7 +149,7 @@ def live_chat_system():
 
     with patch('src.chat_system.load_personas_from_file', return_value=test_personas):
         chat_system = ChatSystem(
-            memory_manager=memory_manager, text_engine=text_engine, zammad_client=zammad_client
+            memory_manager=memory_manager, text_engine=text_engine,
         )
         chat_system.register_service(ZammadIntegration(zammad_client))
 
