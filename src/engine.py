@@ -257,7 +257,10 @@ class TextEngine:
             "top_p": config.get("top_p")
         }
         if tools:
-            api_params["tools"] = tools
+            api_params["tools"] = [
+                {"type": "function", "function": t["function"]}
+                for t in tools if "function" in t
+            ]
             api_params["tool_choice"] = "auto"
 
         api_params = {k: v for k, v in api_params.items() if v is not None}
@@ -330,7 +333,12 @@ class TextEngine:
             "top_k": config.get("top_k")
         }
         if tools:
-            api_params["tools"] = tools
+            api_params["tools"] = [
+                {"name": t["function"]["name"],
+                 "description": t["function"].get("description", ""),
+                 "input_schema": t["function"].get("parameters", {})}
+                for t in tools if "function" in t
+            ]
 
         api_params = {k: v for k, v in api_params.items() if v is not None}
 

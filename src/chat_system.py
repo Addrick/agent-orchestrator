@@ -144,6 +144,8 @@ class ChatSystem:
                 ctx.service_data[binding] = await service.resolve_context(
                     ctx.user_identifier, ctx.channel, ctx.message, ctx.user_display_name
                 )
+            else:
+                logger.debug(f"Persona '{ctx.persona_name}' has binding '{binding}' but no service is registered.")
 
     async def _notify_services(
             self,
