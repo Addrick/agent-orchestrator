@@ -12,6 +12,7 @@ import requests
 from unittest.mock import patch
 
 from src.clients.zammad_client import ZammadClient
+from src.clients.zammad_service import ZammadIntegration
 from src.database.memory_manager import MemoryManager
 from src.engine import TextEngine
 from src.chat_system import ChatSystem
@@ -150,6 +151,7 @@ def live_chat_system():
         chat_system = ChatSystem(
             memory_manager=memory_manager, text_engine=text_engine, zammad_client=zammad_client
         )
+        chat_system.register_service(ZammadIntegration(zammad_client))
 
     try:
         yield chat_system, memory_manager, zammad_client

@@ -1,14 +1,15 @@
 # tests/test_chat_system.py
 
 import pytest
-from unittest.mock import MagicMock, AsyncMock, patch, call
+from unittest.mock import MagicMock, AsyncMock, patch
 import json
 
-from src.chat_system import ChatSystem, ResponseType, ZammadContext, RequestContext, _get_model_prefix
+from src.chat_system import ChatSystem, ResponseType, RequestContext, _get_model_prefix
 from src.database.memory_manager import MemoryManager
 from src.engine import TextEngine, LLMCommunicationError
 from src.clients.zammad_client import ZammadClient
 from src.persona import Persona, ExecutionMode, MemoryMode
+from src.clients.service_integration import ServiceIntegration
 
 
 @pytest.fixture
@@ -41,61 +42,6 @@ def chat_system_with_mocks():
 
         yield (system, mock_memory_manager, mock_text_engine, mock_zammad_client,
                mock_persona, mock_tool_manager)
-
-
-# --- Unit Tests for Helper Methods ---
-
-@pytest.mark.parametrize("message, expected", [
-    ("Help with [Ticket#12345]", 12345),
-    ("[ticket#54321] is the one", 54321),
-    ("No ticket here", None),
-    ("Invalid format [Ticket#abc]", None),
-])
-def test_find_ticket_number_in_message(message, expected, chat_system_with_mocks):
-    system, _, _, _, _, _ = chat_system_with_mocks
-    assert system._find_ticket_number_in_message(message) == expected
-
-
-@pytest.mark.asyncio
-async def test_get_ticket_id_from_number_success(chat_system_with_mocks):
-    system, _, _, zammad_mock, _, _ = chat_system_with_mocks
-    zammad_mock.search_tickets.return_value = [{'id': 999}]
-    result = await system._get_ticket_id_from_number(12345)
-    zammad_mock.search_tickets.assert_called_once_with(query="number:12345")
-    assert result == 999
-
-
-@pytest.mark.asyncio
-async def test_get_ticket_id_from_number_not_found(chat_system_with_mocks):
-    system, _, _, zammad_mock, _, _ = chat_system_with_mocks
-    zammad_mock.search_tickets.return_value = []
-    result = await system._get_ticket_id_from_number(12345)
-    assert result is None
-
-
-@pytest.mark.asyncio
-async def test_get_or_create_zammad_user_existing_real_email(chat_system_with_mocks):
-    system, _, _, zammad_mock, _, _ = chat_system_with_mocks
-    zammad_mock.search_user.return_value = [{'id': 101, 'email': 'test@example.com'}]
-    user_id, email = await system._get_or_create_zammad_user("Test User <test@example.com>", "gmail")
-    zammad_mock.search_user.assert_called_once_with('test@example.com')
-    zammad_mock.create_user.assert_not_called()
-    assert user_id == 101
-    assert email == 'test@example.com'
-
-
-@pytest.mark.asyncio
-async def test_get_or_create_zammad_user_new_non_email(chat_system_with_mocks):
-    system, _, _, zammad_mock, _, _ = chat_system_with_mocks
-    zammad_mock.search_user.return_value = []
-    zammad_mock.create_user.return_value = {'id': 102, 'email': 'discord-12345@zammad.local'}
-    user_id, email = await system._get_or_create_zammad_user("12345", "discord", user_display_name="DiscordUser")
-
-    expected_email = f"discord-12345@{zammad_mock.api_url.split('//')[1]}"
-    zammad_mock.search_user.assert_called_once_with(expected_email)
-    zammad_mock.create_user.assert_called_once()
-    assert user_id == 102
-    assert email == 'discord-12345@zammad.local'
 
 
 # --- Tests for generate_response Core Logic ---
@@ -171,25 +117,6 @@ async def test_generate_response_exits_after_max_tool_calls(chat_system_with_moc
 
 
 # --- Existing High-Level and Formatting Tests ---
-
-@pytest.mark.asyncio
-async def test_ticket_mode_uses_id_from_message(chat_system_with_mocks):
-    """Tests that an explicit ticket ID in a message is used."""
-    system, _, _, zammad_mock, persona, _ = chat_system_with_mocks
-    persona.set_zammad_aware(True)
-
-    with patch.object(system, '_get_or_create_zammad_user', new_callable=AsyncMock,
-                         return_value=(101, "user@example.com")), \
-            patch.object(system, '_find_ticket_number_in_message', return_value=9999), \
-            patch.object(system, '_get_ticket_id_from_number', new_callable=AsyncMock, return_value=999), \
-            patch.object(system, '_find_active_ticket_for_user', new_callable=AsyncMock) as mock_find_active:
-        await system.generate_response('test_persona', 'user_gmail_2', 'gmail', "For [Ticket#9999]",
-                                       user_display_name='Another User')
-
-        mock_find_active.assert_not_awaited()
-        zammad_mock.add_article_to_ticket.assert_any_call(ticket_id=999, body="For [Ticket#9999]",
-                                                          impersonate_email="user@example.com")
-
 
 @pytest.mark.asyncio
 async def test_tool_use_in_autonomous_mode(chat_system_with_mocks):
@@ -439,54 +366,53 @@ async def test_grounding_filtered_for_incompatible_models(chat_system_with_mocks
     assert len(tools_sent) == 0
 
 
-# --- Unit Tests for Extracted Methods ---
+# --- Service Integration Tests ---
 
-@pytest.mark.asyncio
-async def test_resolve_zammad_context_not_aware(chat_system_with_mocks):
-    """Non-Zammad-aware persona returns empty context."""
-    system, _, _, _, persona, _ = chat_system_with_mocks
-    persona.set_zammad_aware(False)
-    ctx = await system._resolve_zammad_context(persona, 'user', 'channel', 'hi', None)
-    assert ctx.is_aware is False
-    assert ctx.customer_id is None
-    assert ctx.ticket_id is None
+def test_register_service(chat_system_with_mocks):
+    """register_service adds a service to the registry."""
+    system, _, _, _, _, _ = chat_system_with_mocks
+    mock_service = MagicMock(spec=ServiceIntegration)
+    mock_service.name = "test_service"
+    system.register_service(mock_service)
+    assert "test_service" in system._services
 
 
 @pytest.mark.asyncio
-async def test_resolve_zammad_context_with_ticket_number(chat_system_with_mocks):
-    """Zammad-aware persona resolves ticket from message number."""
+async def test_resolve_service_contexts_calls_bound_services(chat_system_with_mocks):
+    """_resolve_service_contexts calls resolve_context on each bound service."""
     system, _, _, _, persona, _ = chat_system_with_mocks
-    persona.set_zammad_aware(True)
+    mock_service = MagicMock(spec=ServiceIntegration)
+    mock_service.name = "test_svc"
+    mock_service.resolve_context = AsyncMock(return_value={"key": "value"})
+    system._services["test_svc"] = mock_service
+    persona.set_service_bindings(["test_svc"])
 
-    with patch.object(system, '_get_or_create_zammad_user', new_callable=AsyncMock,
-                      return_value=(101, 'u@test.com')), \
-         patch.object(system, '_get_ticket_id_from_number', new_callable=AsyncMock, return_value=555):
-        ctx = await system._resolve_zammad_context(
-            persona, 'user', 'channel', 'See [Ticket#999]', None
-        )
+    ctx = RequestContext(
+        persona=persona, persona_name='test_persona', user_identifier='user',
+        channel='ch', message='hi',
+    )
+    await system._resolve_service_contexts(ctx)
 
-    assert ctx.is_aware is True
-    assert ctx.customer_id == 101
-    assert ctx.ticket_id == 555
-    assert ctx.user_facing_ticket_number == 999
+    assert ctx.service_data["test_svc"] == {"key": "value"}
+    mock_service.resolve_context.assert_called_once_with('user', 'ch', 'hi', None)
 
 
 @pytest.mark.asyncio
-async def test_resolve_zammad_context_falls_back_to_active_ticket(chat_system_with_mocks):
-    """Without ticket number in message, resolves via active ticket search."""
-    system, _, _, _, persona, _ = chat_system_with_mocks
-    persona.set_zammad_aware(True)
+async def test_notify_services_calls_on_message(chat_system_with_mocks):
+    """_notify_services calls on_message on each service in service_data."""
+    system, _, _, _, _, _ = chat_system_with_mocks
+    mock_service = MagicMock(spec=ServiceIntegration)
+    mock_service.name = "test_svc"
+    mock_service.on_message = AsyncMock()
+    system._services["test_svc"] = mock_service
 
-    with patch.object(system, '_get_or_create_zammad_user', new_callable=AsyncMock,
-                      return_value=(101, 'u@test.com')), \
-         patch.object(system, '_find_active_ticket_for_user', new_callable=AsyncMock, return_value=777):
-        ctx = await system._resolve_zammad_context(
-            persona, 'user', 'channel', 'help me', None
-        )
+    service_data = {"test_svc": {"ticket_id": 42}}
+    await system._notify_services(service_data, "Hello")
 
-    assert ctx.ticket_id == 777
-    assert ctx.user_facing_ticket_number is None
+    mock_service.on_message.assert_called_once_with({"ticket_id": 42}, "Hello")
 
+
+# --- Conversation History Tests ---
 
 def test_build_conversation_history_channel_mode(chat_system_with_mocks):
     """Channel-isolated mode fetches channel history."""
@@ -495,23 +421,29 @@ def test_build_conversation_history_channel_mode(chat_system_with_mocks):
     memory_mock.get_channel_history.return_value = [
         {'author_role': 'user', 'author_name': 'Alice', 'content': 'Hello'}
     ]
-    zammad_ctx = ZammadContext()
 
-    history = system._build_conversation_history(persona, zammad_ctx, 'user', 'general', 'srv1', None)
+    history = system._build_conversation_history(persona, {}, 'user', 'general', 'srv1', None)
 
     memory_mock.get_channel_history.assert_called_once()
     assert len(history) == 1
     assert history[0]['content'] == 'Alice: Hello'
 
 
-def test_build_conversation_history_ticket_mode_adds_system_message(chat_system_with_mocks):
-    """Ticket-isolated mode adds system context message."""
+def test_build_conversation_history_ticket_mode_with_service_system_messages(chat_system_with_mocks):
+    """Service system messages are injected into conversation history."""
     system, memory_mock, _, _, persona, _ = chat_system_with_mocks
     persona.set_memory_mode(MemoryMode.TICKET_ISOLATED)
     memory_mock.get_ticket_history.return_value = []
-    zammad_ctx = ZammadContext(ticket_id=42, user_facing_ticket_number=100)
 
-    history = system._build_conversation_history(persona, zammad_ctx, 'user', 'ch', None, None)
+    mock_service = MagicMock(spec=ServiceIntegration)
+    mock_service.name = "zammad"
+    mock_service.get_system_messages.return_value = [
+        {"role": "system", "content": "This conversation is part of Zammad ticket #100."}
+    ]
+    system._services["zammad"] = mock_service
+
+    service_data = {"zammad": {"ticket_id": 42, "user_facing_ticket_number": 100}}
+    history = system._build_conversation_history(persona, service_data, 'user', 'ch', None, None)
 
     assert history[0]['role'] == 'system'
     assert '#100' in history[0]['content']
@@ -522,12 +454,13 @@ def test_build_conversation_history_personal_mode(chat_system_with_mocks):
     system, memory_mock, _, _, persona, _ = chat_system_with_mocks
     persona.set_memory_mode(MemoryMode.PERSONAL)
     memory_mock.get_personal_history.return_value = []
-    zammad_ctx = ZammadContext()
 
-    system._build_conversation_history(persona, zammad_ctx, 'user123', 'ch', None, None)
+    system._build_conversation_history(persona, {}, 'user123', 'ch', None, None)
 
     memory_mock.get_personal_history.assert_called_once_with('user123', 'test_persona', persona.get_context_length())
 
+
+# --- Tool Filtering Tests ---
 
 def test_filter_tools_wildcard(chat_system_with_mocks):
     """Wildcard enabled_tools returns all compatible tools."""
@@ -537,7 +470,7 @@ def test_filter_tools_wildcard(chat_system_with_mocks):
     tool_b = {"type": "function", "function": {"name": "tool_b", "parameters": {}}}
     tool_manager_mock.get_tool_definitions.return_value = [tool_a, tool_b]
 
-    result = system._filter_tools_for_persona(persona, is_zammad_aware=True)
+    result = system._filter_tools_for_persona(persona)
     assert len(result) == 2
 
 
@@ -549,56 +482,83 @@ def test_filter_tools_specific_names(chat_system_with_mocks):
     tool_b = {"type": "function", "function": {"name": "tool_b", "parameters": {}}}
     tool_manager_mock.get_tool_definitions.return_value = [tool_a, tool_b]
 
-    result = system._filter_tools_for_persona(persona, is_zammad_aware=True)
+    result = system._filter_tools_for_persona(persona)
     assert len(result) == 1
     assert result[0]['function']['name'] == 'tool_a'
 
 
-def test_filter_tools_removes_zammad_when_not_aware(chat_system_with_mocks):
-    """Zammad tools are removed when persona is not Zammad-aware."""
+def test_filter_tools_removes_unbound_service_tools(chat_system_with_mocks):
+    """Tools with a service_binding are removed when the persona lacks that binding."""
     system, _, _, _, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_enabled_tools(['*'])
-    from src.tools.definitions import ZAMMAD_TOOLS
-    zammad_tool = {"type": "function", "function": {"name": list(ZAMMAD_TOOLS)[0], "parameters": {}}}
+    persona.set_service_bindings([])  # No service bindings
+    zammad_tool = {"type": "function", "service_binding": "zammad",
+                   "function": {"name": "search_tickets", "parameters": {}}}
     other_tool = {"type": "function", "function": {"name": "web_search", "parameters": {}}}
     tool_manager_mock.get_tool_definitions.return_value = [zammad_tool, other_tool]
 
-    result = system._filter_tools_for_persona(persona, is_zammad_aware=False)
+    result = system._filter_tools_for_persona(persona)
     tool_names = [t['function']['name'] for t in result]
-    assert list(ZAMMAD_TOOLS)[0] not in tool_names
+    assert 'search_tickets' not in tool_names
     assert 'web_search' in tool_names
 
 
+def test_filter_tools_includes_bound_service_tools(chat_system_with_mocks):
+    """Tools with a service_binding are included when the persona has that binding."""
+    system, _, _, _, persona, tool_manager_mock = chat_system_with_mocks
+    persona.set_enabled_tools(['*'])
+    persona.set_service_bindings(["zammad"])
+    zammad_tool = {"type": "function", "service_binding": "zammad",
+                   "function": {"name": "search_tickets", "parameters": {}}}
+    other_tool = {"type": "function", "function": {"name": "web_search", "parameters": {}}}
+    tool_manager_mock.get_tool_definitions.return_value = [zammad_tool, other_tool]
+
+    result = system._filter_tools_for_persona(persona)
+    tool_names = [t['function']['name'] for t in result]
+    assert 'search_tickets' in tool_names
+    assert 'web_search' in tool_names
+
+
+# --- Write Call Execution Tests ---
+
 @pytest.mark.asyncio
-async def test_execute_write_calls_injects_customer_id(chat_system_with_mocks):
-    """create_ticket gets customer_id injected from ZammadContext."""
+async def test_execute_write_calls_delegates_to_services(chat_system_with_mocks):
+    """Services get to prepare tool args and react to results."""
     system, _, _, _, _, tool_manager_mock = chat_system_with_mocks
     tool_manager_mock.execute_tool.return_value = {"result": {"id": 50}}
 
+    mock_service = MagicMock(spec=ServiceIntegration)
+    mock_service.name = "zammad"
+    mock_service.prepare_tool_args.return_value = {"title": "Test", "customer_id": 101}
+    system._services["zammad"] = mock_service
+
     write_calls = [{"id": "c1", "name": "create_ticket", "arguments": {"title": "Test"}}]
-    history = []
-    ctx = ZammadContext(customer_id=101)
+    history: list = []
+    service_data = {"zammad": {"customer_id": 101}}
 
-    await system._execute_write_calls(write_calls, history, ctx)
+    await system._execute_write_calls(write_calls, history, service_data)
 
-    tool_manager_mock.execute_tool.assert_called_once_with('create_ticket', title='Test', customer_id=101)
-    assert ctx.ticket_id == 50
+    mock_service.prepare_tool_args.assert_called_once()
+    mock_service.on_tool_result.assert_called_once()
+    tool_manager_mock.execute_tool.assert_called_once_with(
+        'create_ticket', title='Test', customer_id=101
+    )
     assert len(history) == 1
 
 
 @pytest.mark.asyncio
-async def test_execute_write_calls_preserves_explicit_customer_id(chat_system_with_mocks):
-    """If arguments already contain customer_id, it is not overwritten."""
+async def test_execute_write_calls_works_without_services(chat_system_with_mocks):
+    """Write calls execute normally when no services are registered."""
     system, _, _, _, _, tool_manager_mock = chat_system_with_mocks
     tool_manager_mock.execute_tool.return_value = {"result": {"id": 60}}
 
-    write_calls = [{"id": "c1", "name": "create_ticket", "arguments": {"title": "T", "customer_id": 999}}]
-    history = []
-    ctx = ZammadContext(customer_id=101)
+    write_calls = [{"id": "c1", "name": "update_ticket", "arguments": {"state": "closed"}}]
+    history: list = []
 
-    await system._execute_write_calls(write_calls, history, ctx)
+    await system._execute_write_calls(write_calls, history, {})
 
-    tool_manager_mock.execute_tool.assert_called_once_with('create_ticket', title='T', customer_id=999)
+    tool_manager_mock.execute_tool.assert_called_once_with('update_ticket', state='closed')
+    assert len(history) == 1
 
 
 def test_append_denied_tool_results():
@@ -607,36 +567,14 @@ def test_append_denied_tool_results():
         {"id": "c1", "name": "update_ticket"},
         {"id": "c2", "name": "create_ticket"},
     ]
-    history = []
+    history: list = []
     ChatSystem._append_denied_tool_results(write_calls, history)
     assert len(history) == 2
     assert json.loads(history[0]['content'])['error'] == "Tool call denied by user"
     assert history[1]['name'] == "create_ticket"
 
 
-@pytest.mark.asyncio
-async def test_mirror_message_to_zammad_when_aware(chat_system_with_mocks):
-    """Message is mirrored to Zammad when aware and ticket exists."""
-    system, _, _, zammad_mock, _, _ = chat_system_with_mocks
-    ctx = ZammadContext(is_aware=True, ticket_id=42, zammad_email='u@test.com')
-
-    await system._mirror_message_to_zammad(ctx, "Hello")
-
-    zammad_mock.add_article_to_ticket.assert_called_once_with(
-        ticket_id=42, body="Hello", impersonate_email='u@test.com'
-    )
-
-
-@pytest.mark.asyncio
-async def test_mirror_message_to_zammad_skipped_when_not_aware(chat_system_with_mocks):
-    """Mirroring is skipped when not Zammad-aware."""
-    system, _, _, zammad_mock, _, _ = chat_system_with_mocks
-    ctx = ZammadContext(is_aware=False)
-
-    await system._mirror_message_to_zammad(ctx, "Hello")
-
-    zammad_mock.add_article_to_ticket.assert_not_called()
-
+# --- Tool Loop Tests ---
 
 @pytest.mark.asyncio
 async def test_run_tool_loop_text_response(chat_system_with_mocks):
@@ -675,7 +613,7 @@ async def test_run_tool_loop_max_calls_exceeded(chat_system_with_mocks):
     assert "stuck in a loop" in text
 
 
-# --- Tests for Extracted Orchestration Methods ---
+# --- Orchestration Method Tests ---
 
 @pytest.mark.asyncio
 async def test_execute_read_calls(chat_system_with_mocks):
@@ -684,7 +622,7 @@ async def test_execute_read_calls(chat_system_with_mocks):
     tool_manager_mock.execute_tool.return_value = {"result": [{"id": 1}]}
 
     read_calls = [{"id": "c1", "name": "search_tickets", "arguments": {"query": "test"}}]
-    history = []
+    history: list = []
     await system._execute_read_calls(read_calls, history)
 
     tool_manager_mock.execute_tool.assert_called_once_with('search_tickets', query='test')
@@ -695,7 +633,7 @@ async def test_execute_read_calls(chat_system_with_mocks):
 
 @pytest.mark.asyncio
 async def test_prepare_request_populates_context(chat_system_with_mocks):
-    """_prepare_request resolves Zammad context, builds history, filters tools, appends user message."""
+    """_prepare_request resolves service contexts, builds history, filters tools, appends user message."""
     system, memory_mock, _, _, persona, tool_manager_mock = chat_system_with_mocks
     memory_mock.get_channel_history.return_value = []
     ctx = RequestContext(
@@ -705,19 +643,25 @@ async def test_prepare_request_populates_context(chat_system_with_mocks):
 
     await system._prepare_request(ctx)
 
-    assert ctx.zammad_ctx.is_aware is False
+    assert ctx.service_data == {}  # No services bound
     assert ctx.conversation_history[-1] == {"role": "user", "content": "hello"}
 
 
 @pytest.mark.asyncio
-async def test_execute_request_mirrors_llm_response(chat_system_with_mocks):
-    """_execute_request mirrors final LLM text to Zammad."""
-    system, _, text_engine_mock, zammad_mock, persona, _ = chat_system_with_mocks
+async def test_execute_request_notifies_services(chat_system_with_mocks):
+    """_execute_request notifies services of the final LLM response."""
+    system, _, text_engine_mock, _, persona, _ = chat_system_with_mocks
     text_engine_mock.generate_response.return_value = ({'type': 'text', 'content': 'Reply'}, {})
+
+    mock_service = MagicMock(spec=ServiceIntegration)
+    mock_service.name = "zammad"
+    mock_service.on_message = AsyncMock()
+    system._services["zammad"] = mock_service
+
     ctx = RequestContext(
         persona=persona, persona_name='test_persona', user_identifier='user',
         channel='ch', message='hi',
-        zammad_ctx=ZammadContext(is_aware=True, ticket_id=42, zammad_email='u@test.com'),
+        service_data={"zammad": {"ticket_id": 42, "zammad_email": "u@test.com"}},
         conversation_history=[{"role": "user", "content": "hi"}],
     )
 
@@ -725,28 +669,53 @@ async def test_execute_request_mirrors_llm_response(chat_system_with_mocks):
 
     assert text == 'Reply'
     assert rtype == ResponseType.LLM_GENERATION
-    zammad_mock.add_article_to_ticket.assert_called_once_with(
-        ticket_id=42, body='Reply', impersonate_email='u@test.com'
+    mock_service.on_message.assert_called_once_with(
+        {"ticket_id": 42, "zammad_email": "u@test.com"}, 'Reply'
     )
 
 
 @pytest.mark.asyncio
-async def test_execute_request_skips_mirror_for_pending(chat_system_with_mocks):
-    """_execute_request does not mirror confirmation prompts to Zammad."""
-    system, _, text_engine_mock, zammad_mock, persona, _ = chat_system_with_mocks
+async def test_execute_request_skips_notify_for_pending(chat_system_with_mocks):
+    """_execute_request does not notify services for confirmation prompts."""
+    system, _, text_engine_mock, _, persona, _ = chat_system_with_mocks
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_enabled_tools(['*'])
     tool_call = {'type': 'tool_calls',
                  'calls': [{'id': 'c1', 'name': 'update_ticket', 'arguments': {'state': 'closed'}}]}
     text_engine_mock.generate_response.return_value = (tool_call, {})
+
+    mock_service = MagicMock(spec=ServiceIntegration)
+    mock_service.name = "zammad"
+    mock_service.on_message = AsyncMock()
+    system._services["zammad"] = mock_service
+
     ctx = RequestContext(
         persona=persona, persona_name='test_persona', user_identifier='user',
         channel='ch', message='close it',
-        zammad_ctx=ZammadContext(is_aware=True, ticket_id=42, zammad_email='u@test.com'),
+        service_data={"zammad": {"ticket_id": 42}},
         conversation_history=[{"role": "user", "content": "close it"}],
     )
 
     _, rtype = await system._execute_request(ctx)
 
     assert rtype == ResponseType.PENDING_CONFIRMATION
-    zammad_mock.add_article_to_ticket.assert_not_called()
+    mock_service.on_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_generate_response_extracts_ticket_id_from_service_data(chat_system_with_mocks):
+    """generate_response returns ticket_id from service_data for backward compatibility."""
+    system, memory_mock, text_engine_mock, _, persona, _ = chat_system_with_mocks
+    memory_mock.get_channel_history.return_value = []
+    persona.set_service_bindings(["zammad"])
+
+    mock_service = MagicMock(spec=ServiceIntegration)
+    mock_service.name = "zammad"
+    mock_service.resolve_context = AsyncMock(return_value={"ticket_id": 42, "customer_id": 101})
+    mock_service.on_message = AsyncMock()
+    mock_service.get_system_messages.return_value = []
+    system._services["zammad"] = mock_service
+
+    _, _, ticket_id = await system.generate_response('test_persona', 'user', 'channel', 'test')
+
+    assert ticket_id == 42
