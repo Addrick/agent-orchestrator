@@ -68,7 +68,7 @@ async def update_models_and_sync_bot(bot: ChatSystem) -> None:
 
 async def main() -> None:
     """Main asynchronous function to initialize and run the application."""
-    print("Starting application...")
+    logger.info("Starting application...")
     if not os.path.exists(CHAT_LOG_LOCATION):
         os.makedirs(CHAT_LOG_LOCATION)
         logger.warning("Logs folder created!")
