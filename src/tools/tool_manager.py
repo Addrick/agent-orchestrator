@@ -81,7 +81,7 @@ class ZammadToolHandler:
         ticket_id = search_results[0]['id']
         logger.info(f"Found ticket ID {ticket_id} for ticket number {ticket_number}.")
 
-        ticket = await asyncio.to_thread(
+        ticket: Dict[str, Any] = await asyncio.to_thread(
             self.zammad_client.get_ticket, ticket_id=ticket_id
         )
         if not ticket:
