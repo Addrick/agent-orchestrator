@@ -33,6 +33,7 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     },
     {
         "type": "function",
+        "is_write": False,
         "function": {
             "name": "web_search",
             "description": "Searches the web for information using DuckDuckGo. Returns titles, "
@@ -57,6 +58,8 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     },
     {
         "type": "function",
+        "is_write": False,
+        "is_zammad": True,
         "function": {
             "name": "get_ticket_details",
             "description": "Retrieves the complete details for a specific Zammad ticket using its user-facing ticket number.",
@@ -74,6 +77,8 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     },
     {
         "type": "function",
+        "is_write": True,
+        "is_zammad": True,
         "function": {
             "name": "update_ticket",
             "description": "Updates one or more properties of an existing Zammad ticket. Requires the ticket's internal ID. All other fields are optional.",
@@ -110,6 +115,8 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     },
     {
         "type": "function",
+        "is_write": True,
+        "is_zammad": True,
         "function": {
             "name": "add_note_to_ticket",
             "description": "Adds a new article (a note or comment) to an existing Zammad ticket. Requires the ticket's internal ID and the note's body.",
@@ -136,6 +143,8 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     },
     {
         "type": "function",
+        "is_write": False,
+        "is_zammad": True,
         "function": {
             "name": "search_tickets",
             "description": "Searches for Zammad tickets using a specific Zammad search query string.",
@@ -153,6 +162,8 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     },
     {
         "type": "function",
+        "is_write": True,
+        "is_zammad": True,
         "function": {
             "name": "create_ticket",
             "description": "Creates a new Zammad ticket. Requires a title and a body. If 'customer_id' is omitted, the ticket is created for the current user. Use the 'search_user' tool to find the ID for a different user.",
@@ -178,6 +189,8 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     },
     {
         "type": "function",
+        "is_write": False,
+        "is_zammad": True,
         "function": {
             "name": "search_user",
             "description": "Searches for a Zammad user by a query string (e.g., email address or last name).",
@@ -195,6 +208,8 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     },
     {
         "type": "function",
+        "is_write": True,
+        "is_zammad": True,
         "function": {
             "name": "create_user",
             "description": "Creates a new customer user in Zammad. The 'firstname', 'lastname', and 'email' parameters are all required. The 'note' is optional.",
@@ -212,6 +227,8 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     },
     {
         "type": "function",
+        "is_write": True,
+        "is_zammad": True,
         "function": {
             "name": "update_user",
             "description": "Updates an existing user in Zammad. The 'user_id' is required to identify the user. All other parameters are optional. Use the 'search_user' tool first to find the 'user_id' if you don't have it.",
@@ -231,6 +248,8 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     },
     {
         "type": "function",
+        "is_write": True,
+        "is_zammad": True,
         "function": {
             "name": "delete_user",
             "description": "Deletes a user from Zammad. This is a destructive and irreversible action. Requires the unique 'user_id'. Use the 'search_user' tool to find the 'user_id' first to ensure you are deleting the correct user.",
@@ -254,16 +273,6 @@ MODEL_INCOMPATIBLE_TOOLS = {
     'google_grounding_search': GROUNDING_INCOMPATIBLE_PREFIXES,
 }
 
-# Tools that modify state and require confirmation in CONFIRM execution mode.
-# Read-only tools (search, get_details) are auto-executed without confirmation.
-WRITE_TOOLS = {
-    'update_ticket', 'add_note_to_ticket', 'create_ticket',
-    'create_user', 'update_user', 'delete_user',
-}
-
-# All Zammad-specific tools. Filtered out for personas with zammad_aware=False.
-ZAMMAD_TOOLS = {
-    'get_ticket_details', 'update_ticket', 'add_note_to_ticket',
-    'create_ticket', 'search_tickets', 'search_user',
-    'create_user', 'update_user', 'delete_user',
-}
+# Derived from tool metadata — no manual maintenance needed when adding new tools.
+WRITE_TOOLS = {t['function']['name'] for t in ALL_TOOL_DEFINITIONS if t.get('is_write')}
+ZAMMAD_TOOLS = {t['function']['name'] for t in ALL_TOOL_DEFINITIONS if t.get('is_zammad')}
