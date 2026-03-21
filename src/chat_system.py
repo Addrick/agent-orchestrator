@@ -73,6 +73,24 @@ class PendingConfirmation:
     created_at: float = field(default_factory=time.time)
 
 
+@dataclass
+class RequestContext:
+    """Bundles resolved pipeline state flowing through generate_response phases."""
+    persona: Persona
+    persona_name: str
+    user_identifier: str
+    channel: str
+    message: str
+    server_id: Optional[str] = None
+    image_url: Optional[str] = None
+    history_limit: Optional[int] = None
+    user_display_name: Optional[str] = None
+    # Populated during _prepare_request
+    zammad_ctx: ZammadContext = field(default_factory=ZammadContext)
+    conversation_history: List[Dict[str, Any]] = field(default_factory=list)
+    tools_for_llm: List[Dict[str, Any]] = field(default_factory=list)
+
+
 class ChatSystem:
     def __init__(self, memory_manager: MemoryManager, text_engine: TextEngine, zammad_client: ZammadClient) -> None:
         self.personas: Dict[str, Persona] = load_personas_from_file() or {}
@@ -368,63 +386,60 @@ class ChatSystem:
                 impersonate_email=zammad_ctx.zammad_email
             )
 
-    async def _run_tool_loop(
+    async def _execute_read_calls(
             self,
-            persona: Persona,
-            conversation_history: List[Dict[str, Any]],
-            tools_for_llm: List[Dict[str, Any]],
-            zammad_ctx: ZammadContext,
-            user_identifier: str,
-            persona_name: str,
-            image_url: Optional[str]
-    ) -> Tuple[str, ResponseType]:
+            read_calls: List[Dict[str, Any]],
+            conversation_history: List[Dict[str, Any]]
+    ) -> None:
+        """Execute read-only tool calls and append results to history."""
+        for call_item in read_calls:
+            tool_name: str = call_item.get("name", "")
+            tool_args = call_item.get("arguments", {})
+            tool_result = await self.tool_manager.execute_tool(tool_name, **tool_args)
+            conversation_history.append({
+                "role": "tool",
+                "tool_call_id": call_item.get("id"),
+                "name": tool_name,
+                "content": json.dumps(tool_result)
+            })
+
+    async def _run_tool_loop(self, ctx: RequestContext) -> Tuple[str, ResponseType]:
         """Runs the LLM call / tool execution loop up to MAX_TOOL_CALLS iterations."""
         for i in range(MAX_TOOL_CALLS):
             context_object: Dict[str, Any] = {
-                "persona_prompt": persona.get_prompt(),
-                "history": conversation_history,
-                "current_message": {"text": "", "image_url": image_url if i == 0 else None}
+                "persona_prompt": ctx.persona.get_prompt(),
+                "history": ctx.conversation_history,
+                "current_message": {"text": "", "image_url": ctx.image_url if i == 0 else None}
             }
             llm_response, api_payload = await self.text_engine.generate_response(
-                persona.get_config_for_engine(), context_object, tools=tools_for_llm
+                ctx.persona.get_config_for_engine(), context_object, tools=ctx.tools_for_llm
             )
             if api_payload:
-                self._store_api_request(user_identifier, persona_name, api_payload)
+                self._store_api_request(ctx.user_identifier, ctx.persona_name, api_payload)
 
             if llm_response.get("type") == "text":
-                final_text = llm_response.get("content", "")
-                await self._mirror_message_to_zammad(zammad_ctx, final_text)
-                return final_text, ResponseType.LLM_GENERATION
+                return llm_response.get("content", ""), ResponseType.LLM_GENERATION
 
             elif llm_response.get("type") == "tool_calls":
                 calls = llm_response.get("calls", [])
-                conversation_history.append({"role": "assistant", "tool_calls": calls})
+                ctx.conversation_history.append({"role": "assistant", "tool_calls": calls})
 
                 read_calls = [c for c in calls if c.get("name") not in WRITE_TOOLS]
                 write_calls = [c for c in calls if c.get("name") in WRITE_TOOLS]
 
-                for call_item in read_calls:
-                    tool_name = call_item.get("name")
-                    tool_args = call_item.get("arguments", {})
-                    tool_result = await self.tool_manager.execute_tool(tool_name, **tool_args)
-                    conversation_history.append({
-                        "role": "tool",
-                        "tool_call_id": call_item.get("id"),
-                        "name": tool_name,
-                        "content": json.dumps(tool_result)
-                    })
+                await self._execute_read_calls(read_calls, ctx.conversation_history)
 
-                if persona.get_execution_mode() == ExecutionMode.CONFIRM and write_calls:
+                if ctx.persona.get_execution_mode() == ExecutionMode.CONFIRM and write_calls:
                     pending = PendingConfirmation(
                         write_calls=write_calls,
-                        conversation_history=conversation_history,
-                        persona_name=persona_name,
-                        tools_for_llm=tools_for_llm,
-                        ticket_to_log=zammad_ctx.ticket_id,
-                        image_url=image_url,
-                        customer_id=zammad_ctx.customer_id
+                        conversation_history=ctx.conversation_history,
+                        persona_name=ctx.persona_name,
+                        tools_for_llm=ctx.tools_for_llm,
+                        ticket_to_log=ctx.zammad_ctx.ticket_id,
+                        image_url=ctx.image_url,
+                        customer_id=ctx.zammad_ctx.customer_id
                     )
-                    self._pending_confirmations[(user_identifier, persona_name)] = pending
+                    self._pending_confirmations[(ctx.user_identifier, ctx.persona_name)] = pending
                     descriptions = [
                         f"- **{wc.get('name')}**: {json.dumps(wc.get('arguments', {}))}"
                         for wc in write_calls
@@ -432,12 +447,32 @@ class ChatSystem:
                     confirm_msg = "I'd like to perform the following actions:\n" + "\n".join(descriptions)
                     return confirm_msg, ResponseType.PENDING_CONFIRMATION
 
-                await self._execute_write_calls(write_calls, conversation_history, zammad_ctx)
+                await self._execute_write_calls(write_calls, ctx.conversation_history, ctx.zammad_ctx)
             else:
                 raise LLMCommunicationError("LLM returned an invalid response structure.")
 
-        logger.error(f"Exceeded max tool calls ({MAX_TOOL_CALLS}) for user {user_identifier}.")
+        logger.error(f"Exceeded max tool calls ({MAX_TOOL_CALLS}) for user {ctx.user_identifier}.")
         return "I seem to be stuck in a loop. Could you please clarify your request?", ResponseType.DEV_COMMAND
+
+    async def _prepare_request(self, ctx: RequestContext) -> None:
+        """Resolve Zammad context, build history, filter tools, append user message."""
+        ctx.zammad_ctx = await self._resolve_zammad_context(
+            ctx.persona, ctx.user_identifier, ctx.channel, ctx.message, ctx.user_display_name
+        )
+        ctx.conversation_history = self._build_conversation_history(
+            ctx.persona, ctx.zammad_ctx, ctx.user_identifier, ctx.channel,
+            ctx.server_id, ctx.history_limit
+        )
+        ctx.tools_for_llm = self._filter_tools_for_persona(ctx.persona, ctx.zammad_ctx.is_aware)
+        await self._mirror_message_to_zammad(ctx.zammad_ctx, ctx.message)
+        ctx.conversation_history.append({"role": "user", "content": ctx.message})
+
+    async def _execute_request(self, ctx: RequestContext) -> Tuple[str, ResponseType]:
+        """Run tool loop, mirror final response to Zammad."""
+        response_text, response_type = await self._run_tool_loop(ctx)
+        if response_type == ResponseType.LLM_GENERATION:
+            await self._mirror_message_to_zammad(ctx.zammad_ctx, response_text)
+        return response_text, response_type
 
     async def generate_response(
             self,
@@ -450,36 +485,28 @@ class ChatSystem:
             history_limit: Optional[int] = None,
             user_display_name: Optional[str] = None
     ) -> Tuple[str, ResponseType, Optional[int]]:
-        command_result: Optional[Dict[str, Any]] = await self.bot_logic.preprocess_message(persona_name,
-                                                                                           user_identifier, message)
+        command_result: Optional[Dict[str, Any]] = await self.bot_logic.preprocess_message(
+            persona_name, user_identifier, message
+        )
         if command_result:
-            mutated = command_result.get("mutated", False)
-            if mutated:
+            if command_result.get("mutated", False):
                 save_personas_to_file(self.personas)
             return command_result["response"], ResponseType.DEV_COMMAND, None
 
-        zammad_ctx = ZammadContext()
+        persona: Optional[Persona] = self.personas.get(persona_name)
+        if not persona:
+            return "Error: Persona not found.", ResponseType.DEV_COMMAND, None
+
+        ctx = RequestContext(
+            persona=persona, persona_name=persona_name,
+            user_identifier=user_identifier, channel=channel, message=message,
+            server_id=server_id, image_url=image_url,
+            history_limit=history_limit, user_display_name=user_display_name,
+        )
         try:
-            persona: Optional[Persona] = self.personas.get(persona_name)
-            if not persona:
-                return "Error: Persona not found.", ResponseType.DEV_COMMAND, None
-
-            zammad_ctx = await self._resolve_zammad_context(
-                persona, user_identifier, channel, message, user_display_name
-            )
-
-            conversation_history = self._build_conversation_history(
-                persona, zammad_ctx, user_identifier, channel, server_id, history_limit
-            )
-            tools_for_llm = self._filter_tools_for_persona(persona, zammad_ctx.is_aware)
-            await self._mirror_message_to_zammad(zammad_ctx, message)
-            conversation_history.append({"role": "user", "content": message})
-
-            response_text, response_type = await self._run_tool_loop(
-                persona, conversation_history, tools_for_llm,
-                zammad_ctx, user_identifier, persona_name, image_url
-            )
-            return response_text, response_type, zammad_ctx.ticket_id
+            await self._prepare_request(ctx)
+            response_text, response_type = await self._execute_request(ctx)
+            return response_text, response_type, ctx.zammad_ctx.ticket_id
 
         except LLMCommunicationError as e:
             logger.error(f"A recoverable LLM communication error occurred for {user_identifier}: {e}")
@@ -487,10 +514,11 @@ class ChatSystem:
                 self._store_api_request(user_identifier, persona_name, e.api_payload)
             error_msg = ("I'm not sure how to continue. Could you please rephrase?" if "empty response" in str(e) else
                          "Error while generating a response: " + str(e))
-            return error_msg, ResponseType.DEV_COMMAND, zammad_ctx.ticket_id
+            return error_msg, ResponseType.DEV_COMMAND, ctx.zammad_ctx.ticket_id
         except Exception as e:
             logger.error(f"A critical error occurred in generate_response for {user_identifier}: {e}", exc_info=True)
-            return "An internal error occurred while processing your request.", ResponseType.DEV_COMMAND, zammad_ctx.ticket_id
+            return ("An internal error occurred while processing your request.",
+                    ResponseType.DEV_COMMAND, ctx.zammad_ctx.ticket_id)
 
     async def resume_pending_confirmation(
             self, user_identifier: str, persona_name: str, approved: bool
