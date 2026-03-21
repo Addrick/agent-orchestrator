@@ -10,7 +10,7 @@
       "top_p": null,
       "top_k": null,
       "display_name_in_chat": false,
-      "execution_mode": "SILENT_ANALYSIS",
+      "execution_mode": "AUTONOMOUS",
       "enabled_tools": [],
       "memory_mode": "global"
     },
@@ -24,7 +24,7 @@
       "top_p": null,
       "top_k": null,
       "display_name_in_chat": false,
-      "execution_mode": "SILENT_ANALYSIS",
+      "execution_mode": "AUTONOMOUS",
       "enabled_tools": [],
       "memory_mode": "global"
     },
@@ -38,7 +38,7 @@
       "top_p": null,
       "top_k": null,
       "display_name_in_chat": false,
-      "execution_mode": "SILENT_ANALYSIS",
+      "execution_mode": "AUTONOMOUS",
       "enabled_tools": [],
       "memory_mode": "ticket_isolated"
     },
@@ -52,7 +52,7 @@
       "top_p": null,
       "top_k": null,
       "display_name_in_chat": false,
-      "execution_mode": "SILENT_ANALYSIS",
+      "execution_mode": "AUTONOMOUS",
       "enabled_tools": [],
       "memory_mode": "global"
     },
@@ -66,7 +66,7 @@
       "top_p": null,
       "top_k": null,
       "display_name_in_chat": false,
-      "execution_mode": "SILENT_ANALYSIS",
+      "execution_mode": "AUTONOMOUS",
       "enabled_tools": [],
       "memory_mode": "global"
     },
@@ -80,7 +80,7 @@
       "top_p": null,
       "top_k": null,
       "display_name_in_chat": false,
-      "execution_mode": "SILENT_ANALYSIS",
+      "execution_mode": "AUTONOMOUS",
       "enabled_tools": [],
       "memory_mode": "global"
     }

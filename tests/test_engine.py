@@ -762,7 +762,7 @@ class TestWebSearch:
     @pytest.mark.asyncio
     @patch('duckduckgo_search.DDGS')
     async def test_web_search_returns_formatted_results(self, mock_ddgs_class):
-        from src.tools.tool_manager import ToolManager
+        from src.tools.tool_manager import ToolManager, WebSearchHandler
         mock_ddgs_instance = MagicMock()
         mock_ddgs_class.return_value.__enter__ = MagicMock(return_value=mock_ddgs_instance)
         mock_ddgs_class.return_value.__exit__ = MagicMock(return_value=False)
@@ -770,7 +770,8 @@ class TestWebSearch:
             {"title": "Result One", "href": "http://example.com/1", "body": "Summary one."},
             {"title": "Result Two", "href": "http://example.com/2", "body": "Summary two."},
         ]
-        manager = ToolManager(MagicMock())
+        manager = ToolManager()
+        WebSearchHandler().register(manager)
         result = await manager.execute_tool("web_search", query="test query")
         assert "result" in result
         assert result["result"] == [
@@ -782,11 +783,12 @@ class TestWebSearch:
     @pytest.mark.asyncio
     @patch('duckduckgo_search.DDGS')
     async def test_web_search_respects_max_results(self, mock_ddgs_class):
-        from src.tools.tool_manager import ToolManager
+        from src.tools.tool_manager import ToolManager, WebSearchHandler
         mock_ddgs_instance = MagicMock()
         mock_ddgs_class.return_value.__enter__ = MagicMock(return_value=mock_ddgs_instance)
         mock_ddgs_class.return_value.__exit__ = MagicMock(return_value=False)
         mock_ddgs_instance.text.return_value = []
-        manager = ToolManager(MagicMock())
+        manager = ToolManager()
+        WebSearchHandler().register(manager)
         await manager.execute_tool("web_search", query="test", max_results=3)
         mock_ddgs_instance.text.assert_called_once_with("test", max_results=3)
