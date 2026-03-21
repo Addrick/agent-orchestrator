@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock, patch, call
 import json
 
-from src.chat_system import ChatSystem, ResponseType, ZammadContext, _get_model_prefix
+from src.chat_system import ChatSystem, ResponseType, ZammadContext, RequestContext, _get_model_prefix
 from src.database.memory_manager import MemoryManager
 from src.engine import TextEngine, LLMCommunicationError
 from src.clients.zammad_client import ZammadClient
@@ -643,11 +643,13 @@ async def test_run_tool_loop_text_response(chat_system_with_mocks):
     """Tool loop returns immediately on text response."""
     system, _, text_engine_mock, _, persona, _ = chat_system_with_mocks
     text_engine_mock.generate_response.return_value = ({'type': 'text', 'content': 'Hi'}, {})
-    ctx = ZammadContext()
-
-    text, rtype = await system._run_tool_loop(
-        persona, [{"role": "user", "content": "hi"}], [], ctx, 'user', 'test_persona', None
+    ctx = RequestContext(
+        persona=persona, persona_name='test_persona', user_identifier='user',
+        channel='ch', message='hi',
+        conversation_history=[{"role": "user", "content": "hi"}],
     )
+
+    text, rtype = await system._run_tool_loop(ctx)
 
     assert rtype == ResponseType.LLM_GENERATION
     assert text == 'Hi'
@@ -661,11 +663,90 @@ async def test_run_tool_loop_max_calls_exceeded(chat_system_with_mocks):
     tool_call = {'type': 'tool_calls', 'calls': [{'id': 'c1', 'name': 'web_search', 'arguments': {}}]}
     text_engine_mock.generate_response.return_value = (tool_call, {})
     tool_manager_mock.execute_tool.return_value = {"result": "ok"}
-    ctx = ZammadContext()
-
-    text, rtype = await system._run_tool_loop(
-        persona, [{"role": "user", "content": "search"}], [], ctx, 'user', 'test_persona', None
+    ctx = RequestContext(
+        persona=persona, persona_name='test_persona', user_identifier='user',
+        channel='ch', message='search',
+        conversation_history=[{"role": "user", "content": "search"}],
     )
+
+    text, rtype = await system._run_tool_loop(ctx)
 
     assert rtype == ResponseType.DEV_COMMAND
     assert "stuck in a loop" in text
+
+
+# --- Tests for Extracted Orchestration Methods ---
+
+@pytest.mark.asyncio
+async def test_execute_read_calls(chat_system_with_mocks):
+    """Read tool calls are executed and results appended to history."""
+    system, _, _, _, _, tool_manager_mock = chat_system_with_mocks
+    tool_manager_mock.execute_tool.return_value = {"result": [{"id": 1}]}
+
+    read_calls = [{"id": "c1", "name": "search_tickets", "arguments": {"query": "test"}}]
+    history = []
+    await system._execute_read_calls(read_calls, history)
+
+    tool_manager_mock.execute_tool.assert_called_once_with('search_tickets', query='test')
+    assert len(history) == 1
+    assert history[0]['role'] == 'tool'
+    assert history[0]['tool_call_id'] == 'c1'
+
+
+@pytest.mark.asyncio
+async def test_prepare_request_populates_context(chat_system_with_mocks):
+    """_prepare_request resolves Zammad context, builds history, filters tools, appends user message."""
+    system, memory_mock, _, _, persona, tool_manager_mock = chat_system_with_mocks
+    memory_mock.get_channel_history.return_value = []
+    ctx = RequestContext(
+        persona=persona, persona_name='test_persona', user_identifier='user',
+        channel='general', message='hello', server_id='srv1',
+    )
+
+    await system._prepare_request(ctx)
+
+    assert ctx.zammad_ctx.is_aware is False
+    assert ctx.conversation_history[-1] == {"role": "user", "content": "hello"}
+
+
+@pytest.mark.asyncio
+async def test_execute_request_mirrors_llm_response(chat_system_with_mocks):
+    """_execute_request mirrors final LLM text to Zammad."""
+    system, _, text_engine_mock, zammad_mock, persona, _ = chat_system_with_mocks
+    text_engine_mock.generate_response.return_value = ({'type': 'text', 'content': 'Reply'}, {})
+    ctx = RequestContext(
+        persona=persona, persona_name='test_persona', user_identifier='user',
+        channel='ch', message='hi',
+        zammad_ctx=ZammadContext(is_aware=True, ticket_id=42, zammad_email='u@test.com'),
+        conversation_history=[{"role": "user", "content": "hi"}],
+    )
+
+    text, rtype = await system._execute_request(ctx)
+
+    assert text == 'Reply'
+    assert rtype == ResponseType.LLM_GENERATION
+    zammad_mock.add_article_to_ticket.assert_called_once_with(
+        ticket_id=42, body='Reply', impersonate_email='u@test.com'
+    )
+
+
+@pytest.mark.asyncio
+async def test_execute_request_skips_mirror_for_pending(chat_system_with_mocks):
+    """_execute_request does not mirror confirmation prompts to Zammad."""
+    system, _, text_engine_mock, zammad_mock, persona, _ = chat_system_with_mocks
+    persona.set_execution_mode(ExecutionMode.CONFIRM)
+    persona.set_enabled_tools(['*'])
+    tool_call = {'type': 'tool_calls',
+                 'calls': [{'id': 'c1', 'name': 'update_ticket', 'arguments': {'state': 'closed'}}]}
+    text_engine_mock.generate_response.return_value = (tool_call, {})
+    ctx = RequestContext(
+        persona=persona, persona_name='test_persona', user_identifier='user',
+        channel='ch', message='close it',
+        zammad_ctx=ZammadContext(is_aware=True, ticket_id=42, zammad_email='u@test.com'),
+        conversation_history=[{"role": "user", "content": "close it"}],
+    )
+
+    _, rtype = await system._execute_request(ctx)
+
+    assert rtype == ResponseType.PENDING_CONFIRMATION
+    zammad_mock.add_article_to_ticket.assert_not_called()
