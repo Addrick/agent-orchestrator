@@ -9,3 +9,4 @@ config/personas.json
 
 .env
 .env.test
+.claude/
