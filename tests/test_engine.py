@@ -131,6 +131,27 @@ class TestOpenAI:
         assert exc_info.value.rate_limited is True
         assert mock_instance.chat.completions.create.call_count == 1
 
+    @pytest.mark.asyncio
+    async def test_tool_metadata_stripped_from_api_call(self, mock_openai_class, text_engine, openai_config,
+                                                        base_context, monkeypatch):
+        """Custom metadata fields (is_write, service_binding) must not leak into API calls."""
+        monkeypatch.setenv("OPENAI_API_KEY", "dummy_key_for_testing")
+        mock_instance = mock_openai_class.return_value
+        mock_instance.chat.completions.create = AsyncMock(
+            return_value=MagicMock(choices=[MagicMock(message=MagicMock(content="ok", tool_calls=None))])
+        )
+        tools = [{
+            "type": "function", "is_write": True, "service_binding": "zammad",
+            "function": {"name": "create_ticket", "description": "Creates a ticket",
+                         "parameters": {"type": "object", "properties": {}}}
+        }]
+        await text_engine.generate_response(openai_config, base_context, tools=tools)
+        call_kwargs = mock_instance.chat.completions.create.call_args[1]
+        for tool in call_kwargs["tools"]:
+            assert "is_write" not in tool, "is_write leaked into OpenAI API call"
+            assert "service_binding" not in tool, "service_binding leaked into OpenAI API call"
+            assert set(tool.keys()) == {"type", "function"}
+
 
 @patch('src.engine.anthropic.Anthropic')
 class TestAnthropic:
@@ -151,7 +172,10 @@ class TestAnthropic:
         mock_tool_use = MagicMock(type='tool_use', id='tool_123', input={'ticker': 'GOOG'})
         mock_tool_use.name = 'get_stock_price'
         mock_instance.messages.create.return_value = MagicMock(content=[mock_tool_use], stop_reason="tool_use")
-        response, _ = await text_engine.generate_response(anthropic_config, base_context, tools=[{"name": "get_stock_price"}])
+        response, _ = await text_engine.generate_response(
+            anthropic_config, base_context,
+            tools=[{"type": "function", "function": {"name": "get_stock_price", "parameters": {}}}]
+        )
         assert response['type'] == 'tool_calls'
         assert response['calls'][0]['name'] == 'get_stock_price'
 
@@ -175,6 +199,27 @@ class TestAnthropic:
         assert exc_info.value.rate_limited is True
         assert mock_instance.messages.create.call_count == 1
 
+    @pytest.mark.asyncio
+    async def test_tool_metadata_stripped_from_api_call(self, mock_anthropic_class, text_engine, anthropic_config,
+                                                        base_context, monkeypatch):
+        """Custom metadata fields must be stripped and tools converted to Anthropic format."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy_key_for_testing")
+        mock_instance = mock_anthropic_class.return_value
+        mock_instance.messages.create.return_value = MagicMock(
+            content=[MagicMock(text="ok")], stop_reason="end_turn"
+        )
+        tools = [{
+            "type": "function", "is_write": True, "service_binding": "zammad",
+            "function": {"name": "create_ticket", "description": "Creates a ticket",
+                         "parameters": {"type": "object", "properties": {}}}
+        }]
+        await text_engine.generate_response(anthropic_config, base_context, tools=tools)
+        call_kwargs = mock_instance.messages.create.call_args[1]
+        for tool in call_kwargs["tools"]:
+            assert "is_write" not in tool, "is_write leaked into Anthropic API call"
+            assert "service_binding" not in tool, "service_binding leaked into Anthropic API call"
+            assert "function" not in tool, "OpenAI-style nesting leaked into Anthropic API call"
+            assert "name" in tool and "input_schema" in tool
 
     @pytest.mark.asyncio
     @patch('aiohttp.ClientSession.get')
