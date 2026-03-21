@@ -7,7 +7,6 @@ import json
 from src.chat_system import ChatSystem, ResponseType, RequestContext, _get_model_prefix
 from src.database.memory_manager import MemoryManager
 from src.engine import TextEngine, LLMCommunicationError
-from src.clients.zammad_client import ZammadClient
 from src.persona import Persona, ExecutionMode, MemoryMode
 from src.clients.service_integration import ServiceIntegration
 
@@ -20,9 +19,6 @@ def chat_system_with_mocks():
     """
     mock_memory_manager = MagicMock(spec=MemoryManager)
     mock_text_engine = MagicMock(spec=TextEngine)
-    mock_zammad_client = MagicMock(spec=ZammadClient)
-    # Add the api_url attribute to make the mock a higher-fidelity representation
-    mock_zammad_client.api_url = "http://zammad.local"
     mock_tool_manager = AsyncMock()
     mock_tool_manager.get_tool_definitions = MagicMock(return_value=[])
 
@@ -35,12 +31,11 @@ def chat_system_with_mocks():
         system = ChatSystem(
             memory_manager=mock_memory_manager,
             text_engine=mock_text_engine,
-            zammad_client=mock_zammad_client
         )
         # Mock bot_logic by default to isolate ChatSystem logic
         system.bot_logic.preprocess_message = AsyncMock(return_value=None)
 
-        yield (system, mock_memory_manager, mock_text_engine, mock_zammad_client,
+        yield (system, mock_memory_manager, mock_text_engine,
                mock_persona, mock_tool_manager)
 
 
@@ -48,7 +43,7 @@ def chat_system_with_mocks():
 
 @pytest.mark.asyncio
 async def test_generate_response_handles_dev_command(chat_system_with_mocks):
-    system, _, text_engine_mock, _, _, _ = chat_system_with_mocks
+    system, _, text_engine_mock, _, _ = chat_system_with_mocks
     system.bot_logic.preprocess_message.return_value = {"response": "Dev command output", "mutated": False}
     response, _, _ = await system.generate_response("test_persona", "user", "channel", "what model")
     assert response == "Dev command output"
@@ -57,7 +52,7 @@ async def test_generate_response_handles_dev_command(chat_system_with_mocks):
 
 @pytest.mark.asyncio
 async def test_generate_response_handles_persona_not_found(chat_system_with_mocks):
-    system, _, text_engine_mock, _, _, _ = chat_system_with_mocks
+    system, _, text_engine_mock, _, _ = chat_system_with_mocks
     response, _, _ = await system.generate_response("unknown_persona", "user", "channel", "test")
     assert "Error: Persona not found" in response
     text_engine_mock.generate_response.assert_not_called()
@@ -65,7 +60,7 @@ async def test_generate_response_handles_persona_not_found(chat_system_with_mock
 
 @pytest.mark.asyncio
 async def test_generate_response_handles_llm_communication_error(chat_system_with_mocks):
-    system, _, text_engine_mock, _, _, _ = chat_system_with_mocks
+    system, _, text_engine_mock, _, _ = chat_system_with_mocks
     text_engine_mock.generate_response.side_effect = LLMCommunicationError("API is down")
     response, _, _ = await system.generate_response("test_persona", "user", "channel", "test")
     assert "Error while generating a response:" in response
@@ -77,7 +72,7 @@ async def test_generate_response_stores_payload_on_llm_error(chat_system_with_mo
     Ensures that if the LLM raises an error, the prepared API payload is
     still stored for debugging purposes via `dump_last`.
     """
-    system, _, text_engine_mock, _, _, _ = chat_system_with_mocks
+    system, _, text_engine_mock, _, _ = chat_system_with_mocks
     failed_payload = {"model": "mock_model", "messages": ["This is the context"]}
     # Configure the mock TextEngine to raise an error that includes the payload
     text_engine_mock.generate_response.side_effect = LLMCommunicationError(
@@ -96,7 +91,7 @@ async def test_generate_response_stores_payload_on_llm_error(chat_system_with_mo
 
 @pytest.mark.asyncio
 async def test_generate_response_handles_generic_exception(chat_system_with_mocks):
-    system, memory_manager, _, _, _, _ = chat_system_with_mocks
+    system, memory_manager, _, _, _ = chat_system_with_mocks
     memory_manager.get_channel_history.side_effect = Exception("DB is locked")
     response, _, _ = await system.generate_response("test_persona", "user", "channel", "test")
     assert "An internal error occurred" in response
@@ -104,7 +99,7 @@ async def test_generate_response_handles_generic_exception(chat_system_with_mock
 
 @pytest.mark.asyncio
 async def test_generate_response_exits_after_max_tool_calls(chat_system_with_mocks):
-    system, _, text_engine_mock, _, persona, tool_manager_mock = chat_system_with_mocks
+    system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_enabled_tools(['*'])
     tool_call = {'type': 'tool_calls', 'calls': [{'id': 'c1', 'name': 'test_tool', 'arguments': {}}]}
     # Make the text engine always return a tool call
@@ -121,7 +116,7 @@ async def test_generate_response_exits_after_max_tool_calls(chat_system_with_moc
 @pytest.mark.asyncio
 async def test_tool_use_in_autonomous_mode(chat_system_with_mocks):
     """Tests that in AUTONOMOUS mode, tool calls are executed immediately."""
-    system, _, text_engine_mock, _, persona, tool_manager_mock = chat_system_with_mocks
+    system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_execution_mode(ExecutionMode.AUTONOMOUS)
     persona.set_enabled_tools(['*'])
 
@@ -153,7 +148,7 @@ async def test_tool_use_in_autonomous_mode(chat_system_with_mocks):
 ])
 def test_format_raw_history_for_llm(chat_system_with_mocks, history, mode, server_id, persona, expected_role,
                                     expected_content):
-    system, _, _, _, _, _ = chat_system_with_mocks
+    system, _, _, _, _ = chat_system_with_mocks
     formatted = system._format_raw_history_for_llm(history, mode, persona, server_id)
     assert len(formatted) == 1
     assert formatted[0]['role'] == expected_role
@@ -165,7 +160,7 @@ def test_format_raw_history_for_llm(chat_system_with_mocks, history, mode, serve
 @pytest.mark.asyncio
 async def test_confirm_mode_returns_pending_for_write_tools(chat_system_with_mocks):
     """In CONFIRM mode, write tool calls should return PENDING_CONFIRMATION instead of executing."""
-    system, _, text_engine_mock, _, persona, tool_manager_mock = chat_system_with_mocks
+    system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_enabled_tools(['*'])
 
@@ -183,7 +178,7 @@ async def test_confirm_mode_returns_pending_for_write_tools(chat_system_with_moc
 @pytest.mark.asyncio
 async def test_confirm_mode_auto_executes_read_only_tools(chat_system_with_mocks):
     """In CONFIRM mode, read-only tools should execute immediately without confirmation."""
-    system, _, text_engine_mock, _, persona, tool_manager_mock = chat_system_with_mocks
+    system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_enabled_tools(['*'])
 
@@ -203,7 +198,7 @@ async def test_confirm_mode_auto_executes_read_only_tools(chat_system_with_mocks
 @pytest.mark.asyncio
 async def test_confirm_mode_mixed_tools_executes_reads_and_pends_writes(chat_system_with_mocks):
     """In CONFIRM mode with mixed read+write tools, reads execute and writes pend."""
-    system, _, text_engine_mock, _, persona, tool_manager_mock = chat_system_with_mocks
+    system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_enabled_tools(['*'])
 
@@ -226,7 +221,7 @@ async def test_confirm_mode_mixed_tools_executes_reads_and_pends_writes(chat_sys
 @pytest.mark.asyncio
 async def test_resume_pending_confirmation_approved(chat_system_with_mocks):
     """Approving a pending confirmation should execute the write tools and return the final response."""
-    system, _, text_engine_mock, _, persona, tool_manager_mock = chat_system_with_mocks
+    system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_enabled_tools(['*'])
 
@@ -251,7 +246,7 @@ async def test_resume_pending_confirmation_approved(chat_system_with_mocks):
 @pytest.mark.asyncio
 async def test_resume_pending_confirmation_denied(chat_system_with_mocks):
     """Denying a pending confirmation should feed denial to LLM and return its response."""
-    system, _, text_engine_mock, _, persona, tool_manager_mock = chat_system_with_mocks
+    system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_enabled_tools(['*'])
 
@@ -296,7 +291,7 @@ def test_get_model_prefix(model_name, expected_prefix):
 @pytest.mark.asyncio
 async def test_grounding_filtered_for_non_gemini_25_models(chat_system_with_mocks):
     """google_grounding_search should be filtered out for non-Gemini-2.5 models."""
-    system, _, text_engine_mock, _, persona, tool_manager_mock = chat_system_with_mocks
+    system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_enabled_tools(['*'])
 
     grounding_tool = {
@@ -322,7 +317,7 @@ async def test_grounding_filtered_for_non_gemini_25_models(chat_system_with_mock
 @pytest.mark.asyncio
 async def test_grounding_kept_for_gemini_25_models(chat_system_with_mocks):
     """google_grounding_search should be kept for Gemini 2.5 models."""
-    system, _, text_engine_mock, _, persona, tool_manager_mock = chat_system_with_mocks
+    system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_enabled_tools(['*'])
 
     grounding_tool = {
@@ -350,7 +345,7 @@ async def test_grounding_kept_for_gemini_25_models(chat_system_with_mocks):
 ])
 async def test_grounding_filtered_for_incompatible_models(chat_system_with_mocks, model_name):
     """Grounding should be filtered for all incompatible model prefixes."""
-    system, _, text_engine_mock, _, persona, tool_manager_mock = chat_system_with_mocks
+    system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_enabled_tools(['*'])
     persona.set_model_name(model_name)
 
@@ -369,18 +364,19 @@ async def test_grounding_filtered_for_incompatible_models(chat_system_with_mocks
 # --- Service Integration Tests ---
 
 def test_register_service(chat_system_with_mocks):
-    """register_service adds a service to the registry."""
-    system, _, _, _, _, _ = chat_system_with_mocks
+    """register_service adds a service to the registry and registers its tools."""
+    system, _, _, _, _ = chat_system_with_mocks
     mock_service = MagicMock(spec=ServiceIntegration)
     mock_service.name = "test_service"
     system.register_service(mock_service)
     assert "test_service" in system._services
+    mock_service.register_tools.assert_called_once_with(system.tool_manager)
 
 
 @pytest.mark.asyncio
 async def test_resolve_service_contexts_calls_bound_services(chat_system_with_mocks):
     """_resolve_service_contexts calls resolve_context on each bound service."""
-    system, _, _, _, persona, _ = chat_system_with_mocks
+    system, _, _, persona, _ = chat_system_with_mocks
     mock_service = MagicMock(spec=ServiceIntegration)
     mock_service.name = "test_svc"
     mock_service.resolve_context = AsyncMock(return_value={"key": "value"})
@@ -400,7 +396,7 @@ async def test_resolve_service_contexts_calls_bound_services(chat_system_with_mo
 @pytest.mark.asyncio
 async def test_notify_services_calls_on_message(chat_system_with_mocks):
     """_notify_services calls on_message on each service in service_data."""
-    system, _, _, _, _, _ = chat_system_with_mocks
+    system, _, _, _, _ = chat_system_with_mocks
     mock_service = MagicMock(spec=ServiceIntegration)
     mock_service.name = "test_svc"
     mock_service.on_message = AsyncMock()
@@ -416,7 +412,7 @@ async def test_notify_services_calls_on_message(chat_system_with_mocks):
 
 def test_build_conversation_history_channel_mode(chat_system_with_mocks):
     """Channel-isolated mode fetches channel history."""
-    system, memory_mock, _, _, persona, _ = chat_system_with_mocks
+    system, memory_mock, _, persona, _ = chat_system_with_mocks
     persona.set_memory_mode(MemoryMode.CHANNEL_ISOLATED)
     memory_mock.get_channel_history.return_value = [
         {'author_role': 'user', 'author_name': 'Alice', 'content': 'Hello'}
@@ -431,7 +427,7 @@ def test_build_conversation_history_channel_mode(chat_system_with_mocks):
 
 def test_build_conversation_history_ticket_mode_with_service_system_messages(chat_system_with_mocks):
     """Service system messages are injected into conversation history."""
-    system, memory_mock, _, _, persona, _ = chat_system_with_mocks
+    system, memory_mock, _, persona, _ = chat_system_with_mocks
     persona.set_memory_mode(MemoryMode.TICKET_ISOLATED)
     memory_mock.get_ticket_history.return_value = []
 
@@ -451,7 +447,7 @@ def test_build_conversation_history_ticket_mode_with_service_system_messages(cha
 
 def test_build_conversation_history_personal_mode(chat_system_with_mocks):
     """Personal mode fetches personal history."""
-    system, memory_mock, _, _, persona, _ = chat_system_with_mocks
+    system, memory_mock, _, persona, _ = chat_system_with_mocks
     persona.set_memory_mode(MemoryMode.PERSONAL)
     memory_mock.get_personal_history.return_value = []
 
@@ -464,7 +460,7 @@ def test_build_conversation_history_personal_mode(chat_system_with_mocks):
 
 def test_filter_tools_wildcard(chat_system_with_mocks):
     """Wildcard enabled_tools returns all compatible tools."""
-    system, _, _, _, persona, tool_manager_mock = chat_system_with_mocks
+    system, _, _, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_enabled_tools(['*'])
     tool_a = {"type": "function", "function": {"name": "tool_a", "parameters": {}}}
     tool_b = {"type": "function", "function": {"name": "tool_b", "parameters": {}}}
@@ -476,7 +472,7 @@ def test_filter_tools_wildcard(chat_system_with_mocks):
 
 def test_filter_tools_specific_names(chat_system_with_mocks):
     """Specific enabled_tools filters to only those tools."""
-    system, _, _, _, persona, tool_manager_mock = chat_system_with_mocks
+    system, _, _, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_enabled_tools(['tool_a'])
     tool_a = {"type": "function", "function": {"name": "tool_a", "parameters": {}}}
     tool_b = {"type": "function", "function": {"name": "tool_b", "parameters": {}}}
@@ -489,7 +485,7 @@ def test_filter_tools_specific_names(chat_system_with_mocks):
 
 def test_filter_tools_removes_unbound_service_tools(chat_system_with_mocks):
     """Tools with a service_binding are removed when the persona lacks that binding."""
-    system, _, _, _, persona, tool_manager_mock = chat_system_with_mocks
+    system, _, _, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_enabled_tools(['*'])
     persona.set_service_bindings([])  # No service bindings
     zammad_tool = {"type": "function", "service_binding": "zammad",
@@ -505,7 +501,7 @@ def test_filter_tools_removes_unbound_service_tools(chat_system_with_mocks):
 
 def test_filter_tools_includes_bound_service_tools(chat_system_with_mocks):
     """Tools with a service_binding are included when the persona has that binding."""
-    system, _, _, _, persona, tool_manager_mock = chat_system_with_mocks
+    system, _, _, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_enabled_tools(['*'])
     persona.set_service_bindings(["zammad"])
     zammad_tool = {"type": "function", "service_binding": "zammad",
@@ -524,7 +520,7 @@ def test_filter_tools_includes_bound_service_tools(chat_system_with_mocks):
 @pytest.mark.asyncio
 async def test_execute_write_calls_delegates_to_services(chat_system_with_mocks):
     """Services get to prepare tool args and react to results."""
-    system, _, _, _, _, tool_manager_mock = chat_system_with_mocks
+    system, _, _, _, tool_manager_mock = chat_system_with_mocks
     tool_manager_mock.execute_tool.return_value = {"result": {"id": 50}}
 
     mock_service = MagicMock(spec=ServiceIntegration)
@@ -549,7 +545,7 @@ async def test_execute_write_calls_delegates_to_services(chat_system_with_mocks)
 @pytest.mark.asyncio
 async def test_execute_write_calls_works_without_services(chat_system_with_mocks):
     """Write calls execute normally when no services are registered."""
-    system, _, _, _, _, tool_manager_mock = chat_system_with_mocks
+    system, _, _, _, tool_manager_mock = chat_system_with_mocks
     tool_manager_mock.execute_tool.return_value = {"result": {"id": 60}}
 
     write_calls = [{"id": "c1", "name": "update_ticket", "arguments": {"state": "closed"}}]
@@ -579,7 +575,7 @@ def test_append_denied_tool_results():
 @pytest.mark.asyncio
 async def test_run_tool_loop_text_response(chat_system_with_mocks):
     """Tool loop returns immediately on text response."""
-    system, _, text_engine_mock, _, persona, _ = chat_system_with_mocks
+    system, _, text_engine_mock, persona, _ = chat_system_with_mocks
     text_engine_mock.generate_response.return_value = ({'type': 'text', 'content': 'Hi'}, {})
     ctx = RequestContext(
         persona=persona, persona_name='test_persona', user_identifier='user',
@@ -596,7 +592,7 @@ async def test_run_tool_loop_text_response(chat_system_with_mocks):
 @pytest.mark.asyncio
 async def test_run_tool_loop_max_calls_exceeded(chat_system_with_mocks):
     """Tool loop returns stuck message after MAX_TOOL_CALLS iterations."""
-    system, _, text_engine_mock, _, persona, tool_manager_mock = chat_system_with_mocks
+    system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_enabled_tools(['*'])
     tool_call = {'type': 'tool_calls', 'calls': [{'id': 'c1', 'name': 'web_search', 'arguments': {}}]}
     text_engine_mock.generate_response.return_value = (tool_call, {})
@@ -618,7 +614,7 @@ async def test_run_tool_loop_max_calls_exceeded(chat_system_with_mocks):
 @pytest.mark.asyncio
 async def test_execute_read_calls(chat_system_with_mocks):
     """Read tool calls are executed and results appended to history."""
-    system, _, _, _, _, tool_manager_mock = chat_system_with_mocks
+    system, _, _, _, tool_manager_mock = chat_system_with_mocks
     tool_manager_mock.execute_tool.return_value = {"result": [{"id": 1}]}
 
     read_calls = [{"id": "c1", "name": "search_tickets", "arguments": {"query": "test"}}]
@@ -634,7 +630,7 @@ async def test_execute_read_calls(chat_system_with_mocks):
 @pytest.mark.asyncio
 async def test_prepare_request_populates_context(chat_system_with_mocks):
     """_prepare_request resolves service contexts, builds history, filters tools, appends user message."""
-    system, memory_mock, _, _, persona, tool_manager_mock = chat_system_with_mocks
+    system, memory_mock, _, persona, tool_manager_mock = chat_system_with_mocks
     memory_mock.get_channel_history.return_value = []
     ctx = RequestContext(
         persona=persona, persona_name='test_persona', user_identifier='user',
@@ -650,7 +646,7 @@ async def test_prepare_request_populates_context(chat_system_with_mocks):
 @pytest.mark.asyncio
 async def test_execute_request_notifies_services(chat_system_with_mocks):
     """_execute_request notifies services of the final LLM response."""
-    system, _, text_engine_mock, _, persona, _ = chat_system_with_mocks
+    system, _, text_engine_mock, persona, _ = chat_system_with_mocks
     text_engine_mock.generate_response.return_value = ({'type': 'text', 'content': 'Reply'}, {})
 
     mock_service = MagicMock(spec=ServiceIntegration)
@@ -677,7 +673,7 @@ async def test_execute_request_notifies_services(chat_system_with_mocks):
 @pytest.mark.asyncio
 async def test_execute_request_skips_notify_for_pending(chat_system_with_mocks):
     """_execute_request does not notify services for confirmation prompts."""
-    system, _, text_engine_mock, _, persona, _ = chat_system_with_mocks
+    system, _, text_engine_mock, persona, _ = chat_system_with_mocks
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_enabled_tools(['*'])
     tool_call = {'type': 'tool_calls',
@@ -703,19 +699,46 @@ async def test_execute_request_skips_notify_for_pending(chat_system_with_mocks):
 
 
 @pytest.mark.asyncio
-async def test_generate_response_extracts_ticket_id_from_service_data(chat_system_with_mocks):
-    """generate_response returns ticket_id from service_data for backward compatibility."""
-    system, memory_mock, text_engine_mock, _, persona, _ = chat_system_with_mocks
+async def test_generate_response_extracts_tracking_id_from_services(chat_system_with_mocks):
+    """generate_response returns tracking ID via service get_tracking_id hook."""
+    system, memory_mock, text_engine_mock, persona, _ = chat_system_with_mocks
     memory_mock.get_channel_history.return_value = []
-    persona.set_service_bindings(["zammad"])
+    persona.set_service_bindings(["test_svc"])
 
     mock_service = MagicMock(spec=ServiceIntegration)
-    mock_service.name = "zammad"
-    mock_service.resolve_context = AsyncMock(return_value={"ticket_id": 42, "customer_id": 101})
+    mock_service.name = "test_svc"
+    mock_service.resolve_context = AsyncMock(return_value={"ticket_id": 42})
     mock_service.on_message = AsyncMock()
     mock_service.get_system_messages.return_value = []
-    system._services["zammad"] = mock_service
+    mock_service.get_tracking_id.return_value = 42
+    system._services["test_svc"] = mock_service
 
     _, _, ticket_id = await system.generate_response('test_persona', 'user', 'channel', 'test')
 
     assert ticket_id == 42
+    mock_service.get_tracking_id.assert_called()
+
+
+def test_get_tracking_id_returns_none_without_services(chat_system_with_mocks):
+    """_get_tracking_id returns None when no services are registered."""
+    system, _, _, _, _ = chat_system_with_mocks
+    assert system._get_tracking_id({}) is None
+
+
+def test_get_tracking_id_returns_first_non_none(chat_system_with_mocks):
+    """_get_tracking_id returns the first non-None tracking ID from services."""
+    system, _, _, _, _ = chat_system_with_mocks
+
+    svc_a = MagicMock(spec=ServiceIntegration)
+    svc_a.name = "svc_a"
+    svc_a.get_tracking_id.return_value = None
+
+    svc_b = MagicMock(spec=ServiceIntegration)
+    svc_b.name = "svc_b"
+    svc_b.get_tracking_id.return_value = 99
+
+    system._services["svc_a"] = svc_a
+    system._services["svc_b"] = svc_b
+
+    result = system._get_tracking_id({"svc_a": {"x": 1}, "svc_b": {"y": 2}})
+    assert result == 99

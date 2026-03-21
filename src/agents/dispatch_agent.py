@@ -14,6 +14,7 @@ from config.global_config import (
 from src.agents.base import AgentLoop
 from src.chat_system import ChatSystem
 from src.clients.notification import NotificationRouter
+from src.clients.zammad_client import ZammadClient
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +33,14 @@ class DispatchAgent(AgentLoop):
 
     poll_interval: float = DISPATCH_POLL_INTERVAL
 
-    def __init__(self, chat_system: ChatSystem, notification_router: NotificationRouter) -> None:
+    def __init__(
+        self,
+        chat_system: ChatSystem,
+        zammad_client: ZammadClient,
+        notification_router: NotificationRouter,
+    ) -> None:
         super().__init__(chat_system)
-        if chat_system.zammad_client is None:
-            raise RuntimeError("DispatchAgent requires a ZammadClient on ChatSystem")
-        self.zammad_client = chat_system.zammad_client
+        self.zammad_client = zammad_client
         self.notification_router = notification_router
 
     async def _poll(self) -> None:
