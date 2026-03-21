@@ -103,7 +103,6 @@ async def main() -> None:
     bot = ChatSystem(
         memory_manager=memory_manager,
         text_engine=text_engine,
-        zammad_client=zammad_client
     )
 
     # 5. Register service integrations
@@ -136,7 +135,7 @@ async def main() -> None:
             logger.error("ZAMMAD_BOT_ENABLED is True but Zammad credentials are missing. Skipping Zammad bot.")
         else:
             logger.info("Initializing Zammad bot...")
-            zammad_bot = create_zammad_bot(bot)
+            zammad_bot = create_zammad_bot(bot, zammad_client)
             task = asyncio.create_task(zammad_bot.start())
             tasks.append(task)
 

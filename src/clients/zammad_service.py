@@ -1,14 +1,19 @@
 # src/clients/zammad_service.py
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 from urllib.parse import urlparse
 
 from src.clients.service_integration import ServiceIntegration
 from src.clients.zammad_client import ZammadClient
+
+if TYPE_CHECKING:
+    from src.tools.tool_manager import ToolManager
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +32,7 @@ class ZammadIntegration(ServiceIntegration):
     Service integration for Zammad ticketing.
 
     Handles user resolution, ticket lookup, message mirroring,
-    and tool argument injection for the Zammad API.
+    tool registration, and tool argument injection for the Zammad API.
     """
 
     def __init__(self, zammad_client: ZammadClient) -> None:
@@ -37,7 +42,18 @@ class ZammadIntegration(ServiceIntegration):
     def name(self) -> str:
         return "zammad"
 
-    # --- ServiceIntegration hooks ---
+    # --- Registration hooks ---
+
+    def register_tools(self, tool_manager: "ToolManager") -> None:
+        """Register all Zammad CRUD tools with the ToolManager."""
+        from src.tools.tool_manager import ZammadToolHandler
+        ZammadToolHandler(self._client).register(tool_manager)
+
+    def get_tracking_id(self, service_data: Dict[str, Any]) -> Optional[int]:
+        """Return the Zammad ticket ID for memory tracking."""
+        return service_data.get("ticket_id")
+
+    # --- ServiceIntegration lifecycle hooks ---
 
     async def resolve_context(
         self,

@@ -20,6 +20,7 @@ from config.global_config import (
 )
 from src.agents.base import AgentLoop
 from src.chat_system import ChatSystem
+from src.clients.zammad_client import ZammadClient
 
 logger = logging.getLogger(__name__)
 
@@ -28,11 +29,9 @@ class ZammadBot(AgentLoop):
 
     poll_interval: float = ZAMMAD_POLL_INTERVAL
 
-    def __init__(self, chat_system: ChatSystem) -> None:
+    def __init__(self, chat_system: ChatSystem, zammad_client: ZammadClient) -> None:
         super().__init__(chat_system)
-        if chat_system.zammad_client is None:
-            raise RuntimeError("ZammadBot requires a ZammadClient on ChatSystem")
-        self.zammad_client = chat_system.zammad_client
+        self.zammad_client = zammad_client
 
     async def _on_start(self) -> None:
         """
@@ -365,5 +364,5 @@ class ZammadBot(AgentLoop):
             logger.error(f"Error processing ticket {ticket_id}: {e}", exc_info=True)
 
 
-def create_zammad_bot(chat_system: ChatSystem) -> ZammadBot:
-    return ZammadBot(chat_system)
+def create_zammad_bot(chat_system: ChatSystem, zammad_client: ZammadClient) -> ZammadBot:
+    return ZammadBot(chat_system, zammad_client)
