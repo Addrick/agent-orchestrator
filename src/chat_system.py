@@ -51,6 +51,16 @@ class ResponseType(Enum):
 
 
 @dataclass
+class ZammadContext:
+    """Bundles Zammad state resolved during request setup."""
+    is_aware: bool = False
+    customer_id: Optional[int] = None
+    zammad_email: Optional[str] = None
+    ticket_id: Optional[int] = None
+    user_facing_ticket_number: Optional[int] = None
+
+
+@dataclass
 class PendingConfirmation:
     """Stores state for a tool call awaiting user approval in CONFIRM mode."""
     write_calls: List[Dict[str, Any]]
@@ -196,6 +206,239 @@ class ChatSystem:
                     final_history.append({'role': 'user', 'content': formatted_content})
         return final_history
 
+    async def _resolve_zammad_context(
+            self,
+            persona: Persona,
+            user_identifier: str,
+            channel: str,
+            message: str,
+            user_display_name: Optional[str]
+    ) -> ZammadContext:
+        """Resolves Zammad user, ticket number, and active ticket for the request."""
+        ctx = ZammadContext(is_aware=persona.get_zammad_aware())
+        if not ctx.is_aware:
+            return ctx
+
+        ctx.customer_id, ctx.zammad_email = await self._get_or_create_zammad_user(
+            user_identifier, channel, user_display_name
+        )
+        if not ctx.customer_id:
+            return ctx
+
+        ctx.user_facing_ticket_number = self._find_ticket_number_in_message(message)
+        if ctx.user_facing_ticket_number:
+            ctx.ticket_id = await self._get_ticket_id_from_number(ctx.user_facing_ticket_number)
+            if not ctx.ticket_id:
+                logger.warning(
+                    f"User mentioned ticket number {ctx.user_facing_ticket_number}, but it was not found.")
+        else:
+            ctx.ticket_id = await self._find_active_ticket_for_user(ctx.customer_id)
+
+        return ctx
+
+    async def _execute_write_calls(
+            self,
+            write_calls: List[Dict[str, Any]],
+            conversation_history: List[Dict[str, Any]],
+            zammad_ctx: ZammadContext
+    ) -> None:
+        """Executes write tool calls, injecting customer_id for create_ticket and capturing new ticket IDs."""
+        for call_item in write_calls:
+            tool_name: str = call_item.get("name", "")
+            tool_args = call_item.get("arguments", {})
+
+            if tool_name == 'create_ticket':
+                if 'customer_id' not in tool_args and zammad_ctx.customer_id:
+                    tool_args['customer_id'] = zammad_ctx.customer_id
+
+            tool_result = await self.tool_manager.execute_tool(tool_name, **tool_args)
+
+            if tool_name == 'create_ticket' and tool_result.get('result', {}).get('id'):
+                zammad_ctx.ticket_id = tool_result['result']['id']
+
+            conversation_history.append({
+                "role": "tool",
+                "tool_call_id": call_item.get("id"),
+                "name": tool_name,
+                "content": json.dumps(tool_result)
+            })
+
+    @staticmethod
+    def _append_denied_tool_results(
+            write_calls: List[Dict[str, Any]],
+            conversation_history: List[Dict[str, Any]]
+    ) -> None:
+        """Appends denial results for write tools the user rejected."""
+        for call_item in write_calls:
+            conversation_history.append({
+                "role": "tool",
+                "tool_call_id": call_item.get("id"),
+                "name": call_item.get("name"),
+                "content": json.dumps({"error": "Tool call denied by user"})
+            })
+
+    def _build_conversation_history(
+            self,
+            persona: Persona,
+            zammad_ctx: ZammadContext,
+            user_identifier: str,
+            channel: str,
+            server_id: Optional[str],
+            history_limit: Optional[int]
+    ) -> List[Dict[str, Any]]:
+        """Retrieves and formats conversation history based on the persona's memory mode."""
+        persona_name = persona.get_name()
+        mode = persona.get_memory_mode()
+
+        effective_limit: int = persona.get_context_length()
+        if history_limit is not None:
+            effective_limit = min(effective_limit, history_limit)
+
+        raw_history: List[Dict[str, Any]] = []
+        memory_mode_used = "none"
+
+        if mode == MemoryMode.TICKET_ISOLATED:
+            memory_mode_used = "ticket"
+            if zammad_ctx.ticket_id:
+                raw_history = self.memory_manager.get_ticket_history(zammad_ctx.ticket_id, effective_limit)
+        elif mode == MemoryMode.SERVER_WIDE:
+            if server_id:
+                memory_mode_used = "server"
+                raw_history = self.memory_manager.get_server_history(server_id, persona_name, effective_limit)
+            else:
+                memory_mode_used = "server (unavailable)"
+        elif mode == MemoryMode.PERSONAL:
+            memory_mode_used = "personal"
+            raw_history = self.memory_manager.get_personal_history(user_identifier, persona_name, effective_limit)
+        elif mode == MemoryMode.GLOBAL:
+            memory_mode_used = "global"
+            raw_history = self.memory_manager.get_global_history(persona_name, effective_limit)
+        elif mode == MemoryMode.CHANNEL_ISOLATED:
+            memory_mode_used = "channel"
+            raw_history = self.memory_manager.get_channel_history(channel, persona_name, server_id, effective_limit)
+
+        conversation_history = self._format_raw_history_for_llm(raw_history, memory_mode_used, persona_name, server_id)
+
+        if memory_mode_used == "ticket" and zammad_ctx.ticket_id:
+            display_number = zammad_ctx.user_facing_ticket_number or zammad_ctx.ticket_id
+            system_msg = f"This conversation is part of Zammad ticket #{display_number}."
+            conversation_history.insert(0, {"role": "system", "content": system_msg})
+
+        return conversation_history
+
+    def _filter_tools_for_persona(
+            self,
+            persona: Persona,
+            is_zammad_aware: bool
+    ) -> List[Dict[str, Any]]:
+        """Filters available tools by persona config, Zammad awareness, and model compatibility."""
+        all_tools = self.tool_manager.get_tool_definitions()
+        enabled_tool_names = persona.get_enabled_tools()
+
+        if enabled_tool_names == ['*']:
+            tools_for_llm = all_tools
+        elif enabled_tool_names:
+            tools_for_llm = [tool for tool in all_tools if
+                             tool.get('function', {}).get('name') in enabled_tool_names]
+        else:
+            tools_for_llm = []
+
+        if not is_zammad_aware:
+            tools_for_llm = [t for t in tools_for_llm
+                             if t.get('function', {}).get('name') not in ZAMMAD_TOOLS]
+
+        model_prefix = _get_model_prefix(persona.get_model_name())
+        tools_for_llm = [t for t in tools_for_llm
+                         if model_prefix not in MODEL_INCOMPATIBLE_TOOLS.get(
+                             t.get('function', {}).get('name'), set())]
+
+        return tools_for_llm
+
+    async def _mirror_message_to_zammad(
+            self,
+            zammad_ctx: ZammadContext,
+            message: str
+    ) -> None:
+        """Mirrors a message to the associated Zammad ticket as an article."""
+        if zammad_ctx.is_aware and zammad_ctx.ticket_id:
+            await asyncio.to_thread(
+                self.zammad_client.add_article_to_ticket,
+                ticket_id=zammad_ctx.ticket_id,
+                body=message,
+                impersonate_email=zammad_ctx.zammad_email
+            )
+
+    async def _run_tool_loop(
+            self,
+            persona: Persona,
+            conversation_history: List[Dict[str, Any]],
+            tools_for_llm: List[Dict[str, Any]],
+            zammad_ctx: ZammadContext,
+            user_identifier: str,
+            persona_name: str,
+            image_url: Optional[str]
+    ) -> Tuple[str, ResponseType]:
+        """Runs the LLM call / tool execution loop up to MAX_TOOL_CALLS iterations."""
+        for i in range(MAX_TOOL_CALLS):
+            context_object: Dict[str, Any] = {
+                "persona_prompt": persona.get_prompt(),
+                "history": conversation_history,
+                "current_message": {"text": "", "image_url": image_url if i == 0 else None}
+            }
+            llm_response, api_payload = await self.text_engine.generate_response(
+                persona.get_config_for_engine(), context_object, tools=tools_for_llm
+            )
+            if api_payload:
+                self._store_api_request(user_identifier, persona_name, api_payload)
+
+            if llm_response.get("type") == "text":
+                final_text = llm_response.get("content", "")
+                await self._mirror_message_to_zammad(zammad_ctx, final_text)
+                return final_text, ResponseType.LLM_GENERATION
+
+            elif llm_response.get("type") == "tool_calls":
+                calls = llm_response.get("calls", [])
+                conversation_history.append({"role": "assistant", "tool_calls": calls})
+
+                read_calls = [c for c in calls if c.get("name") not in WRITE_TOOLS]
+                write_calls = [c for c in calls if c.get("name") in WRITE_TOOLS]
+
+                for call_item in read_calls:
+                    tool_name = call_item.get("name")
+                    tool_args = call_item.get("arguments", {})
+                    tool_result = await self.tool_manager.execute_tool(tool_name, **tool_args)
+                    conversation_history.append({
+                        "role": "tool",
+                        "tool_call_id": call_item.get("id"),
+                        "name": tool_name,
+                        "content": json.dumps(tool_result)
+                    })
+
+                if persona.get_execution_mode() == ExecutionMode.CONFIRM and write_calls:
+                    pending = PendingConfirmation(
+                        write_calls=write_calls,
+                        conversation_history=conversation_history,
+                        persona_name=persona_name,
+                        tools_for_llm=tools_for_llm,
+                        ticket_to_log=zammad_ctx.ticket_id,
+                        image_url=image_url,
+                        customer_id=zammad_ctx.customer_id
+                    )
+                    self._pending_confirmations[(user_identifier, persona_name)] = pending
+                    descriptions = [
+                        f"- **{wc.get('name')}**: {json.dumps(wc.get('arguments', {}))}"
+                        for wc in write_calls
+                    ]
+                    confirm_msg = "I'd like to perform the following actions:\n" + "\n".join(descriptions)
+                    return confirm_msg, ResponseType.PENDING_CONFIRMATION
+
+                await self._execute_write_calls(write_calls, conversation_history, zammad_ctx)
+            else:
+                raise LLMCommunicationError("LLM returned an invalid response structure.")
+
+        logger.error(f"Exceeded max tool calls ({MAX_TOOL_CALLS}) for user {user_identifier}.")
+        return "I seem to be stuck in a loop. Could you please clarify your request?", ResponseType.DEV_COMMAND
+
     async def generate_response(
             self,
             persona_name: str,
@@ -215,174 +458,28 @@ class ChatSystem:
                 save_personas_to_file(self.personas)
             return command_result["response"], ResponseType.DEV_COMMAND, None
 
-        ticket_to_log: Optional[int] = None
+        zammad_ctx = ZammadContext()
         try:
             persona: Optional[Persona] = self.personas.get(persona_name)
             if not persona:
                 return "Error: Persona not found.", ResponseType.DEV_COMMAND, None
 
-            is_zammad_aware: bool = persona.get_zammad_aware()
-            customer_id: Optional[int] = None
-            zammad_email: Optional[str] = None
-            mode = persona.get_memory_mode()
-            user_facing_ticket_number: Optional[int] = None
+            zammad_ctx = await self._resolve_zammad_context(
+                persona, user_identifier, channel, message, user_display_name
+            )
 
-            if is_zammad_aware:
-                customer_id, zammad_email = await self._get_or_create_zammad_user(user_identifier, channel,
-                                                                                  user_display_name)
-                if customer_id:
-                    user_facing_ticket_number = self._find_ticket_number_in_message(message)
-                    if user_facing_ticket_number:
-                        ticket_to_log = await self._get_ticket_id_from_number(user_facing_ticket_number)
-                        if not ticket_to_log:
-                            logger.warning(
-                                f"User mentioned ticket number {user_facing_ticket_number}, but it was not found.")
-                    else:
-                        ticket_to_log = await self._find_active_ticket_for_user(customer_id)
-
-            effective_limit: int = persona.get_context_length()
-            if history_limit is not None:
-                effective_limit = min(effective_limit, history_limit)
-
-            raw_history: List[Dict[str, Any]] = []
-            memory_mode_used = "none"
-            system_context_message: Optional[str] = None
-
-            if mode == MemoryMode.TICKET_ISOLATED:
-                memory_mode_used = "ticket"
-                if ticket_to_log:
-                    raw_history = self.memory_manager.get_ticket_history(ticket_to_log, effective_limit)
-            elif mode == MemoryMode.SERVER_WIDE:
-                if server_id:
-                    memory_mode_used = "server"
-                    raw_history = self.memory_manager.get_server_history(server_id, persona_name, effective_limit)
-                else:
-                    memory_mode_used = "server (unavailable)"
-            elif mode == MemoryMode.PERSONAL:
-                memory_mode_used = "personal"
-                raw_history = self.memory_manager.get_personal_history(user_identifier, persona_name, effective_limit)
-            elif mode == MemoryMode.GLOBAL:
-                memory_mode_used = "global"
-                raw_history = self.memory_manager.get_global_history(persona_name, effective_limit)
-            elif mode == MemoryMode.CHANNEL_ISOLATED:
-                memory_mode_used = "channel"
-                raw_history = self.memory_manager.get_channel_history(channel, persona_name, server_id, effective_limit)
-
-            if memory_mode_used == "ticket" and ticket_to_log:
-                display_number = user_facing_ticket_number or ticket_to_log
-                system_context_message = f"This conversation is part of Zammad ticket #{display_number}."
-
-            conversation_history: List[Dict[str, Any]] = self._format_raw_history_for_llm(raw_history, memory_mode_used,
-                                                                                          persona_name, server_id)
-            if system_context_message:
-                conversation_history.insert(0, {"role": "system", "content": system_context_message})
-
-            all_tools = self.tool_manager.get_tool_definitions()
-            enabled_tool_names = persona.get_enabled_tools()
-            tools_for_llm: List[Dict[str, Any]] = []
-            if enabled_tool_names == ['*']:
-                tools_for_llm = all_tools
-            elif enabled_tool_names:
-                tools_for_llm = [tool for tool in all_tools if
-                                 tool.get('function', {}).get('name') in enabled_tool_names]
-
-            if not is_zammad_aware:
-                tools_for_llm = [t for t in tools_for_llm
-                                 if t.get('function', {}).get('name') not in ZAMMAD_TOOLS]
-
-            model_prefix = _get_model_prefix(persona.get_model_name())
-            tools_for_llm = [t for t in tools_for_llm
-                             if model_prefix not in MODEL_INCOMPATIBLE_TOOLS.get(
-                                 t.get('function', {}).get('name'), set())]
-
-            if is_zammad_aware and ticket_to_log:
-                await asyncio.to_thread(self.zammad_client.add_article_to_ticket, ticket_id=ticket_to_log,
-                                        body=message, impersonate_email=zammad_email)
-
+            conversation_history = self._build_conversation_history(
+                persona, zammad_ctx, user_identifier, channel, server_id, history_limit
+            )
+            tools_for_llm = self._filter_tools_for_persona(persona, zammad_ctx.is_aware)
+            await self._mirror_message_to_zammad(zammad_ctx, message)
             conversation_history.append({"role": "user", "content": message})
 
-            for i in range(MAX_TOOL_CALLS):
-                context_object: Dict[str, Any] = {
-                    "persona_prompt": persona.get_prompt(),
-                    "history": conversation_history,
-                    "current_message": {"text": "", "image_url": image_url if i == 0 else None}
-                }
-                llm_response, api_payload = await self.text_engine.generate_response(
-                    persona.get_config_for_engine(), context_object, tools=tools_for_llm
-                )
-                if api_payload: self._store_api_request(user_identifier, persona_name, api_payload)
-
-                if llm_response.get("type") == "text":
-                    final_text = llm_response.get("content", "")
-                    if is_zammad_aware and ticket_to_log:
-                        await asyncio.to_thread(self.zammad_client.add_article_to_ticket, ticket_id=ticket_to_log,
-                                                body=final_text)
-                    return final_text, ResponseType.LLM_GENERATION, ticket_to_log
-
-                elif llm_response.get("type") == "tool_calls":
-                    calls = llm_response.get("calls", [])
-                    conversation_history.append({"role": "assistant", "tool_calls": calls})
-
-                    is_confirm_mode = persona.get_execution_mode() == ExecutionMode.CONFIRM
-                    read_calls = [c for c in calls if c.get("name") not in WRITE_TOOLS]
-                    write_calls = [c for c in calls if c.get("name") in WRITE_TOOLS]
-
-                    # Execute read-only tools immediately (even in CONFIRM mode)
-                    for call_item in read_calls:
-                        tool_name = call_item.get("name")
-                        tool_args = call_item.get("arguments", {})
-                        tool_result = await self.tool_manager.execute_tool(tool_name, **tool_args)
-                        conversation_history.append({
-                            "role": "tool",
-                            "tool_call_id": call_item.get("id"),
-                            "name": tool_name,
-                            "content": json.dumps(tool_result)
-                        })
-
-                    # In CONFIRM mode, pause on write tools for user approval
-                    if is_confirm_mode and write_calls:
-                        pending = PendingConfirmation(
-                            write_calls=write_calls,
-                            conversation_history=conversation_history,
-                            persona_name=persona_name,
-                            tools_for_llm=tools_for_llm,
-                            ticket_to_log=ticket_to_log,
-                            image_url=image_url,
-                            customer_id=customer_id
-                        )
-                        self._pending_confirmations[(user_identifier, persona_name)] = pending
-
-                        descriptions = []
-                        for wc in write_calls:
-                            descriptions.append(f"- **{wc.get('name')}**: {json.dumps(wc.get('arguments', {}))}")
-                        confirm_msg = "I'd like to perform the following actions:\n" + "\n".join(descriptions)
-                        return confirm_msg, ResponseType.PENDING_CONFIRMATION, ticket_to_log
-
-                    # AUTONOMOUS mode (or CONFIRM with no write tools): execute all write tools
-                    for call_item in write_calls:
-                        tool_name = call_item.get("name")
-                        tool_args = call_item.get("arguments", {})
-
-                        if tool_name == 'create_ticket':
-                            if 'customer_id' not in tool_args and customer_id:
-                                tool_args['customer_id'] = customer_id
-
-                        tool_result = await self.tool_manager.execute_tool(tool_name, **tool_args)
-
-                        if tool_name == 'create_ticket' and tool_result.get('result', {}).get('id'):
-                            ticket_to_log = tool_result['result']['id']
-
-                        conversation_history.append({
-                            "role": "tool",
-                            "tool_call_id": call_item.get("id"),
-                            "name": tool_name,
-                            "content": json.dumps(tool_result)
-                        })
-                else:
-                    raise LLMCommunicationError("LLM returned an invalid response structure.")
-
-            logger.error(f"Exceeded max tool calls ({MAX_TOOL_CALLS}) for user {user_identifier}.")
-            return "I seem to be stuck in a loop. Could you please clarify your request?", ResponseType.DEV_COMMAND, ticket_to_log
+            response_text, response_type = await self._run_tool_loop(
+                persona, conversation_history, tools_for_llm,
+                zammad_ctx, user_identifier, persona_name, image_url
+            )
+            return response_text, response_type, zammad_ctx.ticket_id
 
         except LLMCommunicationError as e:
             logger.error(f"A recoverable LLM communication error occurred for {user_identifier}: {e}")
@@ -390,10 +487,10 @@ class ChatSystem:
                 self._store_api_request(user_identifier, persona_name, e.api_payload)
             error_msg = ("I'm not sure how to continue. Could you please rephrase?" if "empty response" in str(e) else
                          "Error while generating a response: " + str(e))
-            return error_msg, ResponseType.DEV_COMMAND, ticket_to_log
+            return error_msg, ResponseType.DEV_COMMAND, zammad_ctx.ticket_id
         except Exception as e:
             logger.error(f"A critical error occurred in generate_response for {user_identifier}: {e}", exc_info=True)
-            return "An internal error occurred while processing your request.", ResponseType.DEV_COMMAND, ticket_to_log
+            return "An internal error occurred while processing your request.", ResponseType.DEV_COMMAND, zammad_ctx.ticket_id
 
     async def resume_pending_confirmation(
             self, user_identifier: str, persona_name: str, approved: bool
@@ -413,37 +510,16 @@ class ChatSystem:
             return "Error: Persona not found.", ResponseType.DEV_COMMAND, None
 
         conversation_history = pending.conversation_history
-        ticket_to_log = pending.ticket_to_log
+        zammad_ctx = ZammadContext(
+            ticket_id=pending.ticket_to_log,
+            customer_id=pending.customer_id,
+        )
 
         try:
             if approved:
-                for call_item in pending.write_calls:
-                    tool_name: str = call_item.get("name", "")
-                    tool_args = call_item.get("arguments", {})
-
-                    if tool_name == 'create_ticket':
-                        if 'customer_id' not in tool_args and pending.customer_id:
-                            tool_args['customer_id'] = pending.customer_id
-
-                    tool_result = await self.tool_manager.execute_tool(tool_name, **tool_args)
-
-                    if tool_name == 'create_ticket' and tool_result.get('result', {}).get('id'):
-                        ticket_to_log = tool_result['result']['id']
-
-                    conversation_history.append({
-                        "role": "tool",
-                        "tool_call_id": call_item.get("id"),
-                        "name": tool_name,
-                        "content": json.dumps(tool_result)
-                    })
+                await self._execute_write_calls(pending.write_calls, conversation_history, zammad_ctx)
             else:
-                for call_item in pending.write_calls:
-                    conversation_history.append({
-                        "role": "tool",
-                        "tool_call_id": call_item.get("id"),
-                        "name": call_item.get("name"),
-                        "content": json.dumps({"error": "Tool call denied by user"})
-                    })
+                self._append_denied_tool_results(pending.write_calls, conversation_history)
 
             # Continue the LLM conversation with the tool results
             context_object = {
@@ -458,8 +534,8 @@ class ChatSystem:
                 self._store_api_request(user_identifier, persona_name, api_payload)
 
             final_text = llm_response.get("content", "")
-            return final_text, ResponseType.LLM_GENERATION, ticket_to_log
+            return final_text, ResponseType.LLM_GENERATION, zammad_ctx.ticket_id
 
         except Exception as e:
             logger.error(f"Error resuming pending confirmation for {user_identifier}: {e}", exc_info=True)
-            return "An error occurred while processing the confirmed action.", ResponseType.DEV_COMMAND, ticket_to_log
+            return "An error occurred while processing the confirmed action.", ResponseType.DEV_COMMAND, zammad_ctx.ticket_id

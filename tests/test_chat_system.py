@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock, patch, call
 import json
 
-from src.chat_system import ChatSystem, ResponseType, _get_model_prefix
+from src.chat_system import ChatSystem, ResponseType, ZammadContext, _get_model_prefix
 from src.database.memory_manager import MemoryManager
 from src.engine import TextEngine, LLMCommunicationError
 from src.clients.zammad_client import ZammadClient
@@ -437,3 +437,235 @@ async def test_grounding_filtered_for_incompatible_models(chat_system_with_mocks
     call_args = text_engine_mock.generate_response.call_args
     tools_sent = call_args[1].get('tools', call_args[0][2] if len(call_args[0]) > 2 else [])
     assert len(tools_sent) == 0
+
+
+# --- Unit Tests for Extracted Methods ---
+
+@pytest.mark.asyncio
+async def test_resolve_zammad_context_not_aware(chat_system_with_mocks):
+    """Non-Zammad-aware persona returns empty context."""
+    system, _, _, _, persona, _ = chat_system_with_mocks
+    persona.set_zammad_aware(False)
+    ctx = await system._resolve_zammad_context(persona, 'user', 'channel', 'hi', None)
+    assert ctx.is_aware is False
+    assert ctx.customer_id is None
+    assert ctx.ticket_id is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_zammad_context_with_ticket_number(chat_system_with_mocks):
+    """Zammad-aware persona resolves ticket from message number."""
+    system, _, _, _, persona, _ = chat_system_with_mocks
+    persona.set_zammad_aware(True)
+
+    with patch.object(system, '_get_or_create_zammad_user', new_callable=AsyncMock,
+                      return_value=(101, 'u@test.com')), \
+         patch.object(system, '_get_ticket_id_from_number', new_callable=AsyncMock, return_value=555):
+        ctx = await system._resolve_zammad_context(
+            persona, 'user', 'channel', 'See [Ticket#999]', None
+        )
+
+    assert ctx.is_aware is True
+    assert ctx.customer_id == 101
+    assert ctx.ticket_id == 555
+    assert ctx.user_facing_ticket_number == 999
+
+
+@pytest.mark.asyncio
+async def test_resolve_zammad_context_falls_back_to_active_ticket(chat_system_with_mocks):
+    """Without ticket number in message, resolves via active ticket search."""
+    system, _, _, _, persona, _ = chat_system_with_mocks
+    persona.set_zammad_aware(True)
+
+    with patch.object(system, '_get_or_create_zammad_user', new_callable=AsyncMock,
+                      return_value=(101, 'u@test.com')), \
+         patch.object(system, '_find_active_ticket_for_user', new_callable=AsyncMock, return_value=777):
+        ctx = await system._resolve_zammad_context(
+            persona, 'user', 'channel', 'help me', None
+        )
+
+    assert ctx.ticket_id == 777
+    assert ctx.user_facing_ticket_number is None
+
+
+def test_build_conversation_history_channel_mode(chat_system_with_mocks):
+    """Channel-isolated mode fetches channel history."""
+    system, memory_mock, _, _, persona, _ = chat_system_with_mocks
+    persona.set_memory_mode(MemoryMode.CHANNEL_ISOLATED)
+    memory_mock.get_channel_history.return_value = [
+        {'author_role': 'user', 'author_name': 'Alice', 'content': 'Hello'}
+    ]
+    zammad_ctx = ZammadContext()
+
+    history = system._build_conversation_history(persona, zammad_ctx, 'user', 'general', 'srv1', None)
+
+    memory_mock.get_channel_history.assert_called_once()
+    assert len(history) == 1
+    assert history[0]['content'] == 'Alice: Hello'
+
+
+def test_build_conversation_history_ticket_mode_adds_system_message(chat_system_with_mocks):
+    """Ticket-isolated mode adds system context message."""
+    system, memory_mock, _, _, persona, _ = chat_system_with_mocks
+    persona.set_memory_mode(MemoryMode.TICKET_ISOLATED)
+    memory_mock.get_ticket_history.return_value = []
+    zammad_ctx = ZammadContext(ticket_id=42, user_facing_ticket_number=100)
+
+    history = system._build_conversation_history(persona, zammad_ctx, 'user', 'ch', None, None)
+
+    assert history[0]['role'] == 'system'
+    assert '#100' in history[0]['content']
+
+
+def test_build_conversation_history_personal_mode(chat_system_with_mocks):
+    """Personal mode fetches personal history."""
+    system, memory_mock, _, _, persona, _ = chat_system_with_mocks
+    persona.set_memory_mode(MemoryMode.PERSONAL)
+    memory_mock.get_personal_history.return_value = []
+    zammad_ctx = ZammadContext()
+
+    system._build_conversation_history(persona, zammad_ctx, 'user123', 'ch', None, None)
+
+    memory_mock.get_personal_history.assert_called_once_with('user123', 'test_persona', persona.get_context_length())
+
+
+def test_filter_tools_wildcard(chat_system_with_mocks):
+    """Wildcard enabled_tools returns all compatible tools."""
+    system, _, _, _, persona, tool_manager_mock = chat_system_with_mocks
+    persona.set_enabled_tools(['*'])
+    tool_a = {"type": "function", "function": {"name": "tool_a", "parameters": {}}}
+    tool_b = {"type": "function", "function": {"name": "tool_b", "parameters": {}}}
+    tool_manager_mock.get_tool_definitions.return_value = [tool_a, tool_b]
+
+    result = system._filter_tools_for_persona(persona, is_zammad_aware=True)
+    assert len(result) == 2
+
+
+def test_filter_tools_specific_names(chat_system_with_mocks):
+    """Specific enabled_tools filters to only those tools."""
+    system, _, _, _, persona, tool_manager_mock = chat_system_with_mocks
+    persona.set_enabled_tools(['tool_a'])
+    tool_a = {"type": "function", "function": {"name": "tool_a", "parameters": {}}}
+    tool_b = {"type": "function", "function": {"name": "tool_b", "parameters": {}}}
+    tool_manager_mock.get_tool_definitions.return_value = [tool_a, tool_b]
+
+    result = system._filter_tools_for_persona(persona, is_zammad_aware=True)
+    assert len(result) == 1
+    assert result[0]['function']['name'] == 'tool_a'
+
+
+def test_filter_tools_removes_zammad_when_not_aware(chat_system_with_mocks):
+    """Zammad tools are removed when persona is not Zammad-aware."""
+    system, _, _, _, persona, tool_manager_mock = chat_system_with_mocks
+    persona.set_enabled_tools(['*'])
+    from src.tools.definitions import ZAMMAD_TOOLS
+    zammad_tool = {"type": "function", "function": {"name": list(ZAMMAD_TOOLS)[0], "parameters": {}}}
+    other_tool = {"type": "function", "function": {"name": "web_search", "parameters": {}}}
+    tool_manager_mock.get_tool_definitions.return_value = [zammad_tool, other_tool]
+
+    result = system._filter_tools_for_persona(persona, is_zammad_aware=False)
+    tool_names = [t['function']['name'] for t in result]
+    assert list(ZAMMAD_TOOLS)[0] not in tool_names
+    assert 'web_search' in tool_names
+
+
+@pytest.mark.asyncio
+async def test_execute_write_calls_injects_customer_id(chat_system_with_mocks):
+    """create_ticket gets customer_id injected from ZammadContext."""
+    system, _, _, _, _, tool_manager_mock = chat_system_with_mocks
+    tool_manager_mock.execute_tool.return_value = {"result": {"id": 50}}
+
+    write_calls = [{"id": "c1", "name": "create_ticket", "arguments": {"title": "Test"}}]
+    history = []
+    ctx = ZammadContext(customer_id=101)
+
+    await system._execute_write_calls(write_calls, history, ctx)
+
+    tool_manager_mock.execute_tool.assert_called_once_with('create_ticket', title='Test', customer_id=101)
+    assert ctx.ticket_id == 50
+    assert len(history) == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_write_calls_preserves_explicit_customer_id(chat_system_with_mocks):
+    """If arguments already contain customer_id, it is not overwritten."""
+    system, _, _, _, _, tool_manager_mock = chat_system_with_mocks
+    tool_manager_mock.execute_tool.return_value = {"result": {"id": 60}}
+
+    write_calls = [{"id": "c1", "name": "create_ticket", "arguments": {"title": "T", "customer_id": 999}}]
+    history = []
+    ctx = ZammadContext(customer_id=101)
+
+    await system._execute_write_calls(write_calls, history, ctx)
+
+    tool_manager_mock.execute_tool.assert_called_once_with('create_ticket', title='T', customer_id=999)
+
+
+def test_append_denied_tool_results():
+    """Denied results are appended for each write call."""
+    write_calls = [
+        {"id": "c1", "name": "update_ticket"},
+        {"id": "c2", "name": "create_ticket"},
+    ]
+    history = []
+    ChatSystem._append_denied_tool_results(write_calls, history)
+    assert len(history) == 2
+    assert json.loads(history[0]['content'])['error'] == "Tool call denied by user"
+    assert history[1]['name'] == "create_ticket"
+
+
+@pytest.mark.asyncio
+async def test_mirror_message_to_zammad_when_aware(chat_system_with_mocks):
+    """Message is mirrored to Zammad when aware and ticket exists."""
+    system, _, _, zammad_mock, _, _ = chat_system_with_mocks
+    ctx = ZammadContext(is_aware=True, ticket_id=42, zammad_email='u@test.com')
+
+    await system._mirror_message_to_zammad(ctx, "Hello")
+
+    zammad_mock.add_article_to_ticket.assert_called_once_with(
+        ticket_id=42, body="Hello", impersonate_email='u@test.com'
+    )
+
+
+@pytest.mark.asyncio
+async def test_mirror_message_to_zammad_skipped_when_not_aware(chat_system_with_mocks):
+    """Mirroring is skipped when not Zammad-aware."""
+    system, _, _, zammad_mock, _, _ = chat_system_with_mocks
+    ctx = ZammadContext(is_aware=False)
+
+    await system._mirror_message_to_zammad(ctx, "Hello")
+
+    zammad_mock.add_article_to_ticket.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_tool_loop_text_response(chat_system_with_mocks):
+    """Tool loop returns immediately on text response."""
+    system, _, text_engine_mock, _, persona, _ = chat_system_with_mocks
+    text_engine_mock.generate_response.return_value = ({'type': 'text', 'content': 'Hi'}, {})
+    ctx = ZammadContext()
+
+    text, rtype = await system._run_tool_loop(
+        persona, [{"role": "user", "content": "hi"}], [], ctx, 'user', 'test_persona', None
+    )
+
+    assert rtype == ResponseType.LLM_GENERATION
+    assert text == 'Hi'
+
+
+@pytest.mark.asyncio
+async def test_run_tool_loop_max_calls_exceeded(chat_system_with_mocks):
+    """Tool loop returns stuck message after MAX_TOOL_CALLS iterations."""
+    system, _, text_engine_mock, _, persona, tool_manager_mock = chat_system_with_mocks
+    persona.set_enabled_tools(['*'])
+    tool_call = {'type': 'tool_calls', 'calls': [{'id': 'c1', 'name': 'web_search', 'arguments': {}}]}
+    text_engine_mock.generate_response.return_value = (tool_call, {})
+    tool_manager_mock.execute_tool.return_value = {"result": "ok"}
+    ctx = ZammadContext()
+
+    text, rtype = await system._run_tool_loop(
+        persona, [{"role": "user", "content": "search"}], [], ctx, 'user', 'test_persona', None
+    )
+
+    assert rtype == ResponseType.DEV_COMMAND
+    assert "stuck in a loop" in text
