@@ -9,6 +9,23 @@ from src.utils import save_utils
 logger = logging.getLogger(__name__)
 
 
+def get_model_prefix(model_name: str) -> str:
+    """Return the model family prefix for routing and compatibility checks."""
+    if model_name.startswith("gpt"):
+        return "gpt"
+    elif "claude" in model_name:
+        return "claude"
+    elif "gemma" in model_name:
+        return "gemma"
+    elif "gemini-3.1" in model_name:
+        return "gemini-3.1"
+    elif "gemini" in model_name:
+        return "gemini"
+    elif model_name == "local":
+        return "local"
+    return "unknown"
+
+
 def refresh_available_openai_models() -> List[str]:
     """# OpenAI API query to get current list of active models"""
     import openai

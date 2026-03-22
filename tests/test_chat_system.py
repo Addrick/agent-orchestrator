@@ -4,7 +4,8 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 import json
 
-from src.chat_system import ChatSystem, ResponseType, RequestContext, _get_model_prefix
+from src.chat_system import ChatSystem, ResponseType, RequestContext
+from src.utils.model_utils import get_model_prefix
 from src.database.memory_manager import MemoryManager
 from src.engine import TextEngine, LLMCommunicationError
 from src.persona import Persona, ExecutionMode, MemoryMode
@@ -283,7 +284,7 @@ async def test_resume_pending_confirmation_denied(chat_system_with_mocks):
     ("some-unknown-model", "unknown"),
 ])
 def test_get_model_prefix(model_name, expected_prefix):
-    assert _get_model_prefix(model_name) == expected_prefix
+    assert get_model_prefix(model_name) == expected_prefix
 
 
 # --- Model Compatibility Filter Tests ---

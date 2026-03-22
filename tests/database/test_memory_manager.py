@@ -1,5 +1,6 @@
 # tests/database/test_memory_manager.py
 
+import concurrent.futures
 import pytest
 import os
 import time
@@ -162,3 +163,120 @@ def test_get_server_history_isolates_by_persona(mem_manager):
     history = mem_manager.get_server_history(server, "persona_A")
     assert len(history) == 1
     assert history[0]['content'] == "Msg A"
+
+
+# --- Thread Safety Tests ---
+
+@pytest.fixture
+def file_mem_manager(tmp_path):
+    """Provides a file-backed MemoryManager (required for cross-thread access)."""
+    db_path = str(tmp_path / "thread_test.db")
+    manager = MemoryManager(db_path=db_path)
+    manager.create_schema()
+    yield manager
+    manager.close()
+
+
+def test_concurrent_writes_no_errors(file_mem_manager):
+    """Verify that concurrent writes from multiple threads don't raise SQLite errors."""
+    num_threads = 8
+    writes_per_thread = 50
+
+    def write_batch(thread_id):
+        for i in range(writes_per_thread):
+            file_mem_manager.log_message(
+                user_identifier=f"user_{thread_id}",
+                persona_name="persona",
+                channel="chan",
+                author_role="user",
+                author_name=f"Thread-{thread_id}",
+                content=f"msg-{thread_id}-{i}",
+                timestamp=datetime.now(),
+            )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as pool:
+        futures = [pool.submit(write_batch, t) for t in range(num_threads)]
+        for f in concurrent.futures.as_completed(futures):
+            f.result()  # raises if any thread hit an exception
+
+    history = file_mem_manager.get_global_history("persona")
+    assert len(history) == num_threads * writes_per_thread
+
+
+def test_concurrent_reads_and_writes(file_mem_manager):
+    """Verify that simultaneous reads and writes don't corrupt data or raise errors."""
+    num_writers = 4
+    num_readers = 4
+    writes_per_thread = 40
+    errors = []
+
+    def writer(thread_id):
+        for i in range(writes_per_thread):
+            file_mem_manager.log_message(
+                user_identifier="shared_user",
+                persona_name="persona",
+                channel="chan",
+                author_role="user",
+                author_name=f"Writer-{thread_id}",
+                content=f"w-{thread_id}-{i}",
+                timestamp=datetime.now(),
+            )
+
+    def reader():
+        for _ in range(writes_per_thread):
+            try:
+                history = file_mem_manager.get_personal_history("shared_user", "persona")
+                # History should always be a valid list
+                assert isinstance(history, list)
+            except Exception as e:
+                errors.append(e)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_writers + num_readers) as pool:
+        futures = []
+        for t in range(num_writers):
+            futures.append(pool.submit(writer, t))
+        for _ in range(num_readers):
+            futures.append(pool.submit(reader))
+        for f in concurrent.futures.as_completed(futures):
+            f.result()
+
+    assert errors == [], f"Reader threads encountered errors: {errors}"
+    history = file_mem_manager.get_personal_history("shared_user", "persona")
+    assert len(history) == num_writers * writes_per_thread
+
+
+def test_concurrent_write_and_suppress(file_mem_manager):
+    """Verify that suppression under concurrent writes doesn't corrupt state."""
+    # Seed messages to suppress
+    for i in range(20):
+        file_mem_manager.log_message(
+            "user", "persona", "chan", "user", "Human",
+            f"msg-{i}", datetime.now(), platform_message_id=f"plat-{i}",
+        )
+
+    def suppress_batch(start):
+        for i in range(start, start + 10):
+            file_mem_manager.suppress_message_by_platform_id(f"plat-{i}")
+
+    def write_batch():
+        for i in range(20):
+            file_mem_manager.log_message(
+                "user", "persona", "chan", "user", "Human",
+                f"new-{i}", datetime.now(), platform_message_id=f"new-plat-{i}",
+            )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        futures = [
+            pool.submit(suppress_batch, 0),
+            pool.submit(suppress_batch, 10),
+            pool.submit(write_batch),
+        ]
+        for f in concurrent.futures.as_completed(futures):
+            f.result()
+
+    history = file_mem_manager.get_personal_history("user", "persona")
+    # 20 original - 20 suppressed + 20 new = 20
+    assert len(history) == 20
+    # All remaining should be the new batch (none of the originals survive suppression)
+    contents = {msg['content'] for msg in history}
+    assert all(c.startswith("new-") for c in contents)
