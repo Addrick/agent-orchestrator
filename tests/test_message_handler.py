@@ -300,6 +300,7 @@ _SETTER_TO_COMMAND = {
     'set_enabled_tools': 'tools',
     'set_memory_mode': 'memory_mode',
     'set_zammad_aware': 'zammad_aware',
+    'set_service_bindings': 'service_bindings',
 }
 
 # Maps Persona getter method names → expected command name in what_handlers.
@@ -317,6 +318,7 @@ _GETTER_TO_COMMAND = {
     'get_enabled_tools': 'tools',
     'get_memory_mode': 'memory_mode',
     'get_zammad_aware': 'zammad_aware',
+    'get_service_bindings': 'service_bindings',
 }
 
 # Getters that intentionally have no what command (internal/derived values).

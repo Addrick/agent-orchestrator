@@ -1,14 +1,15 @@
 import os
-from pathlib import Path
 
 import pytest
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
 # Load test-specific environment variables, overriding any production .env values.
 # This ensures live tests always hit the test Zammad instance, never production.
-_project_root = Path(__file__).resolve().parent.parent
-_env_test_path = _project_root / ".env.test"
-if _env_test_path.exists():
+# Uses find_dotenv to walk up parent directories — necessary because git worktrees
+# resolve to a different directory tree than the main repo, so a path relative to
+# __file__ would miss .env.test when running from a worktree.
+_env_test_path = find_dotenv(filename=".env.test", usecwd=True)
+if _env_test_path:
     load_dotenv(dotenv_path=_env_test_path, override=True)
 
 

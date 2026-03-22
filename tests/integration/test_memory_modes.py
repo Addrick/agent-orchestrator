@@ -9,6 +9,7 @@ from src.database.memory_manager import MemoryManager
 from src.persona import Persona, MemoryMode
 from src.engine import TextEngine
 from src.clients.zammad_client import ZammadClient
+from src.clients.zammad_service import ZammadIntegration
 
 # Mark all tests in this file as 'integration'.
 pytestmark = pytest.mark.integration
@@ -19,18 +20,16 @@ def mem_test_system():
     memory_manager.create_schema()
 
     mock_text_engine = MagicMock(spec=TextEngine)
-    mock_zammad_client = MagicMock(spec=ZammadClient)
 
     chat_system = ChatSystem(
         memory_manager=memory_manager,
         text_engine=mock_text_engine,
-        zammad_client=mock_zammad_client
     )
     chat_system.personas = {
         'test_persona': Persona('test_persona', 'mock_model', 'prompt', context_length=10),
         'persona_2': Persona('persona_2', 'mock_model', 'prompt', context_length=10)
     }
-    yield chat_system, memory_manager, mock_text_engine, mock_zammad_client
+    yield chat_system, memory_manager, mock_text_engine
 
 
 @pytest.fixture
@@ -46,8 +45,8 @@ def real_test_system(monkeypatch):
     chat_system = ChatSystem(
         memory_manager=memory_manager,
         text_engine=text_engine,
-        zammad_client=zammad_client
     )
+    chat_system.register_service(ZammadIntegration(zammad_client))
     chat_system.personas = {
         'test_persona': Persona('test_persona', 'mock_model', 'prompt', context_length=10),
     }
@@ -56,7 +55,7 @@ def real_test_system(monkeypatch):
 
 def test_database_schema_has_server_id_column(mem_test_system):
     """Tests that the schema creation correctly adds the 'server_id' column."""
-    _, memory_manager, _, _ = mem_test_system
+    _, memory_manager, _ = mem_test_system
     conn = memory_manager._get_connection()
     cursor = conn.cursor()
     cursor.execute("PRAGMA table_info(User_Interactions)")
@@ -66,7 +65,7 @@ def test_database_schema_has_server_id_column(mem_test_system):
 
 def test_log_message_with_server_id(mem_test_system):
     """Tests that the server_id is correctly saved by log_message."""
-    _, memory_manager, _, _ = mem_test_system
+    _, memory_manager, _ = mem_test_system
     memory_manager.log_message(
         user_identifier="user1", persona_name="p", channel="c", author_role="user",
         author_name="user1", content="test", timestamp=datetime.now(), server_id="server123"
@@ -81,7 +80,7 @@ def test_log_message_with_server_id(mem_test_system):
 @pytest.mark.asyncio
 async def test_channel_isolated_mode(mem_test_system):
     """Tests that CHANNEL_ISOLATED mode only retrieves messages from the correct channel and server."""
-    chat_system, memory_manager, mock_text_engine, _ = mem_test_system
+    chat_system, memory_manager, mock_text_engine = mem_test_system
     persona = chat_system.personas['test_persona']
     persona.set_memory_mode(MemoryMode.CHANNEL_ISOLATED)
     mock_text_engine.generate_response.return_value = ({'type': 'text', 'content': ''}, {})
@@ -105,7 +104,7 @@ async def test_channel_isolated_mode(mem_test_system):
 @pytest.mark.asyncio
 async def test_server_wide_mode(mem_test_system):
     """Tests that SERVER_WIDE mode retrieves all messages from one server but not others."""
-    chat_system, memory_manager, mock_text_engine, _ = mem_test_system
+    chat_system, memory_manager, mock_text_engine = mem_test_system
     persona = chat_system.personas['test_persona']
     persona.set_memory_mode(MemoryMode.SERVER_WIDE)
     mock_text_engine.generate_response.return_value = ({'type': 'text', 'content': ''}, {})
@@ -132,7 +131,7 @@ async def test_server_wide_mode(mem_test_system):
 @pytest.mark.asyncio
 async def test_global_mode(mem_test_system):
     """Tests that GLOBAL mode retrieves all messages seen by the persona."""
-    chat_system, memory_manager, mock_text_engine, _ = mem_test_system
+    chat_system, memory_manager, mock_text_engine = mem_test_system
     persona = chat_system.personas['test_persona']
     persona.set_memory_mode(MemoryMode.GLOBAL)
     mock_text_engine.generate_response.return_value = ({'type': 'text', 'content': ''}, {})
@@ -158,7 +157,7 @@ async def test_global_mode(mem_test_system):
 @pytest.mark.asyncio
 async def test_personal_mode_isolates_by_user_and_persona(mem_test_system):
     """Tests that PERSONAL mode isolates by user and the specific persona."""
-    chat_system, memory_manager, mock_text_engine, _ = mem_test_system
+    chat_system, memory_manager, mock_text_engine = mem_test_system
     persona = chat_system.personas['test_persona']
     persona.set_memory_mode(MemoryMode.PERSONAL)
     mock_text_engine.generate_response.return_value = ({'type': 'text', 'content': ''}, {})
