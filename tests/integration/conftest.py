@@ -8,8 +8,8 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 from src.database.memory_manager import MemoryManager
-from src.engine import TextEngine
 from src.chat_system import ChatSystem
+from src.engine import TextEngine
 from src.persona import Persona, MemoryMode
 from config.global_config import TEST_MEMORY_DATABASE_FILE
 
@@ -27,7 +27,7 @@ def mocked_chat_system():
     memory_manager = MemoryManager(db_path=db_path)
     memory_manager.create_schema()
 
-    text_engine = TextEngine()
+    text_engine = MagicMock(spec=TextEngine)
 
     test_personas = {
         "test_persona": Persona(
