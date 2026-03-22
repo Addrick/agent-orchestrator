@@ -17,8 +17,8 @@ from config.global_config import TEST_MEMORY_DATABASE_FILE
 @pytest.fixture(scope="function")
 def mocked_chat_system():
     """
-    Sets up a ChatSystem with real MemoryManager and TextEngine but a mocked ZammadClient.
-    No Zammad credentials required.
+    Sets up a ChatSystem with real MemoryManager and TextEngine.
+    No external service credentials required.
     """
     db_path = f"{TEST_MEMORY_DATABASE_FILE}.{random.randint(1000, 9999)}"
     if os.path.exists(db_path):
@@ -28,10 +28,6 @@ def mocked_chat_system():
     memory_manager.create_schema()
 
     text_engine = TextEngine()
-    mock_zammad_client = MagicMock()
-    mock_zammad_client.api_url = "http://zammad.test"
-    mock_zammad_client.search_user.return_value = []
-    mock_zammad_client.search_tickets.return_value = []
 
     test_personas = {
         "test_persona": Persona(
@@ -45,11 +41,11 @@ def mocked_chat_system():
 
     with patch('src.chat_system.load_personas_from_file', return_value=test_personas):
         chat_system = ChatSystem(
-            memory_manager=memory_manager, text_engine=text_engine, zammad_client=mock_zammad_client
+            memory_manager=memory_manager, text_engine=text_engine,
         )
 
     try:
-        yield chat_system, memory_manager, mock_zammad_client
+        yield chat_system, memory_manager
     finally:
         memory_manager.close()
         time.sleep(0.1)

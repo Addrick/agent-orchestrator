@@ -3,6 +3,7 @@
 # Zammad-dependent integration tests extracted from test_full_system_flow.py.
 # These require a live Zammad instance.
 
+import asyncio
 import pytest
 from datetime import datetime
 from unittest.mock import patch, AsyncMock
@@ -251,3 +252,116 @@ async def test_confirm_mode_resume_denied_skips_tool(live_chat_system, managed_z
 
     results = zammad_client.search_tickets(query="title:\"Denied Ticket\"")
     assert len(results) == 0
+
+
+# ---------------------------------------------------------------------------
+# ServiceIntegration hook coverage
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_register_tools_populates_tool_manager(live_chat_system):
+    """register_tools hook: ZammadIntegration registers all Zammad CRUD tools with the ToolManager."""
+    chat_system, _, _ = live_chat_system
+    registered_names = set(chat_system.tool_manager._handlers.keys())
+    expected_zammad_tools = {
+        "get_ticket_details", "update_ticket", "add_note_to_ticket",
+        "search_tickets", "create_ticket", "search_user", "create_user",
+        "update_user",
+    }
+    assert expected_zammad_tools.issubset(registered_names), (
+        f"Missing Zammad tools: {expected_zammad_tools - registered_names}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_tracking_id_returns_ticket_id(live_chat_system, managed_zammad_user):
+    """get_tracking_id hook: generate_response returns the ticket ID resolved by the service."""
+    chat_system, _, zammad_client = live_chat_system
+    persona = chat_system.personas['test_persona']
+    persona.set_zammad_aware(True)
+    user_info = managed_zammad_user
+    ticket_id = None
+    try:
+        ticket_data = zammad_client.create_ticket(
+            title="TrackingID Test", group="Users", customer_id=user_info['id'],
+            article_body="Seed article."
+        )
+        ticket_id = ticket_data['id']
+        ticket_number = ticket_data['number']
+
+        await wait_for_search(
+            search_func=lambda: zammad_client.search_tickets(query=f"number:{ticket_number}"),
+            assertion_func=lambda results: len(results) == 1
+        )
+
+        # Ticket referenced by number: get_tracking_id should surface the resolved ID.
+        with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
+                          return_value=({'type': 'text', 'content': 'Got it.'}, {})):
+            _, _, returned_ticket_id = await chat_system.generate_response(
+                "test_persona", user_info["identifier"], "support",
+                f"Checking [Ticket#{ticket_number}]"
+            )
+            assert returned_ticket_id == ticket_id
+
+        # No ticket reference: active ticket found for user should still surface.
+        with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
+                          return_value=({'type': 'text', 'content': 'Still here.'}, {})):
+            _, _, returned_ticket_id = await chat_system.generate_response(
+                "test_persona", user_info["identifier"], "support",
+                "Follow-up without ticket reference"
+            )
+            assert returned_ticket_id == ticket_id
+    finally:
+        if ticket_id:
+            zammad_client.delete_ticket(ticket_id)
+
+
+@pytest.mark.asyncio
+async def test_on_message_mirrors_to_zammad_ticket(live_chat_system, managed_zammad_user):
+    """on_message hook: user message and bot response are mirrored as articles on the Zammad ticket."""
+    chat_system, _, zammad_client = live_chat_system
+    persona = chat_system.personas['test_persona']
+    persona.set_zammad_aware(True)
+    user_info = managed_zammad_user
+    ticket_id = None
+    try:
+        ticket_data = zammad_client.create_ticket(
+            title="Mirror Test", group="Users", customer_id=user_info['id'],
+            article_body="Seed article."
+        )
+        ticket_id = ticket_data['id']
+        ticket_number = ticket_data['number']
+
+        await wait_for_search(
+            search_func=lambda: zammad_client.search_tickets(query=f"number:{ticket_number}"),
+            assertion_func=lambda results: len(results) == 1
+        )
+
+        user_msg = "Please help with mirroring test"
+        bot_reply = "Sure, I can help with that."
+
+        with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
+                          return_value=({'type': 'text', 'content': bot_reply}, {})):
+            await chat_system.generate_response(
+                "test_persona", user_info["identifier"], "support",
+                f"{user_msg} [Ticket#{ticket_number}]"
+            )
+
+        # Zammad article creation is synchronous (via asyncio.to_thread),
+        # so articles should exist immediately — but give a tiny buffer.
+        await asyncio.sleep(0.5)
+
+        articles = zammad_client.get_ticket_articles(ticket_id)
+        article_bodies = [a.get('body', '') for a in articles]
+
+        # First article is the seed; user message and bot reply should follow.
+        assert any(user_msg in body for body in article_bodies), (
+            f"User message not mirrored. Article bodies: {article_bodies}"
+        )
+        assert any(bot_reply in body for body in article_bodies), (
+            f"Bot reply not mirrored. Article bodies: {article_bodies}"
+        )
+    finally:
+        if ticket_id:
+            zammad_client.delete_ticket(ticket_id)
