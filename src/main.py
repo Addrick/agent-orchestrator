@@ -10,6 +10,7 @@ from src.chat_system import ChatSystem
 from src.engine import TextEngine
 from src.database.memory_manager import MemoryManager
 from src.clients.zammad_client import ZammadClient
+from src.clients.zammad_service import ZammadIntegration
 
 from src.interfaces.discord_bot import create_discord_bot
 from src.interfaces.gmail_bot import create_gmail_bot
@@ -66,6 +67,17 @@ async def update_models_and_sync_bot(bot: ChatSystem) -> None:
         logger.warning("Failed to fetch new model list; ChatSystem may have stale data.")
 
 
+def _init_zammad_client() -> Optional[ZammadClient]:
+    """Attempt to create a ZammadClient, returning None if credentials are absent."""
+    try:
+        client = ZammadClient()
+        logger.info("Zammad client initialized successfully.")
+        return client
+    except ValueError:
+        logger.warning("Zammad credentials not configured. Zammad features will be disabled.")
+        return None
+
+
 async def main() -> None:
     """Main asynchronous function to initialize and run the application."""
     logger.info("Starting application...")
@@ -84,15 +96,18 @@ async def main() -> None:
     # 2. Initialize the centralized text generation engine
     text_engine = TextEngine()
 
-    # 3. Initialize the Zammad client for ticketing
-    zammad_client = ZammadClient()
+    # 3. Initialize the Zammad client for ticketing (optional)
+    zammad_client = _init_zammad_client()
 
     # 4. Initialize ChatSystem core, injecting dependencies
     bot = ChatSystem(
         memory_manager=memory_manager,
         text_engine=text_engine,
-        zammad_client=zammad_client
     )
+
+    # 5. Register service integrations
+    if zammad_client is not None:
+        bot.register_service(ZammadIntegration(zammad_client))
 
     tasks = []
 
@@ -116,12 +131,15 @@ async def main() -> None:
         tasks.append(task)
 
     if ZAMMAD_BOT_ENABLED:
-        logger.info("Initializing Zammad bot...")
-        zammad_bot = create_zammad_bot(bot)
-        task = asyncio.create_task(zammad_bot.start())
-        tasks.append(task)
+        if zammad_client is None:
+            logger.error("ZAMMAD_BOT_ENABLED is True but Zammad credentials are missing. Skipping Zammad bot.")
+        else:
+            logger.info("Initializing Zammad bot...")
+            zammad_bot = create_zammad_bot(bot, zammad_client)
+            task = asyncio.create_task(zammad_bot.start())
+            tasks.append(task)
 
-    # 5. Optionally update the model list on startup
+    # 6. Optionally update the model list on startup
     if UPDATE_MODELS_ON_STARTUP:
         task = asyncio.create_task(update_models_and_sync_bot(bot))
         tasks.append(task)

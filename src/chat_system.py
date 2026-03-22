@@ -1,25 +1,22 @@
 # src/chat_system.py
 
-import asyncio
 import json
 import logging
-import re
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Any, Coroutine, Dict, List, Optional, Set, Tuple
-from urllib.parse import urlparse
 
 from config.global_config import MAX_TOOL_CALLS, MAX_CACHED_API_REQUESTS, \
     PENDING_CONFIRMATION_TIMEOUT
-from src.clients.zammad_client import ZammadClient
+from src.clients.service_integration import ServiceIntegration
 from src.database.memory_manager import MemoryManager
 from src.engine import LLMCommunicationError, TextEngine
 from src.message_handler import BotLogic
 from src.persona import Persona, ExecutionMode, MemoryMode
-from src.tools.definitions import WRITE_TOOLS, ZAMMAD_TOOLS, MODEL_INCOMPATIBLE_TOOLS
-from src.tools.tool_manager import ToolManager, ZammadToolHandler, WebSearchHandler
+from src.tools.definitions import WRITE_TOOLS, MODEL_INCOMPATIBLE_TOOLS
+from src.tools.tool_manager import ToolManager, WebSearchHandler
 from src.utils.model_utils import get_model_list
 from src.utils.save_utils import load_personas_from_file, save_personas_to_file
 
@@ -51,25 +48,14 @@ class ResponseType(Enum):
 
 
 @dataclass
-class ZammadContext:
-    """Bundles Zammad state resolved during request setup."""
-    is_aware: bool = False
-    customer_id: Optional[int] = None
-    zammad_email: Optional[str] = None
-    ticket_id: Optional[int] = None
-    user_facing_ticket_number: Optional[int] = None
-
-
-@dataclass
 class PendingConfirmation:
     """Stores state for a tool call awaiting user approval in CONFIRM mode."""
     write_calls: List[Dict[str, Any]]
     conversation_history: List[Dict[str, Any]]
     persona_name: str
     tools_for_llm: List[Dict[str, Any]]
-    ticket_to_log: Optional[int]
     image_url: Optional[str]
-    customer_id: Optional[int] = None
+    service_data: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
 
 
@@ -86,26 +72,30 @@ class RequestContext:
     history_limit: Optional[int] = None
     user_display_name: Optional[str] = None
     # Populated during _prepare_request
-    zammad_ctx: ZammadContext = field(default_factory=ZammadContext)
+    service_data: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     conversation_history: List[Dict[str, Any]] = field(default_factory=list)
     tools_for_llm: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class ChatSystem:
-    def __init__(self, memory_manager: MemoryManager, text_engine: TextEngine,
-                 zammad_client: ZammadClient) -> None:
+    def __init__(self, memory_manager: MemoryManager, text_engine: TextEngine) -> None:
         self.personas: Dict[str, Persona] = load_personas_from_file() or {}
         self.memory_manager: MemoryManager = memory_manager
         self.text_engine: TextEngine = text_engine
-        self.zammad_client: ZammadClient = zammad_client
         self.tool_manager: ToolManager = ToolManager()
-        ZammadToolHandler(zammad_client).register(self.tool_manager)
         WebSearchHandler().register(self.tool_manager)
         self.bot_logic: BotLogic = BotLogic(self)
         self.last_api_requests: Dict[str, Dict[str, Optional[Dict[str, Any]]]] = defaultdict(dict)
         self.models_available: Dict[str, Any] = get_model_list() or {}
         self.background_tasks: Set[Coroutine[Any, Any, Any]] = set()
         self._pending_confirmations: Dict[Tuple[str, str], PendingConfirmation] = {}
+        self._services: Dict[str, ServiceIntegration] = {}
+
+    def register_service(self, service: ServiceIntegration) -> None:
+        """Register a service integration and its tools."""
+        self._services[service.name] = service
+        service.register_tools(self.tool_manager)
+        logger.info(f"Registered service integration: {service.name}")
 
     def _store_api_request(self, user_identifier: str, persona_name: str,
                            payload: Dict[str, Any]) -> None:
@@ -114,91 +104,6 @@ class ChatSystem:
         if len(self.last_api_requests) > MAX_CACHED_API_REQUESTS:
             oldest_key = next(iter(self.last_api_requests))
             del self.last_api_requests[oldest_key]
-
-    def _find_ticket_number_in_message(self, message: str) -> Optional[int]:
-        """Finds a ticket NUMBER pattern like [Ticket#12345] in a message."""
-        match = re.search(r'\[Ticket#(\d+)\]', message, re.IGNORECASE)
-        if match:
-            return int(match.group(1))
-        return None
-
-    async def _get_ticket_id_from_number(self, ticket_number: int) -> Optional[int]:
-        """Translates a user-facing ticket number to an internal Zammad ticket ID."""
-        try:
-            search_results = await asyncio.to_thread(
-                self.zammad_client.search_tickets, query=f"number:{ticket_number}"
-            )
-            if search_results:
-                ticket_id: int = search_results[0]['id']
-                return ticket_id
-            return None
-        except Exception as e:
-            logger.error(f"Error searching for ticket number {ticket_number}: {e}", exc_info=True)
-            return None
-
-    async def _find_active_ticket_for_user(self, customer_id: int) -> Optional[int]:
-        """Finds the most recently updated open or new ticket for a given Zammad user ID."""
-        try:
-            query = f"customer_id:{customer_id} AND state.name:(open OR new)"
-            search_results: List[Dict[str, Any]] = await asyncio.to_thread(
-                self.zammad_client.search_tickets,
-                query=query,
-                sort_by='updated_at',
-                order_by='desc'
-            )
-            if search_results:
-                ticket_id: int = search_results[0]['id']
-                return ticket_id
-            return None
-        except Exception as e:
-            logger.error(f"Error searching for active tickets for customer {customer_id}: {e}", exc_info=True)
-            return None
-
-    async def _get_or_create_zammad_user(self, user_identifier: str, channel: str,
-                                         user_display_name: Optional[str] = None) -> Tuple[
-        Optional[int], Optional[str]]:
-        """
-        Finds a Zammad user by email or creates one. Uses display name for better user creation.
-        Returns a tuple of (Zammad user ID, Zammad-registered email).
-        """
-        email_match: Optional[re.Match[str]] = re.search(r'<(.+?)>', user_identifier)
-
-        email: str
-        firstname: str
-        lastname: str
-        note: Optional[str]
-
-        if email_match:
-            email = email_match.group(1)
-            name_part: str = user_display_name if user_display_name else user_identifier.split('<')[0].strip()
-            name_parts: List[str] = name_part.split()
-            firstname = name_parts[0] if name_parts else "Unknown"
-            lastname = ' '.join(name_parts[1:]) if len(name_parts) > 1 else "User"
-            note = None
-        else:
-            domain = urlparse(self.zammad_client.api_url or "").hostname or "local.host"
-            email = f"{channel.lower()}-{user_identifier}@{domain}"
-            name_parts = user_display_name.split() if user_display_name else [f"{channel.capitalize()} User",
-                                                                              user_identifier]
-            firstname = name_parts[0]
-            lastname = ' '.join(name_parts[1:]) if len(name_parts) > 1 else ""
-            note = f"Auto-generated user from {channel.capitalize()}. Original identifier: {user_identifier}"
-
-        try:
-            search_results = await asyncio.to_thread(self.zammad_client.search_user, email)
-            if search_results:
-                return search_results[0]['id'], search_results[0]['email']
-
-            logger.info(f"Creating new Zammad user for identifier '{user_identifier}' with email: {email}")
-            new_user = await asyncio.to_thread(
-                self.zammad_client.create_user,
-                email=email, firstname=firstname, lastname=lastname, note=note
-            )
-            return new_user['id'], new_user['email']
-
-        except Exception as e:
-            logger.error(f"Error getting or creating Zammad user for '{user_identifier}': {e}", exc_info=True)
-            return None, None
 
     def _format_raw_history_for_llm(self, raw_history: List[Dict[str, Any]], memory_mode: str,
                                     persona_name: str, server_id: Optional[str]) -> List[Dict[str, Any]]:
@@ -227,55 +132,60 @@ class ChatSystem:
                     final_history.append({'role': 'user', 'content': formatted_content})
         return final_history
 
-    async def _resolve_zammad_context(
+    def _get_tracking_id(self, service_data: Dict[str, Dict[str, Any]]) -> Optional[int]:
+        """Ask registered services for an external tracking ID (e.g. ticket ID)."""
+        for svc_name, svc_data in service_data.items():
+            service = self._services.get(svc_name)
+            if service:
+                tid = service.get_tracking_id(svc_data)
+                if tid is not None:
+                    return tid
+        return None
+
+    async def _resolve_service_contexts(self, ctx: RequestContext) -> None:
+        """Resolve context for each service the persona is bound to."""
+        for binding in ctx.persona.get_service_bindings():
+            service = self._services.get(binding)
+            if service:
+                ctx.service_data[binding] = await service.resolve_context(
+                    ctx.user_identifier, ctx.channel, ctx.message, ctx.user_display_name
+                )
+            else:
+                logger.debug(f"Persona '{ctx.persona_name}' has binding '{binding}' but no service is registered.")
+
+    async def _notify_services(
             self,
-            persona: Persona,
-            user_identifier: str,
-            channel: str,
-            message: str,
-            user_display_name: Optional[str]
-    ) -> ZammadContext:
-        """Resolves Zammad user, ticket number, and active ticket for the request."""
-        ctx = ZammadContext(is_aware=persona.get_zammad_aware())
-        if not ctx.is_aware:
-            return ctx
-
-        ctx.customer_id, ctx.zammad_email = await self._get_or_create_zammad_user(
-            user_identifier, channel, user_display_name
-        )
-        if not ctx.customer_id:
-            return ctx
-
-        ctx.user_facing_ticket_number = self._find_ticket_number_in_message(message)
-        if ctx.user_facing_ticket_number:
-            ctx.ticket_id = await self._get_ticket_id_from_number(ctx.user_facing_ticket_number)
-            if not ctx.ticket_id:
-                logger.warning(
-                    f"User mentioned ticket number {ctx.user_facing_ticket_number}, but it was not found.")
-        else:
-            ctx.ticket_id = await self._find_active_ticket_for_user(ctx.customer_id)
-
-        return ctx
+            service_data: Dict[str, Dict[str, Any]],
+            message: str
+    ) -> None:
+        """Notify all bound services about a message (e.g. mirror to ticket)."""
+        for svc_name, svc_data in service_data.items():
+            service = self._services.get(svc_name)
+            if service:
+                await service.on_message(svc_data, message)
 
     async def _execute_write_calls(
             self,
             write_calls: List[Dict[str, Any]],
             conversation_history: List[Dict[str, Any]],
-            zammad_ctx: ZammadContext
+            service_data: Dict[str, Dict[str, Any]]
     ) -> None:
-        """Executes write tool calls, injecting customer_id for create_ticket and capturing new ticket IDs."""
+        """Executes write tool calls, delegating arg preparation and result handling to services."""
         for call_item in write_calls:
             tool_name: str = call_item.get("name", "")
             tool_args = call_item.get("arguments", {})
 
-            if tool_name == 'create_ticket':
-                if 'customer_id' not in tool_args and zammad_ctx.customer_id:
-                    tool_args['customer_id'] = zammad_ctx.customer_id
+            for svc_name, svc_data in service_data.items():
+                service = self._services.get(svc_name)
+                if service:
+                    tool_args = service.prepare_tool_args(tool_name, tool_args, svc_data)
 
             tool_result = await self.tool_manager.execute_tool(tool_name, **tool_args)
 
-            if tool_name == 'create_ticket' and tool_result.get('result', {}).get('id'):
-                zammad_ctx.ticket_id = tool_result['result']['id']
+            for svc_name, svc_data in service_data.items():
+                service = self._services.get(svc_name)
+                if service:
+                    service.on_tool_result(tool_name, tool_result, svc_data)
 
             conversation_history.append({
                 "role": "tool",
@@ -298,10 +208,37 @@ class ChatSystem:
                 "content": json.dumps({"error": "Tool call denied by user"})
             })
 
+    def _fetch_raw_history(
+            self,
+            mode: MemoryMode,
+            service_data: Dict[str, Dict[str, Any]],
+            persona_name: str,
+            user_identifier: str,
+            channel: str,
+            server_id: Optional[str],
+            effective_limit: int
+    ) -> Tuple[List[Dict[str, Any]], str]:
+        """Dispatches history retrieval based on memory mode. Returns (raw_history, mode_label)."""
+        if mode == MemoryMode.TICKET_ISOLATED:
+            ticket_id = self._get_tracking_id(service_data)
+            if ticket_id:
+                return self.memory_manager.get_ticket_history(ticket_id, effective_limit), "ticket"
+            return [], "ticket"
+        elif mode == MemoryMode.SERVER_WIDE:
+            if server_id:
+                return self.memory_manager.get_server_history(server_id, persona_name, effective_limit), "server"
+            return [], "server (unavailable)"
+        elif mode == MemoryMode.PERSONAL:
+            return self.memory_manager.get_personal_history(user_identifier, persona_name, effective_limit), "personal"
+        elif mode == MemoryMode.GLOBAL:
+            return self.memory_manager.get_global_history(persona_name, effective_limit), "global"
+        else:
+            return self.memory_manager.get_channel_history(channel, persona_name, server_id, effective_limit), "channel"
+
     def _build_conversation_history(
             self,
             persona: Persona,
-            zammad_ctx: ZammadContext,
+            service_data: Dict[str, Dict[str, Any]],
             user_identifier: str,
             channel: str,
             server_id: Optional[str],
@@ -309,50 +246,29 @@ class ChatSystem:
     ) -> List[Dict[str, Any]]:
         """Retrieves and formats conversation history based on the persona's memory mode."""
         persona_name = persona.get_name()
-        mode = persona.get_memory_mode()
 
         effective_limit: int = persona.get_context_length()
         if history_limit is not None:
             effective_limit = min(effective_limit, history_limit)
 
-        raw_history: List[Dict[str, Any]] = []
-        memory_mode_used = "none"
-
-        if mode == MemoryMode.TICKET_ISOLATED:
-            memory_mode_used = "ticket"
-            if zammad_ctx.ticket_id:
-                raw_history = self.memory_manager.get_ticket_history(zammad_ctx.ticket_id, effective_limit)
-        elif mode == MemoryMode.SERVER_WIDE:
-            if server_id:
-                memory_mode_used = "server"
-                raw_history = self.memory_manager.get_server_history(server_id, persona_name, effective_limit)
-            else:
-                memory_mode_used = "server (unavailable)"
-        elif mode == MemoryMode.PERSONAL:
-            memory_mode_used = "personal"
-            raw_history = self.memory_manager.get_personal_history(user_identifier, persona_name, effective_limit)
-        elif mode == MemoryMode.GLOBAL:
-            memory_mode_used = "global"
-            raw_history = self.memory_manager.get_global_history(persona_name, effective_limit)
-        elif mode == MemoryMode.CHANNEL_ISOLATED:
-            memory_mode_used = "channel"
-            raw_history = self.memory_manager.get_channel_history(channel, persona_name, server_id, effective_limit)
+        raw_history, memory_mode_used = self._fetch_raw_history(
+            persona.get_memory_mode(), service_data, persona_name,
+            user_identifier, channel, server_id, effective_limit
+        )
 
         conversation_history = self._format_raw_history_for_llm(raw_history, memory_mode_used, persona_name, server_id)
 
-        if memory_mode_used == "ticket" and zammad_ctx.ticket_id:
-            display_number = zammad_ctx.user_facing_ticket_number or zammad_ctx.ticket_id
-            system_msg = f"This conversation is part of Zammad ticket #{display_number}."
-            conversation_history.insert(0, {"role": "system", "content": system_msg})
+        # Let each bound service inject system messages
+        for svc_name, svc_data in service_data.items():
+            service = self._services.get(svc_name)
+            if service:
+                for msg in service.get_system_messages(svc_data):
+                    conversation_history.insert(0, msg)
 
         return conversation_history
 
-    def _filter_tools_for_persona(
-            self,
-            persona: Persona,
-            is_zammad_aware: bool
-    ) -> List[Dict[str, Any]]:
-        """Filters available tools by persona config, Zammad awareness, and model compatibility."""
+    def _filter_tools_for_persona(self, persona: Persona) -> List[Dict[str, Any]]:
+        """Filters available tools by persona config, service bindings, and model compatibility."""
         all_tools = self.tool_manager.get_tool_definitions()
         enabled_tool_names = persona.get_enabled_tools()
 
@@ -364,9 +280,10 @@ class ChatSystem:
         else:
             tools_for_llm = []
 
-        if not is_zammad_aware:
-            tools_for_llm = [t for t in tools_for_llm
-                             if t.get('function', {}).get('name') not in ZAMMAD_TOOLS]
+        # Filter out tools whose service_binding isn't in the persona's bindings
+        bindings = set(persona.get_service_bindings())
+        tools_for_llm = [t for t in tools_for_llm
+                         if not t.get('service_binding') or t.get('service_binding') in bindings]
 
         model_prefix = _get_model_prefix(persona.get_model_name())
         tools_for_llm = [t for t in tools_for_llm
@@ -374,20 +291,6 @@ class ChatSystem:
                              t.get('function', {}).get('name'), set())]
 
         return tools_for_llm
-
-    async def _mirror_message_to_zammad(
-            self,
-            zammad_ctx: ZammadContext,
-            message: str
-    ) -> None:
-        """Mirrors a message to the associated Zammad ticket as an article."""
-        if zammad_ctx.is_aware and zammad_ctx.ticket_id:
-            await asyncio.to_thread(
-                self.zammad_client.add_article_to_ticket,
-                ticket_id=zammad_ctx.ticket_id,
-                body=message,
-                impersonate_email=zammad_ctx.zammad_email
-            )
 
     async def _execute_read_calls(
             self,
@@ -438,9 +341,8 @@ class ChatSystem:
                         conversation_history=ctx.conversation_history,
                         persona_name=ctx.persona_name,
                         tools_for_llm=ctx.tools_for_llm,
-                        ticket_to_log=ctx.zammad_ctx.ticket_id,
                         image_url=ctx.image_url,
-                        customer_id=ctx.zammad_ctx.customer_id
+                        service_data=ctx.service_data,
                     )
                     self._pending_confirmations[(ctx.user_identifier, ctx.persona_name)] = pending
                     descriptions = [
@@ -450,7 +352,7 @@ class ChatSystem:
                     confirm_msg = "I'd like to perform the following actions:\n" + "\n".join(descriptions)
                     return confirm_msg, ResponseType.PENDING_CONFIRMATION
 
-                await self._execute_write_calls(write_calls, ctx.conversation_history, ctx.zammad_ctx)
+                await self._execute_write_calls(write_calls, ctx.conversation_history, ctx.service_data)
             else:
                 raise LLMCommunicationError("LLM returned an invalid response structure.")
 
@@ -458,23 +360,21 @@ class ChatSystem:
         return "I seem to be stuck in a loop. Could you please clarify your request?", ResponseType.DEV_COMMAND
 
     async def _prepare_request(self, ctx: RequestContext) -> None:
-        """Resolve Zammad context, build history, filter tools, append user message."""
-        ctx.zammad_ctx = await self._resolve_zammad_context(
-            ctx.persona, ctx.user_identifier, ctx.channel, ctx.message, ctx.user_display_name
-        )
+        """Resolve service contexts, build history, filter tools, append user message."""
+        await self._resolve_service_contexts(ctx)
         ctx.conversation_history = self._build_conversation_history(
-            ctx.persona, ctx.zammad_ctx, ctx.user_identifier, ctx.channel,
+            ctx.persona, ctx.service_data, ctx.user_identifier, ctx.channel,
             ctx.server_id, ctx.history_limit
         )
-        ctx.tools_for_llm = self._filter_tools_for_persona(ctx.persona, ctx.zammad_ctx.is_aware)
-        await self._mirror_message_to_zammad(ctx.zammad_ctx, ctx.message)
+        ctx.tools_for_llm = self._filter_tools_for_persona(ctx.persona)
+        await self._notify_services(ctx.service_data, ctx.message)
         ctx.conversation_history.append({"role": "user", "content": ctx.message})
 
     async def _execute_request(self, ctx: RequestContext) -> Tuple[str, ResponseType]:
-        """Run tool loop, mirror final response to Zammad."""
+        """Run tool loop, notify services of final response."""
         response_text, response_type = await self._run_tool_loop(ctx)
         if response_type == ResponseType.LLM_GENERATION:
-            await self._mirror_message_to_zammad(ctx.zammad_ctx, response_text)
+            await self._notify_services(ctx.service_data, response_text)
         return response_text, response_type
 
     async def generate_response(
@@ -509,7 +409,8 @@ class ChatSystem:
         try:
             await self._prepare_request(ctx)
             response_text, response_type = await self._execute_request(ctx)
-            return response_text, response_type, ctx.zammad_ctx.ticket_id
+            ticket_id = self._get_tracking_id(ctx.service_data)
+            return response_text, response_type, ticket_id
 
         except LLMCommunicationError as e:
             logger.error(f"A recoverable LLM communication error occurred for {user_identifier}: {e}")
@@ -517,11 +418,13 @@ class ChatSystem:
                 self._store_api_request(user_identifier, persona_name, e.api_payload)
             error_msg = ("I'm not sure how to continue. Could you please rephrase?" if "empty response" in str(e) else
                          "Error while generating a response: " + str(e))
-            return error_msg, ResponseType.DEV_COMMAND, ctx.zammad_ctx.ticket_id
+            ticket_id = self._get_tracking_id(ctx.service_data)
+            return error_msg, ResponseType.DEV_COMMAND, ticket_id
         except Exception as e:
             logger.error(f"A critical error occurred in generate_response for {user_identifier}: {e}", exc_info=True)
+            ticket_id = self._get_tracking_id(ctx.service_data)
             return ("An internal error occurred while processing your request.",
-                    ResponseType.DEV_COMMAND, ctx.zammad_ctx.ticket_id)
+                    ResponseType.DEV_COMMAND, ticket_id)
 
     async def resume_pending_confirmation(
             self, user_identifier: str, persona_name: str, approved: bool
@@ -541,14 +444,11 @@ class ChatSystem:
             return "Error: Persona not found.", ResponseType.DEV_COMMAND, None
 
         conversation_history = pending.conversation_history
-        zammad_ctx = ZammadContext(
-            ticket_id=pending.ticket_to_log,
-            customer_id=pending.customer_id,
-        )
+        service_data = pending.service_data
 
         try:
             if approved:
-                await self._execute_write_calls(pending.write_calls, conversation_history, zammad_ctx)
+                await self._execute_write_calls(pending.write_calls, conversation_history, service_data)
             else:
                 self._append_denied_tool_results(pending.write_calls, conversation_history)
 
@@ -565,8 +465,11 @@ class ChatSystem:
                 self._store_api_request(user_identifier, persona_name, api_payload)
 
             final_text = llm_response.get("content", "")
-            return final_text, ResponseType.LLM_GENERATION, zammad_ctx.ticket_id
+            ticket_id = self._get_tracking_id(service_data)
+            return final_text, ResponseType.LLM_GENERATION, ticket_id
 
         except Exception as e:
             logger.error(f"Error resuming pending confirmation for {user_identifier}: {e}", exc_info=True)
-            return "An error occurred while processing the confirmed action.", ResponseType.DEV_COMMAND, zammad_ctx.ticket_id
+            ticket_id = self._get_tracking_id(service_data)
+            return ("An error occurred while processing the confirmed action.",
+                    ResponseType.DEV_COMMAND, ticket_id)

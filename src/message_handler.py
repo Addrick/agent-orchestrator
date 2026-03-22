@@ -51,6 +51,7 @@ class BotLogic:
             'tools': self._what_tools,
             'memory_mode': self._what_memory_mode,
             'zammad_aware': self._what_zammad_aware,
+            'service_bindings': self._what_service_bindings,
             'top_p': self._what_top_p,
             'top_k': self._what_top_k,
         }
@@ -68,6 +69,7 @@ class BotLogic:
             'tools': self._set_tools,
             'memory_mode': self._set_memory_mode,
             'zammad_aware': self._set_zammad_aware,
+            'service_bindings': self._set_service_bindings,
         }
 
     async def preprocess_message(
@@ -353,6 +355,11 @@ class BotLogic:
 
     def _what_zammad_aware(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
         return f"Zammad aware for '{persona.get_name()}' is {persona.get_zammad_aware()}.", False
+
+    def _what_service_bindings(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
+        bindings = persona.get_service_bindings()
+        display = ', '.join(bindings) if bindings else 'none'
+        return f"Service bindings for '{persona.get_name()}': {display}.", False
 
     def _what_top_p(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
         return f"Top P for {persona.get_name()} is set to {persona.get_top_p() or 'default'}.", False
@@ -646,6 +653,17 @@ class BotLogic:
             return f"Zammad awareness for {persona.get_name()} is now disabled.", True
         else:
             return f"Error: Invalid value '{value_str}'. Please use 'on' or 'off'.", False
+
+    def _set_service_bindings(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
+        if len(args) < 2:
+            return "Error: Please specify service bindings (comma-separated, or 'none' to clear).", False
+        value_str = args[1].lower().strip()
+        if value_str in ['none', 'clear', '[]']:
+            persona.set_service_bindings([])
+            return f"Service bindings for {persona.get_name()} cleared.", True
+        bindings = [b.strip() for b in value_str.split(',') if b.strip()]
+        persona.set_service_bindings(bindings)
+        return f"Service bindings for {persona.get_name()} set to: {', '.join(bindings)}.", True
 
     def _handle_start_conversation(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[
         Optional[str], bool]:

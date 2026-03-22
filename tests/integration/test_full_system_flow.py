@@ -5,9 +5,10 @@
 
 import pytest
 from datetime import datetime
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch, AsyncMock, MagicMock
 
 from src.chat_system import ChatSystem, ResponseType
+from src.clients.zammad_service import ZammadIntegration
 from src.persona import MemoryMode, ExecutionMode
 
 pytestmark = pytest.mark.integration
@@ -15,7 +16,7 @@ pytestmark = pytest.mark.integration
 
 @pytest.mark.asyncio
 async def test_dynamic_context_ignores_dev_commands(mocked_chat_system):
-    chat_system, memory_manager, _ = mocked_chat_system
+    chat_system, memory_manager = mocked_chat_system
     persona = chat_system.personas['test_persona']
     with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
                       return_value=({'type': 'text', 'content': '...'}, {})):
@@ -32,7 +33,7 @@ async def test_dynamic_context_ignores_dev_commands(mocked_chat_system):
 
 @pytest.mark.asyncio
 async def test_context_transformation_and_multi_user_differentiation(mocked_chat_system):
-    chat_system, memory_manager, _ = mocked_chat_system
+    chat_system, memory_manager = mocked_chat_system
     persona = chat_system.personas['test_persona']
     persona.set_memory_mode(MemoryMode.CHANNEL_ISOLATED)
     channel, user1_id, server_id = "test-channel", "user1", "server1"
@@ -49,7 +50,7 @@ async def test_context_transformation_and_multi_user_differentiation(mocked_chat
 
 @pytest.mark.asyncio
 async def test_end_to_end_message_suppression(mocked_chat_system):
-    chat_system, memory_manager, _ = mocked_chat_system
+    chat_system, memory_manager = mocked_chat_system
     channel, user_id = "test-channel", "user1"
     memory_manager.log_message(user_id, "test_persona", channel, 'user', user_id, "Message 1", datetime.now(),
                                platform_message_id="p10")
@@ -68,7 +69,7 @@ async def test_end_to_end_message_suppression(mocked_chat_system):
 
 @pytest.mark.asyncio
 async def test_persona_context_length_is_capped_by_history_limit(mocked_chat_system):
-    chat_system, memory_manager, _ = mocked_chat_system
+    chat_system, memory_manager = mocked_chat_system
     with patch.object(memory_manager, 'get_channel_history',
                       wraps=memory_manager.get_channel_history) as mock_get_history:
         await chat_system.generate_response("capped_persona", "user1", "any", "test", history_limit=5)
@@ -78,7 +79,7 @@ async def test_persona_context_length_is_capped_by_history_limit(mocked_chat_sys
 
 @pytest.mark.asyncio
 async def test_empty_history_is_handled_gracefully(mocked_chat_system):
-    chat_system, _, _ = mocked_chat_system
+    chat_system, _ = mocked_chat_system
     with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
                       return_value=({'type': 'text', 'content': 'Hello!'}, {})) as mock_llm_call:
         await chat_system.generate_response("test_persona", "new_user_123", "new-channel", "First message ever")
@@ -89,7 +90,7 @@ async def test_empty_history_is_handled_gracefully(mocked_chat_system):
 
 @pytest.mark.asyncio
 async def test_history_limit_zero_for_channel_mode(mocked_chat_system):
-    chat_system, memory_manager, _ = mocked_chat_system
+    chat_system, memory_manager = mocked_chat_system
     user1, channel = "user1", "test-channel"
     memory_manager.log_message(user1, "test_persona", channel, 'user', user1, "An ignored message", datetime.now())
     with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
@@ -107,10 +108,15 @@ async def test_history_limit_zero_for_channel_mode(mocked_chat_system):
 @pytest.mark.asyncio
 async def test_confirm_mode_auto_executes_read_only_tools(mocked_chat_system):
     """CONFIRM mode: read-only tools execute immediately without pending confirmation."""
-    chat_system, _, _ = mocked_chat_system
+    chat_system, _ = mocked_chat_system
+    mock_zammad = MagicMock()
+    mock_zammad.api_url = "http://zammad.test"
+    mock_zammad.search_tickets.return_value = [{"id": 1, "title": "Open ticket"}]
+    mock_zammad.search_user.return_value = []
+    chat_system.register_service(ZammadIntegration(mock_zammad))
     persona = chat_system.personas['test_persona']
     persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_zammad_aware(True)
+    persona.set_service_bindings(["zammad"])
 
     tool_call = ({'type': 'tool_calls', 'calls': [
         {'id': 'call_1', 'name': 'search_tickets', 'arguments': {'query': 'state.name:open'}}]}, {})
@@ -127,15 +133,15 @@ async def test_confirm_mode_auto_executes_read_only_tools(mocked_chat_system):
 
 
 # =============================================================================
-# ZAMMAD_AWARE TOOL FILTERING TESTS
+# SERVICE BINDING TOOL FILTERING TESTS
 # =============================================================================
 
 @pytest.mark.asyncio
-async def test_zammad_aware_false_excludes_zammad_tools(mocked_chat_system):
-    """zammad_aware=False: Zammad tools are filtered out of tools_for_llm even with enabled_tools=['*']."""
-    chat_system, _, _ = mocked_chat_system
+async def test_no_service_bindings_excludes_service_tools(mocked_chat_system):
+    """No service_bindings: service-bound tools are filtered out even with enabled_tools=['*']."""
+    chat_system, _ = mocked_chat_system
     persona = chat_system.personas['test_persona']
-    persona.set_zammad_aware(False)
+    persona.set_service_bindings([])
 
     zammad_tool_names = {'get_ticket_details', 'update_ticket', 'add_note_to_ticket',
                          'create_ticket', 'search_tickets', 'search_user', 'create_user',
@@ -151,11 +157,14 @@ async def test_zammad_aware_false_excludes_zammad_tools(mocked_chat_system):
 
 
 @pytest.mark.asyncio
-async def test_zammad_aware_true_includes_zammad_tools(mocked_chat_system):
-    """zammad_aware=True: Zammad tools are included in tools_for_llm."""
-    chat_system, _, _ = mocked_chat_system
+async def test_zammad_service_binding_includes_zammad_tools(mocked_chat_system):
+    """service_bindings=["zammad"]: Zammad tools are included in tools_for_llm."""
+    chat_system, _ = mocked_chat_system
+    mock_zammad = MagicMock()
+    mock_zammad.api_url = "http://zammad.test"
+    chat_system.register_service(ZammadIntegration(mock_zammad))
     persona = chat_system.personas['test_persona']
-    persona.set_zammad_aware(True)
+    persona.set_service_bindings(["zammad"])
 
     with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
                       return_value=({'type': 'text', 'content': 'ok'}, {})) as mock_llm_call:
