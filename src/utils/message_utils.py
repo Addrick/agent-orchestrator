@@ -95,27 +95,44 @@ def break_and_recombine_string(input_string: str, substring_length: int, bumper_
 
 def split_string_by_limit(input_string: str, char_limit: int) -> List[str]:
     """
-    Splits a string between words to create chunks under a character limit.
-    This version correctly handles initialization and line-breaking logic.
+    Splits a string into chunks under a character limit.
+    Respects markdown syntax: won't split inside inline code, code blocks,
+    markdown links, or citation blocks.
     """
     if not input_string:
         return [""]
 
-    words: List[str] = input_string.split(' ')
-    lines: List[str] = []
-    current_line: str = ""
+    # Tokenize preserving markdown structure. Order matters: specific patterns first.
+    token_pattern = re.compile(
+        r'```[\s\S]*?```'                                              # fenced code blocks
+        r'|`[^`\n]+`'                                                  # inline code
+        r'|\[\s?\[\d+\]\(<[^>]+>\)(?:,\s?\[\d+\]\(<[^>]+>\))*\s?\]'  # citation blocks
+        r'|\[[^\]]*\]\(<[^>]+>\)'                                      # markdown links
+        r'|\n'                                                         # newline
+        r'| '                                                          # space
+        r'|[^ \n]+'                                                    # any non-whitespace text
+    )
+    tokens: List[str] = token_pattern.findall(input_string)
 
-    for word in words:
-        if not current_line:
-            current_line = word
-            continue
+    chunks: List[str] = []
+    current_chunk: str = ""
 
-        if len(current_line) + len(word) + 1 <= char_limit:
-            current_line += " " + word
+    for token in tokens:
+        if not current_chunk:
+            if token in (" ", "\n"):
+                continue
+            current_chunk = token
+        elif len(current_chunk) + len(token) <= char_limit:
+            current_chunk += token
         else:
-            lines.append(current_line)
-            current_line = word
+            stripped = current_chunk.rstrip()
+            if stripped:
+                chunks.append(stripped)
+            current_chunk = "" if token in (" ", "\n") else token
 
-    lines.append(current_line)
+    if current_chunk:
+        stripped = current_chunk.rstrip()
+        if stripped:
+            chunks.append(stripped)
 
-    return lines
+    return chunks if chunks else [""]
