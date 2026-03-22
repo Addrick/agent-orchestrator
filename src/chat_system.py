@@ -17,27 +17,10 @@ from src.message_handler import BotLogic
 from src.persona import Persona, ExecutionMode, MemoryMode
 from src.tools.definitions import WRITE_TOOLS, MODEL_INCOMPATIBLE_TOOLS
 from src.tools.tool_manager import ToolManager, WebSearchHandler
-from src.utils.model_utils import get_model_list
+from src.utils.model_utils import get_model_list, get_model_prefix
 from src.utils.save_utils import load_personas_from_file, save_personas_to_file
 
 logger = logging.getLogger(__name__)
-
-
-def _get_model_prefix(model_name: str) -> str:
-    """Return the model family prefix using the same logic as engine.py routing."""
-    if model_name.startswith("gpt"):
-        return "gpt"
-    elif "claude" in model_name:
-        return "claude"
-    elif "gemma" in model_name:
-        return "gemma"
-    elif "gemini-3.1" in model_name:
-        return "gemini-3.1"
-    elif "gemini" in model_name:
-        return "gemini"
-    elif model_name == "local":
-        return "local"
-    return "unknown"
 
 
 class ResponseType(Enum):
@@ -285,7 +268,7 @@ class ChatSystem:
         tools_for_llm = [t for t in tools_for_llm
                          if not t.get('service_binding') or t.get('service_binding') in bindings]
 
-        model_prefix = _get_model_prefix(persona.get_model_name())
+        model_prefix = get_model_prefix(persona.get_model_name())
         tools_for_llm = [t for t in tools_for_llm
                          if model_prefix not in MODEL_INCOMPATIBLE_TOOLS.get(
                              t.get('function', {}).get('name'), set())]
