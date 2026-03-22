@@ -275,4 +275,3 @@ MODEL_INCOMPATIBLE_TOOLS = {
 
 # Derived from tool metadata — no manual maintenance needed when adding new tools.
 WRITE_TOOLS = {t['function']['name'] for t in ALL_TOOL_DEFINITIONS if t.get('is_write')}
-ZAMMAD_TOOLS = {t['function']['name'] for t in ALL_TOOL_DEFINITIONS if t.get('service_binding') == 'zammad'}
