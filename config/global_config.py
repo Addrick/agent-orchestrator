@@ -27,7 +27,7 @@ PERSONA_SAVE_FILE = DATA_DIR / "personas.json"
 TEST_PERSONA_SAVE_FILE = DATA_DIR / "test_personas.json"
 MODEL_SAVE_FILE = CONFIG_DIR / "models.json"
 DEFAULT_PERSONA_SAVE_FILE = CONFIG_DIR / "default_personas.json"
-SYSTEM_PERSONA_FILE = os.path.join(CONFIG_DIR, 'system_personas.json')
+SYSTEM_PERSONA_FILE = CONFIG_DIR / 'system_personas.json'
 
 # Application Logging
 CHAT_LOG_LOCATION = LOGS_DIR

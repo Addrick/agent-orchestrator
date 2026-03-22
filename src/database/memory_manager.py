@@ -175,27 +175,19 @@ class MemoryManager:
             except sqlite3.IntegrityError:
                 return False
 
-    def _get_suppressed_ids(self) -> List[int]:
-        """Must be called while self._lock is held."""
-        cursor = self._get_connection().cursor()
-        cursor.execute("SELECT interaction_id FROM Suppressed_Interactions")
-        return [row['interaction_id'] for row in cursor.fetchall()]
+    _SUPPRESSION_SUBQUERY = (" AND interaction_id NOT IN"
+                             " (SELECT interaction_id FROM Suppressed_Interactions)")
 
     def get_personal_history(self, user_identifier: str, persona_name: str,
                              limit: Optional[int] = None) -> List[Dict[str, Any]]:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
-            suppressed_ids = self._get_suppressed_ids()
 
             query = ("SELECT author_role, author_name, content FROM User_Interactions"
-                     " WHERE user_identifier = ? AND persona_name = ?")
+                     " WHERE user_identifier = ? AND persona_name = ?"
+                     + self._SUPPRESSION_SUBQUERY)
             params: List[Any] = [user_identifier, persona_name]
-
-            if suppressed_ids:
-                placeholders = ', '.join('?' for _ in suppressed_ids)
-                query += f" AND interaction_id NOT IN ({placeholders})"
-                params.extend(suppressed_ids)
 
             query += " ORDER BY timestamp DESC"
             if isinstance(limit, int):
@@ -210,16 +202,11 @@ class MemoryManager:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
-            suppressed_ids = self._get_suppressed_ids()
 
             query = ("SELECT author_role, author_name, content FROM User_Interactions"
-                     " WHERE zammad_ticket_id = ?")
+                     " WHERE zammad_ticket_id = ?"
+                     + self._SUPPRESSION_SUBQUERY)
             params: List[Any] = [ticket_id]
-
-            if suppressed_ids:
-                placeholders = ', '.join('?' for _ in suppressed_ids)
-                query += f" AND interaction_id NOT IN ({placeholders})"
-                params.extend(suppressed_ids)
 
             query += " ORDER BY timestamp DESC"
             if isinstance(limit, int):
@@ -235,7 +222,6 @@ class MemoryManager:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
-            suppressed_ids = self._get_suppressed_ids()
 
             query = ("SELECT author_role, author_name, content FROM User_Interactions"
                      " WHERE channel = ? AND persona_name = ?")
@@ -247,11 +233,7 @@ class MemoryManager:
             else:
                 query += " AND server_id IS NULL"
 
-            if suppressed_ids:
-                placeholders = ', '.join('?' for _ in suppressed_ids)
-                query += f" AND interaction_id NOT IN ({placeholders})"
-                params.extend(suppressed_ids)
-
+            query += self._SUPPRESSION_SUBQUERY
             query += " ORDER BY timestamp DESC"
             if isinstance(limit, int):
                 query += " LIMIT ?"
@@ -266,16 +248,11 @@ class MemoryManager:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
-            suppressed_ids = self._get_suppressed_ids()
 
             query = ("SELECT author_role, author_name, content FROM User_Interactions"
-                     " WHERE server_id = ? AND persona_name = ?")
+                     " WHERE server_id = ? AND persona_name = ?"
+                     + self._SUPPRESSION_SUBQUERY)
             params: List[Any] = [server_id, persona_name]
-
-            if suppressed_ids:
-                placeholders = ', '.join('?' for _ in suppressed_ids)
-                query += f" AND interaction_id NOT IN ({placeholders})"
-                params.extend(suppressed_ids)
 
             query += " ORDER BY timestamp DESC"
             if isinstance(limit, int):
@@ -290,16 +267,11 @@ class MemoryManager:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
-            suppressed_ids = self._get_suppressed_ids()
 
             query = ("SELECT author_role, author_name, content FROM User_Interactions"
-                     " WHERE persona_name = ?")
+                     " WHERE persona_name = ?"
+                     + self._SUPPRESSION_SUBQUERY)
             params: List[Any] = [persona_name]
-
-            if suppressed_ids:
-                placeholders = ', '.join('?' for _ in suppressed_ids)
-                query += f" AND interaction_id NOT IN ({placeholders})"
-                params.extend(suppressed_ids)
 
             query += " ORDER BY timestamp DESC"
             if isinstance(limit, int):
