@@ -1,100 +1,138 @@
 # tests/test_app_manager.py
 
+import asyncio
 import pytest
-from unittest.mock import patch, MagicMock
-import sys
+from unittest.mock import patch
 
-from src import app_manager
-
-
-@patch('src.app_manager.Repo')
-def test_update_app_success(mock_repo_class, monkeypatch):
-    """Test update_app when git pull is successful and there are changes."""
-    monkeypatch.setenv("REPO_PATH", "/fake/repo")
-
-    mock_repo_instance = MagicMock()
-
-    # Mock pull result with SUCCESS flag
-    mock_pull_info = MagicMock()
-    mock_pull_info.flags = 4  # Represents a successful pull with changes
-    mock_repo_instance.remotes.origin.pull.return_value = [mock_pull_info]
-
-    # Mock diff index to simulate file changes
-    mock_diff_index = MagicMock()
-    mock_diff_index.iter_change_type.return_value = [MagicMock(b_path="changed_file.py")]
-    mock_repo_instance.index.diff.return_value = mock_diff_index
-
-    mock_repo_class.return_value = mock_repo_instance
-
-    result = app_manager.update_app()
-
-    assert "Pull successful" in result
-    mock_repo_instance.remotes.origin.pull.assert_called_once()
+from src.app_manager import AppManager
+from src.agents.base import Agent
 
 
-@patch('src.app_manager.Repo')
-def test_update_app_failure(mock_repo_class, monkeypatch):
-    """Test update_app when git pull fails."""
-    monkeypatch.setenv("REPO_PATH", "/fake/repo")
+class StubAgent(Agent):
+    """Minimal agent for AppManager tests."""
 
-    mock_repo_instance = MagicMock()
+    def __init__(self):
+        # Skip Agent.__init__ to avoid ChatSystem dependency
+        self._stopping = False
+        self.poll_count = 0
+        self.on_start_called = False
 
-    # Mock pull result without SUCCESS flag
-    mock_pull_info = MagicMock()
-    mock_pull_info.flags = 0  # Represents a failed or no-change pull
-    mock_repo_instance.remotes.origin.pull.return_value = [mock_pull_info]
+    async def on_start(self):
+        self.on_start_called = True
 
-    mock_repo_class.return_value = mock_repo_instance
-
-    result = app_manager.update_app()
-
-    assert result == "Pull failed."
+    async def poll(self):
+        self.poll_count += 1
 
 
-def test_update_app_no_repo_path(monkeypatch):
-    """Test update_app when REPO_PATH environment variable is not set."""
-    monkeypatch.delenv("REPO_PATH", raising=False)
-    result = app_manager.update_app()
-    assert "REPO_PATH not configured" in result
+class FailingAgent(Agent):
+    """Agent whose poll raises an exception."""
+
+    def __init__(self):
+        self._stopping = False
+
+    async def poll(self):
+        raise RuntimeError("Simulated poll failure")
 
 
-@patch('src.app_manager.os.execl')
-@patch('src.app_manager.os.close')
-@patch('src.app_manager.psutil.Process')
-@patch('src.app_manager.os.getpid', return_value=12345)
-def test_restart_app(mock_getpid, mock_psutil_process, mock_os_close, mock_os_execl):
-    """Test the application restart logic."""
-    # Mock process to return dummy file handlers
-    mock_process_instance = MagicMock()
-    mock_handler1 = MagicMock(fd=1)
-    mock_handler2 = MagicMock(fd=2)
-    mock_process_instance.open_files.return_value = [mock_handler1]
-    mock_process_instance.connections.return_value = [mock_handler2]
-    mock_psutil_process.return_value = mock_process_instance
+class TestAppManagerRegistration:
+    def test_register_agent(self):
+        app = AppManager()
+        agent = StubAgent()
+        app.register_agent("test", agent, 10)
+        assert "test" in app._agents
+        assert app._agents["test"] is agent
 
-    # Mock sys arguments
-    original_sys_argv = sys.argv
-    sys.argv = ["/path/to/script.py"]
+    def test_register_task(self):
+        app = AppManager()
 
-    app_manager.restart_app()
+        async def dummy():
+            pass
 
-    mock_getpid.assert_called_once()
-    mock_psutil_process.assert_called_once_with(12345)
-
-    # Check that os.close was called for each file descriptor
-    mock_os_close.assert_any_call(1)
-    mock_os_close.assert_any_call(2)
-    assert mock_os_close.call_count == 2
-
-    # Check that os.execl was called correctly
-    python_executable = sys.executable
-    mock_os_execl.assert_called_once_with(python_executable, python_executable, '"{}"'.format(sys.argv[0]))
-
-    # Restore sys.argv
-    sys.argv = original_sys_argv
+        app.register_task("dummy", dummy())
+        assert len(app._pending_tasks) == 1
+        assert app._pending_tasks[0][0] == "dummy"
 
 
-def test_stop_app():
-    """Test the application stop logic."""
-    with pytest.raises(SystemExit):
-        app_manager.stop_app()
+class TestAppManagerStart:
+    @pytest.mark.asyncio
+    async def test_on_start_called_for_agents(self):
+        app = AppManager()
+        agent = StubAgent()
+        app.register_agent("test", agent, 60)
+
+        # Register a task that completes immediately so start() returns
+        async def quick_task():
+            pass
+
+        app.register_task("quick", quick_task())
+        await app.start()
+        assert agent.on_start_called
+
+    @pytest.mark.asyncio
+    async def test_on_start_error_does_not_crash(self):
+        app = AppManager()
+        agent = StubAgent()
+
+        async def bad_start():
+            raise RuntimeError("Startup failed")
+
+        agent.on_start = bad_start  # type: ignore[assignment]
+        app.register_agent("bad", agent, 60)
+
+        async def quick_task():
+            pass
+
+        app.register_task("quick", quick_task())
+        # Should not raise
+        await app.start()
+
+    @pytest.mark.asyncio
+    async def test_no_tasks_or_agents_returns(self):
+        app = AppManager()
+        # Should return immediately with a warning
+        await app.start()
+
+
+class TestAppManagerShutdown:
+    @pytest.mark.asyncio
+    async def test_shutdown_signals_agents(self):
+        app = AppManager()
+        agent = StubAgent()
+        app.register_agent("test", agent, 60)
+        assert agent.stopping is False
+        await app.shutdown()
+        assert agent.stopping is True
+
+    @pytest.mark.asyncio
+    async def test_shutdown_with_running_scheduler_does_not_raise(self):
+        app = AppManager()
+        agent = StubAgent()
+        app.register_agent("test", agent, 60)
+
+        # Start the scheduler, then verify shutdown completes cleanly
+        app._scheduler.start()
+        assert app._scheduler.running is True
+        await app.shutdown()
+        # Scheduler may not be fully stopped synchronously with wait=False,
+        # but shutdown should not raise
+        assert agent.stopping is True
+
+    @pytest.mark.asyncio
+    async def test_shutdown_safe_when_scheduler_not_started(self):
+        app = AppManager()
+        # Should not raise even if scheduler never started
+        await app.shutdown()
+
+
+class TestSafePoll:
+    @pytest.mark.asyncio
+    async def test_safe_poll_calls_agent(self):
+        agent = StubAgent()
+        await AppManager._safe_poll(agent, "test")
+        assert agent.poll_count == 1
+
+    @pytest.mark.asyncio
+    async def test_safe_poll_catches_exception(self):
+        agent = FailingAgent()
+        # Should not raise
+        await AppManager._safe_poll(agent, "failing")

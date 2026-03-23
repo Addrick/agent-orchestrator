@@ -18,14 +18,14 @@ from config.global_config import (
     ZAMMAD_BOT_FIRSTNAME,
     ZAMMAD_BOT_LASTNAME
 )
-from src.agents.base import AgentLoop
+from src.agents.base import Agent
 from src.chat_system import ChatSystem
 from src.clients.zammad_client import ZammadClient
 
 logger = logging.getLogger(__name__)
 
 
-class ZammadBot(AgentLoop):
+class ZammadBot(Agent):
 
     poll_interval: float = ZAMMAD_POLL_INTERVAL
 
@@ -33,7 +33,7 @@ class ZammadBot(AgentLoop):
         super().__init__(chat_system)
         self.zammad_client = zammad_client
 
-    async def _on_start(self) -> None:
+    async def on_start(self) -> None:
         """
         Checks if the Zammad user for the bot exists.
         Logs instructions if missing, as manual setup is required for permissions.
@@ -57,7 +57,7 @@ class ZammadBot(AgentLoop):
         except Exception as e:
             logger.error(f"Failed to check bot identity in Zammad: {e}")
 
-    async def _poll(self) -> None:
+    async def poll(self) -> None:
         """Checks for new, untagged tickets."""
         query = f"state.name:new AND NOT tags:{ZAMMAD_TRIAGE_TAG}"
         try:
@@ -69,7 +69,7 @@ class ZammadBot(AgentLoop):
             return
 
         for ticket in new_tickets:
-            if self._shutdown_event.is_set():
+            if self.stopping:
                 break
             await self._process_ticket(ticket['id'])
 
