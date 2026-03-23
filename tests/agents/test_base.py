@@ -1,21 +1,20 @@
 # tests/agents/test_base.py
 
-import asyncio
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
-from src.agents.base import AgentLoop
+from src.agents.base import Agent
 from src.persona import Persona
 
 
-class ConcreteAgent(AgentLoop):
-    """Minimal concrete subclass for testing the abstract AgentLoop."""
+class ConcreteAgent(Agent):
+    """Minimal concrete subclass for testing the abstract Agent."""
 
     def __init__(self, chat_system, inject_personas=True):
         super().__init__(chat_system, inject_personas)
         self.poll_count = 0
 
-    async def _poll(self):
+    async def poll(self):
         self.poll_count += 1
 
 
@@ -28,7 +27,7 @@ def mock_chat_system():
     return cs
 
 
-class TestAgentLoopInit:
+class TestAgentInit:
     @patch('src.agents.base.load_system_personas_from_file')
     def test_init_injects_personas(self, mock_load, mock_chat_system):
         mock_load.return_value = {"triage_analyst": MagicMock()}
@@ -51,67 +50,32 @@ class TestAgentLoopInit:
             mock_logger.warning.assert_called_once()
 
 
-class TestAgentLoopPolling:
+class TestAgentStopping:
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
-    @pytest.mark.asyncio
-    async def test_start_and_stop(self, mock_load, mock_chat_system):
+    def test_stopping_default_false(self, mock_load, mock_chat_system):
         agent = ConcreteAgent(mock_chat_system)
-        agent.poll_interval = 0.05
-
-        async def stop_after_polls():
-            while agent.poll_count < 2:
-                await asyncio.sleep(0.01)
-            agent.stop()
-
-        await asyncio.gather(agent.start(), stop_after_polls())
-        assert agent.poll_count >= 2
+        assert agent.stopping is False
 
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
-    @pytest.mark.asyncio
-    async def test_poll_error_does_not_crash_loop(self, mock_load, mock_chat_system):
-        """A single poll failure should not stop the agent."""
+    def test_request_stop_sets_flag(self, mock_load, mock_chat_system):
         agent = ConcreteAgent(mock_chat_system)
-        agent.poll_interval = 0.05
-        call_count = 0
+        agent.request_stop()
+        assert agent.stopping is True
 
-        async def failing_poll():
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise RuntimeError("Simulated poll failure")
 
-        agent._poll = failing_poll  # type: ignore[assignment]
-
-        async def stop_after_recovery():
-            while call_count < 3:
-                await asyncio.sleep(0.01)
-            agent.stop()
-
-        await asyncio.gather(agent.start(), stop_after_recovery())
-        assert call_count >= 3  # Continued polling after the error
+class TestAgentPoll:
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    @pytest.mark.asyncio
+    async def test_poll_increments_count(self, mock_load, mock_chat_system):
+        agent = ConcreteAgent(mock_chat_system)
+        await agent.poll()
+        assert agent.poll_count == 1
 
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
     @pytest.mark.asyncio
-    async def test_on_start_hook_called(self, mock_load, mock_chat_system):
+    async def test_on_start_is_noop_by_default(self, mock_load, mock_chat_system):
         agent = ConcreteAgent(mock_chat_system)
-        agent.poll_interval = 0.05
-        on_start_called = False
-
-        original_on_start = agent._on_start
-
-        async def track_on_start():
-            nonlocal on_start_called
-            on_start_called = True
-            await original_on_start()
-
-        agent._on_start = track_on_start  # type: ignore[assignment]
-
-        async def stop_quickly():
-            await asyncio.sleep(0.02)
-            agent.stop()
-
-        await asyncio.gather(agent.start(), stop_quickly())
-        assert on_start_called
+        await agent.on_start()  # Should not raise
 
 
 class TestBuildLlmContext:
@@ -119,7 +83,7 @@ class TestBuildLlmContext:
         persona = MagicMock(spec=Persona)
         persona.get_prompt.return_value = "You are a test bot."
 
-        result = AgentLoop._build_llm_context(persona, "test prompt")
+        result = Agent._build_llm_context(persona, "test prompt")
 
         assert result["persona_prompt"] == "You are a test bot."
         assert len(result["history"]) == 1
