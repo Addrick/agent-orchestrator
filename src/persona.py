@@ -46,7 +46,6 @@ class Persona:
             execution_mode: Any = ExecutionMode.AUTONOMOUS,
             enabled_tools: Optional[List[str]] = None,
             memory_mode: Any = MemoryMode.CHANNEL_ISOLATED,
-            zammad_aware: bool = False,
             service_bindings: Optional[List[str]] = None
     ) -> None:
         self._name: str = persona_name
@@ -67,13 +66,7 @@ class Persona:
         self._top_p: Optional[float] = top_p
         self._top_k: Optional[int] = top_k
         self._display_name_in_chat: bool = display_name_in_chat
-        # Service bindings: if provided, use directly; else derive from legacy zammad_aware flag
-        if service_bindings is not None:
-            self._service_bindings: List[str] = service_bindings
-        elif zammad_aware:
-            self._service_bindings = ["zammad"]
-        else:
-            self._service_bindings = []
+        self._service_bindings: List[str] = service_bindings if service_bindings is not None else []
 
     # --- Getters ---
 
@@ -129,10 +122,6 @@ class Persona:
     def get_service_bindings(self) -> List[str]:
         """Returns the list of service integrations this persona is bound to."""
         return self._service_bindings
-
-    def get_zammad_aware(self) -> bool:
-        """Convenience: returns whether this persona is bound to the Zammad service."""
-        return "zammad" in self._service_bindings
 
     def get_memory_mode(self) -> MemoryMode:
         """Returns the persona's current memory retrieval strategy."""
@@ -268,14 +257,6 @@ class Persona:
         """Sets the list of service integrations this persona is bound to."""
         self._service_bindings = bindings
         logger.info(f"Persona '{self._name}' service_bindings set to {self._service_bindings}.")
-
-    def set_zammad_aware(self, value: bool) -> None:
-        """Convenience: adds or removes 'zammad' from service_bindings."""
-        if value and "zammad" not in self._service_bindings:
-            self._service_bindings.append("zammad")
-        elif not value and "zammad" in self._service_bindings:
-            self._service_bindings.remove("zammad")
-        logger.info(f"Persona '{self._name}' zammad_aware set to {value}.")
 
     def set_enabled_tools(self, new_tools: List[str]) -> None:
         """Sets the list of tools the persona is allowed to use."""
