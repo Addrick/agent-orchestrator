@@ -299,7 +299,6 @@ _SETTER_TO_COMMAND = {
     'set_execution_mode': 'execution_mode',
     'set_enabled_tools': 'tools',
     'set_memory_mode': 'memory_mode',
-    'set_zammad_aware': 'zammad_aware',
     'set_service_bindings': 'service_bindings',
 }
 
@@ -317,7 +316,6 @@ _GETTER_TO_COMMAND = {
     'get_execution_mode': 'execution_mode',
     'get_enabled_tools': 'tools',
     'get_memory_mode': 'memory_mode',
-    'get_zammad_aware': 'zammad_aware',
     'get_service_bindings': 'service_bindings',
 }
 
@@ -380,7 +378,7 @@ async def test_detail_shows_all_properties(bot_logic):
         "model:",
         "memory mode:",
         "execution mode:",
-        "zammad aware:",
+        "service bindings:",
         "enabled tools:",
         "context length:",
         "display name",

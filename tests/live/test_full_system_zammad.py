@@ -22,7 +22,7 @@ async def test_tool_driven_ticket_creation_flow(live_chat_system, managed_zammad
     chat_system, _, zammad_client = live_chat_system
     persona = chat_system.personas['test_persona']
     persona.set_execution_mode(ExecutionMode.AUTONOMOUS)
-    persona.set_zammad_aware(True)
+    persona.set_service_bindings(["zammad"])
     user_info = managed_zammad_user
     created_ticket_id = None
     try:
@@ -48,7 +48,7 @@ async def test_tool_driven_ticket_creation_flow(live_chat_system, managed_zammad
 async def test_zammad_user_creation_for_non_email_identifier(live_chat_system):
     """zammad_aware persona: non-email user identifier triggers lazy Zammad user creation."""
     chat_system, _, zammad_client = live_chat_system
-    chat_system.personas['test_persona'].set_zammad_aware(True)
+    chat_system.personas['test_persona'].set_service_bindings(["zammad"])
     from urllib.parse import urlparse
     static_user_identifier = "pytest_user_to_delete"
     expected_email = f"support-{static_user_identifier}@{urlparse(zammad_client.api_url).hostname}"
@@ -93,7 +93,7 @@ async def test_ticket_history_is_used_when_mode_is_ticket(live_chat_system, mana
     chat_system, memory_manager, zammad_client = live_chat_system
     persona = chat_system.personas['test_persona']
     persona.set_memory_mode(MemoryMode.TICKET_ISOLATED)
-    persona.set_zammad_aware(True)
+    persona.set_service_bindings(["zammad"])
     user_info = managed_zammad_user
     ticket_id = None
     try:
@@ -134,7 +134,7 @@ async def test_context_transformation_in_ticket_mode(live_chat_system, managed_z
     chat_system, memory_manager, zammad_client = live_chat_system
     persona = chat_system.personas['test_persona']
     persona.set_memory_mode(MemoryMode.TICKET_ISOLATED)
-    persona.set_zammad_aware(True)
+    persona.set_service_bindings(["zammad"])
     user_info = managed_zammad_user
     ticket_id = None
     try:
@@ -167,7 +167,7 @@ async def test_confirm_mode_pends_write_tools(live_chat_system, managed_zammad_u
     chat_system, _, zammad_client = live_chat_system
     persona = chat_system.personas['test_persona']
     persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_zammad_aware(True)
+    persona.set_service_bindings(["zammad"])
     user_info = managed_zammad_user
 
     tool_call = ({'type': 'tool_calls', 'calls': [
@@ -190,7 +190,7 @@ async def test_confirm_mode_resume_approved_creates_ticket(live_chat_system, man
     chat_system, _, zammad_client = live_chat_system
     persona = chat_system.personas['test_persona']
     persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_zammad_aware(True)
+    persona.set_service_bindings(["zammad"])
     user_info = managed_zammad_user
     created_ticket_id = None
 
@@ -228,7 +228,7 @@ async def test_confirm_mode_resume_denied_skips_tool(live_chat_system, managed_z
     chat_system, _, zammad_client = live_chat_system
     persona = chat_system.personas['test_persona']
     persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_zammad_aware(True)
+    persona.set_service_bindings(["zammad"])
     user_info = managed_zammad_user
 
     tool_call = ({'type': 'tool_calls', 'calls': [
@@ -279,7 +279,7 @@ async def test_get_tracking_id_returns_ticket_id(live_chat_system, managed_zamma
     """get_tracking_id hook: generate_response returns the ticket ID resolved by the service."""
     chat_system, _, zammad_client = live_chat_system
     persona = chat_system.personas['test_persona']
-    persona.set_zammad_aware(True)
+    persona.set_service_bindings(["zammad"])
     user_info = managed_zammad_user
     ticket_id = None
     try:
@@ -322,7 +322,7 @@ async def test_on_message_mirrors_to_zammad_ticket(live_chat_system, managed_zam
     """on_message hook: user message and bot response are mirrored as articles on the Zammad ticket."""
     chat_system, _, zammad_client = live_chat_system
     persona = chat_system.personas['test_persona']
-    persona.set_zammad_aware(True)
+    persona.set_service_bindings(["zammad"])
     user_info = managed_zammad_user
     ticket_id = None
     try:

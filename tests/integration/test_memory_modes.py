@@ -249,7 +249,7 @@ async def test_ticket_isolated_mode_is_exclusive(
     chat_system, memory_manager = real_test_system
     persona = chat_system.personas['test_persona']
     persona.set_memory_mode(MemoryMode.TICKET_ISOLATED)
-    persona.set_zammad_aware(True)
+    persona.set_service_bindings(["zammad"])
     persona.set_model_name('local')
 
     # 2. CONFIGURE PATCHES
