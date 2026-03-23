@@ -11,7 +11,7 @@ from config.global_config import (
     DISPATCH_DISPATCHED_TAG,
     DISPATCH_PERSONA_NAME,
 )
-from src.agents.base import AgentLoop
+from src.agents.base import Agent
 from src.chat_system import ChatSystem
 from src.clients.notification import NotificationRouter
 from src.clients.zammad_client import ZammadClient
@@ -19,7 +19,7 @@ from src.clients.zammad_client import ZammadClient
 logger = logging.getLogger(__name__)
 
 
-class DispatchAgent(AgentLoop):
+class DispatchAgent(Agent):
     """
     Polls for triaged tickets and dispatches notifications based on LLM decisions.
 
@@ -43,7 +43,7 @@ class DispatchAgent(AgentLoop):
         self.zammad_client = zammad_client
         self.notification_router = notification_router
 
-    async def _poll(self) -> None:
+    async def poll(self) -> None:
         """Find triaged-but-not-dispatched tickets and process each."""
         query = f"tags:{DISPATCH_TRIAGE_TAG} AND NOT tags:{DISPATCH_DISPATCHED_TAG} AND state.name:new"
         try:
@@ -55,7 +55,7 @@ class DispatchAgent(AgentLoop):
             return
 
         for ticket in tickets:
-            if self._shutdown_event.is_set():
+            if self.stopping:
                 break
             await self._dispatch_ticket(ticket['id'])
 

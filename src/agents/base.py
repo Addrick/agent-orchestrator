@@ -1,6 +1,5 @@
 # src/agents/base.py
 
-import asyncio
 import logging
 from abc import ABC, abstractmethod
 from typing import Any, Dict
@@ -12,18 +11,20 @@ from src.utils.save_utils import load_system_personas_from_file
 logger = logging.getLogger(__name__)
 
 
-class AgentLoop(ABC):
+class Agent(ABC):
     """
-    Base class for polling-based agent loops.
+    Base class for scheduled agents.
 
     Provides:
-    - Async polling loop with graceful shutdown
     - System persona injection into ChatSystem
     - Common LLM context builder
     - Shortcut references to text_engine and memory_manager
+    - Cooperative shutdown flag (`stopping`)
 
-    Subclasses must implement `_poll()` and may override `_on_start()`
+    Subclasses must implement `poll()` and may override `on_start()`
     for one-time setup (e.g. verifying external service identity).
+
+    Scheduling is owned by AppManager, not the agent itself.
     """
 
     poll_interval: float = 60
@@ -32,10 +33,19 @@ class AgentLoop(ABC):
         self.chat_system = chat_system
         self.text_engine = chat_system.text_engine
         self.memory_manager = chat_system.memory_manager
-        self._shutdown_event = asyncio.Event()
+        self._stopping = False
 
         if inject_personas:
             self._inject_system_personas()
+
+    @property
+    def stopping(self) -> bool:
+        """True when the agent has been asked to stop. Check in long-running loops."""
+        return self._stopping
+
+    def request_stop(self) -> None:
+        """Signal the agent to finish its current work and stop."""
+        self._stopping = True
 
     def _inject_system_personas(self) -> None:
         system_personas = load_system_personas_from_file()
@@ -45,33 +55,13 @@ class AgentLoop(ABC):
         else:
             logger.warning("No system personas loaded. Agent may fail if personas are missing.")
 
-    async def start(self) -> None:
-        """Run the polling loop until stop() is called."""
-        logger.info(f"{self.__class__.__name__} started.")
-        await self._on_start()
-
-        while not self._shutdown_event.is_set():
-            try:
-                await self._poll()
-            except Exception as e:
-                logger.error(f"Error in {self.__class__.__name__} polling loop: {e}", exc_info=True)
-
-            try:
-                await asyncio.wait_for(self._shutdown_event.wait(), timeout=self.poll_interval)
-            except asyncio.TimeoutError:
-                continue
-
-    def stop(self) -> None:
-        """Signal the agent to stop after the current poll cycle."""
-        self._shutdown_event.set()
-
-    async def _on_start(self) -> None:
+    async def on_start(self) -> None:
         """Hook for subclass-specific startup work. Called once before the first poll."""
         pass
 
     @abstractmethod
-    async def _poll(self) -> None:
-        """Called each polling cycle. Subclasses implement their work here."""
+    async def poll(self) -> None:
+        """Called each scheduling cycle. Subclasses implement their work here."""
         ...
 
     @staticmethod
