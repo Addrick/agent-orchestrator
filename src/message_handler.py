@@ -50,7 +50,6 @@ class BotLogic:
             'execution_mode': self._what_execution_mode,
             'tools': self._what_tools,
             'memory_mode': self._what_memory_mode,
-            'zammad_aware': self._what_zammad_aware,
             'service_bindings': self._what_service_bindings,
             'top_p': self._what_top_p,
             'top_k': self._what_top_k,
@@ -68,7 +67,6 @@ class BotLogic:
             'execution_mode': self._set_execution_mode,
             'tools': self._set_tools,
             'memory_mode': self._set_memory_mode,
-            'zammad_aware': self._set_zammad_aware,
             'service_bindings': self._set_service_bindings,
         }
 
@@ -118,8 +116,8 @@ class BotLogic:
                                                                        "hello (start new conversation), \n"
                                                                        "goodbye (end conversation), \n"
                                                                        "remember <+prompt>, \n"
-                                                                       "what prompt/model/models/personas/context/tokens/temp/top_p/top_k/execution_mode/tools/memory_mode/zammad_aware, \n"
-                                                                       "set prompt/model/context/tokens/temp/top_p/top_k/display_name/execution_mode/tools/memory_mode/zammad_aware, \n"
+                                                                       "what prompt/model/models/personas/context/tokens/temp/top_p/top_k/execution_mode/tools/memory_mode/service_bindings, \n"
+                                                                       "set prompt/model/context/tokens/temp/top_p/top_k/display_name/execution_mode/tools/memory_mode/service_bindings, \n"
                                                                        "add <persona>, \n"
                                                                        "delete <persona>, \n"
                                                                        "detail, \n"
@@ -277,7 +275,7 @@ class BotLogic:
             f"Model: {persona.get_model_name() or 'default'}\n"
             f"Memory Mode: {persona.get_memory_mode().name}\n"
             f"Execution Mode: {persona.get_execution_mode().name}\n"
-            f"Zammad Aware: {persona.get_zammad_aware()}\n"
+            f"Service Bindings: {', '.join(persona.get_service_bindings()) or 'none'}\n"
             f"Enabled Tools: {tools_display}\n"
             f"Context Length: {context_display}\n"
             f"Display Name in Chat: {persona.should_display_name_in_chat()}\n"
@@ -352,9 +350,6 @@ class BotLogic:
     def _what_memory_mode(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
         valid_modes = ", ".join([e.name.lower() for e in MemoryMode])
         return f"Memory mode for '{persona.get_name()}' is {persona.get_memory_mode().name.lower()}.\nValid modes are: {valid_modes}.", False
-
-    def _what_zammad_aware(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        return f"Zammad aware for '{persona.get_name()}' is {persona.get_zammad_aware()}.", False
 
     def _what_service_bindings(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
         bindings = persona.get_service_bindings()
@@ -638,21 +633,6 @@ class BotLogic:
         except KeyError:
             valid_modes = ", ".join([e.name.lower() for e in MemoryMode])
             return f"Error: Invalid memory mode '{args[1]}'. Valid modes are: {valid_modes}.", False
-
-    def _set_zammad_aware(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        try:
-            value_str = args[1].lower()
-        except IndexError:
-            return "Error: Please specify 'on' or 'off' for zammad_aware.", False
-
-        if value_str in ['true', 'on', 'yes', '1']:
-            persona.set_zammad_aware(True)
-            return f"Zammad awareness for {persona.get_name()} is now enabled.", True
-        elif value_str in ['false', 'off', 'no', '0']:
-            persona.set_zammad_aware(False)
-            return f"Zammad awareness for {persona.get_name()} is now disabled.", True
-        else:
-            return f"Error: Invalid value '{value_str}'. Please use 'on' or 'off'.", False
 
     def _set_service_bindings(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
         if len(args) < 2:
