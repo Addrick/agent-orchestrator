@@ -101,7 +101,7 @@
                 "*"
             ],
             "memory_mode": "CHANNEL_ISOLATED",
-            "service_bindings": ["zammad", "agents"]
+            "service_bindings": ["zammad"]
         }
     ],
     "models": {

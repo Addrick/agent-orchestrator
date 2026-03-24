@@ -24,10 +24,14 @@ anyio==4.12.1
     #   google-genai
     #   httpx
     #   openai
+apscheduler==3.11.2
+    # via -r requirements.in
 attrs==26.1.0
     # via aiohttp
 audioop-lts==0.2.2
     # via discord-py
+build==1.4.0
+    # via pip-tools
 certifi==2026.2.25
     # via
     #   httpcore
@@ -41,8 +45,10 @@ click==8.3.1
     # via
     #   duckduckgo-search
     #   import-linter
+    #   pip-tools
 colorama==0.4.6
     # via
+    #   build
     #   click
     #   pytest
     #   tqdm
@@ -174,9 +180,14 @@ opentelemetry-sdk==1.40.0
 opentelemetry-semantic-conventions==0.61b0
     # via opentelemetry-sdk
 packaging==26.0
-    # via pytest
+    # via
+    #   build
+    #   pytest
+    #   wheel
 pathspec==1.0.4
     # via mypy
+pip-tools==7.5.3
+    # via -r requirements-dev.in
 pluggy==1.6.0
     # via pytest
 primp==1.1.3
@@ -224,6 +235,10 @@ pygments==2.19.2
     #   rich
 pyparsing==3.3.2
     # via httplib2
+pyproject-hooks==1.2.0
+    # via
+    #   build
+    #   pip-tools
 pytest==9.0.2
     # via
     #   -r requirements-dev.in
@@ -285,6 +300,10 @@ typing-extensions==4.15.0
     #   typing-inspection
 typing-inspection==0.4.2
     # via pydantic
+tzdata==2025.3
+    # via tzlocal
+tzlocal==5.3.1
+    # via apscheduler
 uritemplate==4.2.0
     # via google-api-python-client
 urllib3==2.6.3
@@ -293,7 +312,13 @@ urllib3==2.6.3
     #   types-requests
 websockets==16.0
     # via google-genai
+wheel==0.46.3
+    # via pip-tools
 yarl==1.23.0
     # via aiohttp
 zipp==3.23.0
     # via importlib-metadata
+
+# The following packages are considered to be unsafe in a requirements file:
+# pip
+# setuptools

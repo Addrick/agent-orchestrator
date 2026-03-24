@@ -11,11 +11,9 @@ from src.engine import TextEngine
 from src.database.memory_manager import MemoryManager
 from src.clients.zammad_client import ZammadClient
 from src.clients.zammad_service import ZammadIntegration
-from src.clients.notification import NotificationRouter, DiscordNotifier, ZammadNotifier, LogNotifier
-
-from src.agents.agent_manager import AgentManager
-from src.agents.agent_service import AgentServiceIntegration
+from src.app_manager import AppManager
 from src.agents.dispatch_agent import DispatchAgent
+from src.clients.notification import NotificationRouter, DiscordNotifier, ZammadNotifier
 
 from src.interfaces.discord_bot import create_discord_bot
 from src.interfaces.gmail_bot import create_gmail_bot
@@ -27,6 +25,7 @@ from config.global_config import (
     MEMORY_DATABASE_FILE,
     UPDATE_MODELS_ON_STARTUP,
     ZAMMAD_BOT_ENABLED,
+    DISPATCH_ENABLED,
 )
 from dotenv import load_dotenv
 from src.utils.model_utils import get_model_list
@@ -58,6 +57,7 @@ for handler in root_logger.handlers:
 
 logging.getLogger('google_genai').setLevel(logging.WARNING)
 logging.getLogger('discord').setLevel(logging.WARNING)
+logging.getLogger('apscheduler').setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
@@ -83,31 +83,56 @@ def _init_zammad_client() -> Optional[ZammadClient]:
         return None
 
 
-def _init_agent_subsystem(
+def _register_interfaces(
+    app: AppManager,
     bot: ChatSystem,
-    memory_manager: MemoryManager,
+    notification_router: NotificationRouter,
+) -> None:
+    """Register long-running interface tasks (Discord, Gmail)."""
+    if DISCORD_BOT:
+        logger.info("Initializing Discord bot...")
+        discord_bot = create_discord_bot(bot)
+        discord_token = os.environ.get("DISCORD_API_KEY")
+        if not discord_token:
+            logger.error("DISCORD_API_KEY not set. Cannot start Discord bot.")
+        else:
+            notification_router.register("discord", DiscordNotifier(discord_bot))
+            app.register_task("discord", discord_bot.start(discord_token))
+
+    if GMAIL_BOT:
+        logger.info("Initializing Gmail bot...")
+        gmail_bot = create_gmail_bot(bot)
+        app.register_task("gmail", gmail_bot.start())
+
+
+def _register_agents(
+    app: AppManager,
+    bot: ChatSystem,
     zammad_client: Optional[ZammadClient],
-) -> tuple[AgentManager, NotificationRouter]:
-    """Initialize notification routing, agent manager, and register agent classes."""
-    # Notification router
-    notification_router = NotificationRouter()
-    if zammad_client is not None:
-        notification_router.register("zammad", ZammadNotifier(zammad_client))
-    notification_router.register("log", LogNotifier())
+    notification_router: NotificationRouter,
+) -> None:
+    """Register scheduled polling agents (Zammad triage, dispatch)."""
+    if ZAMMAD_BOT_ENABLED:
+        if zammad_client is None:
+            logger.error(
+                "ZAMMAD_BOT_ENABLED is True but Zammad credentials are missing. "
+                "Skipping Zammad bot."
+            )
+        else:
+            logger.info("Initializing Zammad bot...")
+            zammad_bot = create_zammad_bot(bot, zammad_client)
+            app.register_agent("zammad_bot", zammad_bot, zammad_bot.poll_interval)
 
-    # Agent manager
-    agent_manager = AgentManager(
-        chat_system=bot,
-        memory_manager=memory_manager,
-        notification_router=notification_router,
-    )
-    agent_manager.register("dispatch", DispatchAgent)
-    bot.agent_manager = agent_manager
-
-    # Register agent service (gates agent tools behind 'agents' binding)
-    bot.register_service(AgentServiceIntegration(agent_manager, memory_manager))
-
-    return agent_manager, notification_router
+    if DISPATCH_ENABLED:
+        if zammad_client is None:
+            logger.error(
+                "DISPATCH_ENABLED is True but Zammad credentials are missing. "
+                "Skipping dispatch agent."
+            )
+        else:
+            logger.info("Initializing dispatch agent...")
+            dispatch_agent = DispatchAgent(bot, zammad_client, notification_router)
+            app.register_agent("dispatch", dispatch_agent, dispatch_agent.poll_interval)
 
 
 async def main() -> None:
@@ -141,70 +166,22 @@ async def main() -> None:
     if zammad_client is not None:
         bot.register_service(ZammadIntegration(zammad_client))
 
-    # 6. Initialize agent subsystem (notification router + agent manager)
-    agent_manager, notification_router = _init_agent_subsystem(bot, memory_manager, zammad_client)
+    # 6. Create AppManager and NotificationRouter
+    app = AppManager()
+    notification_router = NotificationRouter()
+    if zammad_client is not None:
+        notification_router.register("zammad", ZammadNotifier(zammad_client))
 
-    tasks, discord_bot = _init_interfaces(bot, zammad_client)
-
-    # Wire Discord client into notification router once bot is created
-    if discord_bot is not None:
-        notification_router.register("discord_dm", DiscordNotifier(discord_bot))
-
-    # 7. Auto-start agents configured with auto_start: true
-    await agent_manager.auto_start()
+    # 7. Register interfaces and agents
+    _register_interfaces(app, bot, notification_router)
+    _register_agents(app, bot, zammad_client, notification_router)
 
     # 8. Optionally update the model list on startup
     if UPDATE_MODELS_ON_STARTUP:
-        task = asyncio.create_task(update_models_and_sync_bot(bot))
-        tasks.append(task)
+        app.register_task("model_update", update_models_and_sync_bot(bot))
 
-    if not tasks:
-        logger.warning("No interfaces were enabled. The application will exit.")
-        return
-
-    try:
-        await asyncio.gather(*tasks)
-    finally:
-        await agent_manager.shutdown_all()
-
-
-def _init_interfaces(
-    bot: ChatSystem, zammad_client: Optional[ZammadClient],
-) -> tuple[list[Any], Any]:
-    """Create and start interface tasks (Discord, Gmail, Zammad bots).
-
-    Returns:
-        Tuple of (tasks list, discord_bot instance or None).
-    """
-    tasks: list[Any] = []
-    discord_bot = None
-
-    if DISCORD_BOT:
-        logger.info("Initializing Discord bot...")
-        discord_bot = create_discord_bot(bot)
-        discord_token = os.environ.get("DISCORD_API_KEY")
-        if not discord_token:
-            logger.error("DISCORD_API_KEY not set. Cannot start Discord bot.")
-        else:
-            task = asyncio.create_task(discord_bot.start(discord_token))
-            tasks.append(task)
-
-    if GMAIL_BOT:
-        logger.info("Initializing Gmail bot...")
-        gmail_bot = create_gmail_bot(bot)
-        task = asyncio.create_task(gmail_bot.start())
-        tasks.append(task)
-
-    if ZAMMAD_BOT_ENABLED:
-        if zammad_client is None:
-            logger.error("ZAMMAD_BOT_ENABLED is True but Zammad credentials are missing. Skipping Zammad bot.")
-        else:
-            logger.info("Initializing Zammad bot...")
-            zammad_bot = create_zammad_bot(bot, zammad_client)
-            task = asyncio.create_task(zammad_bot.start())
-            tasks.append(task)
-
-    return tasks, discord_bot
+    # 9. Run everything
+    await app.start()
 
 
 if __name__ == "__main__":

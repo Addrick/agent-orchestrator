@@ -73,8 +73,6 @@ class ChatSystem:
         self.background_tasks: Set[Coroutine[Any, Any, Any]] = set()
         self._pending_confirmations: Dict[Tuple[str, str], PendingConfirmation] = {}
         self._services: Dict[str, ServiceIntegration] = {}
-        # Set by main.py after AgentManager is created — thin reference only
-        self.agent_manager: Optional[Any] = None
 
     def register_service(self, service: ServiceIntegration) -> None:
         """Register a service integration and its tools."""

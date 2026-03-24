@@ -2,7 +2,7 @@
 
 import json
 import pytest
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.agents.dispatch_agent import DispatchAgent
 from src.clients.notification import NotificationRouter, LogNotifier
@@ -15,9 +15,6 @@ def mock_chat_system():
     cs.memory_manager = MagicMock()
     cs.memory_manager.log_agent_action = MagicMock(return_value=1)
     cs.memory_manager.update_agent_action_outcome = MagicMock()
-    cs.memory_manager.add_action_contexts = MagicMock()
-    cs.memory_manager.get_relevant_agent_actions = MagicMock(return_value=[])
-    cs.memory_manager.get_action_steps = MagicMock(return_value=[])
     cs.personas = {}
     return cs
 
@@ -45,12 +42,6 @@ class TestDispatchAgentInit:
         agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
         assert agent.zammad_client is mock_zammad_client
         assert agent.notification_router is notification_router
-
-    @patch('src.agents.base.load_system_personas_from_file', return_value={})
-    def test_class_attributes(self, mock_load, mock_chat_system, mock_zammad_client, notification_router):
-        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
-        assert agent.agent_name == "dispatch"
-        assert agent.action_history_limit == 10
 
 
 class TestExtractTriageNote:
@@ -96,7 +87,7 @@ class TestGetDispatchDecision:
                                                 notification_router):
         agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
         # personas dict is empty, so dispatch_analyst won't be found
-        result = await agent._get_dispatch_decision("Test Ticket", "Triage note", 42)
+        result = await agent._get_dispatch_decision("Test Ticket", "Triage note")
         assert result is None
 
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
@@ -118,7 +109,7 @@ class TestGetDispatchDecision:
             return_value=({"type": "text", "content": decision_json}, None)
         )
 
-        result = await agent._get_dispatch_decision("Server Down", "Triage note content", 42)
+        result = await agent._get_dispatch_decision("Server Down", "Triage note content")
         assert result is not None
         assert result["priority"] == "high"
         assert result["notify_channel"] == "zammad"
@@ -137,7 +128,7 @@ class TestGetDispatchDecision:
             return_value=({"type": "text", "content": "not valid json"}, None)
         )
 
-        result = await agent._get_dispatch_decision("Title", "Note", 42)
+        result = await agent._get_dispatch_decision("Title", "Note")
         assert result is None
 
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
@@ -153,7 +144,7 @@ class TestGetDispatchDecision:
             return_value=({"type": "tool_calls", "calls": []}, None)
         )
 
-        result = await agent._get_dispatch_decision("Title", "Note", 42)
+        result = await agent._get_dispatch_decision("Title", "Note")
         assert result is None
 
 
@@ -165,7 +156,7 @@ class TestDispatchTicket:
 
         # Set up mocks on the injected zammad_client
         mock_zammad_client.get_ticket = MagicMock(
-            return_value={"id": 42, "title": "Test Issue", "number": 10042, "customer": "jane@acme.com"}
+            return_value={"id": 42, "title": "Test Issue", "number": 10042}
         )
         mock_zammad_client.get_ticket_articles = MagicMock(
             return_value=[{"body": "AI triage\n[ AI TRIAGE CONTEXT DUMP ]", "internal": True}]
@@ -182,9 +173,8 @@ class TestDispatchTicket:
 
         await agent._dispatch_ticket(42)
 
-        # Verify parent action logged (first call) + step calls
-        log_calls = mock_chat_system.memory_manager.log_agent_action.call_args_list
-        assert len(log_calls) >= 1  # At least the parent action
+        # Verify action logged
+        mock_chat_system.memory_manager.log_agent_action.assert_called_once()
         # Verify ticket tagged
         mock_zammad_client.add_tag.assert_called_once()
         # Verify outcome updated to success
@@ -227,492 +217,3 @@ class TestDispatchTicket:
         update_call = mock_chat_system.memory_manager.update_agent_action_outcome.call_args
         assert update_call[0][1] == "error"
         assert "API down" in update_call[0][2]
-
-
-class TestDispatchStepLogging:
-    @patch('src.agents.base.load_system_personas_from_file', return_value={})
-    @pytest.mark.asyncio
-    async def test_dispatch_logs_all_steps(self, mock_load, mock_chat_system, mock_zammad_client, notification_router):
-        """Each operation in the dispatch pipeline should create a child step."""
-        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
-
-        mock_zammad_client.get_ticket = MagicMock(
-            return_value={"id": 42, "title": "Test", "number": 10042, "customer": "jane@acme.com"}
-        )
-        mock_zammad_client.get_ticket_articles = MagicMock(
-            return_value=[{"body": "AI triage\n[ AI TRIAGE CONTEXT DUMP ]", "internal": True}]
-        )
-        mock_zammad_client.add_tag = MagicMock()
-
-        decision = {"priority": "high", "notify_channel": "zammad", "summary": "Issue", "reasoning": "Test"}
-        agent._get_dispatch_decision = AsyncMock(return_value=decision)
-
-        await agent._dispatch_ticket(42)
-
-        # Count log_agent_action calls: 1 parent + 5 steps
-        # (fetch_ticket, fetch_articles, llm_decision, send_notification, tag_ticket)
-        log_calls = mock_chat_system.memory_manager.log_agent_action.call_args_list
-        assert len(log_calls) == 6  # 1 parent + 5 steps
-
-        # First call is the parent (no parent_id)
-        parent_call_kwargs = log_calls[0][1]
-        assert parent_call_kwargs.get("parent_id") is None or "parent_id" not in parent_call_kwargs
-
-        # Remaining calls are steps (with parent_id=1)
-        step_types = []
-        for step_call in log_calls[1:]:
-            kwargs = step_call[1]
-            assert kwargs["parent_id"] == 1
-            step_types.append(kwargs["action_type"])
-
-        assert step_types == [
-            "fetch_ticket", "fetch_articles", "llm_decision",
-            "send_notification", "tag_ticket",
-        ]
-
-    @patch('src.agents.base.load_system_personas_from_file', return_value={})
-    @pytest.mark.asyncio
-    async def test_dispatch_adds_context_tags(self, mock_load, mock_chat_system, mock_zammad_client,
-                                              notification_router):
-        """Dispatch should tag the action with ticket and customer contexts."""
-        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
-
-        mock_zammad_client.get_ticket = MagicMock(
-            return_value={"id": 42, "title": "Test", "number": 10042, "customer": "jane@acme.com"}
-        )
-        mock_zammad_client.get_ticket_articles = MagicMock(
-            return_value=[{"body": "content", "internal": False}]
-        )
-        mock_zammad_client.add_tag = MagicMock()
-
-        decision = {"priority": "low", "notify_channel": "zammad", "summary": "Test", "reasoning": "Test"}
-        agent._get_dispatch_decision = AsyncMock(return_value=decision)
-
-        await agent._dispatch_ticket(42)
-
-        mock_chat_system.memory_manager.add_action_contexts.assert_called_once()
-        contexts = mock_chat_system.memory_manager.add_action_contexts.call_args[0][1]
-        context_types = {ct for ct, _ in contexts}
-        assert "ticket" in context_types
-        assert "customer" in context_types
-
-    @patch('src.agents.base.load_system_personas_from_file', return_value={})
-    @pytest.mark.asyncio
-    async def test_failed_step_updates_parent_outcome(self, mock_load, mock_chat_system, mock_zammad_client,
-                                                      notification_router):
-        """When the LLM decision fails, parent should be marked failed."""
-        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
-
-        mock_zammad_client.get_ticket = MagicMock(
-            return_value={"id": 42, "title": "Test", "number": 10042}
-        )
-        mock_zammad_client.get_ticket_articles = MagicMock(
-            return_value=[{"body": "content", "internal": False}]
-        )
-
-        agent._get_dispatch_decision = AsyncMock(return_value=None)
-
-        await agent._dispatch_ticket(42)
-
-        update_call = mock_chat_system.memory_manager.update_agent_action_outcome.call_args
-        assert update_call[0][1] == "failed"
-        assert "llm_decision" in update_call[0][2]
-
-
-class TestResolveRecipient:
-    @patch('src.agents.base.load_system_personas_from_file', return_value={})
-    def test_resolves_discord_dm(self, mock_load, mock_chat_system, mock_zammad_client, notification_router):
-        """Should resolve logical name to Discord user ID from config."""
-        notification_router.register("discord_dm", MagicMock())
-        agent_config = {
-            "notification_defaults": {"channel": "discord_dm", "recipient": "adrich"},
-            "_recipients": {"adrich": {"discord_user_id": "321783731146850305"}},
-        }
-        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router, agent_config)
-
-        result = agent._resolve_recipient("discord_dm")
-        assert result == "321783731146850305"
-
-    @patch('src.agents.base.load_system_personas_from_file', return_value={})
-    def test_returns_none_for_unavailable_channel(self, mock_load, mock_chat_system, mock_zammad_client,
-                                                   notification_router):
-        """Channel not registered with router should return None."""
-        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
-        result = agent._resolve_recipient("discord_dm")
-        assert result is None
-
-    @patch('src.agents.base.load_system_personas_from_file', return_value={})
-    def test_returns_none_when_no_default_recipient(self, mock_load, mock_chat_system, mock_zammad_client,
-                                                     notification_router):
-        """No notification_defaults.recipient configured should return None."""
-        notification_router.register("discord_dm", MagicMock())
-        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router, agent_config={})
-        result = agent._resolve_recipient("discord_dm")
-        assert result is None
-
-    @patch('src.agents.base.load_system_personas_from_file', return_value={})
-    def test_returns_none_when_user_id_not_configured(self, mock_load, mock_chat_system, mock_zammad_client,
-                                                       notification_router):
-        """Recipient exists but has no discord_user_id should return None."""
-        notification_router.register("discord_dm", MagicMock())
-        agent_config = {
-            "notification_defaults": {"recipient": "adrich"},
-            "_recipients": {"adrich": {"discord_user_id": None}},
-        }
-        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router, agent_config)
-        result = agent._resolve_recipient("discord_dm")
-        assert result is None
-
-    @patch('src.agents.base.load_system_personas_from_file', return_value={})
-    def test_resolves_email_channel(self, mock_load, mock_chat_system, mock_zammad_client, notification_router):
-        """Email channel should resolve to the email field."""
-        notification_router.register("email", MagicMock())
-        agent_config = {
-            "notification_defaults": {"recipient": "adrich"},
-            "_recipients": {"adrich": {"email": "adam@tech-ops.it"}},
-        }
-        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router, agent_config)
-        result = agent._resolve_recipient("email")
-        assert result == "adam@tech-ops.it"
-
-    @patch('src.agents.base.load_system_personas_from_file', return_value={})
-    @pytest.mark.asyncio
-    async def test_falls_back_to_zammad_in_dispatch_pipeline(self, mock_load, mock_chat_system,
-                                                              mock_zammad_client, notification_router):
-        """When discord_dm resolution fails, _dispatch_ticket should fall back to zammad."""
-        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
-
-        mock_zammad_client.get_ticket = MagicMock(
-            return_value={"id": 42, "title": "Test", "number": 10042, "customer": "jane"}
-        )
-        mock_zammad_client.get_ticket_articles = MagicMock(
-            return_value=[{"body": "content", "internal": False}]
-        )
-        mock_zammad_client.add_tag = MagicMock()
-
-        # LLM decides discord_dm but no recipient mapping exists
-        decision = {"priority": "high", "notify_channel": "discord_dm", "summary": "Test", "reasoning": "Test"}
-        agent._get_dispatch_decision = AsyncMock(return_value=decision)
-
-        await agent._dispatch_ticket(42)
-
-        # Notification should have been sent to zammad (fallback)
-        log_calls = mock_chat_system.memory_manager.log_agent_action.call_args_list
-        notification_step = [c for c in log_calls if c[1].get("action_type") == "send_notification"]
-        assert len(notification_step) == 1
-        payload = json.loads(notification_step[0][1]["action_payload"])
-        assert payload["channel"] == "zammad"
-
-
-class TestDispatchPoll:
-    @patch('src.agents.base.load_system_personas_from_file', return_value={})
-    @pytest.mark.asyncio
-    async def test_poll_calls_search_and_dispatches(self, mock_load, mock_chat_system, mock_zammad_client,
-                                                     notification_router):
-        """_poll calls search and dispatches each ticket."""
-        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
-
-        mock_zammad_client.search_tickets = MagicMock(
-            return_value=[{"id": 1}, {"id": 2}]
-        )
-        agent._dispatch_ticket = AsyncMock()
-
-        await agent._poll()
-
-        mock_zammad_client.search_tickets.assert_called_once()
-        assert agent._dispatch_ticket.call_count == 2
-        agent._dispatch_ticket.assert_any_call(1)
-        agent._dispatch_ticket.assert_any_call(2)
-
-    @patch('src.agents.base.load_system_personas_from_file', return_value={})
-    @pytest.mark.asyncio
-    async def test_poll_handles_search_error(self, mock_load, mock_chat_system, mock_zammad_client,
-                                              notification_router):
-        """_poll handles search error gracefully."""
-        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
-
-        mock_zammad_client.search_tickets = MagicMock(
-            side_effect=RuntimeError("Search API down")
-        )
-        agent._dispatch_ticket = AsyncMock()
-
-        # Should not raise
-        await agent._poll()
-
-        # _dispatch_ticket should never be called
-        agent._dispatch_ticket.assert_not_called()
-
-    @patch('src.agents.base.load_system_personas_from_file', return_value={})
-    @pytest.mark.asyncio
-    async def test_poll_respects_shutdown_event(self, mock_load, mock_chat_system, mock_zammad_client,
-                                                 notification_router):
-        """_poll respects shutdown event mid-batch."""
-        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
-
-        mock_zammad_client.search_tickets = MagicMock(
-            return_value=[{"id": 1}, {"id": 2}, {"id": 3}]
-        )
-
-        dispatch_count = 0
-
-        async def dispatch_and_shutdown(ticket_id):
-            nonlocal dispatch_count
-            dispatch_count += 1
-            if dispatch_count == 1:
-                # Signal shutdown after first dispatch
-                agent._shutdown_event.set()
-
-        agent._dispatch_ticket = AsyncMock(side_effect=dispatch_and_shutdown)
-
-        await agent._poll()
-
-        # Should have dispatched only the first ticket, then stopped
-        assert dispatch_count == 1
-
-
-class TestSuccessfulDiscordDispatch:
-    @patch('src.agents.base.load_system_personas_from_file', return_value={})
-    @pytest.mark.asyncio
-    async def test_dispatch_with_discord_dm_recipient(self, mock_load, mock_chat_system, mock_zammad_client,
-                                                       notification_router):
-        """Test _dispatch_ticket with discord_dm where recipient resolves successfully."""
-        notification_router.register("discord_dm", MagicMock())
-        agent_config = {
-            "notification_defaults": {"channel": "discord_dm", "recipient": "adrich"},
-            "_recipients": {"adrich": {"discord_user_id": "321783731146850305"}},
-        }
-        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router, agent_config)
-
-        mock_zammad_client.get_ticket = MagicMock(
-            return_value={"id": 42, "title": "Test Issue", "number": 10042, "customer": "jane@acme.com"}
-        )
-        mock_zammad_client.get_ticket_articles = MagicMock(
-            return_value=[{"body": "AI triage\n[ AI TRIAGE CONTEXT DUMP ]", "internal": True}]
-        )
-        mock_zammad_client.add_tag = MagicMock()
-
-        decision = {
-            "priority": "high",
-            "notify_channel": "discord_dm",
-            "summary": "Server is down",
-            "reasoning": "Critical infrastructure",
-        }
-        agent._get_dispatch_decision = AsyncMock(return_value=decision)
-        notification_router.send = AsyncMock(return_value=True)
-
-        await agent._dispatch_ticket(42)
-
-        # Verify notification was sent via discord_dm, not zammad fallback
-        notification_router.send.assert_called_once()
-        send_kwargs = notification_router.send.call_args
-        assert send_kwargs[1]["channel"] == "discord_dm" or send_kwargs[0][0] == "discord_dm"
-
-        # Verify recipient was the resolved discord user ID
-        call_args = notification_router.send.call_args
-        if call_args[1]:
-            assert call_args[1].get("recipient") == "321783731146850305"
-        else:
-            assert call_args[0][1] == "321783731146850305"
-
-        # Verify ticket was tagged
-        mock_zammad_client.add_tag.assert_called_once()
-
-        # Verify outcome was success
-        update_call = mock_chat_system.memory_manager.update_agent_action_outcome.call_args
-        assert update_call[0][1] == "success"
-
-
-class TestResolveRecipientUnknownChannel:
-    @patch('src.agents.base.load_system_personas_from_file', return_value={})
-    def test_unknown_channel_type_returns_none(self, mock_load, mock_chat_system, mock_zammad_client,
-                                                notification_router):
-        """Channel registered with router but not in channel_to_field mapping returns None (line 216)."""
-        notification_router.register("sms", MagicMock())
-        agent_config = {
-            "notification_defaults": {"recipient": "adrich"},
-            "_recipients": {"adrich": {"sms_number": "+1234567890"}},
-        }
-        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router, agent_config)
-        result = agent._resolve_recipient("sms")
-        assert result is None
-
-
-class TestGetDispatchDecisionExceptions:
-    @patch('src.agents.base.load_system_personas_from_file', return_value={})
-    @pytest.mark.asyncio
-    async def test_generic_exception_returns_none(self, mock_load, mock_chat_system, mock_zammad_client,
-                                                   notification_router):
-        """Non-JSON exception from LLM call returns None (line 283-285)."""
-        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
-        mock_persona = MagicMock()
-        mock_persona.get_prompt.return_value = "prompt"
-        mock_persona.get_config_for_engine.return_value = {}
-        mock_chat_system.personas["dispatch_analyst"] = mock_persona
-
-        mock_chat_system.text_engine.generate_response = AsyncMock(
-            side_effect=ConnectionError("Network timeout")
-        )
-
-        result = await agent._get_dispatch_decision("Title", "Note", 42)
-        assert result is None
-
-
-class TestDispatchActionHistoryInContext:
-    @patch('src.agents.base.load_system_personas_from_file', return_value={})
-    @pytest.mark.asyncio
-    async def test_dispatch_decision_includes_action_history(self, mock_load, mock_chat_system,
-                                                             mock_zammad_client, notification_router):
-        """The LLM context should contain action history as a system message."""
-        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
-
-        mock_persona = MagicMock()
-        mock_persona.get_prompt.return_value = "You are a dispatch agent."
-        mock_persona.get_config_for_engine.return_value = {}
-        mock_chat_system.personas["dispatch_analyst"] = mock_persona
-
-        # Set up past actions to be returned
-        mock_chat_system.memory_manager.get_relevant_agent_actions.return_value = [
-            {
-                "id": 1, "action_type": "dispatch", "trigger_context": "ticket:40",
-                "outcome": "success", "outcome_payload": '{"priority": "medium"}',
-                "timestamp": "2025-01-15 09:20:00",
-            }
-        ]
-        mock_chat_system.memory_manager.get_action_steps.return_value = []
-
-        decision_json = json.dumps({
-            "priority": "high", "notify_channel": "zammad",
-            "summary": "Test", "reasoning": "Test"
-        })
-        mock_chat_system.text_engine.generate_response = AsyncMock(
-            return_value=({"type": "text", "content": decision_json}, None)
-        )
-
-        result = await agent._get_dispatch_decision("Test", "Triage note", 42, "jane@acme.com")
-
-        # Verify generate_response was called with a context that includes action history
-        gen_call = mock_chat_system.text_engine.generate_response.call_args
-        context_object = gen_call[1]["context_object"] if "context_object" in gen_call[1] else gen_call[0][1]
-        history = context_object["history"]
-
-        # Should have system message (action history) + user message (prompt)
-        assert len(history) == 2
-        assert history[0]["role"] == "system"
-        assert "RECENT ACTIONS" in history[0]["content"]
-        assert "ticket:40" in history[0]["content"]
-        assert history[1]["role"] == "user"
-
-
-class TestExtractJsonFromResponse:
-    def test_clean_json_passthrough(self):
-        """Already-clean JSON is returned unchanged."""
-        raw = '{"priority": "high", "notify_channel": "discord_dm"}'
-        assert DispatchAgent._extract_json_from_response(raw) == raw.strip()
-
-    def test_strips_json_code_fence(self):
-        """```json ... ``` fences are stripped."""
-        raw = '```json\n{"priority": "high"}\n```'
-        result = DispatchAgent._extract_json_from_response(raw)
-        assert result == '{"priority": "high"}'
-
-    def test_strips_plain_code_fence(self):
-        """``` ... ``` fences (without json label) are stripped."""
-        raw = '```\n{"priority": "low"}\n```'
-        result = DispatchAgent._extract_json_from_response(raw)
-        assert result == '{"priority": "low"}'
-
-    def test_strips_code_fence_with_surrounding_text(self):
-        """Code fences embedded in surrounding text are extracted."""
-        raw = 'Here is my decision:\n```json\n{"priority": "medium"}\n```\nDone.'
-        result = DispatchAgent._extract_json_from_response(raw)
-        assert result == '{"priority": "medium"}'
-
-    def test_no_fence_returns_stripped(self):
-        """Plain text with no fences is returned stripped."""
-        raw = '  some text  '
-        assert DispatchAgent._extract_json_from_response(raw) == 'some text'
-
-
-class TestNotifyChannelNormalization:
-    @patch('src.agents.base.load_system_personas_from_file', return_value={})
-    @pytest.mark.asyncio
-    async def test_discord_normalized_to_discord_dm(
-        self, mock_load, mock_chat_system, mock_zammad_client, notification_router,
-    ):
-        """LLM returning 'discord' as notify_channel gets mapped to 'discord_dm'."""
-        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
-
-        mock_persona = MagicMock()
-        mock_persona.get_prompt.return_value = "prompt"
-        mock_persona.get_config_for_engine.return_value = {}
-        mock_chat_system.personas["dispatch_analyst"] = mock_persona
-        mock_chat_system.memory_manager.get_relevant_agent_actions.return_value = []
-
-        # LLM returns "discord" (not "discord_dm")
-        decision_json = json.dumps({
-            "priority": "high", "notify_channel": "discord",
-            "summary": "Test", "reasoning": "Test"
-        })
-        mock_chat_system.text_engine.generate_response = AsyncMock(
-            return_value=({"type": "text", "content": decision_json}, None)
-        )
-
-        result = await agent._get_dispatch_decision("Title", "Note", 42)
-
-        assert result is not None
-        assert result["notify_channel"] == "discord_dm"
-
-    @patch('src.agents.base.load_system_personas_from_file', return_value={})
-    @pytest.mark.asyncio
-    async def test_zammad_not_normalized(
-        self, mock_load, mock_chat_system, mock_zammad_client, notification_router,
-    ):
-        """LLM returning 'zammad' keeps the channel name as-is."""
-        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
-
-        mock_persona = MagicMock()
-        mock_persona.get_prompt.return_value = "prompt"
-        mock_persona.get_config_for_engine.return_value = {}
-        mock_chat_system.personas["dispatch_analyst"] = mock_persona
-        mock_chat_system.memory_manager.get_relevant_agent_actions.return_value = []
-
-        decision_json = json.dumps({
-            "priority": "low", "notify_channel": "zammad",
-            "summary": "Test", "reasoning": "Test"
-        })
-        mock_chat_system.text_engine.generate_response = AsyncMock(
-            return_value=({"type": "text", "content": decision_json}, None)
-        )
-
-        result = await agent._get_dispatch_decision("Title", "Note", 42)
-
-        assert result is not None
-        assert result["notify_channel"] == "zammad"
-
-    @patch('src.agents.base.load_system_personas_from_file', return_value={})
-    @pytest.mark.asyncio
-    async def test_code_fence_plus_normalization(
-        self, mock_load, mock_chat_system, mock_zammad_client, notification_router,
-    ):
-        """LLM response with code fences AND 'discord' gets both fixed."""
-        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
-
-        mock_persona = MagicMock()
-        mock_persona.get_prompt.return_value = "prompt"
-        mock_persona.get_config_for_engine.return_value = {}
-        mock_chat_system.personas["dispatch_analyst"] = mock_persona
-        mock_chat_system.memory_manager.get_relevant_agent_actions.return_value = []
-
-        fenced_response = (
-            '```json\n{"priority": "critical", "notify_channel": "discord",'
-            ' "summary": "Down", "reasoning": "Outage"}\n```'
-        )
-        mock_chat_system.text_engine.generate_response = AsyncMock(
-            return_value=({"type": "text", "content": fenced_response}, None)
-        )
-
-        result = await agent._get_dispatch_decision("Title", "Note", 42)
-
-        assert result is not None
-        assert result["notify_channel"] == "discord_dm"
-        assert result["priority"] == "critical"
