@@ -280,3 +280,179 @@ def test_concurrent_write_and_suppress(file_mem_manager):
     # All remaining should be the new batch (none of the originals survive suppression)
     contents = {msg['content'] for msg in history}
     assert all(c.startswith("new-") for c in contents)
+
+
+# --- Agent Action Context Tests ---
+
+class TestAgentActionContexts:
+    def test_add_and_query_contexts(self, mem_manager):
+        action_id = mem_manager.log_agent_action("test_agent", "test_action")
+        mem_manager.add_action_contexts(action_id, [
+            ("ticket", "42"),
+            ("customer", "jane@acme.com"),
+        ])
+        conn = mem_manager._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM Agent_Action_Contexts WHERE action_id = ?", (action_id,))
+        rows = cursor.fetchall()
+        assert len(rows) == 2
+        types = {row['context_type'] for row in rows}
+        assert types == {"ticket", "customer"}
+
+    def test_duplicate_context_ignored(self, mem_manager):
+        action_id = mem_manager.log_agent_action("test_agent", "test_action")
+        mem_manager.add_action_contexts(action_id, [("ticket", "42")])
+        # Insert the same context again — should not error
+        mem_manager.add_action_contexts(action_id, [("ticket", "42")])
+        conn = mem_manager._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) as cnt FROM Agent_Action_Contexts WHERE action_id = ?",
+            (action_id,)
+        )
+        assert cursor.fetchone()['cnt'] == 1
+
+
+class TestGetRelevantAgentActions:
+    def test_entity_matches_prioritized(self, mem_manager):
+        """Actions matching context tags should appear before non-matching ones."""
+        # Action for ticket 1
+        id1 = mem_manager.log_agent_action("dispatch", "dispatch",
+                                           trigger_context="ticket:1", outcome="success")
+        mem_manager.add_action_contexts(id1, [("ticket", "1")])
+
+        # Action for ticket 2
+        id2 = mem_manager.log_agent_action("dispatch", "dispatch",
+                                           trigger_context="ticket:2", outcome="success")
+        mem_manager.add_action_contexts(id2, [("ticket", "2")])
+
+        results = mem_manager.get_relevant_agent_actions(
+            "dispatch", match_contexts=[("ticket", "1")]
+        )
+        assert len(results) == 2
+        # Ticket 1 action should be first (entity match bucket)
+        assert results[0]['trigger_context'] == "ticket:1"
+
+    def test_failures_included_from_any_entity(self, mem_manager):
+        """Failed actions should appear even without a context match."""
+        id1 = mem_manager.log_agent_action("dispatch", "dispatch",
+                                           trigger_context="ticket:1", outcome="success")
+        mem_manager.add_action_contexts(id1, [("ticket", "1")])
+
+        id2 = mem_manager.log_agent_action("dispatch", "dispatch",
+                                           trigger_context="ticket:99", outcome="failed",
+                                           outcome_payload="some error")
+        mem_manager.add_action_contexts(id2, [("ticket", "99")])
+
+        results = mem_manager.get_relevant_agent_actions(
+            "dispatch", match_contexts=[("ticket", "1")]
+        )
+        assert len(results) == 2
+        # Entity match first, then failure
+        assert results[0]['trigger_context'] == "ticket:1"
+        assert results[1]['outcome'] == "failed"
+
+    def test_match_types_filter(self, mem_manager):
+        """Only actions matching specified action_types should be returned."""
+        mem_manager.log_agent_action("dispatch", "dispatch", outcome="success")
+        mem_manager.log_agent_action("dispatch", "reminder", outcome="success")
+
+        results = mem_manager.get_relevant_agent_actions(
+            "dispatch", match_types=["dispatch"]
+        )
+        assert all(r['action_type'] == "dispatch" for r in results)
+
+    def test_limit_respected(self, mem_manager):
+        """Result count should not exceed the limit."""
+        for i in range(20):
+            mem_manager.log_agent_action("dispatch", "dispatch",
+                                         trigger_context=f"ticket:{i}", outcome="success")
+
+        results = mem_manager.get_relevant_agent_actions("dispatch", limit=5)
+        assert len(results) == 5
+
+    def test_top_level_only(self, mem_manager):
+        """Child steps (parent_id != NULL) should be excluded from results."""
+        parent_id = mem_manager.log_agent_action("dispatch", "dispatch", outcome="success")
+        mem_manager.log_agent_action("dispatch", "fetch_ticket", outcome="success",
+                                     parent_id=parent_id)
+
+        results = mem_manager.get_relevant_agent_actions("dispatch")
+        assert len(results) == 1
+        assert results[0]['id'] == parent_id
+
+    def test_no_match_contexts_returns_recent(self, mem_manager):
+        """With no match_contexts, should return recent actions."""
+        for i in range(5):
+            mem_manager.log_agent_action("dispatch", "dispatch",
+                                         trigger_context=f"ticket:{i}", outcome="success")
+
+        results = mem_manager.get_relevant_agent_actions("dispatch")
+        assert len(results) == 5
+
+    def test_multi_context_matching(self, mem_manager):
+        """An action tagged with multiple contexts should be found by any of them."""
+        id1 = mem_manager.log_agent_action("dispatch", "dispatch",
+                                           trigger_context="ticket:42", outcome="success")
+        mem_manager.add_action_contexts(id1, [
+            ("ticket", "42"),
+            ("customer", "jane@acme.com"),
+        ])
+
+        # Search by customer — should find the action
+        results = mem_manager.get_relevant_agent_actions(
+            "dispatch", match_contexts=[("customer", "jane@acme.com")]
+        )
+        assert len(results) == 1
+        assert results[0]['trigger_context'] == "ticket:42"
+
+        # Search by ticket — should also find it
+        results2 = mem_manager.get_relevant_agent_actions(
+            "dispatch", match_contexts=[("ticket", "42")]
+        )
+        assert len(results2) == 1
+
+
+class TestGetActionSteps:
+    def test_returns_steps_for_parent(self, mem_manager):
+        parent_id = mem_manager.log_agent_action("dispatch", "dispatch", outcome="pending")
+        mem_manager.log_agent_action("dispatch", "fetch_ticket", outcome="success",
+                                     parent_id=parent_id)
+        mem_manager.log_agent_action("dispatch", "llm_decision", outcome="success",
+                                     parent_id=parent_id)
+
+        steps = mem_manager.get_action_steps(parent_id)
+        assert len(steps) == 2
+        assert steps[0]['action_type'] == "fetch_ticket"
+        assert steps[1]['action_type'] == "llm_decision"
+
+    def test_no_steps_returns_empty(self, mem_manager):
+        parent_id = mem_manager.log_agent_action("dispatch", "dispatch", outcome="success")
+        steps = mem_manager.get_action_steps(parent_id)
+        assert steps == []
+
+
+class TestSchemaAgentActions:
+    def test_parent_id_column_exists(self, mem_manager):
+        conn = mem_manager._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(Agent_Actions)")
+        columns = {row['name'] for row in cursor.fetchall()}
+        assert 'parent_id' in columns
+
+    def test_agent_action_contexts_table_exists(self, mem_manager):
+        conn = mem_manager._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='Agent_Action_Contexts'")
+        assert cursor.fetchone() is not None
+
+    def test_log_agent_action_with_parent_id(self, mem_manager):
+        parent_id = mem_manager.log_agent_action("test", "parent_action")
+        child_id = mem_manager.log_agent_action("test", "child_action", parent_id=parent_id)
+        assert child_id > parent_id
+
+        conn = mem_manager._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT parent_id FROM Agent_Actions WHERE id = ?", (child_id,))
+        row = cursor.fetchone()
+        assert row['parent_id'] == parent_id

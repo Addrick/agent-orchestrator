@@ -25,13 +25,15 @@ class DispatchAgent(AgentLoop):
 
     Pipeline (per ticket):
       1. [Hardcoded] Fetch ticket + triage note
-      2. [LLM]       Decide priority, channel, and message
+      2. [LLM]       Decide priority, channel, and message (with action history)
       3. [Hardcoded] Send notification via NotificationRouter
       4. [Hardcoded] Tag ticket as dispatched
-      5. [Hardcoded] Log action to Agent_Actions table
+      5. [Hardcoded] Log each step to Agent_Actions table
     """
 
     poll_interval: float = DISPATCH_POLL_INTERVAL
+    agent_name: str = "dispatch"
+    action_history_limit: int = 10
 
     def __init__(
         self,
@@ -62,30 +64,53 @@ class DispatchAgent(AgentLoop):
     async def _dispatch_ticket(self, ticket_id: int) -> None:
         """Run the full dispatch pipeline for a single ticket."""
         action_id = self.memory_manager.log_agent_action(
-            agent_name="dispatch",
+            agent_name=self.agent_name,
             action_type="dispatch",
             trigger_context=f"ticket:{ticket_id}",
             outcome="pending",
         )
 
         try:
-            # 1. Fetch ticket and triage note
+            # 1. Fetch ticket
             ticket = await asyncio.to_thread(self.zammad_client.get_ticket, ticket_id=ticket_id)
             title = ticket.get('title', 'No Title')
+            self._log_step(action_id, "fetch_ticket",
+                           action_payload=json.dumps({"ticket_id": ticket_id}),
+                           outcome_payload=json.dumps({
+                               "title": title,
+                               "customer": ticket.get("customer"),
+                               "number": ticket.get("number"),
+                           }))
+
+            # Tag with multi-dimensional contexts
+            contexts = [("ticket", str(ticket_id))]
+            customer = ticket.get("customer")
+            if customer:
+                contexts.append(("customer", str(customer)))
+            self.memory_manager.add_action_contexts(action_id, contexts)
+
+            # 2. Fetch articles + extract triage note
             articles = await asyncio.to_thread(
                 self.zammad_client.get_ticket_articles, ticket_id=ticket_id
             )
             triage_note = self._extract_triage_note(articles)
+            self._log_step(action_id, "fetch_articles",
+                           action_payload=json.dumps({"ticket_id": ticket_id}),
+                           outcome_payload=json.dumps({"article_count": len(articles)}))
 
-            # 2. LLM dispatch decision
-            decision = await self._get_dispatch_decision(title, triage_note)
+            # 3. LLM dispatch decision (with action history in context)
+            decision = await self._get_dispatch_decision(title, triage_note, ticket_id, customer)
+            self._log_step(action_id, "llm_decision",
+                           action_payload=json.dumps({"title": title}),
+                           outcome="success" if decision else "failed",
+                           outcome_payload=json.dumps(decision) if decision else "no decision returned")
             if decision is None:
                 self.memory_manager.update_agent_action_outcome(
-                    action_id, "failed", "LLM returned no dispatch decision"
+                    action_id, "failed", "llm_decision step failed"
                 )
                 return
 
-            # 3. Send notification
+            # 4. Send notification
             notify_channel = decision.get("notify_channel", "zammad")
             summary = decision.get("summary", title)
             priority = decision.get("priority", "medium")
@@ -113,21 +138,34 @@ class DispatchAgent(AgentLoop):
                     # from ticket assignment or a routing table.
                     recipient = str(ticket_id)
 
+            subject = f"[{priority.upper()}] {title}"
             sent = await self.notification_router.send(
                 channel=notify_channel,
                 recipient=recipient,
-                subject=f"[{priority.upper()}] {title}",
+                subject=subject,
                 body=notification_body,
             )
+            self._log_step(action_id, "send_notification",
+                           action_payload=json.dumps({
+                               "channel": notify_channel,
+                               "recipient": recipient,
+                               "subject": subject,
+                           }),
+                           outcome="success" if sent else "failed")
 
-            # 4. Tag ticket as dispatched
+            # 5. Tag ticket as dispatched
             await asyncio.to_thread(
                 self.zammad_client.add_tag,
                 ticket_id=ticket_id,
                 tag=DISPATCH_DISPATCHED_TAG,
             )
+            self._log_step(action_id, "tag_ticket",
+                           action_payload=json.dumps({
+                               "ticket_id": ticket_id,
+                               "tag": DISPATCH_DISPATCHED_TAG,
+                           }))
 
-            # 5. Log outcome
+            # 6. Update parent task outcome
             outcome_payload = json.dumps({
                 "priority": priority,
                 "channel": notify_channel,
@@ -158,7 +196,10 @@ class DispatchAgent(AgentLoop):
             return result
         return 'No content'
 
-    async def _get_dispatch_decision(self, title: str, triage_note: str) -> Optional[Dict[str, Any]]:
+    async def _get_dispatch_decision(
+        self, title: str, triage_note: str,
+        ticket_id: int, customer: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
         """Call the dispatch_analyst persona to decide routing."""
         persona = self.chat_system.personas.get(DISPATCH_PERSONA_NAME)
         if not persona:
@@ -172,10 +213,16 @@ class DispatchAgent(AgentLoop):
             f"Decide how to dispatch this ticket."
         )
 
+        # Build task_data for multi-dimensional context matching
+        match_contexts = [("ticket", str(ticket_id))]
+        if customer:
+            match_contexts.append(("customer", str(customer)))
+        task_data: Dict[str, Any] = {"match_contexts": match_contexts}
+
         try:
             response, _ = await self.text_engine.generate_response(
                 persona_config=persona.get_config_for_engine(),
-                context_object=self._build_llm_context(persona, prompt),
+                context_object=self._build_llm_context(persona, prompt, task_data=task_data),
                 tools=None,
             )
 

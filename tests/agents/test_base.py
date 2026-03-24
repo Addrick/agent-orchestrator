@@ -115,14 +115,187 @@ class TestAgentLoopPolling:
 
 
 class TestBuildLlmContext:
-    def test_build_llm_context_structure(self):
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    def test_build_llm_context_structure(self, mock_load, mock_chat_system):
+        """With action_history_limit=0 (default), no history injection occurs."""
+        agent = ConcreteAgent(mock_chat_system)
         persona = MagicMock(spec=Persona)
         persona.get_prompt.return_value = "You are a test bot."
 
-        result = AgentLoop._build_llm_context(persona, "test prompt")
+        result = agent._build_llm_context(persona, "test prompt")
 
         assert result["persona_prompt"] == "You are a test bot."
         assert len(result["history"]) == 1
         assert result["history"][0] == {"role": "user", "content": "test prompt"}
         assert result["current_message"]["text"] == "test prompt"
         assert result["current_message"]["image_url"] is None
+
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    def test_build_llm_context_with_action_history(self, mock_load, mock_chat_system):
+        """When action_history_limit > 0, a system message with history is prepended."""
+        agent = ConcreteAgent(mock_chat_system)
+        agent.agent_name = "test_agent"
+        agent.action_history_limit = 5
+
+        mock_chat_system.memory_manager.get_relevant_agent_actions.return_value = [
+            {
+                "id": 1, "action_type": "dispatch", "trigger_context": "ticket:42",
+                "outcome": "success", "outcome_payload": '{"priority": "high"}',
+                "timestamp": "2025-01-15 09:23:00",
+            }
+        ]
+        mock_chat_system.memory_manager.get_action_steps.return_value = []
+
+        persona = MagicMock(spec=Persona)
+        persona.get_prompt.return_value = "System prompt"
+
+        result = agent._build_llm_context(persona, "test prompt")
+
+        assert len(result["history"]) == 2
+        assert result["history"][0]["role"] == "system"
+        assert "RECENT ACTIONS" in result["history"][0]["content"]
+        assert "ticket:42" in result["history"][0]["content"]
+        assert result["history"][1] == {"role": "user", "content": "test prompt"}
+
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    def test_build_llm_context_passes_task_data(self, mock_load, mock_chat_system):
+        """match_contexts from task_data should be forwarded to get_relevant_agent_actions."""
+        agent = ConcreteAgent(mock_chat_system)
+        agent.agent_name = "test_agent"
+        agent.action_history_limit = 5
+
+        mock_chat_system.memory_manager.get_relevant_agent_actions.return_value = []
+
+        persona = MagicMock(spec=Persona)
+        persona.get_prompt.return_value = "System prompt"
+
+        task_data = {"match_contexts": [("ticket", "42"), ("customer", "jane")]}
+        agent._build_llm_context(persona, "prompt", task_data=task_data)
+
+        mock_chat_system.memory_manager.get_relevant_agent_actions.assert_called_once_with(
+            agent_name="test_agent",
+            match_contexts=[("ticket", "42"), ("customer", "jane")],
+            match_types=None,
+            limit=5,
+        )
+
+
+class TestLogStep:
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    def test_log_step_sets_parent_and_agent(self, mock_load, mock_chat_system):
+        """_log_step should delegate to memory_manager with correct parent_id and agent_name."""
+        agent = ConcreteAgent(mock_chat_system)
+        agent.agent_name = "test_agent"
+        mock_chat_system.memory_manager.log_agent_action.return_value = 99
+
+        result = agent._log_step(
+            parent_id=1,
+            action_type="fetch_ticket",
+            action_payload='{"ticket_id": 42}',
+            outcome="success",
+            outcome_payload='{"title": "test"}',
+        )
+
+        assert result == 99
+        mock_chat_system.memory_manager.log_agent_action.assert_called_once_with(
+            agent_name="test_agent",
+            action_type="fetch_ticket",
+            action_payload='{"ticket_id": 42}',
+            outcome="success",
+            outcome_payload='{"title": "test"}',
+            parent_id=1,
+        )
+
+
+class TestFormatActionHistory:
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    def test_empty_returns_empty(self, mock_load, mock_chat_system):
+        agent = ConcreteAgent(mock_chat_system)
+        agent.agent_name = "test"
+        assert agent._format_action_history([]) == ""
+
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    def test_chronological_order(self, mock_load, mock_chat_system):
+        """Actions should be displayed oldest-first (input is newest-first from DB)."""
+        agent = ConcreteAgent(mock_chat_system)
+        agent.agent_name = "dispatch"
+        mock_chat_system.memory_manager.get_action_steps.return_value = []
+
+        actions = [
+            {"id": 2, "action_type": "dispatch", "trigger_context": "ticket:2",
+             "outcome": "success", "outcome_payload": None, "timestamp": "2025-01-15 09:25:00"},
+            {"id": 1, "action_type": "dispatch", "trigger_context": "ticket:1",
+             "outcome": "success", "outcome_payload": None, "timestamp": "2025-01-15 09:20:00"},
+        ]
+        result = agent._format_action_history(actions)
+        lines = result.split("\n")
+        # First action line (after header) should be the older one
+        assert "ticket:1" in lines[1]
+        assert "ticket:2" in lines[2]
+
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    def test_failed_action_shows_failing_step(self, mock_load, mock_chat_system):
+        """Failed actions should include the name of the failed step."""
+        agent = ConcreteAgent(mock_chat_system)
+        agent.agent_name = "dispatch"
+        mock_chat_system.memory_manager.get_action_steps.return_value = [
+            {"action_type": "fetch_ticket", "outcome": "success"},
+            {"action_type": "llm_decision", "outcome": "failed"},
+        ]
+
+        actions = [
+            {"id": 1, "action_type": "dispatch", "trigger_context": "ticket:42",
+             "outcome": "failed", "outcome_payload": None, "timestamp": "2025-01-15 09:20:00"},
+        ]
+        result = agent._format_action_history(actions)
+        assert "failed at: llm_decision" in result
+
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    def test_truncates_long_payload(self, mock_load, mock_chat_system):
+        """Long outcome_payload strings should be truncated."""
+        agent = ConcreteAgent(mock_chat_system)
+        agent.agent_name = "test"
+        mock_chat_system.memory_manager.get_action_steps.return_value = []
+
+        long_payload = "x" * 500
+        actions = [
+            {"id": 1, "action_type": "test", "trigger_context": "ctx",
+             "outcome": "success", "outcome_payload": long_payload,
+             "timestamp": "2025-01-15 09:20:00"},
+        ]
+        result = agent._format_action_history(actions)
+        # Should contain truncation indicator
+        assert "..." in result
+
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    def test_json_payload_extraction(self, mock_load, mock_chat_system):
+        """JSON outcome_payload should extract key fields."""
+        agent = ConcreteAgent(mock_chat_system)
+        agent.agent_name = "dispatch"
+        mock_chat_system.memory_manager.get_action_steps.return_value = []
+
+        actions = [
+            {"id": 1, "action_type": "dispatch", "trigger_context": "ticket:42",
+             "outcome": "success",
+             "outcome_payload": '{"priority": "high", "channel": "discord"}',
+             "timestamp": "2025-01-15 09:20:00"},
+        ]
+        result = agent._format_action_history(actions)
+        assert "priority=high" in result
+        assert "channel=discord" in result
+
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    def test_header_and_footer(self, mock_load, mock_chat_system):
+        """Output should have RECENT ACTIONS header and footer markers."""
+        agent = ConcreteAgent(mock_chat_system)
+        agent.agent_name = "test"
+        mock_chat_system.memory_manager.get_action_steps.return_value = []
+
+        actions = [
+            {"id": 1, "action_type": "test", "trigger_context": "ctx",
+             "outcome": "success", "outcome_payload": None,
+             "timestamp": "2025-01-15 09:20:00"},
+        ]
+        result = agent._format_action_history(actions)
+        assert result.startswith("--- RECENT ACTIONS (test) ---")
+        assert result.endswith("---")
