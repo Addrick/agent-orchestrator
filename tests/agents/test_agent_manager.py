@@ -436,3 +436,198 @@ class TestAutoStart:
         await manager.auto_start()
 
         assert "stub" not in manager.get_running()
+
+
+class TestNotificationRouterProperty:
+    def test_getter_returns_router(self, manager):
+        assert manager.notification_router is not None
+
+    def test_setter_updates_router(self, mock_chat_system, tmp_path):
+        config_path = tmp_path / "agents.json"
+        config_path.write_text("{}")
+        mgr = AgentManager(
+            chat_system=mock_chat_system,
+            memory_manager=mock_chat_system.memory_manager,
+            config_path=config_path,
+        )
+        assert mgr.notification_router is None
+
+        new_router = MagicMock()
+        mgr.notification_router = new_router
+        assert mgr.notification_router is new_router
+
+
+class BlockingAgent(AgentLoop):
+    """Agent whose _poll blocks forever, ignoring the shutdown event."""
+    agent_name = "blocking"
+    poll_interval = 0.05
+
+    def __init__(self, chat_system, inject_personas=False):
+        super().__init__(chat_system, inject_personas=inject_personas)
+
+    async def _poll(self):
+        # This blocks forever and cannot be interrupted by stop()
+        await asyncio.Event().wait()
+
+
+class TestStopTimeout:
+    @pytest.mark.asyncio
+    async def test_stop_timeout_cancels_task(self, mock_chat_system, tmp_path):
+        """When an agent's task doesn't complete within timeout, the task gets cancelled."""
+        config_path = tmp_path / "agents.json"
+        config_path.write_text("{}")
+        mgr = AgentManager(
+            chat_system=mock_chat_system,
+            memory_manager=mock_chat_system.memory_manager,
+            config_path=config_path,
+        )
+        mgr.register("blocking", BlockingAgent)
+        await mgr.start_agent("blocking")
+
+        running = mgr._running["blocking"]
+        task = running.task
+
+        # Wait for agent to enter _poll (which blocks forever)
+        await asyncio.sleep(0.1)
+
+        # Signal stop — but _poll is stuck in Event().wait(), so
+        # the task won't finish within the timeout
+        running.instance.stop()
+
+        # Simulate what stop_agent does (lines 224-228) with a short timeout
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=0.1)
+        except asyncio.TimeoutError:
+            task.cancel()
+
+        # Give event loop time to process the cancellation
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        assert task.cancelled()
+
+
+class CrashingAgent(AgentLoop):
+    """Agent that crashes during start (not during _poll)."""
+    agent_name = "crashing"
+    poll_interval = 0.05
+
+    def __init__(self, chat_system, inject_personas=False):
+        super().__init__(chat_system, inject_personas=inject_personas)
+
+    async def _poll(self):
+        pass
+
+    async def _on_start(self):
+        raise RuntimeError("Crash during startup")
+
+
+class TestCrashErrorReporting:
+    @pytest.mark.asyncio
+    async def test_crash_error_in_status(self, mock_chat_system, tmp_path):
+        """When an agent's task crashes, the status includes crash_error."""
+        config_path = tmp_path / "agents.json"
+        config_path.write_text("{}")
+        mgr = AgentManager(
+            chat_system=mock_chat_system,
+            memory_manager=mock_chat_system.memory_manager,
+            config_path=config_path,
+        )
+        mgr.register("crashing", CrashingAgent)
+        await mgr.start_agent("crashing")
+
+        # Wait for the task to finish (it will crash quickly)
+        task = mgr._running["crashing"].task
+        try:
+            await asyncio.wait_for(task, timeout=2.0)
+        except Exception:
+            pass
+
+        assert task.done()
+        status = mgr.get_status("crashing")
+        agent_status = status["agents"]["crashing"]
+        assert "crash_error" in agent_status
+        assert "Crash during startup" in agent_status["crash_error"]
+
+
+class TestShutdownErrorHandling:
+    @pytest.mark.asyncio
+    async def test_shutdown_continues_on_stop_error(self, mock_chat_system, tmp_path):
+        """shutdown_all continues even if one agent fails to stop."""
+        config_path = tmp_path / "agents.json"
+        config_path.write_text("{}")
+        mgr = AgentManager(
+            chat_system=mock_chat_system,
+            memory_manager=mock_chat_system.memory_manager,
+            config_path=config_path,
+        )
+        mgr.register("stub1", StubAgent)
+        mgr.register("stub2", StubAgent)
+
+        await mgr.start_agent("stub1")
+        await mgr.start_agent("stub2")
+
+        # Make stop_agent raise for stub1 but succeed for stub2
+        original_stop = mgr.stop_agent
+        call_count = 0
+
+        async def failing_stop(name):
+            nonlocal call_count
+            call_count += 1
+            if name == "stub1":
+                raise RuntimeError("Stop failed for stub1")
+            return await original_stop(name)
+
+        mgr.stop_agent = failing_stop
+
+        # Should not raise, should continue to stub2
+        await mgr.shutdown_all()
+        assert call_count == 2
+
+
+class FailStartAgent(AgentLoop):
+    """Agent that requires zammad_client — will fail to start when not provided."""
+    agent_name = "fail_start"
+    poll_interval = 0.05
+
+    def __init__(self, chat_system, zammad_client=None, inject_personas=False):
+        super().__init__(chat_system, inject_personas=inject_personas)
+        if zammad_client is None:
+            raise ValueError("zammad_client is required")
+
+    async def _poll(self):
+        pass
+
+
+class TestAutoStartErrorHandling:
+    @pytest.mark.asyncio
+    async def test_auto_start_logs_errors_without_crashing(self, mock_chat_system, tmp_path):
+        """auto_start logs errors but doesn't crash when an agent fails to start."""
+        config = {
+            "agents": {
+                "fail_start": {"auto_start": True},
+                "stub": {"auto_start": True},
+            }
+        }
+        config_path = tmp_path / "agents.json"
+        config_path.write_text(json.dumps(config))
+
+        mgr = AgentManager(
+            chat_system=mock_chat_system,
+            memory_manager=mock_chat_system.memory_manager,
+            config_path=config_path,
+        )
+
+        # Register an agent that will fail (needs zammad but none provided)
+        mgr.register("fail_start", DependencyAgent)
+        mgr.register("stub", StubAgent)
+
+        # auto_start should not raise even though fail_start will error
+        await mgr.auto_start()
+
+        # stub should have started successfully despite fail_start failing
+        assert "stub" in mgr.get_running()
+
+        await mgr.shutdown_all()

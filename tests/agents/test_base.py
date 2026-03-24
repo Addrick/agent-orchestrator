@@ -299,3 +299,109 @@ class TestFormatActionHistory:
         result = agent._format_action_history(actions)
         assert result.startswith("--- RECENT ACTIONS (test) ---")
         assert result.endswith("---")
+
+
+class TestIsRunning:
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    def test_is_running_false_before_start(self, mock_load, mock_chat_system):
+        """is_running returns False before start."""
+        agent = ConcreteAgent(mock_chat_system)
+        assert agent.is_running is False
+
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    @pytest.mark.asyncio
+    async def test_is_running_true_after_start(self, mock_load, mock_chat_system):
+        """is_running returns True after start."""
+        agent = ConcreteAgent(mock_chat_system)
+        agent.poll_interval = 0.05
+
+        async def check_and_stop():
+            while agent.started_at is None:
+                await asyncio.sleep(0.01)
+            assert agent.is_running is True
+            agent.stop()
+
+        await asyncio.gather(agent.start(), check_and_stop())
+
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    @pytest.mark.asyncio
+    async def test_is_running_false_after_stop(self, mock_load, mock_chat_system):
+        """is_running returns False after stop."""
+        agent = ConcreteAgent(mock_chat_system)
+        agent.poll_interval = 0.05
+
+        async def stop_quickly():
+            while agent.started_at is None:
+                await asyncio.sleep(0.01)
+            agent.stop()
+
+        await asyncio.gather(agent.start(), stop_quickly())
+        assert agent.is_running is False
+
+
+class TestSummarizePayloadFallbacks:
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    def test_json_dict_no_known_keys_falls_back_to_json_dumps(self, mock_load, mock_chat_system):
+        """JSON dict with no known keys falls back to json.dumps."""
+        agent = ConcreteAgent(mock_chat_system)
+        result = agent._summarize_payload('{"unknown_key": "value"}')
+        assert "unknown_key" in result
+        assert "value" in result
+
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    def test_json_dict_no_known_keys_long_gets_truncated(self, mock_load, mock_chat_system):
+        """JSON dict with no known keys that's very long gets truncated."""
+        agent = ConcreteAgent(mock_chat_system)
+        import json
+        long_data = {f"key_{i}": "x" * 20 for i in range(20)}
+        payload = json.dumps(long_data)
+        result = agent._summarize_payload(payload)
+        assert result.endswith("...")
+        assert len(result) <= 124  # max_len (120) + "..."
+
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    def test_short_plain_string_returned_as_is(self, mock_load, mock_chat_system):
+        """Short non-JSON string is returned unchanged (line 236)."""
+        agent = ConcreteAgent(mock_chat_system)
+        result = agent._summarize_payload("simple status text")
+        assert result == "simple status text"
+
+
+class TestGetFailedStepNameNoFailures:
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    def test_returns_empty_string_when_all_steps_succeed(self, mock_load, mock_chat_system):
+        """Returns empty string when no steps have failed outcome."""
+        agent = ConcreteAgent(mock_chat_system)
+        mock_chat_system.memory_manager.get_action_steps.return_value = [
+            {"action_type": "fetch_ticket", "outcome": "success"},
+            {"action_type": "llm_decision", "outcome": "success"},
+            {"action_type": "send_notification", "outcome": "success"},
+        ]
+        result = agent._get_failed_step_name(1)
+        assert result == ""
+
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    def test_returns_empty_string_for_none_action_id(self, mock_load, mock_chat_system):
+        """action_id=None returns empty string without querying DB (line 241)."""
+        agent = ConcreteAgent(mock_chat_system)
+        result = agent._get_failed_step_name(None)
+        assert result == ""
+        mock_chat_system.memory_manager.get_action_steps.assert_not_called()
+
+
+class TestFormatActionHistoryDatetime:
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    def test_datetime_timestamp_formatted(self, mock_load, mock_chat_system):
+        """Real datetime objects use strftime formatting (line 186)."""
+        from datetime import datetime
+        agent = ConcreteAgent(mock_chat_system)
+        agent.agent_name = "test"
+        mock_chat_system.memory_manager.get_action_steps.return_value = []
+
+        ts = datetime(2025, 1, 15, 9, 23, 0)
+        actions = [
+            {"id": 1, "action_type": "dispatch", "trigger_context": "ticket:42",
+             "outcome": "success", "outcome_payload": None, "timestamp": ts},
+        ]
+        result = agent._format_action_history(actions)
+        assert "2025-01-15 09:23" in result
