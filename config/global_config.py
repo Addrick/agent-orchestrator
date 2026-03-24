@@ -27,7 +27,7 @@ PERSONA_SAVE_FILE = DATA_DIR / "personas.json"
 TEST_PERSONA_SAVE_FILE = DATA_DIR / "test_personas.json"
 MODEL_SAVE_FILE = CONFIG_DIR / "models.json"
 DEFAULT_PERSONA_SAVE_FILE = CONFIG_DIR / "default_personas.json"
-SYSTEM_PERSONA_FILE = os.path.join(CONFIG_DIR, 'system_personas.json')
+SYSTEM_PERSONA_FILE = CONFIG_DIR / 'system_personas.json'
 
 # Application Logging
 CHAT_LOG_LOCATION = LOGS_DIR
@@ -130,6 +130,15 @@ TRIAGE_FILTER_NAME = "triage_filter"
 ZAMMAD_BOT_EMAIL = "autotriage@bot.local"
 ZAMMAD_BOT_FIRSTNAME = "autotriage"
 ZAMMAD_BOT_LASTNAME = "LLM"
+
+# =============================================================================
+# --- Dispatch Agent Configuration ---
+# =============================================================================
+DISPATCH_ENABLED = False
+DISPATCH_POLL_INTERVAL = 30
+DISPATCH_TRIAGE_TAG = ZAMMAD_TRIAGE_TAG  # tickets must have this tag
+DISPATCH_DISPATCHED_TAG = "ai_dispatched"  # tag applied after dispatch
+DISPATCH_PERSONA_NAME = "dispatch_analyst"
 # =============================================================================
 # --- Local LLM Configuration ---
 # =============================================================================

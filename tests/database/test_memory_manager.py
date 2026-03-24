@@ -1,5 +1,6 @@
 # tests/database/test_memory_manager.py
 
+import concurrent.futures
 import pytest
 import os
 import time
@@ -162,3 +163,296 @@ def test_get_server_history_isolates_by_persona(mem_manager):
     history = mem_manager.get_server_history(server, "persona_A")
     assert len(history) == 1
     assert history[0]['content'] == "Msg A"
+
+
+# --- Thread Safety Tests ---
+
+@pytest.fixture
+def file_mem_manager(tmp_path):
+    """Provides a file-backed MemoryManager (required for cross-thread access)."""
+    db_path = str(tmp_path / "thread_test.db")
+    manager = MemoryManager(db_path=db_path)
+    manager.create_schema()
+    yield manager
+    manager.close()
+
+
+def test_concurrent_writes_no_errors(file_mem_manager):
+    """Verify that concurrent writes from multiple threads don't raise SQLite errors."""
+    num_threads = 8
+    writes_per_thread = 50
+
+    def write_batch(thread_id):
+        for i in range(writes_per_thread):
+            file_mem_manager.log_message(
+                user_identifier=f"user_{thread_id}",
+                persona_name="persona",
+                channel="chan",
+                author_role="user",
+                author_name=f"Thread-{thread_id}",
+                content=f"msg-{thread_id}-{i}",
+                timestamp=datetime.now(),
+            )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as pool:
+        futures = [pool.submit(write_batch, t) for t in range(num_threads)]
+        for f in concurrent.futures.as_completed(futures):
+            f.result()  # raises if any thread hit an exception
+
+    history = file_mem_manager.get_global_history("persona")
+    assert len(history) == num_threads * writes_per_thread
+
+
+def test_concurrent_reads_and_writes(file_mem_manager):
+    """Verify that simultaneous reads and writes don't corrupt data or raise errors."""
+    num_writers = 4
+    num_readers = 4
+    writes_per_thread = 40
+    errors = []
+
+    def writer(thread_id):
+        for i in range(writes_per_thread):
+            file_mem_manager.log_message(
+                user_identifier="shared_user",
+                persona_name="persona",
+                channel="chan",
+                author_role="user",
+                author_name=f"Writer-{thread_id}",
+                content=f"w-{thread_id}-{i}",
+                timestamp=datetime.now(),
+            )
+
+    def reader():
+        for _ in range(writes_per_thread):
+            try:
+                history = file_mem_manager.get_personal_history("shared_user", "persona")
+                # History should always be a valid list
+                assert isinstance(history, list)
+            except Exception as e:
+                errors.append(e)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_writers + num_readers) as pool:
+        futures = []
+        for t in range(num_writers):
+            futures.append(pool.submit(writer, t))
+        for _ in range(num_readers):
+            futures.append(pool.submit(reader))
+        for f in concurrent.futures.as_completed(futures):
+            f.result()
+
+    assert errors == [], f"Reader threads encountered errors: {errors}"
+    history = file_mem_manager.get_personal_history("shared_user", "persona")
+    assert len(history) == num_writers * writes_per_thread
+
+
+def test_concurrent_write_and_suppress(file_mem_manager):
+    """Verify that suppression under concurrent writes doesn't corrupt state."""
+    # Seed messages to suppress
+    for i in range(20):
+        file_mem_manager.log_message(
+            "user", "persona", "chan", "user", "Human",
+            f"msg-{i}", datetime.now(), platform_message_id=f"plat-{i}",
+        )
+
+    def suppress_batch(start):
+        for i in range(start, start + 10):
+            file_mem_manager.suppress_message_by_platform_id(f"plat-{i}")
+
+    def write_batch():
+        for i in range(20):
+            file_mem_manager.log_message(
+                "user", "persona", "chan", "user", "Human",
+                f"new-{i}", datetime.now(), platform_message_id=f"new-plat-{i}",
+            )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        futures = [
+            pool.submit(suppress_batch, 0),
+            pool.submit(suppress_batch, 10),
+            pool.submit(write_batch),
+        ]
+        for f in concurrent.futures.as_completed(futures):
+            f.result()
+
+    history = file_mem_manager.get_personal_history("user", "persona")
+    # 20 original - 20 suppressed + 20 new = 20
+    assert len(history) == 20
+    # All remaining should be the new batch (none of the originals survive suppression)
+    contents = {msg['content'] for msg in history}
+    assert all(c.startswith("new-") for c in contents)
+
+
+# --- Agent Action Context Tests ---
+
+class TestAgentActionContexts:
+    def test_add_and_query_contexts(self, mem_manager):
+        action_id = mem_manager.log_agent_action("test_agent", "test_action")
+        mem_manager.add_action_contexts(action_id, [
+            ("ticket", "42"),
+            ("customer", "jane@acme.com"),
+        ])
+        conn = mem_manager._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM Agent_Action_Contexts WHERE action_id = ?", (action_id,))
+        rows = cursor.fetchall()
+        assert len(rows) == 2
+        types = {row['context_type'] for row in rows}
+        assert types == {"ticket", "customer"}
+
+    def test_duplicate_context_ignored(self, mem_manager):
+        action_id = mem_manager.log_agent_action("test_agent", "test_action")
+        mem_manager.add_action_contexts(action_id, [("ticket", "42")])
+        # Insert the same context again — should not error
+        mem_manager.add_action_contexts(action_id, [("ticket", "42")])
+        conn = mem_manager._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) as cnt FROM Agent_Action_Contexts WHERE action_id = ?",
+            (action_id,)
+        )
+        assert cursor.fetchone()['cnt'] == 1
+
+
+class TestGetRelevantAgentActions:
+    def test_entity_matches_prioritized(self, mem_manager):
+        """Actions matching context tags should appear before non-matching ones."""
+        # Action for ticket 1
+        id1 = mem_manager.log_agent_action("dispatch", "dispatch",
+                                           trigger_context="ticket:1", outcome="success")
+        mem_manager.add_action_contexts(id1, [("ticket", "1")])
+
+        # Action for ticket 2
+        id2 = mem_manager.log_agent_action("dispatch", "dispatch",
+                                           trigger_context="ticket:2", outcome="success")
+        mem_manager.add_action_contexts(id2, [("ticket", "2")])
+
+        results = mem_manager.get_relevant_agent_actions(
+            "dispatch", match_contexts=[("ticket", "1")]
+        )
+        assert len(results) == 2
+        # Ticket 1 action should be first (entity match bucket)
+        assert results[0]['trigger_context'] == "ticket:1"
+
+    def test_failures_included_from_any_entity(self, mem_manager):
+        """Failed actions should appear even without a context match."""
+        id1 = mem_manager.log_agent_action("dispatch", "dispatch",
+                                           trigger_context="ticket:1", outcome="success")
+        mem_manager.add_action_contexts(id1, [("ticket", "1")])
+
+        id2 = mem_manager.log_agent_action("dispatch", "dispatch",
+                                           trigger_context="ticket:99", outcome="failed",
+                                           outcome_payload="some error")
+        mem_manager.add_action_contexts(id2, [("ticket", "99")])
+
+        results = mem_manager.get_relevant_agent_actions(
+            "dispatch", match_contexts=[("ticket", "1")]
+        )
+        assert len(results) == 2
+        # Entity match first, then failure
+        assert results[0]['trigger_context'] == "ticket:1"
+        assert results[1]['outcome'] == "failed"
+
+    def test_match_types_filter(self, mem_manager):
+        """Only actions matching specified action_types should be returned."""
+        mem_manager.log_agent_action("dispatch", "dispatch", outcome="success")
+        mem_manager.log_agent_action("dispatch", "reminder", outcome="success")
+
+        results = mem_manager.get_relevant_agent_actions(
+            "dispatch", match_types=["dispatch"]
+        )
+        assert all(r['action_type'] == "dispatch" for r in results)
+
+    def test_limit_respected(self, mem_manager):
+        """Result count should not exceed the limit."""
+        for i in range(20):
+            mem_manager.log_agent_action("dispatch", "dispatch",
+                                         trigger_context=f"ticket:{i}", outcome="success")
+
+        results = mem_manager.get_relevant_agent_actions("dispatch", limit=5)
+        assert len(results) == 5
+
+    def test_top_level_only(self, mem_manager):
+        """Child steps (parent_id != NULL) should be excluded from results."""
+        parent_id = mem_manager.log_agent_action("dispatch", "dispatch", outcome="success")
+        mem_manager.log_agent_action("dispatch", "fetch_ticket", outcome="success",
+                                     parent_id=parent_id)
+
+        results = mem_manager.get_relevant_agent_actions("dispatch")
+        assert len(results) == 1
+        assert results[0]['id'] == parent_id
+
+    def test_no_match_contexts_returns_recent(self, mem_manager):
+        """With no match_contexts, should return recent actions."""
+        for i in range(5):
+            mem_manager.log_agent_action("dispatch", "dispatch",
+                                         trigger_context=f"ticket:{i}", outcome="success")
+
+        results = mem_manager.get_relevant_agent_actions("dispatch")
+        assert len(results) == 5
+
+    def test_multi_context_matching(self, mem_manager):
+        """An action tagged with multiple contexts should be found by any of them."""
+        id1 = mem_manager.log_agent_action("dispatch", "dispatch",
+                                           trigger_context="ticket:42", outcome="success")
+        mem_manager.add_action_contexts(id1, [
+            ("ticket", "42"),
+            ("customer", "jane@acme.com"),
+        ])
+
+        # Search by customer — should find the action
+        results = mem_manager.get_relevant_agent_actions(
+            "dispatch", match_contexts=[("customer", "jane@acme.com")]
+        )
+        assert len(results) == 1
+        assert results[0]['trigger_context'] == "ticket:42"
+
+        # Search by ticket — should also find it
+        results2 = mem_manager.get_relevant_agent_actions(
+            "dispatch", match_contexts=[("ticket", "42")]
+        )
+        assert len(results2) == 1
+
+
+class TestGetActionSteps:
+    def test_returns_steps_for_parent(self, mem_manager):
+        parent_id = mem_manager.log_agent_action("dispatch", "dispatch", outcome="pending")
+        mem_manager.log_agent_action("dispatch", "fetch_ticket", outcome="success",
+                                     parent_id=parent_id)
+        mem_manager.log_agent_action("dispatch", "llm_decision", outcome="success",
+                                     parent_id=parent_id)
+
+        steps = mem_manager.get_action_steps(parent_id)
+        assert len(steps) == 2
+        assert steps[0]['action_type'] == "fetch_ticket"
+        assert steps[1]['action_type'] == "llm_decision"
+
+    def test_no_steps_returns_empty(self, mem_manager):
+        parent_id = mem_manager.log_agent_action("dispatch", "dispatch", outcome="success")
+        steps = mem_manager.get_action_steps(parent_id)
+        assert steps == []
+
+
+class TestSchemaAgentActions:
+    def test_parent_id_column_exists(self, mem_manager):
+        conn = mem_manager._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(Agent_Actions)")
+        columns = {row['name'] for row in cursor.fetchall()}
+        assert 'parent_id' in columns
+
+    def test_agent_action_contexts_table_exists(self, mem_manager):
+        conn = mem_manager._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='Agent_Action_Contexts'")
+        assert cursor.fetchone() is not None
+
+    def test_log_agent_action_with_parent_id(self, mem_manager):
+        parent_id = mem_manager.log_agent_action("test", "parent_action")
+        child_id = mem_manager.log_agent_action("test", "child_action", parent_id=parent_id)
+        assert child_id > parent_id
+
+        conn = mem_manager._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT parent_id FROM Agent_Actions WHERE id = ?", (child_id,))
+        row = cursor.fetchone()
+        assert row['parent_id'] == parent_id

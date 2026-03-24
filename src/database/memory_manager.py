@@ -4,7 +4,7 @@ import sqlite3
 import logging
 import threading
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -103,6 +103,7 @@ class MemoryManager:
 
             CREATE TABLE IF NOT EXISTS Agent_Actions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                parent_id INTEGER,
                 agent_name TEXT NOT NULL,
                 action_type TEXT NOT NULL,
                 trigger_context TEXT,
@@ -115,6 +116,17 @@ class MemoryManager:
             ON Agent_Actions (agent_name, timestamp);
             CREATE INDEX IF NOT EXISTS idx_agent_action_type
             ON Agent_Actions (agent_name, action_type);
+            CREATE INDEX IF NOT EXISTS idx_agent_parent
+            ON Agent_Actions (parent_id);
+
+            CREATE TABLE IF NOT EXISTS Agent_Action_Contexts (
+                action_id INTEGER NOT NULL,
+                context_type TEXT NOT NULL,
+                context_value TEXT NOT NULL,
+                PRIMARY KEY (action_id, context_type, context_value)
+            );
+            CREATE INDEX IF NOT EXISTS idx_action_context_lookup
+            ON Agent_Action_Contexts (context_type, context_value);
             """
             conn.executescript(schema_sql)
 
@@ -131,6 +143,13 @@ class MemoryManager:
                 CREATE INDEX IF NOT EXISTS idx_server_id_timestamp
                 ON User_Interactions (server_id, timestamp);
             """)
+
+            # Step 3: Add parent_id column to Agent_Actions if it doesn't exist.
+            cursor.execute("PRAGMA table_info(Agent_Actions)")
+            agent_columns = [row['name'] for row in cursor.fetchall()]
+            if 'parent_id' not in agent_columns:
+                conn.execute("ALTER TABLE Agent_Actions ADD COLUMN parent_id INTEGER")
+                logger.info("Added 'parent_id' column to Agent_Actions table.")
 
             conn.commit()
             logger.info("User memory database schema created or verified successfully.")
@@ -175,27 +194,19 @@ class MemoryManager:
             except sqlite3.IntegrityError:
                 return False
 
-    def _get_suppressed_ids(self) -> List[int]:
-        """Must be called while self._lock is held."""
-        cursor = self._get_connection().cursor()
-        cursor.execute("SELECT interaction_id FROM Suppressed_Interactions")
-        return [row['interaction_id'] for row in cursor.fetchall()]
+    _SUPPRESSION_SUBQUERY = (" AND interaction_id NOT IN"
+                             " (SELECT interaction_id FROM Suppressed_Interactions)")
 
     def get_personal_history(self, user_identifier: str, persona_name: str,
                              limit: Optional[int] = None) -> List[Dict[str, Any]]:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
-            suppressed_ids = self._get_suppressed_ids()
 
             query = ("SELECT author_role, author_name, content FROM User_Interactions"
-                     " WHERE user_identifier = ? AND persona_name = ?")
+                     " WHERE user_identifier = ? AND persona_name = ?"
+                     + self._SUPPRESSION_SUBQUERY)
             params: List[Any] = [user_identifier, persona_name]
-
-            if suppressed_ids:
-                placeholders = ', '.join('?' for _ in suppressed_ids)
-                query += f" AND interaction_id NOT IN ({placeholders})"
-                params.extend(suppressed_ids)
 
             query += " ORDER BY timestamp DESC"
             if isinstance(limit, int):
@@ -210,16 +221,11 @@ class MemoryManager:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
-            suppressed_ids = self._get_suppressed_ids()
 
             query = ("SELECT author_role, author_name, content FROM User_Interactions"
-                     " WHERE zammad_ticket_id = ?")
+                     " WHERE zammad_ticket_id = ?"
+                     + self._SUPPRESSION_SUBQUERY)
             params: List[Any] = [ticket_id]
-
-            if suppressed_ids:
-                placeholders = ', '.join('?' for _ in suppressed_ids)
-                query += f" AND interaction_id NOT IN ({placeholders})"
-                params.extend(suppressed_ids)
 
             query += " ORDER BY timestamp DESC"
             if isinstance(limit, int):
@@ -235,7 +241,6 @@ class MemoryManager:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
-            suppressed_ids = self._get_suppressed_ids()
 
             query = ("SELECT author_role, author_name, content FROM User_Interactions"
                      " WHERE channel = ? AND persona_name = ?")
@@ -247,11 +252,7 @@ class MemoryManager:
             else:
                 query += " AND server_id IS NULL"
 
-            if suppressed_ids:
-                placeholders = ', '.join('?' for _ in suppressed_ids)
-                query += f" AND interaction_id NOT IN ({placeholders})"
-                params.extend(suppressed_ids)
-
+            query += self._SUPPRESSION_SUBQUERY
             query += " ORDER BY timestamp DESC"
             if isinstance(limit, int):
                 query += " LIMIT ?"
@@ -266,16 +267,11 @@ class MemoryManager:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
-            suppressed_ids = self._get_suppressed_ids()
 
             query = ("SELECT author_role, author_name, content FROM User_Interactions"
-                     " WHERE server_id = ? AND persona_name = ?")
+                     " WHERE server_id = ? AND persona_name = ?"
+                     + self._SUPPRESSION_SUBQUERY)
             params: List[Any] = [server_id, persona_name]
-
-            if suppressed_ids:
-                placeholders = ', '.join('?' for _ in suppressed_ids)
-                query += f" AND interaction_id NOT IN ({placeholders})"
-                params.extend(suppressed_ids)
 
             query += " ORDER BY timestamp DESC"
             if isinstance(limit, int):
@@ -290,16 +286,11 @@ class MemoryManager:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
-            suppressed_ids = self._get_suppressed_ids()
 
             query = ("SELECT author_role, author_name, content FROM User_Interactions"
-                     " WHERE persona_name = ?")
+                     " WHERE persona_name = ?"
+                     + self._SUPPRESSION_SUBQUERY)
             params: List[Any] = [persona_name]
-
-            if suppressed_ids:
-                placeholders = ', '.join('?' for _ in suppressed_ids)
-                query += f" AND interaction_id NOT IN ({placeholders})"
-                params.extend(suppressed_ids)
 
             query += " ORDER BY timestamp DESC"
             if isinstance(limit, int):
@@ -316,16 +307,19 @@ class MemoryManager:
                          trigger_context: Optional[str] = None,
                          action_payload: Optional[str] = None,
                          outcome: Optional[str] = None,
-                         outcome_payload: Optional[str] = None) -> int:
+                         outcome_payload: Optional[str] = None,
+                         parent_id: Optional[int] = None) -> int:
         """Logs an agent action and returns the row id."""
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
             cursor.execute(
                 """INSERT INTO Agent_Actions
-                   (agent_name, action_type, trigger_context, action_payload, outcome, outcome_payload)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (agent_name, action_type, trigger_context, action_payload, outcome, outcome_payload)
+                   (parent_id, agent_name, action_type, trigger_context,
+                    action_payload, outcome, outcome_payload)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (parent_id, agent_name, action_type, trigger_context,
+                 action_payload, outcome, outcome_payload)
             )
             conn.commit()
             return cursor.lastrowid  # type: ignore[return-value]
@@ -355,4 +349,94 @@ class MemoryManager:
             query += " ORDER BY timestamp DESC LIMIT ?"
             params.append(limit)
             cursor.execute(query, params)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def add_action_contexts(self, action_id: int,
+                            contexts: List[Tuple[str, str]]) -> None:
+        """Associates context tags with an agent action for multi-dimensional retrieval."""
+        with self._lock:
+            conn = self._get_connection()
+            for context_type, context_value in contexts:
+                try:
+                    conn.execute(
+                        """INSERT OR IGNORE INTO Agent_Action_Contexts
+                           (action_id, context_type, context_value)
+                           VALUES (?, ?, ?)""",
+                        (action_id, context_type, context_value)
+                    )
+                except sqlite3.IntegrityError:
+                    pass  # Duplicate context, ignore
+            conn.commit()
+
+    _FAILURE_OUTCOMES = ('failed', 'error', 'notification_failed')
+
+    def get_relevant_agent_actions(
+        self, agent_name: str,
+        match_contexts: Optional[List[Tuple[str, str]]] = None,
+        match_types: Optional[List[str]] = None,
+        limit: int = 15,
+    ) -> List[Dict[str, Any]]:
+        """Returns recent top-level actions, prioritizing entity matches and failures.
+
+        Results are partitioned into three buckets:
+        1. Entity matches — actions whose context tags match any of match_contexts
+        2. Recent failures — actions with failure outcomes, not already in bucket 1
+        3. Other recent actions
+        """
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+
+            # Overfetch to have enough for partitioning
+            fetch_limit = limit * 3
+
+            query = ("SELECT * FROM Agent_Actions"
+                     " WHERE agent_name = ? AND parent_id IS NULL")
+            params: List[Any] = [agent_name]
+
+            if match_types:
+                placeholders = ",".join("?" for _ in match_types)
+                query += f" AND action_type IN ({placeholders})"
+                params.extend(match_types)
+
+            query += " ORDER BY timestamp DESC LIMIT ?"
+            params.append(fetch_limit)
+            cursor.execute(query, params)
+            all_actions = [dict(row) for row in cursor.fetchall()]
+
+            # Find IDs of actions matching the provided contexts
+            matched_ids: set[int] = set()
+            if match_contexts:
+                for ctx_type, ctx_value in match_contexts:
+                    cursor.execute(
+                        """SELECT action_id FROM Agent_Action_Contexts
+                           WHERE context_type = ? AND context_value = ?""",
+                        (ctx_type, ctx_value)
+                    )
+                    matched_ids.update(row['action_id'] for row in cursor.fetchall())
+
+            # Partition into buckets
+            entity_matches = []
+            failures = []
+            other = []
+            for action in all_actions:
+                if action['id'] in matched_ids:
+                    entity_matches.append(action)
+                elif action.get('outcome') in self._FAILURE_OUTCOMES:
+                    failures.append(action)
+                else:
+                    other.append(action)
+
+            merged = entity_matches + failures + other
+            return merged[:limit]
+
+    def get_action_steps(self, parent_id: int) -> List[Dict[str, Any]]:
+        """Returns child steps for a task, ordered chronologically."""
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM Agent_Actions WHERE parent_id = ? ORDER BY timestamp ASC",
+                (parent_id,)
+            )
             return [dict(row) for row in cursor.fetchall()]

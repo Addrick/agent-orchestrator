@@ -100,7 +100,8 @@
             "enabled_tools": [
                 "*"
             ],
-            "memory_mode": "CHANNEL_ISOLATED"
+            "memory_mode": "CHANNEL_ISOLATED",
+            "service_bindings": ["zammad", "agents"]
         }
     ],
     "models": {

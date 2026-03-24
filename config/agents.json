@@ -1,0 +1,49 @@
+{
+    "agents": {
+        "dispatch": {
+            "persona": "dispatch_analyst",
+            "poll_interval": 300,
+            "action_history_limit": 10,
+            "auto_start": false,
+            "notification_defaults": {
+                "channel": "discord_dm",
+                "recipient": "adrich"
+            },
+            "description": "Monitors triaged tickets and dispatches notifications based on priority and content analysis."
+        }
+    },
+
+    "recipients": {
+        "adrich": {
+            "discord_user_id": "321783731146850305",
+            "discord_username": "adrich",
+            "email": null
+        }
+    },
+
+    "agent_requirements": {
+        "_doc": "Template and checklist for defining new agents. Not consumed by code.",
+        "required": {
+            "class": "Python class name — must extend AgentLoop",
+            "module": "Import path for the agent module (e.g. src.agents.dispatch_agent)",
+            "persona": "Name of system persona in system_personas.json",
+            "poll_interval": "Seconds between poll cycles (integer)"
+        },
+        "optional": {
+            "action_history_limit": "Recent actions injected into LLM context (default: 0 = disabled)",
+            "auto_start": "Start automatically on boot (default: false)",
+            "notification_defaults": "Default notification routing {channel, recipient}",
+            "service_bindings": "Required services the agent depends on (e.g. ['zammad'])"
+        },
+        "checklist": [
+            "1. Create AgentLoop subclass with _poll() implementation",
+            "2. Create or assign system persona in system_personas.json",
+            "3. Register agent class in main.py via agent_manager.register()",
+            "4. Define notification routing if agent sends alerts",
+            "5. Add entry to this file under 'agents'",
+            "6. Write unit tests — mock all external calls",
+            "7. Write integration test with step logging assertions",
+            "8. Add recipient mappings if agent sends user-targeted notifications"
+        ]
+    }
+}
