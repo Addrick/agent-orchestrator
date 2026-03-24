@@ -40,10 +40,14 @@ class DispatchAgent(AgentLoop):
         chat_system: ChatSystem,
         zammad_client: ZammadClient,
         notification_router: NotificationRouter,
+        agent_config: Optional[Dict[str, Any]] = None,
     ) -> None:
         super().__init__(chat_system)
         self.zammad_client = zammad_client
         self.notification_router = notification_router
+        self._agent_config = agent_config or {}
+        self._notification_defaults = self._agent_config.get("notification_defaults", {})
+        self._recipients = self._agent_config.get("_recipients", {})
 
     async def _poll(self) -> None:
         """Find triaged-but-not-dispatched tickets and process each."""
@@ -125,18 +129,16 @@ class DispatchAgent(AgentLoop):
             if notify_channel == "zammad":
                 recipient = str(ticket_id)
             else:
-                # For discord/email, a recipient mapping would go here.
-                # For now, fall back to zammad note if no mapping exists.
-                if notify_channel not in self.notification_router.available_channels:
+                resolved = self._resolve_recipient(notify_channel)
+                if resolved is None:
                     logger.warning(
-                        f"Channel '{notify_channel}' not available. Falling back to zammad note."
+                        f"Could not resolve recipient for channel '{notify_channel}'. "
+                        f"Falling back to zammad note."
                     )
                     notify_channel = "zammad"
                     recipient = str(ticket_id)
                 else:
-                    # Placeholder: in production, this would resolve a tech user ID
-                    # from ticket assignment or a routing table.
-                    recipient = str(ticket_id)
+                    recipient = resolved
 
             subject = f"[{priority.upper()}] {title}"
             sent = await self.notification_router.send(
@@ -182,6 +184,47 @@ class DispatchAgent(AgentLoop):
             self.memory_manager.update_agent_action_outcome(
                 action_id, "error", str(e)
             )
+
+    def _resolve_recipient(self, channel: str) -> Optional[str]:
+        """Resolve a platform-specific recipient ID for the given channel.
+
+        Uses notification_defaults.recipient from agent config to find the
+        logical recipient, then maps it to a platform ID via the recipients table.
+
+        Returns None if the channel isn't available or no mapping exists.
+        """
+        if channel not in self.notification_router.available_channels:
+            return None
+
+        # Look up logical recipient name from agent config
+        logical_name = self._notification_defaults.get("recipient")
+        if not logical_name:
+            logger.warning("No default recipient configured for dispatch agent.")
+            return None
+
+        # Map logical name to platform-specific ID
+        recipient_info = self._recipients.get(logical_name, {})
+
+        # Channel → recipient field mapping
+        channel_to_field = {
+            "discord_dm": "discord_user_id",
+            "email": "email",
+        }
+
+        field = channel_to_field.get(channel)
+        if not field:
+            logger.warning(f"No recipient field mapping for channel '{channel}'.")
+            return None
+
+        resolved: Optional[str] = recipient_info.get(field)
+        if not resolved:
+            logger.warning(
+                f"Recipient '{logical_name}' has no '{field}' configured. "
+                f"Update the recipients section in agents.json."
+            )
+            return None
+
+        return str(resolved)
 
     def _extract_triage_note(self, articles: List[Dict[str, Any]]) -> str:
         """Extract the AI triage note from ticket articles (last internal note)."""

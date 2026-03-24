@@ -319,6 +319,91 @@ class TestDispatchStepLogging:
         assert "llm_decision" in update_call[0][2]
 
 
+class TestResolveRecipient:
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    def test_resolves_discord_dm(self, mock_load, mock_chat_system, mock_zammad_client, notification_router):
+        """Should resolve logical name to Discord user ID from config."""
+        notification_router.register("discord_dm", MagicMock())
+        agent_config = {
+            "notification_defaults": {"channel": "discord_dm", "recipient": "adrich"},
+            "_recipients": {"adrich": {"discord_user_id": "321783731146850305"}},
+        }
+        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router, agent_config)
+
+        result = agent._resolve_recipient("discord_dm")
+        assert result == "321783731146850305"
+
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    def test_returns_none_for_unavailable_channel(self, mock_load, mock_chat_system, mock_zammad_client,
+                                                   notification_router):
+        """Channel not registered with router should return None."""
+        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
+        result = agent._resolve_recipient("discord_dm")
+        assert result is None
+
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    def test_returns_none_when_no_default_recipient(self, mock_load, mock_chat_system, mock_zammad_client,
+                                                     notification_router):
+        """No notification_defaults.recipient configured should return None."""
+        notification_router.register("discord_dm", MagicMock())
+        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router, agent_config={})
+        result = agent._resolve_recipient("discord_dm")
+        assert result is None
+
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    def test_returns_none_when_user_id_not_configured(self, mock_load, mock_chat_system, mock_zammad_client,
+                                                       notification_router):
+        """Recipient exists but has no discord_user_id should return None."""
+        notification_router.register("discord_dm", MagicMock())
+        agent_config = {
+            "notification_defaults": {"recipient": "adrich"},
+            "_recipients": {"adrich": {"discord_user_id": None}},
+        }
+        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router, agent_config)
+        result = agent._resolve_recipient("discord_dm")
+        assert result is None
+
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    def test_resolves_email_channel(self, mock_load, mock_chat_system, mock_zammad_client, notification_router):
+        """Email channel should resolve to the email field."""
+        notification_router.register("email", MagicMock())
+        agent_config = {
+            "notification_defaults": {"recipient": "adrich"},
+            "_recipients": {"adrich": {"email": "adam@tech-ops.it"}},
+        }
+        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router, agent_config)
+        result = agent._resolve_recipient("email")
+        assert result == "adam@tech-ops.it"
+
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    @pytest.mark.asyncio
+    async def test_falls_back_to_zammad_in_dispatch_pipeline(self, mock_load, mock_chat_system,
+                                                              mock_zammad_client, notification_router):
+        """When discord_dm resolution fails, _dispatch_ticket should fall back to zammad."""
+        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
+
+        mock_zammad_client.get_ticket = MagicMock(
+            return_value={"id": 42, "title": "Test", "number": 10042, "customer": "jane"}
+        )
+        mock_zammad_client.get_ticket_articles = MagicMock(
+            return_value=[{"body": "content", "internal": False}]
+        )
+        mock_zammad_client.add_tag = MagicMock()
+
+        # LLM decides discord_dm but no recipient mapping exists
+        decision = {"priority": "high", "notify_channel": "discord_dm", "summary": "Test", "reasoning": "Test"}
+        agent._get_dispatch_decision = AsyncMock(return_value=decision)
+
+        await agent._dispatch_ticket(42)
+
+        # Notification should have been sent to zammad (fallback)
+        log_calls = mock_chat_system.memory_manager.log_agent_action.call_args_list
+        notification_step = [c for c in log_calls if c[1].get("action_type") == "send_notification"]
+        assert len(notification_step) == 1
+        payload = json.loads(notification_step[0][1]["action_payload"])
+        assert payload["channel"] == "zammad"
+
+
 class TestDispatchActionHistoryInContext:
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
     @pytest.mark.asyncio

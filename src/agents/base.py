@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.chat_system import ChatSystem
@@ -23,6 +24,7 @@ class AgentLoop(ABC):
     - Common LLM context builder with action history injection
     - Step-level action logging
     - Shortcut references to text_engine and memory_manager
+    - Observable status properties for external monitoring
 
     Subclasses must implement `_poll()` and may override `_on_start()`
     for one-time setup (e.g. verifying external service identity).
@@ -41,6 +43,14 @@ class AgentLoop(ABC):
         self.memory_manager = chat_system.memory_manager
         self._shutdown_event = asyncio.Event()
 
+        # Observable status properties — read by AgentManager or any monitor
+        self.started_at: Optional[datetime] = None
+        self.last_poll_time: Optional[datetime] = None
+        self.poll_count: int = 0
+        self.error_count: int = 0
+        self.consecutive_errors: int = 0
+        self.last_error: Optional[str] = None
+
         if inject_personas:
             self._inject_system_personas()
 
@@ -52,15 +62,28 @@ class AgentLoop(ABC):
         else:
             logger.warning("No system personas loaded. Agent may fail if personas are missing.")
 
+    @property
+    def is_running(self) -> bool:
+        """True if the agent has started and has not been signalled to stop."""
+        return self.started_at is not None and not self._shutdown_event.is_set()
+
     async def start(self) -> None:
         """Run the polling loop until stop() is called."""
         logger.info(f"{self.__class__.__name__} started.")
+        self.started_at = datetime.now(timezone.utc)
         await self._on_start()
 
         while not self._shutdown_event.is_set():
             try:
                 await self._poll()
+                self.poll_count += 1
+                self.last_poll_time = datetime.now(timezone.utc)
+                self.consecutive_errors = 0
             except Exception as e:
+                self.error_count += 1
+                self.consecutive_errors += 1
+                self.last_error = str(e)
+                self.last_poll_time = datetime.now(timezone.utc)
                 logger.error(f"Error in {self.__class__.__name__} polling loop: {e}", exc_info=True)
 
             try:
