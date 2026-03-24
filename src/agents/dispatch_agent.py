@@ -115,7 +115,10 @@ class DispatchAgent(AgentLoop):
                 return
 
             # 4. Send notification
-            notify_channel = decision.get("notify_channel", "zammad")
+            # Channel comes from agent config, not the LLM — every dispatch
+            # notifies via the configured default (e.g. discord_dm).  The LLM
+            # still decides priority, summary, and reasoning.
+            notify_channel = self._notification_defaults.get("channel", "zammad")
             summary = decision.get("summary", title)
             priority = decision.get("priority", "medium")
 
@@ -226,6 +229,23 @@ class DispatchAgent(AgentLoop):
 
         return str(resolved)
 
+    @staticmethod
+    def _extract_json_from_response(text: str) -> str:
+        """Strip markdown code fences and extract JSON from an LLM response.
+
+        Handles common patterns:
+          ```json\n{...}\n```
+          ```\n{...}\n```
+          { ... }  (already clean)
+        """
+        import re
+        # Match ```json ... ``` or ``` ... ``` blocks
+        match = re.search(r'```(?:json)?\s*\n?(.*?)\n?\s*```', text, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+        # Already clean JSON (starts with { or [)
+        return text.strip()
+
     def _extract_triage_note(self, articles: List[Dict[str, Any]]) -> str:
         """Extract the AI triage note from ticket articles (last internal note)."""
         for article in reversed(articles):
@@ -252,8 +272,7 @@ class DispatchAgent(AgentLoop):
         prompt = (
             f"TICKET TITLE: {title}\n\n"
             f"TRIAGE NOTE:\n{triage_note[:4000]}\n\n"
-            f"AVAILABLE NOTIFICATION CHANNELS: {', '.join(self.notification_router.available_channels) or 'zammad'}\n\n"
-            f"Decide how to dispatch this ticket."
+            f"Assess this ticket's priority and summarize for dispatch."
         )
 
         # Build task_data for multi-dimensional context matching
@@ -273,8 +292,13 @@ class DispatchAgent(AgentLoop):
                 return None
 
             content = response.get('content', '').strip()
+            # Strip markdown code fences (common with Gemma/Gemini models)
+            content = self._extract_json_from_response(content)
             # Parse JSON from the LLM response
             parsed: Dict[str, Any] = json.loads(content)
+            # Normalize channel names (LLM may say "discord" but router uses "discord_dm")
+            if parsed.get("notify_channel") == "discord":
+                parsed["notify_channel"] = "discord_dm"
             return parsed
 
         except json.JSONDecodeError as e:

@@ -601,3 +601,118 @@ class TestDispatchActionHistoryInContext:
         assert "RECENT ACTIONS" in history[0]["content"]
         assert "ticket:40" in history[0]["content"]
         assert history[1]["role"] == "user"
+
+
+class TestExtractJsonFromResponse:
+    def test_clean_json_passthrough(self):
+        """Already-clean JSON is returned unchanged."""
+        raw = '{"priority": "high", "notify_channel": "discord_dm"}'
+        assert DispatchAgent._extract_json_from_response(raw) == raw.strip()
+
+    def test_strips_json_code_fence(self):
+        """```json ... ``` fences are stripped."""
+        raw = '```json\n{"priority": "high"}\n```'
+        result = DispatchAgent._extract_json_from_response(raw)
+        assert result == '{"priority": "high"}'
+
+    def test_strips_plain_code_fence(self):
+        """``` ... ``` fences (without json label) are stripped."""
+        raw = '```\n{"priority": "low"}\n```'
+        result = DispatchAgent._extract_json_from_response(raw)
+        assert result == '{"priority": "low"}'
+
+    def test_strips_code_fence_with_surrounding_text(self):
+        """Code fences embedded in surrounding text are extracted."""
+        raw = 'Here is my decision:\n```json\n{"priority": "medium"}\n```\nDone.'
+        result = DispatchAgent._extract_json_from_response(raw)
+        assert result == '{"priority": "medium"}'
+
+    def test_no_fence_returns_stripped(self):
+        """Plain text with no fences is returned stripped."""
+        raw = '  some text  '
+        assert DispatchAgent._extract_json_from_response(raw) == 'some text'
+
+
+class TestNotifyChannelNormalization:
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    @pytest.mark.asyncio
+    async def test_discord_normalized_to_discord_dm(
+        self, mock_load, mock_chat_system, mock_zammad_client, notification_router,
+    ):
+        """LLM returning 'discord' as notify_channel gets mapped to 'discord_dm'."""
+        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
+
+        mock_persona = MagicMock()
+        mock_persona.get_prompt.return_value = "prompt"
+        mock_persona.get_config_for_engine.return_value = {}
+        mock_chat_system.personas["dispatch_analyst"] = mock_persona
+        mock_chat_system.memory_manager.get_relevant_agent_actions.return_value = []
+
+        # LLM returns "discord" (not "discord_dm")
+        decision_json = json.dumps({
+            "priority": "high", "notify_channel": "discord",
+            "summary": "Test", "reasoning": "Test"
+        })
+        mock_chat_system.text_engine.generate_response = AsyncMock(
+            return_value=({"type": "text", "content": decision_json}, None)
+        )
+
+        result = await agent._get_dispatch_decision("Title", "Note", 42)
+
+        assert result is not None
+        assert result["notify_channel"] == "discord_dm"
+
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    @pytest.mark.asyncio
+    async def test_zammad_not_normalized(
+        self, mock_load, mock_chat_system, mock_zammad_client, notification_router,
+    ):
+        """LLM returning 'zammad' keeps the channel name as-is."""
+        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
+
+        mock_persona = MagicMock()
+        mock_persona.get_prompt.return_value = "prompt"
+        mock_persona.get_config_for_engine.return_value = {}
+        mock_chat_system.personas["dispatch_analyst"] = mock_persona
+        mock_chat_system.memory_manager.get_relevant_agent_actions.return_value = []
+
+        decision_json = json.dumps({
+            "priority": "low", "notify_channel": "zammad",
+            "summary": "Test", "reasoning": "Test"
+        })
+        mock_chat_system.text_engine.generate_response = AsyncMock(
+            return_value=({"type": "text", "content": decision_json}, None)
+        )
+
+        result = await agent._get_dispatch_decision("Title", "Note", 42)
+
+        assert result is not None
+        assert result["notify_channel"] == "zammad"
+
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    @pytest.mark.asyncio
+    async def test_code_fence_plus_normalization(
+        self, mock_load, mock_chat_system, mock_zammad_client, notification_router,
+    ):
+        """LLM response with code fences AND 'discord' gets both fixed."""
+        agent = DispatchAgent(mock_chat_system, mock_zammad_client, notification_router)
+
+        mock_persona = MagicMock()
+        mock_persona.get_prompt.return_value = "prompt"
+        mock_persona.get_config_for_engine.return_value = {}
+        mock_chat_system.personas["dispatch_analyst"] = mock_persona
+        mock_chat_system.memory_manager.get_relevant_agent_actions.return_value = []
+
+        fenced_response = (
+            '```json\n{"priority": "critical", "notify_channel": "discord",'
+            ' "summary": "Down", "reasoning": "Outage"}\n```'
+        )
+        mock_chat_system.text_engine.generate_response = AsyncMock(
+            return_value=({"type": "text", "content": fenced_response}, None)
+        )
+
+        result = await agent._get_dispatch_decision("Title", "Note", 42)
+
+        assert result is not None
+        assert result["notify_channel"] == "discord_dm"
+        assert result["priority"] == "critical"
