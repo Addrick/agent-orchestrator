@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import io
 from discord import File
 
-from src.interfaces.discord_bot import create_discord_bot
+from src.interfaces.discord_bot import create_discord_bot, _safe_typing
 from src.chat_system import ChatSystem, ResponseType
 from src.database.memory_manager import MemoryManager
 from src.persona import Persona
@@ -291,3 +291,99 @@ async def test_dev_command_thread_creation_failure_fallback(mock_reset, mock_dis
     mock_message.channel.send.assert_called()
     # Verify it's wrapped in code blocks (fallback behavior)
     assert "```" in mock_message.channel.send.call_args[0][0]
+
+
+# ── _safe_typing context manager ──────────────────────────────────────
+
+class _FakeTypingCtx:
+    """Minimal stand-in for the object returned by channel.typing()."""
+
+    def __init__(self, *, enter_exc: Exception | None = None):
+        self._enter_exc = enter_exc
+        self.entered = False
+        self.exited = False
+
+    async def __aenter__(self):
+        if self._enter_exc:
+            raise self._enter_exc
+        self.entered = True
+        return self
+
+    async def __aexit__(self, *args):
+        self.exited = True
+
+
+def _make_http_exc(status: int) -> discord.HTTPException:
+    """Create a discord.HTTPException with the given HTTP status code."""
+    resp = MagicMock()
+    resp.status = status
+    resp.reason = "rate limited" if status == 429 else "error"
+    exc = discord.HTTPException(resp, "mock error")
+    exc.status = status
+    return exc
+
+
+@pytest.mark.asyncio
+async def test_safe_typing_normal_flow():
+    """_safe_typing enters and exits the typing context normally."""
+    fake_ctx = _FakeTypingCtx()
+    channel = MagicMock()
+    channel.typing.return_value = fake_ctx
+
+    body_ran = False
+    async with _safe_typing(channel):
+        body_ran = True
+
+    assert body_ran
+    assert fake_ctx.entered
+    assert fake_ctx.exited
+
+
+@pytest.mark.asyncio
+async def test_safe_typing_suppresses_429():
+    """_safe_typing suppresses a 429 HTTPException and still runs the body."""
+    fake_ctx = _FakeTypingCtx(enter_exc=_make_http_exc(429))
+    channel = MagicMock()
+    channel.typing.return_value = fake_ctx
+
+    body_ran = False
+    async with _safe_typing(channel):
+        body_ran = True
+
+    assert body_ran
+    assert not fake_ctx.entered  # entry was blocked by exception
+
+
+@pytest.mark.asyncio
+async def test_safe_typing_reraises_non_429():
+    """_safe_typing re-raises non-429 HTTPExceptions (e.g. 500)."""
+    fake_ctx = _FakeTypingCtx(enter_exc=_make_http_exc(500))
+    channel = MagicMock()
+    channel.typing.return_value = fake_ctx
+
+    with pytest.raises(discord.HTTPException) as exc_info:
+        async with _safe_typing(channel):
+            pass  # pragma: no cover — should not reach here
+
+    assert exc_info.value.status == 500
+
+
+@pytest.mark.asyncio
+@patch('src.interfaces.discord_bot.reset_discord_status', new_callable=AsyncMock)
+async def test_on_message_succeeds_despite_typing_429(
+    mock_reset, mock_discord_client, mock_chat_system, mock_message
+):
+    """Full on_message still processes and responds when typing indicator is 429'd."""
+    # Wire up channel.typing() to raise 429 on __aenter__
+    fake_ctx = _FakeTypingCtx(enter_exc=_make_http_exc(429))
+    mock_message.channel.typing.return_value = fake_ctx
+
+    mock_chat_system.generate_response.return_value = (
+        "Hello!", ResponseType.LLM_GENERATION, None
+    )
+
+    await mock_discord_client.on_message(mock_message)
+
+    # The bot should still have generated and sent a response
+    mock_chat_system.generate_response.assert_called_once()
+    mock_message.channel.send.assert_called_once_with("**vocal:** Hello!")
