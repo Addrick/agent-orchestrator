@@ -86,6 +86,10 @@ class ChatSystem:
         """Stores the last API request payload, evicting the oldest user entry if over capacity."""
         if tools_for_llm is not None:
             payload["_tools_for_llm"] = tools_for_llm
+        else:
+            existing = self.last_api_requests.get(user_identifier, {}).get(persona_name)
+            if existing and "_tools_for_llm" in existing:
+                payload["_tools_for_llm"] = existing["_tools_for_llm"]
         self.last_api_requests[user_identifier][persona_name] = payload
         if len(self.last_api_requests) > MAX_CACHED_API_REQUESTS:
             oldest_key = next(iter(self.last_api_requests))
