@@ -116,3 +116,7 @@ When changing any of the following, you MUST add corresponding tests before comm
 - If renaming or moving a class/function: grep for all importers and update them in the same commit
 - If changing a base class API (e.g. `Agent` or `AgentLoop`): update all subclasses and their tests in the same commit
 - Run `mypy src/ --config-file mypy.ini` before committing any structural change
+
+**Startup registration** (new `ServiceIntegration`, tool handler, or notifier):
+- If a component must be registered at startup to function, test that the registration actually happens — not just that the component works in isolation
+- The startup wiring test in `tests/integration/test_startup_wiring.py` asserts every tool `service_binding` in `ALL_TOOL_DEFINITIONS` has a registered handler; update it when adding new services
