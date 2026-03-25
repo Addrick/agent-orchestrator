@@ -116,8 +116,6 @@ class MemoryManager:
             ON Agent_Actions (agent_name, timestamp);
             CREATE INDEX IF NOT EXISTS idx_agent_action_type
             ON Agent_Actions (agent_name, action_type);
-            CREATE INDEX IF NOT EXISTS idx_agent_parent
-            ON Agent_Actions (parent_id);
 
             CREATE TABLE IF NOT EXISTS Agent_Action_Contexts (
                 action_id INTEGER NOT NULL,
@@ -150,6 +148,12 @@ class MemoryManager:
             if 'parent_id' not in agent_columns:
                 conn.execute("ALTER TABLE Agent_Actions ADD COLUMN parent_id INTEGER")
                 logger.info("Added 'parent_id' column to Agent_Actions table.")
+
+            # Index on parent_id — must be created AFTER migration adds the column
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_agent_parent
+                ON Agent_Actions (parent_id);
+            """)
 
             conn.commit()
             logger.info("User memory database schema created or verified successfully.")
