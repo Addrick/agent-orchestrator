@@ -140,12 +140,48 @@ async def test_handle_dump_context_returns_file_response_format(bot_logic, mock_
     Tests that the dump_context command returns the special FILE_RESPONSE string
     and correctly formats the context into a string.
     """
-    # 1. Setup a mock API payload
+    # 1. Setup a mock API payload with tools
     user_identifier = "user1"
     persona_name = "derpr"
+    mock_tools = [
+        {
+            "type": "function",
+            "is_write": False,
+            "service_binding": "zammad",
+            "function": {
+                "name": "search_tickets",
+                "description": "Search for tickets in Zammad.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search query string."}
+                    },
+                    "required": ["query"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "is_write": True,
+            "service_binding": "agents",
+            "function": {
+                "name": "manage_agent",
+                "description": "Start, stop, or restart an agent.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "agent_name": {"type": "string", "description": "The agent name."},
+                        "action": {"type": "string", "description": "The action to perform."}
+                    },
+                    "required": ["agent_name", "action"]
+                }
+            }
+        }
+    ]
     mock_payload = {
         'model': 'test-model',
-        'config': {},
+        'config': {'max_output_tokens': 1024},
+        '_tools_for_llm': mock_tools,
         'contents': [
             {'role': 'user', 'parts': [{'text': 'Hello there'}]},
             {'role': 'assistant', 'parts': [{'text': 'General Kenobi'}]}
@@ -155,8 +191,6 @@ async def test_handle_dump_context_returns_file_response_format(bot_logic, mock_
     current_persona = mock_chat_system_with_state.personas[persona_name]
 
     # 2. Action
-    # Note: We are testing the private method directly here for simplicity,
-    # as preprocess_message would just route to it.
     response, mutated = bot_logic._handle_dump_context(args=[], persona=current_persona,
                                                        user_identifier=user_identifier)
 
@@ -164,14 +198,155 @@ async def test_handle_dump_context_returns_file_response_format(bot_logic, mock_
     assert mutated is False
     assert response.startswith("FILE_RESPONSE::context_dump.txt::")
 
-    # Check that key parts of the context are in the file content string
     file_content = response.split("::", 2)[2]
-    assert "--- Context Dump for derpr ---" in file_content
+
+    # Persona config section
+    assert "=== Context Dump for derpr ===" in file_content
+    assert "Service Bindings:" in file_content
+
+    # Tool definitions section — full schemas, not just names
+    assert "--- Tools Sent to LLM (2 total) ---" in file_content
+    assert "[search_tickets]" in file_content
+    assert "Search for tickets in Zammad." in file_content
+    assert "Service Binding: zammad" in file_content
+    assert "Write Operation: False" in file_content
+    assert "query: string (required)" in file_content
+
+    assert "[manage_agent]" in file_content
+    assert "Service Binding: agents" in file_content
+    assert "Write Operation: True" in file_content
+    assert "agent_name: string (required)" in file_content
+
+    # API config section
+    assert "--- API Request Config ---" in file_content
+    assert "max_output_tokens: 1024" in file_content
+
+    # Conversation history
     assert "--- Context Sent to Model ---" in file_content
     assert "[Message 1 - ROLE: USER]" in file_content
     assert "Hello there" in file_content
     assert "[Message 2 - ROLE: ASSISTANT]" in file_content
     assert "General Kenobi" in file_content
+
+
+# --- Test Cases for _extract_message_content ---
+
+class TestExtractMessageContent:
+    """Tests for the multi-provider message content extraction helper."""
+
+    def test_openai_string_content(self):
+        msg = {"role": "user", "content": "Hello world"}
+        assert BotLogic._extract_message_content(msg) == "Hello world"
+
+    def test_google_parts_format(self):
+        msg = {"role": "user", "parts": [{"text": "Hello from Gemini"}]}
+        assert BotLogic._extract_message_content(msg) == "Hello from Gemini"
+
+    def test_openai_multimodal_content(self):
+        msg = {"role": "user", "content": [
+            {"type": "text", "text": "What is this?"},
+            {"type": "image_url", "image_url": {"url": "https://example.com/img.png"}}
+        ]}
+        result = BotLogic._extract_message_content(msg)
+        assert "What is this?" in result
+        assert "[IMAGE]" in result
+
+    def test_tool_calls_message(self):
+        msg = {"role": "assistant", "tool_calls": [
+            {"id": "call_1", "name": "search_tickets", "arguments": {"query": "printer"}}
+        ]}
+        result = BotLogic._extract_message_content(msg)
+        assert "[TOOL CALLS]" in result
+        assert "search_tickets" in result
+        assert "printer" in result
+
+    def test_tool_result_message(self):
+        msg = {"role": "tool", "name": "search_tickets", "content": '{"tickets": []}'}
+        result = BotLogic._extract_message_content(msg)
+        assert "[TOOL RESULT: search_tickets]" in result
+        assert '{"tickets": []}' in result
+
+    def test_empty_message(self):
+        msg = {"role": "user"}
+        assert BotLogic._extract_message_content(msg) == "[NO TEXT CONTENT]"
+
+    def test_anthropic_image_content(self):
+        msg = {"role": "user", "content": [
+            {"type": "text", "text": "Describe this"},
+            {"type": "image", "source": {"type": "base64", "data": "..."}}
+        ]}
+        result = BotLogic._extract_message_content(msg)
+        assert "Describe this" in result
+        assert "[IMAGE]" in result
+
+
+@pytest.mark.asyncio
+async def test_dump_context_with_tool_calls_in_history(bot_logic, mock_chat_system_with_state):
+    """dump_context renders tool call and tool result messages in conversation history."""
+    user_identifier = "user1"
+    persona_name = "derpr"
+    mock_payload = {
+        'model': 'test-model',
+        'config': {},
+        '_tools_for_llm': [],
+        'messages': [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Search for printer tickets"},
+            {"role": "assistant", "tool_calls": [
+                {"id": "call_1", "name": "search_tickets", "arguments": {"query": "printer"}}
+            ]},
+            {"role": "tool", "name": "search_tickets", "content": '{"count": 3}'},
+            {"role": "assistant", "content": "I found 3 printer tickets."}
+        ]
+    }
+    mock_chat_system_with_state.last_api_requests = {user_identifier: {persona_name: mock_payload}}
+    current_persona = mock_chat_system_with_state.personas[persona_name]
+
+    response, mutated = bot_logic._handle_dump_context(args=[], persona=current_persona,
+                                                       user_identifier=user_identifier)
+
+    file_content = response.split("::", 2)[2]
+
+    # System prompt extracted from OpenAI format
+    assert "[System Prompt]" in file_content
+    assert "You are a helpful assistant." in file_content
+
+    # User message
+    assert "Search for printer tickets" in file_content
+
+    # Tool call rendered
+    assert "[TOOL CALLS]" in file_content
+    assert "search_tickets" in file_content
+
+    # Tool result rendered
+    assert "[TOOL RESULT: search_tickets]" in file_content
+    assert '{"count": 3}' in file_content
+
+    # Final assistant response
+    assert "I found 3 printer tickets." in file_content
+
+
+@pytest.mark.asyncio
+async def test_dump_context_no_tools(bot_logic, mock_chat_system_with_state):
+    """dump_context handles payloads with no tools gracefully."""
+    user_identifier = "user1"
+    persona_name = "derpr"
+    mock_payload = {
+        'model': 'test-model',
+        'config': {},
+        'contents': [
+            {'role': 'user', 'parts': [{'text': 'Just a question'}]}
+        ]
+    }
+    mock_chat_system_with_state.last_api_requests = {user_identifier: {persona_name: mock_payload}}
+    current_persona = mock_chat_system_with_state.personas[persona_name]
+
+    response, _ = bot_logic._handle_dump_context(args=[], persona=current_persona,
+                                                  user_identifier=user_identifier)
+
+    file_content = response.split("::", 2)[2]
+    assert "--- Tools Sent to LLM (0 total) ---" in file_content
+    assert "No tools were sent to the LLM." in file_content
 
 
 # --- Test Cases for Fuzzy Tool Selection & Exclude Syntax ---
