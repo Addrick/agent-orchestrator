@@ -95,3 +95,24 @@ Configured in `config/global_config.py`. Split by model family (not provider): G
 Live tests auto-skip when credentials are absent (via `tests/conftest.py`). Test Zammad credentials are stored in `.env.test` (gitignored), loaded with `override=True` so tests never hit production.
 
 - Test fixtures and mock data in `tests/test_data/`
+
+### Mandatory Test Requirements
+
+When changing any of the following, you MUST add corresponding tests before committing:
+
+**Database schema changes** (`memory_manager.py` CREATE TABLE / ALTER TABLE):
+- Add migration tests using the `legacy_mem_manager` fixture pattern in `tests/database/test_memory_manager.py`
+- The fixture creates a DB with the OLD schema (before your change), then tests call `create_schema()` and verify the migration works
+- Must test: column/table added, existing data preserved, indexes created, new features usable on migrated DB, idempotent on second run
+- Unit tests with `:memory:` always start fresh and will NOT catch migration bugs against existing production databases
+
+**Config schema changes** (`agents.json`, `system_personas.json`, `default_personas.json`, `global_config.py`):
+- If adding/renaming/removing a config key: test that code handles the key being absent (old config files) and present (new config files)
+- If a config value drives runtime behavior (e.g. `notification_defaults.channel`): test the behavior with realistic config, not just mocks
+- Agent config: test via `AgentManager` dependency injection in `tests/agents/test_agent_manager.py`
+- Persona config: test loading and field access in `tests/test_persona.py`
+
+**Cross-module contracts** (imports, base class APIs, interface signatures):
+- If renaming or moving a class/function: grep for all importers and update them in the same commit
+- If changing a base class API (e.g. `Agent` or `AgentLoop`): update all subclasses and their tests in the same commit
+- Run `mypy src/ --config-file mypy.ini` before committing any structural change
