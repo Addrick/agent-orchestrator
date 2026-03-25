@@ -5,8 +5,9 @@ import re
 import discord
 import asyncio
 import io
+from contextlib import asynccontextmanager
 from datetime import timedelta, datetime
-from typing import Optional, List, Any
+from typing import Any, AsyncIterator, Optional, List
 
 from config.global_config import DISCORD_CHAR_LIMIT, DISCORD_STATUS_LIMIT, DISCORD_DEBUG_CHANNEL, \
     AMBIENT_LOGGING_CHANNELS, GLOBAL_CONTEXT_LIMIT, PENDING_CONFIRMATION_TIMEOUT
@@ -92,6 +93,33 @@ async def _send_dev_response(channel: discord.abc.Messageable, msg: str, origina
         return True
 
 
+@asynccontextmanager
+async def _safe_typing(channel: discord.abc.Messageable) -> AsyncIterator[None]:
+    """Typing indicator that degrades gracefully on rate limit (429).
+
+    The typing indicator is cosmetic — it should never crash the message
+    handler.  If Discord returns 429 on the POST /typing endpoint, we
+    log the event and let the caller proceed without the indicator.
+    """
+    ctx = channel.typing()
+    entered = False
+    try:
+        await ctx.__aenter__()
+        entered = True
+    except discord.HTTPException as exc:
+        if exc.status != 429:
+            raise
+        logger.debug("Typing indicator rate-limited, continuing without it.")
+    try:
+        yield
+    finally:
+        if entered:
+            try:
+                await ctx.__aexit__(None, None, None)
+            except Exception:
+                pass
+
+
 def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
     intents = discord.Intents.default()
     intents.message_content = True
@@ -168,7 +196,7 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                     await reset_discord_status(client, chat_system)
                     return
 
-                async with message.channel.typing():
+                async with _safe_typing(message.channel):
                     response_text, response_type, ticket_id = await chat_system.generate_response(
                         persona_name=active_persona_name,
                         user_identifier=str(message.author.id),
@@ -216,7 +244,7 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                     except discord.HTTPException:
                         pass
 
-                    async with message.channel.typing():
+                    async with _safe_typing(message.channel):
                         final_text, final_type, ticket_id = await chat_system.resume_pending_confirmation(
                             str(message.author.id), active_persona_name, approved=approved
                         )
