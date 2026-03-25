@@ -9,10 +9,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 pytest
 
 # Unit + integration only (no external services needed)
-pytest -m "not zammad_live and not llm_live"
+pytest -m "not zammad_live and not llm_live and not discord_live"
 
 # Unit tests only
-pytest -m "not integration and not zammad_live and not llm_live"
+pytest -m "not integration and not zammad_live and not llm_live and not discord_live"
 
 # Zammad live tests only
 pytest -m "zammad_live"
