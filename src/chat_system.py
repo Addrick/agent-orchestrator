@@ -81,8 +81,11 @@ class ChatSystem:
         logger.info(f"Registered service integration: {service.name}")
 
     def _store_api_request(self, user_identifier: str, persona_name: str,
-                           payload: Dict[str, Any]) -> None:
+                           payload: Dict[str, Any],
+                           tools_for_llm: Optional[List[Dict[str, Any]]] = None) -> None:
         """Stores the last API request payload, evicting the oldest user entry if over capacity."""
+        if tools_for_llm is not None:
+            payload["_tools_for_llm"] = tools_for_llm
         self.last_api_requests[user_identifier][persona_name] = payload
         if len(self.last_api_requests) > MAX_CACHED_API_REQUESTS:
             oldest_key = next(iter(self.last_api_requests))
@@ -304,7 +307,10 @@ class ChatSystem:
                 ctx.persona.get_config_for_engine(), context_object, tools=ctx.tools_for_llm
             )
             if api_payload:
-                self._store_api_request(ctx.user_identifier, ctx.persona_name, api_payload)
+                self._store_api_request(
+                    ctx.user_identifier, ctx.persona_name, api_payload,
+                    tools_for_llm=ctx.tools_for_llm if i == 0 else None
+                )
 
             if llm_response.get("type") == "text":
                 return llm_response.get("content", ""), ResponseType.LLM_GENERATION
@@ -398,7 +404,10 @@ class ChatSystem:
         except LLMCommunicationError as e:
             logger.error(f"A recoverable LLM communication error occurred for {user_identifier}: {e}")
             if e.api_payload:
-                self._store_api_request(user_identifier, persona_name, e.api_payload)
+                self._store_api_request(
+                    user_identifier, persona_name, e.api_payload,
+                    tools_for_llm=ctx.tools_for_llm
+                )
             error_msg = ("I'm not sure how to continue. Could you please rephrase?" if "empty response" in str(e) else
                          "Error while generating a response: " + str(e))
             ticket_id = self._get_tracking_id(ctx.service_data)
@@ -445,7 +454,10 @@ class ChatSystem:
                 persona.get_config_for_engine(), context_object, tools=pending.tools_for_llm
             )
             if api_payload:
-                self._store_api_request(user_identifier, persona_name, api_payload)
+                self._store_api_request(
+                    user_identifier, persona_name, api_payload,
+                    tools_for_llm=pending.tools_for_llm
+                )
 
             final_text = llm_response.get("content", "")
             ticket_id = self._get_tracking_id(service_data)

@@ -719,9 +719,8 @@ class BotLogic:
         """
         Generates a detailed text file containing the full context of the last API call.
 
-        This includes the persona's configuration and the exact prompt and message
-        history sent to the model, with the system prompt clearly separated from
-        the conversational messages.
+        Includes everything the LLM received: persona config, service bindings,
+        tool definitions (with full schemas), system prompt, and conversation history.
 
         Returns:
             A specially formatted string that signals to the Discord interface
@@ -737,57 +736,142 @@ class BotLogic:
         if not last_request:
             return f"{persona_name}: No previous request to analyze.", False
 
-        output_lines = [f"--- Context Dump for {persona_name} ---"]
+        output_lines = [f"=== Context Dump for {persona_name} ==="]
+        self._dump_persona_config(output_lines, persona)
+        self._dump_tools(output_lines, last_request.get('_tools_for_llm', []))
+        self._dump_api_config(output_lines, last_request.get('config', {}))
+        self._dump_conversation(output_lines, last_request)
 
-        # Append the persona's current configuration for a comprehensive debugging view.
-        output_lines.append("\n--- Persona Configuration ---")
-        output_lines.append(f"Model: {persona.get_model_name()}")
-        output_lines.append(f"Memory Mode: {persona.get_memory_mode().name}")
-        output_lines.append(f"Execution Mode: {persona.get_execution_mode().name}")
-        output_lines.append(f"Context Length Setting: {persona.get_base_context_length()}")
-        output_lines.append(
+        file_content = "\n".join(output_lines)
+        return f"FILE_RESPONSE::context_dump.txt::{file_content}", False
+
+    @staticmethod
+    def _dump_persona_config(lines: List[str], persona: Persona) -> None:
+        """Append persona configuration section to dump output."""
+        lines.append("\n--- Persona Configuration ---")
+        lines.append(f"Model: {persona.get_model_name()}")
+        lines.append(f"Memory Mode: {persona.get_memory_mode().name}")
+        lines.append(f"Execution Mode: {persona.get_execution_mode().name}")
+        bindings = persona.get_service_bindings()
+        lines.append(f"Service Bindings: {', '.join(bindings) if bindings else 'none'}")
+        lines.append(f"Context Length Setting: {persona.get_base_context_length()}")
+        lines.append(f"Response Token Limit: {persona.get_response_token_limit() or 'default'}")
+        lines.append(
             f"Temp: {persona.get_temperature()}, Top P: {persona.get_top_p()}, Top K: {persona.get_top_k()}")
 
-        output_lines.append("\n--- Context Sent to Model ---")
-        # The history payload can be under 'contents' (Google) or 'messages' (OpenAI).
+    @staticmethod
+    def _dump_tools(lines: List[str], tools_for_llm: List[Dict[str, Any]]) -> None:
+        """Append tool definitions section to dump output."""
+        lines.append(f"\n--- Tools Sent to LLM ({len(tools_for_llm)} total) ---")
+        if not tools_for_llm:
+            lines.append("No tools were sent to the LLM.")
+            return
+        for tool in tools_for_llm:
+            func = tool.get('function', {})
+            name = func.get('name', 'unknown')
+            params = func.get('parameters', {})
+            props = params.get('properties', {})
+            required = params.get('required', [])
+
+            lines.append(f"\n  [{name}]")
+            lines.append(f"    Description: {func.get('description', 'No description')}")
+            lines.append(f"    Service Binding: {tool.get('service_binding', 'none')}")
+            lines.append(f"    Write Operation: {tool.get('is_write', False)}")
+            if props:
+                lines.append("    Parameters:")
+                for pname, pdef in props.items():
+                    req = " (required)" if pname in required else ""
+                    lines.append(f"      - {pname}: {pdef.get('type', 'any')}{req}"
+                                 f" — {pdef.get('description', '')}")
+            else:
+                lines.append("    Parameters: none")
+
+    @staticmethod
+    def _dump_api_config(lines: List[str], config_data: Dict[str, Any]) -> None:
+        """Append API request config section to dump output."""
+        if not config_data:
+            return
+        lines.append("\n--- API Request Config ---")
+        for key, value in config_data.items():
+            if key not in ('tools', 'tool_config', 'safety_settings'):
+                lines.append(f"  {key}: {value}")
+
+    @staticmethod
+    def _dump_conversation(lines: List[str], last_request: Dict[str, Any]) -> None:
+        """Append conversation history section to dump output."""
+        lines.append("\n--- Context Sent to Model ---")
         contents = last_request.get('contents', last_request.get('messages', []))
 
         if not contents:
-            output_lines.append("No content was sent to the model.")
-        else:
-            conversation_history = contents
-            # Check if the first entry is a system prompt and handle it as a special case
-            # to distinguish it from conversational turns.
-            if contents and contents[0].get('role') == 'system':
-                system_prompt_content = contents[0].get('parts', [{}])[0].get('text', '[NO TEXT CONTENT]')
-                output_lines.append("\n[System Prompt]")
-                output_lines.append(system_prompt_content)
-                output_lines.append("-" * 20)
-                # The rest of the list is the actual conversation.
-                conversation_history = contents[1:]
+            lines.append("No content was sent to the model.")
+            return
 
-            # Loop through the remaining conversational messages.
-            if not conversation_history:
-                output_lines.append("\nNo conversational messages were sent (only a system prompt).")
-            else:
-                for i, item in enumerate(conversation_history):
-                    role = item.get('role', 'unknown').upper()
+        conversation_history = contents
+        if contents[0].get('role') == 'system':
+            sys_content = contents[0].get('content', '')
+            if not sys_content:
+                parts = contents[0].get('parts', [{}])
+                sys_content = parts[0].get('text', '[NO TEXT CONTENT]') if parts else '[NO TEXT CONTENT]'
+            lines.append("\n[System Prompt]")
+            lines.append(sys_content)
+            lines.append("-" * 40)
+            conversation_history = contents[1:]
 
-                    # Safely access potentially nested content from different API formats.
-                    content_text = '[NO TEXT CONTENT]'
-                    parts = item.get('parts', [])
-                    if parts and isinstance(parts, list) and isinstance(parts[0], dict):
-                        content_text = parts[0].get('text', content_text)
+        if not conversation_history:
+            lines.append("\nNo conversational messages were sent (only a system prompt).")
+            return
 
-                    # Number messages starting from 1 for readability.
-                    output_lines.append(f"\n[Message {i + 1} - ROLE: {role}]")
-                    output_lines.append(content_text)
-                    output_lines.append("-" * 20)
+        for i, item in enumerate(conversation_history):
+            role = item.get('role', 'unknown').upper()
+            lines.append(f"\n[Message {i + 1} - ROLE: {role}]")
+            lines.append(BotLogic._extract_message_content(item))
+            lines.append("-" * 40)
 
-        # Return a specially formatted string. The Discord interface is configured
-        # to parse this format and upload the content as a file attachment.
-        file_content = "\n".join(output_lines)
-        return f"FILE_RESPONSE::context_dump.txt::{file_content}", False
+    @staticmethod
+    def _extract_message_content(message: Dict[str, Any]) -> str:
+        """Extract displayable text from a message dict across all provider formats."""
+        # Tool call messages (assistant requesting tool use)
+        if 'tool_calls' in message:
+            calls = message['tool_calls']
+            call_strs = [f"  {c.get('name', 'unknown')}({json.dumps(c.get('arguments', {}), indent=2)})"
+                         for c in calls]
+            return "[TOOL CALLS]\n" + "\n".join(call_strs)
+
+        # Tool result messages (results returned to assistant)
+        if message.get('role') == 'tool':
+            return f"[TOOL RESULT: {message.get('name', 'unknown')}]\n{message.get('content', '')}"
+
+        content = message.get('content')
+
+        # Direct content string (OpenAI/Anthropic)
+        if isinstance(content, str) and content:
+            return content
+
+        # OpenAI/Anthropic multimodal: content is a list of typed parts
+        if isinstance(content, list):
+            return BotLogic._extract_multimodal_parts(content)
+
+        # Google format: parts list
+        parts = message.get('parts', [])
+        if parts and isinstance(parts, list):
+            texts = [p['text'] for p in parts if isinstance(p, dict) and 'text' in p]
+            return '\n'.join(texts) if texts else '[NO TEXT CONTENT]'
+
+        return '[NO TEXT CONTENT]'
+
+    @staticmethod
+    def _extract_multimodal_parts(content: List[Any]) -> str:
+        """Extract text from OpenAI/Anthropic multimodal content arrays."""
+        texts = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            ptype = part.get('type', '')
+            if ptype == 'text':
+                texts.append(part.get('text', ''))
+            elif ptype in ('image_url', 'image'):
+                texts.append('[IMAGE]')
+        return '\n'.join(texts) if texts else '[MULTIMODAL CONTENT]'
 
     def _handle_update_models(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[str, bool]:
         if args:
