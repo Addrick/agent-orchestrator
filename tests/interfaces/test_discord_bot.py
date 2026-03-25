@@ -188,38 +188,35 @@ async def test_bot_treats_empty_message_as_continuation(mock_reset, mock_discord
 
 @pytest.mark.asyncio
 @patch('src.interfaces.discord_bot.reset_discord_status', new_callable=AsyncMock)
-async def test_file_response_flow(mock_reset, mock_discord_client, mock_chat_system, mock_message):
-    """Tests that a FILE_RESPONSE from the dev command triggers a file upload."""
+async def test_file_response_from_dev_command_uploads_as_attachment(mock_reset, mock_discord_client, mock_chat_system, mock_message):
+    """Tests that a FILE_RESPONSE from the dev command path triggers a file upload."""
     # 1. Setup
-    mock_message.content = "vocal dump context"
+    mock_message.content = "vocal dump_context"
     file_content = "This is the content of the dump file."
 
-    # Configure generate_response to return our special string
-    mock_chat_system.generate_response.return_value = (
-        f"FILE_RESPONSE::dump.txt::{file_content}",
-        ResponseType.DEV_COMMAND,
-        None
-    )
+    # Configure preprocess_message to return the FILE_RESPONSE (the actual dev command path)
+    mock_chat_system.bot_logic.preprocess_message.return_value = {
+        "response": f"FILE_RESPONSE::dump.txt::{file_content}",
+        "mutated": False,
+    }
 
     # 2. Action
     await mock_discord_client.on_message(mock_message)  # type: ignore
 
     # 3. Assertions
-    # Check that channel.send was called
-    mock_message.channel.send.assert_called_once()
+    # generate_response should NOT have been called (dev commands short-circuit)
+    mock_chat_system.generate_response.assert_not_called()
 
-    # Check the arguments passed to channel.send
+    # Check that channel.send was called with a file attachment
+    mock_message.channel.send.assert_called_once()
     call_args, call_kwargs = mock_message.channel.send.call_args
 
-    # The first positional arg should be the message content
     assert call_args[0] == "Here is the context dump:"
 
-    # The 'file' keyword argument should be a discord.File object
     sent_file = call_kwargs.get('file')
     assert isinstance(sent_file, File)
     assert sent_file.filename == "dump.txt"
 
-    # Verify the content of the file buffer
     sent_file.fp.seek(0)
     assert sent_file.fp.read() == file_content.encode('utf-8')
 

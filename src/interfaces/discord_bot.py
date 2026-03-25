@@ -154,9 +154,17 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                     if mutated:
                         save_personas_to_file(chat_system.personas)
                     response_text = command_result["response"]
-                    success = await _send_dev_response(message.channel, response_text, message)
-                    if mutated or not success:
-                        await message.add_reaction('✅' if success else '❌')
+                    if response_text.startswith("FILE_RESPONSE::"):
+                        parts = response_text.split("::", 2)
+                        filename = parts[1]
+                        file_content = parts[2]
+                        file_buffer = io.BytesIO(file_content.encode('utf-8'))
+                        discord_file = discord.File(fp=file_buffer, filename=filename)
+                        await message.channel.send("Here is the context dump:", file=discord_file)
+                    else:
+                        success = await _send_dev_response(message.channel, response_text, message)
+                        if mutated or not success:
+                            await message.add_reaction('✅' if success else '❌')
                     await reset_discord_status(client, chat_system)
                     return
 
