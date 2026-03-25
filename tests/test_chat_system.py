@@ -90,6 +90,27 @@ async def test_generate_response_stores_payload_on_llm_error(chat_system_with_mo
     assert system.last_api_requests["user123"]["test_persona"] == failed_payload
 
 
+def test_store_api_request_preserves_tools_across_iterations(chat_system_with_mocks):
+    """tools_for_llm from iteration 0 must survive subsequent stores that pass None."""
+    system, _, _, _, _ = chat_system_with_mocks
+    tools = [{"type": "function", "function": {"name": "web_search"}}]
+
+    # Iteration 0: stores tools
+    system._store_api_request("user1", "persona1", {"model": "m1"}, tools_for_llm=tools)
+    assert system.last_api_requests["user1"]["persona1"]["_tools_for_llm"] is tools
+
+    # Iteration 1+: tools_for_llm=None, but should carry forward
+    system._store_api_request("user1", "persona1", {"model": "m1"}, tools_for_llm=None)
+    assert system.last_api_requests["user1"]["persona1"]["_tools_for_llm"] is tools
+
+
+def test_store_api_request_no_tools_when_never_set(chat_system_with_mocks):
+    """If tools were never stored, subsequent None calls should not invent them."""
+    system, _, _, _, _ = chat_system_with_mocks
+    system._store_api_request("user1", "persona1", {"model": "m1"}, tools_for_llm=None)
+    assert "_tools_for_llm" not in system.last_api_requests["user1"]["persona1"]
+
+
 @pytest.mark.asyncio
 async def test_generate_response_handles_generic_exception(chat_system_with_mocks):
     system, memory_manager, _, _, _ = chat_system_with_mocks
