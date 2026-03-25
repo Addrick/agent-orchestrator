@@ -516,6 +516,42 @@ def test_filter_tools_includes_bound_service_tools(chat_system_with_mocks):
     assert 'web_search' in tool_names
 
 
+def test_filter_tools_includes_agent_tools_with_agents_binding(chat_system_with_mocks):
+    """Agent tools are included when the persona has the 'agents' service binding."""
+    system, _, _, persona, tool_manager_mock = chat_system_with_mocks
+    persona.set_enabled_tools(['*'])
+    persona.set_service_bindings(["agents"])
+    agent_tool = {"type": "function", "service_binding": "agents",
+                  "function": {"name": "get_agent_status", "parameters": {}}}
+    zammad_tool = {"type": "function", "service_binding": "zammad",
+                   "function": {"name": "search_tickets", "parameters": {}}}
+    universal_tool = {"type": "function", "function": {"name": "web_search", "parameters": {}}}
+    tool_manager_mock.get_tool_definitions.return_value = [agent_tool, zammad_tool, universal_tool]
+
+    result = system._filter_tools_for_persona(persona)
+    tool_names = [t['function']['name'] for t in result]
+    assert 'get_agent_status' in tool_names
+    assert 'web_search' in tool_names
+    assert 'search_tickets' not in tool_names
+
+
+def test_filter_tools_excludes_agent_tools_without_binding(chat_system_with_mocks):
+    """Agent tools are excluded when the persona lacks the 'agents' service binding."""
+    system, _, _, persona, tool_manager_mock = chat_system_with_mocks
+    persona.set_enabled_tools(['*'])
+    persona.set_service_bindings(["zammad"])
+    agent_tool = {"type": "function", "service_binding": "agents",
+                  "function": {"name": "get_agent_status", "parameters": {}}}
+    zammad_tool = {"type": "function", "service_binding": "zammad",
+                   "function": {"name": "search_tickets", "parameters": {}}}
+    tool_manager_mock.get_tool_definitions.return_value = [agent_tool, zammad_tool]
+
+    result = system._filter_tools_for_persona(persona)
+    tool_names = [t['function']['name'] for t in result]
+    assert 'get_agent_status' not in tool_names
+    assert 'search_tickets' in tool_names
+
+
 # --- Write Call Execution Tests ---
 
 @pytest.mark.asyncio
