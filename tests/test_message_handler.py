@@ -202,6 +202,7 @@ async def test_handle_dump_context_returns_file_response_format(bot_logic, mock_
 
     # Persona config section
     assert "=== Context Dump for derpr ===" in file_content
+    assert "Enabled Tools:" in file_content
     assert "Service Bindings:" in file_content
 
     # Tool definitions section — full schemas, not just names
@@ -347,6 +348,185 @@ async def test_dump_context_no_tools(bot_logic, mock_chat_system_with_state):
     file_content = response.split("::", 2)[2]
     assert "--- Tools Sent to LLM (0 total) ---" in file_content
     assert "No tools were sent to the LLM." in file_content
+
+
+@pytest.mark.asyncio
+async def test_dump_context_openai_payload_shows_api_config(bot_logic, mock_chat_system_with_state):
+    """dump_context shows API config from OpenAI-shaped payloads (flat top-level keys, no 'config')."""
+    user_identifier = "user1"
+    persona_name = "derpr"
+    mock_payload = {
+        'model': 'gpt-4',
+        'max_tokens': 2048,
+        'temperature': 0.7,
+        'top_p': 0.9,
+        'tool_choice': 'auto',
+        'messages': [
+            {"role": "user", "content": "Hello"},
+        ],
+        '_tools_for_llm': [],
+    }
+    mock_chat_system_with_state.last_api_requests = {user_identifier: {persona_name: mock_payload}}
+    current_persona = mock_chat_system_with_state.personas[persona_name]
+
+    response, _ = bot_logic._handle_dump_context(args=[], persona=current_persona,
+                                                  user_identifier=user_identifier)
+    file_content = response.split("::", 2)[2]
+
+    assert "--- API Request Config ---" in file_content
+    assert "max_tokens: 2048" in file_content
+    assert "temperature: 0.7" in file_content
+    assert "top_p: 0.9" in file_content
+    # Internal keys should be excluded
+    assert "tool_choice" not in file_content
+    assert "_tools_for_llm" not in file_content
+    assert "messages" not in file_content
+
+
+@pytest.mark.asyncio
+async def test_dump_context_google_payload_shows_api_config(bot_logic, mock_chat_system_with_state):
+    """dump_context shows API config from Google-shaped payloads (nested 'config' dict)."""
+    user_identifier = "user1"
+    persona_name = "derpr"
+    mock_payload = {
+        'model': 'gemini-2.5-pro',
+        'config': {
+            'max_output_tokens': 4096,
+            'temperature': 0.5,
+            'tools': ['search_tickets'],
+            'safety_settings': {'block': 'none'},
+        },
+        'contents': [
+            {'role': 'user', 'parts': [{'text': 'Hello'}]},
+        ],
+        '_tools_for_llm': [],
+    }
+    mock_chat_system_with_state.last_api_requests = {user_identifier: {persona_name: mock_payload}}
+    current_persona = mock_chat_system_with_state.personas[persona_name]
+
+    response, _ = bot_logic._handle_dump_context(args=[], persona=current_persona,
+                                                  user_identifier=user_identifier)
+    file_content = response.split("::", 2)[2]
+
+    assert "--- API Request Config ---" in file_content
+    assert "max_output_tokens: 4096" in file_content
+    assert "temperature: 0.5" in file_content
+    # Internal config keys should be excluded
+    assert "safety_settings" not in file_content
+    assert "tools: [" not in file_content
+
+
+@pytest.mark.asyncio
+async def test_dump_last_shows_tools_from_openai_payload(bot_logic, mock_chat_system_with_state):
+    """dump_last reads tools from _tools_for_llm for OpenAI payloads."""
+    user_identifier = "user1"
+    persona_name = "derpr"
+    mock_payload = {
+        'model': 'gpt-4',
+        'max_tokens': 1024,
+        'temperature': 0.7,
+        'tools': ['search_tickets', 'web_search'],  # stripped names (engine post-processing)
+        '_tools_for_llm': [
+            {"type": "function", "function": {"name": "search_tickets"}},
+            {"type": "function", "function": {"name": "web_search"}},
+        ],
+        'messages': [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi there"},
+        ],
+    }
+    mock_chat_system_with_state.last_api_requests = {user_identifier: {persona_name: mock_payload}}
+    current_persona = mock_chat_system_with_state.personas[persona_name]
+
+    response, _ = bot_logic._handle_dump_last(args=[], persona=current_persona,
+                                               user_identifier=user_identifier)
+    assert "search_tickets" in response
+    assert "web_search" in response
+
+
+@pytest.mark.asyncio
+async def test_dump_last_falls_back_to_stripped_names(bot_logic, mock_chat_system_with_state):
+    """dump_last falls back to stripped tool names when _tools_for_llm is absent."""
+    user_identifier = "user1"
+    persona_name = "derpr"
+    mock_payload = {
+        'model': 'gemini-2.5-pro',
+        'config': {
+            'max_output_tokens': 1024,
+            'temperature': 0.5,
+            'tools': ['search_tickets', 'manage_agent'],
+        },
+        'contents': [
+            {'role': 'user', 'parts': [{'text': 'Hello'}]},
+        ],
+    }
+    mock_chat_system_with_state.last_api_requests = {user_identifier: {persona_name: mock_payload}}
+    current_persona = mock_chat_system_with_state.personas[persona_name]
+
+    response, _ = bot_logic._handle_dump_last(args=[], persona=current_persona,
+                                               user_identifier=user_identifier)
+    assert "search_tickets" in response
+    assert "manage_agent" in response
+
+
+def test_dump_persona_config_shows_enabled_tools_wildcard(bot_logic, mock_chat_system_with_state):
+    """Persona config dump shows '*' when all tools are enabled."""
+    persona = mock_chat_system_with_state.personas["derpr"]
+    persona.set_enabled_tools(['*'])
+    lines = []
+    BotLogic._dump_persona_config(lines, persona)
+    output = "\n".join(lines)
+    assert "Enabled Tools: *" in output
+
+
+def test_dump_persona_config_shows_enabled_tools_specific(bot_logic, mock_chat_system_with_state):
+    """Persona config dump shows specific tool names."""
+    persona = mock_chat_system_with_state.personas["derpr"]
+    persona.set_enabled_tools(['search_tickets', 'web_search'])
+    lines = []
+    BotLogic._dump_persona_config(lines, persona)
+    output = "\n".join(lines)
+    assert "Enabled Tools: search_tickets, web_search" in output
+
+
+def test_dump_persona_config_shows_enabled_tools_none(bot_logic, mock_chat_system_with_state):
+    """Persona config dump shows 'none' when no tools are enabled."""
+    persona = mock_chat_system_with_state.personas["derpr"]
+    persona.set_enabled_tools([])
+    lines = []
+    BotLogic._dump_persona_config(lines, persona)
+    output = "\n".join(lines)
+    assert "Enabled Tools: none" in output
+
+
+class TestExtractMessageContentGoogleNative:
+    """Tests for Google-native function_call/function_response part handling."""
+
+    def test_google_function_call_parts(self):
+        msg = {"role": "model", "parts": [
+            {"function_call": {"name": "search_tickets", "args": {"query": "printer"}}}
+        ]}
+        result = BotLogic._extract_message_content(msg)
+        assert "[TOOL CALL] search_tickets" in result
+        assert "printer" in result
+
+    def test_google_function_response_parts(self):
+        msg = {"role": "tool", "parts": [
+            {"function_response": {"name": "search_tickets", "response": {"count": 3}}}
+        ]}
+        result = BotLogic._extract_message_content(msg)
+        assert "[TOOL RESULT: search_tickets]" in result
+        assert "3" in result
+
+    def test_google_mixed_parts(self):
+        """Parts list with text and function_call renders both."""
+        msg = {"role": "model", "parts": [
+            {"text": "Let me search for that."},
+            {"function_call": {"name": "web_search", "args": {"query": "test"}}}
+        ]}
+        result = BotLogic._extract_message_content(msg)
+        assert "Let me search for that." in result
+        assert "[TOOL CALL] web_search" in result
 
 
 # --- Test Cases for Fuzzy Tool Selection & Exclude Syntax ---

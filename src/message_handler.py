@@ -690,11 +690,15 @@ class BotLogic:
         temp = config.get('temperature', last_request.get('temperature', 'default'))
         max_tokens = config.get('max_output_tokens', last_request.get('max_length', 'default'))
 
-        # Safely get and format tool names
-        tools_list = config.get('tools', [])
-        if tools_list and isinstance(tools_list[0], dict):  # Handle OpenAI format
-            tools_list = [t.get('function', {}).get('name', 'unknown') for t in tools_list]
-        tools = ", ".join(tools_list) if tools_list else "None"
+        # Safely get and format tool names — prefer full definitions, fall back to stripped names
+        tools_for_llm = last_request.get('_tools_for_llm', [])
+        if tools_for_llm:
+            tools = ", ".join(t.get('function', {}).get('name', '?') for t in tools_for_llm)
+        else:
+            tools_list = config.get('tools', last_request.get('tools', []))
+            if tools_list and isinstance(tools_list[0], dict):
+                tools_list = [t.get('function', {}).get('name', 'unknown') for t in tools_list]
+            tools = ", ".join(tools_list) if tools_list else "None"
 
         summary = (
             f"{persona_name}: Summary of Last API Request\n"
@@ -739,7 +743,7 @@ class BotLogic:
         output_lines = [f"=== Context Dump for {persona_name} ==="]
         self._dump_persona_config(output_lines, persona)
         self._dump_tools(output_lines, last_request.get('_tools_for_llm', []))
-        self._dump_api_config(output_lines, last_request.get('config', {}))
+        self._dump_api_config(output_lines, last_request)
         self._dump_conversation(output_lines, last_request)
 
         file_content = "\n".join(output_lines)
@@ -752,6 +756,8 @@ class BotLogic:
         lines.append(f"Model: {persona.get_model_name()}")
         lines.append(f"Memory Mode: {persona.get_memory_mode().name}")
         lines.append(f"Execution Mode: {persona.get_execution_mode().name}")
+        enabled = persona.get_enabled_tools()
+        lines.append(f"Enabled Tools: {', '.join(enabled) if enabled else 'none'}")
         bindings = persona.get_service_bindings()
         lines.append(f"Service Bindings: {', '.join(bindings) if bindings else 'none'}")
         lines.append(f"Context Length Setting: {persona.get_base_context_length()}")
@@ -787,14 +793,26 @@ class BotLogic:
                 lines.append("    Parameters: none")
 
     @staticmethod
-    def _dump_api_config(lines: List[str], config_data: Dict[str, Any]) -> None:
-        """Append API request config section to dump output."""
-        if not config_data:
+    def _dump_api_config(lines: List[str], last_request: Dict[str, Any]) -> None:
+        """Append API request config section to dump output.
+
+        Handles both Google (nested 'config' dict) and OpenAI/Anthropic (flat top-level keys).
+        """
+        EXCLUDED_KEYS = {
+            'tools', 'tool_config', 'tool_choice', 'safety_settings',
+            'messages', 'contents', 'system', 'model', '_tools_for_llm',
+        }
+        config_data = last_request.get('config')
+        if config_data and isinstance(config_data, dict):
+            params = {k: v for k, v in config_data.items() if k not in EXCLUDED_KEYS}
+        else:
+            params = {k: v for k, v in last_request.items() if k not in EXCLUDED_KEYS}
+
+        if not params:
             return
         lines.append("\n--- API Request Config ---")
-        for key, value in config_data.items():
-            if key not in ('tools', 'tool_config', 'safety_settings'):
-                lines.append(f"  {key}: {value}")
+        for key, value in params.items():
+            lines.append(f"  {key}: {value}")
 
     @staticmethod
     def _dump_conversation(lines: List[str], last_request: Dict[str, Any]) -> None:
@@ -837,8 +855,8 @@ class BotLogic:
                          for c in calls]
             return "[TOOL CALLS]\n" + "\n".join(call_strs)
 
-        # Tool result messages (results returned to assistant)
-        if message.get('role') == 'tool':
+        # Tool result messages (OpenAI/Anthropic format: has 'content' key)
+        if message.get('role') == 'tool' and 'content' in message:
             return f"[TOOL RESULT: {message.get('name', 'unknown')}]\n{message.get('content', '')}"
 
         content = message.get('content')
@@ -851,11 +869,10 @@ class BotLogic:
         if isinstance(content, list):
             return BotLogic._extract_multimodal_parts(content)
 
-        # Google format: parts list
+        # Google format: parts list (may contain text, function_call, or function_response)
         parts = message.get('parts', [])
         if parts and isinstance(parts, list):
-            texts = [p['text'] for p in parts if isinstance(p, dict) and 'text' in p]
-            return '\n'.join(texts) if texts else '[NO TEXT CONTENT]'
+            return BotLogic._extract_google_parts(parts)
 
         return '[NO TEXT CONTENT]'
 
@@ -872,6 +889,25 @@ class BotLogic:
             elif ptype in ('image_url', 'image'):
                 texts.append('[IMAGE]')
         return '\n'.join(texts) if texts else '[MULTIMODAL CONTENT]'
+
+    @staticmethod
+    def _extract_google_parts(parts: List[Any]) -> str:
+        """Extract text, tool calls, and tool results from Google-format parts."""
+        segments = []
+        for p in parts:
+            if not isinstance(p, dict):
+                continue
+            if 'text' in p:
+                segments.append(p['text'])
+            elif 'function_call' in p:
+                fc = p['function_call']
+                segments.append(f"[TOOL CALL] {fc.get('name', 'unknown')}"
+                                f"({json.dumps(fc.get('args', {}), indent=2)})")
+            elif 'function_response' in p:
+                fr = p['function_response']
+                segments.append(f"[TOOL RESULT: {fr.get('name', 'unknown')}]\n"
+                                f"{json.dumps(fr.get('response', {}), indent=2)}")
+        return '\n'.join(segments) if segments else '[NO TEXT CONTENT]'
 
     def _handle_update_models(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[str, bool]:
         if args:
