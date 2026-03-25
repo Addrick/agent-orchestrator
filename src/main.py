@@ -12,6 +12,8 @@ from src.database.memory_manager import MemoryManager
 from src.clients.zammad_client import ZammadClient
 from src.clients.zammad_service import ZammadIntegration
 from src.app_manager import AppManager
+from src.agents.agent_manager import AgentManager
+from src.agents.agent_service import AgentServiceIntegration
 from src.agents.dispatch_agent import DispatchAgent
 from src.clients.notification import NotificationRouter, DiscordNotifier, ZammadNotifier
 
@@ -166,9 +168,17 @@ async def main() -> None:
     if zammad_client is not None:
         bot.register_service(ZammadIntegration(zammad_client))
 
+    # 5b. Create AgentManager and register agent tools
+    agent_manager = AgentManager(
+        chat_system=bot,
+        memory_manager=memory_manager,
+    )
+    bot.register_service(AgentServiceIntegration(agent_manager, memory_manager))
+
     # 6. Create AppManager and NotificationRouter
     app = AppManager()
     notification_router = NotificationRouter()
+    agent_manager.notification_router = notification_router
     if zammad_client is not None:
         notification_router.register("zammad", ZammadNotifier(zammad_client))
 
