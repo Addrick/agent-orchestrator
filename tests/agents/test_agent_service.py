@@ -4,6 +4,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 from src.agents.agent_service import AgentServiceIntegration
+from src.tools.tool_manager import ToolManager
 
 
 class TestAgentServiceIntegrationInit:
@@ -56,3 +57,35 @@ class TestAgentServiceRegisterTools:
 
             MockHandler.assert_called_once_with(mock_agent_manager, mock_memory_manager)
             mock_handler_instance.register.assert_called_once_with(mock_tool_manager)
+
+
+@pytest.mark.integration
+class TestAgentToolRegistrationChain:
+    """Integration: real ToolManager wired through AgentServiceIntegration."""
+
+    def test_agent_tools_appear_in_definitions_after_registration(self):
+        """After register_tools, ToolManager.get_tool_definitions includes the 3 agent tools."""
+        manager = ToolManager()
+        service = AgentServiceIntegration(MagicMock(), MagicMock())
+        service.register_tools(manager)
+
+        tool_names = {t['function']['name'] for t in manager.get_tool_definitions()
+                      if t.get('type') == 'function'}
+        assert {'get_agent_status', 'get_agent_history', 'manage_agent'} <= tool_names
+
+    def test_agent_tools_have_correct_service_binding(self):
+        """All 3 agent tools declare service_binding='agents'."""
+        manager = ToolManager()
+        service = AgentServiceIntegration(MagicMock(), MagicMock())
+        service.register_tools(manager)
+
+        agent_tools = [t for t in manager.get_tool_definitions()
+                       if t.get('service_binding') == 'agents']
+        assert len(agent_tools) == 3
+
+    def test_unregistered_tools_excluded_from_definitions(self):
+        """ToolManager with no registered handlers returns no callable tools."""
+        manager = ToolManager()
+        callable_tools = [t for t in manager.get_tool_definitions()
+                          if t.get('type') == 'function']
+        assert len(callable_tools) == 0
