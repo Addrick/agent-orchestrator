@@ -165,6 +165,154 @@ def test_get_server_history_isolates_by_persona(mem_manager):
     assert history[0]['content'] == "Msg A"
 
 
+# --- Schema Migration Tests ---
+
+@pytest.fixture
+def legacy_mem_manager(tmp_path):
+    """Provides a MemoryManager backed by a DB with the OLD schema (pre-agent-memory).
+
+    Creates the original Agent_Actions table WITHOUT parent_id and
+    WITHOUT the Agent_Action_Contexts table, then hands the manager
+    back WITHOUT calling create_schema() — the test must call it to
+    exercise the migration path.
+    """
+    import sqlite3
+
+    db_path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE User_Interactions (
+            interaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_identifier TEXT NOT NULL,
+            persona_name TEXT NOT NULL,
+            channel TEXT NOT NULL,
+            author_role TEXT NOT NULL CHECK(author_role IN ('user', 'assistant', 'system')),
+            author_name TEXT,
+            content TEXT,
+            timestamp TIMESTAMP NOT NULL,
+            zammad_ticket_id INTEGER,
+            platform_message_id TEXT,
+            server_id TEXT
+        );
+
+        CREATE TABLE Suppressed_Interactions (
+            suppression_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            interaction_id INTEGER NOT NULL UNIQUE,
+            suppressed_at TIMESTAMP NOT NULL,
+            FOREIGN KEY (interaction_id) REFERENCES User_Interactions(interaction_id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE Agent_Actions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_name TEXT NOT NULL,
+            action_type TEXT NOT NULL,
+            trigger_context TEXT,
+            action_payload TEXT,
+            outcome TEXT,
+            outcome_payload TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        INSERT INTO Agent_Actions (agent_name, action_type, trigger_context, outcome)
+        VALUES ('dispatch', 'dispatch', 'ticket:42', 'success');
+        INSERT INTO Agent_Actions (agent_name, action_type, trigger_context, outcome)
+        VALUES ('dispatch', 'dispatch', 'ticket:99', 'failed');
+    """)
+    conn.close()
+
+    manager = MemoryManager(db_path=db_path)
+    yield manager
+    manager.close()
+
+
+def test_migration_adds_parent_id_column(legacy_mem_manager):
+    """create_schema() on a legacy DB adds the parent_id column via ALTER TABLE."""
+    legacy_mem_manager.create_schema()
+
+    conn = legacy_mem_manager._get_connection()
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(Agent_Actions)")
+    columns = {row['name'] for row in cursor.fetchall()}
+    assert 'parent_id' in columns
+
+
+def test_migration_creates_agent_action_contexts_table(legacy_mem_manager):
+    """create_schema() on a legacy DB creates the Agent_Action_Contexts table."""
+    legacy_mem_manager.create_schema()
+
+    conn = legacy_mem_manager._get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='Agent_Action_Contexts'"
+    )
+    assert cursor.fetchone()[0] == 1
+
+
+def test_migration_preserves_existing_data(legacy_mem_manager):
+    """Existing Agent_Actions rows survive the migration unchanged."""
+    legacy_mem_manager.create_schema()
+
+    actions = legacy_mem_manager.get_agent_actions(agent_name="dispatch", limit=10)
+    assert len(actions) == 2
+    triggers = {a['trigger_context'] for a in actions}
+    assert triggers == {'ticket:42', 'ticket:99'}
+
+
+def test_migration_creates_parent_id_index(legacy_mem_manager):
+    """The idx_agent_parent index is created after migration adds the column."""
+    legacy_mem_manager.create_schema()
+
+    conn = legacy_mem_manager._get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_agent_parent'")
+    assert cursor.fetchone()[0] == 1
+
+
+def test_migration_new_features_work(legacy_mem_manager):
+    """After migration, parent_id and Agent_Action_Contexts are fully usable."""
+    legacy_mem_manager.create_schema()
+
+    # Insert a parent action
+    parent_id = legacy_mem_manager.log_agent_action(
+        agent_name="dispatch", action_type="dispatch",
+        trigger_context="ticket:200", outcome="pending",
+    )
+
+    # Insert a child step with parent_id
+    child_id = legacy_mem_manager.log_agent_action(
+        agent_name="dispatch", action_type="fetch_ticket",
+        outcome="success", parent_id=parent_id,
+    )
+
+    # Add contexts
+    legacy_mem_manager.add_action_contexts(parent_id, [
+        ("ticket", "200"),
+        ("customer", "jane"),
+    ])
+
+    # Verify child steps
+    steps = legacy_mem_manager.get_action_steps(parent_id)
+    assert len(steps) == 1
+    assert steps[0]['action_type'] == 'fetch_ticket'
+
+    # Verify context-based retrieval
+    actions = legacy_mem_manager.get_relevant_agent_actions(
+        agent_name="dispatch",
+        match_contexts=[("ticket", "200")],
+        limit=5,
+    )
+    assert any(a['trigger_context'] == 'ticket:200' for a in actions)
+
+
+def test_migration_is_idempotent(legacy_mem_manager):
+    """Running create_schema() twice on the same DB doesn't error or duplicate data."""
+    legacy_mem_manager.create_schema()
+    legacy_mem_manager.create_schema()  # second call should be a no-op
+
+    actions = legacy_mem_manager.get_agent_actions(agent_name="dispatch", limit=10)
+    assert len(actions) == 2  # no duplicates
+
+
 # --- Thread Safety Tests ---
 
 @pytest.fixture
