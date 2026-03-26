@@ -2,42 +2,26 @@
 
 import asyncio
 import logging
-from typing import Any, Coroutine, Dict, List, Tuple
+from typing import Any, Coroutine, List, Optional, Tuple, TYPE_CHECKING
 
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-
-from src.agents.base import Agent
+if TYPE_CHECKING:
+    from src.agents.agent_manager import AgentManager
 
 logger = logging.getLogger(__name__)
 
 
 class AppManager:
     """
-    Central lifecycle manager for agents and long-running interface tasks.
+    Central lifecycle manager for long-running interface tasks (Discord, Gmail).
 
-    Agents are scheduled via APScheduler (interval-based polling).
-    Interfaces (Discord, Gmail) run as plain asyncio tasks.
+    Agent lifecycle is managed by AgentManager. AppManager coordinates
+    startup and shutdown between interfaces and the agent subsystem.
     """
 
-    def __init__(self) -> None:
-        self._scheduler = AsyncIOScheduler()
-        self._agents: Dict[str, Agent] = {}
+    def __init__(self, agent_manager: Optional["AgentManager"] = None) -> None:
+        self._agent_manager = agent_manager
         self._pending_tasks: List[Tuple[str, Coroutine[Any, Any, Any]]] = []
         self._running_tasks: List[asyncio.Task[Any]] = []
-
-    def register_agent(self, name: str, agent: Agent, interval: float) -> None:
-        """Register a polling agent to be scheduled at the given interval (seconds)."""
-        self._agents[name] = agent
-        self._scheduler.add_job(
-            self._safe_poll,
-            'interval',
-            seconds=interval,
-            id=name,
-            name=name,
-            kwargs={'agent': agent, 'name': name},
-            max_instances=1,
-        )
-        logger.info(f"Registered agent '{name}' (interval={interval}s)")
 
     def register_task(self, name: str, coro: Coroutine[Any, Any, Any]) -> None:
         """Register a long-running async task (e.g. Discord bot, Gmail bot)."""
@@ -45,18 +29,10 @@ class AppManager:
         logger.info(f"Registered task '{name}'")
 
     async def start(self) -> None:
-        """Start all agents and tasks. Blocks until all tasks complete or shutdown."""
-        # Run on_start for all agents
-        for name, agent in self._agents.items():
-            try:
-                await agent.on_start()
-                logger.info(f"Agent '{name}' started.")
-            except Exception:
-                logger.error(f"Error starting agent '{name}':", exc_info=True)
-
-        # Start the scheduler (agents begin polling)
-        if self._agents:
-            self._scheduler.start()
+        """Start all interfaces and agents. Blocks until all tasks complete or shutdown."""
+        # Auto-start agents via AgentManager
+        if self._agent_manager:
+            await self._agent_manager.auto_start()
 
         # Launch long-running tasks
         for task_name, coro in self._pending_tasks:
@@ -64,7 +40,8 @@ class AppManager:
                 asyncio.create_task(coro, name=task_name)
             )
 
-        if not self._running_tasks and not self._agents:
+        has_agents = self._agent_manager and self._agent_manager.get_running()
+        if not self._running_tasks and not has_agents:
             logger.warning("No interfaces or agents registered. Exiting.")
             return
 
@@ -79,19 +56,8 @@ class AppManager:
             await self.shutdown()
 
     async def shutdown(self) -> None:
-        """Signal all agents to stop and shut down the scheduler."""
+        """Shut down all agents and cancel interface tasks."""
         logger.info("Shutting down AppManager...")
-        for name, agent in self._agents.items():
-            agent.request_stop()
-            logger.info(f"Requested stop for agent '{name}'")
 
-        if self._scheduler.running:
-            self._scheduler.shutdown(wait=False)
-
-    @staticmethod
-    async def _safe_poll(agent: Agent, name: str) -> None:
-        """Wrapper that catches exceptions so one bad poll doesn't crash the scheduler."""
-        try:
-            await agent.poll()
-        except Exception:
-            logger.error(f"Error in '{name}' poll:", exc_info=True)
+        if self._agent_manager:
+            await self._agent_manager.shutdown_all()

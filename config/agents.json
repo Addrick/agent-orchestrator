@@ -10,6 +10,13 @@
                 "recipient": "adrich"
             },
             "description": "Monitors triaged tickets and dispatches notifications based on priority and content analysis."
+        },
+        "zammad_bot": {
+            "persona": "triage_analyst",
+            "poll_interval": 10,
+            "action_history_limit": 0,
+            "auto_start": false,
+            "description": "Polls Zammad for new tickets and runs the multi-stage AI triage pipeline."
         }
     },
 

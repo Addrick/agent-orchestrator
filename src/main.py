@@ -15,19 +15,17 @@ from src.app_manager import AppManager
 from src.agents.agent_manager import AgentManager
 from src.agents.agent_service import AgentServiceIntegration
 from src.agents.dispatch_agent import DispatchAgent
+from src.interfaces.zammad_bot import ZammadBot
 from src.clients.notification import NotificationRouter, DiscordNotifier, ZammadNotifier
 
 from src.interfaces.discord_bot import create_discord_bot
 from src.interfaces.gmail_bot import create_gmail_bot
-from src.interfaces.zammad_bot import create_zammad_bot
 from config.global_config import (
     CHAT_LOG_LOCATION,
     DISCORD_BOT,
     GMAIL_BOT,
     MEMORY_DATABASE_FILE,
     UPDATE_MODELS_ON_STARTUP,
-    ZAMMAD_BOT_ENABLED,
-    DISPATCH_ENABLED,
 )
 from dotenv import load_dotenv
 from src.utils.model_utils import get_model_list
@@ -59,7 +57,6 @@ for handler in root_logger.handlers:
 
 logging.getLogger('google_genai').setLevel(logging.WARNING)
 logging.getLogger('discord').setLevel(logging.WARNING)
-logging.getLogger('apscheduler').setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
@@ -108,33 +105,18 @@ def _register_interfaces(
 
 
 def _register_agents(
-    app: AppManager,
-    bot: ChatSystem,
+    agent_manager: AgentManager,
     zammad_client: Optional[ZammadClient],
-    notification_router: NotificationRouter,
 ) -> None:
-    """Register scheduled polling agents (Zammad triage, dispatch)."""
-    if ZAMMAD_BOT_ENABLED:
-        if zammad_client is None:
-            logger.error(
-                "ZAMMAD_BOT_ENABLED is True but Zammad credentials are missing. "
-                "Skipping Zammad bot."
-            )
-        else:
-            logger.info("Initializing Zammad bot...")
-            zammad_bot = create_zammad_bot(bot, zammad_client)
-            app.register_agent("zammad_bot", zammad_bot, zammad_bot.poll_interval)
-
-    if DISPATCH_ENABLED:
-        if zammad_client is None:
-            logger.error(
-                "DISPATCH_ENABLED is True but Zammad credentials are missing. "
-                "Skipping dispatch agent."
-            )
-        else:
-            logger.info("Initializing dispatch agent...")
-            dispatch_agent = DispatchAgent(bot, zammad_client, notification_router)
-            app.register_agent("dispatch", dispatch_agent, dispatch_agent.poll_interval)
+    """Register agent classes with AgentManager. Agents start via auto_start config."""
+    if zammad_client is not None:
+        agent_manager.register("zammad_bot", ZammadBot)
+        agent_manager.register("dispatch", DispatchAgent)
+    else:
+        logger.warning(
+            "Zammad credentials missing. Zammad-dependent agents (zammad_bot, dispatch) "
+            "will not be registered."
+        )
 
 
 async def main() -> None:
@@ -168,29 +150,29 @@ async def main() -> None:
     if zammad_client is not None:
         bot.register_service(ZammadIntegration(zammad_client))
 
-    # 5b. Create AgentManager and register agent tools
+    # 6. Create AgentManager, register agent classes, then register agent tools
     agent_manager = AgentManager(
         chat_system=bot,
         memory_manager=memory_manager,
     )
+    _register_agents(agent_manager, zammad_client)
     bot.register_service(AgentServiceIntegration(agent_manager, memory_manager))
 
-    # 6. Create AppManager and NotificationRouter
-    app = AppManager()
+    # 7. Create AppManager and NotificationRouter
+    app = AppManager(agent_manager=agent_manager)
     notification_router = NotificationRouter()
     agent_manager.notification_router = notification_router
     if zammad_client is not None:
         notification_router.register("zammad", ZammadNotifier(zammad_client))
 
-    # 7. Register interfaces and agents
+    # 8. Register interfaces
     _register_interfaces(app, bot, notification_router)
-    _register_agents(app, bot, zammad_client, notification_router)
 
-    # 8. Optionally update the model list on startup
+    # 9. Optionally update the model list on startup
     if UPDATE_MODELS_ON_STARTUP:
         app.register_task("model_update", update_models_and_sync_bot(bot))
 
-    # 9. Run everything
+    # 10. Run everything (auto_start agents + interface tasks)
     await app.start()
 
 

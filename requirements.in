@@ -16,9 +16,6 @@ google-auth-oauthlib
 google-cloud-pubsub
 google-api-python-client  # googleapiclient
 
-# Scheduling
-apscheduler>=3.10,<4
-
 # Utilities
 GitPython
 psutil
