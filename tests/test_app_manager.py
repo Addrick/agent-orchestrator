@@ -2,46 +2,21 @@
 
 import asyncio
 import pytest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock
 
 from src.app_manager import AppManager
-from src.agents.base import Agent
 
 
-class StubAgent(Agent):
-    """Minimal agent for AppManager tests."""
-
-    def __init__(self):
-        # Skip Agent.__init__ to avoid ChatSystem dependency
-        self._stopping = False
-        self.poll_count = 0
-        self.on_start_called = False
-
-    async def on_start(self):
-        self.on_start_called = True
-
-    async def poll(self):
-        self.poll_count += 1
-
-
-class FailingAgent(Agent):
-    """Agent whose poll raises an exception."""
-
-    def __init__(self):
-        self._stopping = False
-
-    async def poll(self):
-        raise RuntimeError("Simulated poll failure")
+@pytest.fixture
+def mock_agent_manager():
+    mgr = MagicMock()
+    mgr.auto_start = AsyncMock()
+    mgr.shutdown_all = AsyncMock()
+    mgr.get_running.return_value = []
+    return mgr
 
 
 class TestAppManagerRegistration:
-    def test_register_agent(self):
-        app = AppManager()
-        agent = StubAgent()
-        app.register_agent("test", agent, 10)
-        assert "test" in app._agents
-        assert app._agents["test"] is agent
-
     def test_register_task(self):
         app = AppManager()
 
@@ -52,39 +27,26 @@ class TestAppManagerRegistration:
         assert len(app._pending_tasks) == 1
         assert app._pending_tasks[0][0] == "dummy"
 
+    def test_init_with_agent_manager(self, mock_agent_manager):
+        app = AppManager(agent_manager=mock_agent_manager)
+        assert app._agent_manager is mock_agent_manager
+
+    def test_init_without_agent_manager(self):
+        app = AppManager()
+        assert app._agent_manager is None
+
 
 class TestAppManagerStart:
     @pytest.mark.asyncio
-    async def test_on_start_called_for_agents(self):
-        app = AppManager()
-        agent = StubAgent()
-        app.register_agent("test", agent, 60)
-
-        # Register a task that completes immediately so start() returns
-        async def quick_task():
-            pass
-
-        app.register_task("quick", quick_task())
-        await app.start()
-        assert agent.on_start_called
-
-    @pytest.mark.asyncio
-    async def test_on_start_error_does_not_crash(self):
-        app = AppManager()
-        agent = StubAgent()
-
-        async def bad_start():
-            raise RuntimeError("Startup failed")
-
-        agent.on_start = bad_start  # type: ignore[assignment]
-        app.register_agent("bad", agent, 60)
+    async def test_auto_starts_agents(self, mock_agent_manager):
+        app = AppManager(agent_manager=mock_agent_manager)
 
         async def quick_task():
             pass
 
         app.register_task("quick", quick_task())
-        # Should not raise
         await app.start()
+        mock_agent_manager.auto_start.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_no_tasks_or_agents_returns(self):
@@ -92,47 +54,26 @@ class TestAppManagerStart:
         # Should return immediately with a warning
         await app.start()
 
+    @pytest.mark.asyncio
+    async def test_no_tasks_with_running_agents_blocks(self, mock_agent_manager):
+        """When agents are running but no tasks, start() should keep alive."""
+        mock_agent_manager.get_running.return_value = ["dispatch"]
+        app = AppManager(agent_manager=mock_agent_manager)
+
+        # start() would block forever in the stop_event.wait(), so we timeout
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(app.start(), timeout=0.1)
+
 
 class TestAppManagerShutdown:
     @pytest.mark.asyncio
-    async def test_shutdown_signals_agents(self):
-        app = AppManager()
-        agent = StubAgent()
-        app.register_agent("test", agent, 60)
-        assert agent.stopping is False
+    async def test_shutdown_calls_agent_manager(self, mock_agent_manager):
+        app = AppManager(agent_manager=mock_agent_manager)
         await app.shutdown()
-        assert agent.stopping is True
+        mock_agent_manager.shutdown_all.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_shutdown_with_running_scheduler_does_not_raise(self):
+    async def test_shutdown_safe_without_agent_manager(self):
         app = AppManager()
-        agent = StubAgent()
-        app.register_agent("test", agent, 60)
-
-        # Start the scheduler, then verify shutdown completes cleanly
-        app._scheduler.start()
-        assert app._scheduler.running is True
+        # Should not raise even without agent manager
         await app.shutdown()
-        # Scheduler may not be fully stopped synchronously with wait=False,
-        # but shutdown should not raise
-        assert agent.stopping is True
-
-    @pytest.mark.asyncio
-    async def test_shutdown_safe_when_scheduler_not_started(self):
-        app = AppManager()
-        # Should not raise even if scheduler never started
-        await app.shutdown()
-
-
-class TestSafePoll:
-    @pytest.mark.asyncio
-    async def test_safe_poll_calls_agent(self):
-        agent = StubAgent()
-        await AppManager._safe_poll(agent, "test")
-        assert agent.poll_count == 1
-
-    @pytest.mark.asyncio
-    async def test_safe_poll_catches_exception(self):
-        agent = FailingAgent()
-        # Should not raise
-        await AppManager._safe_poll(agent, "failing")

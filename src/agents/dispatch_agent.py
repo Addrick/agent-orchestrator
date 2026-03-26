@@ -11,7 +11,7 @@ from config.global_config import (
     DISPATCH_DISPATCHED_TAG,
     DISPATCH_PERSONA_NAME,
 )
-from src.agents.base import Agent
+from src.agents.base import AgentLoop
 from src.chat_system import ChatSystem
 from src.clients.notification import NotificationRouter
 from src.clients.zammad_client import ZammadClient
@@ -19,7 +19,7 @@ from src.clients.zammad_client import ZammadClient
 logger = logging.getLogger(__name__)
 
 
-class DispatchAgent(Agent):
+class DispatchAgent(AgentLoop):
     """
     Polls for triaged tickets and dispatches notifications based on LLM decisions.
 
@@ -32,18 +32,21 @@ class DispatchAgent(Agent):
     """
 
     poll_interval: float = DISPATCH_POLL_INTERVAL
+    agent_name: str = "dispatch"
 
     def __init__(
         self,
         chat_system: ChatSystem,
         zammad_client: ZammadClient,
         notification_router: NotificationRouter,
+        agent_config: Optional[Dict[str, Any]] = None,
     ) -> None:
         super().__init__(chat_system)
         self.zammad_client = zammad_client
         self.notification_router = notification_router
+        self.agent_config = agent_config or {}
 
-    async def poll(self) -> None:
+    async def _poll(self) -> None:
         """Find triaged-but-not-dispatched tickets and process each."""
         query = f"tags:{DISPATCH_TRIAGE_TAG} AND NOT tags:{DISPATCH_DISPATCHED_TAG} AND state.name:new"
         try:
@@ -55,7 +58,7 @@ class DispatchAgent(Agent):
             return
 
         for ticket in tickets:
-            if self.stopping:
+            if self._shutdown_event.is_set():
                 break
             await self._dispatch_ticket(ticket['id'])
 
@@ -100,18 +103,7 @@ class DispatchAgent(Agent):
             if notify_channel == "zammad":
                 recipient = str(ticket_id)
             else:
-                # For discord/email, a recipient mapping would go here.
-                # For now, fall back to zammad note if no mapping exists.
-                if notify_channel not in self.notification_router.available_channels:
-                    logger.warning(
-                        f"Channel '{notify_channel}' not available. Falling back to zammad note."
-                    )
-                    notify_channel = "zammad"
-                    recipient = str(ticket_id)
-                else:
-                    # Placeholder: in production, this would resolve a tech user ID
-                    # from ticket assignment or a routing table.
-                    recipient = str(ticket_id)
+                recipient = self._resolve_recipient(notify_channel, ticket_id)
 
             sent = await self.notification_router.send(
                 channel=notify_channel,
@@ -144,6 +136,26 @@ class DispatchAgent(Agent):
             self.memory_manager.update_agent_action_outcome(
                 action_id, "error", str(e)
             )
+
+    def _resolve_recipient(self, channel: str, ticket_id: int) -> str:
+        """Resolve the notification recipient from agent_config or fall back to zammad."""
+        defaults = self.agent_config.get("notification_defaults", {})
+        recipient_name = defaults.get("recipient")
+        recipients = self.agent_config.get("_recipients", {})
+
+        if recipient_name and recipient_name in recipients:
+            recipient_info = recipients[recipient_name]
+            if "discord" in channel and recipient_info.get("discord_user_id"):
+                return str(recipient_info["discord_user_id"])
+            if "email" in channel and recipient_info.get("email"):
+                return str(recipient_info["email"])
+
+        # No mapping found — fall back to the ticket ID (works for zammad notifier)
+        logger.warning(
+            f"No recipient mapping for channel '{channel}'. "
+            f"Falling back to ticket ID {ticket_id}."
+        )
+        return str(ticket_id)
 
     def _extract_triage_note(self, articles: List[Dict[str, Any]]) -> str:
         """Extract the AI triage note from ticket articles (last internal note)."""
