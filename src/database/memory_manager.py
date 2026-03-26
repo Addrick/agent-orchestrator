@@ -136,6 +136,10 @@ class MemoryManager:
                 conn.execute("ALTER TABLE User_Interactions ADD COLUMN server_id TEXT")
                 logger.info("Added 'server_id' column to User_Interactions table.")
 
+            if 'tool_context' not in columns:
+                conn.execute("ALTER TABLE User_Interactions ADD COLUMN tool_context TEXT")
+                logger.info("Added 'tool_context' column to User_Interactions table.")
+
             # Create any new indexes that might be needed for the new column
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_server_id_timestamp
@@ -162,19 +166,32 @@ class MemoryManager:
                     author_role: str, author_name: Optional[str], content: str,
                     timestamp: datetime, server_id: Optional[str] = None,
                     platform_message_id: Optional[str] = None,
-                    zammad_ticket_id: Optional[int] = None) -> None:
-        """Logs a single message with its author's role and name."""
+                    zammad_ticket_id: Optional[int] = None,
+                    tool_context: Optional[str] = None) -> Optional[int]:
+        """Logs a single message with its author's role and name. Returns the interaction_id."""
         with self._lock:
             conn = self._get_connection()
-            conn.execute(
+            cursor = conn.cursor()
+            cursor.execute(
                 """
                 INSERT INTO User_Interactions
                 (user_identifier, persona_name, channel, author_role, author_name, content,
-                 timestamp, zammad_ticket_id, platform_message_id, server_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 timestamp, zammad_ticket_id, platform_message_id, server_id, tool_context)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (user_identifier, persona_name, channel, author_role, author_name, content,
-                 timestamp, zammad_ticket_id, platform_message_id, server_id)
+                 timestamp, zammad_ticket_id, platform_message_id, server_id, tool_context)
+            )
+            conn.commit()
+            return cursor.lastrowid
+
+    def update_platform_message_id(self, interaction_id: int, platform_message_id: str) -> None:
+        """Patches the platform_message_id onto an existing interaction row."""
+        with self._lock:
+            conn = self._get_connection()
+            conn.execute(
+                "UPDATE User_Interactions SET platform_message_id = ? WHERE interaction_id = ?",
+                (platform_message_id, interaction_id)
             )
             conn.commit()
 
@@ -207,7 +224,7 @@ class MemoryManager:
             conn = self._get_connection()
             cursor = conn.cursor()
 
-            query = ("SELECT author_role, author_name, content FROM User_Interactions"
+            query = ("SELECT author_role, author_name, content, tool_context FROM User_Interactions"
                      " WHERE user_identifier = ? AND persona_name = ?"
                      + self._SUPPRESSION_SUBQUERY)
             params: List[Any] = [user_identifier, persona_name]
@@ -226,7 +243,7 @@ class MemoryManager:
             conn = self._get_connection()
             cursor = conn.cursor()
 
-            query = ("SELECT author_role, author_name, content FROM User_Interactions"
+            query = ("SELECT author_role, author_name, content, tool_context FROM User_Interactions"
                      " WHERE zammad_ticket_id = ?"
                      + self._SUPPRESSION_SUBQUERY)
             params: List[Any] = [ticket_id]
@@ -246,7 +263,7 @@ class MemoryManager:
             conn = self._get_connection()
             cursor = conn.cursor()
 
-            query = ("SELECT author_role, author_name, content FROM User_Interactions"
+            query = ("SELECT author_role, author_name, content, tool_context FROM User_Interactions"
                      " WHERE channel = ? AND persona_name = ?")
             params: List[Any] = [channel, persona_name]
 
@@ -272,7 +289,7 @@ class MemoryManager:
             conn = self._get_connection()
             cursor = conn.cursor()
 
-            query = ("SELECT author_role, author_name, content FROM User_Interactions"
+            query = ("SELECT author_role, author_name, content, tool_context FROM User_Interactions"
                      " WHERE server_id = ? AND persona_name = ?"
                      + self._SUPPRESSION_SUBQUERY)
             params: List[Any] = [server_id, persona_name]
@@ -291,7 +308,7 @@ class MemoryManager:
             conn = self._get_connection()
             cursor = conn.cursor()
 
-            query = ("SELECT author_role, author_name, content FROM User_Interactions"
+            query = ("SELECT author_role, author_name, content, tool_context FROM User_Interactions"
                      " WHERE persona_name = ?"
                      + self._SUPPRESSION_SUBQUERY)
             params: List[Any] = [persona_name]

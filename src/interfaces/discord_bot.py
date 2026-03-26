@@ -6,12 +6,11 @@ import discord
 import asyncio
 import io
 from contextlib import asynccontextmanager
-from datetime import timedelta, datetime
 from typing import Any, AsyncIterator, Optional, List
 
 from config.global_config import DISCORD_CHAR_LIMIT, DISCORD_STATUS_LIMIT, DISCORD_DEBUG_CHANNEL, \
     AMBIENT_LOGGING_CHANNELS, GLOBAL_CONTEXT_LIMIT, PENDING_CONFIRMATION_TIMEOUT
-from src.utils.message_utils import split_string_by_limit, cleanse_message_for_history
+from src.utils.message_utils import split_string_by_limit
 from src.utils.save_utils import save_personas_to_file
 from src.chat_system import ChatSystem, ResponseType
 from src.persona import Persona
@@ -197,7 +196,7 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                     return
 
                 async with _safe_typing(message.channel):
-                    response_text, response_type, ticket_id = await chat_system.generate_response(
+                    response_text, response_type, ticket_id, assistant_id = await chat_system.generate_response(
                         persona_name=active_persona_name,
                         user_identifier=str(message.author.id),
                         channel=message.channel.name if isinstance(message.channel, discord.abc.GuildChannel) else "DM",
@@ -205,7 +204,9 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                         server_id=server_id,
                         image_url=await get_image_url(message),
                         history_limit=GLOBAL_CONTEXT_LIMIT,
-                        user_display_name=message.author.display_name
+                        user_display_name=message.author.display_name,
+                        platform_message_id=str(message.id),
+                        timestamp=message.created_at
                     )
 
                 if response_text and response_text.startswith("FILE_RESPONSE::"):
@@ -245,25 +246,21 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                         pass
 
                     async with _safe_typing(message.channel):
-                        final_text, final_type, ticket_id = await chat_system.resume_pending_confirmation(
+                        final_text, final_type, ticket_id, final_assistant_id = await chat_system.resume_pending_confirmation(
                             str(message.author.id), active_persona_name, approved=approved
                         )
                     if final_text and final_text.strip():
                         chunks = split_string_by_limit(final_text, DISCORD_CHAR_LIMIT)
+                        last_confirm_reply: Optional[discord.Message] = None
                         for chunk in chunks:
-                            await message.channel.send(chunk)
+                            last_confirm_reply = await message.channel.send(chunk)
+                        if last_confirm_reply and final_assistant_id is not None:
+                            await asyncio.to_thread(
+                                chat_system.memory_manager.update_platform_message_id,
+                                final_assistant_id, str(last_confirm_reply.id)
+                            )
 
                 elif response_text and response_text.strip():
-                    await asyncio.to_thread(
-                        chat_system.memory_manager.log_message,
-                        user_identifier=str(message.author.id), persona_name=active_persona_name,
-                        channel=message.channel.name if isinstance(message.channel,
-                                                                   discord.abc.GuildChannel) else "DM",
-                        author_role='user', author_name=message.author.display_name, content=cleaned_message,
-                        timestamp=message.created_at, platform_message_id=str(message.id),
-                        zammad_ticket_id=ticket_id, server_id=server_id
-                    )
-
                     persona: Persona = chat_system.personas[active_persona_name]
                     final_reply_text: str = response_text
                     if persona.should_display_name_in_chat():
@@ -274,19 +271,10 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                     for chunk in chunks:
                         last_reply_message = await message.channel.send(chunk)
 
-                    if last_reply_message:
-                        bot_timestamp: datetime = last_reply_message.created_at
-                        if bot_timestamp <= message.created_at: bot_timestamp = message.created_at + timedelta(
-                            microseconds=1)
+                    if last_reply_message and assistant_id is not None:
                         await asyncio.to_thread(
-                            chat_system.memory_manager.log_message,
-                            user_identifier=str(message.author.id), persona_name=active_persona_name,
-                            channel=message.channel.name if isinstance(message.channel,
-                                                                       discord.abc.GuildChannel) else "DM",
-                            author_role='assistant', author_name=active_persona_name,
-                            content=cleanse_message_for_history(response_text),
-                            timestamp=bot_timestamp, platform_message_id=str(last_reply_message.id),
-                            zammad_ticket_id=ticket_id, server_id=server_id
+                            chat_system.memory_manager.update_platform_message_id,
+                            assistant_id, str(last_reply_message.id)
                         )
                 await reset_discord_status(client, chat_system)
                 return

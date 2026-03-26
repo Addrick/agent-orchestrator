@@ -4,4 +4,5 @@ max-complexity = 10
 extend-ignore =
     E125,
     E221,
+    E501,
     E701

@@ -152,7 +152,7 @@ class BotLogic:
             #     "current_message": {"text": user_message, "image_url": None}
             # }
 
-            response_text, response_type, ticket_id = await self.chat_system.generate_response(
+            response_text, response_type, ticket_id, _ = await self.chat_system.generate_response(
                 persona_name=MODEL_SELECTOR_PERSONA_NAME,
                 user_identifier="n/a",
                 channel="model_selector_query",
@@ -189,7 +189,7 @@ class BotLogic:
             tools_str = "\n".join(available_tools)
             user_message = f"Available tools:\n{tools_str}\n\nUser query: {user_query}\n\nMatched tool:"
 
-            response_text, _, _ = await self.chat_system.generate_response(
+            response_text, _, _, _ = await self.chat_system.generate_response(
                 persona_name=TOOL_SELECTOR_PERSONA_NAME,
                 user_identifier="n/a",
                 channel="tool_selector_query",

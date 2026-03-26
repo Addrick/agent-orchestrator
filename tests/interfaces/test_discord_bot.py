@@ -76,14 +76,14 @@ def mock_message():
 @patch('src.interfaces.discord_bot.reset_discord_status', new_callable=AsyncMock)
 async def test_llm_flow_with_display_name(mock_reset, mock_discord_client, mock_chat_system, mock_message):
     """Tests the full flow where the persona's name IS displayed in the chat."""
-    mock_chat_system.generate_response.return_value = ("Bot reply", ResponseType.LLM_GENERATION, 12345)
+    mock_chat_system.generate_response.return_value = ("Bot reply", ResponseType.LLM_GENERATION, 12345, 42)
     await mock_discord_client.on_message(mock_message)
 
     mock_message.channel.send.assert_called_once_with("**vocal:** Bot reply")
-    assert mock_chat_system.memory_manager.log_message.call_count == 2
-    bot_log_kwargs = mock_chat_system.memory_manager.log_message.call_args_list[1].kwargs
-    assert bot_log_kwargs['content'] == "Bot reply"
-    assert bot_log_kwargs['author_name'] == 'vocal'
+    # Logging is now internal to ChatSystem — bot should NOT call log_message for persona messages
+    mock_chat_system.memory_manager.log_message.assert_not_called()
+    # Bot should call update_platform_message_id with assistant interaction_id
+    mock_chat_system.memory_manager.update_platform_message_id.assert_called_once_with(42, '2002')
 
 
 @pytest.mark.asyncio
@@ -91,7 +91,7 @@ async def test_llm_flow_with_display_name(mock_reset, mock_discord_client, mock_
 async def test_llm_flow_without_display_name(mock_reset, mock_discord_client, mock_chat_system, mock_message):
     """Tests the full flow where the persona's name is NOT displayed in the chat."""
     mock_message.content = "silent hello"
-    mock_chat_system.generate_response.return_value = ("Silent reply", ResponseType.LLM_GENERATION, None)
+    mock_chat_system.generate_response.return_value = ("Silent reply", ResponseType.LLM_GENERATION, None, 43)
     await mock_discord_client.on_message(mock_message)
 
     mock_message.channel.send.assert_called_once_with("Silent reply")
@@ -163,7 +163,6 @@ async def test_graceful_failure_on_exception(mock_reset, mock_discord_client, mo
     await mock_discord_client.on_message(mock_message)
 
     mock_message.channel.send.assert_called_once_with("A critical error occurred. Please check the logs.")
-    mock_chat_system.memory_manager.log_message.assert_not_called()
     mock_reset.assert_called_once()
 
 
@@ -173,7 +172,7 @@ async def test_bot_treats_empty_message_as_continuation(mock_reset, mock_discord
                                                         mock_message):
     """Tests that the bot processes a message with only a persona trigger as a continuation request."""
     mock_message.content = "vocal "
-    mock_chat_system.generate_response.return_value = ("Continuation response", ResponseType.LLM_GENERATION, None)
+    mock_chat_system.generate_response.return_value = ("Continuation response", ResponseType.LLM_GENERATION, None, 44)
 
     await mock_discord_client.on_message(mock_message)
 
@@ -182,7 +181,7 @@ async def test_bot_treats_empty_message_as_continuation(mock_reset, mock_discord
     assert called_kwargs['message'] == ''
 
     mock_message.channel.send.assert_called()
-    assert mock_chat_system.memory_manager.log_message.call_count == 2
+    mock_chat_system.memory_manager.log_message.assert_not_called()
     mock_reset.assert_called_once()
 
 
@@ -379,7 +378,7 @@ async def test_on_message_succeeds_despite_typing_429(
     mock_message.channel.typing.return_value = fake_ctx
 
     mock_chat_system.generate_response.return_value = (
-        "Hello!", ResponseType.LLM_GENERATION, None
+        "Hello!", ResponseType.LLM_GENERATION, None, 45
     )
 
     await mock_discord_client.on_message(mock_message)

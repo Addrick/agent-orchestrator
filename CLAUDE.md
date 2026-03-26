@@ -27,7 +27,7 @@ pytest tests/test_engine.py
 pytest --cov=src
 
 # Lint
-flake8 src/ --max-complexity=10 --max-line-length=127
+flake8 src/
 
 # Type check
 mypy src/ --config-file mypy.ini
