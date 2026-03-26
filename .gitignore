@@ -10,3 +10,21 @@ config/personas.json
 .env
 .env.test
 .claude/
+.coverage
+
+# Local helper scripts
+aggregate_code.py
+aggregate_tests.py
+aggregated_src.txt
+aggregated_tests.txt
+
+# Runtime databases
+src/database/*.db
+
+# Local config/credentials
+config/creds/
+config/logs/
+config/personas_backup
+
+# Test artifacts
+tests/test_data/
