@@ -5,6 +5,7 @@ import logging
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum, auto
 from typing import Any, Coroutine, Dict, List, Optional, Set, Tuple
 
@@ -115,6 +116,9 @@ class ChatSystem:
                     final_history.append({'role': 'user', 'content': content})
             elif author_role == 'assistant':
                 if author_name == persona_name:
+                    tool_context_json = msg.get('tool_context')
+                    if tool_context_json:
+                        final_history.extend(json.loads(tool_context_json))
                     final_history.append({'role': 'assistant', 'content': content})
                 else:
                     # In a group chat, messages from other personas are treated as user messages
@@ -299,8 +303,13 @@ class ChatSystem:
                 "content": json.dumps(tool_result)
             })
 
-    async def _run_tool_loop(self, ctx: RequestContext) -> Tuple[str, ResponseType]:
-        """Runs the LLM call / tool execution loop up to MAX_TOOL_CALLS iterations."""
+    async def _run_tool_loop(self, ctx: RequestContext) -> Tuple[str, ResponseType, Optional[str]]:
+        """Runs the LLM call / tool execution loop up to MAX_TOOL_CALLS iterations.
+
+        Returns (response_text, response_type, tool_context_json).
+        tool_context_json is a JSON string of tool call/result messages, or None if no tools were used.
+        """
+        history_start = len(ctx.conversation_history)
         for i in range(MAX_TOOL_CALLS):
             context_object: Dict[str, Any] = {
                 "persona_prompt": ctx.persona.get_prompt(),
@@ -317,7 +326,9 @@ class ChatSystem:
                 )
 
             if llm_response.get("type") == "text":
-                return llm_response.get("content", ""), ResponseType.LLM_GENERATION
+                tool_msgs = ctx.conversation_history[history_start:]
+                tool_context_json = json.dumps(tool_msgs) if tool_msgs else None
+                return llm_response.get("content", ""), ResponseType.LLM_GENERATION, tool_context_json
 
             elif llm_response.get("type") == "tool_calls":
                 calls = llm_response.get("calls", [])
@@ -343,14 +354,14 @@ class ChatSystem:
                         for wc in write_calls
                     ]
                     confirm_msg = "I'd like to perform the following actions:\n" + "\n".join(descriptions)
-                    return confirm_msg, ResponseType.PENDING_CONFIRMATION
+                    return confirm_msg, ResponseType.PENDING_CONFIRMATION, None
 
                 await self._execute_write_calls(write_calls, ctx.conversation_history, ctx.service_data)
             else:
                 raise LLMCommunicationError("LLM returned an invalid response structure.")
 
         logger.error(f"Exceeded max tool calls ({MAX_TOOL_CALLS}) for user {ctx.user_identifier}.")
-        return "I seem to be stuck in a loop. Could you please clarify your request?", ResponseType.DEV_COMMAND
+        return "I seem to be stuck in a loop. Could you please clarify your request?", ResponseType.DEV_COMMAND, None
 
     async def _prepare_request(self, ctx: RequestContext) -> None:
         """Resolve service contexts, build history, filter tools, append user message."""
@@ -363,12 +374,12 @@ class ChatSystem:
         await self._notify_services(ctx.service_data, ctx.message)
         ctx.conversation_history.append({"role": "user", "content": ctx.message})
 
-    async def _execute_request(self, ctx: RequestContext) -> Tuple[str, ResponseType]:
+    async def _execute_request(self, ctx: RequestContext) -> Tuple[str, ResponseType, Optional[str]]:
         """Run tool loop, notify services of final response."""
-        response_text, response_type = await self._run_tool_loop(ctx)
+        response_text, response_type, tool_context_json = await self._run_tool_loop(ctx)
         if response_type == ResponseType.LLM_GENERATION:
             await self._notify_services(ctx.service_data, response_text)
-        return response_text, response_type
+        return response_text, response_type, tool_context_json
 
     async def generate_response(
             self,
@@ -379,19 +390,21 @@ class ChatSystem:
             server_id: Optional[str] = None,
             image_url: Optional[str] = None,
             history_limit: Optional[int] = None,
-            user_display_name: Optional[str] = None
-    ) -> Tuple[str, ResponseType, Optional[int]]:
+            user_display_name: Optional[str] = None,
+            platform_message_id: Optional[str] = None,
+            timestamp: Optional[datetime] = None
+    ) -> Tuple[str, ResponseType, Optional[int], Optional[int]]:
         command_result: Optional[Dict[str, Any]] = await self.bot_logic.preprocess_message(
             persona_name, user_identifier, message
         )
         if command_result:
             if command_result.get("mutated", False):
                 save_personas_to_file(self.personas)
-            return command_result["response"], ResponseType.DEV_COMMAND, None
+            return command_result["response"], ResponseType.DEV_COMMAND, None, None
 
         persona: Optional[Persona] = self.personas.get(persona_name)
         if not persona:
-            return "Error: Persona not found.", ResponseType.DEV_COMMAND, None
+            return "Error: Persona not found.", ResponseType.DEV_COMMAND, None, None
 
         ctx = RequestContext(
             persona=persona, persona_name=persona_name,
@@ -401,9 +414,31 @@ class ChatSystem:
         )
         try:
             await self._prepare_request(ctx)
-            response_text, response_type = await self._execute_request(ctx)
+            response_text, response_type, tool_context_json = await self._execute_request(ctx)
             ticket_id = self._get_tracking_id(ctx.service_data)
-            return response_text, response_type, ticket_id
+
+            # Log user and assistant messages
+            user_ts = timestamp or datetime.now()
+            self.memory_manager.log_message(
+                user_identifier=user_identifier, persona_name=persona_name,
+                channel=channel, author_role='user',
+                author_name=user_display_name, content=message,
+                timestamp=user_ts, server_id=server_id,
+                platform_message_id=platform_message_id,
+                zammad_ticket_id=ticket_id,
+            )
+            assistant_id: Optional[int] = None
+            if response_type == ResponseType.LLM_GENERATION and response_text and response_text.strip():
+                assistant_id = self.memory_manager.log_message(
+                    user_identifier=user_identifier, persona_name=persona_name,
+                    channel=channel, author_role='assistant',
+                    author_name=persona_name, content=response_text,
+                    timestamp=datetime.now(), server_id=server_id,
+                    zammad_ticket_id=ticket_id,
+                    tool_context=tool_context_json,
+                )
+
+            return response_text, response_type, ticket_id, assistant_id
 
         except LLMCommunicationError as e:
             logger.error(f"A recoverable LLM communication error occurred for {user_identifier}: {e}")
@@ -415,29 +450,29 @@ class ChatSystem:
             error_msg = ("I'm not sure how to continue. Could you please rephrase?" if "empty response" in str(e) else
                          "Error while generating a response: " + str(e))
             ticket_id = self._get_tracking_id(ctx.service_data)
-            return error_msg, ResponseType.DEV_COMMAND, ticket_id
+            return error_msg, ResponseType.DEV_COMMAND, ticket_id, None
         except Exception as e:
             logger.error(f"A critical error occurred in generate_response for {user_identifier}: {e}", exc_info=True)
             ticket_id = self._get_tracking_id(ctx.service_data)
             return ("An internal error occurred while processing your request.",
-                    ResponseType.DEV_COMMAND, ticket_id)
+                    ResponseType.DEV_COMMAND, ticket_id, None)
 
     async def resume_pending_confirmation(
             self, user_identifier: str, persona_name: str, approved: bool
-    ) -> Tuple[str, ResponseType, Optional[int]]:
+    ) -> Tuple[str, ResponseType, Optional[int], Optional[int]]:
         """Resumes a tool execution that was paused for user confirmation."""
         key = (user_identifier, persona_name)
         pending = self._pending_confirmations.pop(key, None)
 
         if not pending:
-            return "No pending confirmation found.", ResponseType.DEV_COMMAND, None
+            return "No pending confirmation found.", ResponseType.DEV_COMMAND, None, None
 
         if time.time() - pending.created_at > PENDING_CONFIRMATION_TIMEOUT:
-            return "Confirmation expired. Please try again.", ResponseType.DEV_COMMAND, None
+            return "Confirmation expired. Please try again.", ResponseType.DEV_COMMAND, None, None
 
         persona = self.personas.get(pending.persona_name)
         if not persona:
-            return "Error: Persona not found.", ResponseType.DEV_COMMAND, None
+            return "Error: Persona not found.", ResponseType.DEV_COMMAND, None, None
 
         conversation_history = pending.conversation_history
         service_data = pending.service_data
@@ -465,10 +500,21 @@ class ChatSystem:
 
             final_text = llm_response.get("content", "")
             ticket_id = self._get_tracking_id(service_data)
-            return final_text, ResponseType.LLM_GENERATION, ticket_id
+
+            assistant_id: Optional[int] = None
+            if final_text and final_text.strip():
+                assistant_id = self.memory_manager.log_message(
+                    user_identifier=user_identifier, persona_name=persona_name,
+                    channel="",  # Not available in pending context
+                    author_role='assistant', author_name=persona_name,
+                    content=final_text, timestamp=datetime.now(),
+                    zammad_ticket_id=ticket_id,
+                )
+
+            return final_text, ResponseType.LLM_GENERATION, ticket_id, assistant_id
 
         except Exception as e:
             logger.error(f"Error resuming pending confirmation for {user_identifier}: {e}", exc_info=True)
             ticket_id = self._get_tracking_id(service_data)
             return ("An error occurred while processing the confirmed action.",
-                    ResponseType.DEV_COMMAND, ticket_id)
+                    ResponseType.DEV_COMMAND, ticket_id, None)
