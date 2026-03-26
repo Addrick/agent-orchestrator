@@ -31,7 +31,7 @@ async def test_tool_driven_ticket_creation_flow(live_chat_system, managed_zammad
         final_text = ({'type': 'text', 'content': 'Ticket created.'}, {})
         with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
                           side_effect=[tool_call, final_text]):
-            _, _, ticket_id = await chat_system.generate_response(
+            _, _, ticket_id, _ = await chat_system.generate_response(
                 "test_persona", user_info["identifier"], "support", "Help me"
             )
             assert ticket_id is not None
@@ -174,7 +174,7 @@ async def test_confirm_mode_pends_write_tools(live_chat_system, managed_zammad_u
         {'id': 'call_1', 'name': 'create_ticket', 'arguments': {'title': 'Pending Ticket', 'body': 'test'}}]}, {})
     with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
                       side_effect=[tool_call]):
-        response, response_type, ticket_id = await chat_system.generate_response(
+        response, response_type, ticket_id, _ = await chat_system.generate_response(
             "test_persona", user_info["identifier"], "support", "Create a ticket"
         )
         assert response_type == ResponseType.PENDING_CONFIRMATION
@@ -208,7 +208,7 @@ async def test_confirm_mode_resume_approved_creates_ticket(live_chat_system, man
 
         with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
                           return_value=final_text):
-            response, response_type, ticket_id = await chat_system.resume_pending_confirmation(
+            response, response_type, ticket_id, _ = await chat_system.resume_pending_confirmation(
                 user_info["identifier"], "test_persona", approved=True
             )
             assert response_type == ResponseType.LLM_GENERATION
@@ -244,7 +244,7 @@ async def test_confirm_mode_resume_denied_skips_tool(live_chat_system, managed_z
 
     with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
                       return_value=denial_response):
-        response, response_type, _ = await chat_system.resume_pending_confirmation(
+        response, response_type, _, _ = await chat_system.resume_pending_confirmation(
             user_info["identifier"], "test_persona", approved=False
         )
         assert response_type == ResponseType.LLM_GENERATION
@@ -298,7 +298,7 @@ async def test_get_tracking_id_returns_ticket_id(live_chat_system, managed_zamma
         # Ticket referenced by number: get_tracking_id should surface the resolved ID.
         with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
                           return_value=({'type': 'text', 'content': 'Got it.'}, {})):
-            _, _, returned_ticket_id = await chat_system.generate_response(
+            _, _, returned_ticket_id, _ = await chat_system.generate_response(
                 "test_persona", user_info["identifier"], "support",
                 f"Checking [Ticket#{ticket_number}]"
             )
@@ -307,7 +307,7 @@ async def test_get_tracking_id_returns_ticket_id(live_chat_system, managed_zamma
         # No ticket reference: active ticket found for user should still surface.
         with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
                           return_value=({'type': 'text', 'content': 'Still here.'}, {})):
-            _, _, returned_ticket_id = await chat_system.generate_response(
+            _, _, returned_ticket_id, _ = await chat_system.generate_response(
                 "test_persona", user_info["identifier"], "support",
                 "Follow-up without ticket reference"
             )
