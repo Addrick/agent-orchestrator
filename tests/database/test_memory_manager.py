@@ -1,6 +1,7 @@
 # tests/database/test_memory_manager.py
 
 import concurrent.futures
+import json
 import pytest
 import os
 import time
@@ -36,7 +37,7 @@ def test_create_schema(mem_manager):
     expected_columns = {
         'interaction_id', 'user_identifier', 'persona_name', 'channel',
         'author_role', 'author_name', 'content', 'timestamp',
-        'zammad_ticket_id', 'platform_message_id', 'server_id'
+        'zammad_ticket_id', 'platform_message_id', 'server_id', 'tool_context'
     }
     assert columns == expected_columns
 
@@ -428,3 +429,114 @@ def test_concurrent_write_and_suppress(file_mem_manager):
     # All remaining should be the new batch (none of the originals survive suppression)
     contents = {msg['content'] for msg in history}
     assert all(c.startswith("new-") for c in contents)
+
+
+# --- Tool Context Migration Tests ---
+
+def test_migration_adds_tool_context_column(legacy_mem_manager):
+    """create_schema() on a legacy DB adds the tool_context column via ALTER TABLE."""
+    legacy_mem_manager.create_schema()
+
+    conn = legacy_mem_manager._get_connection()
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(User_Interactions)")
+    columns = {row['name'] for row in cursor.fetchall()}
+    assert 'tool_context' in columns
+
+
+def test_migration_preserves_existing_data_with_tool_context(legacy_mem_manager):
+    """Existing User_Interactions rows survive the tool_context migration with NULL tool_context."""
+    # Insert a row before migration
+    conn = legacy_mem_manager._get_connection()
+    conn.execute(
+        "INSERT INTO User_Interactions (user_identifier, persona_name, channel, author_role, content, timestamp)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        ("user1", "persona1", "chan", "user", "pre-migration msg", datetime.now().isoformat())
+    )
+    conn.commit()
+
+    legacy_mem_manager.create_schema()
+
+    history = legacy_mem_manager.get_personal_history("user1", "persona1")
+    assert len(history) == 1
+    assert history[0]['content'] == "pre-migration msg"
+    assert history[0]['tool_context'] is None
+
+
+def test_migration_is_idempotent_with_tool_context(legacy_mem_manager):
+    """Running create_schema() twice doesn't error on tool_context column."""
+    legacy_mem_manager.create_schema()
+    legacy_mem_manager.create_schema()  # second call should be a no-op
+
+    conn = legacy_mem_manager._get_connection()
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(User_Interactions)")
+    columns = [row['name'] for row in cursor.fetchall()]
+    assert columns.count('tool_context') == 1
+
+
+# --- Tool Context Functional Tests ---
+
+def test_log_message_with_tool_context(mem_manager):
+    """tool_context JSON round-trips correctly through log and retrieval."""
+    tool_ctx = json.dumps([
+        {"role": "assistant", "tool_calls": [{"id": "c1", "name": "web_search", "arguments": {}}]},
+        {"role": "tool", "tool_call_id": "c1", "name": "web_search", "content": '{"result": "ok"}'}
+    ])
+    mem_manager.log_message("user1", "persona1", "chan", "assistant", "Bot",
+                            "Here are results", datetime.now(), tool_context=tool_ctx)
+
+    history = mem_manager.get_personal_history("user1", "persona1")
+    assert len(history) == 1
+    assert history[0]['tool_context'] == tool_ctx
+    parsed = json.loads(history[0]['tool_context'])
+    assert len(parsed) == 2
+    assert parsed[0]['role'] == 'assistant'
+
+
+def test_log_message_returns_interaction_id(mem_manager):
+    """log_message returns the lastrowid (interaction_id)."""
+    row_id = mem_manager.log_message("user1", "persona1", "chan", "user", "Human",
+                                     "Hello", datetime.now())
+    assert isinstance(row_id, int)
+    assert row_id > 0
+
+    row_id2 = mem_manager.log_message("user1", "persona1", "chan", "assistant", "Bot",
+                                      "Hi", datetime.now())
+    assert row_id2 == row_id + 1
+
+
+def test_update_platform_message_id(mem_manager):
+    """update_platform_message_id patches the row correctly."""
+    row_id = mem_manager.log_message("user1", "persona1", "chan", "assistant", "Bot",
+                                     "Reply", datetime.now())
+
+    mem_manager.update_platform_message_id(row_id, "discord_msg_123")
+
+    conn = mem_manager._get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT platform_message_id FROM User_Interactions WHERE interaction_id = ?", (row_id,))
+    assert cursor.fetchone()['platform_message_id'] == "discord_msg_123"
+
+
+def test_get_history_includes_tool_context(mem_manager):
+    """All get_*_history methods return tool_context in their dicts."""
+    tool_ctx = json.dumps([{"role": "tool", "content": "data"}])
+    mem_manager.log_message("user1", "persona1", "chan", "assistant", "Bot",
+                            "Reply", datetime.now(), server_id="srv1", tool_context=tool_ctx)
+
+    for history in [
+        mem_manager.get_personal_history("user1", "persona1"),
+        mem_manager.get_channel_history("chan", "persona1", server_id="srv1"),
+        mem_manager.get_server_history("srv1", "persona1"),
+        mem_manager.get_global_history("persona1"),
+    ]:
+        assert len(history) == 1
+        assert history[0]['tool_context'] == tool_ctx
+
+    # ticket history
+    mem_manager.log_message("user2", "persona2", "chan", "assistant", "Bot",
+                            "Ticket reply", datetime.now(), zammad_ticket_id=42, tool_context=tool_ctx)
+    ticket_history = mem_manager.get_ticket_history(42)
+    assert len(ticket_history) == 1
+    assert ticket_history[0]['tool_context'] == tool_ctx

@@ -19,9 +19,7 @@ def mock_chat_system() -> MagicMock:
     """Fixture for a mocked ChatSystem."""
     chat_system = MagicMock(spec=ChatSystem)
     chat_system.personas = {}
-    # FIX: Update the mock to return a 3-item tuple, which is the correct signature.
-    # A default ticket_id of None is a sensible default.
-    chat_system.generate_response = AsyncMock(return_value=("Test reply", ResponseType.LLM_GENERATION, None))
+    chat_system.generate_response = AsyncMock(return_value=("Test reply", ResponseType.LLM_GENERATION, None, None))
     return chat_system
 
 
@@ -145,8 +143,8 @@ async def test_handle_specific_message_unpacks_response_correctly(gmail_interfac
     mock_service = MagicMock()
     msg_data = _create_mock_email_data("test@example.com", "support-persona@example.com")
 
-    # Configure the mock to return the specific 3-item tuple that caused the bug
-    mock_chat_system.generate_response.return_value = ("A detailed response.", ResponseType.LLM_GENERATION, 54321)
+    # Configure the mock to return the 4-item tuple
+    mock_chat_system.generate_response.return_value = ("A detailed response.", ResponseType.LLM_GENERATION, 54321, 1)
 
     with patch('src.interfaces.gmail_bot.asyncio.to_thread', new_callable=AsyncMock) as mock_to_thread, \
             patch.object(gmail_interface, '_send_reply', new_callable=AsyncMock) as mock_send_reply:

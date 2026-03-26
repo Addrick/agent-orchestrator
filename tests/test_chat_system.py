@@ -46,7 +46,7 @@ def chat_system_with_mocks():
 async def test_generate_response_handles_dev_command(chat_system_with_mocks):
     system, _, text_engine_mock, _, _ = chat_system_with_mocks
     system.bot_logic.preprocess_message.return_value = {"response": "Dev command output", "mutated": False}
-    response, _, _ = await system.generate_response("test_persona", "user", "channel", "what model")
+    response, _, _, _ = await system.generate_response("test_persona", "user", "channel", "what model")
     assert response == "Dev command output"
     text_engine_mock.generate_response.assert_not_called()
 
@@ -54,7 +54,7 @@ async def test_generate_response_handles_dev_command(chat_system_with_mocks):
 @pytest.mark.asyncio
 async def test_generate_response_handles_persona_not_found(chat_system_with_mocks):
     system, _, text_engine_mock, _, _ = chat_system_with_mocks
-    response, _, _ = await system.generate_response("unknown_persona", "user", "channel", "test")
+    response, _, _, _ = await system.generate_response("unknown_persona", "user", "channel", "test")
     assert "Error: Persona not found" in response
     text_engine_mock.generate_response.assert_not_called()
 
@@ -63,7 +63,7 @@ async def test_generate_response_handles_persona_not_found(chat_system_with_mock
 async def test_generate_response_handles_llm_communication_error(chat_system_with_mocks):
     system, _, text_engine_mock, _, _ = chat_system_with_mocks
     text_engine_mock.generate_response.side_effect = LLMCommunicationError("API is down")
-    response, _, _ = await system.generate_response("test_persona", "user", "channel", "test")
+    response, _, _, _ = await system.generate_response("test_persona", "user", "channel", "test")
     assert "Error while generating a response:" in response
 
 
@@ -115,7 +115,7 @@ def test_store_api_request_no_tools_when_never_set(chat_system_with_mocks):
 async def test_generate_response_handles_generic_exception(chat_system_with_mocks):
     system, memory_manager, _, _, _ = chat_system_with_mocks
     memory_manager.get_channel_history.side_effect = Exception("DB is locked")
-    response, _, _ = await system.generate_response("test_persona", "user", "channel", "test")
+    response, _, _, _ = await system.generate_response("test_persona", "user", "channel", "test")
     assert "An internal error occurred" in response
 
 
@@ -127,7 +127,7 @@ async def test_generate_response_exits_after_max_tool_calls(chat_system_with_moc
     # Make the text engine always return a tool call
     text_engine_mock.generate_response.return_value = (tool_call, {})
     tool_manager_mock.execute_tool.return_value = {"result": "ok"}
-    response, _, _ = await system.generate_response("test_persona", "user", "channel", "test")
+    response, _, _, _ = await system.generate_response("test_persona", "user", "channel", "test")
     assert "stuck in a loop" in response
     # Called exactly MAX_TOOL_CALLS times
     assert text_engine_mock.generate_response.call_count == 5
@@ -148,7 +148,7 @@ async def test_tool_use_in_autonomous_mode(chat_system_with_mocks):
     text_engine_mock.generate_response.side_effect = [(tool_call, {}), (final_response, {})]
     tool_manager_mock.execute_tool.return_value = {"result": {"id": 123, "state": "closed"}}
 
-    response, _, _ = await system.generate_response('test_persona', 'user', 'channel', 'close ticket')
+    response, _, _, _ = await system.generate_response('test_persona', 'user', 'channel', 'close ticket')
 
     tool_manager_mock.execute_tool.assert_called_once_with('update_ticket', state='closed')
     assert response == 'I have closed the ticket.'
@@ -190,7 +190,7 @@ async def test_confirm_mode_returns_pending_for_write_tools(chat_system_with_moc
                  'calls': [{'id': 'call_1', 'name': 'update_ticket', 'arguments': {'state': 'closed'}}]}
     text_engine_mock.generate_response.return_value = (tool_call, {})
 
-    response, response_type, _ = await system.generate_response('test_persona', 'user', 'channel', 'close it')
+    response, response_type, _, _ = await system.generate_response('test_persona', 'user', 'channel', 'close it')
 
     assert response_type == ResponseType.PENDING_CONFIRMATION
     assert 'update_ticket' in response
@@ -210,7 +210,7 @@ async def test_confirm_mode_auto_executes_read_only_tools(chat_system_with_mocks
     text_engine_mock.generate_response.side_effect = [(tool_call, {}), (final_response, {})]
     tool_manager_mock.execute_tool.return_value = {"result": [{"id": 1}, {"id": 2}, {"id": 3}]}
 
-    response, response_type, _ = await system.generate_response('test_persona', 'user', 'channel', 'search tickets')
+    response, response_type, _, _ = await system.generate_response('test_persona', 'user', 'channel', 'search tickets')
 
     assert response_type == ResponseType.LLM_GENERATION
     assert response == 'Found 3 tickets.'
@@ -232,7 +232,7 @@ async def test_confirm_mode_mixed_tools_executes_reads_and_pends_writes(chat_sys
     text_engine_mock.generate_response.return_value = (tool_call, {})
     tool_manager_mock.execute_tool.return_value = {"result": [{"id": 1}]}
 
-    response, response_type, _ = await system.generate_response('test_persona', 'user', 'channel', 'find and close')
+    response, response_type, _, _ = await system.generate_response('test_persona', 'user', 'channel', 'find and close')
 
     assert response_type == ResponseType.PENDING_CONFIRMATION
     assert 'update_ticket' in response
@@ -258,7 +258,7 @@ async def test_resume_pending_confirmation_approved(chat_system_with_mocks):
     final_response = {'type': 'text', 'content': 'Done, ticket closed.'}
     text_engine_mock.generate_response.return_value = (final_response, {})
 
-    response, response_type, _ = await system.resume_pending_confirmation('user', 'test_persona', approved=True)
+    response, response_type, _, _ = await system.resume_pending_confirmation('user', 'test_persona', approved=True)
 
     assert response_type == ResponseType.LLM_GENERATION
     assert response == 'Done, ticket closed.'
@@ -282,7 +282,7 @@ async def test_resume_pending_confirmation_denied(chat_system_with_mocks):
     final_response = {'type': 'text', 'content': 'Understood, I won\'t close the ticket.'}
     text_engine_mock.generate_response.return_value = (final_response, {})
 
-    response, response_type, _ = await system.resume_pending_confirmation('user', 'test_persona', approved=False)
+    response, response_type, _, _ = await system.resume_pending_confirmation('user', 'test_persona', approved=False)
 
     assert response_type == ResponseType.LLM_GENERATION
     tool_manager_mock.execute_tool.assert_not_called()
@@ -641,10 +641,11 @@ async def test_run_tool_loop_text_response(chat_system_with_mocks):
         conversation_history=[{"role": "user", "content": "hi"}],
     )
 
-    text, rtype = await system._run_tool_loop(ctx)
+    text, rtype, tool_ctx = await system._run_tool_loop(ctx)
 
     assert rtype == ResponseType.LLM_GENERATION
     assert text == 'Hi'
+    assert tool_ctx is None  # No tools used
 
 
 @pytest.mark.asyncio
@@ -661,7 +662,7 @@ async def test_run_tool_loop_max_calls_exceeded(chat_system_with_mocks):
         conversation_history=[{"role": "user", "content": "search"}],
     )
 
-    text, rtype = await system._run_tool_loop(ctx)
+    text, rtype, _ = await system._run_tool_loop(ctx)
 
     assert rtype == ResponseType.DEV_COMMAND
     assert "stuck in a loop" in text
@@ -719,7 +720,7 @@ async def test_execute_request_notifies_services(chat_system_with_mocks):
         conversation_history=[{"role": "user", "content": "hi"}],
     )
 
-    text, rtype = await system._execute_request(ctx)
+    text, rtype, _ = await system._execute_request(ctx)
 
     assert text == 'Reply'
     assert rtype == ResponseType.LLM_GENERATION
@@ -750,7 +751,7 @@ async def test_execute_request_skips_notify_for_pending(chat_system_with_mocks):
         conversation_history=[{"role": "user", "content": "close it"}],
     )
 
-    _, rtype = await system._execute_request(ctx)
+    _, rtype, _ = await system._execute_request(ctx)
 
     assert rtype == ResponseType.PENDING_CONFIRMATION
     mock_service.on_message.assert_not_called()
@@ -771,7 +772,7 @@ async def test_generate_response_extracts_tracking_id_from_services(chat_system_
     mock_service.get_tracking_id.return_value = 42
     system._services["test_svc"] = mock_service
 
-    _, _, ticket_id = await system.generate_response('test_persona', 'user', 'channel', 'test')
+    _, _, ticket_id, _ = await system.generate_response('test_persona', 'user', 'channel', 'test')
 
     assert ticket_id == 42
     mock_service.get_tracking_id.assert_called()
@@ -800,3 +801,125 @@ def test_get_tracking_id_returns_first_non_none(chat_system_with_mocks):
 
     result = system._get_tracking_id({"svc_a": {"x": 1}, "svc_b": {"y": 2}})
     assert result == 99
+
+
+# --- Internal Logging Tests ---
+
+@pytest.mark.asyncio
+async def test_generate_response_logs_user_and_assistant(chat_system_with_mocks):
+    """generate_response logs both user and assistant messages via memory_manager."""
+    system, memory_mock, _, _, _ = chat_system_with_mocks
+    memory_mock.get_channel_history.return_value = []
+    memory_mock.log_message.return_value = 42
+
+    _, response_type, _, _ = await system.generate_response(
+        "test_persona", "user", "channel", "hello",
+        platform_message_id="msg_1", user_display_name="Alice"
+    )
+
+    assert response_type == ResponseType.LLM_GENERATION
+    assert memory_mock.log_message.call_count == 2
+
+    # First call: user message
+    user_call = memory_mock.log_message.call_args_list[0]
+    assert user_call.kwargs['author_role'] == 'user'
+    assert user_call.kwargs['content'] == 'hello'
+    assert user_call.kwargs['platform_message_id'] == 'msg_1'
+    assert user_call.kwargs['author_name'] == 'Alice'
+
+    # Second call: assistant message
+    bot_call = memory_mock.log_message.call_args_list[1]
+    assert bot_call.kwargs['author_role'] == 'assistant'
+    assert bot_call.kwargs['author_name'] == 'test_persona'
+    assert bot_call.kwargs['content'] == 'LLM Reply'
+
+
+@pytest.mark.asyncio
+async def test_generate_response_logs_tool_context(chat_system_with_mocks):
+    """Tool loop produces stored tool_context JSON on the assistant log entry."""
+    system, memory_mock, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
+    memory_mock.get_channel_history.return_value = []
+    memory_mock.log_message.return_value = 1
+    persona.set_enabled_tools(['*'])
+
+    tool_call = {'type': 'tool_calls',
+                 'calls': [{'id': 'c1', 'name': 'web_search', 'arguments': {'query': 'test'}}]}
+    final_response = {'type': 'text', 'content': 'Search result.'}
+    text_engine_mock.generate_response.side_effect = [(tool_call, {}), (final_response, {})]
+    tool_manager_mock.execute_tool.return_value = {"result": "data"}
+
+    await system.generate_response("test_persona", "user", "channel", "search")
+
+    # Assistant log call should include tool_context
+    bot_call = memory_mock.log_message.call_args_list[1]
+    tool_ctx = bot_call.kwargs.get('tool_context')
+    assert tool_ctx is not None
+    parsed = json.loads(tool_ctx)
+    # Should contain the assistant tool_calls message and the tool result
+    roles = [m.get('role') for m in parsed]
+    assert 'assistant' in roles or any('tool_calls' in m for m in parsed)
+    assert 'tool' in roles
+
+
+@pytest.mark.asyncio
+async def test_generate_response_no_tool_context_without_tools(chat_system_with_mocks):
+    """When no tools are used, tool_context should be None."""
+    system, memory_mock, _, _, _ = chat_system_with_mocks
+    memory_mock.get_channel_history.return_value = []
+    memory_mock.log_message.return_value = 1
+
+    await system.generate_response("test_persona", "user", "channel", "hello")
+
+    bot_call = memory_mock.log_message.call_args_list[1]
+    assert bot_call.kwargs.get('tool_context') is None
+
+
+@pytest.mark.asyncio
+async def test_generate_response_returns_interaction_id(chat_system_with_mocks):
+    """generate_response returns the assistant interaction_id for platform_message_id update."""
+    system, memory_mock, _, _, _ = chat_system_with_mocks
+    memory_mock.get_channel_history.return_value = []
+    memory_mock.log_message.side_effect = [10, 42]  # user id, assistant id
+
+    _, _, _, assistant_id = await system.generate_response(
+        "test_persona", "user", "channel", "hello"
+    )
+
+    assert assistant_id == 42
+
+
+def test_format_raw_history_injects_tool_context(chat_system_with_mocks):
+    """Tool context JSON is reconstructed into the history before the assistant message."""
+    system, _, _, _, _ = chat_system_with_mocks
+    tool_ctx = json.dumps([
+        {"role": "assistant", "tool_calls": [{"id": "c1", "name": "web_search", "arguments": {}}]},
+        {"role": "tool", "tool_call_id": "c1", "name": "web_search", "content": '{"result": "ok"}'}
+    ])
+    raw_history = [
+        {'author_role': 'user', 'author_name': 'Alice', 'content': 'search please'},
+        {'author_role': 'assistant', 'author_name': 'test_persona', 'content': 'Here are results',
+         'tool_context': tool_ctx},
+    ]
+
+    formatted = system._format_raw_history_for_llm(raw_history, "channel", "test_persona", None)
+
+    # user + tool_call assistant + tool result + final assistant = 4 messages
+    assert len(formatted) == 4
+    assert formatted[0]['role'] == 'user'
+    assert 'tool_calls' in formatted[1]
+    assert formatted[2]['role'] == 'tool'
+    assert formatted[3] == {'role': 'assistant', 'content': 'Here are results'}
+
+
+def test_format_raw_history_no_tool_context(chat_system_with_mocks):
+    """NULL tool_context produces no extra messages."""
+    system, _, _, _, _ = chat_system_with_mocks
+    raw_history = [
+        {'author_role': 'assistant', 'author_name': 'test_persona', 'content': 'Hi',
+         'tool_context': None},
+    ]
+
+    formatted = system._format_raw_history_for_llm(raw_history, "channel", "test_persona", None)
+
+    assert len(formatted) == 1
+    assert formatted[0] == {'role': 'assistant', 'content': 'Hi'}
