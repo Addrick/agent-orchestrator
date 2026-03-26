@@ -37,6 +37,7 @@ DISCORD_READY_TIMEOUT = 30
 PIPELINE_TICKET_TITLE = "[Test] VPN connection drops every 15 minutes"
 NOTIFIER_TICKET_TITLE = "[Test] Agent Notifier Live"
 MULTICHANNEL_TICKET_TITLE = "[Test] Multi-Channel Router"
+MOCKED_PIPELINE_TICKET_TITLE = "[Test] Mocked Pipeline - Printer offline"
 
 
 # ---------------------------------------------------------------------------
@@ -615,3 +616,219 @@ class TestFullTriageDispatchPipeline:
             decision = payload.get("decision", {})
             assert "priority" in decision, f"Missing priority in decision: {decision}"
             assert "summary" in decision, f"Missing summary in decision: {decision}"
+
+
+# ---------------------------------------------------------------------------
+# Mocked-LLM pipeline: ticket → triage → dispatch → Discord DM
+# ---------------------------------------------------------------------------
+
+class TestTriageDispatchMockedLLM:
+    """Triage → dispatch pipeline with mocked LLM, real Zammad + Discord.
+
+    Exercises the full pipeline mechanics (ticket CRUD, tagging, triage note
+    extraction, notification routing, Agent_Actions logging) against real
+    Zammad and Discord without needing LLM API keys.
+
+    Requires discord_live + zammad_live (NOT llm_live).
+    """
+
+    pytestmark = [pytest.mark.discord_live, pytest.mark.zammad_live]
+
+    @pytest.fixture
+    def zammad_client(self):
+        import requests
+        from src.clients.zammad_client import ZammadClient
+        try:
+            client = ZammadClient()
+            client.get_self()
+            return client
+        except (ValueError, requests.exceptions.RequestException) as e:
+            pytest.skip(f"Zammad unavailable: {e}")
+
+    @pytest.fixture
+    def pipeline_env(self, zammad_client, discord_holder):
+        """ChatSystem + agents wired to real Zammad and Discord."""
+        from src.chat_system import ChatSystem
+        from src.database.memory_manager import MemoryManager
+        from src.engine import TextEngine
+        from src.interfaces.zammad_bot import ZammadBot
+        from src.agents.dispatch_agent import DispatchAgent
+        from config.global_config import TEST_MEMORY_DATABASE_FILE
+
+        db_path = f"{TEST_MEMORY_DATABASE_FILE}.mocked_pipeline.{random.randint(1000, 9999)}"
+        if os.path.exists(db_path):
+            os.remove(db_path)
+
+        memory_manager = MemoryManager(db_path=db_path)
+        memory_manager.create_schema()
+        text_engine = TextEngine()
+
+        with patch('src.chat_system.load_personas_from_file', return_value={}):
+            chat_system = ChatSystem(
+                memory_manager=memory_manager,
+                text_engine=text_engine,
+            )
+
+        notification_router = NotificationRouter()
+        notification_router.register("discord_dm", DiscordNotifier(discord_holder.client))
+        notification_router.register("zammad", ZammadNotifier(zammad_client))
+        notification_router.register("log", LogNotifier())
+
+        triage_bot = ZammadBot(chat_system, zammad_client)
+        dispatch_agent = DispatchAgent(
+            chat_system=chat_system,
+            zammad_client=zammad_client,
+            notification_router=notification_router,
+            agent_config={
+                "notification_defaults": {"channel": "discord_dm", "recipient": "adrich"},
+                "_recipients": {
+                    "adrich": {
+                        "discord_user_id": DISCORD_TEST_USER_ID,
+                        "discord_username": "adrich",
+                    }
+                },
+            },
+        )
+
+        yield {
+            "chat_system": chat_system,
+            "memory_manager": memory_manager,
+            "text_engine": text_engine,
+            "zammad_client": zammad_client,
+            "triage_bot": triage_bot,
+            "dispatch_agent": dispatch_agent,
+            "discord_holder": discord_holder,
+        }
+
+        memory_manager.close()
+        time.sleep(0.1)
+        if os.path.exists(db_path):
+            try:
+                os.remove(db_path)
+            except PermissionError:
+                pass
+
+    @pytest.fixture
+    def test_ticket(self, zammad_client):
+        """Create a realistic support ticket. Cleans up previous runs."""
+        old_tickets = zammad_client.search_tickets(
+            query=f'title:"{MOCKED_PIPELINE_TICKET_TITLE}"'
+        )
+        for t in old_tickets:
+            try:
+                zammad_client.delete_ticket(t["id"])
+            except Exception:
+                pass
+
+        ticket_data = zammad_client.create_ticket(
+            title=MOCKED_PIPELINE_TICKET_TITLE,
+            group="Users",
+            customer_id=1,
+            article_body=(
+                "Our main office printer (HP LaserJet 4250) has been offline since "
+                "this morning. The display shows 'PC LOAD LETTER' error. Multiple "
+                "users are affected and unable to print. Tray 2 has been reloaded "
+                "but the error persists. Machine ID: PRN-FLOOR3-001."
+            ),
+        )
+        yield {"id": ticket_data["id"], "number": ticket_data["number"]}
+
+    def test_triage_then_dispatch_sends_discord_dm(self, pipeline_env, test_ticket):
+        """Ticket → triage (mock LLM) → dispatch (mock LLM) → real Discord DM.
+
+        Verifies:
+        1. Triage: 'autotriaged' tag applied, internal note with context dump posted
+        2. Dispatch: 'ai_dispatched' tag applied, Agent_Actions logged, Discord DM sent
+        """
+        triage_bot = pipeline_env["triage_bot"]
+        dispatch_agent = pipeline_env["dispatch_agent"]
+        text_engine = pipeline_env["text_engine"]
+        zammad_client = pipeline_env["zammad_client"]
+        memory_manager = pipeline_env["memory_manager"]
+        discord_holder = pipeline_env["discord_holder"]
+        ticket_id = test_ticket["id"]
+
+        async def mock_generate(persona_config, context_object, tools=None):
+            """Deterministic LLM mock that dispatches on persona prompt content."""
+            sys_prompt = context_object.get('persona_prompt', '')
+
+            if 'keyword extraction' in sys_prompt:
+                return {"type": "text", "content": "printer offline LaserJet error"}, {}
+
+            if 'relevance classifier' in sys_prompt:
+                return {"type": "text", "content": "RELEVANT"}, {}
+
+            if 'summarization' in sys_prompt:
+                return {"type": "text", "content": "Printer offline with PC LOAD LETTER error."}, {}
+
+            if 'dispatch decision agent' in sys_prompt:
+                return {"type": "text", "content": json.dumps({
+                    "priority": "high",
+                    "notify_channel": "discord_dm",
+                    "summary": "Office printer offline affecting multiple users",
+                    "reasoning": "Hardware issue blocking multiple users warrants immediate notification",
+                })}, {}
+
+            # Triage analyst (default)
+            return {"type": "text", "content": (
+                "## Summary\n"
+                "Office printer HP LaserJet 4250 offline with 'PC LOAD LETTER' error.\n\n"
+                "## User History\nNo relevant history.\n\n"
+                "## Similar Tickets\nNone found.\n\n"
+                "## Recommended Action\n"
+                "Dispatch technician to inspect printer hardware."
+            )}, {}
+
+        # ── Stage 1: Triage ──────────────────────────────────────────
+        with patch.object(text_engine, 'generate_response', side_effect=mock_generate):
+            discord_holder.run_async(triage_bot._process_ticket(ticket_id))
+
+        tags = zammad_client.get_tags(ticket_id)
+        assert "autotriaged" in tags, f"Triage tag missing. Tags: {tags}"
+
+        articles = zammad_client.get_ticket_articles(ticket_id)
+        internal_notes = [a for a in articles if a.get("internal", False)]
+        assert len(internal_notes) >= 1, "No internal triage note found."
+        triage_bodies = [a.get("body", "") for a in internal_notes]
+        assert any("AI TRIAGE CONTEXT DUMP" in b for b in triage_bodies), (
+            f"Triage note missing context dump. Previews: {[b[:200] for b in triage_bodies]}"
+        )
+
+        # ── Stage 2: Dispatch ────────────────────────────────────────
+        with patch.object(text_engine, 'generate_response', side_effect=mock_generate):
+            discord_holder.run_async(dispatch_agent._dispatch_ticket(ticket_id))
+
+        tags = zammad_client.get_tags(ticket_id)
+        assert "ai_dispatched" in tags, f"Dispatch tag missing. Tags: {tags}"
+
+        # Verify Agent_Actions logged
+        actions = memory_manager.get_relevant_agent_actions(
+            agent_name="dispatch",
+            match_contexts=[("ticket", str(ticket_id))],
+            limit=10,
+        )
+        dispatch_actions = [
+            a for a in actions
+            if a["action_type"] == "dispatch"
+            and a.get("trigger_context") == f"ticket:{ticket_id}"
+        ]
+        assert len(dispatch_actions) >= 1, (
+            f"No dispatch action logged for ticket {ticket_id}. Actions: {actions}"
+        )
+
+        parent = dispatch_actions[0]
+        assert parent["outcome"] in ("success", "notification_failed"), (
+            f"Unexpected outcome: {parent['outcome']}. "
+            f"Payload: {parent.get('outcome_payload')}"
+        )
+
+        # Verify notification delivery details
+        if parent["outcome"] == "success":
+            payload = json.loads(parent["outcome_payload"])
+            assert payload.get("sent") is True, f"DM not sent: {payload}"
+            assert payload.get("channel") == "discord_dm", (
+                f"Expected discord_dm channel: {payload}"
+            )
+            decision = payload.get("decision", {})
+            assert decision.get("priority") == "high"
+            assert "printer" in decision.get("summary", "").lower()
