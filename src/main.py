@@ -15,7 +15,7 @@ from src.app_manager import AppManager
 from src.agents.agent_manager import AgentManager
 from src.agents.agent_service import AgentServiceIntegration
 from src.agents.dispatch_agent import DispatchAgent
-from src.interfaces.zammad_bot import ZammadBot
+from src.agents.zammad_bot import ZammadBot
 from src.clients.notification import NotificationRouter, DiscordNotifier, ZammadNotifier
 
 from src.interfaces.discord_bot import create_discord_bot

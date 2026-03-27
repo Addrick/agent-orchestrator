@@ -14,30 +14,27 @@ from src.utils.save_utils import load_system_personas_from_file
 logger = logging.getLogger(__name__)
 
 
-class AgentLoop(ABC):
+class Agent(ABC):
     """
-    Base class for self-polling agent loops with lifecycle management.
-
-    Self-managing agent with an internal async polling loop.
-    Designed to be managed by AgentManager.
+    Base class for all agents.
 
     Provides:
-    - Async polling loop with graceful shutdown
+    - Schedule-driven async execution loop with graceful shutdown
     - System persona injection into ChatSystem
     - Common LLM context builder with action history injection
     - Step-level action logging
     - Observable status properties for external monitoring
 
-    Subclasses must implement `_poll()` and may override `_on_start()`
+    Subclasses must implement `deploy()` and may override `_on_start()`
     for one-time setup (e.g. verifying external service identity).
 
     Subclasses should set `agent_name` and `action_history_limit` to
     enable action history injection into LLM prompts.
     """
 
-    poll_interval: float = 60
     agent_name: str = ""
     action_history_limit: int = 0  # 0 = disabled
+    schedule: Dict[str, Any] = {}  # e.g. {"interval": 30}
 
     def __init__(self, chat_system: ChatSystem, inject_personas: bool = True) -> None:
         self.chat_system = chat_system
@@ -47,8 +44,8 @@ class AgentLoop(ABC):
 
         # Observable status properties — read by AgentManager or any monitor
         self.started_at: Optional[datetime] = None
-        self.last_poll_time: Optional[datetime] = None
-        self.poll_count: int = 0
+        self.last_deploy_time: Optional[datetime] = None
+        self.deploy_count: int = 0
         self.error_count: int = 0
         self.consecutive_errors: int = 0
         self.last_error: Optional[str] = None
@@ -70,41 +67,52 @@ class AgentLoop(ABC):
         return self.started_at is not None and not self._shutdown_event.is_set()
 
     async def start(self) -> None:
-        """Run the polling loop until stop() is called."""
+        """Run the agent loop until stop() is called."""
         logger.info(f"{self.__class__.__name__} started.")
         self.started_at = datetime.now(timezone.utc)
         await self._on_start()
 
         while not self._shutdown_event.is_set():
             try:
-                await self._poll()
-                self.poll_count += 1
-                self.last_poll_time = datetime.now(timezone.utc)
+                await self.deploy()
+                self.deploy_count += 1
+                self.last_deploy_time = datetime.now(timezone.utc)
                 self.consecutive_errors = 0
             except Exception as e:
                 self.error_count += 1
                 self.consecutive_errors += 1
                 self.last_error = str(e)
-                self.last_poll_time = datetime.now(timezone.utc)
-                logger.error(f"Error in {self.__class__.__name__} polling loop: {e}", exc_info=True)
+                self.last_deploy_time = datetime.now(timezone.utc)
+                logger.error(f"Error in {self.__class__.__name__} deploy: {e}", exc_info=True)
 
-            try:
-                await asyncio.wait_for(self._shutdown_event.wait(), timeout=self.poll_interval)
-            except asyncio.TimeoutError:
-                continue
+            await self._wait_for_next_run()
 
     def stop(self) -> None:
-        """Signal the agent to stop after the current poll cycle."""
+        """Signal the agent to stop after the current deploy cycle."""
         self._shutdown_event.set()
 
     async def _on_start(self) -> None:
-        """Hook for subclass-specific startup work. Called once before the first poll."""
+        """Hook for subclass-specific startup work. Called once before the first deploy."""
         pass
 
     @abstractmethod
-    async def _poll(self) -> None:
-        """Called each polling cycle. Subclasses implement their work here."""
+    async def deploy(self) -> None:
+        """Execute one cycle of the agent's work. Subclasses implement this."""
         ...
+
+    async def _wait_for_next_run(self) -> None:
+        """Sleep until the next scheduled run, respecting shutdown.
+
+        Currently supports:
+        - {"interval": <seconds>} — fixed interval between runs
+
+        Future: {"daily_at": "09:00"}, {"weekly_at": "monday 09:00"}, etc.
+        """
+        interval = self.schedule.get("interval", 60)
+        try:
+            await asyncio.wait_for(self._shutdown_event.wait(), timeout=float(interval))
+        except asyncio.TimeoutError:
+            pass
 
     # --- Step Logging ---
 
