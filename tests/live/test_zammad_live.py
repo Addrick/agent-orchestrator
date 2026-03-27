@@ -8,7 +8,7 @@ import asyncio
 import time
 from unittest.mock import MagicMock, patch
 from src.clients.zammad_client import ZammadClient
-from src.interfaces.zammad_bot import ZammadBot
+from src.agents.zammad_bot import ZammadBot
 from src.chat_system import ChatSystem
 from src.engine import TextEngine
 from config.global_config import (

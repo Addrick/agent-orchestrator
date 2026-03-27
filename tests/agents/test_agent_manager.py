@@ -7,60 +7,57 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 
 from src.agents.agent_manager import AgentManager, AgentRegistration, RunningAgent
-from src.agents.base import AgentLoop
+from src.agents.base import Agent
 
 
-class StubAgent(AgentLoop):
+class StubAgent(Agent):
     """Minimal agent for testing lifecycle management."""
     agent_name = "stub"
-    poll_interval = 0.05
+    schedule = {"interval": 0.05}
 
     def __init__(self, chat_system, inject_personas=False):
         super().__init__(chat_system, inject_personas=inject_personas)
 
-    async def _poll(self):
+    async def deploy(self):
         pass
 
 
-class FailingAgent(AgentLoop):
+class FailingAgent(Agent):
     """Agent that raises on every poll — tests error tracking."""
     agent_name = "failing"
-    poll_interval = 0.05
+    schedule = {"interval": 0.05}
 
     def __init__(self, chat_system, inject_personas=False):
         super().__init__(chat_system, inject_personas=inject_personas)
 
-    async def _poll(self):
+    async def deploy(self):
         raise RuntimeError("Simulated failure")
 
 
-class DependencyAgent(AgentLoop):
+class DependencyAgent(Agent):
     """Agent that requires zammad_client and notification_router."""
     agent_name = "dep"
-    poll_interval = 0.05
+    schedule = {"interval": 0.05}
 
     def __init__(self, chat_system, zammad_client, notification_router, inject_personas=False):
         super().__init__(chat_system, inject_personas=inject_personas)
         self.zammad_client = zammad_client
         self.notification_router = notification_router
 
-    async def _poll(self):
+    async def deploy(self):
         pass
 
 
-class ConfigAgent(AgentLoop):
+class ConfigAgent(Agent):
     """Agent that accepts agent_config for testing config injection."""
     agent_name = "configurable"
-    poll_interval = 0.05
+    schedule = {"interval": 0.05}
 
     def __init__(self, chat_system, agent_config=None, inject_personas=False):
         super().__init__(chat_system, inject_personas=inject_personas)
         self.agent_config = agent_config
 
-    async def _poll(self):
-        pass
-
-    async def _poll(self):
+    async def deploy(self):
         pass
 
 
@@ -80,11 +77,11 @@ def tmp_config(tmp_path):
     config = {
         "agents": {
             "stub": {
-                "poll_interval": 120,
+                "schedule": {"interval": 120},
                 "auto_start": False,
             },
             "auto_agent": {
-                "poll_interval": 60,
+                "schedule": {"interval": 60},
                 "auto_start": True,
             },
         },
@@ -137,7 +134,7 @@ class TestRegistration:
         assert "stub" in manager.get_registered()
 
     def test_register_with_default_config(self, manager):
-        manager.register("stub", StubAgent, default_config={"poll_interval": 30})
+        manager.register("stub", StubAgent, default_config={"schedule": {"interval": 30}})
         assert "stub" in manager.get_registered()
 
     def test_get_registered_empty(self, manager):
@@ -205,22 +202,22 @@ class TestStartStop:
 class TestConfigMerging:
     @pytest.mark.asyncio
     async def test_file_config_applied_to_instance(self, manager):
-        """Config from agents.json should set poll_interval on the instance."""
+        """Config from agents.json should set schedule on the instance."""
         manager.register("stub", StubAgent)
         await manager.start_agent("stub")
 
         instance = manager._running["stub"].instance
-        assert instance.poll_interval == 120  # from tmp_config
+        assert instance.schedule == {"interval": 120}  # from tmp_config
 
         await manager.stop_agent("stub")
 
     @pytest.mark.asyncio
     async def test_runtime_override_beats_file_config(self, manager):
         manager.register("stub", StubAgent)
-        await manager.start_agent("stub", config_overrides={"poll_interval": 999})
+        await manager.start_agent("stub", config_overrides={"schedule": {"interval": 999}})
 
         instance = manager._running["stub"].instance
-        assert instance.poll_interval == 999
+        assert instance.schedule == {"interval": 999}
 
         await manager.stop_agent("stub")
 
@@ -305,7 +302,7 @@ class TestDependencyInjection:
         config = {
             "agents": {
                 "configurable": {
-                    "poll_interval": 60,
+                    "schedule": {"interval": 60},
                     "notification_defaults": {"channel": "discord_dm", "recipient": "adrich"},
                 }
             },
@@ -356,7 +353,7 @@ class TestGetStatus:
 
         assert agent_status["running"] is True
         assert agent_status["started_at"] is not None
-        assert agent_status["poll_count"] >= 1
+        assert agent_status["deploy_count"] >= 1
         assert agent_status["error_count"] == 0
 
         await manager.stop_agent("stub")
@@ -457,15 +454,15 @@ class TestNotificationRouterProperty:
         assert mgr.notification_router is new_router
 
 
-class BlockingAgent(AgentLoop):
-    """Agent whose _poll blocks forever, ignoring the shutdown event."""
+class BlockingAgent(Agent):
+    """Agent whose deploy blocks forever, ignoring the shutdown event."""
     agent_name = "blocking"
-    poll_interval = 0.05
+    schedule = {"interval": 0.05}
 
     def __init__(self, chat_system, inject_personas=False):
         super().__init__(chat_system, inject_personas=inject_personas)
 
-    async def _poll(self):
+    async def deploy(self):
         # This blocks forever and cannot be interrupted by stop()
         await asyncio.Event().wait()
 
@@ -487,10 +484,10 @@ class TestStopTimeout:
         running = mgr._running["blocking"]
         task = running.task
 
-        # Wait for agent to enter _poll (which blocks forever)
+        # Wait for agent to enter deploy (which blocks forever)
         await asyncio.sleep(0.1)
 
-        # Signal stop — but _poll is stuck in Event().wait(), so
+        # Signal stop — but deploy is stuck in Event().wait(), so
         # the task won't finish within the timeout
         running.instance.stop()
 
@@ -509,15 +506,15 @@ class TestStopTimeout:
         assert task.cancelled()
 
 
-class CrashingAgent(AgentLoop):
-    """Agent that crashes during start (not during _poll)."""
+class CrashingAgent(Agent):
+    """Agent that crashes during start (not during deploy)."""
     agent_name = "crashing"
-    poll_interval = 0.05
+    schedule = {"interval": 0.05}
 
     def __init__(self, chat_system, inject_personas=False):
         super().__init__(chat_system, inject_personas=inject_personas)
 
-    async def _poll(self):
+    async def deploy(self):
         pass
 
     async def _on_start(self):
@@ -587,17 +584,17 @@ class TestShutdownErrorHandling:
         assert call_count == 2
 
 
-class FailStartAgent(AgentLoop):
+class FailStartAgent(Agent):
     """Agent that requires zammad_client — will fail to start when not provided."""
     agent_name = "fail_start"
-    poll_interval = 0.05
+    schedule = {"interval": 0.05}
 
     def __init__(self, chat_system, zammad_client=None, inject_personas=False):
         super().__init__(chat_system, inject_personas=inject_personas)
         if zammad_client is None:
             raise ValueError("zammad_client is required")
 
-    async def _poll(self):
+    async def deploy(self):
         pass
 
 

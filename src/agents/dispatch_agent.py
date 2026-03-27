@@ -6,12 +6,11 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from config.global_config import (
-    DISPATCH_POLL_INTERVAL,
     DISPATCH_TRIAGE_TAG,
     DISPATCH_DISPATCHED_TAG,
     DISPATCH_PERSONA_NAME,
 )
-from src.agents.base import AgentLoop
+from src.agents.base import Agent
 from src.chat_system import ChatSystem
 from src.clients.notification import NotificationRouter
 from src.clients.zammad_client import ZammadClient
@@ -19,9 +18,9 @@ from src.clients.zammad_client import ZammadClient
 logger = logging.getLogger(__name__)
 
 
-class DispatchAgent(AgentLoop):
+class DispatchAgent(Agent):
     """
-    Polls for triaged tickets and dispatches notifications based on LLM decisions.
+    Dispatches notifications for triaged tickets based on LLM decisions.
 
     Pipeline (per ticket):
       1. [Hardcoded] Fetch ticket + triage note
@@ -31,7 +30,6 @@ class DispatchAgent(AgentLoop):
       5. [Hardcoded] Log action to Agent_Actions table
     """
 
-    poll_interval: float = DISPATCH_POLL_INTERVAL
     agent_name: str = "dispatch"
 
     def __init__(
@@ -46,7 +44,7 @@ class DispatchAgent(AgentLoop):
         self.notification_router = notification_router
         self.agent_config = agent_config or {}
 
-    async def _poll(self) -> None:
+    async def deploy(self) -> None:
         """Find triaged-but-not-dispatched tickets and process each."""
         query = f"tags:{DISPATCH_TRIAGE_TAG} AND NOT tags:{DISPATCH_DISPATCHED_TAG} AND state.name:new"
         try:
