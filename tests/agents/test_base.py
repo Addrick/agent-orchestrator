@@ -4,18 +4,18 @@ import asyncio
 import pytest
 from unittest.mock import MagicMock, patch
 
-from src.agents.base import AgentLoop
+from src.agents.base import Agent
 from src.persona import Persona
 
 
-class ConcreteAgent(AgentLoop):
-    """Minimal concrete subclass for testing the abstract AgentLoop."""
+class ConcreteAgent(Agent):
+    """Minimal concrete subclass for testing the abstract Agent."""
     agent_name = "test_agent"
 
     def __init__(self, chat_system, inject_personas=True):
         super().__init__(chat_system, inject_personas)
 
-    async def _poll(self):
+    async def deploy(self):
         pass
 
 
@@ -28,7 +28,7 @@ def mock_chat_system():
     return cs
 
 
-class TestAgentLoopInit:
+class TestAgentInit:
     @patch('src.agents.base.load_system_personas_from_file')
     def test_init_injects_personas(self, mock_load, mock_chat_system):
         mock_load.return_value = {"triage_analyst": MagicMock()}
@@ -51,7 +51,7 @@ class TestAgentLoopInit:
             mock_logger.warning.assert_called_once()
 
 
-class TestAgentLoopLifecycle:
+class TestAgentLifecycle:
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
     def test_is_running_default_false(self, mock_load, mock_chat_system):
         agent = ConcreteAgent(mock_chat_system)
@@ -73,8 +73,8 @@ class TestAgentLoopLifecycle:
     def test_initial_status_properties(self, mock_load, mock_chat_system):
         agent = ConcreteAgent(mock_chat_system)
         assert agent.started_at is None
-        assert agent.last_poll_time is None
-        assert agent.poll_count == 0
+        assert agent.last_deploy_time is None
+        assert agent.deploy_count == 0
         assert agent.error_count == 0
         assert agent.consecutive_errors == 0
         assert agent.last_error is None

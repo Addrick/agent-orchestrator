@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Type
 
-from src.agents.base import AgentLoop
+from src.agents.base import Agent
 
 logger = logging.getLogger(__name__)
 
@@ -19,14 +19,14 @@ _DEFAULT_CONFIG_PATH = Path(__file__).parent.parent.parent / "config" / "agents.
 @dataclass
 class AgentRegistration:
     """Blueprint for an agent that can be instantiated."""
-    agent_class: Type[AgentLoop]
+    agent_class: Type[Agent]
     default_config: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class RunningAgent:
     """Tracks a live agent instance and its asyncio task."""
-    instance: AgentLoop
+    instance: Agent
     task: asyncio.Task[None]
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -35,10 +35,10 @@ class AgentManager:
     """
     Agent lifecycle manager — registry, instantiation, and status tracking.
 
-    Manages the full lifecycle of AgentLoop subclasses:
+    Manages the full lifecycle of Agent subclasses:
     - Registration: associate agent names with classes and default configs
     - Instantiation: create agents on demand with config overrides
-    - Status: query running state, poll counts, error rates
+    - Status: query running state, deploy counts, error rates
     - Shutdown: graceful stop of all running agents
 
     Designed to be held by ChatSystem as a thin reference and
@@ -94,14 +94,14 @@ class AgentManager:
     def register(
         self,
         name: str,
-        agent_class: Type[AgentLoop],
+        agent_class: Type[Agent],
         default_config: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Register an agent class so it can be started by name.
 
         Args:
             name: Unique agent identifier (e.g. "dispatch").
-            agent_class: The AgentLoop subclass.
+            agent_class: The Agent subclass.
             default_config: Default kwargs merged with file config and start-time overrides.
         """
         self._registry[name] = AgentRegistration(
@@ -152,8 +152,11 @@ class AgentManager:
         instance = self._build_agent_instance(name, registration.agent_class, merged)
 
         # Apply runtime config to instance attributes
-        if "poll_interval" in merged:
-            instance.poll_interval = float(merged["poll_interval"])
+        if "schedule" in merged:
+            instance.schedule = merged["schedule"]
+        elif "poll_interval" in merged:
+            # Backward compat: convert old format
+            instance.schedule = {"interval": float(merged["poll_interval"])}
         if "action_history_limit" in merged:
             instance.action_history_limit = int(merged["action_history_limit"])
 
@@ -168,8 +171,8 @@ class AgentManager:
         return f"Agent '{name}' started successfully."
 
     def _build_agent_instance(
-        self, name: str, agent_class: Type[AgentLoop], config: Dict[str, Any],
-    ) -> AgentLoop:
+        self, name: str, agent_class: Type[Agent], config: Dict[str, Any],
+    ) -> Agent:
         """Construct an agent instance, injecting dependencies based on its __init__ signature.
 
         This uses convention-based injection: if the agent's __init__ accepts
@@ -277,11 +280,11 @@ class AgentManager:
             status["started_at"] = (
                 instance.started_at.isoformat() if instance.started_at else None
             )
-            status["last_poll_time"] = (
-                instance.last_poll_time.isoformat() if instance.last_poll_time else None
+            status["last_deploy_time"] = (
+                instance.last_deploy_time.isoformat() if instance.last_deploy_time else None
             )
-            status["poll_count"] = instance.poll_count
-            status["poll_interval"] = instance.poll_interval
+            status["deploy_count"] = instance.deploy_count
+            status["schedule"] = instance.schedule
             status["error_count"] = instance.error_count
             status["consecutive_errors"] = instance.consecutive_errors
             status["last_error"] = instance.last_error

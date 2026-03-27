@@ -389,7 +389,7 @@ class TestFullTriageDispatchPipeline:
         from src.chat_system import ChatSystem
         from src.database.memory_manager import MemoryManager
         from src.engine import TextEngine
-        from src.interfaces.zammad_bot import ZammadBot
+        from src.agents.zammad_bot import ZammadBot
         from src.agents.dispatch_agent import DispatchAgent
         from config.global_config import TEST_MEMORY_DATABASE_FILE
 
@@ -651,7 +651,7 @@ class TestTriageDispatchMockedLLM:
         from src.chat_system import ChatSystem
         from src.database.memory_manager import MemoryManager
         from src.engine import TextEngine
-        from src.interfaces.zammad_bot import ZammadBot
+        from src.agents.zammad_bot import ZammadBot
         from src.agents.dispatch_agent import DispatchAgent
         from config.global_config import TEST_MEMORY_DATABASE_FILE
 

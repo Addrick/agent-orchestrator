@@ -2,7 +2,7 @@
     "agents": {
         "dispatch": {
             "persona": "dispatch_analyst",
-            "poll_interval": 300,
+            "schedule": {"interval": 300},
             "action_history_limit": 10,
             "auto_start": false,
             "notification_defaults": {
@@ -13,7 +13,7 @@
         },
         "zammad_bot": {
             "persona": "triage_analyst",
-            "poll_interval": 10,
+            "schedule": {"interval": 10},
             "action_history_limit": 0,
             "auto_start": false,
             "description": "Polls Zammad for new tickets and runs the multi-stage AI triage pipeline."
@@ -31,10 +31,10 @@
     "agent_requirements": {
         "_doc": "Template and checklist for defining new agents. Not consumed by code.",
         "required": {
-            "class": "Python class name — must extend AgentLoop",
+            "class": "Python class name — must extend Agent",
             "module": "Import path for the agent module (e.g. src.agents.dispatch_agent)",
             "persona": "Name of system persona in system_personas.json",
-            "poll_interval": "Seconds between poll cycles (integer)"
+            "schedule": "Schedule config object, e.g. {\"interval\": 300} for seconds between deploy cycles"
         },
         "optional": {
             "action_history_limit": "Recent actions injected into LLM context (default: 0 = disabled)",
@@ -43,7 +43,7 @@
             "service_bindings": "Required services the agent depends on (e.g. ['zammad'])"
         },
         "checklist": [
-            "1. Create AgentLoop subclass with _poll() implementation",
+            "1. Create Agent subclass with deploy() implementation",
             "2. Create or assign system persona in system_personas.json",
             "3. Register agent class in main.py via agent_manager.register()",
             "4. Define notification routing if agent sends alerts",
