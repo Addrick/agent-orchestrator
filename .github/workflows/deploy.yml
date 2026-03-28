@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.14"]
+        python-version:["3.14"]
 
     steps:
       - uses: actions/checkout@v4
@@ -35,15 +35,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
-
       - name: Lint with flake8
         run: |
           # Stop the build if there are Python syntax errors, undefined names, or bad imports
           flake8 src/ --count --select=E9,F63,F7,F82 --show-source --statistics
           # Treat all other issues as warnings
           flake8 src/ --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
-
-
       - name: Type check with mypy
         run: mypy src/ --config-file mypy.ini
 
@@ -94,16 +91,24 @@ jobs:
             # 1. Log into the registry on the server
             # We pass the PAT specifically to ensure the server has pull rights
             echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-
             # 2. Pull the new image
             docker pull ${{ env.IMAGE_NAME }}:latest
-
             # 3. Stop and remove the old container
             # '|| true' prevents the script from crashing if the container is already stopped
             docker stop chatbot || true
             docker rm chatbot || true
+            
+            # --- SECURITY ADDITIONS ---
+            # 4a. Lock down the .env file so only the 'ubuntu' user can read it
+            chmod 600 .env || true
+            
+            # 4b. Ensure the data directory exists and is owned by UID 1000 
+            # (Matches the non-root user we configure in the Dockerfile)
+            mkdir -p /home/ubuntu/data
+            sudo chown -R 1000:1000 /home/ubuntu/data
+            # --------------------------
 
-            # 4. Run the new container
+            # 5. Run the new container
             # We reuse the .env file already sitting on the server
             docker run -d \
               --name chatbot \
@@ -112,5 +117,6 @@ jobs:
               -v /home/ubuntu/data:/app/data \
               ${{ env.IMAGE_NAME }}:latest
             
-            # 5. Cleanup unused images to save disk space on the micro instance
+            # 6. Cleanup unused images to save disk space on the micro instance
             docker image prune -f
+            
