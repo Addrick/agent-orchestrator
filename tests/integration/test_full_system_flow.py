@@ -124,7 +124,7 @@ async def test_confirm_mode_auto_executes_read_only_tools(mocked_chat_system):
 
     with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
                       side_effect=[tool_call, final_text]):
-        response, response_type, _, _ = await chat_system.generate_response(
+        response, response_type, _ = await chat_system.generate_response(
             "test_persona", "user1", "channel", "Search for open tickets"
         )
         assert response_type == ResponseType.LLM_GENERATION
