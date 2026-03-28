@@ -208,7 +208,8 @@ class DispatchAgent(Agent):
         """Extract JSON from LLM response, handling markdown fences."""
         # Try bare JSON first
         try:
-            return json.loads(content)
+            result: Dict[str, Any] = json.loads(content)
+            return result
         except json.JSONDecodeError:
             pass
 
@@ -216,6 +217,7 @@ class DispatchAgent(Agent):
         import re
         match = re.search(r'```(?:json)?\s*\n?(.*?)\n?\s*```', content, re.DOTALL)
         if match:
-            return json.loads(match.group(1).strip())
+            result = json.loads(match.group(1).strip())
+            return result
 
         raise ValueError(f"No valid JSON found in response: {content[:200]}")
