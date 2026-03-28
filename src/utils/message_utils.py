@@ -93,11 +93,53 @@ def break_and_recombine_string(input_string: str, substring_length: int, bumper_
     return combined_string
 
 
+def _force_split_token(token: str, char_limit: int) -> List[str]:
+    """Split an oversized token into pieces that each fit within char_limit.
+
+    For fenced code blocks, splits by lines and re-wraps each piece with
+    the original fence markers.  For everything else, does a hard character split.
+    """
+    code_match = re.match(r'^```([^\n]*)\n([\s\S]*)```$', token)
+    if code_match:
+        lang = code_match.group(1)
+        content = code_match.group(2)
+        if content.endswith('\n'):
+            content = content[:-1]
+        fence_open = f"```{lang}\n"
+        fence_close = "\n```"
+        overhead = len(fence_open) + len(fence_close)
+        inner_limit = max(char_limit - overhead, 1)
+
+        lines = content.split('\n')
+        pieces: List[str] = []
+        current = ""
+        for line in lines:
+            candidate = (current + "\n" + line) if current else line
+            if len(candidate) <= inner_limit:
+                current = candidate
+            else:
+                if current:
+                    pieces.append(fence_open + current + fence_close)
+                if len(line) > inner_limit:
+                    for i in range(0, len(line), inner_limit):
+                        pieces.append(fence_open + line[i:i + inner_limit] + fence_close)
+                    current = ""
+                else:
+                    current = line
+        if current:
+            pieces.append(fence_open + current + fence_close)
+        return pieces if pieces else [token]
+
+    # Non-code-block: hard character split
+    return [token[i:i + char_limit] for i in range(0, len(token), char_limit)]
+
+
 def split_string_by_limit(input_string: str, char_limit: int) -> List[str]:
     """
     Splits a string into chunks under a character limit.
     Respects markdown syntax: won't split inside inline code, code blocks,
-    markdown links, or citation blocks.
+    markdown links, or citation blocks.  Oversized tokens (e.g. large code
+    blocks) are force-split so every returned chunk fits within the limit.
     """
     if not input_string:
         return [""]
@@ -117,18 +159,29 @@ def split_string_by_limit(input_string: str, char_limit: int) -> List[str]:
     chunks: List[str] = []
     current_chunk: str = ""
 
+    def _assign_token(token: str) -> str:
+        """Handle assigning a new token as current_chunk, force-splitting if oversized."""
+        if len(token) > char_limit:
+            pieces = _force_split_token(token, char_limit)
+            chunks.extend(pieces[:-1])
+            return pieces[-1]
+        return token
+
     for token in tokens:
         if not current_chunk:
             if token in (" ", "\n"):
                 continue
-            current_chunk = token
+            current_chunk = _assign_token(token)
         elif len(current_chunk) + len(token) <= char_limit:
             current_chunk += token
         else:
             stripped = current_chunk.rstrip()
             if stripped:
                 chunks.append(stripped)
-            current_chunk = "" if token in (" ", "\n") else token
+            if token in (" ", "\n"):
+                current_chunk = ""
+            else:
+                current_chunk = _assign_token(token)
 
     if current_chunk:
         stripped = current_chunk.rstrip()
