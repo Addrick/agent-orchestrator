@@ -2,7 +2,7 @@
 #
 # Live tests for the agent notification subsystem.
 #
-# discord_live: Requires DISCORD_API_KEY — boots a real discord.Client and sends DMs.
+# discord_live: Requires DISCORD_API_KEY — boots a real discord.Client and sends to a debug channel.
 # zammad_live: Requires ZAMMAD_URL + ZAMMAD_API_KEY — posts real Zammad internal notes.
 # llm_live: Requires LLM API keys — makes real LLM calls for triage/dispatch.
 #
@@ -21,14 +21,17 @@ import pytest
 from unittest.mock import patch
 
 from src.clients.notification import (
-    DiscordNotifier,
+    DiscordChannelNotifier,
     LogNotifier,
     NotificationRouter,
     ZammadNotifier,
 )
 
-# Target Discord user for DM tests — the repo owner (adrich)
+# Target Discord user for real alerts — the repo owner (adrich)
 DISCORD_TEST_USER_ID = "321783731146850305"
+
+# Debug channel for live test messages (avoids DM spam during testing)
+DISCORD_TEST_CHANNEL_ID = "1222358674127982622"
 
 # Timeout for the Discord client to connect and become ready
 DISCORD_READY_TIMEOUT = 30
@@ -135,33 +138,33 @@ def discord_holder():
 # ---------------------------------------------------------------------------
 
 class TestDiscordNotifierLive:
-    """Send real Discord DMs via the DiscordNotifier."""
+    """Send real Discord messages via the DiscordChannelNotifier."""
 
     pytestmark = pytest.mark.discord_live
 
-    def test_send_dm_to_user(self, discord_holder):
-        """DiscordNotifier.send() delivers a DM and returns True."""
-        notifier = DiscordNotifier(discord_holder.client)
+    def test_send_to_channel(self, discord_holder):
+        """DiscordChannelNotifier.send() delivers to a channel and returns True."""
+        notifier = DiscordChannelNotifier(discord_holder.client)
 
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
         result = discord_holder.run_async(notifier.send(
-            recipient=DISCORD_TEST_USER_ID,
+            recipient=DISCORD_TEST_CHANNEL_ID,
             subject="Agent Live Test",
             body=(
-                f"Automated test from pytest — verifying Discord DM delivery.\n"
+                f"Automated test from pytest — verifying Discord channel delivery.\n"
                 f"Timestamp: {timestamp}\n"
                 f"If you see this, the notification pipeline is working."
             ),
         ))
 
-        assert result is True, "DiscordNotifier.send() returned False — DM delivery failed"
+        assert result is True, "DiscordChannelNotifier.send() returned False — delivery failed"
 
-    def test_send_dm_invalid_user_returns_false(self, discord_holder):
-        """Sending to a nonexistent user ID returns False (not an exception)."""
-        notifier = DiscordNotifier(discord_holder.client)
+    def test_send_invalid_channel_returns_false(self, discord_holder):
+        """Sending to a nonexistent channel ID returns False (not an exception)."""
+        notifier = DiscordChannelNotifier(discord_holder.client)
 
         result = discord_holder.run_async(notifier.send(
-            recipient="000000000000000000",  # Invalid user ID
+            recipient="000000000000000000",  # Invalid channel ID
             subject="Should Fail",
             body="This message should not be delivered.",
         ))
@@ -174,18 +177,18 @@ class TestNotificationRouterLive:
 
     pytestmark = pytest.mark.discord_live
 
-    def test_router_discord_dm_channel(self, discord_holder):
-        """NotificationRouter routes 'discord_dm' to DiscordNotifier and delivers."""
+    def test_router_discord_channel(self, discord_holder):
+        """NotificationRouter routes 'discord_channel' to DiscordChannelNotifier and delivers."""
         router = NotificationRouter()
-        router.register("discord_dm", DiscordNotifier(discord_holder.client))
+        router.register("discord_channel", DiscordChannelNotifier(discord_holder.client))
 
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
         result = discord_holder.run_async(router.send(
-            channel="discord_dm",
-            recipient=DISCORD_TEST_USER_ID,
+            channel="discord_channel",
+            recipient=DISCORD_TEST_CHANNEL_ID,
             subject="Router Live Test",
             body=(
-                f"Routed via NotificationRouter → discord_dm channel.\n"
+                f"Routed via NotificationRouter → discord_channel.\n"
                 f"Timestamp: {timestamp}"
             ),
         ))
@@ -195,7 +198,7 @@ class TestNotificationRouterLive:
     def test_router_unknown_channel_falls_back_to_log(self, discord_holder):
         """An unregistered channel name falls back to LogNotifier (returns True)."""
         router = NotificationRouter()
-        router.register("discord_dm", DiscordNotifier(discord_holder.client))
+        router.register("discord_channel", DiscordChannelNotifier(discord_holder.client))
 
         result = discord_holder.run_async(router.send(
             channel="carrier_pigeon",
@@ -321,9 +324,9 @@ class TestMultiChannelRouterLive:
         yield ticket_data["id"]
 
     def test_multi_channel_dispatch(self, discord_holder, zammad_client, test_ticket):
-        """Router sends to both discord_dm and zammad channels in sequence."""
+        """Router sends to both discord_channel and zammad channels in sequence."""
         router = NotificationRouter()
-        router.register("discord_dm", DiscordNotifier(discord_holder.client))
+        router.register("discord_channel", DiscordChannelNotifier(discord_holder.client))
         router.register("zammad", ZammadNotifier(zammad_client))
         router.register("log", LogNotifier())
 
@@ -331,8 +334,8 @@ class TestMultiChannelRouterLive:
 
         # Send via Discord (runs on discord's event loop)
         discord_result = discord_holder.run_async(router.send(
-            channel="discord_dm",
-            recipient=DISCORD_TEST_USER_ID,
+            channel="discord_channel",
+            recipient=DISCORD_TEST_CHANNEL_ID,
             subject="Multi-Channel Test",
             body=f"Discord leg of multi-channel test.\nTimestamp: {timestamp}",
         ))
@@ -347,7 +350,7 @@ class TestMultiChannelRouterLive:
 
         assert discord_result is True, "Discord leg failed"
         assert zammad_result is True, "Zammad leg failed"
-        assert router.available_channels == ["discord_dm", "zammad", "log"]
+        assert router.available_channels == ["discord_channel", "zammad", "log"]
 
 
 # ---------------------------------------------------------------------------
@@ -407,7 +410,7 @@ class TestTriageDispatchMockedLLM:
             )
 
         notification_router = NotificationRouter()
-        notification_router.register("discord_dm", DiscordNotifier(discord_holder.client))
+        notification_router.register("discord_channel", DiscordChannelNotifier(discord_holder.client))
         notification_router.register("zammad", ZammadNotifier(zammad_client))
         notification_router.register("log", LogNotifier())
 
@@ -417,10 +420,11 @@ class TestTriageDispatchMockedLLM:
             zammad_client=zammad_client,
             notification_router=notification_router,
             agent_config={
-                "notification_defaults": {"channel": "discord_dm", "recipient": "adrich"},
+                "notification_defaults": {"channel": "discord_channel", "recipient": "adrich"},
                 "_recipients": {
                     "adrich": {
                         "discord_user_id": DISCORD_TEST_USER_ID,
+                        "discord_channel_id": DISCORD_TEST_CHANNEL_ID,
                         "discord_username": "adrich",
                     }
                 },
@@ -470,12 +474,12 @@ class TestTriageDispatchMockedLLM:
         )
         yield {"id": ticket_data["id"], "number": ticket_data["number"]}
 
-    def test_triage_then_dispatch_sends_discord_dm(self, pipeline_env, test_ticket):
-        """Ticket → triage (mock LLM) → dispatch (mock LLM) → real Discord DM.
+    def test_triage_then_dispatch_sends_discord_message(self, pipeline_env, test_ticket):
+        """Ticket → triage (mock LLM) → dispatch (mock LLM) → real Discord channel message.
 
         Verifies:
         1. Triage: 'autotriaged' tag applied, internal note with context dump posted
-        2. Dispatch: 'ai_dispatched' tag applied, Agent_Actions logged, Discord DM sent
+        2. Dispatch: 'ai_dispatched' tag applied, Agent_Actions logged, Discord message sent
         """
         triage_bot = pipeline_env["triage_bot"]
         dispatch_agent = pipeline_env["dispatch_agent"]
@@ -562,8 +566,8 @@ class TestTriageDispatchMockedLLM:
         if parent["outcome"] == "success":
             payload = json.loads(parent["outcome_payload"])
             assert payload.get("sent") is True, f"DM not sent: {payload}"
-            assert payload.get("channel") == "discord_dm", (
-                f"Expected discord_dm channel: {payload}"
+            assert payload.get("channel") == "discord_channel", (
+                f"Expected discord_channel channel: {payload}"
             )
             decision = payload.get("decision", {})
             assert decision.get("priority") == "high"
