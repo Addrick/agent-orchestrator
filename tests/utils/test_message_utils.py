@@ -157,3 +157,19 @@ def test_all_chunks_within_discord_limit():
     result = split_string_by_limit(text, limit)
     for i, chunk in enumerate(result):
         assert len(chunk) <= limit, f"Chunk {i} is {len(chunk)} chars, exceeds {limit}"
+
+
+def test_force_split_prefers_spaces_over_url():
+    """An oversized token with spaces should split at space boundaries,
+    keeping URLs intact rather than chopping through them."""
+    url = "https://example.com/very/long/path?query=value"
+    # Build a single oversized token (inline code with spaces)
+    inner = f"some text before {url} and some text after {url} end"
+    token = f"`{inner}`"
+    limit = 60
+    result = split_string_by_limit(token, limit)
+    for chunk in result:
+        assert len(chunk) <= limit
+        # The URL must not be split mid-string
+        if "https://" in chunk:
+            assert url in chunk, f"URL was chopped in chunk: {chunk!r}"
