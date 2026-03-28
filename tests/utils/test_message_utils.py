@@ -74,6 +74,17 @@ def test_split_preserves_citation_blocks():
     assert len(found) == 1, f"Citation block was split across chunks: {result}"
 
 
+def test_split_preserves_citation_with_whitespace_between_entries():
+    """Citations with newline+space between entries must stay as one token."""
+    url = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQG_long"
+    citation = f"[[1](<https://short.com>),\n [18](<{url}>)]"
+    text = f"Some text {citation} end."
+    limit = len(citation) + 20
+    result = split_string_by_limit(text, limit)
+    found = [chunk for chunk in result if url in chunk and "[[1]" in chunk]
+    assert len(found) == 1, f"Citation block was split across chunks: {result}"
+
+
 def test_split_preserves_markdown_links():
     """Tests that markdown links [text](<url>) are not split."""
     link = "[click here](<https://example.com/page>)"
