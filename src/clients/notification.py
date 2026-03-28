@@ -50,6 +50,24 @@ class DiscordNotifier(Notifier):
             return False
 
 
+class DiscordChannelNotifier(Notifier):
+    """Sends a message to a Discord text channel."""
+
+    def __init__(self, discord_client: Any) -> None:
+        self._client = discord_client
+
+    async def send(self, recipient: str, subject: str, body: str) -> bool:
+        try:
+            channel = await self._client.fetch_channel(int(recipient))
+            message = f"**{subject}**\n{body}" if subject else body
+            await channel.send(message)
+            logger.info(f"Discord message sent to channel {recipient}.")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send Discord message to channel {recipient}: {e}")
+            return False
+
+
 class ZammadNotifier(Notifier):
     """Posts an internal note on a Zammad ticket."""
 
