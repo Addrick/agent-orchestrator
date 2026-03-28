@@ -80,6 +80,26 @@ class TestExtractTriageNote:
         assert result == "No content"
 
 
+class TestParseJsonResponse:
+    def test_bare_json(self):
+        result = DispatchAgent._parse_json_response('{"priority": "high"}')
+        assert result["priority"] == "high"
+
+    def test_markdown_fenced_json(self):
+        content = '```json\n{"priority": "high", "summary": "test"}\n```'
+        result = DispatchAgent._parse_json_response(content)
+        assert result["priority"] == "high"
+
+    def test_unfenced_markdown_block(self):
+        content = '```\n{"priority": "low"}\n```'
+        result = DispatchAgent._parse_json_response(content)
+        assert result["priority"] == "low"
+
+    def test_invalid_json_raises(self):
+        with pytest.raises(ValueError):
+            DispatchAgent._parse_json_response("not json at all")
+
+
 class TestGetDispatchDecision:
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
     @pytest.mark.asyncio
@@ -101,7 +121,6 @@ class TestGetDispatchDecision:
 
         decision_json = json.dumps({
             "priority": "high",
-            "notify_channel": "zammad",
             "summary": "Server is down",
             "reasoning": "Critical infrastructure"
         })
@@ -112,7 +131,7 @@ class TestGetDispatchDecision:
         result = await agent._get_dispatch_decision("Server Down", "Triage note content")
         assert result is not None
         assert result["priority"] == "high"
-        assert result["notify_channel"] == "zammad"
+        assert result["summary"] == "Server is down"
 
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
     @pytest.mark.asyncio
@@ -165,7 +184,6 @@ class TestDispatchTicket:
 
         decision = {
             "priority": "medium",
-            "notify_channel": "zammad",
             "summary": "Test issue summary",
             "reasoning": "Routine ticket"
         }
@@ -180,6 +198,32 @@ class TestDispatchTicket:
         # Verify outcome updated to success
         update_call = mock_chat_system.memory_manager.update_agent_action_outcome.call_args
         assert update_call[0][1] == "success"
+
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    @pytest.mark.asyncio
+    async def test_channel_from_config_not_decision(self, mock_load, mock_chat_system, mock_zammad_client, notification_router):
+        """Channel is determined by agent_config, not by the LLM decision."""
+        agent = DispatchAgent(
+            mock_chat_system, mock_zammad_client, notification_router,
+            agent_config={"notification_defaults": {"channel": "discord_dm", "recipient": "someone"}},
+        )
+
+        mock_zammad_client.get_ticket = MagicMock(
+            return_value={"id": 42, "title": "Test", "number": 10042}
+        )
+        mock_zammad_client.get_ticket_articles = MagicMock(
+            return_value=[{"body": "[ AI TRIAGE CONTEXT DUMP ]", "internal": True}]
+        )
+        mock_zammad_client.add_tag = MagicMock()
+
+        decision = {"priority": "high", "summary": "Outage", "reasoning": "Critical"}
+        agent._get_dispatch_decision = AsyncMock(return_value=decision)
+
+        await agent._dispatch_ticket(42)
+
+        update_call = mock_chat_system.memory_manager.update_agent_action_outcome.call_args
+        payload = json.loads(update_call[0][2])
+        assert payload["channel"] == "discord_dm"
 
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
     @pytest.mark.asyncio

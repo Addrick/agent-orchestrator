@@ -240,7 +240,7 @@ async def test_zammad_bot_adaptive_compression(zammad_client: ZammadClient, mana
         bot = ZammadBot(chat_system, zammad_client)
 
         with patch.object(text_engine, 'generate_response', side_effect=_mock_llm_generate):
-            with patch('src.interfaces.zammad_bot.TRIAGE_MAX_CONTEXT_CHARS', 1000):
+            with patch('src.agents.zammad_bot.TRIAGE_MAX_CONTEXT_CHARS', 1000):
                 await bot._process_ticket(new_ticket_id)
 
         articles = zammad_client.get_ticket_articles(new_ticket_id)
@@ -311,7 +311,7 @@ async def test_zammad_bot_impersonation_fallback(zammad_client: ZammadClient, ma
         bot = ZammadBot(chat_system, zammad_client)
 
         with patch.object(text_engine, 'generate_response', side_effect=_mock_llm_generate):
-            with patch("src.interfaces.zammad_bot.ZAMMAD_BOT_EMAIL", "nonexistent_ghost@example.com"):
+            with patch("src.agents.zammad_bot.ZAMMAD_BOT_EMAIL", "nonexistent_ghost@example.com"):
                 await bot._process_ticket(ticket_id)
 
         await wait_for_tag(zammad_client, ticket_id, ZAMMAD_TRIAGE_TAG)
