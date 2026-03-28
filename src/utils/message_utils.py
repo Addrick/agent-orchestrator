@@ -93,11 +93,27 @@ def break_and_recombine_string(input_string: str, substring_length: int, bumper_
     return combined_string
 
 
+def _split_at_boundaries(text: str, limit: int) -> List[str]:
+    """Split text preferring space boundaries, falling back to hard character split."""
+    pieces: List[str] = []
+    remaining = text
+    while len(remaining) > limit:
+        split_at = remaining.rfind(' ', 0, limit)
+        if split_at <= 0:
+            split_at = limit
+        pieces.append(remaining[:split_at])
+        remaining = remaining[split_at:].lstrip(' ')
+    if remaining:
+        pieces.append(remaining)
+    return pieces
+
+
 def _force_split_token(token: str, char_limit: int) -> List[str]:
     """Split an oversized token into pieces that each fit within char_limit.
 
     For fenced code blocks, splits by lines and re-wraps each piece with
-    the original fence markers.  For everything else, does a hard character split.
+    the original fence markers.  For everything else, splits at space
+    boundaries where possible, falling back to hard character split.
     """
     code_match = re.match(r'^```([^\n]*)\n([\s\S]*)```$', token)
     if code_match:
@@ -121,8 +137,8 @@ def _force_split_token(token: str, char_limit: int) -> List[str]:
                 if current:
                     pieces.append(fence_open + current + fence_close)
                 if len(line) > inner_limit:
-                    for i in range(0, len(line), inner_limit):
-                        pieces.append(fence_open + line[i:i + inner_limit] + fence_close)
+                    for sub in _split_at_boundaries(line, inner_limit):
+                        pieces.append(fence_open + sub + fence_close)
                     current = ""
                 else:
                     current = line
@@ -130,8 +146,7 @@ def _force_split_token(token: str, char_limit: int) -> List[str]:
             pieces.append(fence_open + current + fence_close)
         return pieces if pieces else [token]
 
-    # Non-code-block: hard character split
-    return [token[i:i + char_limit] for i in range(0, len(token), char_limit)]
+    return _split_at_boundaries(token, char_limit)
 
 
 def split_string_by_limit(input_string: str, char_limit: int) -> List[str]:
