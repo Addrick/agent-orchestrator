@@ -144,7 +144,9 @@ class DispatchAgent(Agent):
 
         if recipient_name and recipient_name in recipients:
             recipient_info = recipients[recipient_name]
-            if "discord" in channel and recipient_info.get("discord_user_id"):
+            if channel == "discord_channel" and recipient_info.get("discord_channel_id"):
+                return str(recipient_info["discord_channel_id"])
+            if channel == "discord_dm" and recipient_info.get("discord_user_id"):
                 return str(recipient_info["discord_user_id"])
             if "email" in channel and recipient_info.get("email"):
                 return str(recipient_info["email"])
