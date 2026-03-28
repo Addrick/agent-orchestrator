@@ -39,7 +39,6 @@ class PendingConfirmation:
     persona_name: str
     tools_for_llm: List[Dict[str, Any]]
     image_url: Optional[str]
-    service_data: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
 
 
@@ -56,7 +55,6 @@ class RequestContext:
     history_limit: Optional[int] = None
     user_display_name: Optional[str] = None
     # Populated during _prepare_request
-    service_data: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     conversation_history: List[Dict[str, Any]] = field(default_factory=list)
     tools_for_llm: List[Dict[str, Any]] = field(default_factory=list)
 
@@ -126,61 +124,16 @@ class ChatSystem:
                     final_history.append({'role': 'user', 'content': formatted_content})
         return final_history
 
-    def _get_tracking_id(self, service_data: Dict[str, Dict[str, Any]]) -> Optional[int]:
-        """Ask registered services for an external tracking ID (e.g. ticket ID)."""
-        for svc_name, svc_data in service_data.items():
-            service = self._services.get(svc_name)
-            if service:
-                tid = service.get_tracking_id(svc_data)
-                if tid is not None:
-                    return tid
-        return None
-
-    async def _resolve_service_contexts(self, ctx: RequestContext) -> None:
-        """Resolve context for each service the persona is bound to."""
-        for binding in ctx.persona.get_service_bindings():
-            service = self._services.get(binding)
-            if service:
-                ctx.service_data[binding] = await service.resolve_context(
-                    ctx.user_identifier, ctx.channel, ctx.message, ctx.user_display_name
-                )
-            else:
-                logger.debug(f"Persona '{ctx.persona_name}' has binding '{binding}' but no service is registered.")
-
-    async def _notify_services(
-            self,
-            service_data: Dict[str, Dict[str, Any]],
-            message: str
-    ) -> None:
-        """Notify all bound services about a message (e.g. mirror to ticket)."""
-        for svc_name, svc_data in service_data.items():
-            service = self._services.get(svc_name)
-            if service:
-                await service.on_message(svc_data, message)
-
     async def _execute_write_calls(
             self,
             write_calls: List[Dict[str, Any]],
-            conversation_history: List[Dict[str, Any]],
-            service_data: Dict[str, Dict[str, Any]]
+            conversation_history: List[Dict[str, Any]]
     ) -> None:
-        """Executes write tool calls, delegating arg preparation and result handling to services."""
+        """Execute write tool calls and append results to history."""
         for call_item in write_calls:
             tool_name: str = call_item.get("name", "")
             tool_args = call_item.get("arguments", {})
-
-            for svc_name, svc_data in service_data.items():
-                service = self._services.get(svc_name)
-                if service:
-                    tool_args = service.prepare_tool_args(tool_name, tool_args, svc_data)
-
             tool_result = await self.tool_manager.execute_tool(tool_name, **tool_args)
-
-            for svc_name, svc_data in service_data.items():
-                service = self._services.get(svc_name)
-                if service:
-                    service.on_tool_result(tool_name, tool_result, svc_data)
-
             conversation_history.append({
                 "role": "tool",
                 "tool_call_id": call_item.get("id"),
@@ -205,7 +158,6 @@ class ChatSystem:
     def _fetch_raw_history(
             self,
             mode: MemoryMode,
-            service_data: Dict[str, Dict[str, Any]],
             persona_name: str,
             user_identifier: str,
             channel: str,
@@ -214,9 +166,6 @@ class ChatSystem:
     ) -> Tuple[List[Dict[str, Any]], str]:
         """Dispatches history retrieval based on memory mode. Returns (raw_history, mode_label)."""
         if mode == MemoryMode.TICKET_ISOLATED:
-            ticket_id = self._get_tracking_id(service_data)
-            if ticket_id:
-                return self.memory_manager.get_ticket_history(ticket_id, effective_limit), "ticket"
             return [], "ticket"
         elif mode == MemoryMode.SERVER_WIDE:
             if server_id:
@@ -232,7 +181,6 @@ class ChatSystem:
     def _build_conversation_history(
             self,
             persona: Persona,
-            service_data: Dict[str, Dict[str, Any]],
             user_identifier: str,
             channel: str,
             server_id: Optional[str],
@@ -246,20 +194,11 @@ class ChatSystem:
             effective_limit = min(effective_limit, history_limit)
 
         raw_history, memory_mode_used = self._fetch_raw_history(
-            persona.get_memory_mode(), service_data, persona_name,
+            persona.get_memory_mode(), persona_name,
             user_identifier, channel, server_id, effective_limit
         )
 
-        conversation_history = self._format_raw_history_for_llm(raw_history, memory_mode_used, persona_name, server_id)
-
-        # Let each bound service inject system messages
-        for svc_name, svc_data in service_data.items():
-            service = self._services.get(svc_name)
-            if service:
-                for msg in service.get_system_messages(svc_data):
-                    conversation_history.insert(0, msg)
-
-        return conversation_history
+        return self._format_raw_history_for_llm(raw_history, memory_mode_used, persona_name, server_id)
 
     def _filter_tools_for_persona(self, persona: Persona) -> List[Dict[str, Any]]:
         """Filters available tools by persona config, service bindings, and model compatibility."""
@@ -346,7 +285,6 @@ class ChatSystem:
                         persona_name=ctx.persona_name,
                         tools_for_llm=ctx.tools_for_llm,
                         image_url=ctx.image_url,
-                        service_data=ctx.service_data,
                     )
                     self._pending_confirmations[(ctx.user_identifier, ctx.persona_name)] = pending
                     descriptions = [
@@ -356,7 +294,7 @@ class ChatSystem:
                     confirm_msg = "I'd like to perform the following actions:\n" + "\n".join(descriptions)
                     return confirm_msg, ResponseType.PENDING_CONFIRMATION, None
 
-                await self._execute_write_calls(write_calls, ctx.conversation_history, ctx.service_data)
+                await self._execute_write_calls(write_calls, ctx.conversation_history)
             else:
                 raise LLMCommunicationError("LLM returned an invalid response structure.")
 
@@ -364,22 +302,17 @@ class ChatSystem:
         return "I seem to be stuck in a loop. Could you please clarify your request?", ResponseType.DEV_COMMAND, None
 
     async def _prepare_request(self, ctx: RequestContext) -> None:
-        """Resolve service contexts, build history, filter tools, append user message."""
-        await self._resolve_service_contexts(ctx)
+        """Build history, filter tools, append user message."""
         ctx.conversation_history = self._build_conversation_history(
-            ctx.persona, ctx.service_data, ctx.user_identifier, ctx.channel,
+            ctx.persona, ctx.user_identifier, ctx.channel,
             ctx.server_id, ctx.history_limit
         )
         ctx.tools_for_llm = self._filter_tools_for_persona(ctx.persona)
-        await self._notify_services(ctx.service_data, ctx.message)
         ctx.conversation_history.append({"role": "user", "content": ctx.message})
 
     async def _execute_request(self, ctx: RequestContext) -> Tuple[str, ResponseType, Optional[str]]:
-        """Run tool loop, notify services of final response."""
-        response_text, response_type, tool_context_json = await self._run_tool_loop(ctx)
-        if response_type == ResponseType.LLM_GENERATION:
-            await self._notify_services(ctx.service_data, response_text)
-        return response_text, response_type, tool_context_json
+        """Run tool loop and return response."""
+        return await self._run_tool_loop(ctx)
 
     async def generate_response(
             self,
@@ -393,18 +326,18 @@ class ChatSystem:
             user_display_name: Optional[str] = None,
             platform_message_id: Optional[str] = None,
             timestamp: Optional[datetime] = None
-    ) -> Tuple[str, ResponseType, Optional[int], Optional[int]]:
+    ) -> Tuple[str, ResponseType, Optional[int]]:
         command_result: Optional[Dict[str, Any]] = await self.bot_logic.preprocess_message(
             persona_name, user_identifier, message
         )
         if command_result:
             if command_result.get("mutated", False):
                 save_personas_to_file(self.personas)
-            return command_result["response"], ResponseType.DEV_COMMAND, None, None
+            return command_result["response"], ResponseType.DEV_COMMAND, None
 
         persona: Optional[Persona] = self.personas.get(persona_name)
         if not persona:
-            return "Error: Persona not found.", ResponseType.DEV_COMMAND, None, None
+            return "Error: Persona not found.", ResponseType.DEV_COMMAND, None
 
         ctx = RequestContext(
             persona=persona, persona_name=persona_name,
@@ -415,7 +348,6 @@ class ChatSystem:
         try:
             await self._prepare_request(ctx)
             response_text, response_type, tool_context_json = await self._execute_request(ctx)
-            ticket_id = self._get_tracking_id(ctx.service_data)
 
             # Log user and assistant messages
             user_ts = timestamp or datetime.now()
@@ -425,7 +357,6 @@ class ChatSystem:
                 author_name=user_display_name, content=message,
                 timestamp=user_ts, server_id=server_id,
                 platform_message_id=platform_message_id,
-                zammad_ticket_id=ticket_id,
             )
             assistant_id: Optional[int] = None
             if response_type == ResponseType.LLM_GENERATION and response_text and response_text.strip():
@@ -434,11 +365,10 @@ class ChatSystem:
                     channel=channel, author_role='assistant',
                     author_name=persona_name, content=response_text,
                     timestamp=datetime.now(), server_id=server_id,
-                    zammad_ticket_id=ticket_id,
                     tool_context=tool_context_json,
                 )
 
-            return response_text, response_type, ticket_id, assistant_id
+            return response_text, response_type, assistant_id
 
         except LLMCommunicationError as e:
             logger.error(f"A recoverable LLM communication error occurred for {user_identifier}: {e}")
@@ -449,37 +379,34 @@ class ChatSystem:
                 )
             error_msg = ("I'm not sure how to continue. Could you please rephrase?" if "empty response" in str(e) else
                          "Error while generating a response: " + str(e))
-            ticket_id = self._get_tracking_id(ctx.service_data)
-            return error_msg, ResponseType.DEV_COMMAND, ticket_id, None
+            return error_msg, ResponseType.DEV_COMMAND, None
         except Exception as e:
             logger.error(f"A critical error occurred in generate_response for {user_identifier}: {e}", exc_info=True)
-            ticket_id = self._get_tracking_id(ctx.service_data)
             return ("An internal error occurred while processing your request.",
-                    ResponseType.DEV_COMMAND, ticket_id, None)
+                    ResponseType.DEV_COMMAND, None)
 
     async def resume_pending_confirmation(
             self, user_identifier: str, persona_name: str, approved: bool
-    ) -> Tuple[str, ResponseType, Optional[int], Optional[int]]:
+    ) -> Tuple[str, ResponseType, Optional[int]]:
         """Resumes a tool execution that was paused for user confirmation."""
         key = (user_identifier, persona_name)
         pending = self._pending_confirmations.pop(key, None)
 
         if not pending:
-            return "No pending confirmation found.", ResponseType.DEV_COMMAND, None, None
+            return "No pending confirmation found.", ResponseType.DEV_COMMAND, None
 
         if time.time() - pending.created_at > PENDING_CONFIRMATION_TIMEOUT:
-            return "Confirmation expired. Please try again.", ResponseType.DEV_COMMAND, None, None
+            return "Confirmation expired. Please try again.", ResponseType.DEV_COMMAND, None
 
         persona = self.personas.get(pending.persona_name)
         if not persona:
-            return "Error: Persona not found.", ResponseType.DEV_COMMAND, None, None
+            return "Error: Persona not found.", ResponseType.DEV_COMMAND, None
 
         conversation_history = pending.conversation_history
-        service_data = pending.service_data
 
         try:
             if approved:
-                await self._execute_write_calls(pending.write_calls, conversation_history, service_data)
+                await self._execute_write_calls(pending.write_calls, conversation_history)
             else:
                 self._append_denied_tool_results(pending.write_calls, conversation_history)
 
@@ -499,7 +426,6 @@ class ChatSystem:
                 )
 
             final_text = llm_response.get("content", "")
-            ticket_id = self._get_tracking_id(service_data)
 
             assistant_id: Optional[int] = None
             if final_text and final_text.strip():
@@ -508,13 +434,11 @@ class ChatSystem:
                     channel="",  # Not available in pending context
                     author_role='assistant', author_name=persona_name,
                     content=final_text, timestamp=datetime.now(),
-                    zammad_ticket_id=ticket_id,
                 )
 
-            return final_text, ResponseType.LLM_GENERATION, ticket_id, assistant_id
+            return final_text, ResponseType.LLM_GENERATION, assistant_id
 
         except Exception as e:
             logger.error(f"Error resuming pending confirmation for {user_identifier}: {e}", exc_info=True)
-            ticket_id = self._get_tracking_id(service_data)
             return ("An error occurred while processing the confirmed action.",
-                    ResponseType.DEV_COMMAND, ticket_id, None)
+                    ResponseType.DEV_COMMAND, None)
