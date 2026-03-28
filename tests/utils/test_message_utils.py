@@ -32,11 +32,13 @@ def test_split_string_empty_input():
     assert result == [""]
 
 def test_split_string_with_no_spaces():
-    """Tests splitting a long word without spaces."""
+    """Tests that a long word without spaces is force-split to fit the limit."""
     text = "averylongwordthatcannotbesplitnicely"
     limit = 20
     result = split_string_by_limit(text, limit)
-    assert result == ["averylongwordthatcannotbesplitnicely"]
+    assert result == ["averylongwordthatcan", "notbesplitnicely"]
+    for chunk in result:
+        assert len(chunk) <= limit
 
 def test_split_string_on_exact_limit():
     """Tests splitting when adding a word meets the limit exactly."""
@@ -63,7 +65,9 @@ def test_split_preserves_citation_blocks():
     url = "https://example.com/very-long-path"
     citation = f" [[1](<{url}>), [2](<{url}>)]"
     text = f"Some cited text.{citation} More text after citation."
-    limit = 40
+    # Limit must be larger than the citation token itself so the test
+    # actually verifies the token isn't broken at internal spaces.
+    limit = len(citation) + 10
     result = split_string_by_limit(text, limit)
     # The citation block must appear intact in exactly one chunk
     found = [chunk for chunk in result if citation.strip() in chunk]
@@ -74,7 +78,9 @@ def test_split_preserves_markdown_links():
     """Tests that markdown links [text](<url>) are not split."""
     link = "[click here](<https://example.com/page>)"
     text = f"Please {link} for more information about this topic."
-    limit = 30
+    # Limit must be larger than the link token itself so the test
+    # actually verifies the token isn't broken at internal spaces.
+    limit = len(link) + 10
     result = split_string_by_limit(text, limit)
     found = [chunk for chunk in result if link in chunk]
     assert len(found) == 1, f"Markdown link was split across chunks: {result}"
@@ -99,3 +105,55 @@ def test_split_at_newlines():
     assert len(result) >= 2
     for chunk in result:
         assert len(chunk) <= limit
+
+
+def test_split_oversized_code_block():
+    """Tests that a fenced code block exceeding the limit is split into
+    multiple properly-fenced chunks, each within the limit."""
+    lines = [f"line {i}" for i in range(50)]
+    code_block = "```python\n" + "\n".join(lines) + "\n```"
+    limit = 100
+    result = split_string_by_limit(code_block, limit)
+    assert len(result) > 1, "Oversized code block should be split"
+    for chunk in result:
+        assert len(chunk) <= limit, f"Chunk exceeds limit ({len(chunk)} > {limit}): {chunk!r}"
+        assert chunk.startswith("```python\n"), f"Chunk missing opening fence: {chunk!r}"
+        assert chunk.endswith("\n```"), f"Chunk missing closing fence: {chunk!r}"
+
+
+def test_split_oversized_code_block_preserves_content():
+    """Tests that force-splitting a code block preserves all content lines."""
+    lines = [f"line {i}" for i in range(20)]
+    code_block = "```\n" + "\n".join(lines) + "\n```"
+    limit = 60
+    result = split_string_by_limit(code_block, limit)
+    # Reassemble: strip fences from each chunk and join
+    recovered_lines = []
+    for chunk in result:
+        inner = chunk.removeprefix("```\n").removesuffix("\n```")
+        recovered_lines.extend(inner.split("\n"))
+    assert recovered_lines == lines
+
+
+def test_split_mixed_text_and_oversized_code_block():
+    """Tests text before/after an oversized code block lands in separate chunks."""
+    big_code = "```\n" + ("x" * 300) + "\n```"
+    text = f"Before code\n{big_code}\nAfter code"
+    limit = 200
+    result = split_string_by_limit(text, limit)
+    for chunk in result:
+        assert len(chunk) <= limit
+    full = " ".join(result)
+    assert "Before code" in full
+    assert "After code" in full
+
+
+def test_all_chunks_within_discord_limit():
+    """Realistic scenario: LLM response with a large code block must produce
+    chunks that all fit within Discord's 2000-char limit."""
+    big_code = "```python\n" + "\n".join(f"print({i})" for i in range(300)) + "\n```"
+    text = f"Here is the code:\n{big_code}\nHope that helps!"
+    limit = 2000
+    result = split_string_by_limit(text, limit)
+    for i, chunk in enumerate(result):
+        assert len(chunk) <= limit, f"Chunk {i} is {len(chunk)} chars, exceeds {limit}"
