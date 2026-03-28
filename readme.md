@@ -53,7 +53,6 @@ graph TD
         MSU[message_utils]
     end
 
-    CS --> ZC
     CS --> MM
     CS --> Engine
     CS --> BL
@@ -69,9 +68,6 @@ graph TD
     Discord --> SU
     Gmail --> CS
     Gmail --> Persona
-    ZBot --> CS
-    ZBot --> Persona
-    ZBot --> SU
     BL --> CS
     BL --> Persona
     BL --> MU

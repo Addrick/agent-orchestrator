@@ -24,8 +24,8 @@ class DispatchAgent(Agent):
 
     Pipeline (per ticket):
       1. [Hardcoded] Fetch ticket + triage note
-      2. [LLM]       Decide priority, channel, and message
-      3. [Hardcoded] Send notification via NotificationRouter
+      2. [LLM]       Decide priority and summarize
+      3. [Hardcoded] Send notification via config-defined channel/recipient
       4. [Hardcoded] Tag ticket as dispatched
       5. [Hardcoded] Log action to Agent_Actions table
     """
@@ -78,7 +78,7 @@ class DispatchAgent(Agent):
             )
             triage_note = self._extract_triage_note(articles)
 
-            # 2. LLM dispatch decision
+            # 2. LLM dispatch decision (priority + summary only)
             decision = await self._get_dispatch_decision(title, triage_note)
             if decision is None:
                 self.memory_manager.update_agent_action_outcome(
@@ -86,8 +86,9 @@ class DispatchAgent(Agent):
                 )
                 return
 
-            # 3. Send notification
-            notify_channel = decision.get("notify_channel", "zammad")
+            # 3. Send notification via config-defined channel/recipient
+            defaults = self.agent_config.get("notification_defaults", {})
+            notify_channel = defaults.get("channel", "zammad")
             summary = decision.get("summary", title)
             priority = decision.get("priority", "medium")
 
@@ -169,7 +170,7 @@ class DispatchAgent(Agent):
         return 'No content'
 
     async def _get_dispatch_decision(self, title: str, triage_note: str) -> Optional[Dict[str, Any]]:
-        """Call the dispatch_analyst persona to decide routing."""
+        """Call the dispatch_analyst persona to assess priority and summarize."""
         persona = self.chat_system.personas.get(DISPATCH_PERSONA_NAME)
         if not persona:
             logger.error(f"System persona '{DISPATCH_PERSONA_NAME}' not found. Cannot dispatch.")
@@ -178,8 +179,7 @@ class DispatchAgent(Agent):
         prompt = (
             f"TICKET TITLE: {title}\n\n"
             f"TRIAGE NOTE:\n{triage_note[:4000]}\n\n"
-            f"AVAILABLE NOTIFICATION CHANNELS: {', '.join(self.notification_router.available_channels) or 'zammad'}\n\n"
-            f"Decide how to dispatch this ticket."
+            f"Assess this ticket's priority and summarize it for dispatch."
         )
 
         try:
@@ -193,13 +193,29 @@ class DispatchAgent(Agent):
                 return None
 
             content = response.get('content', '').strip()
-            # Parse JSON from the LLM response
-            parsed: Dict[str, Any] = json.loads(content)
+            parsed: Dict[str, Any] = self._parse_json_response(content)
             return parsed
 
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, ValueError) as e:
             logger.warning(f"Dispatch LLM returned invalid JSON: {e}")
             return None
         except Exception as e:
             logger.warning(f"Dispatch LLM call failed: {e}")
             return None
+
+    @staticmethod
+    def _parse_json_response(content: str) -> Dict[str, Any]:
+        """Extract JSON from LLM response, handling markdown fences."""
+        # Try bare JSON first
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            pass
+
+        # Try extracting from ```json ... ``` fences
+        import re
+        match = re.search(r'```(?:json)?\s*\n?(.*?)\n?\s*```', content, re.DOTALL)
+        if match:
+            return json.loads(match.group(1).strip())
+
+        raise ValueError(f"No valid JSON found in response: {content[:200]}")
