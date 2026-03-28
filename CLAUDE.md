@@ -120,3 +120,84 @@ When changing any of the following, you MUST add corresponding tests before comm
 **Startup registration** (new `ServiceIntegration`, tool handler, or notifier):
 - If a component must be registered at startup to function, test that the registration actually happens — not just that the component works in isolation
 - The startup wiring test in `tests/integration/test_startup_wiring.py` asserts every tool `service_binding` in `ALL_TOOL_DEFINITIONS` has a registered handler; update it when adding new services
+
+## Memory System — Viking L0/L1/L2 Protocol
+
+This project uses a tiered memory system inspired by [OpenViking](https://github.com/volcengine/OpenViking)'s context database. The core principle is **progressive disclosure**: load the minimum context needed to make decisions, and only drill deeper when required. This avoids dumping large documents into every conversation and keeps the context window efficient.
+
+### Structure
+
+Memory lives in the project-scoped memory directory with three tiers:
+
+- **L0** — `MEMORY.md` (auto-loaded every session). Directory-level summaries, ~20 lines. Purpose: decide what's relevant without reading anything else.
+- **L1** — `<dir>/_overview.md` files. Component summaries, relationships, current state. ~200-300 tokens each. Purpose: usually sufficient for decision-making.
+- **L2** — Individual detail files. Full content. Purpose: schemas, signatures, implementation specifics. Only read when L1 isn't enough.
+
+```
+memory/
+├── MEMORY.md              # L0 — always loaded, directory summaries
+├── codebase/
+│   ├── _overview.md       # L1 — component map, pipeline, key patterns
+│   └── architecture.md    # L2 — full structural detail
+├── user/
+│   ├── _overview.md       # L1 — who Adam is, collaboration guide
+│   ├── profile.md         # L2 — full background
+│   └── feedback.md        # L2 — behavioral rules (universal + project-specific)
+├── project/
+│   ├── _overview.md       # L1 — active work, decisions, roadmap summary
+│   ├── decisions/         # L2 — immutable records with rationale
+│   └── plans/             # L2 — appendable roadmaps
+└── external/
+    ├── _overview.md       # L1 — external system references
+    └── *.md               # L2 — specific external details
+```
+
+### Navigation Rules
+
+1. L0 (`MEMORY.md`) is always in context — use it to decide which directories are relevant
+2. Read L1 (`_overview.md`) before drilling into L2 files
+3. Only read L2 when you need implementation-level detail (schemas, function signatures, DB tables)
+4. For code-related work, `codebase/_overview.md` is almost always worth reading
+
+### Mutability Rules
+
+| Category | Rule | Notes |
+|----------|------|-------|
+| `user/` | Appendable | Profile, preferences, feedback evolve over time |
+| `project/decisions/` | Immutable | Historical choices with rationale — never modify, only add new |
+| `project/plans/` | Appendable | Active roadmaps, update as work progresses |
+| `codebase/` | Regenerable | Can be rebuilt from source if stale — trust code over memory |
+| `external/` | Appendable | Update when external facts change |
+
+### Memory Update Triggers
+
+**Automated (hook-enforced):** A post-commit hook writes a marker file that injects a reminder on the next user message. When you see this reminder, review what was committed and update affected L2 → L1 → L0 files before proceeding with new work.
+
+**Self-directed:** The hook only catches commits. You must be vigilant about updating memory in contexts where no hook fires. Common situations:
+
+- User gives feedback or corrections about how to work ("don't do X", "yes that approach was right") — these are high-value and easy to miss
+- An architectural decision is made during discussion — capture the *rationale*, not just the choice. The code shows what; memory stores why.
+- Research or exploration surfaces conclusions worth keeping (tool evaluations, security findings, API discoveries) — session context vanishes, but the conclusions shouldn't
+- A plan is created or substantially revised
+- You learn something new about the user's background, role, or goals
+- A non-obvious bug is resolved — the root cause reasoning is often not in the commit message or code
+
+When in doubt, ask: "would a future session benefit from knowing this?" If yes, save it. If it's derivable from the code or git history, don't.
+
+**Self-check:** If this conversation involved research, decisions, or user feedback and you have NOT written any memory files this session, you are probably missing something. Review the conversation for saveable context before it ends. Conversations about code changes are covered by the commit hook, but discussions, explorations, and planning sessions have no safety net — if you don't save it, it's gone.
+
+### Update Protocol
+
+When updating memory (whether triggered by hook or self-directed):
+1. Identify which memory directories are affected
+2. Update affected L2 files (or create new ones)
+3. Regenerate affected L1 `_overview.md` bottom-up from L2 content
+4. Update L0 `MEMORY.md` if directory-level summaries changed
+
+### Staleness Rule
+
+If an L1 or L2 memory conflicts with what you observe in the code, **trust the code**. Update the memory. Do not act on stale information.
+
+### Project Scope
+
+This memory system is scoped to this project. User profile and universal feedback (preferences that apply across all projects) are stored here but are conceptually global. If working across multiple projects, these may need manual synchronization. Codebase and project memories are correctly project-scoped and should never leak across projects.
