@@ -163,7 +163,7 @@ def split_string_by_limit(input_string: str, char_limit: int) -> List[str]:
     token_pattern = re.compile(
         r'```[\s\S]*?```'                                              # fenced code blocks
         r'|`[^`\n]+`'                                                  # inline code
-        r'|\[\s?\[\d+\]\(<[^>]+>\)(?:,\s?\[\d+\]\(<[^>]+>\))*\s?\]'  # citation blocks
+        r'|\[\s*\[\d+\]\(<[^>]+>\)(?:,\s*\[\d+\]\(<[^>]+>\))*\s*\]'  # citation blocks
         r'|\[[^\]]*\]\(<[^>]+>\)'                                      # markdown links
         r'|\n'                                                         # newline
         r'| '                                                          # space
