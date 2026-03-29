@@ -27,6 +27,18 @@ COPY . .
 # Create a directory for persistent data (SQLite db)
 RUN mkdir -p /app/data
 
+# --- SECURITY ADDITIONS ---
+# Create a non-root user matching the 'ubuntu' user (UID 1000) on the AWS host
+RUN useradd -u 1000 -m botuser
+
+# Ensure the new user owns the data directory so it can write to it
+# (Even though we mount a volume over it, this is good practice in case the container is run standalone)
+RUN chown -R botuser:botuser /app
+
+# Switch to the non-root user
+USER botuser
+# --------------------------
+
 # Command to run the application
 # We use python -m to ensure imports work correctly from the root
 CMD ["python", "-m", "src.main"]
