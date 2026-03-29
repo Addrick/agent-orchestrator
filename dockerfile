@@ -33,7 +33,7 @@ RUN useradd -u 1000 -m botuser
 
 # Ensure the new user owns the data directory so it can write to it
 # (Even though we mount a volume over it, this is good practice in case the container is run standalone)
-RUN chown -R botuser:botuser /app/data
+RUN chown -R botuser:botuser /app
 
 # Switch to the non-root user
 USER botuser
