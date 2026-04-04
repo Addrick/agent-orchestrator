@@ -3,8 +3,9 @@
 import sqlite3
 import logging
 import threading
+from contextlib import contextmanager
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Generator, List, Optional, Tuple
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,22 @@ class MemoryManager:
             )
             self._conn.row_factory = sqlite3.Row
         return self._conn
+
+    @contextmanager
+    def transaction(self) -> Generator[sqlite3.Connection, None, None]:
+        """Context manager for atomic multi-step writes.
+
+        Acquires the lock, yields the connection, and commits on success
+        or rolls back on exception.
+        """
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                yield conn
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
 
     def close(self) -> None:
         """Explicitly closes the database connection. Important for test cleanup."""

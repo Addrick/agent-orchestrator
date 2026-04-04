@@ -330,7 +330,7 @@ class TestDeploy:
 
         await memory_agent.deploy()
         # No segments/summaries should be stored
-        memory_agent.memory_manager._get_connection.assert_not_called()
+        memory_agent.memory_manager.transaction.assert_not_called()
 
     @pytest.mark.asyncio
     @patch('src.agents.memory_agent.GeminiEmbeddingProvider')
@@ -399,8 +399,8 @@ class TestTransactionModel:
         with pytest.raises(Exception, match="API error"):
             await memory_agent._process_channel("chan", "p1", None, memory_agent._embedding_service)
 
-        # DB connection should not have been used for writes
-        memory_agent.memory_manager._get_connection.assert_not_called()
+        # Transaction should not have been entered
+        memory_agent.memory_manager.transaction.assert_not_called()
 
 
 # --- Config Injection Tests ---
@@ -415,3 +415,60 @@ class TestConfigInjection:
     def test_agent_name(self, mock_load, mock_chat_system):
         agent = MemoryAgent(mock_chat_system)
         assert agent.agent_name == "memory"
+
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    def test_allowed_channels_default_none(self, mock_load, mock_chat_system):
+        agent = MemoryAgent(mock_chat_system)
+        assert agent._allowed_channels is None
+
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    def test_allowed_channels_from_config(self, mock_load, mock_chat_system):
+        agent = MemoryAgent(mock_chat_system, agent_config={
+            "allowed_channels": ["chan-a", "chan-b"]
+        })
+        assert agent._allowed_channels == ["chan-a", "chan-b"]
+
+
+class TestAllowedChannels:
+    @pytest.mark.asyncio
+    @patch('src.agents.memory_agent.GeminiEmbeddingProvider')
+    async def test_deploy_filters_to_allowed_channels(self, mock_provider_cls, memory_agent):
+        """Deploy only processes channels in allowed_channels when configured."""
+        mock_provider = MagicMock()
+        mock_provider.model_name = "test-model"
+        mock_provider.dimensions = 4
+        mock_provider.max_input_tokens = None
+        mock_provider_cls.return_value = mock_provider
+
+        memory_agent._allowed_channels = ["chan-b"]
+        memory_agent.memory_manager.get_active_channels.return_value = [
+            ("chan-a", "p1", None),
+            ("chan-b", "p1", None),
+            ("chan-c", "p1", "s1"),
+        ]
+        memory_agent._process_channel = AsyncMock()
+
+        await memory_agent.deploy()
+        memory_agent._process_channel.assert_called_once()
+        call_args = memory_agent._process_channel.call_args
+        assert call_args[0][0] == "chan-b"
+
+    @pytest.mark.asyncio
+    @patch('src.agents.memory_agent.GeminiEmbeddingProvider')
+    async def test_deploy_no_filter_when_allowed_channels_none(self, mock_provider_cls, memory_agent):
+        """Deploy processes all channels when allowed_channels is not set."""
+        mock_provider = MagicMock()
+        mock_provider.model_name = "test-model"
+        mock_provider.dimensions = 4
+        mock_provider.max_input_tokens = None
+        mock_provider_cls.return_value = mock_provider
+
+        memory_agent._allowed_channels = None
+        memory_agent.memory_manager.get_active_channels.return_value = [
+            ("chan-a", "p1", None),
+            ("chan-b", "p1", None),
+        ]
+        memory_agent._process_channel = AsyncMock()
+
+        await memory_agent.deploy()
+        assert memory_agent._process_channel.call_count == 2

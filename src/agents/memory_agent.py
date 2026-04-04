@@ -49,6 +49,7 @@ class MemoryAgent(Agent):
             self.agent_config.get("batch_size", 200)
         )
         self._persona_name: str = self.agent_config.get("persona", "memory_summarizer")
+        self._allowed_channels: Optional[List[str]] = self.agent_config.get("allowed_channels")
 
     def _get_embedding_service(self) -> EmbeddingService:
         """Lazily initialize the embedding service on first use."""
@@ -74,7 +75,17 @@ class MemoryAgent(Agent):
         embedding_service = self._get_embedding_service()
         model_name = embedding_service.model_name
 
-        channels = self.memory_manager.get_active_channels(model_name=model_name)
+        all_channels = self.memory_manager.get_active_channels(model_name=model_name)
+
+        # Filter to allowed channels if configured (for staged rollout / testing)
+        if self._allowed_channels is not None:
+            channels = [
+                (ch, pn, sid) for ch, pn, sid in all_channels
+                if ch in self._allowed_channels
+            ]
+        else:
+            channels = all_channels
+
         if not channels:
             logger.debug("MemoryAgent: no channels with unprocessed messages.")
             return
@@ -143,48 +154,41 @@ class MemoryAgent(Agent):
 
         # 5. Write everything to DB in one transaction
         now = datetime.now(timezone.utc)
-        with self.memory_manager._lock:
-            conn = self.memory_manager._get_connection()
-            try:
-                # Store message embeddings
-                for msg, emb in zip(messages, embeddings):
-                    conn.execute(
-                        """INSERT OR REPLACE INTO Message_Embeddings
-                           (interaction_id, embedding, model_name, created_at)
-                           VALUES (?, ?, ?, ?)""",
-                        (msg['interaction_id'], emb, model_name, now)
-                    )
-
-                # Store segments and summaries
-                for segment, summary_text, summary_emb in results:
-                    cursor = conn.execute(
-                        """INSERT INTO Memory_Segments
-                           (channel, server_id, persona_name,
-                            start_interaction_id, end_interaction_id,
-                            message_count, created_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                        (channel, server_id, persona_name,
-                         segment['start_id'], segment['end_id'],
-                         segment['count'], now)
-                    )
-                    segment_id = cursor.lastrowid
-
-                    conn.execute(
-                        """INSERT INTO Memory_Summaries
-                           (segment_id, content, embedding, model_name, created_at)
-                           VALUES (?, ?, ?, ?, ?)""",
-                        (segment_id, summary_text, summary_emb, model_name, now)
-                    )
-
-                conn.commit()
-                logger.info(
-                    f"MemoryAgent: {channel}/{persona_name} — stored {len(embeddings)} embeddings, "
-                    f"{len(results)} segments+summaries."
+        with self.memory_manager.transaction() as conn:
+            # Store message embeddings
+            for msg, emb in zip(messages, embeddings):
+                conn.execute(
+                    """INSERT OR REPLACE INTO Message_Embeddings
+                       (interaction_id, embedding, model_name, created_at)
+                       VALUES (?, ?, ?, ?)""",
+                    (msg['interaction_id'], emb, model_name, now)
                 )
 
-            except Exception:
-                conn.rollback()
-                raise
+            # Store segments and summaries
+            for segment, summary_text, summary_emb in results:
+                cursor = conn.execute(
+                    """INSERT INTO Memory_Segments
+                       (channel, server_id, persona_name,
+                        start_interaction_id, end_interaction_id,
+                        message_count, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (channel, server_id, persona_name,
+                     segment['start_id'], segment['end_id'],
+                     segment['count'], now)
+                )
+                segment_id = cursor.lastrowid
+
+                conn.execute(
+                    """INSERT INTO Memory_Summaries
+                       (segment_id, content, embedding, model_name, created_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (segment_id, summary_text, summary_emb, model_name, now)
+                )
+
+        logger.info(
+            f"MemoryAgent: {channel}/{persona_name} — stored {len(embeddings)} embeddings, "
+            f"{len(results)} segments+summaries."
+        )
 
     def _segment_by_similarity(
         self,

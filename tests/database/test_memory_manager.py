@@ -880,3 +880,42 @@ def test_migration_memory_tables_idempotent(legacy_mem_manager):
     cursor.execute(
         "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='Memory_Segments'")
     assert cursor.fetchone()[0] == 1
+
+
+# --- Transaction Context Manager Tests ---
+
+def test_transaction_commits_on_success(mem_manager):
+    """Transaction commits writes when the block completes without error."""
+    now = datetime.now()
+    mem_manager.log_message("u1", "p1", "chan", "user", "Alice", "msg", now)
+
+    with mem_manager.transaction() as conn:
+        conn.execute(
+            """INSERT INTO Message_Embeddings (interaction_id, embedding, model_name, created_at)
+               VALUES (?, ?, ?, ?)""",
+            (1, b'\x00' * 12, "test-model", now)
+        )
+
+    # Verify it persisted
+    rows = conn.execute("SELECT * FROM Message_Embeddings WHERE interaction_id = 1").fetchall()
+    assert len(rows) == 1
+
+
+def test_transaction_rolls_back_on_error(mem_manager):
+    """Transaction rolls back all writes when an exception occurs."""
+    now = datetime.now()
+    mem_manager.log_message("u1", "p1", "chan", "user", "Alice", "msg", now)
+
+    with pytest.raises(RuntimeError, match="deliberate"):
+        with mem_manager.transaction() as conn:
+            conn.execute(
+                """INSERT INTO Message_Embeddings (interaction_id, embedding, model_name, created_at)
+                   VALUES (?, ?, ?, ?)""",
+                (1, b'\x00' * 12, "test-model", now)
+            )
+            raise RuntimeError("deliberate")
+
+    # Verify nothing was persisted
+    conn = mem_manager._get_connection()
+    rows = conn.execute("SELECT * FROM Message_Embeddings WHERE interaction_id = 1").fetchall()
+    assert len(rows) == 0
