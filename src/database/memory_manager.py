@@ -101,6 +101,39 @@ class MemoryManager:
                 FOREIGN KEY (interaction_id) REFERENCES User_Interactions(interaction_id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS Message_Embeddings (
+                interaction_id INTEGER PRIMARY KEY,
+                embedding BLOB NOT NULL,
+                model_name TEXT NOT NULL DEFAULT 'text-embedding-004',
+                created_at TIMESTAMP NOT NULL,
+                FOREIGN KEY (interaction_id) REFERENCES User_Interactions(interaction_id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS Memory_Segments (
+                segment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel TEXT NOT NULL,
+                server_id TEXT,
+                persona_name TEXT NOT NULL,
+                start_interaction_id INTEGER NOT NULL,
+                end_interaction_id INTEGER NOT NULL,
+                message_count INTEGER NOT NULL,
+                created_at TIMESTAMP NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_segment_channel_persona
+            ON Memory_Segments (channel, persona_name, server_id);
+
+            CREATE TABLE IF NOT EXISTS Memory_Summaries (
+                summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                segment_id INTEGER NOT NULL UNIQUE,
+                content TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                model_name TEXT NOT NULL,
+                created_at TIMESTAMP NOT NULL,
+                FOREIGN KEY (segment_id) REFERENCES Memory_Segments(segment_id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_summary_segment
+            ON Memory_Summaries (segment_id);
+
             CREATE TABLE IF NOT EXISTS Agent_Actions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 parent_id INTEGER,
@@ -224,7 +257,7 @@ class MemoryManager:
             conn = self._get_connection()
             cursor = conn.cursor()
 
-            query = ("SELECT author_role, author_name, content, tool_context FROM User_Interactions"
+            query = ("SELECT interaction_id, author_role, author_name, content, tool_context FROM User_Interactions"
                      " WHERE user_identifier = ? AND persona_name = ?"
                      + self._SUPPRESSION_SUBQUERY)
             params: List[Any] = [user_identifier, persona_name]
@@ -243,7 +276,7 @@ class MemoryManager:
             conn = self._get_connection()
             cursor = conn.cursor()
 
-            query = ("SELECT author_role, author_name, content, tool_context FROM User_Interactions"
+            query = ("SELECT interaction_id, author_role, author_name, content, tool_context FROM User_Interactions"
                      " WHERE zammad_ticket_id = ?"
                      + self._SUPPRESSION_SUBQUERY)
             params: List[Any] = [ticket_id]
@@ -263,7 +296,7 @@ class MemoryManager:
             conn = self._get_connection()
             cursor = conn.cursor()
 
-            query = ("SELECT author_role, author_name, content, tool_context FROM User_Interactions"
+            query = ("SELECT interaction_id, author_role, author_name, content, tool_context FROM User_Interactions"
                      " WHERE channel = ? AND persona_name = ?")
             params: List[Any] = [channel, persona_name]
 
@@ -289,7 +322,7 @@ class MemoryManager:
             conn = self._get_connection()
             cursor = conn.cursor()
 
-            query = ("SELECT author_role, author_name, content, tool_context FROM User_Interactions"
+            query = ("SELECT interaction_id, author_role, author_name, content, tool_context FROM User_Interactions"
                      " WHERE server_id = ? AND persona_name = ?"
                      + self._SUPPRESSION_SUBQUERY)
             params: List[Any] = [server_id, persona_name]
@@ -308,7 +341,7 @@ class MemoryManager:
             conn = self._get_connection()
             cursor = conn.cursor()
 
-            query = ("SELECT author_role, author_name, content, tool_context FROM User_Interactions"
+            query = ("SELECT interaction_id, author_role, author_name, content, tool_context FROM User_Interactions"
                      " WHERE persona_name = ?"
                      + self._SUPPRESSION_SUBQUERY)
             params: List[Any] = [persona_name]
@@ -460,4 +493,347 @@ class MemoryManager:
                 "SELECT * FROM Agent_Actions WHERE parent_id = ? ORDER BY timestamp ASC",
                 (parent_id,)
             )
+            return [dict(row) for row in cursor.fetchall()]
+
+    # --- Long-Term Memory Methods ---
+
+    def store_message_embedding(self, interaction_id: int, embedding: bytes,
+                                model_name: str, created_at: datetime) -> None:
+        """Stores or updates an embedding for a message."""
+        with self._lock:
+            conn = self._get_connection()
+            conn.execute(
+                """INSERT OR REPLACE INTO Message_Embeddings
+                   (interaction_id, embedding, model_name, created_at)
+                   VALUES (?, ?, ?, ?)""",
+                (interaction_id, embedding, model_name, created_at)
+            )
+            conn.commit()
+
+    def get_unembedded_messages(self, persona_name: str, channel: str,
+                                server_id: Optional[str] = None,
+                                limit: int = 200,
+                                model_name: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Returns messages that need embedding (missing or stale model).
+
+        Excludes suppressed interactions and messages with NULL/empty content.
+        When model_name is provided, also returns messages whose existing embedding
+        was computed by a different model (supports model migration).
+        """
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+
+            query = (
+                "SELECT ui.interaction_id, ui.author_role, ui.author_name, ui.content"
+                " FROM User_Interactions ui"
+                " LEFT JOIN Message_Embeddings me ON ui.interaction_id = me.interaction_id"
+                " WHERE ui.persona_name = ? AND ui.channel = ?"
+            )
+            params: List[Any] = [persona_name, channel]
+
+            if server_id is not None:
+                query += " AND ui.server_id = ?"
+                params.append(server_id)
+            else:
+                query += " AND ui.server_id IS NULL"
+
+            # Exclude suppressed
+            query += self._SUPPRESSION_SUBQUERY.replace(
+                "interaction_id", "ui.interaction_id"
+            )
+
+            # Exclude non-embeddable
+            query += " AND ui.content IS NOT NULL AND ui.content != ''"
+
+            # Missing or stale-model embeddings
+            if model_name:
+                query += " AND (me.embedding IS NULL OR me.model_name != ?)"
+                params.append(model_name)
+            else:
+                query += " AND me.embedding IS NULL"
+
+            query += " ORDER BY ui.interaction_id ASC LIMIT ?"
+            params.append(limit)
+
+            cursor.execute(query, params)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def store_segment(self, channel: str, server_id: Optional[str],
+                      persona_name: str, start_id: int, end_id: int,
+                      message_count: int, created_at: datetime) -> int:
+        """Stores a memory segment. Returns the segment_id."""
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                """INSERT INTO Memory_Segments
+                   (channel, server_id, persona_name, start_interaction_id,
+                    end_interaction_id, message_count, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (channel, server_id, persona_name, start_id, end_id,
+                 message_count, created_at)
+            )
+            conn.commit()
+            return cursor.lastrowid  # type: ignore[return-value]
+
+    def store_summary(self, segment_id: int, content: str, embedding: bytes,
+                      model_name: str, created_at: datetime) -> int:
+        """Stores a summary for a segment. Returns the summary_id."""
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                """INSERT INTO Memory_Summaries
+                   (segment_id, content, embedding, model_name, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (segment_id, content, embedding, model_name, created_at)
+            )
+            conn.commit()
+            return cursor.lastrowid  # type: ignore[return-value]
+
+    def get_summaries_for_channel(self, channel: str, persona_name: str,
+                                  server_id: Optional[str] = None,
+                                  exclude_after_interaction_id: Optional[int] = None,
+                                  model_name: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Returns summaries for a specific channel+persona.
+
+        Low-level single-channel query used by retrieve_relevant_summaries
+        and diagnostic scripts.
+        """
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+
+            query = (
+                "SELECT ms.summary_id, ms.segment_id, ms.content, ms.embedding,"
+                " ms.model_name, ms.created_at, seg.channel, seg.persona_name,"
+                " seg.start_interaction_id, seg.end_interaction_id"
+                " FROM Memory_Summaries ms"
+                " JOIN Memory_Segments seg ON ms.segment_id = seg.segment_id"
+                " WHERE seg.channel = ? AND seg.persona_name = ?"
+            )
+            params: List[Any] = [channel, persona_name]
+
+            if server_id is not None:
+                query += " AND seg.server_id = ?"
+                params.append(server_id)
+            else:
+                query += " AND seg.server_id IS NULL"
+
+            if exclude_after_interaction_id is not None:
+                query += " AND seg.start_interaction_id < ?"
+                params.append(exclude_after_interaction_id)
+
+            if model_name is not None:
+                query += " AND ms.model_name = ?"
+                params.append(model_name)
+
+            query += " ORDER BY seg.start_interaction_id ASC"
+
+            cursor.execute(query, params)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_active_channels(self, model_name: Optional[str] = None
+                            ) -> List[Tuple[str, str, Optional[str]]]:
+        """Returns (channel, persona_name, server_id) tuples with unprocessed messages.
+
+        When model_name is provided, also returns channels where existing embeddings
+        were computed by a different model (supports model migration discovery).
+        """
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+
+            query = (
+                "SELECT DISTINCT ui.channel, ui.persona_name, ui.server_id"
+                " FROM User_Interactions ui"
+                " LEFT JOIN Message_Embeddings me ON ui.interaction_id = me.interaction_id"
+                " WHERE ui.content IS NOT NULL AND ui.content != ''"
+            )
+            params: List[Any] = []
+
+            # Exclude suppressed
+            query += self._SUPPRESSION_SUBQUERY.replace(
+                "interaction_id", "ui.interaction_id"
+            )
+
+            if model_name:
+                query += " AND (me.embedding IS NULL OR me.model_name != ?)"
+                params.append(model_name)
+            else:
+                query += " AND me.embedding IS NULL"
+
+            cursor.execute(query, params)
+            return [(row['channel'], row['persona_name'], row['server_id'])
+                    for row in cursor.fetchall()]
+
+    def get_last_segment_tail_embeddings(self, channel: str, persona_name: str,
+                                         server_id: Optional[str] = None,
+                                         n: int = 3,
+                                         model_name: Optional[str] = None
+                                         ) -> Optional[List[bytes]]:
+        """Returns the last N message embeddings from the most recent segment.
+
+        Used to seed the centroid for topic continuity across batch boundaries.
+        Returns None if no previous segment or model mismatch.
+        """
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+
+            # Find the most recent segment for this channel+persona
+            seg_query = (
+                "SELECT segment_id, start_interaction_id, end_interaction_id"
+                " FROM Memory_Segments"
+                " WHERE channel = ? AND persona_name = ?"
+            )
+            seg_params: List[Any] = [channel, persona_name]
+
+            if server_id is not None:
+                seg_query += " AND server_id = ?"
+                seg_params.append(server_id)
+            else:
+                seg_query += " AND server_id IS NULL"
+
+            seg_query += " ORDER BY end_interaction_id DESC LIMIT 1"
+
+            cursor.execute(seg_query, seg_params)
+            seg_row = cursor.fetchone()
+            if seg_row is None:
+                return None
+
+            # Get tail embeddings from this segment, scoped to channel+persona
+            emb_query = (
+                "SELECT me.embedding FROM Message_Embeddings me"
+                " JOIN User_Interactions ui ON me.interaction_id = ui.interaction_id"
+                " WHERE ui.channel = ? AND ui.persona_name = ?"
+                " AND ui.interaction_id BETWEEN ? AND ?"
+            )
+            emb_params: List[Any] = [
+                channel, persona_name,
+                seg_row['start_interaction_id'],
+                seg_row['end_interaction_id'],
+            ]
+
+            if server_id is not None:
+                emb_query += " AND ui.server_id = ?"
+                emb_params.append(server_id)
+            else:
+                emb_query += " AND ui.server_id IS NULL"
+
+            if model_name is not None:
+                emb_query += " AND me.model_name = ?"
+                emb_params.append(model_name)
+
+            emb_query += " ORDER BY me.interaction_id DESC LIMIT ?"
+            emb_params.append(n)
+
+            cursor.execute(emb_query, emb_params)
+            rows = cursor.fetchall()
+
+            if not rows:
+                return None
+
+            # Return in chronological order (query was DESC)
+            return [row['embedding'] for row in reversed(rows)]
+
+    @staticmethod
+    def _build_summary_where(
+        persona: str,
+        memory_mode: str,
+        channel: str,
+        server_id: Optional[str],
+        user_identifier: Optional[str],
+        exclude_after_interaction_id: Optional[int],
+        model_name: Optional[str],
+    ) -> Tuple[str, List[Any]]:
+        """Build a WHERE clause for summary retrieval scoped by memory mode."""
+        where_parts = ["seg.persona_name = ?"]
+        params: List[Any] = [persona]
+
+        if memory_mode == "channel":
+            where_parts.append("seg.channel = ?")
+            params.append(channel)
+            if server_id is not None:
+                where_parts.append("seg.server_id = ?")
+                params.append(server_id)
+            else:
+                where_parts.append("seg.server_id IS NULL")
+        elif memory_mode == "server":
+            if server_id is not None:
+                where_parts.append("seg.server_id = ?")
+                params.append(server_id)
+            else:
+                return "1=0", []  # no server_id -> no results
+        elif memory_mode == "personal":
+            where_parts.append(
+                "seg.channel IN ("
+                "SELECT DISTINCT channel FROM User_Interactions"
+                " WHERE user_identifier = ? AND persona_name = ?)"
+            )
+            params.extend([user_identifier, persona])
+        # global: no additional channel/server filter
+
+        if exclude_after_interaction_id is not None:
+            where_parts.append("seg.start_interaction_id < ?")
+            params.append(exclude_after_interaction_id)
+
+        if model_name is not None:
+            where_parts.append("ms.model_name = ?")
+            params.append(model_name)
+
+        return " AND ".join(where_parts), params
+
+    def retrieve_relevant_summaries(
+        self,
+        persona_name: str,
+        channel: str,
+        server_id: Optional[str] = None,
+        user_identifier: Optional[str] = None,
+        memory_mode: str = "channel",
+        include_ambient: bool = True,
+        exclude_after_interaction_id: Optional[int] = None,
+        model_name: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Retrieve summaries scoped by MemoryMode for retrieval-time fan-out.
+
+        memory_mode determines which channels' summaries to pull:
+          channel  -> WHERE channel = ? AND persona_name = ?
+          server   -> WHERE server_id = ? AND persona_name = ?
+          personal -> WHERE persona_name = ? AND channel IN (user's channels)
+          global   -> WHERE persona_name = ?
+          ticket   -> returns empty (no long-term memory for tickets)
+
+        include_ambient adds a UNION with persona_name='ambient' using same scope.
+        """
+        if memory_mode == "ticket":
+            return []
+
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+
+            base_select = (
+                "SELECT ms.summary_id, ms.segment_id, ms.content, ms.embedding,"
+                " ms.model_name, ms.created_at, seg.channel, seg.persona_name,"
+                " seg.start_interaction_id, seg.end_interaction_id"
+                " FROM Memory_Summaries ms"
+                " JOIN Memory_Segments seg ON ms.segment_id = seg.segment_id"
+            )
+
+            build_args = (memory_mode, channel, server_id, user_identifier,
+                          exclude_after_interaction_id, model_name)
+
+            # Build primary query
+            where_clause, params = self._build_summary_where(persona_name, *build_args)
+            query = f"{base_select} WHERE {where_clause}"
+
+            # Ambient union
+            if include_ambient and persona_name != "ambient":
+                amb_where, amb_params = self._build_summary_where("ambient", *build_args)
+                query += f" UNION {base_select} WHERE {amb_where}"
+                params.extend(amb_params)
+
+            cursor.execute(query, params)
             return [dict(row) for row in cursor.fetchall()]

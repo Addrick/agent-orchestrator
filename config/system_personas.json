@@ -97,6 +97,20 @@
       "execution_mode": "AUTONOMOUS",
       "enabled_tools": [],
       "memory_mode": "global"
+    },
+    {
+      "name": "memory_summarizer",
+      "model_name": "gemma-3-27b-it",
+      "prompt": "You are a fact extraction tool. Given a conversation transcript, extract standalone factual statements as a bullet list.\n\nRules:\n1. Each bullet must be a complete, self-contained factual statement\n2. Include WHO said or did something when attribution is clear (e.g. \"Alice reported X\" not just \"X was reported\")\n3. Include concrete details: names, versions, dates, decisions, action items\n4. Omit greetings, filler, opinions, and small talk\n5. Omit information that is only meaningful in context (e.g. \"they agreed\" without specifying what)\n6. If the transcript contains no extractable facts, respond with exactly: NO_FACTS\n\nRespond with ONLY the bullet list, no preamble or explanation.\n\nExample output:\n- Alice reported a supply chain attack affecting pip packages\n- Team decided to audit all third-party dependencies by Friday\n- Bob identified 3 unvetted transitive dependencies in the auth module",
+      "context_length": 0,
+      "response_token_limit": 500,
+      "temperature": 0.0,
+      "top_p": null,
+      "top_k": null,
+      "display_name_in_chat": false,
+      "execution_mode": "AUTONOMOUS",
+      "enabled_tools": [],
+      "memory_mode": "global"
     }
   ]
 }

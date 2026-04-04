@@ -540,3 +540,343 @@ def test_get_history_includes_tool_context(mem_manager):
     ticket_history = mem_manager.get_ticket_history(42)
     assert len(ticket_history) == 1
     assert ticket_history[0]['tool_context'] == tool_ctx
+
+
+# --- Long-Term Memory Schema Tests ---
+
+def test_schema_creates_memory_tables(mem_manager):
+    """Verify all three memory tables are created with correct columns."""
+    conn = mem_manager._get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("PRAGMA table_info(Message_Embeddings)")
+    cols = {row['name'] for row in cursor.fetchall()}
+    assert cols == {'interaction_id', 'embedding', 'model_name', 'created_at'}
+
+    cursor.execute("PRAGMA table_info(Memory_Segments)")
+    cols = {row['name'] for row in cursor.fetchall()}
+    assert cols == {'segment_id', 'channel', 'server_id', 'persona_name',
+                    'start_interaction_id', 'end_interaction_id',
+                    'message_count', 'created_at'}
+
+    cursor.execute("PRAGMA table_info(Memory_Summaries)")
+    cols = {row['name'] for row in cursor.fetchall()}
+    assert cols == {'summary_id', 'segment_id', 'content', 'embedding',
+                    'model_name', 'created_at'}
+
+
+def test_schema_creates_memory_indexes(mem_manager):
+    """Verify indexes are created for memory tables."""
+    conn = mem_manager._get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='index'")
+    indexes = {row['name'] for row in cursor.fetchall()}
+    assert 'idx_segment_channel_persona' in indexes
+    assert 'idx_summary_segment' in indexes
+
+
+# --- Message Embedding Tests ---
+
+def _make_fake_embedding(dim=768) -> bytes:
+    """Create a fake embedding BLOB for testing."""
+    import struct
+    import math
+    # Create a normalized vector
+    values = [1.0 / math.sqrt(dim)] * dim
+    return struct.pack(f'{dim}f', *values)
+
+
+def test_store_and_retrieve_message_embedding(mem_manager):
+    """Embedding round-trips correctly through store and is queryable."""
+    iid = mem_manager.log_message("u1", "p1", "chan", "user", "Alice",
+                                   "Hello world", datetime.now())
+    emb = _make_fake_embedding()
+    mem_manager.store_message_embedding(iid, emb, "text-embedding-004", datetime.now())
+
+    conn = mem_manager._get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT embedding, model_name FROM Message_Embeddings WHERE interaction_id = ?",
+                   (iid,))
+    row = cursor.fetchone()
+    assert row['embedding'] == emb
+    assert row['model_name'] == "text-embedding-004"
+
+
+def test_store_message_embedding_upsert(mem_manager):
+    """INSERT OR REPLACE updates existing embedding."""
+    iid = mem_manager.log_message("u1", "p1", "chan", "user", "Alice",
+                                   "Hello", datetime.now())
+    emb1 = _make_fake_embedding()
+    emb2 = b'\x00' * 3072  # different blob
+    mem_manager.store_message_embedding(iid, emb1, "model-a", datetime.now())
+    mem_manager.store_message_embedding(iid, emb2, "model-b", datetime.now())
+
+    conn = mem_manager._get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT model_name FROM Message_Embeddings WHERE interaction_id = ?", (iid,))
+    assert cursor.fetchone()['model_name'] == "model-b"
+
+
+# --- get_unembedded_messages Tests ---
+
+def test_get_unembedded_messages_basic(mem_manager):
+    """Returns messages without embeddings."""
+    ts = datetime.now()
+    id1 = mem_manager.log_message("u1", "p1", "chan", "user", "Alice", "Hello", ts)
+    id2 = mem_manager.log_message("u1", "p1", "chan", "assistant", "Bot", "Hi", ts)
+
+    msgs = mem_manager.get_unembedded_messages("p1", "chan")
+    assert len(msgs) == 2
+    assert msgs[0]['interaction_id'] == id1
+
+    # Embed one, now only one is returned
+    mem_manager.store_message_embedding(id1, _make_fake_embedding(), "text-embedding-004", ts)
+    msgs = mem_manager.get_unembedded_messages("p1", "chan")
+    assert len(msgs) == 1
+    assert msgs[0]['interaction_id'] == id2
+
+
+def test_get_unembedded_messages_model_name_filter(mem_manager):
+    """With model_name, also returns messages with stale-model embeddings."""
+    ts = datetime.now()
+    id1 = mem_manager.log_message("u1", "p1", "chan", "user", "Alice", "Hello", ts)
+    mem_manager.store_message_embedding(id1, _make_fake_embedding(), "old-model", ts)
+
+    # Without model_name filter: appears embedded
+    msgs = mem_manager.get_unembedded_messages("p1", "chan")
+    assert len(msgs) == 0
+
+    # With model_name filter: stale model, needs re-embedding
+    msgs = mem_manager.get_unembedded_messages("p1", "chan", model_name="new-model")
+    assert len(msgs) == 1
+    assert msgs[0]['interaction_id'] == id1
+
+
+def test_get_unembedded_messages_excludes_suppressed(mem_manager):
+    """Suppressed messages are excluded."""
+    ts = datetime.now()
+    mem_manager.log_message("u1", "p1", "chan", "user", "Alice", "Hello", ts,
+                            platform_message_id="p1")
+    mem_manager.suppress_message_by_platform_id("p1")
+
+    msgs = mem_manager.get_unembedded_messages("p1", "chan")
+    assert len(msgs) == 0
+
+
+def test_get_unembedded_messages_excludes_null_content(mem_manager):
+    """Messages with NULL or empty content are excluded."""
+    ts = datetime.now()
+    mem_manager.log_message("u1", "p1", "chan", "user", "Alice", None, ts)
+    mem_manager.log_message("u1", "p1", "chan", "user", "Alice", "", ts)
+    mem_manager.log_message("u1", "p1", "chan", "user", "Alice", "Real content", ts)
+
+    msgs = mem_manager.get_unembedded_messages("p1", "chan")
+    assert len(msgs) == 1
+    assert msgs[0]['content'] == "Real content"
+
+
+def test_get_unembedded_messages_channel_persona_filter(mem_manager):
+    """Only returns messages for the specified channel+persona."""
+    ts = datetime.now()
+    mem_manager.log_message("u1", "p1", "chan-a", "user", "Alice", "In A", ts)
+    mem_manager.log_message("u1", "p2", "chan-a", "user", "Alice", "Different persona", ts)
+    mem_manager.log_message("u1", "p1", "chan-b", "user", "Alice", "In B", ts)
+
+    msgs = mem_manager.get_unembedded_messages("p1", "chan-a")
+    assert len(msgs) == 1
+    assert msgs[0]['content'] == "In A"
+
+
+# --- Segment and Summary Tests ---
+
+def test_store_segment_and_summary(mem_manager):
+    """Segment and summary round-trip correctly."""
+    ts = datetime.now()
+    seg_id = mem_manager.store_segment("chan", None, "p1", 1, 5, 5, ts)
+    assert isinstance(seg_id, int)
+
+    emb = _make_fake_embedding()
+    sum_id = mem_manager.store_summary(seg_id, "- Fact 1\n- Fact 2", emb, "text-embedding-004", ts)
+    assert isinstance(sum_id, int)
+
+    summaries = mem_manager.get_summaries_for_channel("chan", "p1")
+    assert len(summaries) == 1
+    assert summaries[0]['content'] == "- Fact 1\n- Fact 2"
+    assert summaries[0]['embedding'] == emb
+    assert summaries[0]['segment_id'] == seg_id
+
+
+def test_get_summaries_recency_filter(mem_manager):
+    """exclude_after_interaction_id filters segments starting inside the window."""
+    ts = datetime.now()
+    # Segment A: IDs 1-5 (outside window)
+    seg_a = mem_manager.store_segment("chan", None, "p1", 1, 5, 5, ts)
+    mem_manager.store_summary(seg_a, "Facts A", _make_fake_embedding(), "m", ts)
+
+    # Segment B: IDs 6-10 (straddles window at 8)
+    seg_b = mem_manager.store_segment("chan", None, "p1", 6, 10, 5, ts)
+    mem_manager.store_summary(seg_b, "Facts B", _make_fake_embedding(), "m", ts)
+
+    # Segment C: IDs 11-15 (fully inside window at 8)
+    seg_c = mem_manager.store_segment("chan", None, "p1", 11, 15, 5, ts)
+    mem_manager.store_summary(seg_c, "Facts C", _make_fake_embedding(), "m", ts)
+
+    # Window starts at 8 — exclude segments starting at or after 8
+    summaries = mem_manager.get_summaries_for_channel(
+        "chan", "p1", exclude_after_interaction_id=8)
+    assert len(summaries) == 2
+    contents = {s['content'] for s in summaries}
+    assert contents == {"Facts A", "Facts B"}
+
+
+def test_get_summaries_model_name_filter(mem_manager):
+    """model_name filter only returns matching summaries."""
+    ts = datetime.now()
+    seg = mem_manager.store_segment("chan", None, "p1", 1, 5, 5, ts)
+    mem_manager.store_summary(seg, "Facts", _make_fake_embedding(), "old-model", ts)
+
+    assert len(mem_manager.get_summaries_for_channel("chan", "p1", model_name="old-model")) == 1
+    assert len(mem_manager.get_summaries_for_channel("chan", "p1", model_name="new-model")) == 0
+
+
+# --- get_active_channels Tests ---
+
+def test_get_active_channels_basic(mem_manager):
+    """Returns channels with unembedded messages."""
+    ts = datetime.now()
+    mem_manager.log_message("u1", "p1", "chan-a", "user", "Alice", "Hello", ts)
+    mem_manager.log_message("u1", "p2", "chan-b", "user", "Bob", "Hi", ts, server_id="srv1")
+
+    channels = mem_manager.get_active_channels()
+    assert len(channels) == 2
+    assert ("chan-a", "p1", None) in channels
+    assert ("chan-b", "p2", "srv1") in channels
+
+
+def test_get_active_channels_excludes_embedded(mem_manager):
+    """Channels where all messages are embedded are not returned."""
+    ts = datetime.now()
+    iid = mem_manager.log_message("u1", "p1", "chan", "user", "Alice", "Hello", ts)
+    mem_manager.store_message_embedding(iid, _make_fake_embedding(), "text-embedding-004", ts)
+
+    assert len(mem_manager.get_active_channels()) == 0
+
+
+def test_get_active_channels_model_name_filter(mem_manager):
+    """With model_name, channels with stale-model embeddings are also returned."""
+    ts = datetime.now()
+    iid = mem_manager.log_message("u1", "p1", "chan", "user", "Alice", "Hello", ts)
+    mem_manager.store_message_embedding(iid, _make_fake_embedding(), "old-model", ts)
+
+    assert len(mem_manager.get_active_channels()) == 0
+    assert len(mem_manager.get_active_channels(model_name="new-model")) == 1
+
+
+def test_get_active_channels_excludes_null_content(mem_manager):
+    """Channels with only NULL/empty content messages are not returned."""
+    ts = datetime.now()
+    mem_manager.log_message("u1", "p1", "chan", "user", "Alice", None, ts)
+    mem_manager.log_message("u1", "p1", "chan", "user", "Alice", "", ts)
+
+    assert len(mem_manager.get_active_channels()) == 0
+
+
+# --- get_last_segment_tail_embeddings Tests ---
+
+def test_get_last_segment_tail_embeddings_basic(mem_manager):
+    """Returns tail embeddings from the most recent segment."""
+    ts = datetime.now()
+    # Create messages and embeddings
+    ids = []
+    embs = []
+    for i in range(5):
+        iid = mem_manager.log_message("u1", "p1", "chan", "user", "Alice",
+                                       f"Message {i}", ts)
+        ids.append(iid)
+        emb = _make_fake_embedding()
+        embs.append(emb)
+        mem_manager.store_message_embedding(iid, emb, "text-embedding-004", ts)
+
+    # Create a segment covering all messages
+    mem_manager.store_segment("chan", None, "p1", ids[0], ids[-1], 5, ts)
+
+    # Get last 3 tail embeddings
+    tail = mem_manager.get_last_segment_tail_embeddings("chan", "p1", n=3)
+    assert tail is not None
+    assert len(tail) == 3
+    # Should be in chronological order (last 3 messages)
+    assert tail[0] == embs[2]
+    assert tail[1] == embs[3]
+    assert tail[2] == embs[4]
+
+
+def test_get_last_segment_tail_embeddings_no_segment(mem_manager):
+    """Returns None when no segments exist."""
+    result = mem_manager.get_last_segment_tail_embeddings("chan", "p1")
+    assert result is None
+
+
+def test_get_last_segment_tail_embeddings_model_filter(mem_manager):
+    """Returns None when previous segment used a different model."""
+    ts = datetime.now()
+    iid = mem_manager.log_message("u1", "p1", "chan", "user", "Alice", "Hello", ts)
+    mem_manager.store_message_embedding(iid, _make_fake_embedding(), "old-model", ts)
+    mem_manager.store_segment("chan", None, "p1", iid, iid, 1, ts)
+
+    # Asking for new model — should return None (cold start)
+    result = mem_manager.get_last_segment_tail_embeddings("chan", "p1", model_name="new-model")
+    assert result is None
+
+    # Asking for matching model — should return embeddings
+    result = mem_manager.get_last_segment_tail_embeddings("chan", "p1", model_name="old-model")
+    assert result is not None
+    assert len(result) == 1
+
+
+def test_get_last_segment_tail_scoped_to_channel_persona(mem_manager):
+    """Tail embeddings are scoped to the correct channel+persona, not just ID range."""
+    ts = datetime.now()
+
+    # Messages in chan-a
+    id_a = mem_manager.log_message("u1", "p1", "chan-a", "user", "Alice", "In A", ts)
+    emb_a = _make_fake_embedding()
+    mem_manager.store_message_embedding(id_a, emb_a, "m", ts)
+
+    # Messages in chan-b (interleaved IDs)
+    id_b = mem_manager.log_message("u1", "p1", "chan-b", "user", "Bob", "In B", ts)
+    emb_b = _make_fake_embedding()
+    mem_manager.store_message_embedding(id_b, emb_b, "m", ts)
+
+    # Segment for chan-a that spans both IDs
+    mem_manager.store_segment("chan-a", None, "p1", id_a, id_b, 1, ts)
+
+    tail = mem_manager.get_last_segment_tail_embeddings("chan-a", "p1")
+    assert tail is not None
+    assert len(tail) == 1  # Only the chan-a message, not chan-b
+
+
+# --- Migration Tests for Memory Tables ---
+
+def test_migration_creates_memory_tables(legacy_mem_manager):
+    """create_schema() on a legacy DB creates the memory tables."""
+    legacy_mem_manager.create_schema()
+
+    conn = legacy_mem_manager._get_connection()
+    cursor = conn.cursor()
+    for table in ('Message_Embeddings', 'Memory_Segments', 'Memory_Summaries'):
+        cursor.execute(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?",
+            (table,))
+        assert cursor.fetchone()[0] == 1, f"{table} not created"
+
+
+def test_migration_memory_tables_idempotent(legacy_mem_manager):
+    """Running create_schema() twice doesn't error on memory tables."""
+    legacy_mem_manager.create_schema()
+    legacy_mem_manager.create_schema()
+
+    conn = legacy_mem_manager._get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='Memory_Segments'")
+    assert cursor.fetchone()[0] == 1

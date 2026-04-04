@@ -402,14 +402,15 @@ def test_build_conversation_history_channel_mode(chat_system_with_mocks):
     system, memory_mock, _, persona, _ = chat_system_with_mocks
     persona.set_memory_mode(MemoryMode.CHANNEL_ISOLATED)
     memory_mock.get_channel_history.return_value = [
-        {'author_role': 'user', 'author_name': 'Alice', 'content': 'Hello'}
+        {'interaction_id': 1, 'author_role': 'user', 'author_name': 'Alice', 'content': 'Hello'}
     ]
 
-    history = system._build_conversation_history(persona, 'user', 'general', 'srv1', None)
+    history, oldest_id = system._build_conversation_history(persona, 'user', 'general', 'srv1', None)
 
     memory_mock.get_channel_history.assert_called_once()
     assert len(history) == 1
     assert history[0]['content'] == 'Alice: Hello'
+    assert oldest_id == 1
 
 
 def test_build_conversation_history_ticket_mode_returns_empty(chat_system_with_mocks):
@@ -417,9 +418,10 @@ def test_build_conversation_history_ticket_mode_returns_empty(chat_system_with_m
     system, _, _, persona, _ = chat_system_with_mocks
     persona.set_memory_mode(MemoryMode.TICKET_ISOLATED)
 
-    history = system._build_conversation_history(persona, 'user', 'ch', None, None)
+    history, oldest_id = system._build_conversation_history(persona, 'user', 'ch', None, None)
 
     assert history == []
+    assert oldest_id is None
 
 
 def test_build_conversation_history_personal_mode(chat_system_with_mocks):
