@@ -160,8 +160,10 @@ RATE_LIMIT_GEMINI_25_RPM = int(os.environ.get("RATE_LIMIT_GEMINI_25_RPM", "5"))
 RATE_LIMIT_GEMINI_25_RPD = int(os.environ.get("RATE_LIMIT_GEMINI_25_RPD", "20"))
 # Gemini 3.1 (confirmed 2026-03): 15 RPM  (other gemini-3.x models have quota 0)
 RATE_LIMIT_GEMINI_3_RPM  = int(os.environ.get("RATE_LIMIT_GEMINI_3_RPM",  "15"))
-# Gemma free tier (confirmed 2026-03): 30 RPM
-RATE_LIMIT_GEMMA_RPM     = int(os.environ.get("RATE_LIMIT_GEMMA_RPM",     "30"))
+# Gemma 3 free tier (confirmed 2026-04): 30 RPM
+RATE_LIMIT_GEMMA_3_RPM   = int(os.environ.get("RATE_LIMIT_GEMMA_3_RPM",   "30"))
+# Gemma 4 free tier (confirmed 2026-04): 15 RPM
+RATE_LIMIT_GEMMA_4_RPM   = int(os.environ.get("RATE_LIMIT_GEMMA_4_RPM",   "15"))
 
 # OpenAI and Anthropic — set generously; adjust if you hit 429s on those providers.
 RATE_LIMIT_OPENAI_RPM    = int(os.environ.get("RATE_LIMIT_OPENAI_RPM",    "60"))
