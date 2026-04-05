@@ -156,9 +156,16 @@ class MemoryAgent(Agent):
         model_name = embedding_service.model_name
 
         # --- Phase 1: Embed unembedded messages ---
-        await self._embed_unembedded(
-            channel, persona_name, server_id, embedding_service
-        )
+        # Errors here (e.g. rate limits) must not prevent Phase 2 from
+        # processing previously saved embeddings.
+        try:
+            await self._embed_unembedded(
+                channel, persona_name, server_id, embedding_service
+            )
+        except Exception as e:
+            logger.warning(
+                f"MemoryAgent: {channel}/{persona_name} embedding phase failed: {e}"
+            )
 
         # --- Phase 2: Segment and summarize ---
         await self._segment_and_summarize(
