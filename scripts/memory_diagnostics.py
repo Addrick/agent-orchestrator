@@ -151,6 +151,55 @@ def cmd_overview(mm: MemoryManager) -> None:
             print(f"    {ch:<20} / {r['persona_name']:<15} {r['c']} messages")
 
 
+# -- Embedding Similarity ------------------------------------------
+
+def _print_embedding_similarity(conn, channel: str) -> None:
+    """Print message-to-centroid similarity distribution for embedded messages."""
+    rows = conn.execute(
+        "SELECT me.embedding"
+        " FROM User_Interactions ui"
+        " JOIN Message_Embeddings me ON ui.interaction_id = me.interaction_id"
+        " WHERE ui.channel = ?"
+        " AND ui.content IS NOT NULL AND ui.content != ''"
+        " ORDER BY ui.interaction_id ASC",
+        (channel,)
+    ).fetchall()
+
+    if len(rows) < 2:
+        return
+
+    # Compute running centroid similarities (same algo as MemoryAgent)
+    centroid = blob_to_vector(rows[0]['embedding']).copy()
+    n = 1
+    similarities: List[float] = []
+
+    for row in rows[1:]:
+        vec = blob_to_vector(row['embedding']).copy()
+        sim = float(np.dot(centroid, vec))
+        similarities.append(sim)
+        n += 1
+        centroid = centroid * ((n - 1) / n) + vec / n
+        norm = np.linalg.norm(centroid)
+        if norm > 0:
+            centroid = centroid / norm
+
+    arr = np.array(similarities)
+    print(f"\n  === Embedding Similarity (centroid-based, {len(rows)} messages) ===")
+    print(f"  mean={arr.mean():.3f}  min={arr.min():.3f}  "
+          f"max={arr.max():.3f}  std={arr.std():.3f}")
+    print(f"  p5={np.percentile(arr, 5):.3f}  p25={np.percentile(arr, 25):.3f}  "
+          f"median={np.median(arr):.3f}  p75={np.percentile(arr, 75):.3f}  "
+          f"p95={np.percentile(arr, 95):.3f}")
+
+    bins = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+    counts, _ = np.histogram(similarities, bins=bins)
+    max_count = max(max(counts), 1)
+    for i in range(len(counts)):
+        bar = "#" * int(counts[i] * 40 / max_count)
+        print(f"    {bins[i]:.1f}-{bins[i+1]:.1f}: {counts[i]:>4} {bar}")
+    print()
+
+
 # -- Channel Detail ------------------------------------------------
 
 def cmd_channel(mm: MemoryManager, channel: str, verbose: bool,
@@ -175,7 +224,6 @@ def cmd_channel(mm: MemoryManager, channel: str, verbose: bool,
         print(f"No segments for channel {channel}.")
         if row['c'] > 0:
             print(f"  ({row['c']} messages exist but are not yet processed)")
-        return
 
     for combo in combos:
         persona = combo['persona_name']
@@ -183,6 +231,9 @@ def cmd_channel(mm: MemoryManager, channel: str, verbose: bool,
         _print_channel_segments(
             conn, channel, persona, server_id, verbose, limit
         )
+
+    # Always show embedding similarity distribution for the channel
+    _print_embedding_similarity(conn, channel)
 
 
 def _print_channel_segments(
