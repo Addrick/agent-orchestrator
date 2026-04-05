@@ -270,6 +270,13 @@ class MemoryManager:
     _SUPPRESSION_SUBQUERY = (" AND interaction_id NOT IN"
                              " (SELECT interaction_id FROM Suppressed_Interactions)")
 
+    @staticmethod
+    def _suppression_filter(alias: str = "") -> str:
+        """Return a suppression subquery with an optional table alias for the outer column."""
+        prefix = f"{alias}." if alias else ""
+        return (f" AND {prefix}interaction_id NOT IN"
+                " (SELECT interaction_id FROM Suppressed_Interactions)")
+
     def get_personal_history(self, user_identifier: str, persona_name: str,
                              limit: Optional[int] = None) -> List[Dict[str, Any]]:
         with self._lock:
@@ -558,9 +565,7 @@ class MemoryManager:
                 query += " AND ui.server_id IS NULL"
 
             # Exclude suppressed
-            query += self._SUPPRESSION_SUBQUERY.replace(
-                "interaction_id", "ui.interaction_id"
-            )
+            query += self._suppression_filter("ui")
 
             # Exclude non-embeddable
             query += " AND ui.content IS NOT NULL AND ui.content != ''"
@@ -673,9 +678,7 @@ class MemoryManager:
             params: List[Any] = []
 
             # Exclude suppressed
-            query += self._SUPPRESSION_SUBQUERY.replace(
-                "interaction_id", "ui.interaction_id"
-            )
+            query += self._suppression_filter("ui")
 
             if model_name:
                 query += " AND (me.embedding IS NULL OR me.model_name != ?)"
