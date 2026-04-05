@@ -597,7 +597,8 @@ def main() -> None:
     args = parser.parse_args()
 
     load_dotenv()
-    mm = MemoryManager(db_path=args.db)
+    db_path = args.db or os.environ.get("MEMORY_DATABASE_FILE")
+    mm = MemoryManager(db_path=db_path)
     mm.create_schema()
 
     if args.threshold is not None:
