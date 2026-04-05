@@ -14,14 +14,13 @@ Key rules: ask before investigating, fix root causes, remind to commit.
 Read `_overview.md` for collaboration guide, `feedback.md` for all behavioral rules.
 
 ## project/
-Active work: long-term memory system (planned, not started), agent expansion, ToolLoop extraction.
-Memory plan in `plans/long_term_memory.md`. Read `_overview.md` for current status.
+Active work: long-term memory, agent expansion, ToolLoop extraction, MSP productionization.
+Read `_overview.md` for current status and live plans.
 
 ## project-history/
 Archive of completed plans, decisions, and research. Not loaded by default.
 Read `_overview.md` only when you need rationale behind a past choice.
 
 ## external/
-GitHub repo: Addrick/llm-orchestrator. Google free-tier rate limits. TeamPCP supply
-chain attack (March 2026). Claude Code config (autocompact at 90%, settings scope).
+External system references: repo, API limits, supply chain incidents, Claude Code config.
 Read `_overview.md` for quick reference.
