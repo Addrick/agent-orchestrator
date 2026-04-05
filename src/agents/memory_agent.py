@@ -128,10 +128,16 @@ class MemoryAgent(Agent):
                     channel, persona_name, server_id, embedding_service
                 )
             except Exception as e:
-                logger.error(
-                    f"MemoryAgent: error processing {channel}/{persona_name}: {e}",
-                    exc_info=True,
-                )
+                is_rate_limit = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e)
+                if is_rate_limit:
+                    logger.warning(
+                        f"MemoryAgent: {channel}/{persona_name} rate-limited, will retry next cycle."
+                    )
+                else:
+                    logger.error(
+                        f"MemoryAgent: error processing {channel}/{persona_name}: {e}",
+                        exc_info=True,
+                    )
 
     async def _process_channel(
         self,
