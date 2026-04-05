@@ -4,7 +4,7 @@ description: Quick reference for who Adam is and how to collaborate — read bef
 type: user
 ---
 
-**Who:** Developer with ML/robotics master's, building a personal LLM orchestration engine. Strong async Python, testing discipline, system design. Deploys to AWS.
+**Who:** Developer with ML/robotics master's, founder of an MSP (est. early 2024), building LLM orchestration as the MSP's automation backend. Non-linear career path — gap years, IT work, returned to school, graduated 2021 into COVID. Strong async Python, testing discipline, system design. Deploys to AWS. Has cybersecurity interest and knowledge (adversarial ML, prompt injection, attack surface modeling).
 
 **How to collaborate:**
 - Ask clarifying questions before deep investigation (saves context/quota)

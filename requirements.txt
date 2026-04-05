@@ -24,8 +24,6 @@ anyio==4.12.1
     #   google-genai
     #   httpx
     #   openai
-apscheduler==3.11.2
-    # via -r requirements.in
 attrs==26.1.0
     # via aiohttp
 audioop-lts==0.2.2
@@ -137,6 +135,8 @@ multidict==6.7.1
     # via
     #   aiohttp
     #   yarl
+numpy==2.4.4
+    # via -r requirements.in
 oauthlib==3.3.1
     # via requests-oauthlib
 openai==2.29.0
@@ -223,10 +223,6 @@ typing-extensions==4.15.0
     #   typing-inspection
 typing-inspection==0.4.2
     # via pydantic
-tzdata==2025.3
-    # via tzlocal
-tzlocal==5.3.1
-    # via apscheduler
 uritemplate==4.2.0
     # via google-api-python-client
 urllib3==2.6.3

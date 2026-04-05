@@ -140,8 +140,11 @@ DISPATCH_TRIAGE_TAG = ZAMMAD_TRIAGE_TAG  # tickets must have this tag
 DISPATCH_DISPATCHED_TAG = "ai_dispatched"  # tag applied after dispatch
 DISPATCH_PERSONA_NAME = "dispatch_analyst"
 # =============================================================================
-# --- Local LLM Configuration ---
+# --- Long-Term Memory Configuration ---
 # =============================================================================
+MEMORY_RETRIEVAL_ENABLED = os.environ.get("MEMORY_RETRIEVAL_ENABLED", "false").lower() == "true"
+MEMORY_MAX_SUMMARIES_IN_CONTEXT = int(os.environ.get("MEMORY_MAX_SUMMARIES", "5"))
+
 LOCAL_LLM_URL = "http://omen:5001/v1"
 
 # =============================================================================
