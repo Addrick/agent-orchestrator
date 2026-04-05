@@ -15,6 +15,7 @@ from src.app_manager import AppManager
 from src.agents.agent_manager import AgentManager
 from src.agents.agent_service import AgentServiceIntegration
 from src.agents.dispatch_agent import DispatchAgent
+from src.agents.memory_agent import MemoryAgent
 from src.agents.zammad_bot import ZammadBot
 from src.clients.notification import NotificationRouter, DiscordNotifier, ZammadNotifier
 
@@ -109,6 +110,9 @@ def _register_agents(
     zammad_client: Optional[ZammadClient],
 ) -> None:
     """Register agent classes with AgentManager. Agents start via auto_start config."""
+    # Memory agent — no external service dependency
+    agent_manager.register("memory", MemoryAgent)
+
     if zammad_client is not None:
         agent_manager.register("zammad_bot", ZammadBot)
         agent_manager.register("dispatch", DispatchAgent)

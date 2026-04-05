@@ -185,3 +185,24 @@ def test_get_config_for_engine(base_persona_args):
         "top_k": 40,
     }
     assert p.get_config_for_engine() == expected_config
+
+
+# --- Ambient Memory Tests ---
+
+def test_include_ambient_memory_default(base_persona_args):
+    """include_ambient_memory defaults to True."""
+    p = Persona(**base_persona_args)
+    assert p.get_include_ambient_memory() is True
+
+
+def test_include_ambient_memory_explicit_false(base_persona_args):
+    """include_ambient_memory can be set to False."""
+    p = Persona(**base_persona_args, include_ambient_memory=False)
+    assert p.get_include_ambient_memory() is False
+
+
+def test_include_ambient_memory_absent_in_config(base_persona_args):
+    """When loading from config without the field, defaults to True (backward compat)."""
+    # Simulates old config without include_ambient_memory key
+    p = Persona(**base_persona_args)
+    assert p.get_include_ambient_memory() is True

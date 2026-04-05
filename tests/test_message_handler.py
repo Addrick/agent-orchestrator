@@ -680,6 +680,7 @@ _GETTER_EXCEPTIONS = {
     'get_base_context_length',
     'get_current_effective_context_length',
     'get_config_for_engine',
+    'get_include_ambient_memory',
 }
 
 
