@@ -163,7 +163,21 @@ class MemoryAgent(Agent):
         texts = [msg['content'] for msg in messages]
         embeddings = await embedding_service.encode(texts)
 
-        # 3. Segment by topic similarity
+        # 3. Persist embeddings immediately so they survive later failures
+        now = datetime.now(timezone.utc)
+        with self.memory_manager.transaction() as conn:
+            for msg, emb in zip(messages, embeddings):
+                conn.execute(
+                    """INSERT OR REPLACE INTO Message_Embeddings
+                       (interaction_id, embedding, model_name, created_at)
+                       VALUES (?, ?, ?, ?)""",
+                    (msg['interaction_id'], emb, model_name, now)
+                )
+        logger.info(
+            f"MemoryAgent: {channel}/{persona_name} — stored {len(embeddings)} embeddings."
+        )
+
+        # 4. Segment by topic similarity
         segments = self._segment_by_similarity(
             messages, embeddings, channel, persona_name, server_id
         )
@@ -172,7 +186,7 @@ class MemoryAgent(Agent):
             logger.debug(f"MemoryAgent: no segments produced for {channel}/{persona_name}.")
             return
 
-        # 4. Summarize each segment and embed summaries
+        # 5. Summarize each segment and embed summaries
         results: List[Tuple[Dict[str, Any], str, bytes]] = []
         for segment in segments:
             summary_result = await self._summarize_segment(segment, embedding_service)
@@ -182,23 +196,12 @@ class MemoryAgent(Agent):
         if not results:
             logger.warning(
                 f"MemoryAgent: all {len(segments)} segments failed summarization "
-                f"for {channel}/{persona_name}, skipping DB write."
+                f"for {channel}/{persona_name}, skipping segment write."
             )
             return
 
-        # 5. Write everything to DB in one transaction
-        now = datetime.now(timezone.utc)
+        # 6. Store segments and summaries
         with self.memory_manager.transaction() as conn:
-            # Store message embeddings
-            for msg, emb in zip(messages, embeddings):
-                conn.execute(
-                    """INSERT OR REPLACE INTO Message_Embeddings
-                       (interaction_id, embedding, model_name, created_at)
-                       VALUES (?, ?, ?, ?)""",
-                    (msg['interaction_id'], emb, model_name, now)
-                )
-
-            # Store segments and summaries
             for segment, summary_text, summary_emb in results:
                 cursor = conn.execute(
                     """INSERT INTO Memory_Segments
@@ -220,8 +223,8 @@ class MemoryAgent(Agent):
                 )
 
         logger.info(
-            f"MemoryAgent: {channel}/{persona_name} — stored {len(embeddings)} embeddings, "
-            f"{len(results)} segments+summaries."
+            f"MemoryAgent: {channel}/{persona_name} — "
+            f"{len(results)} segments+summaries stored."
         )
 
     def _segment_by_similarity(
