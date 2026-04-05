@@ -54,6 +54,8 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
     def max_input_tokens(self) -> Optional[int]:
         return self._max_input_tokens
 
+    _MAX_BATCH_SIZE = 100  # Gemini API limit per batch request
+
     async def encode(self, texts: List[str]) -> List[List[float]]:
         import os
         from google import genai
@@ -62,20 +64,22 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
             api_key=os.environ.get("GOOGLE_GENERATIVEAI_API_KEY")
         )
 
-        result = await asyncio.to_thread(
-            client.models.embed_content,
-            model=self._model_name,
-            contents=texts,
-        )
+        vectors: List[List[float]] = []
+        for i in range(0, len(texts), self._MAX_BATCH_SIZE):
+            chunk = texts[i:i + self._MAX_BATCH_SIZE]
+            result = await asyncio.to_thread(
+                client.models.embed_content,
+                model=self._model_name,
+                contents=chunk,
+            )
 
-        vectors = []
-        for embedding in result.embeddings or []:
-            vec = list(embedding.values or [])
-            # Normalize to unit vector
-            norm = sum(v * v for v in vec) ** 0.5
-            if norm > 0:
-                vec = [v / norm for v in vec]
-            vectors.append(vec)
+            for embedding in result.embeddings or []:
+                vec = list(embedding.values or [])
+                # Normalize to unit vector
+                norm = sum(v * v for v in vec) ** 0.5
+                if norm > 0:
+                    vec = [v / norm for v in vec]
+                vectors.append(vec)
 
         return vectors
 
