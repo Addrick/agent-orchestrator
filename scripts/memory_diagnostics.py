@@ -10,7 +10,8 @@ Usage
   python -m scripts.memory_diagnostics                        # overview of all channels
   python -m scripts.memory_diagnostics --channel 114148...    # specific channel
   python -m scripts.memory_diagnostics --verbose              # full message content + scores
-  python -m scripts.memory_diagnostics --threshold 0.25       # re-segment with alt threshold
+  python -m scripts.memory_diagnostics --threshold 0.25       # re-segment with alt threshold (dry run)
+  python -m scripts.memory_diagnostics --reset-segments --channel 114...  # delete segments, keep embeddings
   python -m scripts.memory_diagnostics --judge gemini-2.5-flash  # LLM quality evaluation
 """
 
@@ -480,6 +481,54 @@ def cmd_resegment(mm: MemoryManager, channel: str, threshold: float,
     print()
 
 
+# -- Reset Segments ------------------------------------------------
+
+def cmd_reset_segments(mm: MemoryManager, channel: str) -> None:
+    """Delete all segments and summaries for a channel.
+
+    Embeddings are preserved — messages return to 'embedded but unsegmented'
+    state, so the next agent cycle will re-segment with the current config.
+    """
+    conn = mm._get_connection()
+
+    # Count what we're about to delete
+    row = conn.execute(
+        "SELECT COUNT(*) AS c FROM Memory_Segments WHERE channel = ?",
+        (channel,)
+    ).fetchone()
+    seg_count = row['c']
+
+    if seg_count == 0:
+        print(f"No segments to reset for channel {channel}.")
+        return
+
+    row = conn.execute(
+        "SELECT COUNT(*) AS c FROM Memory_Summaries ms"
+        " JOIN Memory_Segments seg ON ms.segment_id = seg.segment_id"
+        " WHERE seg.channel = ?",
+        (channel,)
+    ).fetchone()
+    sum_count = row['c']
+
+    print(f"Resetting channel {channel}:")
+    print(f"  Deleting {sum_count} summaries and {seg_count} segments.")
+    print(f"  Embeddings are preserved — messages will be re-segmented on next cycle.")
+
+    with mm.transaction() as tx:
+        # Delete summaries first (FK dependency)
+        tx.execute(
+            "DELETE FROM Memory_Summaries WHERE segment_id IN"
+            " (SELECT segment_id FROM Memory_Segments WHERE channel = ?)",
+            (channel,)
+        )
+        tx.execute(
+            "DELETE FROM Memory_Segments WHERE channel = ?",
+            (channel,)
+        )
+
+    print("  Done.")
+
+
 # -- LLM Judge -----------------------------------------------------
 
 _JUDGE_KEYS = ('SEGMENTATION', 'COMPLETENESS', 'ACCURACY', 'CONCISENESS')
@@ -643,6 +692,11 @@ def main() -> None:
         help='Run LLM judge with this model (e.g., gemini-2.5-flash)'
     )
     parser.add_argument(
+        '--reset-segments', action='store_true',
+        help='Delete segments+summaries for --channel (keeps embeddings). '
+             'Next agent cycle will re-segment with current config.'
+    )
+    parser.add_argument(
         '--db', type=str, default=None,
         help='Path to database file (default: production DB)'
     )
@@ -654,7 +708,11 @@ def main() -> None:
     mm = MemoryManager(db_path=db_path)
     mm.create_schema()
 
-    if args.threshold is not None:
+    if args.reset_segments:
+        if not args.channel:
+            parser.error("--reset-segments requires --channel")
+        cmd_reset_segments(mm, args.channel)
+    elif args.threshold is not None:
         if not args.channel:
             parser.error("--threshold requires --channel")
         cmd_resegment(mm, args.channel, args.threshold, args.min_size)
