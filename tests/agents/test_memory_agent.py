@@ -424,9 +424,15 @@ class TestConfigInjection:
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
     def test_allowed_channels_from_config(self, mock_load, mock_chat_system):
         agent = MemoryAgent(mock_chat_system, agent_config={
-            "allowed_channels": ["chan-a", "chan-b"]
+            "allowed_channels": [
+                {"channel": "chan-a", "server_id": "s1"},
+                {"channel": "chan-b", "server_id": "s2"},
+            ]
         })
-        assert agent._allowed_channels == ["chan-a", "chan-b"]
+        assert agent._allowed_channels == [
+            {"channel": "chan-a", "server_id": "s1"},
+            {"channel": "chan-b", "server_id": "s2"},
+        ]
 
 
 class TestAllowedChannels:
@@ -440,10 +446,11 @@ class TestAllowedChannels:
         mock_provider.max_input_tokens = None
         mock_provider_cls.return_value = mock_provider
 
-        memory_agent._allowed_channels = ["chan-b"]
+        memory_agent._allowed_channels = [{"channel": "chan-b", "server_id": "s1"}]
         memory_agent.memory_manager.get_active_channels.return_value = [
             ("chan-a", "p1", None),
             ("chan-b", "p1", None),
+            ("chan-b", "p1", "s1"),
             ("chan-c", "p1", "s1"),
         ]
         memory_agent._process_channel = AsyncMock()
@@ -452,6 +459,7 @@ class TestAllowedChannels:
         memory_agent._process_channel.assert_called_once()
         call_args = memory_agent._process_channel.call_args
         assert call_args[0][0] == "chan-b"
+        assert call_args[0][2] == "s1"
 
     @pytest.mark.asyncio
     @patch('src.agents.memory_agent.GeminiEmbeddingProvider')
