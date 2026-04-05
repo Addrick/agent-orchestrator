@@ -26,7 +26,7 @@ import anthropic
 from openai import AsyncOpenAI, APIStatusError, APITimeoutError
 from google import genai
 from google.genai.types import GenerateContentConfig, Tool, GoogleSearch, Candidate, \
-    FunctionDeclaration, Part
+    FunctionDeclaration, Part, ThinkingConfig
 from src.utils.google_utils import process_grounding_metadata
 
 logger = logging.getLogger(__name__)
@@ -573,6 +573,11 @@ class TextEngine:
             content_config_for_api['top_p'] = config.get("top_p")
         if isinstance(config.get("top_k"), (int, float)):
             content_config_for_api['top_k'] = config.get("top_k")
+
+        if config.get("thinking_level"):
+            content_config_for_api['thinking_config'] = ThinkingConfig(
+                thinking_level=config["thinking_level"]
+            )
 
         api_params_for_dumping = self._build_google_dump_params(
             config["model_name"], content_config_for_api, serializable_history

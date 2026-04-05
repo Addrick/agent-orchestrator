@@ -157,7 +157,8 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
                 enabled_tools=new_persona.get("enabled_tools", []),
                 memory_mode=new_persona.get("memory_mode"),
                 service_bindings=new_persona.get("service_bindings"),
-                include_ambient_memory=new_persona.get("include_ambient_memory", True)
+                include_ambient_memory=new_persona.get("include_ambient_memory", True),
+                thinking_level=new_persona.get("thinking_level")
             )
 
         return personas
@@ -212,7 +213,8 @@ def load_system_personas_from_file() -> Dict[str, Any]:
                 enabled_tools=new_persona.get("enabled_tools", []),
                 memory_mode=new_persona.get("memory_mode", "TICKET_ISOLATED"),
                 service_bindings=new_persona.get("service_bindings"),
-                include_ambient_memory=new_persona.get("include_ambient_memory", True)
+                include_ambient_memory=new_persona.get("include_ambient_memory", True),
+                thinking_level=new_persona.get("thinking_level")
             )
 
         return personas
