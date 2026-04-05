@@ -658,34 +658,111 @@ class MemoryManager:
             cursor.execute(query, params)
             return [dict(row) for row in cursor.fetchall()]
 
-    def get_active_channels(self, model_name: Optional[str] = None
-                            ) -> List[Tuple[str, str, Optional[str]]]:
-        """Returns (channel, persona_name, server_id) tuples with unprocessed messages.
+    def get_unsegmented_embedded_messages(
+        self, persona_name: str, channel: str,
+        server_id: Optional[str] = None,
+        model_name: Optional[str] = None,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """Returns embedded messages not yet covered by any segment.
 
-        When model_name is provided, also returns channels where existing embeddings
-        were computed by a different model (supports model migration discovery).
+        Uses the high-water mark (max end_interaction_id from Memory_Segments)
+        to find messages with embeddings that haven't been segmented yet.
         """
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
 
+            # Find the high-water mark for this channel
+            hw_query = (
+                "SELECT MAX(end_interaction_id) AS hw"
+                " FROM Memory_Segments"
+                " WHERE channel = ? AND persona_name = ?"
+            )
+            hw_params: List[Any] = [channel, persona_name]
+            if server_id is not None:
+                hw_query += " AND server_id = ?"
+                hw_params.append(server_id)
+            else:
+                hw_query += " AND server_id IS NULL"
+
+            hw_row = cursor.execute(hw_query, hw_params).fetchone()
+            high_water = hw_row['hw'] if hw_row and hw_row['hw'] is not None else 0
+
+            # Fetch embedded messages after the high-water mark
             query = (
+                "SELECT ui.interaction_id, ui.author_role, ui.author_name,"
+                " ui.content, me.embedding"
+                " FROM User_Interactions ui"
+                " JOIN Message_Embeddings me ON ui.interaction_id = me.interaction_id"
+                " WHERE ui.persona_name = ? AND ui.channel = ?"
+                " AND ui.interaction_id > ?"
+            )
+            params: List[Any] = [persona_name, channel, high_water]
+
+            if server_id is not None:
+                query += " AND ui.server_id = ?"
+                params.append(server_id)
+            else:
+                query += " AND ui.server_id IS NULL"
+
+            query += self._suppression_filter("ui")
+            query += " AND ui.content IS NOT NULL AND ui.content != ''"
+
+            if model_name:
+                query += " AND me.model_name = ?"
+                params.append(model_name)
+
+            query += " ORDER BY ui.interaction_id ASC LIMIT ?"
+            params.append(limit)
+
+            cursor.execute(query, params)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_active_channels(self, model_name: Optional[str] = None
+                            ) -> List[Tuple[str, str, Optional[str]]]:
+        """Returns (channel, persona_name, server_id) tuples with pending work.
+
+        A channel has pending work if it has either:
+        - Unembedded messages (or stale-model embeddings)
+        - Embedded messages beyond the last segment boundary (unsegmented)
+        """
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+
+            # Channels with unembedded messages
+            q1 = (
                 "SELECT DISTINCT ui.channel, ui.persona_name, ui.server_id"
                 " FROM User_Interactions ui"
                 " LEFT JOIN Message_Embeddings me ON ui.interaction_id = me.interaction_id"
                 " WHERE ui.content IS NOT NULL AND ui.content != ''"
             )
+            q1 += self._suppression_filter("ui")
             params: List[Any] = []
 
-            # Exclude suppressed
-            query += self._suppression_filter("ui")
-
             if model_name:
-                query += " AND (me.embedding IS NULL OR me.model_name != ?)"
+                q1 += " AND (me.embedding IS NULL OR me.model_name != ?)"
                 params.append(model_name)
             else:
-                query += " AND me.embedding IS NULL"
+                q1 += " AND me.embedding IS NULL"
 
+            # Channels with embedded-but-unsegmented messages
+            q2 = (
+                "SELECT DISTINCT ui.channel, ui.persona_name, ui.server_id"
+                " FROM User_Interactions ui"
+                " JOIN Message_Embeddings me ON ui.interaction_id = me.interaction_id"
+                " WHERE ui.content IS NOT NULL AND ui.content != ''"
+                " AND ui.interaction_id > COALESCE("
+                "   (SELECT MAX(seg.end_interaction_id) FROM Memory_Segments seg"
+                "    WHERE seg.channel = ui.channel"
+                "    AND seg.persona_name = ui.persona_name"
+                "    AND (seg.server_id = ui.server_id"
+                "         OR (seg.server_id IS NULL AND ui.server_id IS NULL))), 0)"
+            )
+            q2 += self._suppression_filter("ui")
+
+            query = q1 + " UNION " + q2
             cursor.execute(query, params)
             return [(row['channel'], row['persona_name'], row['server_id'])
                     for row in cursor.fetchall()]

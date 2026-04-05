@@ -753,12 +753,17 @@ def test_get_active_channels_basic(mem_manager):
     assert ("chan-b", "p2", "srv1") in channels
 
 
-def test_get_active_channels_excludes_embedded(mem_manager):
-    """Channels where all messages are embedded are not returned."""
+def test_get_active_channels_includes_unsegmented_embedded(mem_manager):
+    """Channels with embedded-but-unsegmented messages are still active."""
     ts = datetime.now()
     iid = mem_manager.log_message("u1", "p1", "chan", "user", "Alice", "Hello", ts)
     mem_manager.store_message_embedding(iid, _make_fake_embedding(), "text-embedding-004", ts)
 
+    # Embedded but not segmented — still needs work
+    assert len(mem_manager.get_active_channels()) == 1
+
+    # Segment covers the message — now fully processed
+    mem_manager.store_segment("chan", None, "p1", iid, iid, 1, ts)
     assert len(mem_manager.get_active_channels()) == 0
 
 
@@ -767,6 +772,8 @@ def test_get_active_channels_model_name_filter(mem_manager):
     ts = datetime.now()
     iid = mem_manager.log_message("u1", "p1", "chan", "user", "Alice", "Hello", ts)
     mem_manager.store_message_embedding(iid, _make_fake_embedding(), "old-model", ts)
+    # Segment it so the unsegmented UNION branch doesn't match
+    mem_manager.store_segment("chan", None, "p1", iid, iid, 1, ts)
 
     assert len(mem_manager.get_active_channels()) == 0
     assert len(mem_manager.get_active_channels(model_name="new-model")) == 1

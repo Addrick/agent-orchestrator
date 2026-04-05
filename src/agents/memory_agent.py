@@ -146,10 +146,35 @@ class MemoryAgent(Agent):
         server_id: Optional[str],
         embedding_service: EmbeddingService,
     ) -> None:
-        """Process a single channel: embed -> segment -> summarize -> store."""
+        """Process a single channel in two independent phases.
+
+        Phase 1 — Embed: fetch unembedded messages, embed and persist in chunks.
+                  Each chunk is committed immediately so partial progress survives.
+        Phase 2 — Segment+Summarize: fetch all embedded-but-unsegmented messages
+                  (including any from prior cycles), segment, summarize, store.
+        """
         model_name = embedding_service.model_name
 
-        # 1. Fetch unembedded messages
+        # --- Phase 1: Embed unembedded messages ---
+        await self._embed_unembedded(
+            channel, persona_name, server_id, embedding_service
+        )
+
+        # --- Phase 2: Segment and summarize ---
+        await self._segment_and_summarize(
+            channel, persona_name, server_id, embedding_service
+        )
+
+    async def _embed_unembedded(
+        self,
+        channel: str,
+        persona_name: str,
+        server_id: Optional[str],
+        embedding_service: EmbeddingService,
+    ) -> None:
+        """Embed unembedded messages in chunks, persisting each chunk immediately."""
+        model_name = embedding_service.model_name
+
         messages = self.memory_manager.get_unembedded_messages(
             persona_name=persona_name,
             channel=channel,
@@ -158,41 +183,67 @@ class MemoryAgent(Agent):
             model_name=model_name,
         )
 
-        if len(messages) < self._min_segment_size:
-            logger.debug(
-                f"MemoryAgent: {channel}/{persona_name} has {len(messages)} messages "
-                f"(< min_segment_size={self._min_segment_size}), skipping."
-            )
+        if not messages:
             return
 
-        # 2. Embed all messages (single batch API call)
-        texts = [msg['content'] for msg in messages]
-        embeddings = await embedding_service.encode(texts)
-
-        # 3. Persist embeddings immediately so they survive later failures
+        chunk_size = 100  # Gemini API batch limit
+        total_stored = 0
         now = datetime.now(timezone.utc)
-        with self.memory_manager.transaction() as conn:
-            for msg, emb in zip(messages, embeddings):
-                conn.execute(
-                    """INSERT OR REPLACE INTO Message_Embeddings
-                       (interaction_id, embedding, model_name, created_at)
-                       VALUES (?, ?, ?, ?)""",
-                    (msg['interaction_id'], emb, model_name, now)
-                )
+
+        for i in range(0, len(messages), chunk_size):
+            chunk_msgs = messages[i:i + chunk_size]
+            chunk_texts = [msg['content'] for msg in chunk_msgs]
+            chunk_embs = await embedding_service.encode(chunk_texts)
+
+            with self.memory_manager.transaction() as conn:
+                for msg, emb in zip(chunk_msgs, chunk_embs):
+                    conn.execute(
+                        """INSERT OR REPLACE INTO Message_Embeddings
+                           (interaction_id, embedding, model_name, created_at)
+                           VALUES (?, ?, ?, ?)""",
+                        (msg['interaction_id'], emb, model_name, now)
+                    )
+            total_stored += len(chunk_embs)
+
         logger.info(
-            f"MemoryAgent: {channel}/{persona_name} — stored {len(embeddings)} embeddings."
+            f"MemoryAgent: {channel}/{persona_name} — stored {total_stored} embeddings."
         )
 
-        # 4. Segment by topic similarity
+    async def _segment_and_summarize(
+        self,
+        channel: str,
+        persona_name: str,
+        server_id: Optional[str],
+        embedding_service: EmbeddingService,
+    ) -> None:
+        """Segment and summarize all embedded-but-unsegmented messages."""
+        model_name = embedding_service.model_name
+
+        rows = self.memory_manager.get_unsegmented_embedded_messages(
+            persona_name=persona_name,
+            channel=channel,
+            server_id=server_id,
+            model_name=model_name,
+            limit=self._batch_size,
+        )
+
+        if len(rows) < self._min_segment_size:
+            return
+
+        # Split rows into messages (for segmentation) and embeddings
+        messages = [
+            {k: r[k] for k in ('interaction_id', 'author_role', 'author_name', 'content')}
+            for r in rows
+        ]
+        embeddings = [r['embedding'] for r in rows]
+
         segments = self._segment_by_similarity(
             messages, embeddings, channel, persona_name, server_id
         )
 
         if not segments:
-            logger.debug(f"MemoryAgent: no segments produced for {channel}/{persona_name}.")
             return
 
-        # 5. Summarize each segment and embed summaries
         results: List[Tuple[Dict[str, Any], str, bytes]] = []
         for segment in segments:
             summary_result = await self._summarize_segment(segment, embedding_service)
@@ -202,11 +253,11 @@ class MemoryAgent(Agent):
         if not results:
             logger.warning(
                 f"MemoryAgent: all {len(segments)} segments failed summarization "
-                f"for {channel}/{persona_name}, skipping segment write."
+                f"for {channel}/{persona_name}."
             )
             return
 
-        # 6. Store segments and summaries
+        now = datetime.now(timezone.utc)
         with self.memory_manager.transaction() as conn:
             for segment, summary_text, summary_emb in results:
                 cursor = conn.execute(
