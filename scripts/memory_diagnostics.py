@@ -42,7 +42,9 @@ def cosine_sim(a: bytes, b: bytes) -> float:
     return float(np.dot(va, vb))
 
 
-def relative_time(dt: datetime) -> str:
+def relative_time(dt) -> str:
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt)
     now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
     delta = now - dt
     seconds = int(delta.total_seconds())

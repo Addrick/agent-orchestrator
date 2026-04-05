@@ -234,6 +234,11 @@ class MemoryAgent(Agent):
             limit=self._batch_size,
         )
 
+        logger.info(
+            f"MemoryAgent: {channel}/{persona_name} — "
+            f"{len(rows)} unsegmented embedded messages found."
+        )
+
         if len(rows) < self._min_segment_size:
             return
 
