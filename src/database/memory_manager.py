@@ -62,7 +62,9 @@ class MemoryManager:
         """Context manager for atomic multi-step writes.
 
         Acquires the lock, yields the connection, and commits on success
-        or rolls back on exception.
+        or rolls back on exception. Do NOT call other MemoryManager methods
+        (store_*, get_*) from within the block — they acquire the same lock
+        and will commit prematurely, breaking atomicity.
         """
         with self._lock:
             conn = self._get_connection()

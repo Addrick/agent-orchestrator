@@ -29,6 +29,8 @@ def _relative_time(dt: datetime) -> str:
     now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
     delta = now - dt
     seconds = int(delta.total_seconds())
+    if seconds < 0:
+        return "just now"
     if seconds < 60:
         return "just now"
     minutes = seconds // 60
@@ -297,6 +299,10 @@ class ChatSystem:
             window_embeddings = await self._embedding_service.encode(window_texts)
         except Exception as e:
             logger.warning(f"Memory retrieval: embedding failed: {e}")
+            return None
+
+        if not window_embeddings:
+            logger.warning("Memory retrieval: encode returned empty results")
             return None
 
         # Score each summary: max similarity across all window messages

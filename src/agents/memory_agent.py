@@ -152,6 +152,13 @@ class MemoryAgent(Agent):
             if summary_result is not None:
                 results.append((segment, summary_result[0], summary_result[1]))
 
+        if not results:
+            logger.warning(
+                f"MemoryAgent: all {len(segments)} segments failed summarization "
+                f"for {channel}/{persona_name}, skipping DB write."
+            )
+            return
+
         # 5. Write everything to DB in one transaction
         now = datetime.now(timezone.utc)
         with self.memory_manager.transaction() as conn:
@@ -296,8 +303,9 @@ class MemoryAgent(Agent):
         norm = float(np.linalg.norm(centroid))
         if norm > 0:
             centroid = centroid / norm
+            return centroid
 
-        return centroid
+        return None
 
     async def _summarize_segment(
         self,
