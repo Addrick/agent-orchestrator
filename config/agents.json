@@ -6,8 +6,8 @@
             "action_history_limit": 5,
             "auto_start": true,
             "embedding_provider": "gemini",
-            "similarity_threshold": 0.3,
-            "min_segment_size": 3,
+            "similarity_threshold": 0.75,
+            "min_segment_size": 2,
             "batch_size": 200,
             "allowed_channels": [{"channel": "arbitr", "server_id": "347812763093172225"}],
             "description": "Segments conversations by topic, extracts facts, and stores embedded summaries for long-term memory retrieval."
