@@ -4,7 +4,7 @@
             "persona": "memory_summarizer",
             "schedule": {"interval": 900},
             "action_history_limit": 5,
-            "auto_start": false,
+            "auto_start": true,
             "embedding_provider": "gemini",
             "similarity_threshold": 0.3,
             "min_segment_size": 3,
