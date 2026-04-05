@@ -16,7 +16,7 @@ from config.global_config import (
     EMPTY_RESPONSE_RETRIES, EMPTY_RESPONSE_RETRY_DELAY,
     RATE_LIMIT_GEMINI_25_RPM, RATE_LIMIT_GEMINI_25_RPD,
     RATE_LIMIT_GEMINI_3_RPM,
-    RATE_LIMIT_GEMMA_RPM,
+    RATE_LIMIT_GEMMA_3_RPM, RATE_LIMIT_GEMMA_4_RPM,
     RATE_LIMIT_OPENAI_RPM, RATE_LIMIT_ANTHROPIC_RPM,
 )
 # --- Provider-specific imports ---
@@ -65,14 +65,15 @@ class TextEngine:
         self._gemini_25_rpm_limiter = AsyncLimiter(max_rate=RATE_LIMIT_GEMINI_25_RPM, time_period=60)
         self._gemini_25_rpd_limiter = AsyncLimiter(max_rate=RATE_LIMIT_GEMINI_25_RPD, time_period=86400)
         self._gemini_3_rpm_limiter  = AsyncLimiter(max_rate=RATE_LIMIT_GEMINI_3_RPM,  time_period=60)
-        self._gemma_rpm_limiter     = AsyncLimiter(max_rate=RATE_LIMIT_GEMMA_RPM,     time_period=60)
+        self._gemma_3_rpm_limiter   = AsyncLimiter(max_rate=RATE_LIMIT_GEMMA_3_RPM,   time_period=60)
+        self._gemma_4_rpm_limiter   = AsyncLimiter(max_rate=RATE_LIMIT_GEMMA_4_RPM,   time_period=60)
         self._openai_limiter        = AsyncLimiter(max_rate=RATE_LIMIT_OPENAI_RPM,    time_period=60)
         self._anthropic_limiter     = AsyncLimiter(max_rate=RATE_LIMIT_ANTHROPIC_RPM, time_period=60)
         logger.info(
             f"Rate limiters initialised — "
             f"Gemini 2.5: {RATE_LIMIT_GEMINI_25_RPM} RPM / {RATE_LIMIT_GEMINI_25_RPD} RPD | "
             f"Gemini 3.1: {RATE_LIMIT_GEMINI_3_RPM} RPM | "
-            f"Gemma: {RATE_LIMIT_GEMMA_RPM} RPM | "
+            f"Gemma 3: {RATE_LIMIT_GEMMA_3_RPM} RPM | Gemma 4: {RATE_LIMIT_GEMMA_4_RPM} RPM | "
             f"OpenAI: {RATE_LIMIT_OPENAI_RPM} RPM | "
             f"Anthropic: {RATE_LIMIT_ANTHROPIC_RPM} RPM"
         )
@@ -96,8 +97,8 @@ class TextEngine:
         # Anthropic: claude-3, claude-4, etc.
         if 'claude-3' in model_name or 'claude-4' in model_name:
             return True
-        # Google: gemini and gemma-3 models
-        if 'gemini' in model_name or 'gemma-3' in model_name:
+        # Google: gemini and gemma models
+        if 'gemini' in model_name or 'gemma' in model_name:
             return True
         return False
 
@@ -137,8 +138,10 @@ class TextEngine:
             return self._generate_openai_response, [self._openai_limiter]
         if "claude" in model_name:
             return self._generate_anthropic_response, [self._anthropic_limiter]
+        if "gemma-4" in model_name:
+            return self._generate_google_response, [self._gemma_4_rpm_limiter]
         if "gemma" in model_name:
-            return self._generate_google_response, [self._gemma_rpm_limiter]
+            return self._generate_google_response, [self._gemma_3_rpm_limiter]
         if "gemini-3.1" in model_name:
             return self._generate_google_response, [self._gemini_3_rpm_limiter]
         if "gemini" in model_name:
