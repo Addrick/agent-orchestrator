@@ -1,5 +1,17 @@
 {
     "agents": {
+        "memory": {
+            "persona": "memory_summarizer",
+            "schedule": {"interval": 900},
+            "action_history_limit": 5,
+            "auto_start": true,
+            "embedding_provider": "gemini",
+            "similarity_threshold": 0.3,
+            "min_segment_size": 3,
+            "batch_size": 200,
+            "allowed_channels": ["1141480872403538071"],
+            "description": "Segments conversations by topic, extracts facts, and stores embedded summaries for long-term memory retrieval."
+        },
         "dispatch": {
             "persona": "dispatch_analyst",
             "schedule": {"interval": 300},

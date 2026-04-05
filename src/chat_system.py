@@ -10,7 +10,7 @@ from enum import Enum, auto
 from typing import Any, Coroutine, Dict, List, Optional, Set, Tuple
 
 from config.global_config import MAX_TOOL_CALLS, MAX_CACHED_API_REQUESTS, \
-    PENDING_CONFIRMATION_TIMEOUT
+    PENDING_CONFIRMATION_TIMEOUT, MEMORY_RETRIEVAL_ENABLED, MEMORY_MAX_SUMMARIES_IN_CONTEXT
 from src.clients.service_integration import ServiceIntegration
 from src.database.memory_manager import MemoryManager
 from src.engine import LLMCommunicationError, TextEngine
@@ -22,6 +22,34 @@ from src.utils.model_utils import get_model_list, get_model_prefix
 from src.utils.save_utils import load_personas_from_file, save_personas_to_file
 
 logger = logging.getLogger(__name__)
+
+
+def _relative_time(dt: datetime) -> str:
+    """Format a datetime as a relative time string (e.g., '2 days ago')."""
+    now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+    delta = now - dt
+    seconds = int(delta.total_seconds())
+    if seconds < 0:
+        return "just now"
+    if seconds < 60:
+        return "just now"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    days = hours // 24
+    if days < 7:
+        return f"{days} day{'s' if days != 1 else ''} ago"
+    weeks = days // 7
+    if weeks < 5:
+        return f"{weeks} week{'s' if weeks != 1 else ''} ago"
+    months = days // 30
+    if months < 12:
+        return f"{months} month{'s' if months != 1 else ''} ago"
+    years = days // 365
+    return f"{years} year{'s' if years != 1 else ''} ago"
 
 
 class ResponseType(Enum):
@@ -57,6 +85,7 @@ class RequestContext:
     # Populated during _prepare_request
     conversation_history: List[Dict[str, Any]] = field(default_factory=list)
     tools_for_llm: List[Dict[str, Any]] = field(default_factory=list)
+    oldest_interaction_id: Optional[int] = None
 
 
 class ChatSystem:
@@ -72,6 +101,7 @@ class ChatSystem:
         self.background_tasks: Set[Coroutine[Any, Any, Any]] = set()
         self._pending_confirmations: Dict[Tuple[str, str], PendingConfirmation] = {}
         self._services: Dict[str, ServiceIntegration] = {}
+        self._embedding_service: Optional[Any] = None  # Set by MemoryAgent on first deploy
 
     def register_service(self, service: ServiceIntegration) -> None:
         """Register a service integration and its tools."""
@@ -185,8 +215,13 @@ class ChatSystem:
             channel: str,
             server_id: Optional[str],
             history_limit: Optional[int]
-    ) -> List[Dict[str, Any]]:
-        """Retrieves and formats conversation history based on the persona's memory mode."""
+    ) -> Tuple[List[Dict[str, Any]], Optional[int]]:
+        """Retrieves and formats conversation history based on the persona's memory mode.
+
+        Returns (formatted_history, oldest_interaction_id).
+        oldest_interaction_id is the interaction_id of the oldest message in the
+        sliding window, used for the memory recency filter.
+        """
         persona_name = persona.get_name()
 
         effective_limit: int = persona.get_context_length()
@@ -198,7 +233,126 @@ class ChatSystem:
             user_identifier, channel, server_id, effective_limit
         )
 
-        return self._format_raw_history_for_llm(raw_history, memory_mode_used, persona_name, server_id)
+        oldest_interaction_id = None
+        if raw_history:
+            oldest_interaction_id = raw_history[0].get('interaction_id')
+
+        formatted = self._format_raw_history_for_llm(raw_history, memory_mode_used, persona_name, server_id)
+        return formatted, oldest_interaction_id
+
+    async def _retrieve_memory_block(
+            self,
+            persona: Persona,
+            user_identifier: str,
+            channel: str,
+            server_id: Optional[str],
+            conversation_history: List[Dict[str, Any]],
+            oldest_interaction_id: Optional[int] = None,
+    ) -> Optional[str]:
+        """Retrieve and format relevant long-term memory summaries for injection.
+
+        Returns a formatted <memory> block string, or None if no relevant memories
+        or the feature is disabled.
+        """
+        if not MEMORY_RETRIEVAL_ENABLED or self._embedding_service is None:
+            return None
+
+        from src.embedding_service import EmbeddingService
+
+        # Map MemoryMode enum to string for retrieve_relevant_summaries
+        mode_map = {
+            MemoryMode.CHANNEL_ISOLATED: "channel",
+            MemoryMode.SERVER_WIDE: "server",
+            MemoryMode.PERSONAL: "personal",
+            MemoryMode.GLOBAL: "global",
+            MemoryMode.TICKET_ISOLATED: "ticket",
+        }
+        memory_mode = mode_map.get(persona.get_memory_mode(), "channel")
+
+        # Fetch candidate summaries
+        summaries = self.memory_manager.retrieve_relevant_summaries(
+            persona_name=persona.get_name(),
+            channel=channel,
+            server_id=server_id,
+            user_identifier=user_identifier,
+            memory_mode=memory_mode,
+            include_ambient=persona.get_include_ambient_memory(),
+            exclude_after_interaction_id=oldest_interaction_id,
+            model_name=self._embedding_service.model_name,
+        )
+
+        if not summaries:
+            return None
+
+        # Extract text content from conversation history for embedding
+        window_texts = []
+        for msg in conversation_history:
+            content = msg.get('content', '')
+            if isinstance(content, str) and content.strip():
+                window_texts.append(content)
+
+        if not window_texts:
+            return None
+
+        # Embed the sliding window messages (1 batched API call)
+        try:
+            window_embeddings = await self._embedding_service.encode(window_texts)
+        except Exception as e:
+            logger.warning(f"Memory retrieval: embedding failed: {e}")
+            return None
+
+        if not window_embeddings:
+            logger.warning("Memory retrieval: encode returned empty results")
+            return None
+
+        # Score each summary: max similarity across all window messages
+        scored = []
+        for summary in summaries:
+            summary_emb = summary['embedding']
+            max_sim = max(
+                EmbeddingService.cosine_similarity(summary_emb, w_emb)
+                for w_emb in window_embeddings
+            )
+            scored.append((max_sim, summary))
+
+        # Sort by similarity (highest first) and take top-K
+        scored.sort(key=lambda x: x[0], reverse=True)
+        top_summaries = scored[:MEMORY_MAX_SUMMARIES_IN_CONTEXT]
+
+        # Format memory block
+        return self._format_memory_block(top_summaries)
+
+    @staticmethod
+    def _format_memory_block(scored_summaries: List[Tuple[float, Dict[str, Any]]]) -> Optional[str]:
+        """Format scored summaries into a <memory> block for injection."""
+        if not scored_summaries:
+            return None
+
+        lines = ["<memory>", "The following are relevant facts from previous conversations:", ""]
+
+        for _score, summary in scored_summaries:
+            channel = summary.get('channel', 'unknown')
+            persona = summary.get('persona_name', '')
+            created_at = summary.get('created_at')
+
+            # Build label
+            label_parts = [f"#{channel}"]
+            if persona == 'ambient':
+                label_parts.append("ambient")
+            if created_at:
+                label_parts.append(_relative_time(created_at))
+
+            label = ", ".join(label_parts)
+            lines.append(f"[{label}]")
+
+            content = summary.get('content', '')
+            for fact_line in content.strip().split('\n'):
+                if fact_line.strip():
+                    lines.append(fact_line)
+            lines.append("")
+
+        lines.append("</memory>")
+        return "\n".join(lines)
 
     def _filter_tools_for_persona(self, persona: Persona) -> List[Dict[str, Any]]:
         """Filters available tools by persona config, service bindings, and model compatibility."""
@@ -302,11 +456,21 @@ class ChatSystem:
         return "I seem to be stuck in a loop. Could you please clarify your request?", ResponseType.DEV_COMMAND, None
 
     async def _prepare_request(self, ctx: RequestContext) -> None:
-        """Build history, filter tools, append user message."""
-        ctx.conversation_history = self._build_conversation_history(
+        """Build history, inject long-term memory, filter tools, append user message."""
+        ctx.conversation_history, ctx.oldest_interaction_id = self._build_conversation_history(
             ctx.persona, ctx.user_identifier, ctx.channel,
             ctx.server_id, ctx.history_limit
         )
+
+        # Inject long-term memory block before the sliding window
+        memory_block = await self._retrieve_memory_block(
+            ctx.persona, ctx.user_identifier, ctx.channel,
+            ctx.server_id, ctx.conversation_history,
+            oldest_interaction_id=ctx.oldest_interaction_id,
+        )
+        if memory_block:
+            ctx.conversation_history.insert(0, {"role": "user", "content": memory_block})
+
         ctx.tools_for_llm = self._filter_tools_for_persona(ctx.persona)
         ctx.conversation_history.append({"role": "user", "content": ctx.message})
 

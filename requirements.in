@@ -16,6 +16,9 @@ google-auth-oauthlib
 google-cloud-pubsub
 google-api-python-client  # googleapiclient
 
+# Numerical
+numpy
+
 # Utilities
 GitPython
 psutil

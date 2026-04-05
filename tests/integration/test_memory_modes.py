@@ -1,5 +1,7 @@
 # tests/test_memory_modes.py
 
+import math
+import struct
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 from datetime import datetime, timedelta
@@ -233,5 +235,144 @@ async def test_channel_mode_in_non_server_context_integration(
     assert "gmail_message" in history_string
     assert "conflicting_server_message" not in history_string
     assert "current_msg" in history_string
+
+
+# --- Helpers for Long-Term Memory Integration Tests ---
+
+def _unit_blob(*components):
+    """Create a normalized float32 BLOB from components."""
+    vec = list(components)
+    norm = math.sqrt(sum(v * v for v in vec))
+    if norm > 0:
+        vec = [v / norm for v in vec]
+    return struct.pack(f'{len(vec)}f', *vec)
+
+
+# --- End-to-End Long-Term Memory Tests ---
+
+@pytest.fixture
+def memory_e2e_system():
+    """ChatSystem with real in-memory DB and mocked text engine for memory tests."""
+    memory_manager = MemoryManager(db_path=":memory:")
+    memory_manager.create_schema()
+    mock_text_engine = MagicMock(spec=TextEngine)
+    mock_text_engine.generate_response = AsyncMock(
+        return_value=({'type': 'text', 'content': ''}, {})
+    )
+    chat_system = ChatSystem(
+        memory_manager=memory_manager,
+        text_engine=mock_text_engine,
+    )
+    chat_system.personas = {
+        'test_persona': Persona('test_persona', 'mock_model', 'prompt', context_length=5),
+    }
+    yield chat_system, memory_manager, mock_text_engine
+
+
+@pytest.mark.asyncio
+@patch('src.chat_system.MEMORY_RETRIEVAL_ENABLED', True)
+async def test_e2e_memory_injection_in_prepare_request(memory_e2e_system):
+    """End-to-end: store messages -> create segments/summaries -> verify memory
+    block appears in _prepare_request conversation history."""
+    system, mm, mock_engine = memory_e2e_system
+
+    # 1. Seed older messages (outside the sliding window of context_length=5)
+    now = datetime.now()
+    for i in range(1, 8):
+        mm.log_message("u1", "test_persona", "general", "user", "Alice",
+                       f"old message {i}", now + timedelta(seconds=i), server_id="s1")
+
+    # 2. Create a segment + summary for the old messages (simulating batch agent output)
+    seg_id = mm.store_segment("general", "s1", "test_persona",
+                              start_id=1, end_id=3, message_count=3, created_at=now)
+    summary_emb = _unit_blob(1.0, 0.0)
+    mm.store_summary(seg_id, "- Alice discussed Python 3.13 JIT compiler improvements",
+                     summary_emb, "test-model", now)
+
+    # 3. Set up a mock embedding service on ChatSystem
+    mock_emb_service = MagicMock()
+    mock_emb_service.model_name = "test-model"
+    mock_emb_service.encode = AsyncMock(return_value=[_unit_blob(1.0, 0.0)])
+    system._embedding_service = mock_emb_service
+
+    # 4. Trigger generate_response which calls _prepare_request internally
+    persona = system.personas['test_persona']
+    persona.set_memory_mode(MemoryMode.CHANNEL_ISOLATED)
+
+    await system.generate_response("test_persona", "u1", "general",
+                                   "Tell me about the JIT", server_id="s1")
+
+    # 5. Verify the memory block was injected
+    call_args = mock_engine.generate_response.call_args
+    context = call_args.args[1]
+    history = context['history']
+
+    # First message should be the memory block
+    assert any("<memory>" in msg.get('content', '') for msg in history), \
+        "Memory block not found in conversation history"
+    memory_msg = next(m for m in history if "<memory>" in m.get('content', ''))
+    assert "Python 3.13 JIT compiler" in memory_msg['content']
+    assert "#general" in memory_msg['content']
+
+
+@pytest.mark.asyncio
+@patch('src.chat_system.MEMORY_RETRIEVAL_ENABLED', True)
+async def test_e2e_recency_filter_no_information_gap(memory_e2e_system):
+    """Recency filter integration: a segment straddling the sliding window boundary
+    is included (not filtered), preventing information gaps for messages that are
+    too old for the window but inside a segment that extends into it."""
+    system, mm, mock_engine = memory_e2e_system
+
+    now = datetime.now()
+
+    # Seed 10 messages — IDs 1-10
+    for i in range(1, 11):
+        mm.log_message("u1", "test_persona", "general", "user", "Alice",
+                       f"message {i}", now + timedelta(seconds=i), server_id="s1")
+
+    # Segment A: IDs 1-4 (fully outside a sliding window starting at ID 6)
+    seg_a = mm.store_segment("general", "s1", "test_persona",
+                             start_id=1, end_id=4, message_count=4, created_at=now)
+    mm.store_summary(seg_a, "- Old topic: infrastructure migration",
+                     _unit_blob(1.0, 0.0), "test-model", now)
+
+    # Segment B: IDs 5-8 (straddles — start=5 < window start, end=8 inside window)
+    seg_b = mm.store_segment("general", "s1", "test_persona",
+                             start_id=5, end_id=8, message_count=4, created_at=now)
+    mm.store_summary(seg_b, "- Straddling topic: database schema review",
+                     _unit_blob(0.9, 0.1), "test-model", now)
+
+    # Segment C: IDs 9-10 (fully inside window)
+    seg_c = mm.store_segment("general", "s1", "test_persona",
+                             start_id=9, end_id=10, message_count=2, created_at=now)
+    mm.store_summary(seg_c, "- Recent topic: deployment checklist",
+                     _unit_blob(0.8, 0.2), "test-model", now)
+
+    # Mock embedding service
+    mock_emb_service = MagicMock()
+    mock_emb_service.model_name = "test-model"
+    mock_emb_service.encode = AsyncMock(return_value=[_unit_blob(1.0, 0.0)])
+    system._embedding_service = mock_emb_service
+
+    persona = system.personas['test_persona']
+    persona.set_memory_mode(MemoryMode.CHANNEL_ISOLATED)
+
+    await system.generate_response("test_persona", "u1", "general",
+                                   "What about the migration?", server_id="s1")
+
+    call_args = mock_engine.generate_response.call_args
+    context = call_args.args[1]
+    history = context['history']
+
+    memory_msg = next((m for m in history if "<memory>" in m.get('content', '')), None)
+    assert memory_msg is not None, "Memory block should be present"
+
+    content = memory_msg['content']
+    # Segment A (fully outside window) — included
+    assert "infrastructure migration" in content
+    # Segment B (straddling) — included, not filtered
+    assert "database schema review" in content
+    # Segment C (fully inside window, start_id=9 >= oldest_interaction_id) — filtered
+    assert "deployment checklist" not in content
 
 
