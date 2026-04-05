@@ -49,7 +49,31 @@ class MemoryAgent(Agent):
             self.agent_config.get("batch_size", 200)
         )
         self._persona_name: str = self.agent_config.get("persona", "memory_summarizer")
-        self._allowed_channels: Optional[List[str]] = self.agent_config.get("allowed_channels")
+        self._allowed_channels = self._parse_allowed_channels(
+            self.agent_config.get("allowed_channels")
+        )
+
+    @staticmethod
+    def _parse_allowed_channels(
+        raw: Optional[List[Any]],
+    ) -> Optional[List[Dict[str, str]]]:
+        """Parse allowed_channels config into channel+server pairs.
+
+        Each entry must be {"channel": "name", "server_id": "id"}.
+        """
+        if raw is None:
+            return None
+        result = []
+        for entry in raw:
+            if not isinstance(entry, dict) or "channel" not in entry or "server_id" not in entry:
+                raise ValueError(
+                    f"allowed_channels entries must have 'channel' and 'server_id': {entry}"
+                )
+            result.append({
+                "channel": entry["channel"],
+                "server_id": entry["server_id"],
+            })
+        return result
 
     def _get_embedding_service(self) -> EmbeddingService:
         """Lazily initialize the embedding service on first use."""
@@ -81,7 +105,10 @@ class MemoryAgent(Agent):
         if self._allowed_channels is not None:
             channels = [
                 (ch, pn, sid) for ch, pn, sid in all_channels
-                if ch in self._allowed_channels
+                if any(
+                    a["channel"] == ch and a["server_id"] == sid
+                    for a in self._allowed_channels
+                )
             ]
         else:
             channels = all_channels
