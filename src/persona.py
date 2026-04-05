@@ -47,7 +47,8 @@ class Persona:
             enabled_tools: Optional[List[str]] = None,
             memory_mode: Any = MemoryMode.CHANNEL_ISOLATED,
             service_bindings: Optional[List[str]] = None,
-            include_ambient_memory: bool = True
+            include_ambient_memory: bool = True,
+            thinking_level: Optional[str] = None
     ) -> None:
         self._name: str = persona_name
         self._model_name: str = model_name
@@ -69,6 +70,7 @@ class Persona:
         self._display_name_in_chat: bool = display_name_in_chat
         self._service_bindings: List[str] = service_bindings if service_bindings is not None else []
         self._include_ambient_memory: bool = include_ambient_memory
+        self._thinking_level: Optional[str] = thinking_level
 
     # --- Getters ---
 
@@ -318,10 +320,13 @@ class Persona:
 
     def get_config_for_engine(self) -> Dict[str, Any]:
         """Returns a dictionary of the current generation parameters for the TextEngine."""
-        return {
+        config: Dict[str, Any] = {
             "model_name": self._model_name,
             "max_output_tokens": self._response_token_limit,
             "temperature": self._temperature,
             "top_p": self._top_p,
             "top_k": self._top_k,
         }
+        if self._thinking_level is not None:
+            config["thinking_level"] = self._thinking_level
+        return config
