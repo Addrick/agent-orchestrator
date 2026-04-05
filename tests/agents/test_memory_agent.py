@@ -384,8 +384,8 @@ class TestDeploy:
 
 class TestTransactionModel:
     @pytest.mark.asyncio
-    async def test_nothing_written_on_embedding_failure(self, memory_agent):
-        """If embedding fails, no data is written to DB."""
+    async def test_embedding_failure_does_not_prevent_segmentation(self, memory_agent):
+        """If embedding fails, Phase 2 still runs on any prior embeddings."""
         memory_agent._embedding_service = MagicMock()
         memory_agent._embedding_service.model_name = "test-model"
         memory_agent._embedding_service.encode = AsyncMock(side_effect=Exception("API error"))
@@ -394,13 +394,14 @@ class TestTransactionModel:
             {'interaction_id': i, 'content': f'msg {i}', 'author_role': 'user', 'author_name': 'Alice'}
             for i in range(5)
         ]
-        memory_agent.memory_manager.get_last_segment_tail_embeddings.return_value = None
+        # Phase 2 query returns nothing — no prior embeddings to segment
+        memory_agent.memory_manager.get_unsegmented_embedded_messages.return_value = []
 
-        with pytest.raises(Exception, match="API error"):
-            await memory_agent._process_channel("chan", "p1", None, memory_agent._embedding_service)
+        # Should not raise — Phase 1 failure is caught, Phase 2 runs
+        await memory_agent._process_channel("chan", "p1", None, memory_agent._embedding_service)
 
-        # Transaction should not have been entered
-        memory_agent.memory_manager.transaction.assert_not_called()
+        # Phase 2 was attempted despite Phase 1 failure
+        memory_agent.memory_manager.get_unsegmented_embedded_messages.assert_called_once()
 
 
 # --- Config Injection Tests ---
