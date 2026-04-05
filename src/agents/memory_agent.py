@@ -452,5 +452,9 @@ class MemoryAgent(Agent):
             return (facts_text, summary_embedding)
 
         except Exception as e:
-            logger.error(f"MemoryAgent: summarization failed: {e}", exc_info=True)
+            is_rate_limit = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e)
+            if is_rate_limit:
+                logger.warning("MemoryAgent: summarization rate-limited, will retry next cycle.")
+            else:
+                logger.error(f"MemoryAgent: summarization failed: {e}", exc_info=True)
             return None

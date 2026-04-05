@@ -45,6 +45,12 @@ class LLMCommunicationError(Exception):
 class TextEngine:
     """A centralized engine for handling requests to various LLM APIs."""
 
+    # Model fallback mapping: primary → fallback on 429.
+    # Add entries here to enable automatic fallback for any model.
+    _FALLBACK_MODELS: Dict[str, str] = {
+        "gemma-4-31b-it": "gemma-4-26b-it",
+    }
+
     def __init__(self) -> None:
         # --- Lazy-loaded clients ---
         self.openai_client: Optional[AsyncOpenAI] = None
@@ -131,6 +137,11 @@ class TextEngine:
         self.google_search_tool = Tool(google_search=GoogleSearch())
         logger.info("Google AI Studio client initialized.")
 
+    @classmethod
+    def _get_fallback_model(cls, model_name: str) -> Optional[str]:
+        """Returns a fallback model for rate-limited requests, or None."""
+        return cls._FALLBACK_MODELS.get(model_name)
+
     def _get_provider_route(self, model_name: str) -> Tuple[Callable, List[AsyncLimiter]]:
         """Returns (handler_method, [limiters]) for the model name.
         Raises LLMCommunicationError for unsupported models."""
@@ -199,6 +210,16 @@ class TextEngine:
 
             except LLMCommunicationError as e:
                 if e.rate_limited:
+                    fallback = self._get_fallback_model(model_name)
+                    if fallback:
+                        logger.warning(
+                            f"Rate limit (429) hit for '{model_name}', "
+                            f"falling back to '{fallback}'."
+                        )
+                        persona_config = {**persona_config, "model_name": fallback}
+                        model_name = fallback
+                        handler, limiters = self._get_provider_route(model_name)
+                        continue
                     logger.warning(f"Rate limit (429) hit for model '{model_name}'. Aborting retries.")
                     raise
                 if attempt >= EMPTY_RESPONSE_RETRIES:
@@ -565,7 +586,10 @@ class TextEngine:
             )
         except Exception as e:
             rate_limited = '429' in str(e) or 'RESOURCE_EXHAUSTED' in str(e)
-            logger.error(f"Google API error: {e}", exc_info=True)
+            if rate_limited:
+                logger.warning(f"Google API rate-limited ({config['model_name']}): retryable.")
+            else:
+                logger.error(f"Google API error: {e}", exc_info=True)
             raise LLMCommunicationError(f"An error occurred with Google API: {e}",
                                         api_payload=api_params_for_dumping, rate_limited=rate_limited) from e
 
