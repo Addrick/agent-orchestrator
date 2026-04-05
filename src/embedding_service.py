@@ -55,9 +55,12 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         return self._max_input_tokens
 
     async def encode(self, texts: List[str]) -> List[List[float]]:
+        import os
         from google import genai
 
-        client = genai.Client()
+        client = genai.Client(
+            api_key=os.environ.get("GOOGLE_GENERATIVEAI_API_KEY")
+        )
 
         result = await asyncio.to_thread(
             client.models.embed_content,
