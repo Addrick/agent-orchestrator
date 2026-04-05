@@ -36,9 +36,9 @@ class EmbeddingProvider(ABC):
 
 
 class GeminiEmbeddingProvider(EmbeddingProvider):
-    """Uses Google's text-embedding-004 via the google-genai SDK."""
+    """Uses Google's gemini-embedding-001 via the google-genai SDK."""
 
-    _model_name = "text-embedding-004"
+    _model_name = "gemini-embedding-001"
     _dimensions = 768
     _max_input_tokens = 2048
 
