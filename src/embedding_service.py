@@ -60,9 +60,10 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         import os
         from google import genai
 
-        client = genai.Client(
-            api_key=os.environ.get("GOOGLE_GENERATIVEAI_API_KEY")
-        )
+        api_key = os.environ.get("GOOGLE_GENERATIVEAI_API_KEY")
+        if not api_key:
+            raise RuntimeError("GOOGLE_GENERATIVEAI_API_KEY not set — skipping Gemini embedding provider.")
+        client = genai.Client(api_key=api_key)
 
         vectors: List[List[float]] = []
         for i in range(0, len(texts), self._MAX_BATCH_SIZE):
