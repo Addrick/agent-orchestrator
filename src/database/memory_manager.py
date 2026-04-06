@@ -136,7 +136,9 @@ class MemoryManager:
                 start_interaction_id INTEGER NOT NULL,
                 end_interaction_id INTEGER NOT NULL,
                 message_count INTEGER NOT NULL,
-                created_at TIMESTAMP NOT NULL
+                created_at TIMESTAMP NOT NULL,
+                first_message_at TIMESTAMP,
+                last_message_at TIMESTAMP
             );
             CREATE INDEX IF NOT EXISTS idx_segment_channel_persona
             ON Memory_Segments (channel, persona_name, server_id);
@@ -210,6 +212,20 @@ class MemoryManager:
                 CREATE INDEX IF NOT EXISTS idx_agent_parent
                 ON Agent_Actions (parent_id);
             """)
+
+            # Step 4: Add message timestamp columns to Memory_Segments
+            cursor.execute("PRAGMA table_info(Memory_Segments)")
+            seg_columns = [row['name'] for row in cursor.fetchall()]
+            if 'first_message_at' not in seg_columns:
+                conn.execute(
+                    "ALTER TABLE Memory_Segments ADD COLUMN first_message_at TIMESTAMP"
+                )
+                logger.info("Added 'first_message_at' column to Memory_Segments table.")
+            if 'last_message_at' not in seg_columns:
+                conn.execute(
+                    "ALTER TABLE Memory_Segments ADD COLUMN last_message_at TIMESTAMP"
+                )
+                logger.info("Added 'last_message_at' column to Memory_Segments table.")
 
             conn.commit()
             logger.info("User memory database schema created or verified successfully.")
@@ -692,7 +708,7 @@ class MemoryManager:
             # Fetch embedded messages after the high-water mark
             query = (
                 "SELECT ui.interaction_id, ui.author_role, ui.author_name,"
-                " ui.content, me.embedding"
+                " ui.content, ui.timestamp, me.embedding"
                 " FROM User_Interactions ui"
                 " JOIN Message_Embeddings me ON ui.interaction_id = me.interaction_id"
                 " WHERE ui.persona_name = ? AND ui.channel = ?"
