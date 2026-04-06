@@ -27,6 +27,7 @@ import numpy as np
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from dotenv import load_dotenv
+from config.global_config import MEMORY_DATABASE_FILE as _DEFAULT_DB_PATH
 from src.database.memory_manager import MemoryManager
 
 logging.basicConfig(level=logging.WARNING, format='%(levelname)s  %(message)s')
@@ -713,7 +714,7 @@ def main() -> None:
     args = parser.parse_args()
 
     load_dotenv()
-    db_path = args.db or os.environ.get("MEMORY_DATABASE_FILE")
+    db_path = args.db or os.environ.get("MEMORY_DATABASE_FILE") or _DEFAULT_DB_PATH
     mm = MemoryManager(db_path=db_path)
     mm.create_schema()
 
