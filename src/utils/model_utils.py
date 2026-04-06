@@ -29,7 +29,11 @@ def get_model_prefix(model_name: str) -> str:
 def refresh_available_openai_models() -> List[str]:
     """# OpenAI API query to get current list of active models"""
     import openai
-    client = openai.OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        logger.warning("OPENAI_API_KEY not set — skipping OpenAI model refresh.")
+        return []
+    client = openai.OpenAI(api_key=api_key)
     openai_models = client.models.list()
     trimmed_list: List[str] = [model.id for model in openai_models]
     logger.debug(trimmed_list)
@@ -43,7 +47,11 @@ def refresh_available_google_models() -> List[str]:
     """
     from google import genai
 
-    client = genai.Client(api_key=os.environ.get("GOOGLE_GENERATIVEAI_API_KEY"))
+    api_key = os.environ.get("GOOGLE_GENERATIVEAI_API_KEY")
+    if not api_key:
+        logger.warning("GOOGLE_GENERATIVEAI_API_KEY not set — skipping Google model refresh.")
+        return []
+    client = genai.Client(api_key=api_key)
     google_models: List[str] = []
     for model in client.models.list():
         if not model.name:
@@ -59,8 +67,10 @@ def refresh_available_google_models() -> List[str]:
 
 def refresh_available_anthropic_models() -> List[str]:
     import anthropic
-    api_key: Optional[str] = os.environ.get("ANTHROPIC_API_KEY")  # Assumes .env is loaded at app startup
-
+    api_key: Optional[str] = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        logger.warning("ANTHROPIC_API_KEY not set — skipping Anthropic model refresh.")
+        return []
     client = anthropic.Anthropic(api_key=api_key)
     # The actual return type is a Page, but we can treat it as a generic iterable of Model objects
     models: Any = client.models.list(limit=20)

@@ -112,7 +112,8 @@ class TextEngine:
         """Initializes and returns the OpenAI client."""
         if self.openai_client is None:
             api_key = os.environ.get("OPENAI_API_KEY")
-            if not api_key: raise ValueError("OPENAI_API_KEY not found in environment.")
+            if not api_key:
+                raise LLMCommunicationError("OPENAI_API_KEY not set — skipping OpenAI provider.")
             self.openai_client = AsyncOpenAI(api_key=api_key)
         return self.openai_client
 
@@ -120,7 +121,8 @@ class TextEngine:
         """Initializes and returns the Anthropic client."""
         if self.anthropic_client is None:
             api_key = os.environ.get("ANTHROPIC_API_KEY")
-            if not api_key: raise ValueError("ANTHROPIC_API_KEY not found in environment.")
+            if not api_key:
+                raise LLMCommunicationError("ANTHROPIC_API_KEY not set — skipping Anthropic provider.")
             self.anthropic_client = anthropic.Anthropic(api_key=api_key)
         return self.anthropic_client
 
