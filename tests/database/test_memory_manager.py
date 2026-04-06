@@ -557,7 +557,8 @@ def test_schema_creates_memory_tables(mem_manager):
     cols = {row['name'] for row in cursor.fetchall()}
     assert cols == {'segment_id', 'channel', 'server_id', 'persona_name',
                     'start_interaction_id', 'end_interaction_id',
-                    'message_count', 'created_at'}
+                    'message_count', 'created_at',
+                    'first_message_at', 'last_message_at'}
 
     cursor.execute("PRAGMA table_info(Memory_Summaries)")
     cols = {row['name'] for row in cursor.fetchall()}
@@ -887,6 +888,138 @@ def test_migration_memory_tables_idempotent(legacy_mem_manager):
     cursor.execute(
         "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='Memory_Segments'")
     assert cursor.fetchone()[0] == 1
+
+
+@pytest.fixture
+def legacy_mem_manager_pre_segment_timestamps(tmp_path):
+    """MemoryManager with Memory_Segments table missing timestamp columns."""
+    import sqlite3
+
+    db_path = str(tmp_path / "legacy_seg.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE User_Interactions (
+            interaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_identifier TEXT NOT NULL,
+            persona_name TEXT NOT NULL,
+            channel TEXT NOT NULL,
+            author_role TEXT NOT NULL CHECK(author_role IN ('user', 'assistant', 'system')),
+            author_name TEXT,
+            content TEXT,
+            timestamp TIMESTAMP NOT NULL,
+            zammad_ticket_id INTEGER,
+            platform_message_id TEXT,
+            server_id TEXT,
+            tool_context TEXT
+        );
+
+        CREATE TABLE Suppressed_Interactions (
+            suppression_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            interaction_id INTEGER NOT NULL UNIQUE,
+            suppressed_at TIMESTAMP NOT NULL,
+            FOREIGN KEY (interaction_id) REFERENCES User_Interactions(interaction_id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE Agent_Actions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            parent_id INTEGER,
+            agent_name TEXT NOT NULL,
+            action_type TEXT NOT NULL,
+            trigger_context TEXT,
+            action_payload TEXT,
+            outcome TEXT,
+            outcome_payload TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE Message_Embeddings (
+            interaction_id INTEGER PRIMARY KEY,
+            embedding BLOB NOT NULL,
+            model_name TEXT NOT NULL,
+            created_at TIMESTAMP NOT NULL,
+            FOREIGN KEY (interaction_id) REFERENCES User_Interactions(interaction_id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE Memory_Segments (
+            segment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel TEXT NOT NULL,
+            server_id TEXT,
+            persona_name TEXT NOT NULL,
+            start_interaction_id INTEGER NOT NULL,
+            end_interaction_id INTEGER NOT NULL,
+            message_count INTEGER NOT NULL,
+            created_at TIMESTAMP NOT NULL
+        );
+
+        CREATE TABLE Memory_Summaries (
+            summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            segment_id INTEGER NOT NULL UNIQUE,
+            content TEXT NOT NULL,
+            embedding BLOB NOT NULL,
+            model_name TEXT NOT NULL,
+            created_at TIMESTAMP NOT NULL,
+            FOREIGN KEY (segment_id) REFERENCES Memory_Segments(segment_id) ON DELETE CASCADE
+        );
+
+        INSERT INTO Memory_Segments
+            (channel, server_id, persona_name, start_interaction_id,
+             end_interaction_id, message_count, created_at)
+        VALUES ('test_channel', 'srv1', 'test_persona', 1, 10, 10,
+                '2026-04-01 00:00:00');
+    """)
+    conn.close()
+
+    manager = MemoryManager(db_path=db_path)
+    yield manager
+    manager.close()
+
+
+def test_migration_adds_segment_timestamp_columns(
+    legacy_mem_manager_pre_segment_timestamps,
+):
+    """create_schema() adds first_message_at/last_message_at to Memory_Segments."""
+    mm = legacy_mem_manager_pre_segment_timestamps
+    mm.create_schema()
+
+    conn = mm._get_connection()
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(Memory_Segments)")
+    columns = {row['name'] for row in cursor.fetchall()}
+    assert 'first_message_at' in columns
+    assert 'last_message_at' in columns
+
+
+def test_migration_preserves_existing_segments(
+    legacy_mem_manager_pre_segment_timestamps,
+):
+    """Existing segments survive migration with NULL timestamp columns."""
+    mm = legacy_mem_manager_pre_segment_timestamps
+    mm.create_schema()
+
+    conn = mm._get_connection()
+    row = conn.execute(
+        "SELECT * FROM Memory_Segments WHERE channel = 'test_channel'"
+    ).fetchone()
+    assert row is not None
+    assert row['message_count'] == 10
+    assert row['first_message_at'] is None
+    assert row['last_message_at'] is None
+
+
+def test_migration_segment_timestamps_idempotent(
+    legacy_mem_manager_pre_segment_timestamps,
+):
+    """Running create_schema() twice doesn't error on segment timestamp columns."""
+    mm = legacy_mem_manager_pre_segment_timestamps
+    mm.create_schema()
+    mm.create_schema()
+
+    conn = mm._get_connection()
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(Memory_Segments)")
+    columns = [row['name'] for row in cursor.fetchall()]
+    assert columns.count('first_message_at') == 1
+    assert columns.count('last_message_at') == 1
 
 
 # --- Transaction Context Manager Tests ---

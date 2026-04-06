@@ -245,6 +245,7 @@ def _print_channel_segments(
     query = (
         "SELECT seg.segment_id, seg.start_interaction_id, seg.end_interaction_id,"
         " seg.message_count, seg.created_at,"
+        " seg.first_message_at, seg.last_message_at,"
         " ms.summary_id, ms.content AS summary, ms.model_name,"
         " ms.embedding AS summary_embedding"
         " FROM Memory_Segments seg"
@@ -276,12 +277,20 @@ def _print_channel_segments(
         start = seg['start_interaction_id']
         end = seg['end_interaction_id']
         count = seg['message_count']
-        created = seg['created_at']
         summary = seg['summary']
         summary_emb = seg['summary_embedding']
         model = seg['model_name']
+        first_msg = seg['first_message_at']
+        last_msg = seg['last_message_at']
 
-        created_str = relative_time(created) if created else "?"
+        # Show message time range if available, otherwise fall back to created_at
+        if first_msg:
+            time_str = relative_time(first_msg)
+            if last_msg and last_msg != first_msg:
+                time_str = f"{relative_time(first_msg)} -> {relative_time(last_msg)}"
+        else:
+            created = seg['created_at']
+            time_str = relative_time(created) if created else "?"
 
         # Similarity to previous segment's summary
         sim_str = ""
@@ -291,7 +300,7 @@ def _print_channel_segments(
             sim_str = f"  (sim to prev: {sim:.3f})"
 
         print(f"  +- Segment {seg_id}  |  IDs {start}-{end}"
-              f"  |  {count} msgs  |  {created_str}  |  {model}{sim_str}")
+              f"  |  {count} msgs  |  {time_str}  |  {model}{sim_str}")
 
         if summary:
             # Indent each fact line

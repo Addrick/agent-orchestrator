@@ -110,11 +110,17 @@ class MemoryAgent(Agent):
                     for a in self._allowed_channels
                 )
             ]
+            if len(channels) != len(all_channels):
+                logger.debug(
+                    f"MemoryAgent: {len(all_channels)} active channels, "
+                    f"{len(channels)} after allowed_channels filter. "
+                    f"Active: {[(ch, pn, sid) for ch, pn, sid in all_channels]}"
+                )
         else:
             channels = all_channels
 
         if not channels:
-            logger.debug("MemoryAgent: no channels with unprocessed messages.")
+            logger.info("MemoryAgent: no channels with unprocessed messages.")
             return
 
         logger.info(f"MemoryAgent: found {len(channels)} channel(s) to process.")
@@ -191,7 +197,16 @@ class MemoryAgent(Agent):
         )
 
         if not messages:
+            logger.debug(
+                f"MemoryAgent: {channel}/{persona_name} (server={server_id}) "
+                f"— no unembedded messages found."
+            )
             return
+
+        logger.info(
+            f"MemoryAgent: {channel}/{persona_name} — "
+            f"{len(messages)} unembedded messages to process."
+        )
 
         chunk_size = 100  # Gemini API batch limit
         total_stored = 0
@@ -244,7 +259,8 @@ class MemoryAgent(Agent):
 
         # Split rows into messages (for segmentation) and embeddings
         messages = [
-            {k: r[k] for k in ('interaction_id', 'author_role', 'author_name', 'content')}
+            {k: r[k] for k in ('interaction_id', 'author_role', 'author_name',
+                                'content', 'timestamp')}
             for r in rows
         ]
         embeddings = [r['embedding'] for r in rows]
@@ -272,15 +288,25 @@ class MemoryAgent(Agent):
         now = datetime.now(timezone.utc)
         with self.memory_manager.transaction() as conn:
             for segment, summary_text, summary_emb in results:
+                # Extract message time range
+                msg_timestamps = [
+                    m['timestamp'] for m in segment['messages']
+                    if m.get('timestamp')
+                ]
+                first_msg_at = min(msg_timestamps) if msg_timestamps else None
+                last_msg_at = max(msg_timestamps) if msg_timestamps else None
+
                 cursor = conn.execute(
                     """INSERT INTO Memory_Segments
                        (channel, server_id, persona_name,
                         start_interaction_id, end_interaction_id,
-                        message_count, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        message_count, created_at,
+                        first_message_at, last_message_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (channel, server_id, persona_name,
                      segment['start_id'], segment['end_id'],
-                     segment['count'], now)
+                     segment['count'], now,
+                     first_msg_at, last_msg_at)
                 )
                 segment_id = cursor.lastrowid
 
@@ -422,13 +448,21 @@ class MemoryAgent(Agent):
             )
             return None
 
-        # Build transcript
+        # Build transcript with timestamps
         lines = []
         for msg in segment['messages']:
             role = msg.get('author_role', 'user')
             name = msg.get('author_name', 'Unknown')
             content = msg.get('content', '')
-            lines.append(f"[{role}] {name}: {content}")
+            ts = msg.get('timestamp', '')
+            if ts:
+                # Format as readable date for the LLM
+                if isinstance(ts, str):
+                    ts = datetime.fromisoformat(ts)
+                ts_str = ts.strftime('%Y-%m-%d %H:%M')
+                lines.append(f"[{ts_str}] [{role}] {name}: {content}")
+            else:
+                lines.append(f"[{role}] {name}: {content}")
 
         transcript = "\n".join(lines)
         prompt = (
