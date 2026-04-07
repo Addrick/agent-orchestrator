@@ -142,7 +142,7 @@ DISPATCH_PERSONA_NAME = "dispatch_analyst"
 # =============================================================================
 # --- Long-Term Memory Configuration ---
 # =============================================================================
-MEMORY_RETRIEVAL_ENABLED = os.environ.get("MEMORY_RETRIEVAL_ENABLED", "false").lower() == "true"
+MEMORY_RETRIEVAL_ENABLED = os.environ.get("MEMORY_RETRIEVAL_ENABLED", "true").lower() == "true"
 MEMORY_MAX_SUMMARIES_IN_CONTEXT = int(os.environ.get("MEMORY_MAX_SUMMARIES", "5"))
 
 LOCAL_LLM_URL = "http://omen:5001/v1"
