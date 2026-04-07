@@ -48,6 +48,13 @@ class MemoryAgent(Agent):
         self._batch_size: int = int(
             self.agent_config.get("batch_size", 200)
         )
+        # Cap embedding requests by total input tokens. Gemini's free tier
+        # limits embedding input to 30k tokens/min; staying well under that
+        # avoids 429s on chunks of long messages. Token count is estimated as
+        # chars/4 to match EmbeddingService._truncate_texts.
+        self._max_tokens_per_chunk: int = int(
+            self.agent_config.get("max_tokens_per_chunk", 25000)
+        )
         self._persona_name: str = self.agent_config.get("persona", "memory_summarizer")
         self._allowed_channels = self._parse_allowed_channels(
             self.agent_config.get("allowed_channels")
@@ -170,7 +177,8 @@ class MemoryAgent(Agent):
             )
         except Exception as e:
             logger.warning(
-                f"MemoryAgent: {channel}/{persona_name} embedding phase failed: {e}"
+                f"MemoryAgent: {channel}/{persona_name} embedding phase failed: {e}",
+                exc_info=True,
             )
 
         # --- Phase 2: Segment and summarize ---
@@ -212,9 +220,16 @@ class MemoryAgent(Agent):
         total_stored = 0
         now = datetime.now(timezone.utc)
 
-        for i in range(0, len(messages), chunk_size):
-            chunk_msgs = messages[i:i + chunk_size]
+        chunks = self._chunk_messages(messages, chunk_size, self._max_tokens_per_chunk)
+        for chunk_idx, chunk_msgs in enumerate(chunks):
             chunk_texts = [msg['content'] for msg in chunk_msgs]
+            est_tokens = sum(len(t) for t in chunk_texts) // 4
+            logger.debug(
+                f"MemoryAgent: {channel}/{persona_name} — "
+                f"embedding chunk {chunk_idx + 1}/{len(chunks)} "
+                f"({len(chunk_texts)} messages, ~{est_tokens} tokens, ids "
+                f"{chunk_msgs[0]['interaction_id']}–{chunk_msgs[-1]['interaction_id']})"
+            )
             chunk_embs = await embedding_service.encode(chunk_texts)
 
             with self.memory_manager.transaction() as conn:
@@ -230,6 +245,37 @@ class MemoryAgent(Agent):
         logger.info(
             f"MemoryAgent: {channel}/{persona_name} — stored {total_stored} embeddings."
         )
+
+    @staticmethod
+    def _chunk_messages(
+        messages: List[Dict[str, Any]],
+        max_items: int,
+        max_tokens: int,
+    ) -> List[List[Dict[str, Any]]]:
+        """Split messages into chunks bounded by both item count and token budget.
+
+        Token count is estimated as chars/4 (matching EmbeddingService's
+        truncation heuristic). A single message exceeding the budget still
+        gets its own chunk — EmbeddingService will truncate it before sending.
+        """
+        chunks: List[List[Dict[str, Any]]] = []
+        current: List[Dict[str, Any]] = []
+        current_tokens = 0
+        for msg in messages:
+            msg_tokens = len(msg.get('content', '')) // 4
+            would_exceed_tokens = (
+                current and current_tokens + msg_tokens > max_tokens
+            )
+            would_exceed_items = len(current) >= max_items
+            if would_exceed_items or would_exceed_tokens:
+                chunks.append(current)
+                current = []
+                current_tokens = 0
+            current.append(msg)
+            current_tokens += msg_tokens
+        if current:
+            chunks.append(current)
+        return chunks
 
     async def _segment_and_summarize(
         self,
