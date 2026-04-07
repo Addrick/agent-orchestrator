@@ -72,7 +72,8 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         # exc.details is the raw response JSON dict; RetryInfo is in the
         # 'details' list inside the 'error' key.
         try:
-            details_list = exc.details.get("error", {}).get("details", [])  # type: ignore[union-attr]
+            details = getattr(exc, "details", None) or {}
+            details_list = details.get("error", {}).get("details", [])
             for item in details_list:
                 delay_str = item.get("retryDelay", "")
                 if delay_str:
@@ -98,7 +99,8 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         """
         quota_ids: List[str] = []
         try:
-            details_list = exc.details.get("error", {}).get("details", [])  # type: ignore[union-attr]
+            details = getattr(exc, "details", None) or {}
+            details_list = details.get("error", {}).get("details", [])
             for item in details_list:
                 for violation in item.get("violations", []) or []:
                     qid = violation.get("quotaId", "")
