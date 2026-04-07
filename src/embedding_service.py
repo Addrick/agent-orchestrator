@@ -55,10 +55,76 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         return self._max_input_tokens
 
     _MAX_BATCH_SIZE = 100  # Gemini API limit per batch request
+    _MAX_RETRIES = 5
+    # Free-tier quota: 100 items/min (each item in a batch counts as 1 request).
+    # After a successful chunk we must wait for those slots to age out before
+    # sending the next chunk, or the next call hits 429 immediately.
+    _ITEMS_PER_MINUTE = 90  # stay just under the hard limit
+
+    @staticmethod
+    def _parse_retry_delay(exc: Exception) -> Optional[float]:
+        """Extract the suggested retry delay (seconds) from a 429 error response.
+
+        The Gemini API returns a RetryInfo detail with retryDelay like '24s'.
+        Falls back to None if unparseable so the caller can use a default.
+        """
+        import re
+        # exc.details is the raw response JSON dict; RetryInfo is in the
+        # 'details' list inside the 'error' key.
+        try:
+            details_list = exc.details.get("error", {}).get("details", [])  # type: ignore[union-attr]
+            for item in details_list:
+                delay_str = item.get("retryDelay", "")
+                if delay_str:
+                    match = re.match(r"([0-9.]+)s", delay_str)
+                    if match:
+                        return float(match.group(1))
+        except Exception:
+            pass
+        # Fallback: parse the string representation
+        match = re.search(r"'retryDelay':\s*'([0-9.]+)s'", str(exc))
+        if match:
+            return float(match.group(1))
+        return None
+
+    @staticmethod
+    def _parse_quota_kind(exc: Exception) -> str:
+        """Identify which quota was exceeded on a 429.
+
+        Gemini's 429 carries a QuotaFailure detail listing violated quotaIds
+        like 'GenerateContentInputTokensPerModelPerMinute' (TPM) or
+        'GenerateRequestsPerModelPerMinute' (RPM). Returns a short label —
+        'TPM', 'RPM', 'TPM+RPM', or 'unknown' — for log output.
+        """
+        quota_ids: List[str] = []
+        try:
+            details_list = exc.details.get("error", {}).get("details", [])  # type: ignore[union-attr]
+            for item in details_list:
+                for violation in item.get("violations", []) or []:
+                    qid = violation.get("quotaId", "")
+                    if qid:
+                        quota_ids.append(qid)
+        except Exception:
+            pass
+        if not quota_ids:
+            # Fallback: scan string representation
+            import re
+            quota_ids = re.findall(r"'quotaId':\s*'([^']+)'", str(exc))
+
+        has_tokens = any("Token" in q for q in quota_ids)
+        has_requests = any("Request" in q for q in quota_ids)
+        if has_tokens and has_requests:
+            return "TPM+RPM"
+        if has_tokens:
+            return "TPM"
+        if has_requests:
+            return "RPM"
+        return "unknown"
 
     async def encode(self, texts: List[str]) -> List[List[float]]:
         import os
         from google import genai
+        from google.genai.errors import ClientError
 
         api_key = os.environ.get("GOOGLE_GENERATIVEAI_API_KEY")
         if not api_key:
@@ -68,11 +134,27 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         vectors: List[List[float]] = []
         for i in range(0, len(texts), self._MAX_BATCH_SIZE):
             chunk = texts[i:i + self._MAX_BATCH_SIZE]
-            result = await asyncio.to_thread(
-                client.models.embed_content,
-                model=self._model_name,
-                contents=chunk,
-            )
+
+            for attempt in range(self._MAX_RETRIES):
+                try:
+                    result = await asyncio.to_thread(
+                        client.models.embed_content,
+                        model=self._model_name,
+                        contents=chunk,
+                    )
+                    break
+                except ClientError as exc:
+                    if exc.code != 429 or attempt == self._MAX_RETRIES - 1:
+                        raise
+                    delay = self._parse_retry_delay(exc) or (30 * (attempt + 1))
+                    quota_kind = self._parse_quota_kind(exc)
+                    logger.warning(
+                        f"GeminiEmbeddingProvider: 429 rate-limited ({quota_kind}) "
+                        f"on chunk {i // self._MAX_BATCH_SIZE + 1} "
+                        f"(attempt {attempt + 1}/{self._MAX_RETRIES}), "
+                        f"retrying in {delay:.1f}s"
+                    )
+                    await asyncio.sleep(delay)
 
             for embedding in result.embeddings or []:
                 vec = list(embedding.values or [])
@@ -81,6 +163,18 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
                 if norm > 0:
                     vec = [v / norm for v in vec]
                 vectors.append(vec)
+
+            # Rate-pace: each item in a batch counts as 1 RPM request.
+            # Sleep long enough for this chunk's slots to age out of the
+            # rolling window before we send the next chunk.
+            remaining = len(texts) - (i + self._MAX_BATCH_SIZE)
+            if remaining > 0:
+                pace_delay = len(chunk) / self._ITEMS_PER_MINUTE * 60
+                logger.debug(
+                    f"GeminiEmbeddingProvider: pacing {pace_delay:.1f}s "
+                    f"before next chunk ({remaining} items remaining)"
+                )
+                await asyncio.sleep(pace_delay)
 
         return vectors
 

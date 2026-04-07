@@ -413,6 +413,16 @@ class TestConfigInjection:
         assert agent._batch_size == 50
 
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    def test_max_tokens_per_chunk_default(self, mock_load, mock_chat_system):
+        agent = MemoryAgent(mock_chat_system)
+        assert agent._max_tokens_per_chunk == 25000
+
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    def test_max_tokens_per_chunk_from_config(self, mock_load, mock_chat_system):
+        agent = MemoryAgent(mock_chat_system, agent_config={"max_tokens_per_chunk": 5000})
+        assert agent._max_tokens_per_chunk == 5000
+
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
     def test_agent_name(self, mock_load, mock_chat_system):
         agent = MemoryAgent(mock_chat_system)
         assert agent.agent_name == "memory"
@@ -434,6 +444,44 @@ class TestConfigInjection:
             {"channel": "chan-a", "server_id": "s1"},
             {"channel": "chan-b", "server_id": "s2"},
         ]
+
+
+class TestChunkMessages:
+    """Token-aware chunking respects both item count and token budget."""
+
+    def test_single_chunk_under_limits(self):
+        msgs = [{'content': 'short'} for _ in range(5)]
+        chunks = MemoryAgent._chunk_messages(msgs, max_items=100, max_tokens=10000)
+        assert len(chunks) == 1
+        assert len(chunks[0]) == 5
+
+    def test_splits_on_item_count(self):
+        msgs = [{'content': 'x'} for _ in range(250)]
+        chunks = MemoryAgent._chunk_messages(msgs, max_items=100, max_tokens=10**9)
+        assert [len(c) for c in chunks] == [100, 100, 50]
+
+    def test_splits_on_token_budget(self):
+        # 4 chars/token estimate; 4000 chars = 1000 tokens per message
+        msgs = [{'content': 'a' * 4000} for _ in range(10)]
+        chunks = MemoryAgent._chunk_messages(msgs, max_items=100, max_tokens=2500)
+        # Each chunk fits at most 2 messages (2000 tokens) before the 3rd would exceed 2500
+        assert all(len(c) <= 2 for c in chunks)
+        assert sum(len(c) for c in chunks) == 10
+
+    def test_oversized_message_gets_own_chunk(self):
+        # A single message larger than the budget must still be emitted
+        # (EmbeddingService truncates it before sending).
+        msgs = [
+            {'content': 'a' * 200000},  # ~50k tokens, way over budget
+            {'content': 'short'},
+        ]
+        chunks = MemoryAgent._chunk_messages(msgs, max_items=100, max_tokens=25000)
+        assert len(chunks) == 2
+        assert chunks[0] == [msgs[0]]
+        assert chunks[1] == [msgs[1]]
+
+    def test_empty_input(self):
+        assert MemoryAgent._chunk_messages([], max_items=100, max_tokens=25000) == []
 
 
 class TestAllowedChannels:
