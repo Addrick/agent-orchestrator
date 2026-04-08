@@ -1,6 +1,8 @@
 # src/agents/memory_agent.py
 
 import logging
+import time
+import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -10,33 +12,91 @@ from src.agents.base import Agent
 from src.chat_system import ChatSystem
 from src.embedding_service import EmbeddingService, GeminiEmbeddingProvider
 
+# --- NEW: Import rate limits and dynamic model names ---
+from config.global_config import (
+    EMBEDDING_MODEL,
+    GEMINI_EMBEDDING_001_RPM,
+    GEMINI_EMBEDDING_001_TPM,
+    GEMINI_EMBEDDING_001_RPD
+)
+
 logger = logging.getLogger(__name__)
+
+
+class EmbeddingRateLimiter:
+    """Proactively tracks item-based Google API quota limits to prevent 429s."""
+
+    def __init__(self, rpm: int, tpm: int, rpd: int):
+        self.rpm = rpm
+        self.tpm = tpm
+        self.rpd = rpd
+        self.minute_req_history: List[Tuple[float, int]] = []  # (timestamp, items)
+        self.minute_tok_history: List[Tuple[float, int]] = []  # (timestamp, tokens)
+        self.day_req_history: List[Tuple[float, int]] = []  # (timestamp, items)
+        self._lock = asyncio.Lock()
+
+    async def acquire(self, item_count: int, token_count: int) -> None:
+        """Awaits until the payload can safely be sent without hitting a 429."""
+        async with self._lock:
+            while True:
+                now = time.time()
+
+                # Prune out-of-window timestamps
+                self.minute_req_history = [(t, c) for t, c in self.minute_req_history if now - t < 60.0]
+                self.minute_tok_history = [(t, tok) for t, tok in self.minute_tok_history if now - t < 60.0]
+                self.day_req_history = [(t, c) for t, c in self.day_req_history if now - t < 86400.0]
+
+                # 1. Enforce Daily Limit (Hard stop)
+                current_day_reqs = sum(c for _, c in self.day_req_history)
+                if current_day_reqs + item_count > self.rpd:
+                    raise RuntimeError(f"Daily Google AI Studio Quota Exhausted ({self.rpd} items).")
+
+                # 2. Check Minute Limits (Requests & Tokens)
+                current_min_reqs = sum(c for _, c in self.minute_req_history)
+                current_min_toks = sum(tok for _, tok in self.minute_tok_history)
+
+                if current_min_reqs + item_count <= self.rpm and current_min_toks + token_count <= self.tpm:
+                    # Safe to proceed! Log consumption.
+                    self.minute_req_history.append((now, item_count))
+                    self.minute_tok_history.append((now, token_count))
+                    self.day_req_history.append((now, item_count))
+                    break
+
+                # 3. Throttle: Calculate exact sleep time until enough items expire
+                sleep_time = 0.0
+                if current_min_reqs + item_count > self.rpm and self.minute_req_history:
+                    sleep_time = max(sleep_time, 60.0 - (now - self.minute_req_history[0][0]))
+                if current_min_toks + token_count > self.tpm and self.minute_tok_history:
+                    sleep_time = max(sleep_time, 60.0 - (now - self.minute_tok_history[0][0]))
+
+                if sleep_time > 0:
+                    logger.info(f"Embedding rate limiter active: waiting {sleep_time:.1f}s for bucket refill...")
+                    await asyncio.sleep(sleep_time + 0.1)  # Add 100ms buffer to ensure API clearance
 
 
 class MemoryAgent(Agent):
     """
     Batch agent that segments conversations by topic, extracts facts via LLM,
     and stores embedded summaries for retrieval-augmented conversation context.
-
-    Pipeline per channel:
-      1. Fetch unembedded messages
-      2. Embed messages (batch API call)
-      3. Segment by topic similarity (sliding-window centroid)
-      4. Summarize each segment via LLM (fact extraction)
-      5. Embed summaries
-      6. Write all results to DB in one transaction
     """
 
     agent_name: str = "memory"
 
     def __init__(
-        self,
-        chat_system: ChatSystem,
-        agent_config: Optional[Dict[str, Any]] = None,
+            self,
+            chat_system: ChatSystem,
+            agent_config: Optional[Dict[str, Any]] = None,
     ) -> None:
         super().__init__(chat_system)
         self.agent_config = agent_config or {}
         self._embedding_service: Optional[EmbeddingService] = None
+
+        # Initialize the proactive sliding-window rate limiter
+        self._rate_limiter = EmbeddingRateLimiter(
+            rpm=GEMINI_EMBEDDING_001_RPM,
+            tpm=GEMINI_EMBEDDING_001_TPM,
+            rpd=GEMINI_EMBEDDING_001_RPD
+        )
 
         # Config with defaults
         self._similarity_threshold: float = float(
@@ -45,15 +105,14 @@ class MemoryAgent(Agent):
         self._min_segment_size: int = int(
             self.agent_config.get("min_segment_size", 3)
         )
-        self._batch_size: int = int(
-            self.agent_config.get("batch_size", 200)
-        )
-        # Cap embedding requests by total input tokens. Gemini's free tier
-        # limits embedding input to 30k tokens/min; staying well under that
-        # avoids 429s on chunks of long messages. Token count is estimated as
-        # chars/4 to match EmbeddingService._truncate_texts.
+
+        # We cap batches to Gemini's hard 100 item array limit, or whatever is lower
+        config_batch_size = int(self.agent_config.get("batch_size", 100))
+        self._batch_size: int = min(config_batch_size, 100)
+
+        # Max tokens per chunk defaults to the TPM variable to prevent immediate token exhaustion
         self._max_tokens_per_chunk: int = int(
-            self.agent_config.get("max_tokens_per_chunk", 25000)
+            self.agent_config.get("max_tokens_per_chunk", GEMINI_EMBEDDING_001_TPM)
         )
         self._persona_name: str = self.agent_config.get("persona", "memory_summarizer")
         self._allowed_channels = self._parse_allowed_channels(
@@ -62,12 +121,8 @@ class MemoryAgent(Agent):
 
     @staticmethod
     def _parse_allowed_channels(
-        raw: Optional[List[Any]],
+            raw: Optional[List[Any]],
     ) -> Optional[List[Dict[str, str]]]:
-        """Parse allowed_channels config into channel+server pairs.
-
-        Each entry must be {"channel": "name", "server_id": "id"}.
-        """
         if raw is None:
             return None
         result = []
@@ -83,32 +138,37 @@ class MemoryAgent(Agent):
         return result
 
     def _get_embedding_service(self) -> EmbeddingService:
-        """Lazily initialize the embedding service on first use."""
         if self._embedding_service is None:
             provider_name = self.agent_config.get("embedding_provider", "gemini")
             if provider_name == "gemini":
+                # Ensure the provider respects our global model variable
                 provider = GeminiEmbeddingProvider()
             else:
                 raise ValueError(f"Unknown embedding provider: {provider_name}")
 
             self._embedding_service = EmbeddingService(provider)
-            # Share with ChatSystem for query-time retrieval
+
+            # Optionally override or assert the model name if your EmbeddingService supports it
+            if hasattr(self._embedding_service, 'model_name') and getattr(self._embedding_service,
+                                                                          'model_name') != EMBEDDING_MODEL:
+                logger.debug(f"Overriding EmbeddingService model to: {EMBEDDING_MODEL}")
+                self._embedding_service.model_name = EMBEDDING_MODEL
+
             self.chat_system._embedding_service = self._embedding_service
             logger.info(
                 f"MemoryAgent initialized EmbeddingService with provider "
-                f"'{provider_name}' (model: {self._embedding_service.model_name})"
+                f"'{provider_name}' (model: {EMBEDDING_MODEL})"
             )
 
         return self._embedding_service
 
     async def deploy(self) -> None:
-        """Discover channels with unprocessed messages and process each."""
         embedding_service = self._get_embedding_service()
-        model_name = embedding_service.model_name
+        # Ensure we query using the globally configured model name
+        model_name = EMBEDDING_MODEL
 
         all_channels = self.memory_manager.get_active_channels(model_name=model_name)
 
-        # Filter to allowed channels if configured (for staged rollout / testing)
         if self._allowed_channels is not None:
             channels = [
                 (ch, pn, sid) for ch, pn, sid in all_channels
@@ -141,60 +201,40 @@ class MemoryAgent(Agent):
                     channel, persona_name, server_id, embedding_service
                 )
             except Exception as e:
-                is_rate_limit = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e)
-                if is_rate_limit:
-                    logger.warning(
-                        f"MemoryAgent: {channel}/{persona_name} rate-limited, will retry next cycle."
-                    )
-                else:
-                    logger.error(
-                        f"MemoryAgent: error processing {channel}/{persona_name}: {e}",
-                        exc_info=True,
-                    )
+                # Keep error logging quiet without vomiting stack traces
+                logger.error(f"MemoryAgent: error processing {channel}/{persona_name}: {str(e)}")
 
     async def _process_channel(
-        self,
-        channel: str,
-        persona_name: str,
-        server_id: Optional[str],
-        embedding_service: EmbeddingService,
+            self,
+            channel: str,
+            persona_name: str,
+            server_id: Optional[str],
+            embedding_service: EmbeddingService,
     ) -> None:
-        """Process a single channel in two independent phases.
-
-        Phase 1 — Embed: fetch unembedded messages, embed and persist in chunks.
-                  Each chunk is committed immediately so partial progress survives.
-        Phase 2 — Segment+Summarize: fetch all embedded-but-unsegmented messages
-                  (including any from prior cycles), segment, summarize, store.
-        """
-        model_name = embedding_service.model_name
-
         # --- Phase 1: Embed unembedded messages ---
-        # Errors here (e.g. rate limits) must not prevent Phase 2 from
-        # processing previously saved embeddings.
         try:
             await self._embed_unembedded(
                 channel, persona_name, server_id, embedding_service
             )
         except Exception as e:
-            logger.warning(
-                f"MemoryAgent: {channel}/{persona_name} embedding phase failed: {e}",
-                exc_info=True,
-            )
+            logger.warning(f"MemoryAgent: {channel}/{persona_name} embedding phase aborted: {str(e)}")
 
         # --- Phase 2: Segment and summarize ---
-        await self._segment_and_summarize(
-            channel, persona_name, server_id, embedding_service
-        )
+        try:
+            await self._segment_and_summarize(
+                channel, persona_name, server_id, embedding_service
+            )
+        except Exception as e:
+            logger.warning(f"MemoryAgent: {channel}/{persona_name} summary phase aborted: {str(e)}")
 
     async def _embed_unembedded(
-        self,
-        channel: str,
-        persona_name: str,
-        server_id: Optional[str],
-        embedding_service: EmbeddingService,
+            self,
+            channel: str,
+            persona_name: str,
+            server_id: Optional[str],
+            embedding_service: EmbeddingService,
     ) -> None:
-        """Embed unembedded messages in chunks, persisting each chunk immediately."""
-        model_name = embedding_service.model_name
+        model_name = EMBEDDING_MODEL
 
         messages = self.memory_manager.get_unembedded_messages(
             persona_name=persona_name,
@@ -205,18 +245,12 @@ class MemoryAgent(Agent):
         )
 
         if not messages:
-            logger.debug(
-                f"MemoryAgent: {channel}/{persona_name} (server={server_id}) "
-                f"— no unembedded messages found."
-            )
+            logger.debug(f"MemoryAgent: {channel}/{persona_name} — no unembedded messages found.")
             return
 
-        logger.info(
-            f"MemoryAgent: {channel}/{persona_name} — "
-            f"{len(messages)} unembedded messages to process."
-        )
+        logger.info(f"MemoryAgent: {channel}/{persona_name} — {len(messages)} unembedded messages to process.")
 
-        chunk_size = 100  # Gemini API batch limit
+        chunk_size = self._batch_size
         total_stored = 0
         now = datetime.now(timezone.utc)
 
@@ -224,48 +258,54 @@ class MemoryAgent(Agent):
         for chunk_idx, chunk_msgs in enumerate(chunks):
             chunk_texts = [msg['content'] for msg in chunk_msgs]
             est_tokens = sum(len(t) for t in chunk_texts) // 4
+
             logger.debug(
                 f"MemoryAgent: {channel}/{persona_name} — "
                 f"embedding chunk {chunk_idx + 1}/{len(chunks)} "
-                f"({len(chunk_texts)} messages, ~{est_tokens} tokens, ids "
-                f"{chunk_msgs[0]['interaction_id']}–{chunk_msgs[-1]['interaction_id']})"
+                f"({len(chunk_texts)} messages, ~{est_tokens} tokens)"
             )
-            chunk_embs = await embedding_service.encode(chunk_texts)
 
-            with self.memory_manager.transaction() as conn:
-                for msg, emb in zip(chunk_msgs, chunk_embs):
-                    conn.execute(
-                        """INSERT OR REPLACE INTO Message_Embeddings
-                           (interaction_id, embedding, model_name, created_at)
-                           VALUES (?, ?, ?, ?)""",
-                        (msg['interaction_id'], emb, model_name, now)
-                    )
-            total_stored += len(chunk_embs)
+            try:
+                # Proactively ensure we do not hit API rate limits
+                await self._rate_limiter.acquire(item_count=len(chunk_texts), token_count=est_tokens)
 
-        logger.info(
-            f"MemoryAgent: {channel}/{persona_name} — stored {total_stored} embeddings."
-        )
+                # Execute API call
+                chunk_embs = await embedding_service.encode(chunk_texts)
+
+                with self.memory_manager.transaction() as conn:
+                    for msg, emb in zip(chunk_msgs, chunk_embs):
+                        conn.execute(
+                            """INSERT OR REPLACE INTO Message_Embeddings
+                               (interaction_id, embedding, model_name, created_at)
+                               VALUES (?, ?, ?, ?)""",
+                            (msg['interaction_id'], emb, model_name, now)
+                        )
+                total_stored += len(chunk_embs)
+
+            except RuntimeError as e:
+                # Daily limit hit - break loop cleanly
+                logger.warning(f"Embedding loop stopped: {str(e)}")
+                break
+            except Exception as e:
+                # Network or Unexpected error - backoff and break to prevent spam
+                logger.error(f"API Error during chunk encoding: {str(e)}")
+                await asyncio.sleep(60)
+                break
+
+        logger.info(f"MemoryAgent: {channel}/{persona_name} — stored {total_stored} embeddings.")
 
     @staticmethod
     def _chunk_messages(
-        messages: List[Dict[str, Any]],
-        max_items: int,
-        max_tokens: int,
+            messages: List[Dict[str, Any]],
+            max_items: int,
+            max_tokens: int,
     ) -> List[List[Dict[str, Any]]]:
-        """Split messages into chunks bounded by both item count and token budget.
-
-        Token count is estimated as chars/4 (matching EmbeddingService's
-        truncation heuristic). A single message exceeding the budget still
-        gets its own chunk — EmbeddingService will truncate it before sending.
-        """
         chunks: List[List[Dict[str, Any]]] = []
         current: List[Dict[str, Any]] = []
         current_tokens = 0
         for msg in messages:
             msg_tokens = len(msg.get('content', '')) // 4
-            would_exceed_tokens = (
-                current and current_tokens + msg_tokens > max_tokens
-            )
+            would_exceed_tokens = (current and current_tokens + msg_tokens > max_tokens)
             would_exceed_items = len(current) >= max_items
             if would_exceed_items or would_exceed_tokens:
                 chunks.append(current)
@@ -278,14 +318,13 @@ class MemoryAgent(Agent):
         return chunks
 
     async def _segment_and_summarize(
-        self,
-        channel: str,
-        persona_name: str,
-        server_id: Optional[str],
-        embedding_service: EmbeddingService,
+            self,
+            channel: str,
+            persona_name: str,
+            server_id: Optional[str],
+            embedding_service: EmbeddingService,
     ) -> None:
-        """Segment and summarize all embedded-but-unsegmented messages."""
-        model_name = embedding_service.model_name
+        model_name = EMBEDDING_MODEL
 
         rows = self.memory_manager.get_unsegmented_embedded_messages(
             persona_name=persona_name,
@@ -295,18 +334,14 @@ class MemoryAgent(Agent):
             limit=self._batch_size,
         )
 
-        logger.info(
-            f"MemoryAgent: {channel}/{persona_name} — "
-            f"{len(rows)} unsegmented embedded messages found."
-        )
+        logger.info(f"MemoryAgent: {channel}/{persona_name} — {len(rows)} unsegmented embedded messages found.")
 
         if len(rows) < self._min_segment_size:
             return
 
-        # Split rows into messages (for segmentation) and embeddings
         messages = [
             {k: r[k] for k in ('interaction_id', 'author_role', 'author_name',
-                                'content', 'timestamp')}
+                               'content', 'timestamp')}
             for r in rows
         ]
         embeddings = [r['embedding'] for r in rows]
@@ -326,19 +361,13 @@ class MemoryAgent(Agent):
 
         if not results:
             logger.warning(
-                f"MemoryAgent: all {len(segments)} segments failed summarization "
-                f"for {channel}/{persona_name}."
-            )
+                f"MemoryAgent: all {len(segments)} segments failed summarization for {channel}/{persona_name}.")
             return
 
         now = datetime.now(timezone.utc)
         with self.memory_manager.transaction() as conn:
             for segment, summary_text, summary_emb in results:
-                # Extract message time range
-                msg_timestamps = [
-                    m['timestamp'] for m in segment['messages']
-                    if m.get('timestamp')
-                ]
+                msg_timestamps = [m['timestamp'] for m in segment['messages'] if m.get('timestamp')]
                 first_msg_at = min(msg_timestamps) if msg_timestamps else None
                 last_msg_at = max(msg_timestamps) if msg_timestamps else None
 
@@ -363,53 +392,39 @@ class MemoryAgent(Agent):
                     (segment_id, summary_text, summary_emb, model_name, now)
                 )
 
-        logger.info(
-            f"MemoryAgent: {channel}/{persona_name} — "
-            f"{len(results)} segments+summaries stored."
-        )
+        logger.info(f"MemoryAgent: {channel}/{persona_name} — {len(results)} segments+summaries stored.")
 
     def _segment_by_similarity(
-        self,
-        messages: List[Dict[str, Any]],
-        embeddings: List[bytes],
-        channel: str,
-        persona_name: str,
-        server_id: Optional[str],
+            self,
+            messages: List[Dict[str, Any]],
+            embeddings: List[bytes],
+            channel: str,
+            persona_name: str,
+            server_id: Optional[str],
     ) -> List[Dict[str, Any]]:
-        """Segment messages by sliding-window centroid similarity.
-
-        Returns list of dicts with keys: start_id, end_id, count, messages, embeddings.
-        """
         if not messages:
             return []
 
-        # Seed centroid from previous segment tail
-        centroid = self._seed_centroid_from_previous(
-            channel, persona_name, server_id
-        )
+        centroid = self._seed_centroid_from_previous(channel, persona_name, server_id)
 
         segments: List[Dict[str, Any]] = []
         current_msgs: List[Dict[str, Any]] = []
         current_embs: List[bytes] = []
-        n = 0  # running count for centroid update
+        n = 0
 
         for i, (msg, emb_blob) in enumerate(zip(messages, embeddings)):
             vec = np.frombuffer(emb_blob, dtype=np.float32).copy()
 
             if centroid is None:
-                # First message — initialize centroid
                 centroid = vec.copy()
                 n = 1
                 current_msgs.append(msg)
                 current_embs.append(emb_blob)
                 continue
 
-            # Compute similarity to running centroid
             similarity = float(np.dot(centroid, vec))
 
-            if (similarity < self._similarity_threshold
-                    and len(current_msgs) >= self._min_segment_size):
-                # Cut — save current segment
+            if (similarity < self._similarity_threshold and len(current_msgs) >= self._min_segment_size):
                 segments.append({
                     'start_id': current_msgs[0]['interaction_id'],
                     'end_id': current_msgs[-1]['interaction_id'],
@@ -417,13 +432,11 @@ class MemoryAgent(Agent):
                     'messages': current_msgs,
                     'embeddings': current_embs,
                 })
-                # Reset — clean break
                 current_msgs = [msg]
                 current_embs = [emb_blob]
                 centroid = vec.copy()
                 n = 1
             else:
-                # Update centroid incrementally and re-normalize
                 current_msgs.append(msg)
                 current_embs.append(emb_blob)
                 n += 1
@@ -432,7 +445,6 @@ class MemoryAgent(Agent):
                 if norm > 0:
                     centroid = centroid / norm
 
-        # Final segment
         if current_msgs:
             segments.append({
                 'start_id': current_msgs[0]['interaction_id'],
@@ -445,17 +457,12 @@ class MemoryAgent(Agent):
         return segments
 
     def _seed_centroid_from_previous(
-        self,
-        channel: str,
-        persona_name: str,
-        server_id: Optional[str],
+            self,
+            channel: str,
+            persona_name: str,
+            server_id: Optional[str],
     ) -> Optional["np.ndarray[Any, Any]"]:
-        """Load tail embeddings from the previous segment and compute mean centroid.
-
-        Returns None if no previous segment or model mismatch.
-        """
-        model_name = (self._embedding_service.model_name
-                      if self._embedding_service else None)
+        model_name = EMBEDDING_MODEL
 
         tail_blobs = self.memory_manager.get_last_segment_tail_embeddings(
             channel=channel,
@@ -468,7 +475,6 @@ class MemoryAgent(Agent):
         if tail_blobs is None:
             return None
 
-        # Compute mean of tail embeddings and normalize
         vectors = [np.frombuffer(b, dtype=np.float32) for b in tail_blobs]
         centroid: np.ndarray[Any, Any] = np.mean(vectors, axis=0)
         norm = float(np.linalg.norm(centroid))
@@ -479,22 +485,15 @@ class MemoryAgent(Agent):
         return None
 
     async def _summarize_segment(
-        self,
-        segment: Dict[str, Any],
-        embedding_service: EmbeddingService,
+            self,
+            segment: Dict[str, Any],
+            embedding_service: EmbeddingService,
     ) -> Optional[Tuple[str, bytes]]:
-        """Extract facts from a segment via LLM and embed the result.
-
-        Returns (facts_text, summary_embedding) or None on failure.
-        """
         persona = self.chat_system.personas.get(self._persona_name)
         if not persona:
-            logger.error(
-                f"System persona '{self._persona_name}' not found. Cannot summarize."
-            )
+            logger.error(f"System persona '{self._persona_name}' not found. Cannot summarize.")
             return None
 
-        # Build transcript with timestamps
         lines = []
         for msg in segment['messages']:
             role = msg.get('author_role', 'user')
@@ -502,7 +501,6 @@ class MemoryAgent(Agent):
             content = msg.get('content', '')
             ts = msg.get('timestamp', '')
             if ts:
-                # Format as readable date for the LLM
                 if isinstance(ts, str):
                     ts = datetime.fromisoformat(ts)
                 ts_str = ts.strftime('%Y-%m-%d %H:%M')
@@ -532,14 +530,16 @@ class MemoryAgent(Agent):
                 logger.warning("MemoryAgent: summarizer returned empty content.")
                 return None
 
-            # Embed the summary
+            # Calculate tokens and await rate limits for the embedding of the summary
+            est_tokens = len(facts_text) // 4
+            await self._rate_limiter.acquire(item_count=1, token_count=est_tokens)
+
             summary_embedding = await embedding_service.encode_single(facts_text)
             return (facts_text, summary_embedding)
 
+        except RuntimeError as e:
+            logger.warning(f"MemoryAgent: Summarization embedding paused due to Daily Quota: {str(e)}")
+            return None
         except Exception as e:
-            is_rate_limit = "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e)
-            if is_rate_limit:
-                logger.warning("MemoryAgent: summarization rate-limited, will retry next cycle.")
-            else:
-                logger.error(f"MemoryAgent: summarization failed: {e}", exc_info=True)
+            logger.error(f"MemoryAgent: summarization failed: {str(e)}")
             return None
