@@ -367,7 +367,16 @@ class MemoryAgent(Agent):
         now = datetime.now(timezone.utc)
         with self.memory_manager.transaction() as conn:
             for segment, summary_text, summary_emb in results:
-                msg_timestamps = [m['timestamp'] for m in segment['messages'] if m.get('timestamp')]
+                msg_timestamps = []
+                for m in segment['messages']:
+                    ts = m.get('timestamp')
+                    if ts:
+                        if isinstance(ts, str):
+                            ts = datetime.fromisoformat(ts)
+                        if getattr(ts, 'tzinfo', None) is None:
+                            ts = ts.replace(tzinfo=timezone.utc)
+                        msg_timestamps.append(ts)
+                        
                 first_msg_at = min(msg_timestamps) if msg_timestamps else None
                 last_msg_at = max(msg_timestamps) if msg_timestamps else None
 
