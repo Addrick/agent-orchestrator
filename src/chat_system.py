@@ -333,14 +333,15 @@ class ChatSystem:
         for _score, summary in scored_summaries:
             channel = summary.get('channel', 'unknown')
             persona = summary.get('persona_name', '')
-            created_at = summary.get('created_at')
+            # Prefer the actual time the memory occurred over when it was summarized
+            memory_timestamp = summary.get('last_message_at') or summary.get('created_at')
 
             # Build label
             label_parts = [f"#{channel}"]
             if persona == 'ambient':
                 label_parts.append("ambient")
-            if created_at:
-                label_parts.append(_relative_time(created_at))
+            if memory_timestamp:
+                label_parts.append(_relative_time(memory_timestamp))
 
             label = ", ".join(label_parts)
             lines.append(f"[{label}]")
