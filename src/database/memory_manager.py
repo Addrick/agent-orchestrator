@@ -693,7 +693,7 @@ class MemoryManager:
             base_select = (
                 "SELECT ms.summary_id, ms.segment_id, ms.content, ms.embedding,"
                 " ms.model_name, ms.created_at, seg.channel, seg.persona_name,"
-                " seg.start_interaction_id, seg.end_interaction_id"
+                " seg.start_interaction_id, seg.end_interaction_id, seg.last_message_at"
                 " FROM Memory_Summaries ms"
                 " JOIN Memory_Segments seg ON ms.segment_id = seg.segment_id"
             )
