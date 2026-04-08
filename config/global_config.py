@@ -164,7 +164,16 @@ RATE_LIMIT_GEMINI_3_RPM  = int(os.environ.get("RATE_LIMIT_GEMINI_3_RPM",  "15"))
 RATE_LIMIT_GEMMA_3_RPM   = int(os.environ.get("RATE_LIMIT_GEMMA_3_RPM",   "30"))
 # Gemma 4 free tier (confirmed 2026-04): 15 RPM
 RATE_LIMIT_GEMMA_4_RPM   = int(os.environ.get("RATE_LIMIT_GEMMA_4_RPM",   "15"))
+RATE_LIMIT_GEMMA_4_RPD   = int(os.environ.get("RATE_LIMIT_GEMMA_4_RPD",   "1500"))
 
 # OpenAI and Anthropic — set generously; adjust if you hit 429s on those providers.
 RATE_LIMIT_OPENAI_RPM    = int(os.environ.get("RATE_LIMIT_OPENAI_RPM",    "60"))
 RATE_LIMIT_ANTHROPIC_RPM = int(os.environ.get("RATE_LIMIT_ANTHROPIC_RPM", "50"))
+
+# Models
+EMBEDDING_MODEL = 'gemini-embedding-001'
+
+# Rate Limits (Google AI Studio tracks embeddings *per item*, not per HTTP request)
+GEMINI_EMBEDDING_001_RPM = 100
+GEMINI_EMBEDDING_001_TPM = 30000
+GEMINI_EMBEDDING_001_RPD = 1000

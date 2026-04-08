@@ -3,12 +3,82 @@
 import asyncio
 import logging
 import struct
+import time
+import re
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 
+# Import global configurations
+from config.global_config import (
+    EMBEDDING_MODEL,
+    GEMINI_EMBEDDING_001_RPM,
+    GEMINI_EMBEDDING_001_TPM,
+    GEMINI_EMBEDDING_001_RPD
+)
+
 logger = logging.getLogger(__name__)
+
+
+class EmbeddingRateLimiter:
+    """Proactively tracks item-based Google API quota limits to prevent 429s."""
+
+    def __init__(self, rpm: int, tpm: int, rpd: int):
+        self.rpm = rpm
+        self.tpm = tpm
+        self.rpd = rpd
+        self.minute_req_history: List[Tuple[float, int]] = []
+        self.minute_tok_history: List[Tuple[float, int]] = []
+        self.day_req_history: List[Tuple[float, int]] = []
+        self._lock = asyncio.Lock()
+
+    async def acquire(self, item_count: int, token_count: int) -> None:
+        """Awaits until the payload can safely be sent without hitting a 429."""
+        async with self._lock:
+            while True:
+                now = time.time()
+
+                # Prune out-of-window timestamps
+                self.minute_req_history = [(t, c) for t, c in self.minute_req_history if now - t < 60.0]
+                self.minute_tok_history = [(t, tok) for t, tok in self.minute_tok_history if now - t < 60.0]
+                self.day_req_history = [(t, c) for t, c in self.day_req_history if now - t < 86400.0]
+
+                # 1. Enforce Daily Limit (Hard stop)
+                current_day_reqs = sum(c for _, c in self.day_req_history)
+                if current_day_reqs + item_count > self.rpd:
+                    raise RuntimeError(f"Daily Google API Quota Exhausted ({self.rpd} items).")
+
+                # 2. Check Minute Limits
+                current_min_reqs = sum(c for _, c in self.minute_req_history)
+                current_min_toks = sum(tok for _, tok in self.minute_tok_history)
+
+                if current_min_reqs + item_count <= self.rpm and current_min_toks + token_count <= self.tpm:
+                    # Safe to proceed!
+                    self.minute_req_history.append((now, item_count))
+                    self.minute_tok_history.append((now, token_count))
+                    self.day_req_history.append((now, item_count))
+                    break
+
+                # 3. Throttle if we don't have capacity
+                sleep_time = 0.0
+                if current_min_reqs + item_count > self.rpm and self.minute_req_history:
+                    sleep_time = max(sleep_time, 60.0 - (now - self.minute_req_history[0][0]))
+                if current_min_toks + token_count > self.tpm and self.minute_tok_history:
+                    sleep_time = max(sleep_time, 60.0 - (now - self.minute_tok_history[0][0]))
+
+                if sleep_time > 0:
+                    logger.info(f"Embedding API throttle: pausing {sleep_time:.1f}s for rate limit reset "
+                                f"(TPM: {current_min_toks}/{self.tpm}, RPM: {current_min_reqs}/{self.rpm})")
+                    await asyncio.sleep(sleep_time + 0.1)
+
+
+# Global singleton so all instances and agents share the same rate-limit history
+GLOBAL_EMBEDDING_LIMITER = EmbeddingRateLimiter(
+    rpm=GEMINI_EMBEDDING_001_RPM,
+    tpm=GEMINI_EMBEDDING_001_TPM,
+    rpd=GEMINI_EMBEDDING_001_RPD
+)
 
 
 class EmbeddingProvider(ABC):
@@ -24,6 +94,11 @@ class EmbeddingProvider(ABC):
     def model_name(self) -> str:
         ...
 
+    @model_name.setter
+    @abstractmethod
+    def model_name(self, value: str) -> None:
+        ...
+
     @property
     @abstractmethod
     def dimensions(self) -> int:
@@ -36,15 +111,24 @@ class EmbeddingProvider(ABC):
 
 
 class GeminiEmbeddingProvider(EmbeddingProvider):
-    """Uses Google's gemini-embedding-001 via the google-genai SDK."""
+    """Uses Google's API via the google-genai SDK."""
 
-    _model_name = "gemini-embedding-001"
     _dimensions = 768
     _max_input_tokens = 2048
+    _MAX_BATCH_SIZE = 10  # Kept low to bypass generic payload size errors
+    _MAX_RETRIES = 5
+
+    def __init__(self) -> None:
+        self._model_name = EMBEDDING_MODEL
+        self._limiter = GLOBAL_EMBEDDING_LIMITER
 
     @property
     def model_name(self) -> str:
         return self._model_name
+
+    @model_name.setter
+    def model_name(self, value: str) -> None:
+        self._model_name = value
 
     @property
     def dimensions(self) -> int:
@@ -54,76 +138,30 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
     def max_input_tokens(self) -> Optional[int]:
         return self._max_input_tokens
 
-    _MAX_BATCH_SIZE = 100  # Gemini API limit per batch request
-    _MAX_RETRIES = 5
-    # Free-tier quota: 100 items/min (each item in a batch counts as 1 request).
-    # After a successful chunk we must wait for those slots to age out before
-    # sending the next chunk, or the next call hits 429 immediately.
-    _ITEMS_PER_MINUTE = 90  # stay just under the hard limit
-
     @staticmethod
-    def _parse_retry_delay(exc: Exception) -> Optional[float]:
-        """Extract the suggested retry delay (seconds) from a 429 error response.
+    def _parse_error_details(exc: Exception) -> Tuple[str, float]:
+        """Extracts the quota metric and enforces a strict 60s minimum delay."""
+        exc_str = str(exc)
 
-        The Gemini API returns a RetryInfo detail with retryDelay like '24s'.
-        Falls back to None if unparseable so the caller can use a default.
-        """
-        import re
-        # exc.details is the raw response JSON dict; RetryInfo is in the
-        # 'details' list inside the 'error' key.
-        try:
-            details = getattr(exc, "details", None) or {}
-            details_list = details.get("error", {}).get("details", [])
-            for item in details_list:
-                delay_str = item.get("retryDelay", "")
-                if delay_str:
-                    match = re.match(r"([0-9.]+)s", delay_str)
-                    if match:
-                        return float(match.group(1))
-        except Exception:
-            pass
-        # Fallback: parse the string representation
-        match = re.search(r"'retryDelay':\s*'([0-9.]+)s'", str(exc))
-        if match:
-            return float(match.group(1))
-        return None
+        # If we hit a 429, our local limiter is out of sync with Google's API.
+        # We MUST wait a full 60 seconds to guarantee Google's sliding window drains.
+        delay = 60.0
 
-    @staticmethod
-    def _parse_quota_kind(exc: Exception) -> str:
-        """Identify which quota was exceeded on a 429.
+        # Parse metric name out of Google's new error format
+        metric = "Unknown_Quota"
+        match_metric = re.search(r"metric:\s*[a-zA-Z0-9.-]+/([^,\s]+)", exc_str)
+        if match_metric:
+            metric = match_metric.group(1)
+            if "limit: 1000" in exc_str:
+                metric += "_DAILY_LIMIT"
+        elif "quotaId" in exc_str:
+            match_quota = re.search(r"'quotaId':\s*'([^']+)'", exc_str)
+            if match_quota:
+                metric = match_quota.group(1)
 
-        Gemini's 429 carries a QuotaFailure detail listing violated quotaIds
-        like 'GenerateContentInputTokensPerModelPerMinute' (TPM) or
-        'GenerateRequestsPerModelPerMinute' (RPM). Returns a short label —
-        'TPM', 'RPM', 'TPM+RPM', or 'unknown' — for log output.
-        """
-        quota_ids: List[str] = []
-        try:
-            details = getattr(exc, "details", None) or {}
-            details_list = details.get("error", {}).get("details", [])
-            for item in details_list:
-                for violation in item.get("violations", []) or []:
-                    qid = violation.get("quotaId", "")
-                    if qid:
-                        quota_ids.append(qid)
-        except Exception:
-            pass
-        if not quota_ids:
-            # Fallback: scan string representation
-            import re
-            quota_ids = re.findall(r"'quotaId':\s*'([^']+)'", str(exc))
+        return metric, delay
 
-        has_tokens = any("Token" in q for q in quota_ids)
-        has_requests = any("Request" in q for q in quota_ids)
-        if has_tokens and has_requests:
-            return "TPM+RPM"
-        if has_tokens:
-            return "TPM"
-        if has_requests:
-            return "RPM"
-        return "unknown"
-
-    async def encode(self, texts: List[str]) -> List[List[float]]:
+    async def encode(self, texts: List[str]) -> List[List[float]]:  # noqa: C901
         import os
         from google import genai
         from google.genai.errors import ClientError
@@ -137,6 +175,24 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
         for i in range(0, len(texts), self._MAX_BATCH_SIZE):
             chunk = texts[i:i + self._MAX_BATCH_SIZE]
 
+            # --- EXACT TOKEN COUNTING ---
+            # Instead of guessing with chars // 4, we query the exact token size.
+            try:
+                count_response = await asyncio.to_thread(
+                    client.models.count_tokens,
+                    model=self._model_name,
+                    contents=chunk,
+                )
+                exact_tokens = count_response.total_tokens or int(sum(len(t) for t in chunk) / 2.0)
+            except Exception as e:
+                logger.debug(f"Token count API failed, using conservative heuristic: {e}")
+                # Highly conservative fallback if the count API fails (2.0 chars per token)
+                exact_tokens = int(sum(len(t) for t in chunk) / 2.0)
+
+            # 1. Proactively wait for API capacity using EXACT token counts
+            await self._limiter.acquire(item_count=len(chunk), token_count=exact_tokens)
+
+            # 2. Execute with safety net
             for attempt in range(self._MAX_RETRIES):
                 try:
                     result = await asyncio.to_thread(
@@ -148,13 +204,16 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
                 except ClientError as exc:
                     if exc.code != 429 or attempt == self._MAX_RETRIES - 1:
                         raise
-                    delay = self._parse_retry_delay(exc) or (30 * (attempt + 1))
-                    quota_kind = self._parse_quota_kind(exc)
+
+                    metric, delay = self._parse_error_details(exc)
+                    raw_err = str(exc).replace('\n', ' ')
+
                     logger.warning(
-                        f"GeminiEmbeddingProvider: 429 rate-limited ({quota_kind}) "
+                        f"Gemini API 429 Exception ({metric}) "
                         f"on chunk {i // self._MAX_BATCH_SIZE + 1} "
-                        f"(attempt {attempt + 1}/{self._MAX_RETRIES}), "
-                        f"retrying in {delay:.1f}s"
+                        f"(attempt {attempt + 1}/{self._MAX_RETRIES}). "
+                        f"API bucket full. Backing off for {delay:.1f}s. "
+                        f"[Raw Error: {raw_err}]"
                     )
                     await asyncio.sleep(delay)
 
@@ -165,18 +224,6 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
                 if norm > 0:
                     vec = [v / norm for v in vec]
                 vectors.append(vec)
-
-            # Rate-pace: each item in a batch counts as 1 RPM request.
-            # Sleep long enough for this chunk's slots to age out of the
-            # rolling window before we send the next chunk.
-            remaining = len(texts) - (i + self._MAX_BATCH_SIZE)
-            if remaining > 0:
-                pace_delay = len(chunk) / self._ITEMS_PER_MINUTE * 60
-                logger.debug(
-                    f"GeminiEmbeddingProvider: pacing {pace_delay:.1f}s "
-                    f"before next chunk ({remaining} items remaining)"
-                )
-                await asyncio.sleep(pace_delay)
 
         return vectors
 
@@ -191,21 +238,20 @@ class EmbeddingService:
     def model_name(self) -> str:
         return self._provider.model_name
 
+    @model_name.setter
+    def model_name(self, value: str) -> None:
+        self._provider.model_name = value
+
     @property
     def dimensions(self) -> int:
         return self._provider.dimensions
 
     def _truncate_texts(self, texts: List[str]) -> List[str]:
-        """Truncate texts exceeding the provider's max input token limit.
-
-        Uses a rough char-based estimate (4 chars per token) since we don't
-        have a tokenizer. Conservative — slightly over-truncates rather than
-        risking API errors.
-        """
+        """Truncate texts exceeding the provider's max input token limit."""
         max_tokens = self._provider.max_input_tokens
         if max_tokens is None:
             return texts
-        # Rough estimate: 4 chars per token
+
         max_chars = max_tokens * 4
         result = []
         for text in texts:
@@ -238,20 +284,14 @@ class EmbeddingService:
 
     @staticmethod
     def cosine_similarity(blob_a: bytes, blob_b: bytes) -> float:
-        """Cosine similarity between two BLOB embeddings.
-
-        Vectors are pre-normalized, so this is just a dot product.
-        """
+        """Cosine similarity between two BLOB embeddings."""
         a = np.frombuffer(blob_a, dtype=np.float32)
         b = np.frombuffer(blob_b, dtype=np.float32)
         return float(np.dot(a, b))
 
     @staticmethod
     def cosine_similarities(query_blob: bytes, candidate_blobs: List[bytes]) -> List[float]:
-        """Cosine similarity of a query against multiple candidates.
-
-        Vectors are pre-normalized, so this is just dot products.
-        """
+        """Cosine similarity of a query against multiple candidates."""
         query = np.frombuffer(query_blob, dtype=np.float32)
         scores = []
         for blob in candidate_blobs:

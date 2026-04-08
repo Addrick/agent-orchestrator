@@ -8,7 +8,7 @@ import time
 from datetime import datetime
 
 from src.database.memory_manager import MemoryManager
-from config.global_config import TEST_MEMORY_DATABASE_FILE, TEST_DATABASE_DIR
+from config.global_config import TEST_MEMORY_DATABASE_FILE, TEST_DATABASE_DIR, EMBEDDING_MODEL
 
 
 @pytest.fixture
@@ -592,7 +592,7 @@ def test_store_and_retrieve_message_embedding(mem_manager):
     iid = mem_manager.log_message("u1", "p1", "chan", "user", "Alice",
                                    "Hello world", datetime.now())
     emb = _make_fake_embedding()
-    mem_manager.store_message_embedding(iid, emb, "text-embedding-004", datetime.now())
+    mem_manager.store_message_embedding(iid, emb, EMBEDDING_MODEL, datetime.now())
 
     conn = mem_manager._get_connection()
     cursor = conn.cursor()
@@ -600,7 +600,7 @@ def test_store_and_retrieve_message_embedding(mem_manager):
                    (iid,))
     row = cursor.fetchone()
     assert row['embedding'] == emb
-    assert row['model_name'] == "text-embedding-004"
+    assert row['model_name'] == EMBEDDING_MODEL
 
 
 def test_store_message_embedding_upsert(mem_manager):
@@ -631,7 +631,7 @@ def test_get_unembedded_messages_basic(mem_manager):
     assert msgs[0]['interaction_id'] == id1
 
     # Embed one, now only one is returned
-    mem_manager.store_message_embedding(id1, _make_fake_embedding(), "text-embedding-004", ts)
+    mem_manager.store_message_embedding(id1, _make_fake_embedding(), EMBEDDING_MODEL, ts)
     msgs = mem_manager.get_unembedded_messages("p1", "chan")
     assert len(msgs) == 1
     assert msgs[0]['interaction_id'] == id2
@@ -641,7 +641,7 @@ def test_get_unembedded_messages_model_name_filter(mem_manager):
     """With model_name, also returns messages with stale-model embeddings."""
     ts = datetime.now()
     id1 = mem_manager.log_message("u1", "p1", "chan", "user", "Alice", "Hello", ts)
-    mem_manager.store_message_embedding(id1, _make_fake_embedding(), "old-model", ts)
+    mem_manager.store_message_embedding(id1, _make_fake_embedding(), EMBEDDING_MODEL, ts)
 
     # Without model_name filter: appears embedded
     msgs = mem_manager.get_unembedded_messages("p1", "chan")
@@ -697,7 +697,7 @@ def test_store_segment_and_summary(mem_manager):
     assert isinstance(seg_id, int)
 
     emb = _make_fake_embedding()
-    sum_id = mem_manager.store_summary(seg_id, "- Fact 1\n- Fact 2", emb, "text-embedding-004", ts)
+    sum_id = mem_manager.store_summary(seg_id, "- Fact 1\n- Fact 2", emb, EMBEDDING_MODEL, ts)
     assert isinstance(sum_id, int)
 
     summaries = mem_manager.get_summaries_for_channel("chan", "p1")
@@ -712,15 +712,15 @@ def test_get_summaries_recency_filter(mem_manager):
     ts = datetime.now()
     # Segment A: IDs 1-5 (outside window)
     seg_a = mem_manager.store_segment("chan", None, "p1", 1, 5, 5, ts)
-    mem_manager.store_summary(seg_a, "Facts A", _make_fake_embedding(), "m", ts)
+    mem_manager.store_summary(seg_a, "Facts A", _make_fake_embedding(), EMBEDDING_MODEL, ts)
 
     # Segment B: IDs 6-10 (straddles window at 8)
     seg_b = mem_manager.store_segment("chan", None, "p1", 6, 10, 5, ts)
-    mem_manager.store_summary(seg_b, "Facts B", _make_fake_embedding(), "m", ts)
+    mem_manager.store_summary(seg_b, "Facts B", _make_fake_embedding(), EMBEDDING_MODEL, ts)
 
     # Segment C: IDs 11-15 (fully inside window at 8)
     seg_c = mem_manager.store_segment("chan", None, "p1", 11, 15, 5, ts)
-    mem_manager.store_summary(seg_c, "Facts C", _make_fake_embedding(), "m", ts)
+    mem_manager.store_summary(seg_c, "Facts C", _make_fake_embedding(), EMBEDDING_MODEL, ts)
 
     # Window starts at 8 — exclude segments starting at or after 8
     summaries = mem_manager.get_summaries_for_channel(
@@ -758,7 +758,7 @@ def test_get_active_channels_includes_unsegmented_embedded(mem_manager):
     """Channels with embedded-but-unsegmented messages are still active."""
     ts = datetime.now()
     iid = mem_manager.log_message("u1", "p1", "chan", "user", "Alice", "Hello", ts)
-    mem_manager.store_message_embedding(iid, _make_fake_embedding(), "text-embedding-004", ts)
+    mem_manager.store_message_embedding(iid, _make_fake_embedding(), EMBEDDING_MODEL, ts)
 
     # Embedded but not segmented — still needs work
     assert len(mem_manager.get_active_channels()) == 1
@@ -772,7 +772,7 @@ def test_get_active_channels_model_name_filter(mem_manager):
     """With model_name, channels with stale-model embeddings are also returned."""
     ts = datetime.now()
     iid = mem_manager.log_message("u1", "p1", "chan", "user", "Alice", "Hello", ts)
-    mem_manager.store_message_embedding(iid, _make_fake_embedding(), "old-model", ts)
+    mem_manager.store_message_embedding(iid, _make_fake_embedding(), EMBEDDING_MODEL, ts)
     # Segment it so the unsegmented UNION branch doesn't match
     mem_manager.store_segment("chan", None, "p1", iid, iid, 1, ts)
 
@@ -803,7 +803,7 @@ def test_get_last_segment_tail_embeddings_basic(mem_manager):
         ids.append(iid)
         emb = _make_fake_embedding()
         embs.append(emb)
-        mem_manager.store_message_embedding(iid, emb, "text-embedding-004", ts)
+        mem_manager.store_message_embedding(iid, emb, EMBEDDING_MODEL, ts)
 
     # Create a segment covering all messages
     mem_manager.store_segment("chan", None, "p1", ids[0], ids[-1], 5, ts)
@@ -848,12 +848,12 @@ def test_get_last_segment_tail_scoped_to_channel_persona(mem_manager):
     # Messages in chan-a
     id_a = mem_manager.log_message("u1", "p1", "chan-a", "user", "Alice", "In A", ts)
     emb_a = _make_fake_embedding()
-    mem_manager.store_message_embedding(id_a, emb_a, "m", ts)
+    mem_manager.store_message_embedding(id_a, emb_a, EMBEDDING_MODEL, ts)
 
     # Messages in chan-b (interleaved IDs)
     id_b = mem_manager.log_message("u1", "p1", "chan-b", "user", "Bob", "In B", ts)
     emb_b = _make_fake_embedding()
-    mem_manager.store_message_embedding(id_b, emb_b, "m", ts)
+    mem_manager.store_message_embedding(id_b, emb_b, EMBEDDING_MODEL, ts)
 
     # Segment for chan-a that spans both IDs
     mem_manager.store_segment("chan-a", None, "p1", id_a, id_b, 1, ts)
