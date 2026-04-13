@@ -315,7 +315,12 @@ class ChatSystem:
         scored_summaries = [(summary.get('dist', 1.0), summary) for summary in summaries]
 
         # Format memory block
-        return self._format_memory_block(scored_summaries)
+        memory_block = self._format_memory_block(scored_summaries)
+        if memory_block:
+            logger.info(f"ChatSystem: Injected memory block for {persona.get_name()} ({len(scored_summaries)} summaries)")
+        else:
+            logger.info(f"ChatSystem: No relevant memories found for {persona.get_name()}")
+        return memory_block
 
     @staticmethod
     def _format_memory_block(scored_summaries: List[Tuple[float, Dict[str, Any]]]) -> Optional[str]:
