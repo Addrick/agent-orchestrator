@@ -309,7 +309,8 @@ class TextEngine:
 
         except (APIStatusError, APITimeoutError) as e:
             rate_limited = isinstance(e, APIStatusError) and e.status_code == 429
-            logger.error(f"OpenAI API error: {e}", exc_info=True)
+            is_server_error = isinstance(e, APIStatusError) and e.status_code >= 500
+            logger.error(f"OpenAI API error: {e}", exc_info=not is_server_error)
             raise LLMCommunicationError(f"OpenAI API returned an error: {e}", api_payload=api_params,
                                         rate_limited=rate_limited) from e
         except Exception as e:
@@ -391,7 +392,8 @@ class TextEngine:
 
         except anthropic.APIError as e:
             rate_limited = hasattr(e, 'status_code') and e.status_code == 429
-            logger.error(f"Anthropic API error: {e}", exc_info=True)
+            is_server_error = hasattr(e, 'status_code') and e.status_code >= 500
+            logger.error(f"Anthropic API error: {e}", exc_info=not is_server_error)
             raise LLMCommunicationError(f"Anthropic API returned an error: {e}", api_payload=api_params,
                                         rate_limited=rate_limited) from e
         except Exception as e:
@@ -593,11 +595,15 @@ class TextEngine:
                 config=GenerateContentConfig(**content_config_for_api)
             )
         except Exception as e:
-            rate_limited = '429' in str(e) or 'RESOURCE_EXHAUSTED' in str(e)
+            err_str = str(e)
+            rate_limited = '429' in err_str or 'RESOURCE_EXHAUSTED' in err_str
+            is_server_error = '500' in err_str or 'InternalServerError' in err_str or 'INTERNAL' in err_str
+            
             if rate_limited:
                 logger.warning(f"Google API rate-limited ({config['model_name']}): retryable.")
             else:
-                logger.error(f"Google API error: {e}", exc_info=True)
+                logger.error(f"Google API error: {e}", exc_info=not is_server_error)
+                
             raise LLMCommunicationError(f"An error occurred with Google API: {e}",
                                         api_payload=api_params_for_dumping, rate_limited=rate_limited) from e
 
