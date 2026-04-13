@@ -1,4 +1,6 @@
-# Runtime dependencies — what the application needs to run
+# Runtime dependencies — what the application needs to run.
+# Compiled into requirements.txt via pip-compile.
+# This file is used by the Dockerfile for production builds.
 
 # LLM providers
 anthropic
@@ -20,10 +22,7 @@ google-api-python-client  # googleapiclient
 numpy
 
 # Utilities
-GitPython
-psutil
 python-dotenv
 requests
 duckduckgo_search
-tenacity
 sqlite-vec

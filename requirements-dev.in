@@ -1,4 +1,7 @@
-# Development and testing dependencies
+# Development and testing dependencies.
+# Compiled into requirements-dev.txt via pip-compile.
+# This file includes all production dependencies (-r requirements.in).
+# CI/CD and local development should use requirements-dev.txt.
 -r requirements.in
 
 # Testing
