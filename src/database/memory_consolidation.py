@@ -30,7 +30,9 @@ class MemoryConsolidator:
             try:
                 await self._run_global_consolidation()
             except Exception as e:
-                logger.error(f"Error in MemoryConsolidator loop: {e}", exc_info=True)
+                err_str = str(e)
+                is_transient = "500" in err_str or "InternalServerError" in err_str or "INTERNAL" in err_str
+                logger.error(f"Error in MemoryConsolidator loop: {e}", exc_info=not is_transient)
             import asyncio
             await asyncio.sleep(check_interval_seconds)
 
