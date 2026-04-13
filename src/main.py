@@ -60,6 +60,7 @@ for handler in root_logger.handlers:
 
 logging.getLogger('google_genai').setLevel(logging.WARNING)
 logging.getLogger('discord').setLevel(logging.WARNING)
+logging.getLogger('httpx').setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
