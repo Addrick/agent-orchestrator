@@ -147,10 +147,14 @@ async def main() -> None:
     # 3. Initialize the Zammad client for ticketing (optional)
     zammad_client = _init_zammad_client()
 
-    # 4. Initialize ChatSystem core, injecting dependencies
+    # 4. Initialize embedding service for both ChatSystem and background daemons
+    embedding_service = EmbeddingService(GeminiEmbeddingProvider())
+
+    # 5. Initialize ChatSystem core, injecting dependencies
     bot = ChatSystem(
         memory_manager=memory_manager,
         text_engine=text_engine,
+        embedding_service=embedding_service,
     )
 
     # 5. Register service integrations
@@ -176,7 +180,6 @@ async def main() -> None:
     _register_interfaces(app, bot, notification_router)
 
     # 9. Register background daemons
-    embedding_service = EmbeddingService(GeminiEmbeddingProvider())
     consolidator = MemoryConsolidator(memory_manager, text_engine, embedding_service)
     app.register_task("memory_consolidator", consolidator.start_daemon(check_interval_seconds=3600))
 

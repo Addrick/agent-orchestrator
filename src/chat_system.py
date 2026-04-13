@@ -11,6 +11,7 @@ from typing import Any, Coroutine, Dict, List, Optional, Set, Tuple
 
 from config.global_config import MAX_TOOL_CALLS, MAX_CACHED_API_REQUESTS, \
     PENDING_CONFIRMATION_TIMEOUT, MEMORY_RETRIEVAL_ENABLED, MEMORY_MAX_SUMMARIES_IN_CONTEXT
+from src.embedding_service import EmbeddingService
 from src.clients.service_integration import ServiceIntegration
 from src.database.memory_manager import MemoryManager
 from src.engine import LLMCommunicationError, TextEngine
@@ -89,7 +90,8 @@ class RequestContext:
 
 
 class ChatSystem:
-    def __init__(self, memory_manager: MemoryManager, text_engine: TextEngine) -> None:
+    def __init__(self, memory_manager: MemoryManager, text_engine: TextEngine,
+                 embedding_service: Optional[EmbeddingService] = None) -> None:
         self.personas: Dict[str, Persona] = load_personas_from_file() or {}
         self.memory_manager: MemoryManager = memory_manager
         self.text_engine: TextEngine = text_engine
@@ -105,7 +107,7 @@ class ChatSystem:
         self.background_tasks: Set[Coroutine[Any, Any, Any]] = set()
         self._pending_confirmations: Dict[Tuple[str, str], PendingConfirmation] = {}
         self._services: Dict[str, ServiceIntegration] = {}
-        self._embedding_service: Optional[Any] = None  # Set by MemoryAgent on first deploy
+        self._embedding_service: Optional[EmbeddingService] = embedding_service
 
     def register_service(self, service: ServiceIntegration) -> None:
         """Register a service integration and its tools."""
@@ -260,8 +262,6 @@ class ChatSystem:
         """
         if not MEMORY_RETRIEVAL_ENABLED or self._embedding_service is None:
             return None
-
-        from src.embedding_service import EmbeddingService
 
         # Map MemoryMode enum to string for retrieve_relevant_summaries
         mode_map = {
