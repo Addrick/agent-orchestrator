@@ -47,8 +47,9 @@ class TextEngine:
 
     # Model fallback mapping: primary → fallback on 429.
     # Add entries here to enable automatic fallback for any model.
+    # TODO: expand this to alert user of model change, add 'use_fallback_models' to persona config, probably more design warranted
     _FALLBACK_MODELS: Dict[str, str] = {
-        "gemma-4-31b-it": "gemma-4-26b-it",
+        "gemma-4-31b-it": "gemma-4-27b-it",
     }
 
     def __init__(self) -> None:
