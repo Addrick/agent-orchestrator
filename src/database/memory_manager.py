@@ -236,6 +236,18 @@ class MemoryManager:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_summary_segment ON Memory_Summaries (segment_id)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_summary_parent ON Memory_Summaries (parent_summary_id)")
 
+            # Verify sqlite-vec virtual table dimensions match current config
+            for table_name in ["vec_Message_Embeddings", "vec_Memory_Summaries"]:
+                cursor.execute(f"SELECT sql FROM sqlite_master WHERE name='{table_name}'")
+                row = cursor.fetchone()
+                if row:
+                    sql = row[0]
+                    # Check for "float[DIM]" in the SQL schema
+                    expected = f"float[{EMBEDDING_DIMENSION}]"
+                    if expected not in sql:
+                        logger.warning(f"Dimension mismatch in {table_name}: schema expected {expected} but found something else. Dropping and recreating...")
+                        conn.execute(f"DROP TABLE {table_name}")
+
             conn.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_Message_Embeddings USING vec0(interaction_id INTEGER PRIMARY KEY, embedding float[{EMBEDDING_DIMENSION}])")
             conn.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_Memory_Summaries USING vec0(summary_id INTEGER PRIMARY KEY, embedding float[{EMBEDDING_DIMENSION}])")
 
@@ -829,9 +841,13 @@ class MemoryManager:
             if query_embeddings:
                 query += " ORDER BY dist ASC"
             
+            # Log search parameters for diagnostics (exclude raw embeddings for brevity)
             if limit:
                 query += " LIMIT ?"
                 final_params.append(limit)
+
+            safe_params = [f"<blob:{len(p)}b>" if isinstance(p, bytes) else p for p in final_params]
+            logger.info(f"MemoryManager.retrieve: Executing query for {persona_name} (mode: {memory_mode}). Params: {safe_params}")
 
             cursor.execute(query, final_params)
             rows = [dict(row) for row in cursor.fetchall()]
