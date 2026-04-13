@@ -250,9 +250,10 @@ class ChatSystem:
             self,
             persona: Persona,
             user_identifier: str,
-            channel: str,
+             channel: str,
             server_id: Optional[str],
             conversation_history: List[Dict[str, Any]],
+            current_message: Optional[str] = None,
             oldest_interaction_id: Optional[int] = None,
     ) -> Optional[str]:
         """Retrieve and format relevant long-term memory summaries for injection.
@@ -282,7 +283,12 @@ class ChatSystem:
             if isinstance(content, str) and content.strip():
                 window_texts.append(content)
 
+        # THE FIX: Always include the current message in the search query
+        if current_message and current_message.strip():
+            window_texts.append(current_message)
+
         if not window_texts:
+            logger.warning(f"### ChatSystem: Skipping retrieval for {persona.get_name()} (no text content to embed)")
             return None
 
         # Embed the sliding window messages (1 batched API call)
@@ -311,6 +317,7 @@ class ChatSystem:
         )
 
         if not summaries:
+            logger.warning(f"### ChatSystem: No relevant memories returned from database for {persona.get_name()}")
             return None
 
         # Pack into the expected format matching (score, summary)
@@ -469,6 +476,7 @@ class ChatSystem:
         memory_block = await self._retrieve_memory_block(
             ctx.persona, ctx.user_identifier, ctx.channel,
             ctx.server_id, ctx.conversation_history,
+            current_message=ctx.message,
             oldest_interaction_id=ctx.oldest_interaction_id,
         )
         if memory_block:
