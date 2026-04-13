@@ -569,11 +569,16 @@ class MemoryAgent(Agent):
                 # Build the content structure exactly like the API expects
                 # Note: count_tokens is a synchronous call in the current SDK version or async depending on usage.
                 # In our TextEngine, the client is usually initialized for async.
-                count_resp = await self.text_engine.google_client.models.count_tokens(
-                    model=persona.get_config_for_engine().get("model_name"),
-                    contents=prompt
-                )
-                token_count = count_resp.total_tokens
+                model_name = persona.get_config_for_engine().get("model_name")
+                if not isinstance(model_name, str):
+                    # Fallback to heuristic if model name is missing or invalid
+                    token_count = len(prompt) // 4
+                else:
+                    count_resp = await self.text_engine.google_client.models.count_tokens(
+                        model=model_name,
+                        contents=prompt
+                    )
+                    token_count = count_resp.total_tokens or 0
             else:
                 # Fallback to heuristic if SDK client is missing
                 token_count = len(prompt) // 4
