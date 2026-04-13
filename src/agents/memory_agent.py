@@ -439,18 +439,22 @@ class MemoryAgent(Agent):
 
             similarity = float(np.dot(centroid, vec))
 
-            # --- SEMANTIC GLUE (BACKWARD GRAVITY) ---
-            # If we are below threshold, but the current block is exactly 1 'user' message
-            # and the incoming message is from an 'assistant', we FORCE-BRIDGE them.
-            # This ensures that Question/Answer pairs are captured as a single segment
-            # even if the answer is highly technical and deviates semantically from the question.
-            is_qa_bridge = (
+            # --- SEGMENTATION BRIDGING (GRAVITY) ---
+            # 1. Explicit Link: Pair messages if one explicitly replies to another in the same cluster.
+            current_ids = {m.get('interaction_id') for m in current_msgs}
+            reply_link = msg.get('reply_to_id') in current_ids
+
+            # 2. Heuristic Link: Fallback for historical data without IDs (User followed by Assistant).
+            role_link = (
+                msg.get('reply_to_id') is None and
                 len(current_msgs) == 1 and
                 current_msgs[0].get('author_role') == 'user' and
                 msg.get('author_role') == 'assistant'
             )
 
-            if (similarity < self._similarity_threshold and len(current_msgs) >= self._min_segment_size and not is_qa_bridge):
+            is_bridge = reply_link or role_link
+
+            if (similarity < self._similarity_threshold and len(current_msgs) >= self._min_segment_size and not is_bridge):
                 segments.append({
                     'start_id': current_msgs[0]['interaction_id'],
                     'end_id': current_msgs[-1]['interaction_id'],

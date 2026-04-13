@@ -611,7 +611,7 @@ class MemoryManager:
             conn = self._get_connection()
             cursor = conn.cursor()
 
-            query = ("SELECT ui.interaction_id, ui.author_role, ui.author_name, ui.content, ui.timestamp, me.embedding, ui.parent_summary_id"
+            query = ("SELECT ui.interaction_id, ui.author_role, ui.author_name, ui.content, ui.timestamp, me.embedding, ui.parent_summary_id, ui.reply_to_id"
                      " FROM User_Interactions ui JOIN Message_Embeddings me ON ui.interaction_id = me.interaction_id"
                      " WHERE ui.persona_name = ? AND ui.channel = ? AND ui.parent_summary_id IS NULL")
             params: List[Any] = [persona_name, channel]
