@@ -260,6 +260,8 @@ class ChatSystem:
         Returns a formatted <memory> block string, or None if no relevant memories
         or the feature is disabled.
         """
+        logger.warning(f"### RETRIEVAL_DIAGNOSTIC: Entering _retrieve_memory_block for {persona.get_name()} (Enabled: {MEMORY_RETRIEVAL_ENABLED}, Service: {'YES' if self._embedding_service else 'NO'})")
+
         if not MEMORY_RETRIEVAL_ENABLED or self._embedding_service is None:
             return None
 
@@ -317,9 +319,9 @@ class ChatSystem:
         # Format memory block
         memory_block = self._format_memory_block(scored_summaries)
         if memory_block:
-            logger.info(f"ChatSystem: Injected memory block for {persona.get_name()} ({len(scored_summaries)} summaries)")
+            logger.warning(f"### ChatSystem: Injected memory block for {persona.get_name()} ({len(scored_summaries)} summaries)")
         else:
-            logger.info(f"ChatSystem: No relevant memories found for {persona.get_name()}")
+            logger.warning(f"### ChatSystem: No relevant memories found for {persona.get_name()}")
         return memory_block
 
     @staticmethod
@@ -511,6 +513,7 @@ class ChatSystem:
             history_limit=history_limit, user_display_name=user_display_name,
         )
         try:
+            logger.warning(f"### ChatSystem.generate_response: Received message from {user_identifier} for {persona_name}")
             await self._prepare_request(ctx)
             response_text, response_type, tool_context_json = await self._execute_request(ctx)
 
