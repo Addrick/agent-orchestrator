@@ -87,26 +87,31 @@ class MemoryAgent(Agent):
 
     def _get_embedding_service(self) -> EmbeddingService:
         if self._embedding_service is None:
-            provider_name = self.agent_config.get("embedding_provider", "gemini")
-            if provider_name == "gemini":
-                # Ensure the provider respects our global model variable
-                provider = GeminiEmbeddingProvider()
+            # First, check if the ChatSystem already has a service initialized (e.g. from main.py)
+            if self.chat_system._embedding_service is not None:
+                self._embedding_service = self.chat_system._embedding_service
+                logger.info("MemoryAgent: using existing EmbeddingService from ChatSystem.")
             else:
-                raise ValueError(f"Unknown embedding provider: {provider_name}")
+                # Initialize new service
+                from src.embedding_service import GeminiEmbeddingProvider
+                provider_name = self.agent_config.get("embedding_provider", "gemini")
+                if provider_name == "gemini":
+                    provider = GeminiEmbeddingProvider()
+                else:
+                    raise ValueError(f"Unknown embedding provider: {provider_name}")
 
-            self._embedding_service = EmbeddingService(provider)
+                self._embedding_service = EmbeddingService(provider)
 
-            # Optionally override or assert the model name if your EmbeddingService supports it
-            if hasattr(self._embedding_service, 'model_name') and getattr(self._embedding_service,
-                                                                          'model_name') != EMBEDDING_MODEL:
-                logger.debug(f"Overriding EmbeddingService model to: {EMBEDDING_MODEL}")
-                self._embedding_service.model_name = EMBEDDING_MODEL
+                # Ensure model name consistency
+                if self._embedding_service.model_name != EMBEDDING_MODEL:
+                    logger.debug(f"Overriding EmbeddingService model to: {EMBEDDING_MODEL}")
+                    self._embedding_service.model_name = EMBEDDING_MODEL
 
-            self.chat_system._embedding_service = self._embedding_service
-            logger.info(
-                f"MemoryAgent initialized EmbeddingService with provider "
-                f"'{provider_name}' (model: {EMBEDDING_MODEL})"
-            )
+                # Shared service with the bot
+                self.chat_system._embedding_service = self._embedding_service
+                logger.info(
+                    f"MemoryAgent: initialized new EmbeddingService ({provider_name}) (model: {EMBEDDING_MODEL})"
+                )
 
         return self._embedding_service
 
