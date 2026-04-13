@@ -51,7 +51,7 @@ class MemoryAgent(Agent):
             self.agent_config.get("similarity_threshold", 0.80)
         )
         self._min_segment_size: int = int(
-            self.agent_config.get("min_segment_size", 2)
+            self.agent_config.get("min_segment_size", 1)
         )
 
         # We cap batches to Gemini's hard 100 item array limit, or whatever is lower

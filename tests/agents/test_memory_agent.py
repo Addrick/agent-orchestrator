@@ -71,7 +71,7 @@ class TestMemoryAgentInit:
     def test_init_defaults(self,mock_load: Any,mock_chat_system: Any) -> None:
         agent = MemoryAgent(mock_chat_system)
         assert agent._similarity_threshold == 0.8
-        assert agent._min_segment_size == 2
+        assert agent._min_segment_size == 1
         assert agent._batch_size == 100
 
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
