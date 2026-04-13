@@ -37,7 +37,8 @@ def test_create_schema(mem_manager):
     expected_columns = {
         'interaction_id', 'user_identifier', 'persona_name', 'channel',
         'author_role', 'author_name', 'content', 'timestamp',
-        'zammad_ticket_id', 'platform_message_id', 'server_id', 'tool_context'
+        'zammad_ticket_id', 'platform_message_id', 'server_id', 'tool_context',
+        'parent_summary_id', 'reply_to_id'
     }
     assert columns == expected_columns
 
@@ -475,6 +476,62 @@ def test_migration_is_idempotent_with_tool_context(legacy_mem_manager):
     assert columns.count('tool_context') == 1
 
 
+def test_migration_adds_reply_to_id_column(legacy_mem_manager):
+    """create_schema() on a legacy DB adds the reply_to_id column via ALTER TABLE."""
+    legacy_mem_manager.create_schema()
+
+    conn = legacy_mem_manager._get_connection()
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(User_Interactions)")
+    columns = {row['name'] for row in cursor.fetchall()}
+    assert 'reply_to_id' in columns
+
+
+def test_migration_preserves_existing_data_with_reply_to_id(legacy_mem_manager):
+    """Existing User_Interactions rows survive the reply_to_id migration with NULL."""
+    conn = legacy_mem_manager._get_connection()
+    conn.execute(
+        "INSERT INTO User_Interactions (user_identifier, persona_name, channel, author_role, content, timestamp)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        ("user1", "persona1", "chan", "user", "pre-migration msg", datetime.now().isoformat())
+    )
+    conn.commit()
+
+    legacy_mem_manager.create_schema()
+
+    history = legacy_mem_manager.get_personal_history("user1", "persona1")
+    assert len(history) == 1
+    assert history[0]['content'] == "pre-migration msg"
+
+
+def test_reply_to_id_links_assistant_to_user(mem_manager):
+    """Assistant message reply_to_id correctly references the user message."""
+    user_id = mem_manager.log_message(
+        user_identifier="u1", persona_name="p1", channel="ch",
+        author_role="user", author_name="user1", content="question",
+        timestamp=datetime.now(),
+    )
+    assistant_id = mem_manager.log_message(
+        user_identifier="u1", persona_name="p1", channel="ch",
+        author_role="assistant", author_name="p1", content="answer",
+        timestamp=datetime.now(), reply_to_id=user_id,
+    )
+
+    conn = mem_manager._get_connection()
+    row = conn.execute(
+        "SELECT reply_to_id FROM User_Interactions WHERE interaction_id = ?",
+        (assistant_id,)
+    ).fetchone()
+    assert row['reply_to_id'] == user_id
+
+    # User msg has no reply_to_id
+    user_row = conn.execute(
+        "SELECT reply_to_id FROM User_Interactions WHERE interaction_id = ?",
+        (user_id,)
+    ).fetchone()
+    assert user_row['reply_to_id'] is None
+
+
 # --- Tool Context Functional Tests ---
 
 def test_log_message_with_tool_context(mem_manager):
@@ -563,7 +620,7 @@ def test_schema_creates_memory_tables(mem_manager):
     cursor.execute("PRAGMA table_info(Memory_Summaries)")
     cols = {row['name'] for row in cursor.fetchall()}
     assert cols == {'summary_id', 'segment_id', 'content', 'embedding',
-                    'model_name', 'created_at'}
+                    'model_name', 'created_at', 'summary_level', 'parent_summary_id'}
 
 
 def test_schema_creates_memory_indexes(mem_manager):
@@ -578,10 +635,13 @@ def test_schema_creates_memory_indexes(mem_manager):
 
 # --- Message Embedding Tests ---
 
-def _make_fake_embedding(dim=768) -> bytes:
+def _make_fake_embedding(dim=None) -> bytes:
     """Create a fake embedding BLOB for testing."""
     import struct
     import math
+    from config.global_config import EMBEDDING_DIMENSION
+    if dim is None:
+        dim = EMBEDDING_DIMENSION
     # Create a normalized vector
     values = [1.0 / math.sqrt(dim)] * dim
     return struct.pack(f'{dim}f', *values)
@@ -763,8 +823,11 @@ def test_get_active_channels_includes_unsegmented_embedded(mem_manager):
     # Embedded but not segmented — still needs work
     assert len(mem_manager.get_active_channels()) == 1
 
-    # Segment covers the message — now fully processed
+    # Segment covers the message AND parent_summary_id is set — now fully processed
     mem_manager.store_segment("chan", None, "p1", iid, iid, 1, ts)
+    conn = mem_manager._get_connection()
+    conn.execute("UPDATE User_Interactions SET parent_summary_id = 1 WHERE interaction_id = ?", (iid,))
+    conn.commit()
     assert len(mem_manager.get_active_channels()) == 0
 
 
@@ -773,8 +836,11 @@ def test_get_active_channels_model_name_filter(mem_manager):
     ts = datetime.now()
     iid = mem_manager.log_message("u1", "p1", "chan", "user", "Alice", "Hello", ts)
     mem_manager.store_message_embedding(iid, _make_fake_embedding(), EMBEDDING_MODEL, ts)
-    # Segment it so the unsegmented UNION branch doesn't match
+    # Segment it AND mark summarized so no UNION branch matches
     mem_manager.store_segment("chan", None, "p1", iid, iid, 1, ts)
+    conn = mem_manager._get_connection()
+    conn.execute("UPDATE User_Interactions SET parent_summary_id = 1 WHERE interaction_id = ?", (iid,))
+    conn.commit()
 
     assert len(mem_manager.get_active_channels()) == 0
     assert len(mem_manager.get_active_channels(model_name="new-model")) == 1
@@ -787,6 +853,36 @@ def test_get_active_channels_excludes_null_content(mem_manager):
     mem_manager.log_message("u1", "p1", "chan", "user", "Alice", "", ts)
 
     assert len(mem_manager.get_active_channels()) == 0
+
+
+def test_get_active_channels_surfaces_old_unsummarized_below_segment(mem_manager):
+    """Regression: embedded messages older than the last segment must still surface the channel.
+
+    Previously q2 only returned channels with messages AFTER the segment high-water mark,
+    stranding older embedded-but-unsummarized messages permanently.
+    """
+    ts = datetime.now()
+    # Log 6 messages — IDs will be 1..6
+    ids = [
+        mem_manager.log_message("u1", "p1", "chan", "user", "Alice", f"msg {i}", ts)
+        for i in range(6)
+    ]
+    # Embed all 6
+    for iid in ids:
+        mem_manager.store_message_embedding(iid, _make_fake_embedding(), EMBEDDING_MODEL, ts)
+
+    # Segment covers only messages 4-6 (high-water mark = id[5])
+    mem_manager.store_segment("chan", None, "p1", ids[3], ids[5], 3, ts)
+    # Mark those messages as summarized
+    conn = mem_manager._get_connection()
+    for iid in ids[3:]:
+        conn.execute("UPDATE User_Interactions SET parent_summary_id = 1 WHERE interaction_id = ?", (iid,))
+    conn.commit()
+
+    # Messages 1-3 are embedded, parent_summary_id IS NULL, but sit below the segment.
+    # Channel MUST still appear as active.
+    channels = mem_manager.get_active_channels()
+    assert ("chan", "p1", None) in channels
 
 
 # --- get_last_segment_tail_embeddings Tests ---

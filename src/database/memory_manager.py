@@ -9,9 +9,17 @@ from typing import Any, Dict, Generator, List, Optional, Tuple
 from pathlib import Path
 
 # --- NEW: Import the global embedding model variable ---
-from config.global_config import EMBEDDING_MODEL
+from config.global_config import EMBEDDING_MODEL, EMBEDDING_DIMENSION
+import sqlite_vec
 
 logger = logging.getLogger(__name__)
+
+# --- Universal Summary Levels ---
+# L0 conceptually refers to raw User_Interactions data.
+LEVEL_UNPROCESSED = 0  # Pre-migration summaries not yet classified; still retrievable
+LEVEL_EPISODIC = 1     # Summaries of raw L0 chat data
+LEVEL_CORE = 2         # Meta-summaries of L1 episodes (Core Profiles)
+# Level 3+ is reserved for future tertiary abstractions.
 
 
 # --- DATETIME <-> ISO 8601 STRING CONVERSION FOR SQLITE ---
@@ -50,6 +58,9 @@ class MemoryManager:
                 check_same_thread=False
             )
             self._conn.row_factory = sqlite3.Row
+            self._conn.enable_load_extension(True)
+            sqlite_vec.load(self._conn)
+            self._conn.enable_load_extension(False)
         return self._conn
 
     @contextmanager
@@ -125,16 +136,7 @@ class MemoryManager:
             );
             CREATE INDEX IF NOT EXISTS idx_segment_channel_persona ON Memory_Segments (channel, persona_name, server_id);
 
-            CREATE TABLE IF NOT EXISTS Memory_Summaries (
-                summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                segment_id INTEGER NOT NULL UNIQUE,
-                content TEXT NOT NULL,
-                embedding BLOB NOT NULL,
-                model_name TEXT NOT NULL,
-                created_at TIMESTAMP NOT NULL,
-                FOREIGN KEY (segment_id) REFERENCES Memory_Segments(segment_id) ON DELETE CASCADE
-            );
-            CREATE INDEX IF NOT EXISTS idx_summary_segment ON Memory_Summaries (segment_id);
+
 
             CREATE TABLE IF NOT EXISTS Agent_Actions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -182,6 +184,70 @@ class MemoryManager:
             user_int_cols = {row['name'] for row in cursor.fetchall()}
             if 'tool_context' not in user_int_cols:
                 conn.execute("ALTER TABLE User_Interactions ADD COLUMN tool_context TEXT")
+            if 'parent_summary_id' not in user_int_cols:
+                conn.execute("ALTER TABLE User_Interactions ADD COLUMN parent_summary_id INTEGER")
+            if 'reply_to_id' not in user_int_cols:
+                conn.execute("ALTER TABLE User_Interactions ADD COLUMN reply_to_id INTEGER")
+
+            # Memory_Summaries migration and sqlite-vec setup
+            cursor.execute("PRAGMA table_info(Memory_Summaries)")
+            mem_sum_cols = {row['name'] for row in cursor.fetchall()}
+            if mem_sum_cols and 'summary_level' not in mem_sum_cols:
+                logger.info("Migrating Memory_Summaries to v2 schema...")
+                conn.execute("ALTER TABLE Memory_Summaries RENAME TO Memory_Summaries_old")
+                conn.execute("""
+                    CREATE TABLE Memory_Summaries (
+                        summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        segment_id INTEGER,
+                        content TEXT NOT NULL,
+                        embedding BLOB,
+                        model_name TEXT NOT NULL,
+                        created_at TIMESTAMP NOT NULL,
+                        summary_level INTEGER NOT NULL DEFAULT 1,
+                        parent_summary_id INTEGER,
+                        FOREIGN KEY (segment_id) REFERENCES Memory_Segments(segment_id) ON DELETE CASCADE,
+                        FOREIGN KEY (parent_summary_id) REFERENCES Memory_Summaries(summary_id) ON DELETE CASCADE
+                    )
+                """)
+                conn.execute("""
+                    INSERT INTO Memory_Summaries 
+                    (summary_id, segment_id, content, embedding, model_name, created_at, summary_level)
+                    SELECT summary_id, segment_id, content, embedding, model_name, created_at, 0
+                    FROM Memory_Summaries_old
+                """)
+                conn.execute("DROP TABLE Memory_Summaries_old")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_summary_segment ON Memory_Summaries (segment_id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_summary_parent ON Memory_Summaries (parent_summary_id)")
+            elif not mem_sum_cols:
+                conn.execute("""
+                    CREATE TABLE Memory_Summaries (
+                        summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        segment_id INTEGER,
+                        content TEXT NOT NULL,
+                        embedding BLOB,
+                        model_name TEXT NOT NULL,
+                        created_at TIMESTAMP NOT NULL,
+                        summary_level INTEGER NOT NULL DEFAULT 1,
+                        parent_summary_id INTEGER,
+                        FOREIGN KEY (segment_id) REFERENCES Memory_Segments(segment_id) ON DELETE CASCADE,
+                        FOREIGN KEY (parent_summary_id) REFERENCES Memory_Summaries(summary_id) ON DELETE CASCADE
+                    )
+                """)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_summary_segment ON Memory_Summaries (segment_id)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_summary_parent ON Memory_Summaries (parent_summary_id)")
+
+            conn.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_Message_Embeddings USING vec0(interaction_id INTEGER PRIMARY KEY, embedding float[{EMBEDDING_DIMENSION}])")
+            conn.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_Memory_Summaries USING vec0(summary_id INTEGER PRIMARY KEY, embedding float[{EMBEDDING_DIMENSION}])")
+
+            cursor.execute("SELECT COUNT(*) FROM vec_Message_Embeddings")
+            if cursor.fetchone()[0] == 0:
+                logger.info("Backfilling sqlite-vec message embeddings...")
+                conn.execute(f"INSERT INTO vec_Message_Embeddings(interaction_id, embedding) SELECT interaction_id, embedding FROM Message_Embeddings WHERE embedding IS NOT NULL AND length(embedding) = {EMBEDDING_DIMENSION * 4}")
+            
+            cursor.execute("SELECT COUNT(*) FROM vec_Memory_Summaries")
+            if cursor.fetchone()[0] == 0:
+                logger.info("Backfilling sqlite-vec memory summaries...")
+                conn.execute(f"INSERT INTO vec_Memory_Summaries(summary_id, embedding) SELECT summary_id, embedding FROM Memory_Summaries WHERE embedding IS NOT NULL AND length(embedding) = {EMBEDDING_DIMENSION * 4}")
 
             conn.commit()
             logger.info("User memory database schema created or verified successfully.")
@@ -191,7 +257,8 @@ class MemoryManager:
                     timestamp: datetime, server_id: Optional[str] = None,
                     platform_message_id: Optional[str] = None,
                     zammad_ticket_id: Optional[int] = None,
-                    tool_context: Optional[str] = None) -> Optional[int]:
+                    tool_context: Optional[str] = None,
+                    reply_to_id: Optional[int] = None) -> Optional[int]:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
@@ -199,11 +266,13 @@ class MemoryManager:
                 """
                 INSERT INTO User_Interactions
                 (user_identifier, persona_name, channel, author_role, author_name, content,
-                 timestamp, zammad_ticket_id, platform_message_id, server_id, tool_context)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 timestamp, zammad_ticket_id, platform_message_id, server_id, tool_context,
+                 reply_to_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (user_identifier, persona_name, channel, author_role, author_name, content,
-                 timestamp, zammad_ticket_id, platform_message_id, server_id, tool_context)
+                 timestamp, zammad_ticket_id, platform_message_id, server_id, tool_context,
+                 reply_to_id)
             )
             conn.commit()
             return cursor.lastrowid
@@ -473,17 +542,38 @@ class MemoryManager:
             return cursor.lastrowid  # type: ignore[return-value]
 
     def store_summary(self, segment_id: int, content: str, embedding: bytes, model_name: str,
-                      created_at: datetime) -> int:
+                      created_at: datetime, summary_level: Optional[int] = None,
+                      parent_summary_id: Optional[int] = None) -> int:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
+            
+            # If summary_level is None, the DB default will be used (LEVEL_EPISODIC = 1)
+            cols = ["segment_id", "content", "embedding", "model_name", "created_at"]
+            vals = [segment_id, content, embedding, model_name, created_at]
+            
+            if summary_level is not None:
+                cols.append("summary_level")
+                vals.append(summary_level)
+            if parent_summary_id is not None:
+                cols.append("parent_summary_id")
+                vals.append(parent_summary_id)
+                
+            placeholders = ", ".join("?" for _ in vals)
+            col_names = ", ".join(cols)
+            
             cursor.execute(
-                """INSERT INTO Memory_Summaries (segment_id, content, embedding, model_name, created_at)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (segment_id, content, embedding, model_name, created_at)
+                f"INSERT INTO Memory_Summaries ({col_names}) VALUES ({placeholders})",
+                vals
+            )
+            summary_id = cursor.lastrowid
+            cursor.execute(
+                """INSERT INTO vec_Memory_Summaries (summary_id, embedding)
+                   VALUES (?, ?)""",
+                (summary_id, embedding)
             )
             conn.commit()
-            return cursor.lastrowid  # type: ignore[return-value]
+            return summary_id  # type: ignore[return-value]
 
     def get_summaries_for_channel(self, channel: str, persona_name: str, server_id: Optional[str] = None,
                                   exclude_after_interaction_id: Optional[int] = None,
@@ -516,26 +606,15 @@ class MemoryManager:
             return [dict(row) for row in cursor.fetchall()]
 
     def get_unsegmented_embedded_messages(self, persona_name: str, channel: str, server_id: Optional[str] = None,
-                                          model_name: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+                                          model_name: Optional[str] = None, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
 
-            hw_query = "SELECT MAX(end_interaction_id) AS hw FROM Memory_Segments WHERE channel = ? AND persona_name = ?"
-            hw_params: List[Any] = [channel, persona_name]
-            if server_id is not None:
-                hw_query += " AND server_id = ?"
-                hw_params.append(server_id)
-            else:
-                hw_query += " AND server_id IS NULL"
-
-            hw_row = cursor.execute(hw_query, hw_params).fetchone()
-            high_water = hw_row['hw'] if hw_row and hw_row['hw'] is not None else 0
-
-            query = ("SELECT ui.interaction_id, ui.author_role, ui.author_name, ui.content, ui.timestamp, me.embedding"
+            query = ("SELECT ui.interaction_id, ui.author_role, ui.author_name, ui.content, ui.timestamp, me.embedding, ui.parent_summary_id"
                      " FROM User_Interactions ui JOIN Message_Embeddings me ON ui.interaction_id = me.interaction_id"
-                     " WHERE ui.persona_name = ? AND ui.channel = ? AND ui.interaction_id > ?")
-            params: List[Any] = [persona_name, channel, high_water]
+                     " WHERE ui.persona_name = ? AND ui.channel = ? AND ui.parent_summary_id IS NULL")
+            params: List[Any] = [persona_name, channel]
 
             if server_id is not None:
                 query += " AND ui.server_id = ?"
@@ -550,8 +629,10 @@ class MemoryManager:
             query += " AND me.model_name = ?"
             params.append(active_model)
 
-            query += " ORDER BY ui.interaction_id ASC LIMIT ?"
-            params.append(limit)
+            query += " ORDER BY ui.interaction_id ASC"
+            if limit is not None:
+                query += " LIMIT ?"
+                params.append(limit)
 
             cursor.execute(query, params)
             return [dict(row) for row in cursor.fetchall()]
@@ -575,7 +656,16 @@ class MemoryManager:
                   " AND seg.persona_name = ui.persona_name AND (seg.server_id = ui.server_id OR (seg.server_id IS NULL AND ui.server_id IS NULL))), 0)"
                   + self._suppression_filter("ui"))
 
-            query = q1 + " UNION " + q2
+            # q3: Channels with embedded messages that were never summarized (parent_summary_id IS NULL).
+            # This catches historical messages that sit below existing segments' high-water mark.
+            q3 = ("SELECT DISTINCT ui.channel, ui.persona_name, ui.server_id FROM User_Interactions ui"
+                  " JOIN Message_Embeddings me ON ui.interaction_id = me.interaction_id"
+                  " WHERE ui.content IS NOT NULL AND ui.content != ''"
+                  " AND ui.parent_summary_id IS NULL AND me.model_name = ?"
+                  + self._suppression_filter("ui"))
+            params.append(active_model)
+
+            query = q1 + " UNION " + q2 + " UNION " + q3
             cursor.execute(query, params)
             return [(row['channel'], row['persona_name'], row['server_id']) for row in cursor.fetchall()]
 
@@ -635,7 +725,14 @@ class MemoryManager:
         model_name: Optional[str],
     ) -> Tuple[str, List[Any]]:
         """Build a WHERE clause for summary retrieval scoped by memory mode."""
-        where_parts = ["seg.persona_name = ?"]
+        # We fetch LEVEL_CORE unconditionally, and LEVEL_EPISODIC / LEVEL_UNPROCESSED
+        # only if they haven't been subsumed into a LEVEL_CORE profile yet
+        # (parent_summary_id IS NULL). This ensures pre-migration (level 0)
+        # summaries remain retrievable.
+        where_parts = [
+            "seg.persona_name = ?",
+            f"(ms.summary_level = {LEVEL_CORE} OR (ms.summary_level <= {LEVEL_EPISODIC} AND ms.parent_summary_id IS NULL))"
+        ]
         params: List[Any] = [persona]
 
         if memory_mode == "channel":
@@ -681,6 +778,8 @@ class MemoryManager:
         include_ambient: bool = True,
         exclude_after_interaction_id: Optional[int] = None,
         model_name: Optional[str] = None,
+        query_embeddings: Optional[List[bytes]] = None,
+        limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """Retrieve summaries scoped by MemoryMode for retrieval-time fan-out."""
         if memory_mode == "ticket":
@@ -690,13 +789,25 @@ class MemoryManager:
             conn = self._get_connection()
             cursor = conn.cursor()
 
+            dist_select = ""
+            dist_params: List[Any] = []
+            if query_embeddings:
+                d_exprs = ["vec_distance_cosine(v.embedding, ?)"] * len(query_embeddings)
+                if len(d_exprs) > 1:
+                    dist_select = f", min({', '.join(d_exprs)}) as dist"
+                else:
+                    dist_select = f", {d_exprs[0]} as dist"
+                dist_params.extend(query_embeddings)
+
             base_select = (
-                "SELECT ms.summary_id, ms.segment_id, ms.content, ms.embedding,"
-                " ms.model_name, ms.created_at, seg.channel, seg.persona_name,"
-                " seg.start_interaction_id, seg.end_interaction_id, seg.last_message_at"
-                " FROM Memory_Summaries ms"
-                " JOIN Memory_Segments seg ON ms.segment_id = seg.segment_id"
+                f"SELECT ms.summary_id, ms.segment_id, ms.content, ms.embedding,"
+                f" ms.model_name, ms.created_at, seg.channel, seg.persona_name,"
+                f" seg.start_interaction_id, seg.end_interaction_id, seg.last_message_at{dist_select}"
+                f" FROM Memory_Summaries ms"
+                f" JOIN Memory_Segments seg ON ms.segment_id = seg.segment_id"
             )
+            if query_embeddings:
+                base_select += " JOIN vec_Memory_Summaries v ON ms.summary_id = v.summary_id"
 
             build_args = (memory_mode, channel, server_id, user_identifier,
                           exclude_after_interaction_id, model_name)
@@ -704,12 +815,20 @@ class MemoryManager:
             # Build primary query
             where_clause, params = self._build_summary_where(persona_name, *build_args)
             query = f"{base_select} WHERE {where_clause}"
+            final_params = dist_params + params
 
             # Ambient union
             if include_ambient and persona_name != "ambient":
                 amb_where, amb_params = self._build_summary_where("ambient", *build_args)
                 query += f" UNION {base_select} WHERE {amb_where}"
-                params.extend(amb_params)
+                final_params.extend(dist_params + amb_params)
 
-            cursor.execute(query, params)
+            if query_embeddings:
+                query += " ORDER BY dist ASC"
+            
+            if limit:
+                query += " LIMIT ?"
+                final_params.append(limit)
+
+            cursor.execute(query, final_params)
             return [dict(row) for row in cursor.fetchall()]

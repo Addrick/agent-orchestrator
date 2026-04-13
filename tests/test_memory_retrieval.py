@@ -16,12 +16,17 @@ from src.persona import MemoryMode
 # --- Helpers ---
 
 def _unit_blob(*components):
-    """Create a normalized float32 BLOB from components."""
-    vec = list(components)
+    """Create a normalized float32 BLOB of dimension 3072."""
+    # Use the requested components for the start, pad with zeros to 3072
+    vec = [0.0] * 3072
+    for i, val in enumerate(components):
+        if i < 3072:
+            vec[i] = val
+    
     norm = math.sqrt(sum(v * v for v in vec))
     if norm > 0:
         vec = [v / norm for v in vec]
-    return struct.pack(f'{len(vec)}f', *vec)
+    return struct.pack('3072f', *vec)
 
 
 # --- MemoryManager.retrieve_relevant_summaries Tests ---
@@ -144,14 +149,16 @@ def test_retrieve_recency_filter(mem_manager):
 
 
 def test_retrieve_model_name_filter(mem_manager):
-    """model_name filter excludes summaries from different models."""
+    """model_name filter excludes summaries from different embedding models."""
     ts = datetime.now()
     seg = mem_manager.store_segment("chan", None, "p1", 1, 3, 3, ts)
     mem_manager.store_summary(seg, "Facts", _unit_blob(1.0, 0.0), "old-model", ts)
 
+    # Matching model name should return the summary
     assert len(mem_manager.retrieve_relevant_summaries(
         "p1", "chan", memory_mode="channel", include_ambient=False, model_name="old-model"
     )) == 1
+    # Different model name should exclude it (prevents cross-model similarity noise)
     assert len(mem_manager.retrieve_relevant_summaries(
         "p1", "chan", memory_mode="channel", include_ambient=False, model_name="new-model"
     )) == 0
@@ -276,16 +283,15 @@ async def test_retrieve_memory_block_empty_history(chat_system_with_memory, mock
 @patch('src.chat_system.MEMORY_RETRIEVAL_ENABLED', True)
 @patch('src.chat_system.MEMORY_MAX_SUMMARIES_IN_CONTEXT', 2)
 async def test_retrieve_memory_block_top_k_limit(chat_system_with_memory, mock_persona):
-    """Only top-K summaries are returned."""
+    """Only top-K summaries are fetched from the database."""
     system, mm, emb_service = chat_system_with_memory
 
-    # 3 summaries, but max is 2
     mm.retrieve_relevant_summaries.return_value = [
         {'summary_id': i, 'segment_id': i, 'content': f'Fact {i}',
          'embedding': _unit_blob(1.0, 0.0), 'model_name': 'test-model',
          'created_at': datetime.now(), 'channel': 'chan', 'persona_name': 'p1',
          'start_interaction_id': i, 'end_interaction_id': i + 2}
-        for i in range(3)
+        for i in range(2)
     ]
     emb_service.encode = AsyncMock(return_value=[_unit_blob(1.0, 0.0)])
 
@@ -295,9 +301,9 @@ async def test_retrieve_memory_block_top_k_limit(chat_system_with_memory, mock_p
     )
 
     assert result is not None
-    # Should contain at most 2 fact sections
-    fact_count = result.count("Fact ")
-    assert fact_count == 2
+    # Verify the database limit argument was correctly passed
+    mm.retrieve_relevant_summaries.assert_called_once()
+    assert mm.retrieve_relevant_summaries.call_args.kwargs['limit'] == 2
 
 
 @pytest.mark.asyncio

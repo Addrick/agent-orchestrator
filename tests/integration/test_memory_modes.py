@@ -240,8 +240,10 @@ async def test_channel_mode_in_non_server_context_integration(
 # --- Helpers for Long-Term Memory Integration Tests ---
 
 def _unit_blob(*components):
-    """Create a normalized float32 BLOB from components."""
+    """Create a normalized float32 BLOB from components, padded to EMBEDDING_DIMENSION dimensions."""
+    from config.global_config import EMBEDDING_DIMENSION
     vec = list(components)
+    vec += [0.0] * (EMBEDDING_DIMENSION - len(vec))  # Pad to match sqlite-vec schema
     norm = math.sqrt(sum(v * v for v in vec))
     if norm > 0:
         vec = [v / norm for v in vec]

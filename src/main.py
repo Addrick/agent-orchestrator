@@ -9,6 +9,8 @@ from typing import Optional, Dict, Any
 from src.chat_system import ChatSystem
 from src.engine import TextEngine
 from src.database.memory_manager import MemoryManager
+from src.database.memory_consolidation import MemoryConsolidator
+from src.embedding_service import EmbeddingService, GeminiEmbeddingProvider
 from src.clients.zammad_client import ZammadClient
 from src.clients.zammad_service import ZammadIntegration
 from src.app_manager import AppManager
@@ -172,11 +174,16 @@ async def main() -> None:
     # 8. Register interfaces
     _register_interfaces(app, bot, notification_router)
 
-    # 9. Optionally update the model list on startup
+    # 9. Register background daemons
+    embedding_service = EmbeddingService(GeminiEmbeddingProvider())
+    consolidator = MemoryConsolidator(memory_manager, text_engine, embedding_service)
+    app.register_task("memory_consolidator", consolidator.start_daemon(check_interval_seconds=3600))
+
+    # 10. Optionally update the model list on startup
     if UPDATE_MODELS_ON_STARTUP:
         app.register_task("model_update", update_models_and_sync_bot(bot))
 
-    # 10. Run everything (auto_start agents + interface tasks)
+    # 11. Run everything (auto_start agents + interface tasks)
     await app.start()
 
 
