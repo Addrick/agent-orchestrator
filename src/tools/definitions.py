@@ -22,6 +22,35 @@ The actual implementation of these tools is handled by the ToolManager.
 #                        Has no effect on other providers or Gemma models.
 ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     {
+        "type": "function",
+        "is_write": True,
+        "function": {
+            "name": "submit_memory_summary",
+            "description": "Records observations extracted from a conversation segment for long-term recall. "
+                           "Also identifies outlier messages that do not share the primary theme "
+                           "of the segment so they can be re-routed to a different cluster.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "observations": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Discrete statements capturing what was discussed: facts, preferences, "
+                                       "opinions, problems described, solutions provided, advice given, "
+                                       "decisions made, and significant emotional context.",
+                    },
+                    "outlier_ids": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "A list of Interaction IDs for messages that are thematic outliers "
+                                       "and should be excluded from this summary.",
+                    },
+                },
+                "required": ["observations", "outlier_ids"],
+            },
+        },
+    },
+    {
         "type": "google_grounding",
         "function": {
             "name": "google_grounding_search",
@@ -351,6 +380,43 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             },
         },
     },
+    # =========================================================================
+    # Memory Management Tools
+    # =========================================================================
+    {
+        "type": "function",
+        "is_write": False,
+        "function": {
+            "name": "drill_down_memory",
+            "description": "Fetch raw episodic memories (Level 2 Archival) under a specific Core Profile. Use this to find missing specific details like dates, links, or verbatim quotes that were consolidated away.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "parent_summary_id": {
+                        "type": "integer",
+                        "description": "The exact ID of the Level 1 Core Profile memory to drill down into.",
+                    },
+                },
+                "required": ["parent_summary_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "is_write": True,
+        "function": {
+            "name": "update_core_memory",
+            "description": "Modify an existing 'Core Fact Profile' (Level 1) when new information contradicts it or adds significant context.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "summary_id": {"type": "integer", "description": "The exact ID of the Core Profile to modify."},
+                    "new_content": {"type": "string", "description": "The completely revised, comprehensive markdown summary."}
+                },
+                "required": ["summary_id", "new_content"]
+            }
+        }
+    }
 ]
 
 # Model prefixes that do NOT support each tool.

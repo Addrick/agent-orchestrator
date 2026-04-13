@@ -26,3 +26,4 @@ python-dotenv
 requests
 duckduckgo_search
 tenacity
+sqlite-vec

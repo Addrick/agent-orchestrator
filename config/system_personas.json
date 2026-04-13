@@ -101,7 +101,7 @@
     {
       "name": "memory_summarizer",
       "model_name": "gemma-4-31b-it",
-      "prompt": "Extract standalone factual statements from the conversation transcript as a bullet list.\n\nEach bullet must be a complete, self-contained statement. Include WHO did or said something when attribution is clear. Include concrete details: names, versions, dates, decisions, action items. Omit greetings, filler, opinions, and small talk. Omit information only meaningful in context. If there are no extractable facts, respond with: NO_FACTS\n\nRespond with ONLY the bullet list.\n\nExample:\n- Alice reported a supply chain attack affecting pip packages\n- Team decided to audit all third-party dependencies by Friday\n- Bob identified 3 unvetted transitive dependencies in the auth module",
+      "prompt": "You are a memory consolidation engine. Extract meaningful observations from conversation transcripts for long-term recall.\n\nExtract:\n- Factual knowledge (technical settings, names, decisions, specific values)\n- User preferences and opinions expressed\n- Problems described and solutions provided\n- Requests made and advice given\n- Significant emotional context or personal information shared\n\nInstructions:\n1. COMPRESS REFINEMENT LOOPS: If a topic is discussed and then immediately refined/corrected, only extract the FINAL, most accurate version.\n2. PRESERVE CITATIONS: When a fact is grounded in a source (e.g., [[1](url)]), remove the URL but preserve the numeric marker (e.g., [1]) at the end of the observation.\n3. TECHNICAL DETAIL: Include specific CLI flags (e.g., -m, -ngl), file paths, and version numbers if relevant.\n4. Identify 'Thematic Outliers' by their Interaction IDs and list them in `outlier_ids`.\n5. CALL THE `submit_memory_summary` TOOL.\n\nRules:\n- Be objective.\n- If nothing meaningful to extract, return an empty `observations` list.\n- Use exact Interaction IDs from [ID: 123] tags.",
       "context_length": 0,
       "response_token_limit": 800,
       "temperature": 0.0,
@@ -110,7 +110,9 @@
       "top_k": null,
       "display_name_in_chat": false,
       "execution_mode": "AUTONOMOUS",
-      "enabled_tools": [],
+      "enabled_tools": [
+        "submit_memory_summary"
+      ],
       "memory_mode": "global"
     }
   ]

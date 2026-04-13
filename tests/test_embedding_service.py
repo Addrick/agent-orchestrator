@@ -67,9 +67,10 @@ def test_blob_round_trip():
 
 
 def test_gemini_blob_size():
-    """Gemini text-embedding-004 produces 768-dim blobs (768 * 4 = 3072 bytes)."""
-    blob = struct.pack('768f', *([0.0] * 768))
-    assert len(blob) == 3072
+    """gemini-embedding-001 produces EMBEDDING_DIMENSION-dim blobs."""
+    from config.global_config import EMBEDDING_DIMENSION
+    blob = struct.pack(f'{EMBEDDING_DIMENSION}f', *([0.0] * EMBEDDING_DIMENSION))
+    assert len(blob) == EMBEDDING_DIMENSION * 4
 
 
 # --- Cosine Similarity Tests ---
@@ -187,11 +188,12 @@ def test_provider_abc_cannot_instantiate():
 @pytest.mark.asyncio
 async def test_gemini_provider_live():
     """Live test: GeminiEmbeddingProvider returns correct-dimension embeddings."""
+    from config.global_config import EMBEDDING_DIMENSION
     provider = GeminiEmbeddingProvider()
     vectors = await provider.encode(["Hello world", "Test embedding"])
     assert len(vectors) == 2
     for vec in vectors:
-        assert len(vec) == 768
+        assert len(vec) == EMBEDDING_DIMENSION
         # Verify normalized (magnitude ≈ 1.0)
         magnitude = math.sqrt(sum(v * v for v in vec))
         assert abs(magnitude - 1.0) < 0.01

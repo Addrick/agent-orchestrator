@@ -95,6 +95,10 @@ class ChatSystem:
         self.text_engine: TextEngine = text_engine
         self.tool_manager: ToolManager = ToolManager()
         WebSearchHandler().register(self.tool_manager)
+        
+        from src.tools.tool_manager import MemoryToolHandler
+        MemoryToolHandler(self.memory_manager).register(self.tool_manager)
+        
         self.bot_logic: BotLogic = BotLogic(self)
         self.last_api_requests: Dict[str, Dict[str, Optional[Dict[str, Any]]]] = defaultdict(dict)
         self.models_available: Dict[str, Any] = get_model_list() or {}
@@ -269,21 +273,6 @@ class ChatSystem:
         }
         memory_mode = mode_map.get(persona.get_memory_mode(), "channel")
 
-        # Fetch candidate summaries
-        summaries = self.memory_manager.retrieve_relevant_summaries(
-            persona_name=persona.get_name(),
-            channel=channel,
-            server_id=server_id,
-            user_identifier=user_identifier,
-            memory_mode=memory_mode,
-            include_ambient=persona.get_include_ambient_memory(),
-            exclude_after_interaction_id=oldest_interaction_id,
-            model_name=self._embedding_service.model_name,
-        )
-
-        if not summaries:
-            return None
-
         # Extract text content from conversation history for embedding
         window_texts = []
         for msg in conversation_history:
@@ -305,22 +294,28 @@ class ChatSystem:
             logger.warning("Memory retrieval: encode returned empty results")
             return None
 
-        # Score each summary: max similarity across all window messages
-        scored = []
-        for summary in summaries:
-            summary_emb = summary['embedding']
-            max_sim = max(
-                EmbeddingService.cosine_similarity(summary_emb, w_emb)
-                for w_emb in window_embeddings
-            )
-            scored.append((max_sim, summary))
+        # Fetch candidate summaries natively in sqlite using sqlite-vec nearest neighbor
+        summaries = self.memory_manager.retrieve_relevant_summaries(
+            persona_name=persona.get_name(),
+            channel=channel,
+            server_id=server_id,
+            user_identifier=user_identifier,
+            memory_mode=memory_mode,
+            include_ambient=persona.get_include_ambient_memory(),
+            exclude_after_interaction_id=oldest_interaction_id,
+            model_name=self._embedding_service.model_name,
+            query_embeddings=window_embeddings,
+            limit=MEMORY_MAX_SUMMARIES_IN_CONTEXT,
+        )
 
-        # Sort by similarity (highest first) and take top-K
-        scored.sort(key=lambda x: x[0], reverse=True)
-        top_summaries = scored[:MEMORY_MAX_SUMMARIES_IN_CONTEXT]
+        if not summaries:
+            return None
+
+        # Pack into the expected format matching (score, summary)
+        scored_summaries = [(summary.get('dist', 1.0), summary) for summary in summaries]
 
         # Format memory block
-        return self._format_memory_block(top_summaries)
+        return self._format_memory_block(scored_summaries)
 
     @staticmethod
     def _format_memory_block(scored_summaries: List[Tuple[float, Dict[str, Any]]]) -> Optional[str]:
@@ -516,7 +511,7 @@ class ChatSystem:
 
             # Log user and assistant messages
             user_ts = timestamp or datetime.now()
-            self.memory_manager.log_message(
+            user_interaction_id = self.memory_manager.log_message(
                 user_identifier=user_identifier, persona_name=persona_name,
                 channel=channel, author_role='user',
                 author_name=user_display_name, content=message,
@@ -531,6 +526,7 @@ class ChatSystem:
                     author_name=persona_name, content=response_text,
                     timestamp=datetime.now(), server_id=server_id,
                     tool_context=tool_context_json,
+                    reply_to_id=user_interaction_id,
                 )
 
             return response_text, response_type, assistant_id

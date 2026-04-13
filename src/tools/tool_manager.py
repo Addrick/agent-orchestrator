@@ -172,3 +172,52 @@ class WebSearchHandler:
 
         raw = await asyncio.to_thread(_sync_search)
         return [{"title": r["title"], "url": r["href"], "summary": r["body"]} for r in raw]
+
+
+class MemoryToolHandler:
+    def __init__(self, memory_manager: Any, embedding_service: Any = None) -> None:
+        self.memory_manager = memory_manager
+        self.embedding_service = embedding_service
+
+    def register(self, manager: ToolManager) -> None:
+        manager.register("drill_down_memory", self._drill_down_memory)
+        manager.register("update_core_memory", self._update_core_memory)
+        manager.register("submit_memory_summary", self._submit_memory_summary)
+
+    async def _drill_down_memory(self, parent_summary_id: int) -> List[Dict[str, Any]]:
+        logger.info(f"Executing drill_down_memory for parent {parent_summary_id}")
+        with self.memory_manager._lock:
+            conn = self.memory_manager._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT content, created_at FROM Memory_Summaries WHERE parent_summary_id = ? ORDER BY created_at ASC",
+                (parent_summary_id,)
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    async def _update_core_memory(self, summary_id: int, new_content: str) -> Dict[str, Any]:
+        logger.info(f"Executing update_core_memory for ID {summary_id}")
+        embedding = None
+        if self.embedding_service:
+            embedding = await self.embedding_service.encode_single(new_content)
+        
+        with self.memory_manager.transaction() as conn:
+            conn.execute("UPDATE Memory_Summaries SET content = ? WHERE summary_id = ?", (new_content, summary_id))
+            if embedding is not None:
+                conn.execute("UPDATE Memory_Summaries SET embedding = ? WHERE summary_id = ?", (embedding, summary_id))
+                conn.execute(
+                    "INSERT OR REPLACE INTO vec_Memory_Summaries (summary_id, embedding) VALUES (?, ?)", 
+                    (summary_id, embedding)
+                )
+        return {"status": "success", "message": f"Core Profile {summary_id} updated."}
+
+    async def _submit_memory_summary(self, facts: List[str], outlier_ids: List[int]) -> Dict[str, Any]:
+        """
+        Handler for the agent tool to submit factual updates.
+        In this context, the agent is already managing the segment state, 
+        so this tool serves as a confirmation of the extracted metadata.
+        """
+        logger.info(f"submit_memory_summary received: {len(facts)} facts, {len(outlier_ids)} outliers.")
+        # Logic is handled within MemoryAgent's run_summarization loop, 
+        # but the tool must exit successfully to fulfill the LLM contract.
+        return {"status": "success", "processed_facts": len(facts)}

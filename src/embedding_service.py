@@ -13,6 +13,7 @@ import numpy as np
 # Import global configurations
 from config.global_config import (
     EMBEDDING_MODEL,
+    EMBEDDING_DIMENSION,
     GEMINI_EMBEDDING_001_RPM,
     GEMINI_EMBEDDING_001_TPM,
     GEMINI_EMBEDDING_001_RPD
@@ -113,7 +114,7 @@ class EmbeddingProvider(ABC):
 class GeminiEmbeddingProvider(EmbeddingProvider):
     """Uses Google's API via the google-genai SDK."""
 
-    _dimensions = 768
+    _dimensions = EMBEDDING_DIMENSION
     _max_input_tokens = 2048
     _MAX_BATCH_SIZE = 10  # Kept low to bypass generic payload size errors
     _MAX_RETRIES = 5

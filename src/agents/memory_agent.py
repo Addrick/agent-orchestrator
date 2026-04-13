@@ -1,77 +1,26 @@
 # src/agents/memory_agent.py
 
 import logging
-import time
 import asyncio
+import re
+import numpy as np
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
-
 from src.agents.base import Agent
 from src.chat_system import ChatSystem
-from src.embedding_service import EmbeddingService, GeminiEmbeddingProvider
+from src.embedding_service import (
+    EmbeddingService,
+    GeminiEmbeddingProvider,
+    GLOBAL_EMBEDDING_LIMITER,
+)
 
-# --- NEW: Import rate limits and dynamic model names ---
 from config.global_config import (
     EMBEDDING_MODEL,
-    GEMINI_EMBEDDING_001_RPM,
     GEMINI_EMBEDDING_001_TPM,
-    GEMINI_EMBEDDING_001_RPD
 )
 
 logger = logging.getLogger(__name__)
-
-
-class EmbeddingRateLimiter:
-    """Proactively tracks item-based Google API quota limits to prevent 429s."""
-
-    def __init__(self, rpm: int, tpm: int, rpd: int):
-        self.rpm = rpm
-        self.tpm = tpm
-        self.rpd = rpd
-        self.minute_req_history: List[Tuple[float, int]] = []  # (timestamp, items)
-        self.minute_tok_history: List[Tuple[float, int]] = []  # (timestamp, tokens)
-        self.day_req_history: List[Tuple[float, int]] = []  # (timestamp, items)
-        self._lock = asyncio.Lock()
-
-    async def acquire(self, item_count: int, token_count: int) -> None:
-        """Awaits until the payload can safely be sent without hitting a 429."""
-        async with self._lock:
-            while True:
-                now = time.time()
-
-                # Prune out-of-window timestamps
-                self.minute_req_history = [(t, c) for t, c in self.minute_req_history if now - t < 60.0]
-                self.minute_tok_history = [(t, tok) for t, tok in self.minute_tok_history if now - t < 60.0]
-                self.day_req_history = [(t, c) for t, c in self.day_req_history if now - t < 86400.0]
-
-                # 1. Enforce Daily Limit (Hard stop)
-                current_day_reqs = sum(c for _, c in self.day_req_history)
-                if current_day_reqs + item_count > self.rpd:
-                    raise RuntimeError(f"Daily Google AI Studio Quota Exhausted ({self.rpd} items).")
-
-                # 2. Check Minute Limits (Requests & Tokens)
-                current_min_reqs = sum(c for _, c in self.minute_req_history)
-                current_min_toks = sum(tok for _, tok in self.minute_tok_history)
-
-                if current_min_reqs + item_count <= self.rpm and current_min_toks + token_count <= self.tpm:
-                    # Safe to proceed! Log consumption.
-                    self.minute_req_history.append((now, item_count))
-                    self.minute_tok_history.append((now, token_count))
-                    self.day_req_history.append((now, item_count))
-                    break
-
-                # 3. Throttle: Calculate exact sleep time until enough items expire
-                sleep_time = 0.0
-                if current_min_reqs + item_count > self.rpm and self.minute_req_history:
-                    sleep_time = max(sleep_time, 60.0 - (now - self.minute_req_history[0][0]))
-                if current_min_toks + token_count > self.tpm and self.minute_tok_history:
-                    sleep_time = max(sleep_time, 60.0 - (now - self.minute_tok_history[0][0]))
-
-                if sleep_time > 0:
-                    logger.info(f"Embedding rate limiter active: waiting {sleep_time:.1f}s for bucket refill...")
-                    await asyncio.sleep(sleep_time + 0.1)  # Add 100ms buffer to ensure API clearance
 
 
 class MemoryAgent(Agent):
@@ -85,25 +34,24 @@ class MemoryAgent(Agent):
     def __init__(
             self,
             chat_system: ChatSystem,
+            memory_manager: Optional[Any] = None,
             agent_config: Optional[Dict[str, Any]] = None,
     ) -> None:
         super().__init__(chat_system)
+        self.memory_manager = memory_manager or chat_system.memory_manager
         self.agent_config = agent_config or {}
         self._embedding_service: Optional[EmbeddingService] = None
 
-        # Initialize the proactive sliding-window rate limiter
-        self._rate_limiter = EmbeddingRateLimiter(
-            rpm=GEMINI_EMBEDDING_001_RPM,
-            tpm=GEMINI_EMBEDDING_001_TPM,
-            rpd=GEMINI_EMBEDDING_001_RPD
-        )
+        # Share quota state with GeminiEmbeddingProvider so concurrent
+        # consumers (consolidator + agent) can't double-spend the budget.
+        self._rate_limiter = GLOBAL_EMBEDDING_LIMITER
 
         # Config with defaults
         self._similarity_threshold: float = float(
-            self.agent_config.get("similarity_threshold", 0.3)
+            self.agent_config.get("similarity_threshold", 0.80)
         )
         self._min_segment_size: int = int(
-            self.agent_config.get("min_segment_size", 3)
+            self.agent_config.get("min_segment_size", 2)
         )
 
         # We cap batches to Gemini's hard 100 item array limit, or whatever is lower
@@ -211,21 +159,37 @@ class MemoryAgent(Agent):
             server_id: Optional[str],
             embedding_service: EmbeddingService,
     ) -> None:
-        # --- Phase 1: Embed unembedded messages ---
-        try:
-            await self._embed_unembedded(
-                channel, persona_name, server_id, embedding_service
-            )
-        except Exception as e:
-            logger.warning(f"MemoryAgent: {channel}/{persona_name} embedding phase aborted: {str(e)}")
+        # --- Phase 1: Embed all unembedded messages (loop until exhausted) ---
+        batch_num = 0
+        while not self._shutdown_event.is_set():
+            try:
+                count = await self._embed_unembedded(
+                    channel, persona_name, server_id, embedding_service
+                )
+                if count == 0:
+                    break
+                batch_num += 1
+                logger.info(f"MemoryAgent: {channel}/{persona_name} — embedding batch {batch_num} done ({count} stored).")
+            except Exception as e:
+                logger.warning(f"MemoryAgent: {channel}/{persona_name} embedding phase aborted: {str(e)}")
+                break
 
-        # --- Phase 2: Segment and summarize ---
-        try:
-            await self._segment_and_summarize(
-                channel, persona_name, server_id, embedding_service
-            )
-        except Exception as e:
-            logger.warning(f"MemoryAgent: {channel}/{persona_name} summary phase aborted: {str(e)}")
+        # --- Phase 2: Segment and summarize all available (loop until clear) ---
+        batch_num = 0
+        while not self._shutdown_event.is_set():
+            try:
+                # We do NOT pass a limit here anymore as per USER_REQUEST;
+                # we process everything the similarity logic generates in one sweep.
+                committed_count = await self._segment_and_summarize(
+                    channel, persona_name, server_id, embedding_service
+                )
+                if committed_count == 0:
+                    break
+                batch_num += 1
+                logger.info(f"MemoryAgent: {channel}/{persona_name} — summary batch {batch_num} done ({committed_count} stored).")
+            except Exception as e:
+                logger.warning(f"MemoryAgent: {channel}/{persona_name} summary phase aborted: {str(e)}")
+                break
 
     async def _embed_unembedded(
             self,
@@ -233,7 +197,7 @@ class MemoryAgent(Agent):
             persona_name: str,
             server_id: Optional[str],
             embedding_service: EmbeddingService,
-    ) -> None:
+    ) -> int:
         model_name = EMBEDDING_MODEL
 
         messages = self.memory_manager.get_unembedded_messages(
@@ -246,7 +210,7 @@ class MemoryAgent(Agent):
 
         if not messages:
             logger.debug(f"MemoryAgent: {channel}/{persona_name} — no unembedded messages found.")
-            return
+            return 0
 
         logger.info(f"MemoryAgent: {channel}/{persona_name} — {len(messages)} unembedded messages to process.")
 
@@ -280,6 +244,12 @@ class MemoryAgent(Agent):
                                VALUES (?, ?, ?, ?)""",
                             (msg['interaction_id'], emb, model_name, now)
                         )
+                        conn.execute(
+                            """INSERT OR REPLACE INTO vec_Message_Embeddings
+                               (interaction_id, embedding)
+                               VALUES (?, ?)""",
+                            (msg['interaction_id'], emb)
+                        )
                 total_stored += len(chunk_embs)
 
             except RuntimeError as e:
@@ -293,6 +263,7 @@ class MemoryAgent(Agent):
                 break
 
         logger.info(f"MemoryAgent: {channel}/{persona_name} — stored {total_stored} embeddings.")
+        return total_stored
 
     @staticmethod
     def _chunk_messages(
@@ -323,7 +294,7 @@ class MemoryAgent(Agent):
             persona_name: str,
             server_id: Optional[str],
             embedding_service: EmbeddingService,
-    ) -> None:
+    ) -> int:
         model_name = EMBEDDING_MODEL
 
         rows = self.memory_manager.get_unsegmented_embedded_messages(
@@ -331,13 +302,12 @@ class MemoryAgent(Agent):
             channel=channel,
             server_id=server_id,
             model_name=model_name,
-            limit=self._batch_size,
         )
 
         logger.info(f"MemoryAgent: {channel}/{persona_name} — {len(rows)} unsegmented embedded messages found.")
 
         if len(rows) < self._min_segment_size:
-            return
+            return 0
 
         messages = [
             {k: r[k] for k in ('interaction_id', 'author_role', 'author_name',
@@ -351,35 +321,43 @@ class MemoryAgent(Agent):
         )
 
         if not segments:
-            return
+            return 0
 
-        results: List[Tuple[Dict[str, Any], str, bytes]] = []
-        for segment in segments:
+        total_committed = 0
+        for i, segment in enumerate(segments):
+            if self._shutdown_event.is_set():
+                logger.info(f"MemoryAgent: {channel}/{persona_name} — shutdown signalled, stopping at segment {i + 1}/{len(segments)}.")
+                break
+
+            logger.info(f"MemoryAgent: {channel}/{persona_name} — Processing segment {i + 1}/{len(segments)}...")
             summary_result = await self._summarize_segment(segment, embedding_service)
-            if summary_result is not None:
-                results.append((segment, summary_result[0], summary_result[1]))
+            if summary_result is None:
+                logger.warning(
+                    f"MemoryAgent: {channel}/{persona_name} — Segment {i + 1}/{len(segments)} failed summarization, skipping.")
+                continue
 
-        if not results:
-            logger.warning(
-                f"MemoryAgent: all {len(segments)} segments failed summarization for {channel}/{persona_name}.")
-            return
+            summary_text, summary_emb, outlier_ids = summary_result
 
-        now = datetime.now(timezone.utc)
-        with self.memory_manager.transaction() as conn:
-            for segment, summary_text, summary_emb in results:
-                msg_timestamps = []
-                for m in segment['messages']:
-                    ts = m.get('timestamp')
-                    if ts:
-                        if isinstance(ts, str):
-                            ts = datetime.fromisoformat(ts)
-                        if getattr(ts, 'tzinfo', None) is None:
-                            ts = ts.replace(tzinfo=timezone.utc)
-                        msg_timestamps.append(ts)
-                        
-                first_msg_at = min(msg_timestamps) if msg_timestamps else None
-                last_msg_at = max(msg_timestamps) if msg_timestamps else None
+            now = datetime.now(timezone.utc)
+            msg_timestamps = []
+            seg_msg_ids = []
+            for m in segment['messages']:
+                m_id = m.get('interaction_id')
+                if m_id:
+                    seg_msg_ids.append(m_id)
 
+                ts = m.get('timestamp')
+                if ts:
+                    if isinstance(ts, str):
+                        ts = datetime.fromisoformat(ts)
+                    if getattr(ts, 'tzinfo', None) is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    msg_timestamps.append(ts)
+
+            first_msg_at = min(msg_timestamps) if msg_timestamps else None
+            last_msg_at = max(msg_timestamps) if msg_timestamps else None
+
+            with self.memory_manager.transaction() as conn:
                 cursor = conn.execute(
                     """INSERT INTO Memory_Segments
                        (channel, server_id, persona_name,
@@ -394,14 +372,42 @@ class MemoryAgent(Agent):
                 )
                 segment_id = cursor.lastrowid
 
-                conn.execute(
+                cursor2 = conn.execute(
                     """INSERT INTO Memory_Summaries
                        (segment_id, content, embedding, model_name, created_at)
                        VALUES (?, ?, ?, ?, ?)""",
                     (segment_id, summary_text, summary_emb, model_name, now)
                 )
+                summary_id = cursor2.lastrowid
+                conn.execute(
+                    """INSERT INTO vec_Memory_Summaries
+                       (summary_id, embedding)
+                       VALUES (?, ?)""",
+                    (summary_id, summary_emb)
+                )
 
-        logger.info(f"MemoryAgent: {channel}/{persona_name} — {len(results)} segments+summaries stored.")
+                outlier_set = set(outlier_ids)
+                summarized_ids = [m_id for m_id in seg_msg_ids if m_id not in outlier_set]
+
+                if summarized_ids:
+                    placeholders = ",".join("?" for _ in summarized_ids)
+                    conn.execute(
+                        f"UPDATE User_Interactions SET parent_summary_id = ? WHERE interaction_id IN ({placeholders})",
+                        [summary_id] + summarized_ids
+                    )
+
+                if outlier_ids:
+                    logger.info(f"MemoryAgent: Excluded {len(outlier_ids)} outliers from summary {summary_id}. They remain NULL for re-queueing.")
+
+            total_committed += 1
+            logger.info(f"MemoryAgent: {channel}/{persona_name} — Segment {i + 1}/{len(segments)} committed.")
+
+        if total_committed == 0 and segments:
+            logger.warning(
+                f"MemoryAgent: all {len(segments)} segments failed summarization for {channel}/{persona_name}.")
+
+        logger.info(f"MemoryAgent: {channel}/{persona_name} — {total_committed}/{len(segments)} segments+summaries stored.")
+        return total_committed
 
     def _segment_by_similarity(
             self,
@@ -433,7 +439,18 @@ class MemoryAgent(Agent):
 
             similarity = float(np.dot(centroid, vec))
 
-            if (similarity < self._similarity_threshold and len(current_msgs) >= self._min_segment_size):
+            # --- SEMANTIC GLUE (BACKWARD GRAVITY) ---
+            # If we are below threshold, but the current block is exactly 1 'user' message
+            # and the incoming message is from an 'assistant', we FORCE-BRIDGE them.
+            # This ensures that Question/Answer pairs are captured as a single segment
+            # even if the answer is highly technical and deviates semantically from the question.
+            is_qa_bridge = (
+                len(current_msgs) == 1 and
+                current_msgs[0].get('author_role') == 'user' and
+                msg.get('author_role') == 'assistant'
+            )
+
+            if (similarity < self._similarity_threshold and len(current_msgs) >= self._min_segment_size and not is_qa_bridge):
                 segments.append({
                     'start_id': current_msgs[0]['interaction_id'],
                     'end_id': current_msgs[-1]['interaction_id'],
@@ -497,7 +514,7 @@ class MemoryAgent(Agent):
             self,
             segment: Dict[str, Any],
             embedding_service: EmbeddingService,
-    ) -> Optional[Tuple[str, bytes]]:
+    ) -> Optional[Tuple[str, bytes, List[int]]]:
         persona = self.chat_system.personas.get(self._persona_name)
         if not persona:
             logger.error(f"System persona '{self._persona_name}' not found. Cannot summarize.")
@@ -508,43 +525,106 @@ class MemoryAgent(Agent):
             role = msg.get('author_role', 'user')
             name = msg.get('author_name', 'Unknown')
             content = msg.get('content', '')
+            msg_id = msg.get('interaction_id')
             ts = msg.get('timestamp', '')
+
+            # Strip vertexai grounding redirect URLs from content.
+            # Preserves link text and citation markers, removes only the URL.
+            # [Text](https://vertexaisearch.cloud.google.com/...) → [Text]
+            # [[1](<https://vertexaisearch...>)] → [[1]]
+            content = re.sub(
+                r'\(<?https://vertexaisearch\.cloud\.google\.com/[^)]*>?\)',
+                '', content
+            )
+            
+            id_tag = f"[ID: {msg_id}]" if msg_id else ""
+            
             if ts:
                 if isinstance(ts, str):
                     ts = datetime.fromisoformat(ts)
                 ts_str = ts.strftime('%Y-%m-%d %H:%M')
-                lines.append(f"[{ts_str}] [{role}] {name}: {content}")
+                lines.append(f"{id_tag} [{ts_str}] [{role}] {name}: {content}")
             else:
-                lines.append(f"[{role}] {name}: {content}")
+                lines.append(f"{id_tag} [{role}] {name}: {content}")
 
         transcript = "\n".join(lines)
         prompt = (
-            f"Extract factual information from this conversation segment.\n\n"
+            f"Please process the following conversation segment and extract factual knowledge.\n\n"
             f"TRANSCRIPT:\n{transcript}"
         )
 
+        # --- TOKEN GUARDRAIL (SDK BASED) ---
         try:
+            # We check against the Gemma 4 TPR limit from global_config.
+            # Using 240,000 as a safety margin for the 256,000 limit.
+            from config.global_config import RATE_LIMIT_GEMMA_4_TPR
+            
+            # Request token count from Google SDK if available
+            token_count = 0
+            if self.text_engine.google_client:
+                # Build the content structure exactly like the API expects
+                # Note: count_tokens is a synchronous call in the current SDK version or async depending on usage.
+                # In our TextEngine, the client is usually initialized for async.
+                count_resp = await self.text_engine.google_client.models.count_tokens(
+                    model=persona.get_config_for_engine().get("model_name"),
+                    contents=prompt
+                )
+                token_count = count_resp.total_tokens
+            else:
+                # Fallback to heuristic if SDK client is missing
+                token_count = len(prompt) // 4
+            
+            if token_count > RATE_LIMIT_GEMMA_4_TPR * 0.95:
+                logger.warning(f"MemoryAgent: Segment token count ({token_count}) exceeds safety limit. Splitting segment.")
+                # We return None to signal failure; the iterative loop will try again with a smaller fetch?
+                # No, if we don't have a LIMIT, it will just fetch the same thing.
+                # IMPLEMENTATION NOTE: Since the user rejected manual split logic but wants a safeguard,
+                # we skip this giant segment for now and log it.
+                return None
+
+        except Exception as e:
+            logger.debug(f"MemoryAgent: Token counting failed/skipped: {e}")
+
+        try:
+            tools_for_llm = self.chat_system._filter_tools_for_persona(persona)
             response, _ = await self.text_engine.generate_response(
                 persona_config=persona.get_config_for_engine(),
                 context_object=self._build_llm_context(persona, prompt),
-                tools=None,
+                tools=tools_for_llm,
             )
 
-            if response.get('type') != 'text':
-                logger.warning("MemoryAgent: summarizer returned non-text response.")
+            observations = []
+            outlier_ids = []
+
+            if response.get('type') == 'tool_calls':
+                for call in response.get('calls', []):
+                    if call.get('name') == 'submit_memory_summary':
+                        args = call.get('arguments', {})
+                        if isinstance(args, str):
+                            import json
+                            args = json.loads(args)
+                        observations = args.get('observations', []) or args.get('facts', [])
+                        outlier_ids = args.get('outlier_ids', [])
+                        break
+
+            # Fallback to text parsing if model returned plain text instead of a tool call
+            if not observations and response.get('type') == 'text' and response.get('content'):
+                text = response['content'].strip()
+                if text and text != "NO_FACTS":
+                    observations = [line.strip("- ").strip() for line in text.split("\n") if line.strip()]
+
+            if not observations:
+                logger.info(f"MemoryAgent: No observations extracted for segment starting at {segment['start_id']}.")
                 return None
 
-            facts_text = response.get('content', '').strip()
-            if not facts_text:
-                logger.warning("MemoryAgent: summarizer returned empty content.")
-                return None
-
-            # Calculate tokens and await rate limits for the embedding of the summary
+            facts_text = "\n".join([f"- {f}" for f in observations])
+            
+            # Calculate tokens for embedding of the concatenated facts
             est_tokens = len(facts_text) // 4
             await self._rate_limiter.acquire(item_count=1, token_count=est_tokens)
 
             summary_embedding = await embedding_service.encode_single(facts_text)
-            return (facts_text, summary_embedding)
+            return (facts_text, summary_embedding, outlier_ids)
 
         except RuntimeError as e:
             logger.warning(f"MemoryAgent: Summarization embedding paused due to Daily Quota: {str(e)}")

@@ -70,8 +70,8 @@ class TestMemoryAgentInit:
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
     def test_init_defaults(self,mock_load: Any,mock_chat_system: Any) -> None:
         agent = MemoryAgent(mock_chat_system)
-        assert agent._similarity_threshold == 0.3
-        assert agent._min_segment_size == 3
+        assert agent._similarity_threshold == 0.8
+        assert agent._min_segment_size == 2
         assert agent._batch_size == 100
 
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
@@ -237,9 +237,10 @@ class TestSummarization:
 
         result = await memory_agent._summarize_segment(segment, mock_emb_service)
         assert result is not None
-        facts_text, summary_emb = result
+        facts_text, summary_emb, outlier_ids = result
         assert "Fact 1" in facts_text
         assert isinstance(summary_emb, bytes)
+        assert isinstance(outlier_ids, list)
 
         # Verify LLM was called
         memory_agent.text_engine.generate_response.assert_called_once()
@@ -386,6 +387,62 @@ class TestDeploy:
 # --- Transaction Model Tests ---
 
 class TestTransactionModel:
+    @pytest.mark.asyncio
+    async def test_partial_failure_commits_prior_segments(self, memory_agent: Any) -> None:
+        """If segment N fails, segments 1..N-1 are already committed and not lost."""
+        import struct
+        from unittest.mock import AsyncMock, MagicMock, call
+
+        blob = struct.pack('4f', 1.0, 0.0, 0.0, 0.0)
+        rows = [
+            {'interaction_id': i, 'author_role': 'user', 'author_name': 'Alice',
+             'content': f'msg {i}', 'timestamp': None, 'embedding': blob}
+            for i in range(9)
+        ]
+        memory_agent.memory_manager.get_unsegmented_embedded_messages.return_value = rows
+        memory_agent.memory_manager.get_last_segment_tail_embeddings.return_value = None
+
+        # Force 3 segments by overriding _segment_by_similarity
+        fake_segments = [
+            {'start_id': 0, 'end_id': 2, 'count': 3,
+             'messages': [{'interaction_id': i, 'timestamp': None} for i in range(3)],
+             'embeddings': [blob] * 3},
+            {'start_id': 3, 'end_id': 5, 'count': 3,
+             'messages': [{'interaction_id': i, 'timestamp': None} for i in range(3, 6)],
+             'embeddings': [blob] * 3},
+            {'start_id': 6, 'end_id': 8, 'count': 3,
+             'messages': [{'interaction_id': i, 'timestamp': None} for i in range(6, 9)],
+             'embeddings': [blob] * 3},
+        ]
+        memory_agent._segment_by_similarity = MagicMock(return_value=fake_segments)
+
+        # Segment 2 (index 1) fails; 1 and 3 succeed
+        dummy_emb = b'\x00' * 16
+        call_count = 0
+
+        async def summarize_side_effect(segment: Any, emb_svc: Any) -> Any:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                return None  # segment 2 fails
+            return ("- Fact", dummy_emb, [])
+
+        memory_agent._summarize_segment = summarize_side_effect
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.lastrowid = 42
+        mock_conn.execute.return_value = mock_cursor
+        memory_agent.memory_manager.transaction.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        memory_agent.memory_manager.transaction.return_value.__exit__ = MagicMock(return_value=False)
+
+        mock_emb_service = MagicMock()
+        result = await memory_agent._segment_and_summarize("chan", "p1", None, mock_emb_service)
+
+        # Segments 1 and 3 committed; segment 2 skipped
+        assert result == 2
+        assert memory_agent.memory_manager.transaction.call_count == 2
+
     @pytest.mark.asyncio
     @patch('asyncio.sleep')
     async def test_embedding_failure_does_not_prevent_segmentation(self, mock_sleep: Any, memory_agent: Any) -> None:
