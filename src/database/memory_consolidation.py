@@ -162,32 +162,58 @@ class MemoryConsolidator:
         transcript = "\n".join(lines)
 
         system_prompt = (
-            "You are a core memory consolidation process.\n"
-            "Review the following chronological episodic memories about a specific topic/entity.\n"
-            "Merge them into a single, comprehensive, up-to-date 'Core Fact Profile'.\n\n"
-            "RULES:\n"
-            "1. Replace outdated information with the newest state.\n"
-            "2. Keep the summary incredibly dense with concrete details.\n"
-            "3. Include explicit keywords so an agent can 'drill down' for specifics.\n"
-            "4. Respond ONLY with the Core Fact Profile. No preamble."
+            "You are a hierarchal compression engine. Your task is to transform disparate episodic memories into an exhaustive Core Profile.\n\n"
+            "NO-LOSS SEMANTICS:\n"
+            "1. TOTAL COVERAGE: Every input observation must be nested under a Concept. If a fact doesn't fit existing concepts, create a new one. Deletion is failure.\n"
+            "2. INTUITIVE LABELS: Concept names must be so descriptive that a human (or bot) could accurately predict every internal observation just by reading the label.\n"
+            "3. REVERSE CHECK: Before submitting, verify that your hierarchy can be fully 'drilled down'—ensure that selecting a Concept name is the logical path to find its specific observations.\n"
+            "4. NO META-TALK: Respond ONLY by calling the `submit_core_profile` tool."
         )
 
-        user_message = f"MEMORIES TO CONSOLIDATE:\n{transcript}"
+        user_message = f"MEMORIES TO CONSOLIDATE:\n<memories>\n{transcript}\n</memories>"
 
-        core_profile_text, _ = await self.text_engine.generate_response(
+        from src.tools.definitions import ALL_TOOL_DEFINITIONS
+        l2_tool_def = next(t for t in ALL_TOOL_DEFINITIONS if t.get('function', {}).get('name') == 'submit_core_profile')
+
+        core_profile_resp, _ = await self.text_engine.generate_response(
             persona_config=llm_persona.get_config_for_engine(),
             context_object={
                 "persona_prompt": system_prompt,
                 "history": [{"role": "user", "content": user_message}],
                 "current_message": {"text": "", "image_url": None}
             },
-            tools=None,
+            tools=[l2_tool_def],
         )
         
-        if core_profile_text.get('type') != 'text':
-            return
-            
-        summary_text = core_profile_text.get("content", "").strip()
+        summary_text = ""
+        if core_profile_resp.get('type') == 'tool_calls':
+            for call in core_profile_resp.get('calls', []):
+                if call.get('name') == 'submit_core_profile':
+                    args = call.get('arguments', {})
+                    if isinstance(args, str):
+                        import json
+                        args = json.loads(args)
+                    
+                    concepts = args.get('concepts', [])
+                    output_lines = ["### CORE FACT PROFILE"]
+                    for concept in concepts:
+                        name = concept.get('name', 'General')
+                        facts = concept.get('observations', [])
+                        keywords = concept.get('keywords', [])
+                        
+                        output_lines.append(f"\n[{name}]")
+                        for f in facts:
+                            output_lines.append(f"  - {f}")
+                        if keywords:
+                            output_lines.append(f"  Keywords: {', '.join(keywords)}")
+                    
+                    summary_text = "\n".join(output_lines).strip()
+                    break
+        
+        # Fallback to text if tool wasn't used correctly
+        if not summary_text and core_profile_resp.get('type') == 'text':
+            summary_text = core_profile_resp.get("content", "").strip()
+
         if not summary_text:
             return
             
