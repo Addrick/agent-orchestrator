@@ -39,6 +39,11 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
                                        "opinions, problems described, solutions provided, advice given, "
                                        "decisions made, and significant emotional context.",
                     },
+                    "keywords": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Descriptive tags or conceptual labels that categorize the main themes of this segment.",
+                    },
                     "outlier_ids": {
                         "type": "array",
                         "items": {"type": "integer"},
@@ -46,9 +51,49 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
                                        "and should be excluded from this summary.",
                     },
                 },
-                "required": ["observations", "outlier_ids"],
+                "required": ["observations", "keywords", "outlier_ids"],
             },
         },
+    },
+    {
+        "type": "function",
+        "is_write": True,
+        "function": {
+            "name": "submit_core_profile",
+            "description": "Consolidates multiple episodic memories into a structured core profile. "
+                           "Groups observations under overarching concept labels to provide a "
+                           "clean, hierarchical representation of the data.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "concepts": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {
+                                    "type": "string",
+                                    "description": "The overarching concept or entity name (e.g., 'Device Repair History')."
+                                },
+                                "observations": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Factual observations and details nested under this concept. No loss of detail allowed."
+                                },
+                                "keywords": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Targeted conceptual tags for this specific concept cluster."
+                                }
+                            },
+                            "required": ["name", "observations", "keywords"]
+                        },
+                        "description": "A list of nested concepts that exhaustively cover all input data."
+                    }
+                },
+                "required": ["concepts"]
+            }
+        }
     },
     {
         "type": "google_grounding",

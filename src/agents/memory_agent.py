@@ -619,6 +619,7 @@ class MemoryAgent(Agent):
                             args = json.loads(args)
                         observations = args.get('observations', []) or args.get('facts', [])
                         outlier_ids = args.get('outlier_ids', [])
+                        keywords = args.get('keywords', [])
                         break
 
             # Fallback to text parsing if model returned plain text instead of a tool call
@@ -631,7 +632,12 @@ class MemoryAgent(Agent):
                 logger.info(f"MemoryAgent: No observations extracted for segment starting at {segment['start_id']}.")
                 return None
 
-            facts_text = "\n".join([f"- {f}" for f in observations])
+            # Build structured text for storage
+            facts_lines = [f"- {f}" for f in observations]
+            if keywords:
+                facts_lines.append(f"Keywords: {', '.join(keywords)}")
+            
+            facts_text = "\n".join(facts_lines)
             
             # Calculate tokens for embedding of the concatenated facts
             est_tokens = len(facts_text) // 4
