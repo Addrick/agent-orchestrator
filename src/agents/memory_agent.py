@@ -600,15 +600,49 @@ class MemoryAgent(Agent):
             logger.debug(f"MemoryAgent: Token counting failed/skipped: {e}")
 
         try:
-            tools_for_llm = self.chat_system._filter_tools_for_persona(persona)
+            # Agent-internal schema — passed directly to the LLM, never routed through ToolManager
+            summary_tool = {
+                "type": "function",
+                "function": {
+                    "name": "submit_memory_summary",
+                    "description": "Records observations extracted from a conversation segment for long-term recall. "
+                                   "Also identifies outlier messages that do not share the primary theme "
+                                   "of the segment so they can be re-routed to a different cluster.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "observations": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Discrete statements capturing what was discussed: facts, preferences, "
+                                               "opinions, problems described, solutions provided, advice given, "
+                                               "decisions made, and significant emotional context.",
+                            },
+                            "keywords": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Descriptive tags or conceptual labels that categorize the main themes of this segment.",
+                            },
+                            "outlier_ids": {
+                                "type": "array",
+                                "items": {"type": "integer"},
+                                "description": "A list of Interaction IDs for messages that are thematic outliers "
+                                               "and should be excluded from this summary.",
+                            },
+                        },
+                        "required": ["observations", "keywords", "outlier_ids"],
+                    },
+                },
+            }
             response, _ = await self.text_engine.generate_response(
                 persona_config=persona.get_config_for_engine(),
                 context_object=self._build_llm_context(persona, prompt),
-                tools=tools_for_llm,
+                tools=[summary_tool],
             )
 
             observations = []
             outlier_ids = []
+            keywords = []
 
             if response.get('type') == 'tool_calls':
                 for call in response.get('calls', []):
