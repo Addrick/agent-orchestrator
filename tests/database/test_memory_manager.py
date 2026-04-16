@@ -48,6 +48,16 @@ def test_create_schema(mem_manager):
     expected_suppressed = {'suppression_id', 'interaction_id', 'suppressed_at'}
     assert suppressed_columns == expected_suppressed
 
+    # Check Segment_Failures table
+    cursor.execute("PRAGMA table_info(Segment_Failures)")
+    sf_columns = {row['name'] for row in cursor.fetchall()}
+    expected_sf = {
+        'failure_id', 'channel', 'server_id', 'persona_name',
+        'start_interaction_id', 'end_interaction_id', 'message_count',
+        'attempts', 'last_attempt_at', 'error_reason',
+    }
+    assert sf_columns == expected_sf
+
 
 def test_log_and_get_message(mem_manager):
     """Test basic logging and retrieval of a message."""
@@ -1155,3 +1165,128 @@ def test_transaction_rolls_back_on_error(mem_manager):
     conn = mem_manager._get_connection()
     rows = conn.execute("SELECT * FROM Message_Embeddings WHERE interaction_id = 1").fetchall()
     assert len(rows) == 0
+
+
+# --- Segment Failures Tests ---
+
+def test_record_segment_failure_creates_entry(mem_manager):
+    """First failure for a range creates a new record with attempts=1."""
+    mem_manager.record_segment_failure(
+        channel="chan", server_id=None, persona_name="p1",
+        start_id=1, end_id=50, message_count=50,
+        error_reason="LLM timeout",
+    )
+    failures = mem_manager.get_failed_segment_ranges("chan", "p1")
+    assert len(failures) == 1
+    assert failures[0]['start_interaction_id'] == 1
+    assert failures[0]['end_interaction_id'] == 50
+    assert failures[0]['attempts'] == 1
+    assert failures[0]['error_reason'] == "LLM timeout"
+
+
+def test_record_segment_failure_increments_attempts(mem_manager):
+    """Repeated failure on same range increments attempts counter."""
+    for _ in range(3):
+        mem_manager.record_segment_failure(
+            channel="chan", server_id=None, persona_name="p1",
+            start_id=1, end_id=50, message_count=50,
+        )
+    failures = mem_manager.get_failed_segment_ranges("chan", "p1")
+    assert len(failures) == 1
+    assert failures[0]['attempts'] == 3
+
+
+def test_record_segment_failure_different_ranges_separate(mem_manager):
+    """Different ranges create separate failure records."""
+    mem_manager.record_segment_failure("chan", None, "p1", 1, 50, 50)
+    mem_manager.record_segment_failure("chan", None, "p1", 51, 100, 50)
+    failures = mem_manager.get_failed_segment_ranges("chan", "p1")
+    assert len(failures) == 2
+
+
+def test_record_segment_failure_with_server_id(mem_manager):
+    """Failures with server_id are tracked separately from NULL server_id."""
+    mem_manager.record_segment_failure("chan", "srv1", "p1", 1, 50, 50)
+    mem_manager.record_segment_failure("chan", None, "p1", 1, 50, 50)
+
+    with_server = mem_manager.get_failed_segment_ranges("chan", "p1", server_id="srv1")
+    without_server = mem_manager.get_failed_segment_ranges("chan", "p1", server_id=None)
+    assert len(with_server) == 1
+    assert len(without_server) == 1
+
+
+def test_clear_segment_failure_removes_record(mem_manager):
+    """Clearing a failure removes it from future queries."""
+    mem_manager.record_segment_failure("chan", None, "p1", 1, 50, 50)
+    assert len(mem_manager.get_failed_segment_ranges("chan", "p1")) == 1
+
+    mem_manager.clear_segment_failure("chan", "p1", None, 1, 50)
+    assert len(mem_manager.get_failed_segment_ranges("chan", "p1")) == 0
+
+
+def test_get_failed_segment_ranges_respects_cooldown(mem_manager):
+    """Failures with attempts < max_attempts that are old enough are not returned."""
+    from datetime import timezone
+    mem_manager.record_segment_failure("chan", None, "p1", 1, 50, 50)
+
+    # With a very short cooldown (0 hours) and attempts < max, should not block
+    failures = mem_manager.get_failed_segment_ranges(
+        "chan", "p1", max_attempts=3, cooldown_hours=0.0,
+    )
+    assert len(failures) == 0
+
+    # With default cooldown (24h), recent failure with 1 attempt still blocks
+    failures = mem_manager.get_failed_segment_ranges(
+        "chan", "p1", max_attempts=3, cooldown_hours=24.0,
+    )
+    assert len(failures) == 1
+
+
+def test_get_failed_segment_ranges_max_attempts_always_blocks(mem_manager):
+    """Failures at max_attempts block regardless of cooldown."""
+    for _ in range(3):
+        mem_manager.record_segment_failure("chan", None, "p1", 1, 50, 50)
+
+    # Even with 0 cooldown, max attempts reached => still blocked
+    failures = mem_manager.get_failed_segment_ranges(
+        "chan", "p1", max_attempts=3, cooldown_hours=0.0,
+    )
+    assert len(failures) == 1
+
+
+def test_migration_creates_segment_failures_table(legacy_mem_manager):
+    """create_schema() on a legacy DB creates the Segment_Failures table."""
+    legacy_mem_manager.create_schema()
+
+    conn = legacy_mem_manager._get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='Segment_Failures'"
+    )
+    assert cursor.fetchone()[0] == 1
+
+
+def test_migration_segment_failures_idempotent(legacy_mem_manager):
+    """Running create_schema() twice doesn't error on Segment_Failures."""
+    legacy_mem_manager.create_schema()
+    legacy_mem_manager.create_schema()
+
+    conn = legacy_mem_manager._get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='Segment_Failures'"
+    )
+    assert cursor.fetchone()[0] == 1
+
+
+def test_migration_segment_failures_usable_after_migration(legacy_mem_manager):
+    """After migration, Segment_Failures methods work on the migrated DB."""
+    legacy_mem_manager.create_schema()
+
+    legacy_mem_manager.record_segment_failure("chan", None, "p1", 1, 50, 50, "test error")
+    failures = legacy_mem_manager.get_failed_segment_ranges("chan", "p1")
+    assert len(failures) == 1
+    assert failures[0]['error_reason'] == "test error"
+
+    legacy_mem_manager.clear_segment_failure("chan", "p1", None, 1, 50)
+    assert len(legacy_mem_manager.get_failed_segment_ranges("chan", "p1")) == 0
