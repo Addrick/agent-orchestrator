@@ -655,6 +655,9 @@ _SETTER_TO_COMMAND = {
     'set_enabled_tools': 'tools',
     'set_memory_mode': 'memory_mode',
     'set_service_bindings': 'service_bindings',
+    'set_long_term_memory': 'long_term_memory',
+    'set_include_ambient_memory': 'include_ambient_memory',
+    'set_thinking_level': 'thinking_level',
 }
 
 # Maps Persona getter method names → expected command name in what_handlers.
@@ -672,6 +675,9 @@ _GETTER_TO_COMMAND = {
     'get_enabled_tools': 'tools',
     'get_memory_mode': 'memory_mode',
     'get_service_bindings': 'service_bindings',
+    'get_long_term_memory': 'long_term_memory',
+    'get_include_ambient_memory': 'include_ambient_memory',
+    'get_thinking_level': 'thinking_level',
 }
 
 # Getters that intentionally have no what command (internal/derived values).
@@ -680,7 +686,6 @@ _GETTER_EXCEPTIONS = {
     'get_base_context_length',
     'get_current_effective_context_length',
     'get_config_for_engine',
-    'get_include_ambient_memory',
 }
 
 

@@ -53,6 +53,10 @@ class BotLogic:
             'service_bindings': self._what_service_bindings,
             'top_p': self._what_top_p,
             'top_k': self._what_top_k,
+            'display_name': self._what_display_name,
+            'long_term_memory': self._what_long_term_memory,
+            'include_ambient_memory': self._what_include_ambient_memory,
+            'thinking_level': self._what_thinking_level,
         }
         self.set_handlers = {
             'prompt': self._set_prompt,
@@ -68,6 +72,9 @@ class BotLogic:
             'tools': self._set_tools,
             'memory_mode': self._set_memory_mode,
             'service_bindings': self._set_service_bindings,
+            'long_term_memory': self._set_long_term_memory,
+            'include_ambient_memory': self._set_include_ambient_memory,
+            'thinking_level': self._set_thinking_level,
         }
 
     async def preprocess_message(
@@ -116,8 +123,8 @@ class BotLogic:
                                                                        "hello (start new conversation), \n"
                                                                        "goodbye (end conversation), \n"
                                                                        "remember <+prompt>, \n"
-                                                                       "what prompt/model/models/personas/context/tokens/temp/top_p/top_k/execution_mode/tools/memory_mode/service_bindings, \n"
-                                                                       "set prompt/model/context/tokens/temp/top_p/top_k/display_name/execution_mode/tools/memory_mode/service_bindings, \n"
+                                                                       "what prompt/model/models/personas/context/tokens/temp/top_p/top_k/execution_mode/tools/memory_mode/service_bindings/display_name/long_term_memory/include_ambient_memory/thinking_level, \n"
+                                                                       "set prompt/model/context/tokens/temp/top_p/top_k/display_name/execution_mode/tools/memory_mode/service_bindings/long_term_memory/include_ambient_memory/thinking_level, \n"
                                                                        "add <persona>, \n"
                                                                        "delete <persona>, \n"
                                                                        "detail, \n"
@@ -274,6 +281,8 @@ class BotLogic:
             f"----------------------------------------\n"
             f"Model: {persona.get_model_name() or 'default'}\n"
             f"Memory Mode: {persona.get_memory_mode().name}\n"
+            f"Long-term Memory: {'on' if persona.get_long_term_memory() else 'off'}\n"
+            f"Include Ambient Memory: {'on' if persona.get_include_ambient_memory() else 'off'}\n"
             f"Execution Mode: {persona.get_execution_mode().name}\n"
             f"Service Bindings: {', '.join(persona.get_service_bindings()) or 'none'}\n"
             f"Enabled Tools: {tools_display}\n"
@@ -284,6 +293,7 @@ class BotLogic:
             f"  - Temperature: {persona.get_temperature() or 'default'}\n"
             f"  - Top P: {persona.get_top_p() or 'default'}\n"
             f"  - Top K: {persona.get_top_k() or 'default'}\n"
+            f"  - Thinking Level: {persona.get_thinking_level() or 'default'}\n"
             f"----------------------------------------\n"
             f"Prompt:\n{persona.get_prompt()}"
         )
@@ -361,6 +371,23 @@ class BotLogic:
 
     def _what_top_k(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
         return f"Top K for {persona.get_name()} is set to {persona.get_top_k() or 'default'}.", False
+
+    def _what_display_name(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
+        status = "enabled" if persona.should_display_name_in_chat() else "disabled"
+        return f"Display name in chat for '{persona.get_name()}' is {status}.", False
+
+    def _what_long_term_memory(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
+        status = "enabled" if persona.get_long_term_memory() else "disabled"
+        return f"Long-term memory retrieval for '{persona.get_name()}' is {status}.", False
+
+    def _what_include_ambient_memory(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
+        status = "enabled" if persona.get_include_ambient_memory() else "disabled"
+        return f"Ambient memory inclusion for '{persona.get_name()}' is {status}.", False
+
+    def _what_thinking_level(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
+        level = persona.get_thinking_level()
+        display = f"'{level}'" if level else "not set (default)"
+        return f"Thinking level for '{persona.get_name()}' is {display}.", False
 
     async def _handle_set(
             self,
@@ -644,6 +671,46 @@ class BotLogic:
         bindings = [b.strip() for b in value_str.split(',') if b.strip()]
         persona.set_service_bindings(bindings)
         return f"Service bindings for {persona.get_name()} set to: {', '.join(bindings)}.", True
+
+    def _set_long_term_memory(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
+        try:
+            value_str = args[1].lower()
+        except IndexError:
+            return "Error: Please specify 'on' or 'off' for long_term_memory.", False
+
+        if value_str in ('on', 'true', 'yes', '1'):
+            persona.set_long_term_memory(True)
+            return f"Long-term memory retrieval enabled for {persona.get_name()}.", True
+        elif value_str in ('off', 'false', 'no', '0'):
+            persona.set_long_term_memory(False)
+            return f"Long-term memory retrieval disabled for {persona.get_name()}.", True
+        return f"Error: Invalid value '{args[1]}'. Use 'on' or 'off'.", False
+
+    def _set_include_ambient_memory(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
+        try:
+            value_str = args[1].lower()
+        except IndexError:
+            return "Error: Please specify 'on' or 'off' for include_ambient_memory.", False
+
+        if value_str in ('on', 'true', 'yes', '1'):
+            persona.set_include_ambient_memory(True)
+            return f"Ambient memory inclusion enabled for {persona.get_name()}.", True
+        elif value_str in ('off', 'false', 'no', '0'):
+            persona.set_include_ambient_memory(False)
+            return f"Ambient memory inclusion disabled for {persona.get_name()}.", True
+        return f"Error: Invalid value '{args[1]}'. Use 'on' or 'off'.", False
+
+    def _set_thinking_level(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
+        try:
+            value = args[1].lower()
+        except IndexError:
+            return "Error: Please specify a thinking level (e.g. 'minimal') or 'none' to clear.", False
+
+        if value == 'none':
+            persona.set_thinking_level(None)
+            return f"Thinking level cleared for {persona.get_name()} (will use model default).", True
+        persona.set_thinking_level(value)
+        return f"Thinking level for {persona.get_name()} set to '{value}'.", True
 
     def _handle_start_conversation(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[
         Optional[str], bool]:
