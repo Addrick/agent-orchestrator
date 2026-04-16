@@ -124,7 +124,7 @@ These ship with the bot (defined in `config/default_personas.json`):
 | it-help | gemini-2.5-flash | Testing/dev persona for Zammad integration | AUTONOMOUS | All |
 | gemini | gemini-2.5-flash | General-purpose Gemini | AUTONOMOUS | google_grounding_search |
 | chatgpt | gpt-5 | General-purpose GPT | AUTONOMOUS | None |
-| claude | claude-haiku-4-5 | General-purpose Claude | AUTONOMOUS | None |
+| claude | claude-haiku-4-5-20251001 | General-purpose Claude | AUTONOMOUS | None |
 | testr | gemini-2.5-flash | Test persona (responds "success") | AUTONOMOUS | None |
 
 ### System Personas
@@ -138,6 +138,7 @@ Defined in `config/system_personas.json`. Not directly user-accessible — used 
 - **triage_filter** — Relevance scoring between historical and new tickets
 - **triage_summarizer** — Ticket content compression
 - **dispatch_analyst** — Priority assignment and dispatch notification generation
+- **memory_summarizer** — Extracts observations from conversation segments for long-term recall; used by MemoryAgent
 
 ## Execution Modes
 
@@ -200,11 +201,29 @@ Tools are capabilities the LLM can invoke during a conversation. Available tools
 | `get_agent_history` | Read | Recent action log with optional ticket/customer filters |
 | `manage_agent` | Write | Start, stop, or restart an agent |
 
+### Memory Tools (no service binding required)
+
+Available to any persona with `enabled_tools: ["*"]` (e.g., `joy`, `it-help`). These tools interact with the long-term memory store built by MemoryAgent.
+
+| Tool | Type | Description |
+|------|------|-------------|
+| `drill_down_memory` | Read | Fetch raw episodic memories under a specific Core Profile. Use to recover specific details (dates, links, verbatim quotes) that were abstracted away during consolidation. Requires `parent_summary_id`. |
+| `update_core_memory` | Write | Modify an existing Core Profile when new information contradicts or extends it. Requires `summary_id` and the revised content. |
+
+**Internal tools** (used by agents/system personas, not by user personas):
+
+| Tool | Used by | Description |
+|------|---------|-------------|
+| `submit_memory_summary` | memory_summarizer (MemoryAgent) | Records extracted observations and keywords from a conversation segment; identifies thematic outliers for re-queueing |
+| `submit_core_profile` | Consolidator | Merges clustered episodic summaries into a structured core profile with nested concepts |
+
 ## Agents
 
 Agents are autonomous background workers that run on a schedule without user interaction. They are configured in `config/agents.json`.
 
 ### Current Agents
+
+**MemoryAgent** (`auto_start: true`) — Runs every 15 minutes. Segments recent conversations by topic, extracts observations via LLM, and stores embedded summaries for long-term recall. See [Long-term Memory](#long-term-memory) below for the full pipeline description. Config in `agents.json` under `"memory"`.
 
 **ZammadBot (triage)** — Polls for new, untagged Zammad tickets and runs a multi-stage AI triage pipeline:
 1. Extracts search keywords from the ticket
@@ -230,6 +249,32 @@ Personas with `service_bindings: ["agents"]` and the relevant tools enabled can:
 There is no user-level permission system. Access to tools is controlled entirely by persona configuration (enabled tools and service bindings). Any user who can message a persona inherits that persona's tool access.
 
 Agent configuration (schedule intervals, notification channels, recipients) is driven by `config/agents.json`, not by LLM decisions.
+
+## Long-term Memory
+
+The bot automatically builds a long-term memory store from conversations in the background. This is separate from the sliding-window conversation history controlled by `context` and `memory_mode`.
+
+### How it works
+
+1. **Embedding** — Each message logged to the database is embedded using the Gemini Embedding API (`gemini-embedding-001`). Embeddings are stored in the `Message_Embeddings` table.
+
+2. **Segmentation** (MemoryAgent, every 15 min) — Unprocessed embedded messages are grouped into topically coherent segments using centroid-based cosine similarity. Q/A pairs (a user message immediately followed by an assistant reply) are never split across segments. Minimum segment size is configurable (default: 2 messages).
+
+3. **Summarization** — Each segment is sent to the `memory_summarizer` system persona, which extracts discrete observations (facts, preferences, decisions, solutions) and thematic keywords via the `submit_memory_summary` tool. Messages that don't fit the segment's theme are flagged as outliers and re-queued for the next batch.
+
+4. **Consolidation** — Periodically, similar episodic summaries (level 1) are clustered by similarity and merged into core profiles (level 2) via `submit_core_profile`. This creates a two-tier hierarchy: detailed episodic records and compressed concept profiles.
+
+5. **Retrieval** — On each LLM request, relevant summaries are retrieved via KNN vector search and injected into the context window *before* the sliding-window history. This gives the LLM access to facts from older conversations that would otherwise have fallen out of the context limit.
+
+### Scope
+
+Long-term memory retrieval is filtered by channel, persona, and embedding model. Memory built in one channel is not surfaced in another (same scoping rules as `CHANNEL_ISOLATED` history). Currently only channels listed under `allowed_channels` in `agents.json` are processed by MemoryAgent.
+
+### User-visible effects
+
+- Personas may reference past conversations that occurred outside the current context window
+- The `drill_down_memory` tool lets a persona with `*` tools fetch raw episodic details behind a core profile
+- The `update_core_memory` tool lets a persona correct or extend a core profile when new information supersedes it
 
 ## System Defaults
 
