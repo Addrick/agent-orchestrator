@@ -4,7 +4,7 @@ import sqlite3
 import logging
 import threading
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Generator, List, Optional, Tuple
 from pathlib import Path
 
@@ -136,7 +136,20 @@ class MemoryManager:
             );
             CREATE INDEX IF NOT EXISTS idx_segment_channel_persona ON Memory_Segments (channel, persona_name, server_id);
 
-
+            CREATE TABLE IF NOT EXISTS Segment_Failures (
+                failure_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel TEXT NOT NULL,
+                server_id TEXT,
+                persona_name TEXT NOT NULL,
+                start_interaction_id INTEGER NOT NULL,
+                end_interaction_id INTEGER NOT NULL,
+                message_count INTEGER NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 1,
+                last_attempt_at TIMESTAMP NOT NULL,
+                error_reason TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_segment_failure_lookup
+                ON Segment_Failures (channel, persona_name, server_id);
 
             CREATE TABLE IF NOT EXISTS Agent_Actions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -651,6 +664,105 @@ class MemoryManager:
 
             cursor.execute(query, params)
             return [dict(row) for row in cursor.fetchall()]
+
+    def record_segment_failure(
+            self,
+            channel: str,
+            server_id: Optional[str],
+            persona_name: str,
+            start_id: int,
+            end_id: int,
+            message_count: int,
+            error_reason: Optional[str] = None,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        with self._lock:
+            conn = self._get_connection()
+            # Check for existing failure covering same range
+            if server_id is not None:
+                existing = conn.execute(
+                    "SELECT failure_id, attempts FROM Segment_Failures"
+                    " WHERE channel = ? AND persona_name = ? AND server_id = ?"
+                    " AND start_interaction_id = ? AND end_interaction_id = ?",
+                    (channel, persona_name, server_id, start_id, end_id),
+                ).fetchone()
+            else:
+                existing = conn.execute(
+                    "SELECT failure_id, attempts FROM Segment_Failures"
+                    " WHERE channel = ? AND persona_name = ? AND server_id IS NULL"
+                    " AND start_interaction_id = ? AND end_interaction_id = ?",
+                    (channel, persona_name, start_id, end_id),
+                ).fetchone()
+
+            if existing:
+                conn.execute(
+                    "UPDATE Segment_Failures SET attempts = ?, last_attempt_at = ?, error_reason = ? WHERE failure_id = ?",
+                    (existing['attempts'] + 1, now, error_reason, existing['failure_id']),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO Segment_Failures"
+                    " (channel, server_id, persona_name, start_interaction_id, end_interaction_id,"
+                    "  message_count, attempts, last_attempt_at, error_reason)"
+                    " VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)",
+                    (channel, server_id, persona_name, start_id, end_id, message_count, now, error_reason),
+                )
+            conn.commit()
+
+    def get_failed_segment_ranges(
+            self,
+            channel: str,
+            persona_name: str,
+            server_id: Optional[str] = None,
+            max_attempts: int = 3,
+            cooldown_hours: float = 24.0,
+    ) -> List[Dict[str, Any]]:
+        with self._lock:
+            conn = self._get_connection()
+            cutoff = datetime.now(timezone.utc).timestamp() - (cooldown_hours * 3600)
+            query = (
+                "SELECT start_interaction_id, end_interaction_id, attempts, last_attempt_at, error_reason"
+                " FROM Segment_Failures"
+                " WHERE channel = ? AND persona_name = ?"
+            )
+            params: List[Any] = [channel, persona_name]
+            if server_id is not None:
+                query += " AND server_id = ?"
+                params.append(server_id)
+            else:
+                query += " AND server_id IS NULL"
+            # Still blocked: either under max attempts with cooldown, or at/over max attempts
+            query += " AND (attempts >= ? OR last_attempt_at > ?)"
+            params.extend([max_attempts, datetime.fromtimestamp(cutoff, tz=timezone.utc)])
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def clear_segment_failure(
+            self,
+            channel: str,
+            persona_name: str,
+            server_id: Optional[str],
+            start_id: int,
+            end_id: int,
+    ) -> None:
+        with self._lock:
+            conn = self._get_connection()
+            if server_id is not None:
+                conn.execute(
+                    "DELETE FROM Segment_Failures"
+                    " WHERE channel = ? AND persona_name = ? AND server_id = ?"
+                    " AND start_interaction_id = ? AND end_interaction_id = ?",
+                    (channel, persona_name, server_id, start_id, end_id),
+                )
+            else:
+                conn.execute(
+                    "DELETE FROM Segment_Failures"
+                    " WHERE channel = ? AND persona_name = ? AND server_id IS NULL"
+                    " AND start_interaction_id = ? AND end_interaction_id = ?",
+                    (channel, persona_name, start_id, end_id),
+                )
+            conn.commit()
 
     def get_active_channels(self, model_name: Optional[str] = None) -> List[Tuple[str, str, Optional[str]]]:
         with self._lock:

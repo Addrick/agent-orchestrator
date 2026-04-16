@@ -328,6 +328,27 @@ class MemoryAgent(Agent):
         if not segments:
             return 0
 
+        # Filter out segments that overlap with recently-failed ranges
+        failed_ranges = self.memory_manager.get_failed_segment_ranges(
+            channel=channel, persona_name=persona_name, server_id=server_id,
+        )
+        if failed_ranges:
+            original_count = len(segments)
+            segments = [
+                seg for seg in segments
+                if not any(
+                    seg['start_id'] >= fr['start_interaction_id'] and seg['end_id'] <= fr['end_interaction_id']
+                    for fr in failed_ranges
+                )
+            ]
+            skipped = original_count - len(segments)
+            if skipped:
+                logger.info(
+                    f"MemoryAgent: {channel}/{persona_name} — skipped {skipped} segments matching prior failures "
+                    f"(cooldown/max-retries). {len(segments)} remaining.")
+            if not segments:
+                return 0
+
         total_committed = 0
         for i, segment in enumerate(segments):
             if self._shutdown_event.is_set():
@@ -338,7 +359,12 @@ class MemoryAgent(Agent):
             summary_result = await self._summarize_segment(segment, embedding_service)
             if summary_result is None:
                 logger.warning(
-                    f"MemoryAgent: {channel}/{persona_name} — Segment {i + 1}/{len(segments)} failed summarization, skipping.")
+                    f"MemoryAgent: {channel}/{persona_name} — Segment {i + 1}/{len(segments)} failed summarization, recording failure.")
+                self.memory_manager.record_segment_failure(
+                    channel=channel, server_id=server_id, persona_name=persona_name,
+                    start_id=segment['start_id'], end_id=segment['end_id'],
+                    message_count=segment['count'],
+                )
                 continue
 
             summary_text, summary_emb, outlier_ids = summary_result
@@ -404,6 +430,11 @@ class MemoryAgent(Agent):
                 if outlier_ids:
                     logger.info(f"MemoryAgent: Excluded {len(outlier_ids)} outliers from summary {summary_id}. They remain NULL for re-queueing.")
 
+            # Clear any prior failure record now that this range succeeded
+            self.memory_manager.clear_segment_failure(
+                channel=channel, persona_name=persona_name, server_id=server_id,
+                start_id=segment['start_id'], end_id=segment['end_id'],
+            )
             total_committed += 1
             logger.info(f"MemoryAgent: {channel}/{persona_name} — Segment {i + 1}/{len(segments)} committed.")
 
