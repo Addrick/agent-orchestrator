@@ -48,7 +48,8 @@ class Persona:
             memory_mode: Any = MemoryMode.CHANNEL_ISOLATED,
             service_bindings: Optional[List[str]] = None,
             include_ambient_memory: bool = True,
-            thinking_level: Optional[str] = None
+            thinking_level: Optional[str] = None,
+            long_term_memory: bool = True,
     ) -> None:
         self._name: str = persona_name
         self._model_name: str = model_name
@@ -71,6 +72,7 @@ class Persona:
         self._service_bindings: List[str] = service_bindings if service_bindings is not None else []
         self._include_ambient_memory: bool = include_ambient_memory
         self._thinking_level: Optional[str] = thinking_level
+        self._long_term_memory: bool = long_term_memory
 
     # --- Getters ---
 
@@ -130,6 +132,14 @@ class Persona:
     def get_include_ambient_memory(self) -> bool:
         """Whether to include ambient channel memories in long-term memory retrieval."""
         return self._include_ambient_memory
+
+    def get_long_term_memory(self) -> bool:
+        """Whether long-term memory retrieval is enabled for this persona."""
+        return self._long_term_memory
+
+    def get_thinking_level(self) -> Optional[str]:
+        """Returns the thinking level override for extended thinking models (e.g. 'minimal')."""
+        return self._thinking_level
 
     def get_memory_mode(self) -> MemoryMode:
         """Returns the persona's current memory retrieval strategy."""
@@ -260,6 +270,21 @@ class Persona:
             logger.warning(f"Invalid type for execution mode: {type(new_mode)}. No change made.")
             return
         logger.info(f"Persona '{self._name}' execution mode set to {self._execution_mode.name}.")
+
+    def set_include_ambient_memory(self, value: bool) -> None:
+        """Sets whether ambient channel memories are included in long-term retrieval."""
+        self._include_ambient_memory = value
+        logger.info(f"Persona '{self._name}' include_ambient_memory set to {value}.")
+
+    def set_long_term_memory(self, value: bool) -> None:
+        """Enables or disables long-term memory retrieval for this persona."""
+        self._long_term_memory = value
+        logger.info(f"Persona '{self._name}' long_term_memory set to {value}.")
+
+    def set_thinking_level(self, value: Optional[str]) -> None:
+        """Sets the thinking level for extended thinking models (e.g. 'minimal', None to clear)."""
+        self._thinking_level = value
+        logger.info(f"Persona '{self._name}' thinking_level set to {value}.")
 
     def set_service_bindings(self, bindings: List[str]) -> None:
         """Sets the list of service integrations this persona is bound to."""

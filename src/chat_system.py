@@ -263,7 +263,7 @@ class ChatSystem:
         """
         logger.warning(f"### RETRIEVAL_DIAGNOSTIC: Entering _retrieve_memory_block for {persona.get_name()} (Enabled: {MEMORY_RETRIEVAL_ENABLED}, Service: {'YES' if self._embedding_service else 'NO'})")
 
-        if not MEMORY_RETRIEVAL_ENABLED or self._embedding_service is None:
+        if not MEMORY_RETRIEVAL_ENABLED or not persona.get_long_term_memory() or self._embedding_service is None:
             return None
 
         # Map MemoryMode enum to string for retrieve_relevant_summaries

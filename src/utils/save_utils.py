@@ -94,6 +94,8 @@ def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
             "memory_mode": persona.get_memory_mode().name,
             "service_bindings": persona.get_service_bindings(),
             "include_ambient_memory": persona.get_include_ambient_memory(),
+            "thinking_level": persona.get_thinking_level(),
+            "long_term_memory": persona.get_long_term_memory(),
         }
         persona_list.append(persona_json)
     return persona_list
@@ -158,7 +160,8 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
                 memory_mode=new_persona.get("memory_mode"),
                 service_bindings=new_persona.get("service_bindings"),
                 include_ambient_memory=new_persona.get("include_ambient_memory", True),
-                thinking_level=new_persona.get("thinking_level")
+                thinking_level=new_persona.get("thinking_level"),
+                long_term_memory=new_persona.get("long_term_memory", True),
             )
 
         return personas
@@ -214,7 +217,8 @@ def load_system_personas_from_file() -> Dict[str, Any]:
                 memory_mode=new_persona.get("memory_mode", "TICKET_ISOLATED"),
                 service_bindings=new_persona.get("service_bindings"),
                 include_ambient_memory=new_persona.get("include_ambient_memory", True),
-                thinking_level=new_persona.get("thinking_level")
+                thinking_level=new_persona.get("thinking_level"),
+                long_term_memory=new_persona.get("long_term_memory", True),
             )
 
         return personas
