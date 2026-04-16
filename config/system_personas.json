@@ -110,9 +110,7 @@
       "top_k": null,
       "display_name_in_chat": false,
       "execution_mode": "AUTONOMOUS",
-      "enabled_tools": [
-        "submit_memory_summary"
-      ],
+      "enabled_tools": [],
       "memory_mode": "global"
     }
   ]

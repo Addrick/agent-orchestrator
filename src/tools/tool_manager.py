@@ -182,7 +182,6 @@ class MemoryToolHandler:
     def register(self, manager: ToolManager) -> None:
         manager.register("drill_down_memory", self._drill_down_memory)
         manager.register("update_core_memory", self._update_core_memory)
-        manager.register("submit_memory_summary", self._submit_memory_summary)
 
     async def _drill_down_memory(self, parent_summary_id: int) -> List[Dict[str, Any]]:
         logger.info(f"Executing drill_down_memory for parent {parent_summary_id}")
@@ -211,13 +210,3 @@ class MemoryToolHandler:
                 )
         return {"status": "success", "message": f"Core Profile {summary_id} updated."}
 
-    async def _submit_memory_summary(self, facts: List[str], outlier_ids: List[int]) -> Dict[str, Any]:
-        """
-        Handler for the agent tool to submit factual updates.
-        In this context, the agent is already managing the segment state, 
-        so this tool serves as a confirmation of the extracted metadata.
-        """
-        logger.info(f"submit_memory_summary received: {len(facts)} facts, {len(outlier_ids)} outliers.")
-        # Logic is handled within MemoryAgent's run_summarization loop, 
-        # but the tool must exit successfully to fulfill the LLM contract.
-        return {"status": "success", "processed_facts": len(facts)}
