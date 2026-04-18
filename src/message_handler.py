@@ -133,92 +133,143 @@ class BotLogic:
                                                                        "dump_context")
         return help_msg, False
 
+    async def _query_llm_with_selection_tool(
+        self,
+        persona_name: str,
+        tool_name: str,
+        arg_name: str,
+        choices: List[str],
+        none_sentinel: str,
+        user_query: str,
+        tool_description: str,
+    ) -> Optional[str]:
+        """
+        Run a single-shot structured selection via TextEngine + inline tool schema.
+        Bypasses ChatSystem (no history, memory, or channel side-effects).
+        Returns the chosen string (verbatim from `choices`) or None for no-match.
+        """
+        persona = self.chat_system.personas.get(persona_name)
+        if not persona:
+            logger.warning(f"Selector persona '{persona_name}' not found")
+            return None
+
+        enum_values = list(choices) + [none_sentinel]
+        selection_tool = {
+            "type": "function",
+            "function": {
+                "name": tool_name,
+                "description": tool_description,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        arg_name: {
+                            "type": "string",
+                            "enum": enum_values,
+                            "description": (
+                                f"Exact value from the provided list, or '{none_sentinel}' if no reasonable match."
+                            ),
+                        }
+                    },
+                    "required": [arg_name],
+                },
+            },
+        }
+
+        prompt = (
+            f"User query: {user_query}\n\n"
+            f"Available options:\n" + "\n".join(f"- {c}" for c in choices) + "\n\n"
+            f"Call {tool_name} with the best match. Use '{none_sentinel}' if nothing matches."
+        )
+
+        try:
+            response, _ = await self.chat_system.text_engine.generate_response(
+                persona_config=persona.get_config_for_engine(),
+                context_object={
+                    "persona_prompt": persona.get_prompt(),
+                    "history": [{"role": "user", "content": prompt}],
+                    "current_message": {"text": prompt, "image_url": None},
+                },
+                tools=[selection_tool],
+            )
+        except Exception as e:
+            logger.error(f"Error during LLM selection ({tool_name}): {e}", exc_info=True)
+            return None
+
+        return self._parse_selection_response(
+            response, tool_name, arg_name, choices, none_sentinel
+        )
+
+    @staticmethod
+    def _parse_selection_response(
+        response: Dict[str, Any],
+        tool_name: str,
+        arg_name: str,
+        choices: List[str],
+        none_sentinel: str,
+    ) -> Optional[str]:
+        if response.get("type") != "tool_calls":
+            logger.warning(f"{tool_name}: model returned text, not a tool call: {response.get('content', '')[:120]}")
+            return None
+
+        for call in response.get("calls", []):
+            if call.get("name") != tool_name:
+                continue
+            args = call.get("arguments", {})
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError:
+                    logger.warning(f"{tool_name}: bad JSON args: {args!r}")
+                    return None
+            choice = args.get(arg_name)
+            if not isinstance(choice, str) or choice == none_sentinel:
+                return None
+            for c in choices:
+                if c.lower() == choice.lower():
+                    return c
+            logger.warning(f"{tool_name}: model returned off-list value '{choice}'")
+            return None
+
+        return None
+
     async def _query_llm_for_model_selection(self, user_query: str) -> Optional[str]:
         """
         Query model selector persona to find best matching model.
-        Returns model name if successful, None if persona unavailable or parsing fails.
+        Returns model name if successful, None if persona unavailable or no match.
         """
-        try:
-            # # Get the model selector persona
-            # selector_persona = self.chat_system.personas.get(MODEL_SELECTOR_PERSONA_NAME)
-            #
-            # if not selector_persona:
-            #     logger.warning(f"Model selector persona '{MODEL_SELECTOR_PERSONA_NAME}' not found")
-            #     return None
-
-            # Build available models list
-            models_str = json.dumps(self.chat_system.models_available, indent=2)
-
-            # Construct query message
-            user_message = f"Available models:\n{models_str}\n\nUser query: {user_query}\n\nSelected model:"
-            #
-            # # Build context for text_engine
-            # context = {
-            #     "persona_prompt": selector_persona.get_prompt(),
-            #     "history": [],
-            #     "current_message": {"text": user_message, "image_url": None}
-            # }
-
-            response_text, response_type, _ = await self.chat_system.generate_response(
-                persona_name=MODEL_SELECTOR_PERSONA_NAME,
-                user_identifier="n/a",
-                channel="model_selector_query",
-                message=user_message,
-                server_id="model_selector_query",
-                image_url=None,
-                history_limit=0,
-                user_display_name="n/a"
-            )
-
-            if response_text:
-                model_name = response_text.strip()
-
-                # Validate response
-                if model_name == "DEFAULT":
-                    return None
-
-                # Check if returned model exists
-                if model_utils.check_model_available(model_name):
-                    return model_name
-
+        models_list: List[str] = []
+        for models in self.chat_system.models_available.values():
+            if isinstance(models, list):
+                models_list.extend(models)
+        if not models_list:
             return None
 
-        except Exception as e:
-            logger.error(f"Error during LLM model selection: {e}", exc_info=True)
-            return None
+        return await self._query_llm_with_selection_tool(
+            persona_name=MODEL_SELECTOR_PERSONA_NAME,
+            tool_name="select_model",
+            arg_name="model",
+            choices=sorted(models_list),
+            none_sentinel="DEFAULT",
+            user_query=user_query,
+            tool_description="Pick the model ID from the available list that best matches the user query.",
+        )
 
     async def _query_llm_for_tool_selection(self, user_query: str, available_tools: List[str]) -> Optional[str]:
         """
         Query tool selector persona to find best matching tool name.
-        Returns exact tool name if successful, None if persona unavailable or no match.
+        Returns exact tool name if successful, None if no match.
         """
-        try:
-            tools_str = "\n".join(available_tools)
-            user_message = f"Available tools:\n{tools_str}\n\nUser query: {user_query}\n\nMatched tool:"
-
-            response_text, _, _ = await self.chat_system.generate_response(
-                persona_name=TOOL_SELECTOR_PERSONA_NAME,
-                user_identifier="n/a",
-                channel="tool_selector_query",
-                message=user_message,
-                server_id="tool_selector_query",
-                image_url=None,
-                history_limit=0,
-                user_display_name="n/a"
-            )
-
-            if response_text:
-                tool_name = response_text.strip()
-                if tool_name == "NONE":
-                    return None
-                if tool_name in available_tools:
-                    return tool_name
-
+        if not available_tools:
             return None
-
-        except Exception as e:
-            logger.error(f"Error during LLM tool selection: {e}", exc_info=True)
-            return None
+        return await self._query_llm_with_selection_tool(
+            persona_name=TOOL_SELECTOR_PERSONA_NAME,
+            tool_name="select_tool",
+            arg_name="tool",
+            choices=available_tools,
+            none_sentinel="NONE",
+            user_query=user_query,
+            tool_description="Pick the tool name from the available list that best matches the user query.",
+        )
 
     def _handle_remember(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[Optional[str], bool]:
         if not args:
@@ -439,16 +490,19 @@ class BotLogic:
             return f"Model for {persona.get_name()} set to '{model_name}'.", True
 
         # Try LLM-assisted selection
-        model = " ".join(args)
-        selected_model = await self._query_llm_for_model_selection(model)
+        # Strip command words to avoid confusing the selector
+        query_parts = [a for i, a in enumerate(args) if not (i == 0 and a.lower() == 'model')]
+        model_query = " ".join(query_parts)
+
+        selected_model = await self._query_llm_for_model_selection(model_query)
 
         if selected_model:
             persona.set_model_name(selected_model)
-            return f"Model for {persona.get_name()} set to '{selected_model}' (matched from '{model}').", True
+            return f"Model for {persona.get_name()} set to '{selected_model}' (fuzzy matched '{model_query}').", True
 
         # Fallback to default
         persona.set_model_name(DEFAULT_MODEL_NAME)
-        return f"Could not find '{model}'. Model for {persona.get_name()} set to default: '{DEFAULT_MODEL_NAME}'.", True
+        return f"Could not find a match for '{model_query}'. Falling back to default: '{DEFAULT_MODEL_NAME}'.", True
 
     def _set_tokens(self, args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
         limit_str: str
