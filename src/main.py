@@ -23,10 +23,13 @@ from src.clients.notification import NotificationRouter, DiscordNotifier, Zammad
 
 from src.interfaces.discord_bot import create_discord_bot
 from src.interfaces.gmail_bot import create_gmail_bot
+from src.interfaces.kobold_adapter import create_kobold_adapter
 from config.global_config import (
     CHAT_LOG_LOCATION,
     DISCORD_BOT,
     GMAIL_BOT,
+    WEB_INTERFACE,
+    KOBOLD_PORT,
     MEMORY_DATABASE_FILE,
     UPDATE_MODELS_ON_STARTUP,
 )
@@ -106,6 +109,13 @@ def _register_interfaces(
         logger.info("Initializing Gmail bot...")
         gmail_bot = create_gmail_bot(bot)
         app.register_task("gmail", gmail_bot.start())
+
+    if WEB_INTERFACE:
+        logger.info(f"Initializing Kobold Web API on port {KOBOLD_PORT}...")
+        kobold_adapter = create_kobold_adapter(bot)
+        # Configure the adapter's port from the config
+        kobold_adapter.port = KOBOLD_PORT
+        app.register_task("kobold_api", kobold_adapter.start())
 
 
 def _register_agents(
