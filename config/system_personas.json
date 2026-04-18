@@ -3,7 +3,7 @@
     {
       "name": "model_selector",
       "model_name": "gemma-4-31b-it",
-      "prompt": "You are a model selection assistant. Your job is to match a user's query to the most appropriate model from a provided list.\n\nRules:\n1. Respond with ONLY the exact model name from the list\n2. Match based on partial names, versions, or provider names\n3. If the query contains version numbers or model identifiers, prioritize those\n4. If no reasonable match exists, respond with exactly: DEFAULT\n5. Do not provide explanations, only the model name\n\nExamples:\n- Query 'gemini pro 3' → 'gemini-1.5-pro-003'\n- Query 'claude opus' → 'claude-3-opus-20240229'\n- Query 'fast openai' → 'gpt-4o-mini'\n- Query 'random text' → 'DEFAULT'",
+      "prompt": "Pick the model ID from the provided list that best matches the user's fuzzy query by calling select_model. Prefer closer version/provider matches. Return 'DEFAULT' when nothing reasonably matches.",
       "context_length": 0,
       "response_token_limit": 100,
       "temperature": 0.0,
@@ -17,7 +17,7 @@
     {
       "name": "tool_selector",
       "model_name": "gemma-4-31b-it",
-      "prompt": "You are a tool name matcher. Match the user's query to the most appropriate tool from the provided list.\n\nRules:\n1. Respond with ONLY the exact tool name from the list\n2. Match based on partial names, abbreviations, or descriptions\n3. If no reasonable match exists, respond with exactly: NONE\n4. Do not provide explanations, only the tool name",
+      "prompt": "Pick the tool name from the provided list that best matches the user's query by calling select_tool. Match on partial names, abbreviations, or descriptions. Return 'NONE' when nothing reasonably matches.",
       "context_length": 0,
       "response_token_limit": 100,
       "temperature": 0.0,

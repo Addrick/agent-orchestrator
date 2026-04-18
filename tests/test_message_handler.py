@@ -752,3 +752,158 @@ async def test_detail_shows_all_properties(bot_logic):
     assert not missing, (
         f"detail command is missing these fields: {missing}\n\nFull output:\n{result['response']}"
     )
+
+
+# --- Tests for the tool-call-based selection helper ---
+
+@pytest.fixture
+def bot_logic_with_selector(mock_chat_system_with_state):
+    """BotLogic with model_selector + tool_selector personas and a mocked text_engine."""
+    mock_chat_system_with_state.personas["model_selector"] = Persona(
+        "model_selector", "gemma-4-31b-it", "Pick a model via select_model."
+    )
+    mock_chat_system_with_state.personas["tool_selector"] = Persona(
+        "tool_selector", "gemma-4-31b-it", "Pick a tool via select_tool."
+    )
+    mock_chat_system_with_state.models_available = {
+        "From Google": ["gemini-2.5-flash-lite", "gemini-2.5-flash"],
+        "From Anthropic": ["claude-opus-4-7"],
+    }
+    mock_chat_system_with_state.text_engine = MagicMock()
+    mock_chat_system_with_state.text_engine.generate_response = AsyncMock()
+    return BotLogic(mock_chat_system_with_state)
+
+
+@pytest.mark.asyncio
+async def test_model_selection_returns_enum_choice(bot_logic_with_selector, mock_chat_system_with_state):
+    mock_chat_system_with_state.text_engine.generate_response.return_value = (
+        {"type": "tool_calls", "calls": [
+            {"name": "select_model", "arguments": {"model": "gemini-2.5-flash"}}
+        ]},
+        None,
+    )
+    result = await bot_logic_with_selector._query_llm_for_model_selection("gemini 2.5")
+    assert result == "gemini-2.5-flash"
+
+
+@pytest.mark.asyncio
+async def test_model_selection_default_sentinel_returns_none(bot_logic_with_selector, mock_chat_system_with_state):
+    mock_chat_system_with_state.text_engine.generate_response.return_value = (
+        {"type": "tool_calls", "calls": [
+            {"name": "select_model", "arguments": {"model": "DEFAULT"}}
+        ]},
+        None,
+    )
+    assert await bot_logic_with_selector._query_llm_for_model_selection("gibberish") is None
+
+
+@pytest.mark.asyncio
+async def test_model_selection_text_response_returns_none(bot_logic_with_selector, mock_chat_system_with_state):
+    """If the model ignores the tool and returns plain text, no match."""
+    mock_chat_system_with_state.text_engine.generate_response.return_value = (
+        {"type": "text", "content": "gemini-2.5-flash"},
+        None,
+    )
+    assert await bot_logic_with_selector._query_llm_for_model_selection("gemini") is None
+
+
+@pytest.mark.asyncio
+async def test_model_selection_off_list_value_rejected(bot_logic_with_selector, mock_chat_system_with_state):
+    """Enum violation by the provider should not leak through."""
+    mock_chat_system_with_state.text_engine.generate_response.return_value = (
+        {"type": "tool_calls", "calls": [
+            {"name": "select_model", "arguments": {"model": "gpt-9"}}
+        ]},
+        None,
+    )
+    assert await bot_logic_with_selector._query_llm_for_model_selection("gpt") is None
+
+
+@pytest.mark.asyncio
+async def test_model_selection_string_arguments_parsed(bot_logic_with_selector, mock_chat_system_with_state):
+    """Some providers return tool arguments as a JSON string; parse it."""
+    mock_chat_system_with_state.text_engine.generate_response.return_value = (
+        {"type": "tool_calls", "calls": [
+            {"name": "select_model", "arguments": '{"model": "claude-opus-4-7"}'}
+        ]},
+        None,
+    )
+    result = await bot_logic_with_selector._query_llm_for_model_selection("opus")
+    assert result == "claude-opus-4-7"
+
+
+@pytest.mark.asyncio
+async def test_model_selection_case_insensitive(bot_logic_with_selector, mock_chat_system_with_state):
+    mock_chat_system_with_state.text_engine.generate_response.return_value = (
+        {"type": "tool_calls", "calls": [
+            {"name": "select_model", "arguments": {"model": "CLAUDE-OPUS-4-7"}}
+        ]},
+        None,
+    )
+    result = await bot_logic_with_selector._query_llm_for_model_selection("opus")
+    assert result == "claude-opus-4-7"
+
+
+@pytest.mark.asyncio
+async def test_model_selection_missing_persona_returns_none(bot_logic_with_selector, mock_chat_system_with_state):
+    del mock_chat_system_with_state.personas["model_selector"]
+    assert await bot_logic_with_selector._query_llm_for_model_selection("anything") is None
+    mock_chat_system_with_state.text_engine.generate_response.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_tool_selection_returns_choice(bot_logic_with_selector, mock_chat_system_with_state):
+    mock_chat_system_with_state.text_engine.generate_response.return_value = (
+        {"type": "tool_calls", "calls": [
+            {"name": "select_tool", "arguments": {"tool": "web_search"}}
+        ]},
+        None,
+    )
+    result = await bot_logic_with_selector._query_llm_for_tool_selection(
+        "search", ["web_search", "create_ticket"]
+    )
+    assert result == "web_search"
+
+
+@pytest.mark.asyncio
+async def test_tool_selection_none_sentinel(bot_logic_with_selector, mock_chat_system_with_state):
+    mock_chat_system_with_state.text_engine.generate_response.return_value = (
+        {"type": "tool_calls", "calls": [
+            {"name": "select_tool", "arguments": {"tool": "NONE"}}
+        ]},
+        None,
+    )
+    assert await bot_logic_with_selector._query_llm_for_tool_selection(
+        "unrelated", ["web_search"]
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_tool_selection_empty_list_returns_none(bot_logic_with_selector, mock_chat_system_with_state):
+    assert await bot_logic_with_selector._query_llm_for_tool_selection("x", []) is None
+    mock_chat_system_with_state.text_engine.generate_response.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_selection_tool_schema_enum_includes_sentinel(bot_logic_with_selector, mock_chat_system_with_state):
+    """Verify the tool schema passed to the engine has the sentinel in its enum."""
+    mock_chat_system_with_state.text_engine.generate_response.return_value = (
+        {"type": "tool_calls", "calls": [
+            {"name": "select_model", "arguments": {"model": "DEFAULT"}}
+        ]},
+        None,
+    )
+    await bot_logic_with_selector._query_llm_for_model_selection("q")
+    kwargs = mock_chat_system_with_state.text_engine.generate_response.call_args.kwargs
+    tools = kwargs["tools"]
+    assert len(tools) == 1
+    enum_values = tools[0]["function"]["parameters"]["properties"]["model"]["enum"]
+    assert "DEFAULT" in enum_values
+    assert "gemini-2.5-flash" in enum_values
+    assert "claude-opus-4-7" in enum_values
+
+
+@pytest.mark.asyncio
+async def test_selection_engine_exception_returns_none(bot_logic_with_selector, mock_chat_system_with_state):
+    mock_chat_system_with_state.text_engine.generate_response.side_effect = RuntimeError("boom")
+    assert await bot_logic_with_selector._query_llm_for_model_selection("q") is None
