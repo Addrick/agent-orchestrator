@@ -17,6 +17,7 @@ class KoboldAdapter:
         self.chat_system = chat_system
         self.host = host
         self.port = port
+        self.active_persona: Optional[str] = None
         self.app = FastAPI(title="DERPR Kobold Adapter")
         
         # Setup CORS to allow any origin (required for lite.koboldai.net)
@@ -33,9 +34,32 @@ class KoboldAdapter:
     def _setup_routes(self):
         @self.app.get("/api/v1/model")
         async def get_model():
-            """Returns the current persona name as the 'model'."""
-            persona_name = next(iter(self.chat_system.personas.keys()), "assistant")
-            return {"result": persona_name}
+            """Returns the current active persona name."""
+            return {"result": self._get_current_persona_name()}
+
+        @self.app.put("/api/v1/model")
+        async def set_model(request: Request):
+            """Sets the active persona."""
+            data = await request.json()
+            new_persona = data.get("model") or data.get("result")
+            if new_persona in self.chat_system.personas:
+                self.active_persona = new_persona
+                logger.info(f"Switched active persona to: {new_persona}")
+                return {"result": self.active_persona}
+            return {"error": f"Persona '{new_persona}' not found", "available": list(self.chat_system.personas.keys())}
+
+        @self.app.get("/v1/models")
+        async def list_models():
+            """OpenAI-compatible models list (returns all personas)."""
+            models = []
+            for name in self.chat_system.personas.keys():
+                models.append({
+                    "id": name,
+                    "object": "model",
+                    "owned_by": "derpr",
+                    "permission": []
+                })
+            return {"object": "list", "data": models}
 
         @self.app.get("/api/v1/info/version")
         async def get_info_version():
@@ -53,32 +77,36 @@ class KoboldAdapter:
 
         @self.app.get("/api/v1/config/max_context_length")
         async def get_max_context_length():
-            """Returns the context length of the first persona."""
-            persona_name = next(iter(self.chat_system.personas.keys()), "assistant")
+            """Returns the context length of the active persona."""
+            persona_name = self._get_current_persona_name()
             persona = self.chat_system.personas.get(persona_name)
             limit = persona.get_context_length() if persona else 8192
             return {"result": limit}
 
         @self.app.post("/api/v1/generate")
-        async def generate(request: Request):
+        async def generate(request: Request, persona: Optional[str] = None):
             """
             Handles text generation requests from Kobold Lite.
             Extracts the last user message from the prompt and routes it through ChatSystem.
+            Supports selecting persona via query param '?persona=...' or 'model' field in JSON.
             """
             data = await request.json()
             prompt = data.get("prompt", "")
             
+            # Persona selection priority: 1. Query Param, 2. 'model' field, 3. Active Persona, 4. First in list
+            target_persona = persona or data.get("model") or self._get_current_persona_name()
+            
+            if target_persona not in self.chat_system.personas:
+                target_persona = self._get_current_persona_name()
+
             # Simple heuristic to extract the last user message from the multi-turn prompt
             user_msg = self._extract_user_message(prompt)
             
-            # Use the first available persona
-            persona_name = next(iter(self.chat_system.personas.keys()), "assistant")
-
-            logger.info(f"Kobold API received prompt. Extracted message: '{user_msg[:50]}...'")
+            logger.info(f"Kobold API received prompt for persona '{target_persona}'. Extracted message: '{user_msg[:50]}...'")
 
             # Route to ChatSystem
             response_text, response_type, _, _ = await self.chat_system.generate_response(
-                persona_name=persona_name,
+                persona_name=target_persona,
                 user_identifier="web_user",
                 channel="web_interface",
                 message=user_msg,
@@ -131,6 +159,12 @@ class KoboldAdapter:
 
         # Fallback: Just take the last 500 chars if no markers found, or the whole thing if it's short
         return prompt.strip()[-1000:]
+
+    def _get_current_persona_name(self) -> str:
+        """Helper to get the active persona name or a sane default."""
+        if self.active_persona and self.active_persona in self.chat_system.personas:
+            return self.active_persona
+        return next(iter(self.chat_system.personas.keys()), "assistant")
 
     async def start(self):
         """Runs the server. Must be called as a coroutine."""
