@@ -501,18 +501,18 @@ class ChatSystem:
             user_display_name: Optional[str] = None,
             platform_message_id: Optional[str] = None,
             timestamp: Optional[datetime] = None
-    ) -> Tuple[str, ResponseType, Optional[int]]:
+    ) -> Tuple[str, ResponseType, Optional[int], Optional[int]]:
         command_result: Optional[Dict[str, Any]] = await self.bot_logic.preprocess_message(
             persona_name, user_identifier, message
         )
         if command_result:
             if command_result.get("mutated", False):
                 save_personas_to_file(self.personas)
-            return command_result["response"], ResponseType.DEV_COMMAND, None
+            return command_result["response"], ResponseType.DEV_COMMAND, None, None
 
         persona: Optional[Persona] = self.personas.get(persona_name)
         if not persona:
-            return "Error: Persona not found.", ResponseType.DEV_COMMAND, None
+            return "Error: Persona not found.", ResponseType.DEV_COMMAND, None, None
 
         ctx = RequestContext(
             persona=persona, persona_name=persona_name,
@@ -545,7 +545,7 @@ class ChatSystem:
                     reply_to_id=user_interaction_id,
                 )
 
-            return response_text, response_type, assistant_id
+            return response_text, response_type, assistant_id, user_interaction_id
 
         except LLMCommunicationError as e:
             logger.error(f"A recoverable LLM communication error occurred for {user_identifier}: {e}")
@@ -556,28 +556,28 @@ class ChatSystem:
                 )
             error_msg = ("I'm not sure how to continue. Could you please rephrase?" if "empty response" in str(e) else
                          "Error while generating a response: " + str(e))
-            return error_msg, ResponseType.DEV_COMMAND, None
+            return error_msg, ResponseType.DEV_COMMAND, None, None
         except Exception as e:
             logger.error(f"A critical error occurred in generate_response for {user_identifier}: {e}", exc_info=True)
             return ("An internal error occurred while processing your request.",
-                    ResponseType.DEV_COMMAND, None)
+                    ResponseType.DEV_COMMAND, None, None)
 
     async def resume_pending_confirmation(
             self, user_identifier: str, persona_name: str, approved: bool
-    ) -> Tuple[str, ResponseType, Optional[int]]:
+    ) -> Tuple[str, ResponseType, Optional[int], Optional[int]]:
         """Resumes a tool execution that was paused for user confirmation."""
         key = (user_identifier, persona_name)
         pending = self._pending_confirmations.pop(key, None)
 
         if not pending:
-            return "No pending confirmation found.", ResponseType.DEV_COMMAND, None
+            return "No pending confirmation found.", ResponseType.DEV_COMMAND, None, None
 
         if time.time() - pending.created_at > PENDING_CONFIRMATION_TIMEOUT:
-            return "Confirmation expired. Please try again.", ResponseType.DEV_COMMAND, None
+            return "Confirmation expired. Please try again.", ResponseType.DEV_COMMAND, None, None
 
         persona = self.personas.get(pending.persona_name)
         if not persona:
-            return "Error: Persona not found.", ResponseType.DEV_COMMAND, None
+            return "Error: Persona not found.", ResponseType.DEV_COMMAND, None, None
 
         conversation_history = pending.conversation_history
 
@@ -613,9 +613,9 @@ class ChatSystem:
                     content=final_text, timestamp=datetime.now(),
                 )
 
-            return final_text, ResponseType.LLM_GENERATION, assistant_id
+            return final_text, ResponseType.LLM_GENERATION, assistant_id, None
 
         except Exception as e:
             logger.error(f"Error resuming pending confirmation for {user_identifier}: {e}", exc_info=True)
             return ("An error occurred while processing the confirmed action.",
-                    ResponseType.DEV_COMMAND, None)
+                    ResponseType.DEV_COMMAND, None, None)

@@ -46,7 +46,7 @@ def chat_system_with_mocks():
 async def test_generate_response_handles_dev_command(chat_system_with_mocks):
     system, _, text_engine_mock, _, _ = chat_system_with_mocks
     system.bot_logic.preprocess_message.return_value = {"response": "Dev command output", "mutated": False}
-    response, _, _ = await system.generate_response("test_persona", "user", "channel", "what model")
+    response, _, _ , _ = await system.generate_response("test_persona", "user", "channel", "what model")
     assert response == "Dev command output"
     text_engine_mock.generate_response.assert_not_called()
 
@@ -54,7 +54,7 @@ async def test_generate_response_handles_dev_command(chat_system_with_mocks):
 @pytest.mark.asyncio
 async def test_generate_response_handles_persona_not_found(chat_system_with_mocks):
     system, _, text_engine_mock, _, _ = chat_system_with_mocks
-    response, _, _ = await system.generate_response("unknown_persona", "user", "channel", "test")
+    response, _, _ , _ = await system.generate_response("unknown_persona", "user", "channel", "test")
     assert "Error: Persona not found" in response
     text_engine_mock.generate_response.assert_not_called()
 
@@ -63,7 +63,7 @@ async def test_generate_response_handles_persona_not_found(chat_system_with_mock
 async def test_generate_response_handles_llm_communication_error(chat_system_with_mocks):
     system, _, text_engine_mock, _, _ = chat_system_with_mocks
     text_engine_mock.generate_response.side_effect = LLMCommunicationError("API is down")
-    response, _, _ = await system.generate_response("test_persona", "user", "channel", "test")
+    response, _, _ , _ = await system.generate_response("test_persona", "user", "channel", "test")
     assert "Error while generating a response:" in response
 
 
@@ -115,7 +115,7 @@ def test_store_api_request_no_tools_when_never_set(chat_system_with_mocks):
 async def test_generate_response_handles_generic_exception(chat_system_with_mocks):
     system, memory_manager, _, _, _ = chat_system_with_mocks
     memory_manager.get_channel_history.side_effect = Exception("DB is locked")
-    response, _, _ = await system.generate_response("test_persona", "user", "channel", "test")
+    response, _, _ , _ = await system.generate_response("test_persona", "user", "channel", "test")
     assert "An internal error occurred" in response
 
 
@@ -127,7 +127,7 @@ async def test_generate_response_exits_after_max_tool_calls(chat_system_with_moc
     # Make the text engine always return a tool call
     text_engine_mock.generate_response.return_value = (tool_call, {})
     tool_manager_mock.execute_tool.return_value = {"result": "ok"}
-    response, _, _ = await system.generate_response("test_persona", "user", "channel", "test")
+    response, _, _ , _ = await system.generate_response("test_persona", "user", "channel", "test")
     assert "stuck in a loop" in response
     # Called exactly MAX_TOOL_CALLS times
     assert text_engine_mock.generate_response.call_count == 5
@@ -148,7 +148,7 @@ async def test_tool_use_in_autonomous_mode(chat_system_with_mocks):
     text_engine_mock.generate_response.side_effect = [(tool_call, {}), (final_response, {})]
     tool_manager_mock.execute_tool.return_value = {"result": {"id": 123, "state": "closed"}}
 
-    response, _, _ = await system.generate_response('test_persona', 'user', 'channel', 'close ticket')
+    response, _, _ , _ = await system.generate_response('test_persona', 'user', 'channel', 'close ticket')
 
     tool_manager_mock.execute_tool.assert_called_once_with('update_ticket', state='closed')
     assert response == 'I have closed the ticket.'
@@ -190,7 +190,7 @@ async def test_confirm_mode_returns_pending_for_write_tools(chat_system_with_moc
                  'calls': [{'id': 'call_1', 'name': 'update_ticket', 'arguments': {'state': 'closed'}}]}
     text_engine_mock.generate_response.return_value = (tool_call, {})
 
-    response, response_type, _ = await system.generate_response('test_persona', 'user', 'channel', 'close it')
+    response, response_type, _ , _ = await system.generate_response('test_persona', 'user', 'channel', 'close it')
 
     assert response_type == ResponseType.PENDING_CONFIRMATION
     assert 'update_ticket' in response
@@ -210,7 +210,7 @@ async def test_confirm_mode_auto_executes_read_only_tools(chat_system_with_mocks
     text_engine_mock.generate_response.side_effect = [(tool_call, {}), (final_response, {})]
     tool_manager_mock.execute_tool.return_value = {"result": [{"id": 1}, {"id": 2}, {"id": 3}]}
 
-    response, response_type, _ = await system.generate_response('test_persona', 'user', 'channel', 'search tickets')
+    response, response_type, _ , _ = await system.generate_response('test_persona', 'user', 'channel', 'search tickets')
 
     assert response_type == ResponseType.LLM_GENERATION
     assert response == 'Found 3 tickets.'
@@ -232,7 +232,7 @@ async def test_confirm_mode_mixed_tools_executes_reads_and_pends_writes(chat_sys
     text_engine_mock.generate_response.return_value = (tool_call, {})
     tool_manager_mock.execute_tool.return_value = {"result": [{"id": 1}]}
 
-    response, response_type, _ = await system.generate_response('test_persona', 'user', 'channel', 'find and close')
+    response, response_type, _ , _ = await system.generate_response('test_persona', 'user', 'channel', 'find and close')
 
     assert response_type == ResponseType.PENDING_CONFIRMATION
     assert 'update_ticket' in response
@@ -258,7 +258,7 @@ async def test_resume_pending_confirmation_approved(chat_system_with_mocks):
     final_response = {'type': 'text', 'content': 'Done, ticket closed.'}
     text_engine_mock.generate_response.return_value = (final_response, {})
 
-    response, response_type, _ = await system.resume_pending_confirmation('user', 'test_persona', approved=True)
+    response, response_type, _, _ = await system.resume_pending_confirmation('user', 'test_persona', approved=True)
 
     assert response_type == ResponseType.LLM_GENERATION
     assert response == 'Done, ticket closed.'
@@ -282,7 +282,7 @@ async def test_resume_pending_confirmation_denied(chat_system_with_mocks):
     final_response = {'type': 'text', 'content': 'Understood, I won\'t close the ticket.'}
     text_engine_mock.generate_response.return_value = (final_response, {})
 
-    response, response_type, _ = await system.resume_pending_confirmation('user', 'test_persona', approved=False)
+    response, response_type, _, _ = await system.resume_pending_confirmation('user', 'test_persona', approved=False)
 
     assert response_type == ResponseType.LLM_GENERATION
     tool_manager_mock.execute_tool.assert_not_called()
@@ -642,7 +642,7 @@ async def test_generate_response_logs_user_and_assistant(chat_system_with_mocks)
     memory_mock.get_channel_history.return_value = []
     memory_mock.log_message.return_value = 42
 
-    _, response_type, _ = await system.generate_response(
+    _, response_type, _, _ = await system.generate_response(
         "test_persona", "user", "channel", "hello",
         platform_message_id="msg_1", user_display_name="Alice"
     )
@@ -711,7 +711,7 @@ async def test_generate_response_returns_interaction_id(chat_system_with_mocks):
     memory_mock.get_channel_history.return_value = []
     memory_mock.log_message.side_effect = [10, 42]  # user id, assistant id
 
-    _, _, assistant_id = await system.generate_response(
+    _, _, assistant_id, _ = await system.generate_response(
         "test_persona", "user", "channel", "hello"
     )
 
