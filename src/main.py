@@ -8,6 +8,7 @@ from typing import Optional, Dict, Any
 
 from src.chat_system import ChatSystem
 from src.engine import TextEngine
+from src.stream_engine import StreamEngine
 from src.database.memory_manager import MemoryManager
 from src.database.memory_consolidation import MemoryConsolidator
 from src.embedding_service import EmbeddingService, GeminiEmbeddingProvider
@@ -153,6 +154,7 @@ async def main() -> None:
 
     # 2. Initialize the centralized text generation engine
     text_engine = TextEngine()
+    stream_engine = StreamEngine()
 
     # 3. Initialize the Zammad client for ticketing (optional)
     zammad_client = _init_zammad_client()
@@ -165,6 +167,7 @@ async def main() -> None:
         memory_manager=memory_manager,
         text_engine=text_engine,
         embedding_service=embedding_service,
+        stream_engine=stream_engine,
     )
 
     # 5. Register service integrations

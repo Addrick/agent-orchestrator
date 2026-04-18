@@ -7,7 +7,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, auto
-from typing import Any, Coroutine, Dict, List, Optional, Set, Tuple
+from typing import Any, AsyncIterator, Coroutine, Dict, List, Optional, Set, Tuple
 
 from config.global_config import MAX_TOOL_CALLS, MAX_CACHED_API_REQUESTS, \
     PENDING_CONFIRMATION_TIMEOUT, MEMORY_RETRIEVAL_ENABLED, MEMORY_MAX_SUMMARIES_IN_CONTEXT
@@ -15,6 +15,7 @@ from src.embedding_service import EmbeddingService
 from src.clients.service_integration import ServiceIntegration
 from src.database.memory_manager import MemoryManager
 from src.engine import LLMCommunicationError, TextEngine
+from src.stream_engine import StreamEngine
 from src.message_handler import BotLogic
 from src.persona import Persona, ExecutionMode, MemoryMode
 from src.tools.definitions import WRITE_TOOLS, MODEL_INCOMPATIBLE_TOOLS
@@ -91,10 +92,12 @@ class RequestContext:
 
 class ChatSystem:
     def __init__(self, memory_manager: MemoryManager, text_engine: TextEngine,
-                 embedding_service: Optional[EmbeddingService] = None) -> None:
+                 embedding_service: Optional[EmbeddingService] = None,
+                 stream_engine: Optional[StreamEngine] = None) -> None:
         self.personas: Dict[str, Persona] = load_personas_from_file() or {}
         self.memory_manager: MemoryManager = memory_manager
         self.text_engine: TextEngine = text_engine
+        self.stream_engine: Optional[StreamEngine] = stream_engine
         self.tool_manager: ToolManager = ToolManager()
         WebSearchHandler().register(self.tool_manager)
         
@@ -561,6 +564,222 @@ class ChatSystem:
             logger.error(f"A critical error occurred in generate_response for {user_identifier}: {e}", exc_info=True)
             return ("An internal error occurred while processing your request.",
                     ResponseType.DEV_COMMAND, None, None)
+
+    async def stream_response(
+            self,
+            persona_name: str,
+            user_identifier: str,
+            channel: str,
+            message: str,
+            server_id: Optional[str] = None,
+            image_url: Optional[str] = None,
+            history_limit: Optional[int] = None,
+            user_display_name: Optional[str] = None,
+            platform_message_id: Optional[str] = None,
+            timestamp: Optional[datetime] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Streaming counterpart to generate_response.
+
+        Yields events for the caller to forward over SSE / websocket:
+          {"type": "token", "text": "..."}       — incremental output text
+          {"type": "status", "text": "..."}       — lifecycle markers (e.g. fallback notices)
+          {"type": "done",  "full_text": "...",
+                            "finish_reason": "stop"|"error"|"cancelled",
+                            "response_type": "llm"|"dev_command"|"pending_confirmation"}
+          {"type": "error", "text": "..."}
+
+        The assistant message is logged to the memory DB only if the stream
+        completes without error. The user message is logged up front so it is
+        preserved even on client disconnect.
+        """
+        # 1. Dev-command preprocessing (e.g. /reset, /persona). Emit entire reply as one chunk.
+        command_result: Optional[Dict[str, Any]] = await self.bot_logic.preprocess_message(
+            persona_name, user_identifier, message
+        )
+        if command_result:
+            if command_result.get("mutated", False):
+                save_personas_to_file(self.personas)
+            reply = command_result["response"]
+            yield {"type": "token", "text": reply}
+            yield {"type": "done", "full_text": reply,
+                   "finish_reason": "stop", "response_type": "dev_command"}
+            return
+
+        persona: Optional[Persona] = self.personas.get(persona_name)
+        if not persona:
+            yield {"type": "error", "text": "Persona not found."}
+            yield {"type": "done", "full_text": "",
+                   "finish_reason": "error", "response_type": "dev_command"}
+            return
+
+        ctx = RequestContext(
+            persona=persona, persona_name=persona_name,
+            user_identifier=user_identifier, channel=channel, message=message,
+            server_id=server_id, image_url=image_url,
+            history_limit=history_limit, user_display_name=user_display_name,
+        )
+
+        user_ts = timestamp or datetime.now()
+        user_interaction_id: Optional[int] = None
+        try:
+            await self._prepare_request(ctx)
+
+            # Log the user message up front so client disconnects don't lose it.
+            user_interaction_id = self.memory_manager.log_message(
+                user_identifier=user_identifier, persona_name=persona_name,
+                channel=channel, author_role='user',
+                author_name=user_display_name, content=message,
+                timestamp=user_ts, server_id=server_id,
+                platform_message_id=platform_message_id,
+            )
+
+            model_name = persona.get_config_for_engine().get("model_name", "")
+            use_stream = (
+                self.stream_engine is not None
+                and self.stream_engine.supports(model_name)
+            )
+            logger.info(
+                f"stream_response: persona='{persona_name}' model='{model_name}' "
+                f"stream_engine={'set' if self.stream_engine else 'None'} "
+                f"use_stream={use_stream}"
+            )
+
+            if not use_stream:
+                # Fallback: run normal tool loop, emit full text as a single chunk.
+                response_text, response_type, tool_context_json = await self._execute_request(ctx)
+                yield {"type": "token", "text": response_text}
+                assistant_id: Optional[int] = None
+                if response_type == ResponseType.LLM_GENERATION and response_text and response_text.strip():
+                    assistant_id = self.memory_manager.log_message(
+                        user_identifier=user_identifier, persona_name=persona_name,
+                        channel=channel, author_role='assistant',
+                        author_name=persona_name, content=response_text,
+                        timestamp=datetime.now(), server_id=server_id,
+                        tool_context=tool_context_json,
+                        reply_to_id=user_interaction_id,
+                    )
+                yield {
+                    "type": "done",
+                    "full_text": response_text,
+                    "finish_reason": "stop",
+                    "response_type": (
+                        "pending_confirmation" if response_type == ResponseType.PENDING_CONFIRMATION
+                        else "llm" if response_type == ResponseType.LLM_GENERATION
+                        else "dev_command"
+                    ),
+                    "assistant_id": assistant_id,
+                    "user_interaction_id": user_interaction_id,
+                }
+                return
+
+            # --- Streaming tool loop ---
+            assert self.stream_engine is not None  # narrowed by use_stream check above
+            history_start = len(ctx.conversation_history)
+            final_text = ""
+            response_type = ResponseType.LLM_GENERATION
+            for i in range(MAX_TOOL_CALLS):
+                iter_text = ""
+                tool_calls: List[Dict[str, Any]] = []
+                context_object: Dict[str, Any] = {
+                    "persona_prompt": ctx.persona.get_prompt(),
+                    "history": ctx.conversation_history,
+                    "current_message": {"text": "", "image_url": ctx.image_url if i == 0 else None},
+                }
+                async for event in self.stream_engine.stream_local(
+                    ctx.persona.get_config_for_engine(), context_object, tools=ctx.tools_for_llm
+                ):
+                    etype = event.get("type")
+                    if etype == "api_payload":
+                        self._store_api_request(
+                            ctx.user_identifier, ctx.persona_name, event["payload"],
+                            tools_for_llm=ctx.tools_for_llm if i == 0 else None,
+                        )
+                    elif etype == "text_delta":
+                        iter_text += event["text"]
+                        yield {"type": "token", "text": event["text"]}
+                    elif etype == "tool_calls":
+                        tool_calls = event.get("calls", [])
+                    elif etype == "done":
+                        iter_text = event.get("full_text", iter_text)
+
+                if not tool_calls:
+                    final_text = iter_text
+                    break
+
+                # Record the assistant tool_calls turn, then execute.
+                ctx.conversation_history.append({"role": "assistant", "tool_calls": tool_calls})
+                read_calls = [c for c in tool_calls if c.get("name") not in WRITE_TOOLS]
+                write_calls = [c for c in tool_calls if c.get("name") in WRITE_TOOLS]
+                await self._execute_read_calls(read_calls, ctx.conversation_history)
+
+                if ctx.persona.get_execution_mode() == ExecutionMode.CONFIRM and write_calls:
+                    pending = PendingConfirmation(
+                        write_calls=write_calls,
+                        conversation_history=ctx.conversation_history,
+                        persona_name=ctx.persona_name,
+                        tools_for_llm=ctx.tools_for_llm,
+                        image_url=ctx.image_url,
+                    )
+                    self._pending_confirmations[(ctx.user_identifier, ctx.persona_name)] = pending
+                    descriptions = [
+                        f"- **{wc.get('name')}**: {json.dumps(wc.get('arguments', {}))}"
+                        for wc in write_calls
+                    ]
+                    confirm_msg = "I'd like to perform the following actions:\n" + "\n".join(descriptions)
+                    yield {"type": "token", "text": confirm_msg}
+                    yield {"type": "done", "full_text": confirm_msg,
+                           "finish_reason": "stop", "response_type": "pending_confirmation",
+                           "user_interaction_id": user_interaction_id}
+                    return
+
+                await self._execute_write_calls(write_calls, ctx.conversation_history)
+            else:
+                logger.error(f"Exceeded max tool calls ({MAX_TOOL_CALLS}) for user {user_identifier}.")
+                final_text = "I seem to be stuck in a loop. Could you please clarify your request?"
+                response_type = ResponseType.DEV_COMMAND
+
+            tool_msgs = ctx.conversation_history[history_start:]
+            tool_context_json = json.dumps(tool_msgs) if tool_msgs else None
+
+            assistant_id = None
+            if response_type == ResponseType.LLM_GENERATION and final_text and final_text.strip():
+                assistant_id = self.memory_manager.log_message(
+                    user_identifier=user_identifier, persona_name=persona_name,
+                    channel=channel, author_role='assistant',
+                    author_name=persona_name, content=final_text,
+                    timestamp=datetime.now(), server_id=server_id,
+                    tool_context=tool_context_json,
+                    reply_to_id=user_interaction_id,
+                )
+            yield {
+                "type": "done",
+                "full_text": final_text,
+                "finish_reason": "stop",
+                "response_type": "llm" if response_type == ResponseType.LLM_GENERATION else "dev_command",
+                "assistant_id": assistant_id,
+                "user_interaction_id": user_interaction_id,
+            }
+
+        except LLMCommunicationError as e:
+            logger.error(f"Recoverable LLM error for {user_identifier} in stream_response: {e}")
+            if e.api_payload:
+                self._store_api_request(
+                    user_identifier, persona_name, e.api_payload,
+                    tools_for_llm=ctx.tools_for_llm,
+                )
+            err = ("I'm not sure how to continue. Could you please rephrase?"
+                   if "empty response" in str(e)
+                   else f"Error while generating a response: {e}")
+            yield {"type": "error", "text": err}
+            yield {"type": "done", "full_text": "", "finish_reason": "error",
+                   "response_type": "dev_command",
+                   "user_interaction_id": user_interaction_id}
+        except Exception as e:
+            logger.error(f"Critical error in stream_response for {user_identifier}: {e}", exc_info=True)
+            yield {"type": "error", "text": "An internal error occurred while processing your request."}
+            yield {"type": "done", "full_text": "", "finish_reason": "error",
+                   "response_type": "dev_command",
+                   "user_interaction_id": user_interaction_id}
 
     async def resume_pending_confirmation(
             self, user_identifier: str, persona_name: str, approved: bool
