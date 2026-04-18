@@ -27,7 +27,7 @@ async def test_confirm_mode_pends_write_tools(live_chat_system, managed_zammad_u
         {'id': 'call_1', 'name': 'create_ticket', 'arguments': {'title': 'Pending Ticket', 'body': 'test'}}]}, {})
     with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
                       side_effect=[tool_call]):
-        response, response_type, _ = await chat_system.generate_response(
+        response, response_type, _, _ = await chat_system.generate_response(
             "test_persona", user_info["identifier"], "support", "Create a ticket"
         )
         assert response_type == ResponseType.PENDING_CONFIRMATION
@@ -62,7 +62,7 @@ async def test_confirm_mode_resume_approved_creates_ticket(live_chat_system, man
 
         with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
                           return_value=final_text):
-            response, response_type, _ = await chat_system.resume_pending_confirmation(
+            response, response_type, _, _ = await chat_system.resume_pending_confirmation(
                 user_info["identifier"], "test_persona", approved=True
             )
             assert response_type == ResponseType.LLM_GENERATION
@@ -102,7 +102,7 @@ async def test_confirm_mode_resume_denied_skips_tool(live_chat_system, managed_z
 
     with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
                       return_value=denial_response):
-        response, response_type, _ = await chat_system.resume_pending_confirmation(
+        response, response_type, _, _ = await chat_system.resume_pending_confirmation(
             user_info["identifier"], "test_persona", approved=False
         )
         assert response_type == ResponseType.LLM_GENERATION
