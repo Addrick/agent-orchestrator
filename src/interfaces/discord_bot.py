@@ -196,7 +196,7 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                     return
 
                 async with _safe_typing(message.channel):
-                    response_text, response_type, assistant_id = await chat_system.generate_response(
+                    response_text, response_type, assistant_id, _ = await chat_system.generate_response(
                         persona_name=active_persona_name,
                         user_identifier=str(message.author.id),
                         channel=message.channel.name if isinstance(message.channel, discord.abc.GuildChannel) else "DM",
@@ -246,7 +246,7 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                         pass
 
                     async with _safe_typing(message.channel):
-                        final_text, final_type, final_assistant_id = await chat_system.resume_pending_confirmation(
+                        final_text, final_type, final_assistant_id, _ = await chat_system.resume_pending_confirmation(
                             str(message.author.id), active_persona_name, approved=approved
                         )
                     if final_text and final_text.strip():
