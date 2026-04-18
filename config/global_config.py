@@ -47,6 +47,8 @@ TEST_MEMORY_DATABASE_FILE = TEST_DATABASE_DIR / "test_user_memory.db"
 # Toggles for enabling/disabling specific application interfaces
 DISCORD_BOT = True
 GMAIL_BOT = False
+WEB_INTERFACE = True
+KOBOLD_PORT = 5002
 UPDATE_MODELS_ON_STARTUP = True
 
 # =============================================================================
