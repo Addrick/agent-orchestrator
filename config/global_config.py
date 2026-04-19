@@ -49,6 +49,9 @@ DISCORD_BOT = True
 GMAIL_BOT = False
 WEB_INTERFACE = True
 KOBOLD_PORT = 5002
+# Persona served when kobold-lite connects without picking one explicitly.
+# Overridable with KOBOLD_DEFAULT_PERSONA env var.
+KOBOLD_DEFAULT_PERSONA = os.environ.get("KOBOLD_DEFAULT_PERSONA", "test_persona")
 UPDATE_MODELS_ON_STARTUP = True
 
 # =============================================================================

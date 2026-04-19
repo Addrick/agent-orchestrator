@@ -14,35 +14,27 @@ def test_render_prompt_default_chatml():
     assert prompt.endswith("<|im_start|>assistant\n")
     assert "<|im_end|>" in stop
 
-def test_render_prompt_custom_markers():
+def test_render_prompt_template_selection():
+    # Non-default template is picked up by name. Marker/thinking-trigger
+    # overrides were intentionally dropped — the persona's chat_template owns
+    # rendering and we pass through to kobold-lite otherwise.
     messages = [{"role": "user", "content": "Hello"}]
-    # Simulation of detected Llama markers
-    inference_config = {
-        "user_marker": "<|turn|>user\n",
-        "assistant_marker": "<|turn|>model\n",
-        "stop_sequence": ["<|im_end|>"]
-    }
-    prompt, stop = _render_prompt(messages, "chatml", inference_config)
-    
-    # Should strictly use provided markers
-    assert "<|turn|>user\nHello" in prompt
-    assert prompt.endswith("<|turn|>model\n")
-    # Should NOT have ChatML markers
-    assert "<|im_start|>" not in prompt
-    assert "<|im_end|>" in stop
+    prompt, _ = _render_prompt(messages, "gemma")
+    assert "<start_of_turn>user\nHello<end_of_turn>" in prompt
+    assert prompt.endswith("<start_of_turn>model\n")
 
-def test_render_prompt_thinking_trigger_boundary():
+def test_render_prompt_ignores_marker_overrides():
+    # user_marker / assistant_marker / thinking_trigger in inference_config
+    # are silently ignored; we never let runtime data reshape the template.
     messages = [{"role": "user", "content": "Hello"}]
-    inference_config = {
+    prompt, _ = _render_prompt(messages, "chatml", {
         "user_marker": "USER: ",
         "assistant_marker": "ASSISTANT: ",
-        "thinking_trigger": "<|think|>"
-    }
-    prompt, _ = _render_prompt(messages, "chatml", inference_config)
-    
-    # Verify the thinking trigger is appended immediately after the assistant marker
-    assert prompt.endswith("ASSISTANT: <|think|>")
-    assert "USER: Hello" in prompt
+        "thinking_trigger": "<|think|>",
+    })
+    assert "<|im_start|>user\nHello<|im_end|>" in prompt
+    assert "USER:" not in prompt
+    assert "<|think|>" not in prompt
 
 def test_render_prompt_tool_call_serialization():
     messages = [

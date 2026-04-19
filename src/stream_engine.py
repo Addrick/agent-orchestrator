@@ -58,33 +58,7 @@ def _render_prompt(
     template_name: str,
     inference_config: Optional[Dict[str, Any]] = None
 ) -> Tuple[str, List[str]]:
-    # 1. Select base template
-    base_tpl = CHAT_TEMPLATES.get(template_name, CHAT_TEMPLATES["chatml"])
-    
-    # 2. Build the working template (Either from inference_config or base)
-    if inference_config and (inference_config.get("user_marker") or inference_config.get("assistant_marker")):
-        u_marker = inference_config.get("user_marker", base_tpl["user"].split("{content}")[0])
-        a_marker = inference_config.get("assistant_marker", base_tpl["assistant_start"])
-        
-        # Build a clean, minimal template based on detected markers
-        tpl = {
-            "system": base_tpl["system"], # Keep base system if not specified
-            "user": f"{u_marker}{{content}}",
-            "assistant": f"{a_marker}{{content}}",
-            "assistant_start": a_marker,
-            "stop": list(base_tpl["stop"])
-        }
-        # If user marker doesn't look like it has a suffix in the base, add a newline-ish suffix
-        if "{content}" in base_tpl["user"]:
-            suffix = base_tpl["user"].split("{content}")[1]
-            if suffix and suffix not in tpl["user"]:
-                tpl["user"] += suffix
-        if "{content}" in base_tpl["assistant"]:
-             suffix = base_tpl["assistant"].split("{content}")[1]
-             if suffix and suffix not in tpl["assistant"]:
-                tpl["assistant"] += suffix
-    else:
-        tpl = base_tpl.copy()
+    tpl = CHAT_TEMPLATES.get(template_name, CHAT_TEMPLATES["chatml"])
 
     parts: List[str] = []
     deferred_system = ""
@@ -101,10 +75,10 @@ def _render_prompt(
             parts.append(tpl["user"].format(content=text))
             deferred_system = ""
         elif role == "assistant":
-            tool_calls = msg.get("tool_calls") or []
+            tool_calls = [tc for tc in (msg.get("tool_calls") or []) if tc.get("name")]
             if tool_calls:
                 blocks = [
-                    f"<tool_call>{json.dumps({'name': tc.get('name'), 'arguments': tc.get('arguments', {})})}</tool_call>"
+                    f"<tool_call>{json.dumps({'name': tc['name'], 'arguments': tc.get('arguments', {})})}</tool_call>"
                     for tc in tool_calls
                 ]
                 serialized = (content + "\n" if content else "") + "\n".join(blocks)
@@ -116,22 +90,22 @@ def _render_prompt(
             parts.append(tpl["user"].format(
                 content=f"<tool_result name=\"{name}\">{content}</tool_result>"
             ))
-    
-    final_prompt = "".join(parts) + tpl["assistant_start"]
-    
-    # 3. Append thinking trigger if requested
-    if inference_config and inference_config.get("thinking_trigger"):
-        # Ensure we don't double up or miss a newline
-        trigger = inference_config["thinking_trigger"]
-        if not final_prompt.endswith(("\n", " ")) and not trigger.startswith(("\n", " ")):
-            final_prompt += "\n"
-        final_prompt += trigger
 
-    # 4. Combine stop sequences (Inference config overrides take priority)
-    stop_seqs = []
+    final_prompt = "".join(parts) + tpl["assistant_start"]
+
+    # Assistant prefill: verbatim text the caller wants the model to continue
+    # from. Used by kobold-lite to send reasoning-mode triggers (e.g.
+    # `<|channel>thought\n`), which must be emitted *before* generation starts
+    # so lite can identify thinking boundaries in the output stream.
+    if inference_config and inference_config.get("assistant_prefill"):
+        prefill = inference_config["assistant_prefill"]
+        if not final_prompt.endswith(("\n", " ")) and not prefill.startswith(("\n", " ")):
+            final_prompt += "\n"
+        final_prompt += prefill
+
+    stop_seqs: List[str] = []
     if inference_config and inference_config.get("stop_sequence"):
         stop_seqs.extend(inference_config["stop_sequence"])
-    
     for s in tpl["stop"]:
         if s not in stop_seqs:
             stop_seqs.append(s)
@@ -189,6 +163,11 @@ class StreamEngine:
             self._http_client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=15.0))
         return self._http_client
 
+    async def aclose(self) -> None:
+        if self._http_client is not None:
+            await self._http_client.aclose()
+            self._http_client = None
+
     @staticmethod
     def _kobold_base_url() -> str:
         """Returns the koboldcpp base URL without the trailing /v1 suffix."""
@@ -227,17 +206,22 @@ class StreamEngine:
                 "content": (messages[0].get("content") or "") + _format_tools_instruction(tool_list),
             }
 
-        template_name = (
+        template_name: str = (
             persona_config.get("chat_template")
             or os.environ.get("KOBOLD_CHAT_TEMPLATE")
             or getattr(global_config, "KOBOLD_CHAT_TEMPLATE", "chatml")
+            or "chatml"
         )
         prompt, stop_seqs = _render_prompt(messages, template_name, local_inference_config)
 
         genkey = f"KCPP{random.randint(1000, 9999)}"
+        # Token budget comes from kobold-lite's UI slider (params.max_context_length).
+        # Persona.context_length is a *turn count* for the history window — a
+        # completely different concept — so it must not be used here.
+        ctx_len = (local_inference_config or {}).get("max_context_length")
         payload: Dict[str, Any] = {
             "prompt": prompt,
-            "max_context_length": persona_config.get("context_length") or 8192,
+            "max_context_length": ctx_len,
             "max_length": persona_config.get("max_output_tokens") or global_config.DEFAULT_TOKEN_LIMIT,
             "temperature": persona_config.get("temperature"),
             "top_p": persona_config.get("top_p"),
@@ -246,12 +230,10 @@ class StreamEngine:
             "trim_stop": True,
             "genkey": genkey,
         }
-        
-        # Override sampling strings from the incoming request (Exact Parity)
+
         if local_inference_config:
-            # Simple direct copy for overlapping standard params
             direct_params = [
-                "temperature", "top_p", "top_k", "rep_pen", "rep_pen_range", 
+                "temperature", "top_p", "top_k", "rep_pen", "rep_pen_range",
                 "rep_pen_slope", "min_p", "typical", "tfs"
             ]
             for p in direct_params:
@@ -274,6 +256,7 @@ class StreamEngine:
         accumulated_text = ""
         event_count = 0
         tool_parser = _ToolCallStreamParser()
+        finished_cleanly = False
 
         try:
             async with client.stream("POST", url, json=payload) as resp:
@@ -285,11 +268,12 @@ class StreamEngine:
                         api_payload=dump_payload,
                     )
                 buf = ""
+                done = False
                 async for chunk in resp.aiter_text():
                     if not chunk:
                         continue
                     buf += chunk
-                    while True:
+                    while not done:
                         sep = buf.find("\n\n")
                         if sep == -1:
                             break
@@ -309,7 +293,10 @@ class StreamEngine:
                             if visible:
                                 yield {"type": "text_delta", "text": visible}
                         if data.get("finish_reason") == "stop":
-                            break
+                            done = True
+                    if done:
+                        break
+                finished_cleanly = True
         except httpx.HTTPError as e:
             logger.error(f"Kobold stream transport error: {e}", exc_info=True)
             raise LLMCommunicationError(
@@ -324,6 +311,18 @@ class StreamEngine:
                 "An unexpected error occurred with the Kobold native stream.",
                 api_payload=dump_payload,
             ) from e
+        finally:
+            if not finished_cleanly:
+                # Client disconnect or error — tell koboldcpp to stop burning
+                # tokens on this genkey. Best-effort; swallow any errors.
+                try:
+                    await client.post(
+                        f"{self._kobold_base_url()}/api/extra/abort",
+                        json={"genkey": genkey},
+                        timeout=5.0,
+                    )
+                except Exception:
+                    pass
 
         # Flush any buffered text sitting inside the parser's lookahead window.
         tail = tool_parser.flush()
