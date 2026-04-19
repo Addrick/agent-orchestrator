@@ -30,3 +30,4 @@ config/personas_backup
 tests/test_data/
 /bash.exe.stackdump
 /src/database/user_memory.db.bak
+/test_memory.db
