@@ -38,7 +38,7 @@ class Persona:
             model_name: str,
             prompt: str,
             token_limit: Optional[int] = None,
-            context_length: Optional[int] = global_config.DEFAULT_CONTEXT_LIMIT,
+            context_length: Optional[int] = global_config.DEFAULT_HISTORY_MESSAGES,
             temperature: Optional[float] = None,
             top_p: Optional[float] = None,
             top_k: Optional[int] = None,
@@ -56,7 +56,7 @@ class Persona:
         self._prompt: str = prompt
         self._response_token_limit: int = global_config.DEFAULT_TOKEN_LIMIT
         self._set_and_sanitize_token_limit(token_limit)  # Silent call to private method
-        self._context_length: int = context_length if context_length is not None else global_config.DEFAULT_CONTEXT_LIMIT
+        self._context_length: int = context_length if context_length is not None else global_config.DEFAULT_HISTORY_MESSAGES
         self._execution_mode: ExecutionMode = self._resolve_enum(
             ExecutionMode, execution_mode, ExecutionMode.AUTONOMOUS)
         self._enabled_tools: List[str] = enabled_tools if enabled_tools is not None else []
@@ -207,7 +207,7 @@ class Persona:
             self._context_length = int(new_length)
             logger.info(f"Persona '{self._name}' context length set to {self._context_length}.")
         except (ValueError, TypeError):
-            self._context_length = global_config.DEFAULT_CONTEXT_LIMIT
+            self._context_length = global_config.DEFAULT_HISTORY_MESSAGES
             logger.info(
                 f"Invalid context length provided: '{new_length}'. Setting to default value: {self._context_length}.")
         return self._context_length

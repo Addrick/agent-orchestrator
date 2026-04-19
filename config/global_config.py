@@ -116,8 +116,8 @@ DEFAULT_PERSONA = "You are a helpful LLM assistant."
 DEFAULT_TOKEN_LIMIT = 4096
 
 # Context window limits (number of messages)
-DEFAULT_CONTEXT_LIMIT = 15
-GLOBAL_CONTEXT_LIMIT = 30  # Hard cap for history sent to APIs
+DEFAULT_HISTORY_MESSAGES = 15
+GLOBAL_HISTORY_MESSAGES = 30  # Hard cap for history sent to APIs
 
 # API Error Handling
 EMPTY_RESPONSE_RETRIES = 3

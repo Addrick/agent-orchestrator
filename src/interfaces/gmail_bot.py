@@ -21,7 +21,7 @@ from config.global_config import (
     ALLOWED_SENDER_LIST,
     BLOCK_EXTERNAL_SENDER_REPLIES,
     CREDENTIALS_DIR,
-    GLOBAL_CONTEXT_LIMIT,
+    GLOBAL_HISTORY_MESSAGES,
     GMAIL_CREDENTIALS_FILE,
     GMAIL_PROJECT_ID,
     GMAIL_PUBSUB_SUBSCRIPTION_ID,
@@ -164,7 +164,7 @@ class GmailInterface:
                     channel="gmail",
                     message=full_message,
                     image_url=None,
-                    history_limit=GLOBAL_CONTEXT_LIMIT,
+                    history_limit=GLOBAL_HISTORY_MESSAGES,
                     user_display_name=user_display_name  # Pass new parameter
                 )
             finally:

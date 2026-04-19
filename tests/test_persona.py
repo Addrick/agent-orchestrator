@@ -5,14 +5,14 @@ from src.persona import Persona
 from config import global_config
 
 # Use known values for the default limits in tests
-TEST_DEFAULT_CONTEXT_LIMIT = 15
+TEST_DEFAULT_HISTORY_MESSAGES = 15
 TEST_DEFAULT_TOKEN_LIMIT = 4096
 
 
 @pytest.fixture(autouse=True)
 def patch_global_config(monkeypatch):
     """Fixture to ensure consistent default limits for all tests."""
-    monkeypatch.setattr(global_config, 'DEFAULT_CONTEXT_LIMIT', TEST_DEFAULT_CONTEXT_LIMIT)
+    monkeypatch.setattr(global_config, 'DEFAULT_HISTORY_MESSAGES', TEST_DEFAULT_HISTORY_MESSAGES)
     monkeypatch.setattr(global_config, 'DEFAULT_TOKEN_LIMIT', TEST_DEFAULT_TOKEN_LIMIT)
 
 
@@ -52,7 +52,7 @@ def test_persona_initialization_defaults_context_length(base_persona_args):
     This is a critical test for our new logic.
     """
     p = Persona(**base_persona_args, context_length=None)
-    assert p.get_context_length() == TEST_DEFAULT_CONTEXT_LIMIT
+    assert p.get_context_length() == TEST_DEFAULT_HISTORY_MESSAGES
 
 
 def test_persona_initialization_uses_provided_zero_context(base_persona_args):
@@ -95,8 +95,8 @@ def test_set_context_length_invalid(persona):
     """
     persona.set_context_length(99)  # Start with a known value
     result = persona.set_context_length("invalid_string")
-    assert result == TEST_DEFAULT_CONTEXT_LIMIT
-    assert persona.get_context_length() == TEST_DEFAULT_CONTEXT_LIMIT
+    assert result == TEST_DEFAULT_HISTORY_MESSAGES
+    assert persona.get_context_length() == TEST_DEFAULT_HISTORY_MESSAGES
 
 
 # --- Setter Tests for Other Attributes ---
