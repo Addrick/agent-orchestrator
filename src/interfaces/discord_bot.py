@@ -145,6 +145,22 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
             logger.debug(f"Message {message.id} was deleted, but not found in local DB to suppress.")
 
     @client.event
+    async def on_message_edit(before: discord.Message, after: discord.Message) -> None:
+        if after.author == client.user:
+            return
+
+        if before.content == after.content:
+            return
+
+        success: bool = await asyncio.to_thread(
+            chat_system.memory_manager.handle_message_edit, str(after.id), after.content
+        )
+        if success:
+            logger.info(f"Updated edited message {after.id} in local DB and archived history.")
+        else:
+            logger.debug(f"Message {after.id} was edited, but not found in local DB to update.")
+
+    @client.event
     async def on_message(message: discord.Message) -> None:
         if message.author == client.user or (
                 isinstance(message.channel, discord.abc.GuildChannel) and message.channel.id == DISCORD_DEBUG_CHANNEL):
