@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Optional, List
 
 from config.global_config import DISCORD_CHAR_LIMIT, DISCORD_STATUS_LIMIT, DISCORD_DEBUG_CHANNEL, \
-    AMBIENT_LOGGING_CHANNELS, GLOBAL_CONTEXT_LIMIT, PENDING_CONFIRMATION_TIMEOUT
+    AMBIENT_LOGGING_CHANNELS, GLOBAL_HISTORY_MESSAGES, PENDING_CONFIRMATION_TIMEOUT
 from src.utils.message_utils import split_string_by_limit
 from src.utils.save_utils import save_personas_to_file
 from src.chat_system import ChatSystem, ResponseType
@@ -219,7 +219,7 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                         message=cleaned_message,
                         server_id=server_id,
                         image_url=await get_image_url(message),
-                        history_limit=GLOBAL_CONTEXT_LIMIT,
+                        history_limit=GLOBAL_HISTORY_MESSAGES,
                         user_display_name=message.author.display_name,
                         platform_message_id=str(message.id),
                         timestamp=message.created_at

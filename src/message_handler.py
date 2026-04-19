@@ -537,9 +537,9 @@ class BotLogic:
             return f"Dynamic context mode enabled for {persona.get_name()}, starting at size {start_value}.", True
         else:
             try:
-                context_limit = int(mode)
-                persona.set_context_length(context_limit)
-                return f"Set static context limit for {persona.get_name()} to '{context_limit}'.", True
+                history_messages = int(mode)
+                persona.set_context_length(history_messages)
+                return f"Set static context limit for {persona.get_name()} to '{history_messages}'.", True
             except ValueError:
                 return f"Error: Invalid context command '{mode}'. Use a number or 'dynamic'.", False
 
