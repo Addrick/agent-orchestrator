@@ -14,18 +14,33 @@ DATA_DIR = PROJECT_ROOT / "data"
 LOGS_DIR = PROJECT_ROOT / "logs"
 CREDENTIALS_DIR = PROJECT_ROOT / "credentials"
 TEST_DIR = PROJECT_ROOT / "tests"
+TEST_DATABASE_DIR = TEST_DIR / "test_data"
+
+# =============================================================================
+# ENVIRONMENT DETECTION
+# =============================================================================
+# Automatically detect if we are running in a test environment (Pytest sets this var)
+IS_TESTING = "PYTEST_CURRENT_TEST" in os.environ or os.environ.get("APP_ENV") == "testing"
+
+# If testing, override core directories to ensure isolation within the tests/ folder
+if IS_TESTING:
+    DATA_DIR = TEST_DATABASE_DIR
+    LOGS_DIR = TEST_DATABASE_DIR / "logs"
+    # Create test directories immediately to avoid race conditions
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Ensure essential local directories exist
-for directory in [DATA_DIR, LOGS_DIR, CREDENTIALS_DIR]:
-    directory.mkdir(exist_ok=True)
+if not IS_TESTING:
+    for directory in [DATA_DIR, LOGS_DIR, CREDENTIALS_DIR]:
+        directory.mkdir(exist_ok=True)
 
 # =============================================================================
 # FILE PATHS
 # =============================================================================
 # JSON Configuration Files
 PERSONA_SAVE_FILE = DATA_DIR / "personas.json"
-TEST_PERSONA_SAVE_FILE = DATA_DIR / "test_personas.json"
-MODEL_SAVE_FILE = CONFIG_DIR / "models.json"
+MODEL_SAVE_FILE = (DATA_DIR if IS_TESTING else CONFIG_DIR) / "models.json"
 DEFAULT_PERSONA_SAVE_FILE = CONFIG_DIR / "default_personas.json"
 SYSTEM_PERSONA_FILE = CONFIG_DIR / 'system_personas.json'
 
@@ -33,13 +48,13 @@ SYSTEM_PERSONA_FILE = CONFIG_DIR / 'system_personas.json'
 CHAT_LOG_LOCATION = LOGS_DIR
 
 # Database Paths
-# Allows override via environment variables for Docker volume mapping
-_default_db_path = DATA_DIR / "user_memory.db"
+_default_db_path = DATA_DIR / ("test_user_memory.db" if IS_TESTING else "user_memory.db")
 MEMORY_DATABASE_FILE = os.environ.get("MEMORY_DATABASE_FILE", str(_default_db_path))
 
-# Test Database Paths
-TEST_DATABASE_DIR = TEST_DIR / "test_data"
+# Legacy/Hardcoded test paths (maintained for backward compatibility in existing tests)
 TEST_MEMORY_DATABASE_FILE = TEST_DATABASE_DIR / "test_user_memory.db"
+TEST_PERSONA_SAVE_FILE = TEST_DATABASE_DIR / "test_personas.json"
+
 
 # =============================================================================
 # INTERFACE FLAGS

@@ -1,5 +1,9 @@
 import os
 
+# Set testing environment flag immediately to ensure path redirection in global_config.py
+os.environ["APP_ENV"] = "testing"
+
+
 import pytest
 from dotenv import find_dotenv, load_dotenv
 
