@@ -61,6 +61,7 @@ class MemoryManager:
             self._conn.enable_load_extension(True)
             sqlite_vec.load(self._conn)
             self._conn.enable_load_extension(False)
+            self._conn.execute("PRAGMA foreign_keys = ON;")
         return self._conn
 
     @contextmanager
@@ -135,6 +136,15 @@ class MemoryManager:
                 last_message_at TIMESTAMP
             );
             CREATE INDEX IF NOT EXISTS idx_segment_channel_persona ON Memory_Segments (channel, persona_name, server_id);
+
+            CREATE TABLE IF NOT EXISTS Interaction_Edit_History (
+                edit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                interaction_id INTEGER NOT NULL,
+                old_content TEXT,
+                edited_at TIMESTAMP NOT NULL,
+                FOREIGN KEY (interaction_id) REFERENCES User_Interactions(interaction_id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_edit_history_id ON Interaction_Edit_History (interaction_id);
 
             CREATE TABLE IF NOT EXISTS Segment_Failures (
                 failure_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -314,24 +324,128 @@ class MemoryManager:
             )
             conn.commit()
 
+    def invalidate_summary(self, summary_id: int) -> bool:
+        """
+        Public method to invalidate a summary, its segment, and reset associated messages.
+        Use this to force a re-summarization of a specific timeframe.
+        """
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            try:
+                success = self._invalidate_summary_internal(cursor, summary_id)
+                if success:
+                    conn.commit()
+                return success
+            except sqlite3.Error as e:
+                logger.error(f"Failed to invalidate summary {summary_id}: {e}")
+                conn.rollback()
+                return False
+
+    def _invalidate_summary_internal(self, cursor: sqlite3.Cursor, summary_id: int) -> bool:
+        """
+        Internal helper to invalidate a summary. Does NOT commit or handle locks.
+        """
+        # 1. Find the segment owning this summary
+        cursor.execute("SELECT segment_id FROM Memory_Summaries WHERE summary_id = ?", (summary_id,))
+        seg_row = cursor.fetchone()
+        if not seg_row:
+            return False
+
+        segment_id = seg_row['segment_id']
+
+        # 2. Delete from vector table (Virtual tables do not support standard FK CASCADE)
+        cursor.execute("DELETE FROM vec_Memory_Summaries WHERE summary_id = ?", (summary_id,))
+
+        # 3. Delete the segment (cascades to Memory_Summaries since FKs are enabled)
+        cursor.execute("DELETE FROM Memory_Segments WHERE segment_id = ?", (segment_id,))
+
+        # 3. Reset ALL messages that were in that summary so they re-queue for the agent
+        cursor.execute(
+            "UPDATE User_Interactions SET parent_summary_id = NULL WHERE parent_summary_id = ?",
+            (summary_id,)
+        )
+        return True
+
+    def handle_message_edit(self, platform_message_id: str, new_content: str) -> bool:
+        """
+        Updates content of an interaction and archives the old version.
+        Triggers invalidation of embeddings and L1 summaries if necessary.
+        """
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            
+            # 1. Fetch current version
+            cursor.execute(
+                "SELECT interaction_id, content, parent_summary_id FROM User_Interactions WHERE platform_message_id = ?",
+                (platform_message_id,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                return False
+            
+            interaction_id = row['interaction_id']
+            old_content = row['content']
+            old_summary_id = row['parent_summary_id']
+            now = datetime.now()
+
+            try:
+                # 2. Archive old version
+                cursor.execute(
+                    "INSERT INTO Interaction_Edit_History (interaction_id, old_content, edited_at) VALUES (?, ?, ?)",
+                    (interaction_id, old_content, now)
+                )
+
+                # 3. Update main interaction
+                cursor.execute(
+                    "UPDATE User_Interactions SET content = ?, parent_summary_id = NULL WHERE interaction_id = ?",
+                    (new_content, interaction_id)
+                )
+
+                # 4. Invalidate embeddings
+                cursor.execute("DELETE FROM Message_Embeddings WHERE interaction_id = ?", (interaction_id,))
+                cursor.execute("DELETE FROM vec_Message_Embeddings WHERE interaction_id = ?", (interaction_id,))
+
+                # 5. Memory Rewind: If already summarized, invalidate the segment using the helper
+                if old_summary_id is not None:
+                    self._invalidate_summary_internal(cursor, old_summary_id)
+                
+                conn.commit()
+                logger.info(f"Handled edit for interaction {interaction_id} (platform_id: {platform_message_id}).")
+                return True
+            except sqlite3.Error as e:
+                logger.error(f"Failed to handle message edit: {e}")
+                conn.rollback()
+                return False
+
     def suppress_message_by_platform_id(self, platform_message_id: str) -> bool:
+        """Suppresses ALL versions of messages associated with this platform ID."""
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
             cursor.execute("SELECT interaction_id FROM User_Interactions WHERE platform_message_id = ?",
                            (platform_message_id,))
-            row = cursor.fetchone()
-            if not row:
+            rows = cursor.fetchall()
+            if not rows:
                 return False
-            interaction_id = row['interaction_id']
+
             now = datetime.now()
-            try:
-                cursor.execute("INSERT INTO Suppressed_Interactions (interaction_id, suppressed_at) VALUES (?, ?)",
-                               (interaction_id, now))
+            suppressed_count = 0
+            for row in rows:
+                interaction_id = row['interaction_id']
+                try:
+                    cursor.execute("INSERT INTO Suppressed_Interactions (interaction_id, suppressed_at) VALUES (?, ?)",
+                                   (interaction_id, now))
+                    suppressed_count += 1
+                except sqlite3.IntegrityError:
+                    # Already suppressed
+                    continue
+
+            if suppressed_count > 0:
                 conn.commit()
                 return True
-            except sqlite3.IntegrityError:
-                return False
+            return False
 
     _SUPPRESSION_SUBQUERY = (" AND interaction_id NOT IN (SELECT interaction_id FROM Suppressed_Interactions)")
 
