@@ -54,9 +54,38 @@ CHAT_TEMPLATES: Dict[str, Dict[str, Any]] = {
 
 
 def _render_prompt(
-    messages: List[Dict[str, Any]], template_name: str
+    messages: List[Dict[str, Any]],
+    template_name: str,
+    inference_config: Optional[Dict[str, Any]] = None
 ) -> Tuple[str, List[str]]:
-    tpl = CHAT_TEMPLATES.get(template_name, CHAT_TEMPLATES["chatml"])
+    # 1. Select base template
+    base_tpl = CHAT_TEMPLATES.get(template_name, CHAT_TEMPLATES["chatml"])
+    
+    # 2. Build the working template (Either from inference_config or base)
+    if inference_config and (inference_config.get("user_marker") or inference_config.get("assistant_marker")):
+        u_marker = inference_config.get("user_marker", base_tpl["user"].split("{content}")[0])
+        a_marker = inference_config.get("assistant_marker", base_tpl["assistant_start"])
+        
+        # Build a clean, minimal template based on detected markers
+        tpl = {
+            "system": base_tpl["system"], # Keep base system if not specified
+            "user": f"{u_marker}{{content}}",
+            "assistant": f"{a_marker}{{content}}",
+            "assistant_start": a_marker,
+            "stop": list(base_tpl["stop"])
+        }
+        # If user marker doesn't look like it has a suffix in the base, add a newline-ish suffix
+        if "{content}" in base_tpl["user"]:
+            suffix = base_tpl["user"].split("{content}")[1]
+            if suffix and suffix not in tpl["user"]:
+                tpl["user"] += suffix
+        if "{content}" in base_tpl["assistant"]:
+             suffix = base_tpl["assistant"].split("{content}")[1]
+             if suffix and suffix not in tpl["assistant"]:
+                tpl["assistant"] += suffix
+    else:
+        tpl = base_tpl.copy()
+
     parts: List[str] = []
     deferred_system = ""
     for msg in messages:
@@ -72,7 +101,6 @@ def _render_prompt(
             parts.append(tpl["user"].format(content=text))
             deferred_system = ""
         elif role == "assistant":
-            # Serialize tool_calls back into text form so history is faithful.
             tool_calls = msg.get("tool_calls") or []
             if tool_calls:
                 blocks = [
@@ -88,8 +116,27 @@ def _render_prompt(
             parts.append(tpl["user"].format(
                 content=f"<tool_result name=\"{name}\">{content}</tool_result>"
             ))
-    parts.append(tpl["assistant_start"])
-    return "".join(parts), list(tpl["stop"])
+    
+    final_prompt = "".join(parts) + tpl["assistant_start"]
+    
+    # 3. Append thinking trigger if requested
+    if inference_config and inference_config.get("thinking_trigger"):
+        # Ensure we don't double up or miss a newline
+        trigger = inference_config["thinking_trigger"]
+        if not final_prompt.endswith(("\n", " ")) and not trigger.startswith(("\n", " ")):
+            final_prompt += "\n"
+        final_prompt += trigger
+
+    # 4. Combine stop sequences (Inference config overrides take priority)
+    stop_seqs = []
+    if inference_config and inference_config.get("stop_sequence"):
+        stop_seqs.extend(inference_config["stop_sequence"])
+    
+    for s in tpl["stop"]:
+        if s not in stop_seqs:
+            stop_seqs.append(s)
+
+    return final_prompt, stop_seqs
 
 
 def _format_tools_instruction(tools: List[Dict[str, Any]]) -> str:
@@ -168,20 +215,9 @@ class StreamEngine:
         persona_config: Dict[str, Any],
         context_object: Dict[str, Any],
         tools: Optional[List[Dict[str, Any]]] = None,
+        local_inference_config: Optional[Dict[str, Any]] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
-        """Streams from KoboldCPP's native generate/stream endpoint.
-
-        Yields events:
-          {"type": "text_delta", "text": "..."}  — incremental text chunks
-          {"type": "tool_calls", "calls": [...]}  — emitted when one or more
-              complete `<tool_call>{...}</tool_call>` blocks were detected
-          {"type": "done", "full_text": "..."}    — emitted last, always
-          {"type": "api_payload", "payload": ...} — emitted once before first delta
-
-        Tool calling is supported via prompt injection: the model is asked to
-        emit `<tool_call>{...}</tool_call>` blocks. These are stripped from
-        user-visible text and parsed into structured tool calls.
-        """
+        """Streams from KoboldCPP's native generate/stream endpoint."""
         messages = self._build_messages(context_object)
         tool_list = [t for t in (tools or []) if t.get("function") or t.get("name")]
         if tool_list and messages and messages[0].get("role") == "system":
@@ -196,7 +232,7 @@ class StreamEngine:
             or os.environ.get("KOBOLD_CHAT_TEMPLATE")
             or getattr(global_config, "KOBOLD_CHAT_TEMPLATE", "chatml")
         )
-        prompt, stop_seqs = _render_prompt(messages, template_name)
+        prompt, stop_seqs = _render_prompt(messages, template_name, local_inference_config)
 
         genkey = f"KCPP{random.randint(1000, 9999)}"
         payload: Dict[str, Any] = {
@@ -210,6 +246,18 @@ class StreamEngine:
             "trim_stop": True,
             "genkey": genkey,
         }
+        
+        # Override sampling strings from the incoming request (Exact Parity)
+        if local_inference_config:
+            # Simple direct copy for overlapping standard params
+            direct_params = [
+                "temperature", "top_p", "top_k", "rep_pen", "rep_pen_range", 
+                "rep_pen_slope", "min_p", "typical", "tfs"
+            ]
+            for p in direct_params:
+                if local_inference_config.get(p) is not None:
+                    payload[p] = local_inference_config[p]
+
         payload = {k: v for k, v in payload.items() if v is not None}
 
         dump_payload = {

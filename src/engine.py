@@ -174,7 +174,8 @@ class TextEngine:
             yield
 
     async def generate_response(self, persona_config: Dict[str, Any], context_object: Dict[str, Any],
-                                tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
+                                tools: Optional[List[Dict[str, Any]]] = None,
+                                local_inference_config: Optional[Dict[str, Any]] = None) -> Tuple[
         Dict[str, Any], Optional[Dict[str, Any]]]:
         """
         Routes the generation request and retries on empty responses.
@@ -203,7 +204,10 @@ class TextEngine:
 
             try:
                 async with self._rate_limited(limiters):
-                    result, api_payload = await handler(persona_config, context_object, tools)
+                    if model_name == 'local':
+                        result, api_payload = await handler(persona_config, context_object, tools, local_inference_config)
+                    else:
+                        result, api_payload = await handler(persona_config, context_object, tools)
 
                 # Validate the response structure and content
                 if result.get('type') == 'text' and result.get('content', '').strip():
@@ -619,7 +623,8 @@ class TextEngine:
         return AsyncOpenAI(base_url=local_api_url, api_key="not-required")
 
     async def _generate_local_response(self, config: Dict[str, Any], context: Dict[str, Any],
-                                       tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
+                                       tools: Optional[List[Dict[str, Any]]] = None,
+                                       local_inference_config: Optional[Dict[str, Any]] = None) -> Tuple[
         Dict[str, Any], Dict[str, Any]]:
         """
         Generates a response from a local model by reusing the standard OpenAI
@@ -630,6 +635,10 @@ class TextEngine:
         # Temporarily swap the main OpenAI client with our special local client
         original_openai_client = self.openai_client
         self.openai_client = local_client
+
+        # Merge local_inference_config into config (Exact Parity)
+        if local_inference_config:
+            config = {**config, **{k: v for k, v in local_inference_config.items() if v is not None}}
 
         try:
             # Most local servers ignore the model name in the payload and use whatever is loaded.

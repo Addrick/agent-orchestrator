@@ -88,6 +88,7 @@ class RequestContext:
     conversation_history: List[Dict[str, Any]] = field(default_factory=list)
     tools_for_llm: List[Dict[str, Any]] = field(default_factory=list)
     oldest_interaction_id: Optional[int] = None
+    local_inference_config: Optional[Dict[str, Any]] = None
 
 
 class ChatSystem:
@@ -423,7 +424,9 @@ class ChatSystem:
                 "current_message": {"text": "", "image_url": ctx.image_url if i == 0 else None}
             }
             llm_response, api_payload = await self.text_engine.generate_response(
-                ctx.persona.get_config_for_engine(), context_object, tools=ctx.tools_for_llm
+                ctx.persona.get_config_for_engine(), context_object,
+                tools=ctx.tools_for_llm,
+                local_inference_config=ctx.local_inference_config
             )
             if api_payload:
                 self._store_api_request(
@@ -503,7 +506,8 @@ class ChatSystem:
             history_limit: Optional[int] = None,
             user_display_name: Optional[str] = None,
             platform_message_id: Optional[str] = None,
-            timestamp: Optional[datetime] = None
+            timestamp: Optional[datetime] = None,
+            local_inference_config: Optional[Dict[str, Any]] = None
     ) -> Tuple[str, ResponseType, Optional[int], Optional[int]]:
         command_result: Optional[Dict[str, Any]] = await self.bot_logic.preprocess_message(
             persona_name, user_identifier, message
@@ -522,6 +526,7 @@ class ChatSystem:
             user_identifier=user_identifier, channel=channel, message=message,
             server_id=server_id, image_url=image_url,
             history_limit=history_limit, user_display_name=user_display_name,
+            local_inference_config=local_inference_config,
         )
         try:
             logger.warning(f"### ChatSystem.generate_response: Received message from {user_identifier} for {persona_name}")
@@ -577,6 +582,7 @@ class ChatSystem:
             user_display_name: Optional[str] = None,
             platform_message_id: Optional[str] = None,
             timestamp: Optional[datetime] = None,
+            local_inference_config: Optional[Dict[str, Any]] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
         """Streaming counterpart to generate_response.
 
@@ -617,6 +623,7 @@ class ChatSystem:
             user_identifier=user_identifier, channel=channel, message=message,
             server_id=server_id, image_url=image_url,
             history_limit=history_limit, user_display_name=user_display_name,
+            local_inference_config=local_inference_config,
         )
 
         user_ts = timestamp or datetime.now()
@@ -686,7 +693,9 @@ class ChatSystem:
                     "current_message": {"text": "", "image_url": ctx.image_url if i == 0 else None},
                 }
                 async for event in self.stream_engine.stream_local(
-                    ctx.persona.get_config_for_engine(), context_object, tools=ctx.tools_for_llm
+                    ctx.persona.get_config_for_engine(), context_object,
+                    tools=ctx.tools_for_llm, 
+                    local_inference_config=ctx.local_inference_config
                 ):
                     etype = event.get("type")
                     if etype == "api_payload":
