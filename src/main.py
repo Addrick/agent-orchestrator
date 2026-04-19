@@ -201,7 +201,10 @@ async def main() -> None:
         app.register_task("model_update", update_models_and_sync_bot(bot))
 
     # 11. Run everything (auto_start agents + interface tasks)
-    await app.start()
+    try:
+        await app.start()
+    finally:
+        await stream_engine.aclose()
 
 
 if __name__ == "__main__":
