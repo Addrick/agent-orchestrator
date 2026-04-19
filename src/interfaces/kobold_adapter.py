@@ -13,6 +13,8 @@ import asyncio
 
 from config import global_config
 from src.chat_system import ChatSystem
+from src.utils.model_utils import get_model_list
+from src.utils.save_utils import save_personas_to_file
 
 logger = logging.getLogger(__name__)
 
@@ -90,25 +92,45 @@ def _extract_user_parts(prompt: str) -> Dict[str, str]:
     return {"message": message, "assistant_prefill": prefill}
 
 
+def _extract_params(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize kobold-lite's wire format.
+
+    The kobold-lite frontend flattens `params` into the top-level body before
+    POSTing to `custom_kobold_endpoint + /api/extra/generate/stream`
+    (see `submit_payload = submit_payload.params` in the frontend). So the
+    request body is `{prompt, temperature, history_override, ...}`, not
+    `{prompt, params: {...}}`. Accept either shape: nested `params` takes
+    precedence; otherwise treat the whole body minus known envelope keys as
+    the params dict.
+    """
+    nested = data.get("params")
+    if isinstance(nested, dict) and nested:
+        return nested
+    envelope_keys = {"prompt", "model", "models", "workers"}
+    return {k: v for k, v in data.items() if k not in envelope_keys}
+
+
 def _build_inference_config(params: Dict[str, Any], assistant_prefill: str = "") -> Dict[str, Any]:
     """Flatten kobold-lite's params payload into the fields stream_engine uses.
 
-    Sampling params, context cap, stop sequences, and a verbatim assistant
-    prefill (for reasoning-mode triggers) are forwarded. Template markers are
-    *not* propagated — the persona's chat_template owns prompt rendering.
+    Sampling params, context cap, stop sequences, a verbatim assistant prefill
+    (for reasoning-mode triggers), and the `history_override` flag are
+    forwarded. Template markers are *not* propagated — the persona's
+    chat_template owns prompt rendering.
     """
     cfg: Dict[str, Any] = {
         "stop_sequence": params.get("stop_sequence") or [],
         "max_context_length": params.get("max_context_length"),
         "assistant_prefill": assistant_prefill,
+        "history_override": bool(params.get("history_override")),
     }
     for p in ("temperature", "top_p", "top_k", "rep_pen", "rep_pen_range",
               "rep_pen_slope", "min_p", "typical", "tfs"):
         if params.get(p) is not None:
             cfg[p] = params[p]
-    # Keep stop_sequence + assistant_prefill even when empty; drop other None.
+    # Keep stop_sequence + assistant_prefill + history_override even when empty/false; drop other None.
     return {k: v for k, v in cfg.items()
-            if v is not None or k in ("stop_sequence", "assistant_prefill")}
+            if v is not None or k in ("stop_sequence", "assistant_prefill", "history_override")}
 
 
 class KoboldAdapter:
@@ -128,6 +150,7 @@ class KoboldAdapter:
             allow_headers=["*"],
         )
 
+        self._active_tasks: Dict[str, asyncio.Task] = {}
         self._setup_routes()
         self._setup_portal()
 
@@ -165,6 +188,63 @@ class KoboldAdapter:
             ]
             return {"object": "list", "data": models}
 
+        @self.app.get("/api/v1/persona/{name}")
+        async def get_persona_detail(name: str):
+            if name not in self.chat_system.personas:
+                return {"error": f"Persona '{name}' not found"}
+            
+            p = self.chat_system.personas[name]
+            return {
+                "name": p.get_name(),
+                "display_name": p.get_name().title(),
+                "prompt": p.get_prompt(),
+                "model_name": p.get_model_name(),
+                "temperature": p.get_temperature(),
+                "top_p": p.get_top_p(),
+                "top_k": p.get_top_k(),
+                "max_tokens": p.get_response_token_limit(),
+                "context_length": p.get_base_context_length(),
+                "thinking_level": p.get_thinking_level()
+            }
+
+        @self.app.get("/api/v1/models/list")
+        async def list_all_models():
+            avail = get_model_list() or {}
+            all_m = []
+            for sub in avail.values():
+                if isinstance(sub, list):
+                    all_m.extend(sub)
+                else:
+                    all_m.append(sub)
+            return {"models": sorted(list(set(all_m)))}
+
+        @self.app.post("/api/v1/persona/{name}/reset")
+        async def reset_persona_context(name: str):
+            if name not in self.chat_system.personas:
+                return {"error": "Persona not found"}
+            p = self.chat_system.personas[name]
+            p.start_new_conversation()
+            return {"result": f"Context for {name} reset sync successfully"}
+
+        @self.app.patch("/api/v1/persona/{name}")
+        async def update_persona(name: str, request: Request):
+            if name not in self.chat_system.personas:
+                return {"error": "Persona not found"}
+            data = await request.json()
+            p = self.chat_system.personas[name]
+            
+            if "prompt" in data: p.set_prompt(data["prompt"])
+            if "model_name" in data: p.set_model_name(data["model_name"])
+            if "temperature" in data: p.set_temperature(data["temperature"])
+            if "top_p" in data: p.set_top_p(data["top_p"])
+            if "top_k" in data: p.set_top_k(data["top_k"])
+            if "max_tokens" in data: p.set_response_token_limit(data["max_tokens"])
+            if "context_length" in data: p.set_context_length(data["context_length"])
+            
+            save_personas_to_file(self.chat_system.personas)
+            logger.info(f"Updated and saved persona settings for {name}")
+            return {"result": "success"}
+
         @self.app.get("/api/v1/info/version")
         async def get_info_version():
             return {"version": "1.70", "lib_version": "1.70"}
@@ -186,23 +266,39 @@ class KoboldAdapter:
             # whatever lite sends back in params.max_context_length.
             return {"result": 8192}
 
+        @self.app.post("/api/v1/abort")
+        async def abort_generation(request: Request):
+            # Try to identify user by hostname or fixed ID
+            # For simplicity in local portal, we'll use a single 'web_user' key
+            # unless we start passing user identifiers from the frontend.
+            user_id = "web_user"
+            task = self._active_tasks.get(user_id)
+            if task and not task.done():
+                task.cancel()
+                logger.info(f"Aborted generation for {user_id}")
+                return {"result": "aborted"}
+            return {"result": "not_running"}
+
         @self.app.post("/api/v1/generate")
         async def generate(request: Request, persona: Optional[str] = None):
             data = await request.json()
             prompt = data.get("prompt", "")
-            params = data.get("params", {})
+            params = _extract_params(data)
             target_persona = persona or data.get("model") or self._get_current_persona_name()
             if target_persona not in self.chat_system.personas:
                 target_persona = self._get_current_persona_name()
 
             parts = _extract_user_parts(prompt)
             user_msg = parts["message"]
-            inference_config = _build_inference_config(params, parts["assistant_prefill"])
+            assistant_prefill = parts["assistant_prefill"]
+
+            inference_config = _build_inference_config(params, assistant_prefill)
 
             logger.info(
                 f"Kobold sync request for persona '{target_persona}'. "
+                f"history_override={inference_config.get('history_override')}, "
                 f"Extracted user msg ({len(user_msg)} chars), "
-                f"prefill={parts['assistant_prefill']!r}."
+                f"prefill={assistant_prefill!r}."
             )
 
             final_text = ""
@@ -225,19 +321,22 @@ class KoboldAdapter:
         async def generate_stream(request: Request, persona: Optional[str] = None):
             data = await request.json()
             prompt = data.get("prompt", "")
-            params = data.get("params", {})
+            params = _extract_params(data)
             target_persona = persona or data.get("model") or self._get_current_persona_name()
             if target_persona not in self.chat_system.personas:
                 target_persona = self._get_current_persona_name()
 
             parts = _extract_user_parts(prompt)
             user_msg = parts["message"]
-            inference_config = _build_inference_config(params, parts["assistant_prefill"])
+            assistant_prefill = parts["assistant_prefill"]
+
+            inference_config = _build_inference_config(params, assistant_prefill)
 
             logger.info(
                 f"Kobold stream request for persona '{target_persona}'. "
+                f"history_override={inference_config.get('history_override')}, "
                 f"Extracted user msg ({len(user_msg)} chars), "
-                f"prefill={parts['assistant_prefill']!r}."
+                f"prefill={assistant_prefill!r}."
             )
 
             async def event_source() -> AsyncIterator[bytes]:
@@ -275,8 +374,24 @@ class KoboldAdapter:
                 except asyncio.CancelledError:
                     raise
 
+            user_id = "web_user"
+
+            # Clear any old task
+            if user_id in self._active_tasks and not self._active_tasks[user_id].done():
+                self._active_tasks[user_id].cancel()
+
+            async def wrapped_event_source() -> AsyncIterator[bytes]:
+                try:
+                    async for chunk in event_source():
+                        yield chunk
+                finally:
+                    if user_id in self._active_tasks and self._active_tasks[user_id] == asyncio.current_task():
+                        del self._active_tasks[user_id]
+
+            self._active_tasks[user_id] = asyncio.current_task()
+
             return StreamingResponse(
-                event_source(),
+                wrapped_event_source(),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
