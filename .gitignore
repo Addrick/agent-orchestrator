@@ -28,3 +28,5 @@ config/personas_backup
 
 # Test artifacts
 tests/test_data/
+/bash.exe.stackdump
+/src/database/user_memory.db.bak
