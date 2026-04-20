@@ -40,6 +40,25 @@ If neither matches, the message is ignored (unless in an ambient logging channel
 - Only processes emails from allowed senders (configurable via `BLOCK_EXTERNAL_SENDER_REPLIES` and `ALLOWED_SENDER_LIST`)
 - Uses Google Pub/Sub watch on INBOX for near-instant processing
 
+### Web Portal (kobold-lite)
+
+A FastAPI adapter (`KoboldAdapter`) hosts a customised kobold-lite UI at `/portal` and forwards requests to the local KoboldCPP instance verbatim. KoboldCPP owns prompt rendering / instruct templating; DERPR adds persona management and history sourcing on top.
+
+**Persona controls:** A persona dropdown in the top nav switches the active persona for forwarded requests. The settings cog opens an Inference Matrix popup where you can edit role, system prompt, model, sampling, max tokens, context length, and persist to the backend.
+
+**History Source toggle (Phase 2.1):** Each persona has a two-state switch for where session history comes from.
+
+| Side | Behavior |
+|------|----------|
+| **Kobold Native** (default) | The active session lives entirely in kobold-lite's own state. Nothing is read from DERPR's database. |
+| **DERPR Database** | On switch, the portal fetches `GET /api/v1/session/{persona}/kobold_export`, ingests the response via kobold-lite's standard JSON load path, and the persona's stored conversation appears in the chat. From that point onward, requests are still forwarded as plain passthrough — DERPR does not splice or rewrap. |
+
+The toggle state is remembered per persona in `localStorage`. Switching back to **Kobold Native** prompts for confirmation and clears the visible session (it does **not** delete anything from the DB).
+
+The export pulls global history for that persona name (across all channels) up to the persona's configured `context_length` message count. User turns are wrapped with kobold's `{{[INPUT]}}` / `{{[OUTPUT]}}` placeholders so the portal renders them with the active instruct template at submit time. Tool-call rows and system rows are skipped (the count is logged server-side).
+
+A **LTM Generation** sub-checkbox is visible underneath the toggle but disabled in Phase 2.1; it ships in Phase 2.2.
+
 ## Commands
 
 All commands are entered as the message body when addressing a persona. Commands are case-insensitive.

@@ -14,6 +14,7 @@ import asyncio
 
 from config import global_config
 from src.chat_system import ChatSystem
+from src.interfaces.kobold_export import build_kobold_savefile
 from src.utils.model_utils import get_model_list
 from src.utils.save_utils import save_personas_to_file
 
@@ -129,6 +130,29 @@ class KoboldAdapter:
             p = self.chat_system.personas[name]
             p.start_new_conversation()
             return {"result": f"Context for {name} reset sync successfully"}
+
+        @self.app.get("/api/v1/session/{persona}/kobold_export")
+        async def kobold_export(persona: str, max_turns: Optional[int] = None):
+            """Build a kobold-lite savefile from DERPR's global history for `persona`.
+
+            Phase 2.1 always pulls global history (all channels) — the portal has
+            no channel concept. max_turns defaults to the persona's configured
+            sliding-window size (`get_base_context_length`); no new config key.
+            """
+            if persona not in self.chat_system.personas:
+                return JSONResponse(status_code=404, content={"error": f"Persona '{persona}' not found"})
+
+            p = self.chat_system.personas[persona]
+            limit = max_turns if isinstance(max_turns, int) and max_turns > 0 else p.get_base_context_length()
+            raw_history = await asyncio.to_thread(
+                self.chat_system.memory_manager.get_global_history, persona, limit
+            )
+            savefile, skipped = build_kobold_savefile(raw_history, system_prompt=p.get_prompt())
+            logger.info(
+                f"kobold_export persona={persona} limit={limit} "
+                f"rows={len(raw_history)} skipped={skipped}"
+            )
+            return JSONResponse(content=savefile)
 
         @self.app.patch("/api/v1/persona/{name}")
         async def update_persona(name: str, request: Request):

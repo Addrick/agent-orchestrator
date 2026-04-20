@@ -20777,13 +20777,6 @@ Current version indicated by LITEVER below.
 			}
 		}
 
-		// DERPR: History Override — read toggle live so it works without
-		// requiring the user to click "Apply to Session" first.
-		const historyOverrideToggle = document.getElementById('historyOverrideToggle');
-		if (historyOverrideToggle) {
-			submit_payload.params.history_override = historyOverrideToggle.checked;
-		}
-
 		return submit_payload;
 	}
 
@@ -28973,12 +28966,20 @@ Current version indicated by LITEVER below.
 					</div>
 				</div>
 
-                <div class="settingitem wide" title="Coming soon — requires local tag-schema system" style="margin-top: 10px; display: flex; align-items: center; justify-content: space-between; border-top: 1px solid #333; padding-top: 10px; opacity: 0.45;">
-                    <div class="settinglabel" style="margin-bottom: 0;">History Override <span style="font-size: 10px; color: #888;">(not yet implemented)</span></div>
-                    <label class="switch">
-                        <input type="checkbox" id="historyOverrideToggle" disabled>
-                        <span class="slider round"></span>
-                    </label>
+                <div class="settingitem wide" style="margin-top: 10px; border-top: 1px solid #333; padding-top: 10px;">
+                    <div class="settinglabel" style="margin-bottom: 4px;">History Source</div>
+                    <div style="display: flex; align-items: center; gap: 6px; font-size: 12px;">
+                        <span id="historySourceLabelKobold" style="color: #ccc;">Kobold Native</span>
+                        <label class="switch" title="Switch between kobold-lite's own session and DERPR's stored message_history.">
+                            <input type="checkbox" id="historySourceToggle" onchange="onHistorySourceToggle()">
+                            <span class="slider round"></span>
+                        </label>
+                        <span id="historySourceLabelDerpr" style="color: #888;">DERPR Database</span>
+                    </div>
+                    <div id="ltmGenerationContainer" style="margin-top: 8px; padding-left: 10px; opacity: 0.45; display: flex; align-items: center; gap: 6px; font-size: 11px;" title="Available in Phase 2.2">
+                        <input type="checkbox" id="ltmGenerationToggle" disabled>
+                        <label for="ltmGenerationToggle" style="margin: 0; color: #aaa;">LTM Generation <span style="font-size: 10px; color: #888;">(Phase 2.2)</span></label>
+                    </div>
                 </div>
 			</div>
 			<div class="popupfooter" style="display: flex; gap: 8px;">
@@ -32197,9 +32198,61 @@ Current version indicated by LITEVER below.
             document.getElementById('contextSlider').value = p.context_length || 10;
             document.getElementById('contextVal').textContent = p.context_length || 10;
 
-            // Load history override from browser storage
-            document.getElementById('historyOverrideToggle').checked = localStorage.getItem('persona_history_override') === 'true';
+            // Load DERPR history-source toggle state from browser storage
+            const hs = document.getElementById('historySourceToggle');
+            if (hs) {
+                const stored = localStorage.getItem('persona_history_source_' + name) === 'derpr';
+                hs.checked = stored;
+            }
 		} catch (e) { console.error("Failed to load persona details", e); }
+	}
+
+	// Phase 2.1: switch the active session between kobold-lite's native
+	// in-memory history and a snapshot built from DERPR's message_history.
+	// On switch → DERPR: fetch the persona's saved turns as a kobold savefile
+	// blob and feed it through kobold's standard JSON ingest path
+	// (kai_json_load), so all template/instruct rendering stays inside kobold.
+	// On switch → Kobold Native: confirm-then-clear the current session.
+	async function onHistorySourceToggle() {
+		const toggle = document.getElementById('historySourceToggle');
+		const select = document.getElementById('personaSelectTopNav');
+		if (!toggle || !select) return;
+		const persona = select.value;
+		if (!persona) {
+			msgbox("Pick a persona before switching history source.");
+			toggle.checked = false;
+			return;
+		}
+
+		if (toggle.checked) {
+			try {
+				const res = await fetch(`/api/v1/session/${encodeURIComponent(persona)}/kobold_export`);
+				if (!res.ok) {
+					const err = await res.text();
+					msgbox(`DERPR export failed: ${err}`);
+					toggle.checked = false;
+					return;
+				}
+				const storyobj = await res.json();
+				// force_load_settings=true → skip the advanced-load popup;
+				// ignore_multiplayer_sync=true → portal is single-user;
+				// save_after_loading=false → no autosave for an ephemeral snapshot.
+				kai_json_load(storyobj, true, true, false);
+				localStorage.setItem('persona_history_source_' + persona, 'derpr');
+			} catch (e) {
+				console.error("Kobold export failed", e);
+				msgbox("Could not load DERPR history. See console for details.");
+				toggle.checked = false;
+			}
+		} else {
+			const ok = confirm("Clear the current session and revert to Kobold Native? Unsaved messages will be lost.");
+			if (!ok) {
+				toggle.checked = true;
+				return;
+			}
+			restart_new_game(false);
+			localStorage.setItem('persona_history_source_' + persona, 'kobold');
+		}
 	}
 
 	// Push persona values into kobold-lite's runtime state. Writing DOM input
@@ -32215,9 +32268,8 @@ Current version indicated by LITEVER below.
 		if (typeof current_memory !== 'undefined') { current_memory = prompt; }
 		if (role) { localsettings.chatopponent = role; }
 
-		// History Override stubbed — toggle exists but disabled server-side.
-		const hoEl = document.getElementById('historyOverrideToggle');
-		if (hoEl) localStorage.setItem('persona_history_override', hoEl.checked ? 'true' : 'false');
+		// History-source toggle persists per-persona; the switch handler
+		// (onHistorySourceToggle) does the actual fetch+load on change.
 
 		const temp    = parseFloat(document.getElementById('tempInput').value);
 		const top_p   = parseFloat(document.getElementById('topPInput').value);
