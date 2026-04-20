@@ -93,16 +93,6 @@ def _render_prompt(
 
     final_prompt = "".join(parts) + tpl["assistant_start"]
 
-    # Assistant prefill: verbatim text the caller wants the model to continue
-    # from. Used by kobold-lite to send reasoning-mode triggers (e.g.
-    # `<|channel>thought\n`), which must be emitted *before* generation starts
-    # so lite can identify thinking boundaries in the output stream.
-    if inference_config and inference_config.get("assistant_prefill"):
-        prefill = inference_config["assistant_prefill"]
-        if not final_prompt.endswith(("\n", " ")) and not prefill.startswith(("\n", " ")):
-            final_prompt += "\n"
-        final_prompt += prefill
-
     stop_seqs: List[str] = []
     if inference_config and inference_config.get("stop_sequence"):
         stop_seqs.extend(inference_config["stop_sequence"])
