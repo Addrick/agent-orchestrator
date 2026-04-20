@@ -4429,7 +4429,7 @@ Current version indicated by LITEVER below.
 		compressnewlines: false, //compress multiple newlines
 		eos_ban_mode: 0, //allow the EOS token when using locally 0=auto,1=unban,2=ban,3=bypass
 		token_count_multiplier: 100, //100 means 1x
-		opmode: 3, //what mode are we in? 1=story, 2=adventure, 3=chat, 4=instruct
+		opmode: 4, //what mode are we in? 1=story, 2=adventure, 3=chat, 4=instruct
 		adventure_roll_modifier: 0,
 		adventure_switch_mode: 0, //in adventure mode, determine story=0, action=1 or roll=2
 		adventure_context_mod: true, //extra injection for adventure mode
@@ -28973,10 +28973,10 @@ Current version indicated by LITEVER below.
 					</div>
 				</div>
 
-                <div class="settingitem wide" style="margin-top: 10px; display: flex; align-items: center; justify-content: space-between; border-top: 1px solid #333; padding-top: 10px;">
-                    <div class="settinglabel" style="margin-bottom: 0;">History Override</div>
+                <div class="settingitem wide" title="Coming soon — requires local tag-schema system" style="margin-top: 10px; display: flex; align-items: center; justify-content: space-between; border-top: 1px solid #333; padding-top: 10px; opacity: 0.45;">
+                    <div class="settinglabel" style="margin-bottom: 0;">History Override <span style="font-size: 10px; color: #888;">(not yet implemented)</span></div>
                     <label class="switch">
-                        <input type="checkbox" id="historyOverrideToggle">
+                        <input type="checkbox" id="historyOverrideToggle" disabled>
                         <span class="slider round"></span>
                     </label>
                 </div>
@@ -32130,8 +32130,11 @@ Current version indicated by LITEVER below.
 				if (p === active) opt.selected = true;
 				select.appendChild(opt);
 			});
-			if (active) onPersonaChange();
-            
+			if (active) {
+				await onPersonaChange();
+				applyPersonaToUI(true);  // silent auto-apply on load
+			}
+
             // Sync global model target list
             fetchAllModels();
 		} catch (e) { console.error("Failed to fetch personas", e); }
@@ -32160,14 +32163,13 @@ Current version indicated by LITEVER below.
 
     function onPersonaSelectChange(val) {
         if (!val) return;
-        // Switch backend persona
         fetch('/api/v1/model', {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ model: val })
         }).then(() => {
             onPersonaChange().then(() => {
-                applyPersonaToUI();
+                applyPersonaToUI(true);  // silent: user didn't click a button
             });
         });
     }
@@ -32200,34 +32202,45 @@ Current version indicated by LITEVER below.
 		} catch (e) { console.error("Failed to load persona details", e); }
 	}
 
-	function applyPersonaToUI() {
+	// Push persona values into kobold-lite's runtime state. Writing DOM input
+	// .value alone is NOT enough — kobold reads from localsettings.* and the
+	// current_memory JS var at submit time, so we mirror into both.
+	function applyPersonaToUI(silent) {
 		const role = document.getElementById('personaRole').value;
 		const prompt = document.getElementById('systemPromptInput').value;
-		
-		// Update Kobold's internal memory
-		document.getElementById('memorytext').value = prompt;
-		localsettings.chatopponent = role;
 
-        // History Override — persist toggle state across sessions.
-        const historyOverrideOn = document.getElementById('historyOverrideToggle').checked;
-        localStorage.setItem('persona_history_override', historyOverrideOn ? 'true' : 'false');
-        
-        // Update Sliders - Mirrored logic to push to Kobold-Lite UI
-        const temp = document.getElementById('tempInput').value;
-        const top_p = document.getElementById('topPInput').value;
-        const top_k = document.getElementById('topKInput').value;
-        const max_tok = document.getElementById('maxTokensInput').value;
-        const ctx_len = document.getElementById('contextSlider').value;
-        
-        if (temp) { document.getElementById('temperature').value = temp; document.getElementById('temperature_slide').value = temp; }
-        if (top_p) { document.getElementById('top_p').value = top_p; document.getElementById('top_p_slide').value = top_p; }
-        if (top_k) { document.getElementById('top_k').value = top_k; document.getElementById('top_k_slide').value = top_k; }
-        if (max_tok) { document.getElementById('max_length').value = max_tok; document.getElementById('max_length_slide').value = max_tok; }
-        if (ctx_len) { document.getElementById('max_context_length').value = ctx_len; document.getElementById('max_context_length_slide').value = ctx_len; }
-		
-		// Sync to localsettings
-		render_gametext();
-		msgbox("Inference Matrix applied to session.");
+		// System prompt → kobold's memory (both the DOM input and the live var
+		// that gets baked into the outgoing prompt).
+		document.getElementById('memorytext').value = prompt;
+		if (typeof current_memory !== 'undefined') { current_memory = prompt; }
+		if (role) { localsettings.chatopponent = role; }
+
+		// History Override stubbed — toggle exists but disabled server-side.
+		const hoEl = document.getElementById('historyOverrideToggle');
+		if (hoEl) localStorage.setItem('persona_history_override', hoEl.checked ? 'true' : 'false');
+
+		const temp    = parseFloat(document.getElementById('tempInput').value);
+		const top_p   = parseFloat(document.getElementById('topPInput').value);
+		const top_k   = parseInt(document.getElementById('topKInput').value);
+		const max_tok = parseInt(document.getElementById('maxTokensInput').value);
+		// NOTE: persona.context_length is DERPR-side message count, NOT kobold's
+		// max_context_length (token budget). Do not push to localsettings.
+		// Kobold's max_context_length is set via its own UI sliders.
+
+		// DOM mirror so kobold's own settings popup displays the persona values.
+		const setBoth = (id, v) => {
+			const a = document.getElementById(id);
+			const b = document.getElementById(id + '_slide');
+			if (a) a.value = v;
+			if (b) b.value = v;
+		};
+		if (!isNaN(temp))    { setBoth('temperature', temp);        localsettings.temperature        = temp; }
+		if (!isNaN(top_p))   { setBoth('top_p', top_p);             localsettings.top_p              = top_p; }
+		if (!isNaN(top_k))   { setBoth('top_k', top_k);             localsettings.top_k              = top_k; }
+		if (!isNaN(max_tok)) { setBoth('max_length', max_tok);      localsettings.max_length         = max_tok; }
+
+		if (typeof render_gametext === 'function') render_gametext();
+		if (!silent && typeof msgbox === 'function') msgbox("Inference Matrix applied to session.");
 	}
 
 	async function savePersonaFromUI() {

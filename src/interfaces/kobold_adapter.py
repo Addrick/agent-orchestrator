@@ -7,7 +7,8 @@ from typing import Any, AsyncIterator, Dict, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
+import httpx
 import uvicorn
 import asyncio
 
@@ -19,121 +20,25 @@ from src.utils.save_utils import save_personas_to_file
 logger = logging.getLogger(__name__)
 
 
-# Known markers kobold-lite uses to delimit user turns in its flat prompt.
-# We only use these to locate the *last* user message in the prompt we receive;
-# rendering of outgoing prompts is owned by the persona's chat_template.
-_USER_MARKERS = (
-    "\n### Instruction:\n", "\nUser:", "\nHuman:", "\nInput:",
-    "<|im_start|>user\n", "<start_of_turn>user\n", "<|turn>user\n",
-    "<|user|>\n", "<|start_of_role|>user<|end_of_role|>",
-    "<|im_user|>user<|im_middle|>", "<\uff5cUser\uff5c>",
-    "<|START_OF_TURN_TOKEN|><|USER_TOKEN|>",
-    "<|start_header_id|>user<|end_header_id|>",
-    "<|header_start|>user<|header_end|>", "[INST]", "{{[INPUT]}}",
-)
-_BOUNDARY_MARKERS = (
-    "\n### Response:", "\nAssistant:", "\nAI:", "\nBot:", "\nASSISTANT:",
-    "<|im_start|>assistant", "<start_of_turn>model", "<end_of_turn>",
-    "<|turn>model", "<turn|>", "<|assistant|>", "<|im_assistant|>assistant",
-    "<\uff5cAssistant\uff5c>", "<|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>",
-    "<|start_header_id|>assistant<|end_header_id|>",
-    "<|header_start|>assistant<|header_end|>",
-    "<|start_of_role|>assistant<|end_of_role|>", "[/INST]", "{{[OUTPUT]}}",
-    "{{[INPUT_END]}}", "<|im_end|>", "<\uff5cend\u2581of\u2581sentence\uff5c>",
-    "<|end_of_text|>",
-)
-
-
-def _extract_user_parts(prompt: str) -> Dict[str, str]:
-    """Pulls the last user turn and any trailing assistant prefill out of
-    kobold-lite's flat prompt blob.
-
-    Returns {"message", "assistant_prefill"}.
-
-    - `message`: the newest user turn's text. The persona's chat_template
-      renders this downstream — we do not propagate the user-side markers.
-    - `assistant_prefill`: any content lite placed after the *final* assistant
-      marker. Lite uses this to signal reasoning mode — e.g. it ends the
-      prompt with `<|channel>thought\\n` so the model continues directly into
-      a thought block. Without forwarding this, the model generates its own
-      opener and lite fails to recognize the boundary, so the thinking tags
-      leak into visible output.
-    """
-    last_pos = -1
-    user_marker = ""
-    for m in _USER_MARKERS:
-        pos = prompt.rfind(m)
-        if pos > last_pos:
-            last_pos = pos
-            user_marker = m
-
-    if last_pos == -1:
-        return {"message": prompt.strip()[-1000:], "assistant_prefill": ""}
-
-    segment = prompt[last_pos + len(user_marker):]
-    cut = len(segment)
-    boundary_end = len(segment)
-    for m in _BOUNDARY_MARKERS:
-        p = segment.find(m)
-        if 0 <= p < cut:
-            cut = p
-            boundary_end = p + len(m)
-    message = segment[:cut].strip() or prompt.strip()[-1000:]
-
-    # Prefill = anything after the final boundary/assistant marker in the tail.
-    tail = segment[boundary_end:]
-    last_marker_end = 0
-    for m in _BOUNDARY_MARKERS:
-        p = tail.rfind(m)
-        if p != -1 and p + len(m) > last_marker_end:
-            last_marker_end = p + len(m)
-    prefill = tail[last_marker_end:].strip() if last_marker_end else ""
-
-    return {"message": message, "assistant_prefill": prefill}
-
-
-def _extract_params(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize kobold-lite's wire format.
-
-    The kobold-lite frontend flattens `params` into the top-level body before
-    POSTing to `custom_kobold_endpoint + /api/extra/generate/stream`
-    (see `submit_payload = submit_payload.params` in the frontend). So the
-    request body is `{prompt, temperature, history_override, ...}`, not
-    `{prompt, params: {...}}`. Accept either shape: nested `params` takes
-    precedence; otherwise treat the whole body minus known envelope keys as
-    the params dict.
-    """
-    nested = data.get("params")
-    if isinstance(nested, dict) and nested:
-        return nested
-    envelope_keys = {"prompt", "model", "models", "workers"}
-    return {k: v for k, v in data.items() if k not in envelope_keys}
-
-
-def _build_inference_config(params: Dict[str, Any], assistant_prefill: str = "") -> Dict[str, Any]:
-    """Flatten kobold-lite's params payload into the fields stream_engine uses.
-
-    Sampling params, context cap, stop sequences, a verbatim assistant prefill
-    (for reasoning-mode triggers), and the `history_override` flag are
-    forwarded. Template markers are *not* propagated — the persona's
-    chat_template owns prompt rendering.
-    """
-    cfg: Dict[str, Any] = {
-        "stop_sequence": params.get("stop_sequence") or [],
-        "max_context_length": params.get("max_context_length"),
-        "assistant_prefill": assistant_prefill,
-        "history_override": bool(params.get("history_override")),
-    }
-    for p in ("temperature", "top_p", "top_k", "rep_pen", "rep_pen_range",
-              "rep_pen_slope", "min_p", "typical", "tfs"):
-        if params.get(p) is not None:
-            cfg[p] = params[p]
-    # Keep stop_sequence + assistant_prefill + history_override even when empty/false; drop other None.
-    return {k: v for k, v in cfg.items()
-            if v is not None or k in ("stop_sequence", "assistant_prefill", "history_override")}
+def _kobold_base_url() -> str:
+    """KoboldCPP base URL without trailing /v1."""
+    raw = os.environ.get("LOCAL_LLM_URL", global_config.LOCAL_LLM_URL).rstrip("/")
+    if raw.endswith("/v1"):
+        raw = raw[:-3]
+    return raw
 
 
 class KoboldAdapter:
+    """Verbatim-passthrough adapter between kobold-lite and local KoboldCPP.
+
+    Stage 1 scope: forward kobold-lite's rendered prompt + params directly to
+    KoboldCPP, relay SSE back unchanged. Persona sampling defaults are pushed
+    into lite's UI sliders by the frontend on persona switch, so server-side
+    merging is not needed. History Override / DB-driven prompt rebuild is
+    deferred pending the local-model tag-schema system.
+    See memory/project/decisions/2026-04-19-kobold-portal-passthrough.md.
+    """
+
     def __init__(self, chat_system: ChatSystem, host: str = "0.0.0.0", port: int = 5002):
         self.chat_system = chat_system
         self.host = host
@@ -150,7 +55,7 @@ class KoboldAdapter:
             allow_headers=["*"],
         )
 
-        self._active_tasks: Dict[str, asyncio.Task] = {}
+        self._http = httpx.AsyncClient(timeout=None)
         self._setup_routes()
         self._setup_portal()
 
@@ -192,7 +97,6 @@ class KoboldAdapter:
         async def get_persona_detail(name: str):
             if name not in self.chat_system.personas:
                 return {"error": f"Persona '{name}' not found"}
-            
             p = self.chat_system.personas[name]
             return {
                 "name": p.get_name(),
@@ -204,7 +108,7 @@ class KoboldAdapter:
                 "top_k": p.get_top_k(),
                 "max_tokens": p.get_response_token_limit(),
                 "context_length": p.get_base_context_length(),
-                "thinking_level": p.get_thinking_level()
+                "thinking_level": p.get_thinking_level(),
             }
 
         @self.app.get("/api/v1/models/list")
@@ -232,7 +136,7 @@ class KoboldAdapter:
                 return {"error": "Persona not found"}
             data = await request.json()
             p = self.chat_system.personas[name]
-            
+
             if "prompt" in data: p.set_prompt(data["prompt"])
             if "model_name" in data: p.set_model_name(data["model_name"])
             if "temperature" in data: p.set_temperature(data["temperature"])
@@ -240,158 +144,114 @@ class KoboldAdapter:
             if "top_k" in data: p.set_top_k(data["top_k"])
             if "max_tokens" in data: p.set_response_token_limit(data["max_tokens"])
             if "context_length" in data: p.set_context_length(data["context_length"])
-            
+
             save_personas_to_file(self.chat_system.personas)
             logger.info(f"Updated and saved persona settings for {name}")
             return {"result": "success"}
 
         @self.app.get("/api/v1/info/version")
         async def get_info_version():
-            return {"version": "1.70", "lib_version": "1.70"}
+            return await self._forward_get("/api/v1/info/version", {"version": "1.70", "lib_version": "1.70"})
 
         @self.app.get("/api/extra/version")
         async def get_extra_version():
-            # Must be >= 1.40 so kobold-lite enables SSE streaming.
-            return {"version": "1.70", "platform": "DERPR"}
+            # Forward verbatim so portal can detect KCPP version + jinja/mcp/etc.
+            # Fallback only on upstream failure. Without real version portal
+            # falls back to legacy prompt-field format and instruct tags break.
+            return await self._forward_get("/api/extra/version", {"version": "1.70", "platform": "DERPR"})
 
         @self.app.get("/api/v1/config/soft_prompts")
         async def get_soft_prompts():
-            return {"results": []}
+            return await self._forward_get("/api/v1/config/soft_prompts", {"results": []})
 
         @self.app.get("/api/v1/config/max_context_length")
         async def get_max_context_length():
-            # Report an advertised token budget for kobold-lite's UI slider.
-            # Must NOT be persona.context_length — that's a turn-count for the
-            # history window, not a token budget. The actual per-request cap is
-            # whatever lite sends back in params.max_context_length.
-            return {"result": 8192}
+            return await self._forward_get("/api/v1/config/max_context_length", {"result": 8192})
+
+        @self.app.get("/api/extra/true_max_context_length")
+        async def get_true_max_ctx():
+            return await self._forward_get("/api/extra/true_max_context_length", {"value": 8192})
+
+        @self.app.get("/api/extra/perf")
+        async def get_perf():
+            return await self._forward_get("/api/extra/perf", {})
+
+        @self.app.post("/api/extra/tokencount")
+        async def tokencount(request: Request):
+            return await self._forward_post("/api/extra/tokencount", await request.json())
+
+        @self.app.get("/api/extra/generate/check")
+        @self.app.post("/api/extra/generate/check")
+        async def generate_check(request: Request):
+            body = await request.json() if request.method == "POST" else {}
+            return await self._forward_post("/api/extra/generate/check", body) if request.method == "POST" \
+                else await self._forward_get("/api/extra/generate/check", {})
 
         @self.app.post("/api/v1/abort")
-        async def abort_generation(request: Request):
-            # Try to identify user by hostname or fixed ID
-            # For simplicity in local portal, we'll use a single 'web_user' key
-            # unless we start passing user identifiers from the frontend.
-            user_id = "web_user"
-            task = self._active_tasks.get(user_id)
-            if task and not task.done():
-                task.cancel()
-                logger.info(f"Aborted generation for {user_id}")
-                return {"result": "aborted"}
-            return {"result": "not_running"}
+        @self.app.post("/api/extra/abort")
+        async def abort_generation():
+            url = f"{_kobold_base_url()}/api/extra/abort"
+            try:
+                r = await self._http.post(url, json={})
+                return JSONResponse(r.json() if r.content else {"result": "aborted"})
+            except Exception as e:
+                logger.warning(f"Abort forward failed: {e}")
+                return {"result": "abort_failed", "error": str(e)}
 
         @self.app.post("/api/v1/generate")
-        async def generate(request: Request, persona: Optional[str] = None):
+        async def generate(request: Request):
             data = await request.json()
-            prompt = data.get("prompt", "")
-            params = _extract_params(data)
-            target_persona = persona or data.get("model") or self._get_current_persona_name()
-            if target_persona not in self.chat_system.personas:
-                target_persona = self._get_current_persona_name()
+            body = self._strip_envelope(data)
+            url = f"{_kobold_base_url()}/api/v1/generate"
+            logger.info(f"Kobold passthrough sync -> {url}")
+            try:
+                r = await self._http.post(url, json=body)
+                return JSONResponse(status_code=r.status_code, content=r.json())
+            except httpx.RequestError as e:
+                logger.error(f"Upstream sync generate failed: {e}")
+                return JSONResponse(status_code=502, content={"error": str(e)})
 
-            parts = _extract_user_parts(prompt)
-            user_msg = parts["message"]
-            assistant_prefill = parts["assistant_prefill"]
-
-            inference_config = _build_inference_config(params, assistant_prefill)
-
+        @self.app.post("/chat/completions")
+        @self.app.post("/v1/chat/completions")
+        async def oai_chat_completions(request: Request):
+            data = await request.json()
+            body = self._strip_envelope(data)
+            url = f"{_kobold_base_url()}/v1/chat/completions"
+            is_stream = bool(body.get("stream"))
             logger.info(
-                f"Kobold sync request for persona '{target_persona}'. "
-                f"history_override={inference_config.get('history_override')}, "
-                f"Extracted user msg ({len(user_msg)} chars), "
-                f"prefill={assistant_prefill!r}."
+                f"OAI chat passthrough -> {url} "
+                f"(stream={is_stream}, msgs={len(body.get('messages', []))})"
             )
 
-            final_text = ""
-            async for ev in self.chat_system.stream_response(
-                persona_name=target_persona,
-                user_identifier="web_user",
-                channel="web_interface",
-                message=user_msg,
-                user_display_name="WebUser",
-                local_inference_config=inference_config,
-            ):
-                if ev.get("type") == "done":
-                    final_text = ev.get("full_text", final_text)
-                elif ev.get("type") == "error":
-                    final_text = ev.get("text", "")
-
-            return {"results": [{"text": final_text}]}
-
-        @self.app.post("/api/extra/generate/stream")
-        async def generate_stream(request: Request, persona: Optional[str] = None):
-            data = await request.json()
-            prompt = data.get("prompt", "")
-            params = _extract_params(data)
-            target_persona = persona or data.get("model") or self._get_current_persona_name()
-            if target_persona not in self.chat_system.personas:
-                target_persona = self._get_current_persona_name()
-
-            parts = _extract_user_parts(prompt)
-            user_msg = parts["message"]
-            assistant_prefill = parts["assistant_prefill"]
-
-            inference_config = _build_inference_config(params, assistant_prefill)
-
-            logger.info(
-                f"Kobold stream request for persona '{target_persona}'. "
-                f"history_override={inference_config.get('history_override')}, "
-                f"Extracted user msg ({len(user_msg)} chars), "
-                f"prefill={assistant_prefill!r}."
-            )
-
-            async def event_source() -> AsyncIterator[bytes]:
-                token_count = 0
+            if not is_stream:
                 try:
-                    async for ev in self.chat_system.stream_response(
-                        persona_name=target_persona,
-                        user_identifier="web_user",
-                        channel="web_interface",
-                        message=user_msg,
-                        user_display_name="WebUser",
-                        local_inference_config=inference_config,
-                    ):
-                        if await request.is_disconnected():
-                            return
+                    r = await self._http.post(url, json=body)
+                    return JSONResponse(status_code=r.status_code, content=r.json() if r.content else {})
+                except httpx.RequestError as e:
+                    logger.error(f"OAI sync upstream failed: {e}")
+                    return JSONResponse(status_code=502, content={"error": str(e)})
 
-                        etype = ev.get("type")
-                        if etype == "token":
-                            token_count += 1
-                            payload = json.dumps({"token": ev.get("text", "")})
-                            yield f"event: message\ndata: {payload}\n\n".encode("utf-8")
-                        elif etype == "error":
-                            payload = json.dumps({
-                                "token": f"\n[Error] {ev.get('text', '')}",
-                                "finish_reason": ev.get("finish_reason", "error"),
-                            })
-                            yield f"event: message\ndata: {payload}\n\n".encode("utf-8")
-                        elif etype == "done":
-                            payload = json.dumps({
-                                "token": "",
-                                "finish_reason": ev.get("finish_reason", "stop"),
-                            })
-                            yield f"event: message\ndata: {payload}\n\n".encode("utf-8")
-                            return
+            async def relay() -> AsyncIterator[bytes]:
+                try:
+                    async with self._http.stream("POST", url, json=body) as upstream:
+                        async for chunk in upstream.aiter_raw():
+                            if await request.is_disconnected():
+                                return
+                            if chunk:
+                                yield chunk
+                except httpx.RequestError as e:
+                    logger.error(f"OAI stream upstream failed: {e}")
+                    err = json.dumps({"error": {"message": str(e)}})
+                    yield f"data: {err}\n\ndata: [DONE]\n\n".encode("utf-8")
                 except asyncio.CancelledError:
+                    try:
+                        await self._http.post(f"{_kobold_base_url()}/api/extra/abort", json={})
+                    except Exception:
+                        pass
                     raise
 
-            user_id = "web_user"
-
-            # Clear any old task
-            if user_id in self._active_tasks and not self._active_tasks[user_id].done():
-                self._active_tasks[user_id].cancel()
-
-            async def wrapped_event_source() -> AsyncIterator[bytes]:
-                try:
-                    async for chunk in event_source():
-                        yield chunk
-                finally:
-                    if user_id in self._active_tasks and self._active_tasks[user_id] == asyncio.current_task():
-                        del self._active_tasks[user_id]
-
-            self._active_tasks[user_id] = asyncio.current_task()
-
             return StreamingResponse(
-                wrapped_event_source(),
+                relay(),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
@@ -399,6 +259,86 @@ class KoboldAdapter:
                     "Connection": "keep-alive",
                 },
             )
+
+        @self.app.post("/api/extra/generate/stream")
+        async def generate_stream(request: Request):
+            data = await request.json()
+            body = self._strip_envelope(data)
+
+            # Stub for deferred History Override mode. Toggle currently hidden
+            # in UI; if a client still sends it, log and fall through to
+            # passthrough. Real impl lands with the tag-schema system.
+            if data.get("params", {}).get("history_override") or data.get("history_override"):
+                logger.warning(
+                    "history_override=true received but Override mode is "
+                    "stubbed — forwarding as passthrough."
+                )
+
+            url = f"{_kobold_base_url()}/api/extra/generate/stream"
+            logger.info(
+                f"Kobold passthrough stream -> {url} "
+                f"(prompt_chars={len(body.get('prompt', ''))})"
+            )
+
+            async def relay() -> AsyncIterator[bytes]:
+                try:
+                    async with self._http.stream("POST", url, json=body) as upstream:
+                        async for chunk in upstream.aiter_raw():
+                            if await request.is_disconnected():
+                                return
+                            if chunk:
+                                yield chunk
+                except httpx.RequestError as e:
+                    logger.error(f"Upstream stream failed: {e}")
+                    err = json.dumps({"token": f"\n[Upstream error] {e}", "finish_reason": "error"})
+                    yield f"event: message\ndata: {err}\n\n".encode("utf-8")
+                except asyncio.CancelledError:
+                    # Client disconnected; forward abort upstream.
+                    try:
+                        await self._http.post(f"{_kobold_base_url()}/api/extra/abort", json={})
+                    except Exception:
+                        pass
+                    raise
+
+            return StreamingResponse(
+                relay(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                    "Connection": "keep-alive",
+                },
+            )
+
+    async def _forward_get(self, path: str, fallback: Dict[str, Any]) -> JSONResponse:
+        url = f"{_kobold_base_url()}{path}"
+        try:
+            r = await self._http.get(url)
+            return JSONResponse(status_code=r.status_code, content=r.json() if r.content else fallback)
+        except Exception as e:
+            logger.warning(f"Forward GET {path} failed: {e}; returning fallback")
+            return JSONResponse(content=fallback)
+
+    async def _forward_post(self, path: str, body: Dict[str, Any]) -> JSONResponse:
+        url = f"{_kobold_base_url()}{path}"
+        try:
+            r = await self._http.post(url, json=body)
+            return JSONResponse(status_code=r.status_code, content=r.json() if r.content else {})
+        except Exception as e:
+            logger.warning(f"Forward POST {path} failed: {e}")
+            return JSONResponse(status_code=502, content={"error": str(e)})
+
+    @staticmethod
+    def _strip_envelope(data: Dict[str, Any]) -> Dict[str, Any]:
+        """Remove DERPR-only routing fields before forwarding to KoboldCPP."""
+        out = dict(data)
+        out.pop("model", None)  # our persona selector, not kobold's
+        # history_override is a DERPR-only flag; KoboldCPP would ignore it
+        # but drop defensively in case stricter upstream versions reject unknowns.
+        if isinstance(out.get("params"), dict):
+            out["params"] = {k: v for k, v in out["params"].items() if k != "history_override"}
+        out.pop("history_override", None)
+        return out
 
     def _get_current_persona_name(self) -> str:
         if self.active_persona and self.active_persona in self.chat_system.personas:
@@ -412,7 +352,10 @@ class KoboldAdapter:
         logger.info(f"Starting Kobold Adapter on http://{self.host}:{self.port}")
         config = uvicorn.Config(self.app, host=self.host, port=self.port, log_level="warning")
         server = uvicorn.Server(config)
-        await server.serve()
+        try:
+            await server.serve()
+        finally:
+            await self._http.aclose()
 
 
 def create_kobold_adapter(chat_system: ChatSystem) -> KoboldAdapter:
