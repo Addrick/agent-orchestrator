@@ -44,9 +44,11 @@ If neither matches, the message is ignored (unless in an ambient logging channel
 
 A FastAPI adapter (`KoboldAdapter`) hosts a customised kobold-lite UI at `/portal` and forwards requests to the local KoboldCPP instance verbatim. KoboldCPP owns prompt rendering / instruct templating; DERPR adds persona management and history sourcing on top.
 
-**Persona controls:** A persona dropdown in the top nav switches the active persona for forwarded requests. The settings cog opens an Inference Matrix popup where you can edit role, system prompt, model, sampling, max tokens, context length, and persist to the backend.
+**Persona controls:** A persona dropdown in the top nav switches the active persona for forwarded requests. The settings cog opens an Inference Matrix popup where you can edit role, system prompt, model, sampling, max tokens, context length, and persist to the backend. The persona's system prompt is pushed into kobold-lite's **Sys. Prompt** field (`instruct_sysprompt`), so the Memory block stays user-owned for free-form notes.
 
-**History Source toggle (Phase 2.1):** Each persona has a two-state switch for where session history comes from.
+Switching personas while a session has content — or while either persona is in DERPR Database mode — prompts for confirmation through kobold-lite's standard new-session dialog. Cancel reverts the persona selection; unsaved turns can be rescued via kobold's own Save/Load first. The DERPR database itself is never modified by the portal.
+
+**History Source toggle (Phase 2.1):** Each persona has a two-state switch for where session history comes from. **Requires kobold-lite instruct opmode** — chat / adventure / story modes are not supported.
 
 | Side | Behavior |
 |------|----------|
@@ -55,7 +57,7 @@ A FastAPI adapter (`KoboldAdapter`) hosts a customised kobold-lite UI at `/porta
 
 The toggle state is remembered per persona in `localStorage`. Switching back to **Kobold Native** prompts for confirmation and clears the visible session (it does **not** delete anything from the DB).
 
-The export pulls global history for that persona name (across all channels) up to the persona's configured `context_length` message count. User turns are wrapped with kobold's `{{[INPUT]}}` / `{{[OUTPUT]}}` placeholders so the portal renders them with the active instruct template at submit time. Tool-call rows and system rows are skipped (the count is logged server-side).
+The export pulls global history for that persona name (across all channels) up to the persona's configured `context_length` message count. User turns are wrapped with kobold's `{{[INPUT]}}` / `{{[OUTPUT]}}` placeholders so the portal renders them with the active instruct template at submit time. System rows, empty-content rows, and tool-call-only assistant rows are skipped (the count is logged server-side). Tool-call and tool-result rendering in the portal is out of scope for Phase 2 — see the roadmap backlog.
 
 A **LTM Generation** sub-checkbox is visible underneath the toggle but disabled in Phase 2.1; it ships in Phase 2.2.
 

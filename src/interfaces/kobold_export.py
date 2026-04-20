@@ -24,13 +24,17 @@ _OUTPUT_PLACEHOLDER = "\n{{[OUTPUT]}}\n"
 
 def build_kobold_savefile(
     raw_history: List[Dict[str, Any]],
-    system_prompt: str = "",
 ) -> Tuple[Dict[str, Any], int]:
     """Translate DERPR User_Interactions rows into a kobold-lite savefile dict.
 
     Returns (savefile_dict, skipped_count). Skipped count covers system rows,
-    rows with empty content, and tool-context expansions intentionally
-    dropped (kobold has no place to render tool messages).
+    empty-content rows, assistant rows whose only payload is a tool-call
+    (tool_context present, content empty), and unrecognised roles.
+
+    Tool-call / tool-result rendering is explicitly out of scope for Phase 2.1
+    — see web_ui_roadmap backlog. Persona system prompt is pushed into
+    kobold-lite's `instruct_sysprompt` setting by the UI, not into savefile
+    `memory`, so the memory block stays free for future use.
     """
     actions: List[str] = []
     skipped = 0
@@ -38,33 +42,22 @@ def build_kobold_savefile(
     for msg in raw_history:
         role = msg.get("author_role")
         content = (msg.get("content") or "").strip()
-        tool_context = msg.get("tool_context")
 
-        # Tool calls live inside `tool_context` JSON on assistant rows.
-        # We don't expand them — kobold has no representation for tool turns.
-        if tool_context:
-            skipped += 1
-
-        if role == "system":
-            skipped += 1
-            continue
-        if not content:
+        if role == "system" or not content or role not in ("user", "assistant"):
             skipped += 1
             continue
 
         if role == "user":
             actions.append(f"{_INPUT_PLACEHOLDER}{content}{_OUTPUT_PLACEHOLDER}")
-        elif role == "assistant":
+        else:  # assistant
             actions.append(content)
-        else:
-            skipped += 1
 
     prompt = actions.pop(0) if actions else ""
 
     savefile: Dict[str, Any] = {
         "gamestarted": True,
         "prompt": prompt,
-        "memory": system_prompt or "",
+        "memory": "",
         "authorsnote": "",
         "anotetemplate": "",
         "actions": actions,
