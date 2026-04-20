@@ -27,12 +27,14 @@ REQUIRED_SAVEFILE_KEYS = {
 # -------- Unit tests --------
 
 def test_empty_history_returns_valid_skeleton():
-    savefile, skipped = build_kobold_savefile([], system_prompt="sys")
+    savefile, skipped = build_kobold_savefile([])
     assert REQUIRED_SAVEFILE_KEYS.issubset(savefile.keys())
     assert savefile["gamestarted"] is True
     assert savefile["prompt"] == ""
     assert savefile["actions"] == []
-    assert savefile["memory"] == "sys"
+    # memory stays empty — persona system prompt lives in kobold's
+    # instruct_sysprompt setting, not the savefile memory block.
+    assert savefile["memory"] == ""
     assert skipped == 0
 
 
@@ -91,7 +93,11 @@ def test_empty_content_rows_skipped_and_counted():
     assert "real" in savefile["prompt"]
 
 
-def test_tool_context_rows_counted_but_content_kept():
+def test_assistant_with_tool_context_and_content_is_emitted():
+    # Assistant rows can carry both a `tool_context` (tool-call metadata) and
+    # visible `content`. Phase 2.1 has no tool-turn rendering — we just emit
+    # the textual content as a normal assistant turn. Tool-call expansion is
+    # backlog (see web_ui_roadmap Phase 2 tool-use note).
     rows = [
         {
             "author_role": "assistant",
@@ -100,10 +106,24 @@ def test_tool_context_rows_counted_but_content_kept():
         }
     ]
     savefile, skipped = build_kobold_savefile(rows)
-    # tool_context expansion is dropped (kobold has no slot for tool turns)
-    # but the assistant's textual content survives.
     assert savefile["prompt"] == "final answer"
+    assert skipped == 0
+
+
+def test_tool_only_row_with_empty_content_skipped():
+    # A tool-call-only assistant row (no visible content) has nothing to
+    # render into kobold's text stream — skip it, count once.
+    rows = [
+        {
+            "author_role": "assistant",
+            "content": "",
+            "tool_context": json.dumps([{"role": "tool", "content": "..."}]),
+        },
+        {"author_role": "user", "content": "hi"},
+    ]
+    savefile, skipped = build_kobold_savefile(rows)
     assert skipped == 1
+    assert "hi" in savefile["prompt"]
 
 
 # -------- Integration: round-trip through MemoryManager --------
@@ -132,7 +152,7 @@ def test_export_from_seeded_memory_manager():
         )
 
     raw = mm.get_global_history("test_persona", limit=10)
-    savefile, skipped = build_kobold_savefile(raw, system_prompt="you are test")
+    savefile, skipped = build_kobold_savefile(raw)
 
     assert skipped == 0
     rendered = [savefile["prompt"]] + savefile["actions"]
@@ -141,6 +161,8 @@ def test_export_from_seeded_memory_manager():
     assert rendered[1] == "first reply"
     assert "second user msg" in rendered[2]
     assert rendered[3] == "second reply"
-    assert savefile["memory"] == "you are test"
+    # Exporter no longer stuffs persona prompt into memory — the UI writes it
+    # to kobold's instruct_sysprompt field instead.
+    assert savefile["memory"] == ""
 
     mm.close()

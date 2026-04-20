@@ -31,3 +31,4 @@ tests/test_data/
 /bash.exe.stackdump
 /src/database/user_memory.db.bak
 /test_memory.db
+/src/interfaces/web_assets/portal_test.html

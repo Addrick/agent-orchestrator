@@ -147,7 +147,7 @@ class KoboldAdapter:
             raw_history = await asyncio.to_thread(
                 self.chat_system.memory_manager.get_global_history, persona, limit
             )
-            savefile, skipped = build_kobold_savefile(raw_history, system_prompt=p.get_prompt())
+            savefile, skipped = build_kobold_savefile(raw_history)
             logger.info(
                 f"kobold_export persona={persona} limit={limit} "
                 f"rows={len(raw_history)} skipped={skipped}"

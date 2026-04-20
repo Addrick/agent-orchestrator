@@ -17340,9 +17340,22 @@ Current version indicated by LITEVER below.
 		document.getElementById("newgamecontainer").classList.remove("hidden");
 	}
 
+	// DERPR: persona-switch path hijacks this popup to confirm data loss
+	// before clearing/reloading the session. If an override action is set it
+	// runs instead of the default new-game flow; cancel reverts the dropdown.
+	let derpr_newgame_override_action = null;
+	let derpr_newgame_override_cancel = null;
+
 	function confirm_newgame() {
 		localsettings.new_session_erase_memory = document.getElementById("new_session_erase_memory").checked;
 		hide_popups();
+		if (derpr_newgame_override_action) {
+			const act = derpr_newgame_override_action;
+			derpr_newgame_override_action = null;
+			derpr_newgame_override_cancel = null;
+			act();
+			return;
+		}
 		restart_new_game(true, !localsettings.new_session_erase_memory);
 		sync_multiplayer(true);
 		update_for_sidepanel();
@@ -17352,6 +17365,12 @@ Current version indicated by LITEVER below.
 	{
 		localsettings.new_session_erase_memory = document.getElementById("new_session_erase_memory").checked;
 		hide_popups();
+		if (derpr_newgame_override_cancel) {
+			const can = derpr_newgame_override_cancel;
+			derpr_newgame_override_action = null;
+			derpr_newgame_override_cancel = null;
+			can();
+		}
 	}
 
 	function estimate_and_show_textDB_usage() {
@@ -32134,6 +32153,7 @@ Current version indicated by LITEVER below.
 			if (active) {
 				await onPersonaChange();
 				applyPersonaToUI(true);  // silent auto-apply on load
+				derpr_prior_persona = active;
 			}
 
             // Sync global model target list
@@ -32162,17 +32182,58 @@ Current version indicated by LITEVER below.
         } catch (err) { console.error('Failed to fetch global model list', err); }
     }
 
-    function onPersonaSelectChange(val) {
+    // DERPR: tracks the currently-selected persona so we can revert the
+    // dropdown if the user cancels the data-loss confirmation on switch.
+    let derpr_prior_persona = null;
+
+    async function onPersonaSelectChange(val) {
         if (!val) return;
-        fetch('/api/v1/model', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model: val })
-        }).then(() => {
-            onPersonaChange().then(() => {
-                applyPersonaToUI(true);  // silent: user didn't click a button
+        const selectEl = document.getElementById('personaSelectTopNav');
+
+        const priorWasDerpr = derpr_prior_persona
+            && localStorage.getItem('persona_history_source_' + derpr_prior_persona) === 'derpr';
+        const newIsDerpr = localStorage.getItem('persona_history_source_' + val) === 'derpr';
+        const hasSession = (typeof gametext_arr !== 'undefined' && gametext_arr.length > 0);
+        // Session clobber happens if the prior persona owned a DERPR load (its
+        // content is tied to that persona), or if the new persona will trigger
+        // a DERPR reload that overwrites the current story.
+        const willClobber = priorWasDerpr || (newIsDerpr && hasSession);
+
+        if (willClobber && derpr_prior_persona && derpr_prior_persona !== val) {
+            derpr_newgame_override_action = () => completePersonaSwitch(val, newIsDerpr);
+            derpr_newgame_override_cancel = () => {
+                if (derpr_prior_persona) selectEl.value = derpr_prior_persona;
+            };
+            display_newgame();
+        } else {
+            await completePersonaSwitch(val, newIsDerpr);
+        }
+    }
+
+    async function completePersonaSwitch(val, newIsDerpr) {
+        try {
+            await fetch('/api/v1/model', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ model: val })
             });
-        });
+            await onPersonaChange();
+            applyPersonaToUI(true);  // silent: user didn't click a button
+            if (newIsDerpr) {
+                await loadDerprSession(val);
+            } else if (derpr_prior_persona) {
+                // Kobold-native on both sides but switching persona: if the old
+                // persona had a DERPR session loaded, wipe it so the new persona
+                // doesn't inherit someone else's context. Pure kobold→kobold
+                // (neither side ever DERPR) leaves session alone — matches
+                // pre-Phase-2 behavior.
+                const priorWasDerpr = localStorage.getItem('persona_history_source_' + derpr_prior_persona) === 'derpr';
+                if (priorWasDerpr) restart_new_game(false);
+            }
+            derpr_prior_persona = val;
+        } catch (e) {
+            console.error("Persona switch failed", e);
+        }
     }
 
     function openPersonaSettings() {
@@ -32209,10 +32270,30 @@ Current version indicated by LITEVER below.
 
 	// Phase 2.1: switch the active session between kobold-lite's native
 	// in-memory history and a snapshot built from DERPR's message_history.
-	// On switch → DERPR: fetch the persona's saved turns as a kobold savefile
-	// blob and feed it through kobold's standard JSON ingest path
-	// (kai_json_load), so all template/instruct rendering stays inside kobold.
-	// On switch → Kobold Native: confirm-then-clear the current session.
+	// The exporter fetch + kai_json_load step is factored out so the
+	// persona-switch path can reuse it without re-prompting.
+
+	async function loadDerprSession(persona) {
+		try {
+			const res = await fetch(`/api/v1/session/${encodeURIComponent(persona)}/kobold_export`);
+			if (!res.ok) {
+				msgbox(`DERPR export failed: ${await res.text()}`);
+				return false;
+			}
+			const storyobj = await res.json();
+			// force_load_settings=true → skip the advanced-load popup;
+			// ignore_multiplayer_sync=true → portal is single-user;
+			// save_after_loading=false → no autosave for an ephemeral snapshot.
+			kai_json_load(storyobj, true, true, false);
+			localStorage.setItem('persona_history_source_' + persona, 'derpr');
+			return true;
+		} catch (e) {
+			console.error("Kobold export failed", e);
+			msgbox("Could not load DERPR history. See console for details.");
+			return false;
+		}
+	}
+
 	async function onHistorySourceToggle() {
 		const toggle = document.getElementById('historySourceToggle');
 		const select = document.getElementById('personaSelectTopNav');
@@ -32225,25 +32306,8 @@ Current version indicated by LITEVER below.
 		}
 
 		if (toggle.checked) {
-			try {
-				const res = await fetch(`/api/v1/session/${encodeURIComponent(persona)}/kobold_export`);
-				if (!res.ok) {
-					const err = await res.text();
-					msgbox(`DERPR export failed: ${err}`);
-					toggle.checked = false;
-					return;
-				}
-				const storyobj = await res.json();
-				// force_load_settings=true → skip the advanced-load popup;
-				// ignore_multiplayer_sync=true → portal is single-user;
-				// save_after_loading=false → no autosave for an ephemeral snapshot.
-				kai_json_load(storyobj, true, true, false);
-				localStorage.setItem('persona_history_source_' + persona, 'derpr');
-			} catch (e) {
-				console.error("Kobold export failed", e);
-				msgbox("Could not load DERPR history. See console for details.");
-				toggle.checked = false;
-			}
+			const ok = await loadDerprSession(persona);
+			if (!ok) toggle.checked = false;
 		} else {
 			const ok = confirm("Clear the current session and revert to Kobold Native? Unsaved messages will be lost.");
 			if (!ok) {
@@ -32262,10 +32326,15 @@ Current version indicated by LITEVER below.
 		const role = document.getElementById('personaRole').value;
 		const prompt = document.getElementById('systemPromptInput').value;
 
-		// System prompt → kobold's memory (both the DOM input and the live var
-		// that gets baked into the outgoing prompt).
-		document.getElementById('memorytext').value = prompt;
-		if (typeof current_memory !== 'undefined') { current_memory = prompt; }
+		// Persona system prompt → kobold's instruct Sys. Prompt field. This is
+		// kobold's dedicated instruct-mode system-prompt slot (prepended at
+		// submit time with the active system tag); keeping it out of `memory`
+		// leaves the Memory block user-owned for free-form notes / future LTM.
+		// DOM mirror holds escaped newlines; localsettings holds raw (kobold's
+		// own round-trip in edit_instruct_tag_format handles this inversion).
+		const sysPromptEl = document.getElementById('instruct_sysprompt');
+		if (sysPromptEl) sysPromptEl.value = (prompt || "").replace(/\n/g, "\\n");
+		if (typeof localsettings !== 'undefined') { localsettings.instruct_sysprompt = prompt || ""; }
 		if (role) { localsettings.chatopponent = role; }
 
 		// History-source toggle persists per-persona; the switch handler
