@@ -56,7 +56,7 @@ class Persona:
         self._prompt: str = prompt
         self._response_token_limit: int = global_config.DEFAULT_TOKEN_LIMIT
         self._set_and_sanitize_token_limit(token_limit)  # Silent call to private method
-        self._context_length: int = context_length if context_length is not None else global_config.DEFAULT_HISTORY_MESSAGES
+        self._message_history: int = context_length if context_length is not None else global_config.DEFAULT_HISTORY_MESSAGES
         self._execution_mode: ExecutionMode = self._resolve_enum(
             ExecutionMode, execution_mode, ExecutionMode.AUTONOMOUS)
         self._enabled_tools: List[str] = enabled_tools if enabled_tools is not None else []
@@ -88,11 +88,11 @@ class Persona:
     def get_response_token_limit(self) -> int:
         return self._response_token_limit
 
-    def get_context_length(self) -> int:
+    def get_message_history(self) -> int:
         """
-        Returns the effective context length. If a temporary override is active
-        (from a 'hello' command), it returns the override value and increments it
-        for the next turn. Otherwise, it returns the default context length.
+        Returns the effective history length (alias for message_history).
+        If a temporary override is active (from a 'hello' command), it returns
+        the override value and increments it for the next turn.
         """
         if self._temp_context_override is not None:
             current_limit = self._temp_context_override
@@ -100,11 +100,15 @@ class Persona:
             self._temp_context_override += 2
             return current_limit
 
-        return self._context_length
+        return self._message_history
+
+    def get_context_length(self) -> int:
+        """Legacy alias for get_message_history."""
+        return self.get_message_history()
 
     def get_base_context_length(self) -> int:
-        """Returns the persona's static, default context length."""
-        return self._context_length
+        """Returns the persona's static, default history length."""
+        return self._message_history
 
     def get_temperature(self) -> Optional[float]:
         return self._temperature
@@ -198,19 +202,23 @@ class Persona:
         self._prompt = str(new_prompt)
         logger.info(f"Persona '{self._name}' prompt has been updated.")
 
-    def set_context_length(self, new_length: Any) -> int:
+    def set_message_history(self, new_length: Any) -> int:
         """
-        Sets the static default context length and disables any active dynamic context override.
+        Sets the static default history length and disables any active dynamic context override.
         """
         self.end_new_conversation()  # Ensure dynamic mode is off when setting a static length.
         try:
-            self._context_length = int(new_length)
-            logger.info(f"Persona '{self._name}' context length set to {self._context_length}.")
+            self._message_history = int(new_length)
+            logger.info(f"Persona '{self._name}' message history set to {self._message_history}.")
         except (ValueError, TypeError):
-            self._context_length = global_config.DEFAULT_HISTORY_MESSAGES
+            self._message_history = global_config.DEFAULT_HISTORY_MESSAGES
             logger.info(
-                f"Invalid context length provided: '{new_length}'. Setting to default value: {self._context_length}.")
-        return self._context_length
+                f"Invalid history length provided: '{new_length}'. Setting to default value: {self._message_history}.")
+        return self._message_history
+
+    def set_context_length(self, new_length: Any) -> int:
+        """Legacy alias for set_message_history."""
+        return self.set_message_history(new_length)
 
     def set_temperature(self, new_temp: Any) -> Optional[float]:
         """

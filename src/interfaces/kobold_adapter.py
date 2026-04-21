@@ -3,7 +3,8 @@
 import json
 import logging
 import os
-from typing import Any, AsyncIterator, Dict, Optional
+from typing import Any, AsyncIterator, Dict, Optional, List
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -126,14 +127,20 @@ class KoboldAdapter:
             if persona not in self.chat_system.personas:
                 return JSONResponse(status_code=404, content={"error": f"Persona '{persona}' not found"})
             p = self.chat_system.personas[persona]
+            
+            # USE PRESCRIBED message_history persona attribute for context length
+            history, oldest_id = self.chat_system._build_conversation_history(
+                p, "portal", "web_ui", None, p.get_message_history()
+            )
+
             block = await self.chat_system._retrieve_memory_block(
                 persona=p,
                 user_identifier="portal",
                 channel="web_ui",
                 server_id=None,
-                conversation_history=[],
+                conversation_history=history,
                 current_message=query or None,
-                oldest_interaction_id=None,
+                oldest_interaction_id=oldest_id,
             )
             return {"block": block}
 
@@ -192,7 +199,7 @@ class KoboldAdapter:
             if "top_p" in data: p.set_top_p(data["top_p"])
             if "top_k" in data: p.set_top_k(data["top_k"])
             if "max_tokens" in data: p.set_response_token_limit(data["max_tokens"])
-            if "context_length" in data: p.set_context_length(data["context_length"])
+            if "context_length" in data: p.set_message_history(data["context_length"])
             if "memory_mode" in data: p.set_memory_mode(data["memory_mode"])
 
             save_personas_to_file(self.chat_system.personas)
@@ -254,9 +261,28 @@ class KoboldAdapter:
             body = self._strip_envelope(data)
             url = f"{_kobold_base_url()}/api/v1/generate"
             logger.info(f"Kobold passthrough sync -> {url}")
+            
+            # --- SNIFFING FOR LOGGING ---
+            persona_name = self._get_current_persona_name()
+            prompt = body.get("prompt", "")
+            if prompt:
+                # Basic sniff: log the very last user segment if we can identify it.
+                # Since we don't know the exact turn boundary reliably for ALL prompts 
+                # in passthrough, we'll log a placeholder note for Phase 1.
+                # Once Tag-Schema lands, this will be robust.
+                pass
+
             try:
                 r = await self._http.post(url, json=body)
-                return JSONResponse(status_code=r.status_code, content=r.json())
+                response_data = r.json()
+                
+                # Log response if successful
+                if r.status_code == 200 and response_data.get("results"):
+                    text = response_data["results"][0].get("text")
+                    if text:
+                        self._log_interaction(persona_name, "assistant", text)
+                
+                return JSONResponse(status_code=r.status_code, content=response_data)
             except httpx.RequestError as e:
                 logger.error(f"Upstream sync generate failed: {e}")
                 return JSONResponse(status_code=502, content={"error": str(e)})
@@ -268,27 +294,57 @@ class KoboldAdapter:
             body = self._strip_envelope(data)
             url = f"{_kobold_base_url()}/v1/chat/completions"
             is_stream = bool(body.get("stream"))
+            messages = body.get("messages", [])
+            persona_name = self._get_current_persona_name()
+
             logger.info(
                 f"OAI chat passthrough -> {url} "
-                f"(stream={is_stream}, msgs={len(body.get('messages', []))})"
+                f"(stream={is_stream}, msgs={len(messages)})"
             )
+
+            # Log the newest user message if available
+            if messages and messages[-1].get("role") == "user":
+                self._log_interaction(persona_name, "user", messages[-1].get("content"))
 
             if not is_stream:
                 try:
                     r = await self._http.post(url, json=body)
-                    return JSONResponse(status_code=r.status_code, content=r.json() if r.content else {})
+                    resp = r.json() if r.content else {}
+                    if r.status_code == 200 and resp.get("choices"):
+                        ai_msg = resp["choices"][0].get("message", {}).get("content")
+                        if ai_msg:
+                            self._log_interaction(persona_name, "assistant", ai_msg)
+                    return JSONResponse(status_code=r.status_code, content=resp)
                 except httpx.RequestError as e:
                     logger.error(f"OAI sync upstream failed: {e}")
                     return JSONResponse(status_code=502, content={"error": str(e)})
 
             async def relay() -> AsyncIterator[bytes]:
+                full_response = []
                 try:
                     async with self._http.stream("POST", url, json=body) as upstream:
                         async for chunk in upstream.aiter_raw():
                             if await request.is_disconnected():
                                 return
                             if chunk:
+                                # Capturing response for logging (naively)
+                                try:
+                                    decoded = chunk.decode("utf-8")
+                                    if decoded.startswith("data: "):
+                                        line = decoded[6:].strip()
+                                        if line and line != "[DONE]":
+                                            cdata = json.loads(line)
+                                            delta = cdata.get("choices", [{}])[0].get("delta", {}).get("content")
+                                            if delta:
+                                                full_response.append(delta)
+                                except:
+                                    pass
                                 yield chunk
+                                
+                    # End of stream logging
+                    if full_response:
+                        self._log_interaction(persona_name, "assistant", "".join(full_response))
+                        
                 except httpx.RequestError as e:
                     logger.error(f"OAI stream upstream failed: {e}")
                     err = json.dumps({"error": {"message": str(e)}})
@@ -314,15 +370,7 @@ class KoboldAdapter:
         async def generate_stream(request: Request):
             data = await request.json()
             body = self._strip_envelope(data)
-
-            # Stub for deferred History Override mode. Toggle currently hidden
-            # in UI; if a client still sends it, log and fall through to
-            # passthrough. Real impl lands with the tag-schema system.
-            if data.get("params", {}).get("history_override") or data.get("history_override"):
-                logger.warning(
-                    "history_override=true received but Override mode is "
-                    "stubbed — forwarding as passthrough."
-                )
+            persona_name = self._get_current_persona_name()
 
             url = f"{_kobold_base_url()}/api/extra/generate/stream"
             logger.info(
@@ -331,13 +379,35 @@ class KoboldAdapter:
             )
 
             async def relay() -> AsyncIterator[bytes]:
+                captured_text = []
                 try:
                     async with self._http.stream("POST", url, json=body) as upstream:
                         async for chunk in upstream.aiter_raw():
                             if await request.is_disconnected():
                                 return
                             if chunk:
+                                try:
+                                    decoded = chunk.decode("utf-8")
+                                    if decoded.startswith("data: "):
+                                        line = decoded[6:].strip()
+                                        cdata = json.loads(line)
+                                        token = cdata.get("token")
+                                        if token:
+                                            captured_text.append(token)
+                                    elif decoded.startswith("event: message\ndata: "):
+                                        # Handle multipart event format
+                                        line = decoded.split("data: ")[1].strip()
+                                        cdata = json.loads(line)
+                                        token = cdata.get("token")
+                                        if token:
+                                            captured_text.append(token)
+                                except:
+                                    pass
                                 yield chunk
+                    
+                    if captured_text:
+                        self._log_interaction(persona_name, "assistant", "".join(captured_text))
+
                 except httpx.RequestError as e:
                     logger.error(f"Upstream stream failed: {e}")
                     err = json.dumps({"token": f"\n[Upstream error] {e}", "finish_reason": "error"})
@@ -359,6 +429,30 @@ class KoboldAdapter:
                     "Connection": "keep-alive",
                 },
             )
+
+    def _log_interaction(self, persona_name: str, role: str, content: str):
+        """Helper to safely log interactions to the memory manager in a background thread."""
+        if not content or not content.strip():
+            return
+            
+        def log_task():
+            try:
+                self.chat_system.memory_manager.log_message(
+                    user_identifier="portal",
+                    persona_name=persona_name,
+                    channel="web_ui",
+                    author_role=role,
+                    author_name=None,
+                    content=content,
+                    timestamp=datetime.now(timezone.utc)
+                )
+            except Exception as e:
+                logger.error(f"Background interaction logging failed: {e}")
+
+        # Run in thread to not block the request/stream
+        import threading
+        t = threading.Thread(target=log_task)
+        t.start()
 
     async def _forward_get(self, path: str, fallback: Dict[str, Any]) -> JSONResponse:
         url = f"{_kobold_base_url()}{path}"
@@ -383,8 +477,6 @@ class KoboldAdapter:
         """Remove DERPR-only routing fields before forwarding to KoboldCPP."""
         out = dict(data)
         out.pop("model", None)  # our persona selector, not kobold's
-        # history_override is a DERPR-only flag; KoboldCPP would ignore it
-        # but drop defensively in case stricter upstream versions reject unknowns.
         if isinstance(out.get("params"), dict):
             out["params"] = {k: v for k, v in out["params"].items() if k != "history_override"}
         out.pop("history_override", None)
