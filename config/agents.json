@@ -9,7 +9,10 @@
             "similarity_threshold": 0.8,
             "min_segment_size": 2,
             "batch_size": 200,
-            "allowed_channels": [{"channel": "arbitr", "server_id": "347812763093172225"}],
+            "allowed_channels": [
+                {"channel": "arbitr", "server_id": "347812763093172225"},
+                {"channel": "web_interface", "server_id": null}
+            ],
             "description": "Segments conversations by topic, extracts facts, and stores embedded summaries for long-term memory retrieval."
         },
         "dispatch": {

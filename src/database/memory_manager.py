@@ -989,7 +989,8 @@ class MemoryManager:
                 where_parts.append("seg.server_id = ?")
                 params.append(server_id)
             else:
-                return "1=0", []  # no server_id -> no results
+                # [FIX]: Allow NULL server_id for Web UI (portal) support
+                where_parts.append("seg.server_id IS NULL")
         elif memory_mode == "personal":
             where_parts.append(
                 "seg.channel IN ("
