@@ -38,6 +38,7 @@ def _make_adapter_with_seeded_db(persona_name: str = "test_persona",
         personas={persona_name: persona},
         memory_manager=mm,
         _retrieve_memory_block=retrieve_memory_block or AsyncMock(return_value=None),
+        _build_conversation_history=MagicMock(return_value=([], None)),
     )
     adapter = KoboldAdapter(chat_system=chat_system)
     return adapter, mm, persona
