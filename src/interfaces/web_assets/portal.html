@@ -28995,10 +28995,21 @@ Current version indicated by LITEVER below.
                         </label>
                         <span id="historySourceLabelDerpr" style="color: #888;">DERPR Database</span>
                     </div>
-                    <div id="ltmGenerationContainer" style="margin-top: 8px; padding-left: 10px; opacity: 0.45; display: flex; align-items: center; gap: 6px; font-size: 11px;" title="Available in Phase 2.2">
-                        <input type="checkbox" id="ltmGenerationToggle" disabled>
-                        <label for="ltmGenerationToggle" style="margin: 0; color: #aaa;">LTM Generation <span style="font-size: 10px; color: #888;">(Phase 2.2)</span></label>
+                    <div id="ltmGenerationContainer" style="margin-top: 8px; padding-left: 10px; opacity: 0.45; display: flex; align-items: center; gap: 6px; font-size: 11px;">
+                        <input type="checkbox" id="ltmGenerationToggle" disabled onchange="onLtmToggle()">
+                        <label for="ltmGenerationToggle" style="margin: 0; color: #aaa;">LTM Generation</label>
                     </div>
+                </div>
+
+                <div class="settingitem wide" style="margin-top: 10px; border-top: 1px solid #333; padding-top: 10px;">
+                    <div class="settinglabel" style="margin-bottom: 4px;">Memory Scope</div>
+                    <select id="memoryModeSelect" class="form-control" style="font-size: 12px;">
+                        <option value="CHANNEL_ISOLATED">Channel Isolated</option>
+                        <option value="SERVER_WIDE">Server Wide</option>
+                        <option value="PERSONAL">Personal</option>
+                        <option value="GLOBAL">Global</option>
+                    </select>
+                    <div style="font-size: 10px; color: #888; margin-top: 3px;">Scopes LTM retrieval. With CHANNEL_ISOLATED and channel=web_ui, no memories surface until portal turns are logged (Phase 2.3). Use GLOBAL or PERSONAL to retrieve cross-channel memories now.</div>
                 </div>
 			</div>
 			<div class="popupfooter" style="display: flex; gap: 8px;">
@@ -32264,6 +32275,18 @@ Current version indicated by LITEVER below.
             if (hs) {
                 const stored = localStorage.getItem('persona_history_source_' + name) === 'derpr';
                 hs.checked = stored;
+                updateLtmCheckboxAvailability();
+            }
+
+            // Load memory_mode from persona (backend source of truth)
+            const mm = document.getElementById('memoryModeSelect');
+            if (mm && p.memory_mode) mm.value = p.memory_mode;
+
+            // Restore LTM checkbox state from localStorage
+            const ltmToggle = document.getElementById('ltmGenerationToggle');
+            if (ltmToggle) {
+                ltmToggle.checked = localStorage.getItem('persona_ltm_' + name) === 'true';
+                updateLtmAnoteUI();
             }
 		} catch (e) { console.error("Failed to load persona details", e); }
 	}
@@ -32369,6 +32392,7 @@ Current version indicated by LITEVER below.
 		if (!select) return;
 		const name = select.value;
         if (!name) { msgbox("Please select a persona first."); return; }
+		const mmEl = document.getElementById('memoryModeSelect');
 		const payload = {
 			prompt: document.getElementById('systemPromptInput').value,
 			model_name: document.getElementById('modelTargetSelect').value,
@@ -32376,7 +32400,8 @@ Current version indicated by LITEVER below.
             top_p: parseFloat(document.getElementById('topPInput').value) || null,
             top_k: parseInt(document.getElementById('topKInput').value) || null,
             max_tokens: parseInt(document.getElementById('maxTokensInput').value) || null,
-            context_length: parseInt(document.getElementById('contextSlider').value) || null
+            context_length: parseInt(document.getElementById('contextSlider').value) || null,
+            memory_mode: mmEl ? mmEl.value : undefined,
 		};
 		try {
 			await fetch(`/api/v1/persona/${name}`, {
@@ -32387,6 +32412,116 @@ Current version indicated by LITEVER below.
 			msgbox(`SUCCESS: configuration persisted to memory for ${name}.`);
 		} catch (e) { msgbox("Failed to save persona."); }
 	}
+
+	// --- Phase 2.2: LTM Generation ---
+
+	function getActiveLtmPersona() {
+		const sel = document.getElementById('personaSelectTopNav');
+		return sel ? sel.value : null;
+	}
+
+	function updateLtmCheckboxAvailability() {
+		const hs = document.getElementById('historySourceToggle');
+		const container = document.getElementById('ltmGenerationContainer');
+		const ltmToggle = document.getElementById('ltmGenerationToggle');
+		if (!hs || !container || !ltmToggle) return;
+		const derprMode = hs.checked;
+		container.style.opacity = derprMode ? '1' : '0.45';
+		ltmToggle.disabled = !derprMode;
+		if (!derprMode && ltmToggle.checked) {
+			ltmToggle.checked = false;
+			const persona = getActiveLtmPersona();
+			if (persona) localStorage.setItem('persona_ltm_' + persona, 'false');
+			restoreLtmAnote(persona);
+		}
+		updateLtmAnoteUI();
+	}
+
+	function updateLtmAnoteUI() {
+		const ltmToggle = document.getElementById('ltmGenerationToggle');
+		const anoteEl = document.getElementById('anotetext');
+		const ltmOn = ltmToggle && ltmToggle.checked && !ltmToggle.disabled;
+
+		if (!anoteEl) return;
+
+		let banner = document.getElementById('derpr_ltm_banner');
+		if (ltmOn) {
+			anoteEl.disabled = true;
+			anoteEl.style.opacity = '0.5';
+			if (!banner) {
+				banner = document.createElement('div');
+				banner.id = 'derpr_ltm_banner';
+				banner.style.cssText = 'font-size:11px;color:#7bc8a4;margin-bottom:4px;';
+				banner.textContent = 'Managed by DERPR LTM';
+				anoteEl.parentNode.insertBefore(banner, anoteEl);
+			}
+		} else {
+			anoteEl.disabled = false;
+			anoteEl.style.opacity = '';
+			if (banner) banner.remove();
+		}
+	}
+
+	function onLtmToggle() {
+		const ltmToggle = document.getElementById('ltmGenerationToggle');
+		const persona = getActiveLtmPersona();
+		if (!persona) return;
+		const ltmOn = ltmToggle && ltmToggle.checked;
+		localStorage.setItem('persona_ltm_' + persona, ltmOn ? 'true' : 'false');
+		if (!ltmOn) restoreLtmAnote(persona);
+		updateLtmAnoteUI();
+	}
+
+	function restoreLtmAnote(persona) {
+		if (!persona) return;
+		const key = 'persona_ltm_anote_backup_' + persona;
+		const backup = localStorage.getItem(key);
+		if (backup !== null) {
+			current_anote = backup;
+			const anoteEl = document.getElementById('anotetext');
+			if (anoteEl) anoteEl.value = backup;
+			localStorage.removeItem(key);
+		}
+	}
+
+	let _ltmFetchInFlight = false;
+	const _origPrepareSubmit = prepare_submit_generation;
+	prepare_submit_generation = async function() {
+		const ltmToggle = document.getElementById('ltmGenerationToggle');
+		const persona = getActiveLtmPersona();
+		if (ltmToggle && ltmToggle.checked && !ltmToggle.disabled && persona && !_ltmFetchInFlight) {
+			_ltmFetchInFlight = true;
+			const rawInput = document.getElementById('input_text') ? document.getElementById('input_text').value : '';
+			try {
+				// Backup the user's author's note before first LTM injection
+				const backupKey = 'persona_ltm_anote_backup_' + persona;
+				if (localStorage.getItem(backupKey) === null) {
+					localStorage.setItem(backupKey, current_anote || '');
+				}
+				const res = await fetch(`/api/v1/session/${encodeURIComponent(persona)}/ltm_block?query=${encodeURIComponent(rawInput)}`);
+				if (res.ok) {
+					const data = await res.json();
+					if (data.block) {
+						current_anote = data.block;
+						const anoteEl = document.getElementById('anotetext');
+						if (anoteEl) anoteEl.value = data.block;
+					}
+				}
+			} catch (e) {
+				console.warn('DERPR LTM fetch failed, proceeding with prior author note:', e);
+			} finally {
+				_ltmFetchInFlight = false;
+			}
+		}
+		_origPrepareSubmit();
+	};
+
+	// Wire the history-source toggle to also update LTM checkbox availability
+	const _origHistoryToggle = onHistorySourceToggle;
+	onHistorySourceToggle = async function() {
+		await _origHistoryToggle();
+		updateLtmCheckboxAvailability();
+	};
 
 	// Auto-trigger persona fetch on init
 	fetchPersonas();

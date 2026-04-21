@@ -12,7 +12,7 @@ Covers the adapter HTTP boundary, not just the exporter function:
 
 from datetime import datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from fastapi.testclient import TestClient
 
@@ -22,7 +22,8 @@ from src.persona import Persona
 
 
 def _make_adapter_with_seeded_db(persona_name: str = "test_persona",
-                                 context_length: int = 10):
+                                 context_length: int = 10,
+                                 retrieve_memory_block=None):
     """Build a KoboldAdapter backed by an in-memory DB and a stub ChatSystem."""
     mm = MemoryManager(db_path=":memory:")
     mm.create_schema()
@@ -36,6 +37,7 @@ def _make_adapter_with_seeded_db(persona_name: str = "test_persona",
     chat_system = SimpleNamespace(
         personas={persona_name: persona},
         memory_manager=mm,
+        _retrieve_memory_block=retrieve_memory_block or AsyncMock(return_value=None),
     )
     adapter = KoboldAdapter(chat_system=chat_system)
     return adapter, mm, persona
@@ -188,4 +190,91 @@ def test_generate_stream_passthrough_forwards_body_verbatim(monkeypatch):
     assert captured["body"]["prompt"] == "hi there"
     assert captured["body"]["params"]["temperature"] == 0.5
     assert captured["body"]["max_length"] == 64
+    mm.close()
+
+
+# -------- Phase 2.2: /api/v1/persona/{name} memory_mode --------
+
+def test_get_persona_includes_memory_mode():
+    adapter, mm, persona = _make_adapter_with_seeded_db()
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/persona/test_persona")
+    assert r.status_code == 200
+    data = r.json()
+    assert "memory_mode" in data
+    assert data["memory_mode"] == persona.get_memory_mode().name
+    mm.close()
+
+
+def test_patch_persona_updates_memory_mode():
+    adapter, mm, persona = _make_adapter_with_seeded_db()
+    with TestClient(adapter.app) as client:
+        r = client.patch("/api/v1/persona/test_persona", json={"memory_mode": "GLOBAL"})
+    assert r.status_code == 200
+    assert persona.get_memory_mode().name == "GLOBAL"
+    mm.close()
+
+
+def test_patch_persona_unknown_mode_does_not_crash():
+    # set_memory_mode logs a warning and keeps old mode on invalid input
+    from src.persona import MemoryMode
+    adapter, mm, persona = _make_adapter_with_seeded_db()
+    original = persona.get_memory_mode()
+    with TestClient(adapter.app) as client:
+        r = client.patch("/api/v1/persona/test_persona", json={"memory_mode": "INVALID_MODE"})
+    assert r.status_code == 200
+    assert persona.get_memory_mode() == original
+    mm.close()
+
+
+# -------- Phase 2.2: /api/v1/session/{persona}/ltm_block --------
+
+def test_ltm_block_unknown_persona_returns_404():
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/session/nobody/ltm_block?query=hello")
+    assert r.status_code == 404
+    mm.close()
+
+
+def test_ltm_block_returns_null_when_retrieval_returns_none():
+    adapter, mm, _ = _make_adapter_with_seeded_db(retrieve_memory_block=AsyncMock(return_value=None))
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/session/test_persona/ltm_block?query=hello")
+    assert r.status_code == 200
+    assert r.json() == {"block": None}
+    mm.close()
+
+
+def test_ltm_block_returns_block_string_when_retrieval_succeeds():
+    expected = "<memory>\nfact: user likes cats\n</memory>"
+    adapter, mm, _ = _make_adapter_with_seeded_db(
+        retrieve_memory_block=AsyncMock(return_value=expected)
+    )
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/session/test_persona/ltm_block?query=tell+me+about+pets")
+    assert r.status_code == 200
+    assert r.json()["block"] == expected
+    mm.close()
+
+
+def test_ltm_block_passes_query_text_to_retrieval():
+    mock_retrieve = AsyncMock(return_value=None)
+    adapter, mm, persona = _make_adapter_with_seeded_db(retrieve_memory_block=mock_retrieve)
+    with TestClient(adapter.app) as client:
+        client.get("/api/v1/session/test_persona/ltm_block", params={"query": "my query text"})
+    mock_retrieve.assert_awaited_once()
+    assert mock_retrieve.call_args.kwargs.get("current_message") == "my query text"
+    mm.close()
+
+
+def test_ltm_block_empty_query_passes_none():
+    mock_retrieve = AsyncMock(return_value=None)
+    adapter, mm, persona = _make_adapter_with_seeded_db(retrieve_memory_block=mock_retrieve)
+    with TestClient(adapter.app) as client:
+        client.get("/api/v1/session/test_persona/ltm_block")
+    mock_retrieve.assert_awaited_once()
+    # empty query string → current_message=None (falsy branch in endpoint)
+    kwargs = mock_retrieve.call_args.kwargs
+    assert kwargs.get("current_message") is None
     mm.close()

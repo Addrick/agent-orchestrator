@@ -59,7 +59,18 @@ The toggle state is remembered per persona in `localStorage`. Switching back to 
 
 The export pulls global history for that persona name (across all channels) up to the persona's configured `context_length` message count. User turns are wrapped with kobold's `{{[INPUT]}}` / `{{[OUTPUT]}}` placeholders so the portal renders them with the active instruct template at submit time. System rows, empty-content rows, and tool-call-only assistant rows are skipped (the count is logged server-side). Tool-call and tool-result rendering in the portal is out of scope for Phase 2 — see the roadmap backlog.
 
-A **LTM Generation** sub-checkbox is visible underneath the toggle but disabled in Phase 2.1; it ships in Phase 2.2.
+**LTM Generation (Phase 2.2):** A sub-checkbox under the toggle, enabled only when **DERPR Database** is active. When checked, DERPR runs semantic LTM retrieval against your query before each submit and writes the result into kobold-lite's **Author's Note** field; kobold then places the block near the end of the prompt at its normal author's-note position. The author's note textarea is greyed out and labelled "Managed by DERPR LTM" while this is active. Your prior author's note is backed up to `localStorage` and restored when you uncheck.
+
+The **Memory Scope** dropdown in the Inference Matrix sets the persona's `memory_mode` for retrieval:
+
+| Mode | What memories are searched |
+|------|---------------------------|
+| `CHANNEL_ISOLATED` (default) | Only turns from `channel=web_ui` — **returns nothing until Phase 2.3 logs portal turns**. Change this to see existing memories. |
+| `PERSONAL` | All turns attributed to the portal user, across all channels for this persona. |
+| `SERVER_WIDE` | All turns for this persona in any channel that shares a server context. |
+| `GLOBAL` | All turns across all channels and servers for this persona. Use this to surface Discord / email / Zammad history immediately. |
+
+Saving from the Inference Matrix persists the `memory_mode` to the backend. The LTM checkbox state is stored per persona in `localStorage` (not persisted to the backend).
 
 ## Commands
 

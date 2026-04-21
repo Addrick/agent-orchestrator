@@ -110,7 +110,32 @@ class KoboldAdapter:
                 "max_tokens": p.get_response_token_limit(),
                 "context_length": p.get_base_context_length(),
                 "thinking_level": p.get_thinking_level(),
+                "memory_mode": p.get_memory_mode().name,
             }
+
+        @self.app.get("/api/v1/session/{persona}/ltm_block")
+        async def ltm_block(persona: str, query: str = ""):
+            """Retrieve an LTM memory block for the given persona and query text.
+
+            Returns {"block": "<memory>...</memory>"} or {"block": null} when
+            no relevant memories exist or LTM is disabled for the persona.
+            Phase 2.2: called client-side before each submit when LTM is on;
+            the block is written into kobold-lite's current_anote so kobold
+            places it at its normal author's-note position in the prompt.
+            """
+            if persona not in self.chat_system.personas:
+                return JSONResponse(status_code=404, content={"error": f"Persona '{persona}' not found"})
+            p = self.chat_system.personas[persona]
+            block = await self.chat_system._retrieve_memory_block(
+                persona=p,
+                user_identifier="portal",
+                channel="web_ui",
+                server_id=None,
+                conversation_history=[],
+                current_message=query or None,
+                oldest_interaction_id=None,
+            )
+            return {"block": block}
 
         @self.app.get("/api/v1/models/list")
         async def list_all_models():
@@ -168,6 +193,7 @@ class KoboldAdapter:
             if "top_k" in data: p.set_top_k(data["top_k"])
             if "max_tokens" in data: p.set_response_token_limit(data["max_tokens"])
             if "context_length" in data: p.set_context_length(data["context_length"])
+            if "memory_mode" in data: p.set_memory_mode(data["memory_mode"])
 
             save_personas_to_file(self.chat_system.personas)
             logger.info(f"Updated and saved persona settings for {name}")
