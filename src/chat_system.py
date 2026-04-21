@@ -280,29 +280,43 @@ class ChatSystem:
         }
         memory_mode = mode_map.get(persona.get_memory_mode(), "channel")
 
-        # Extract text content from conversation history for embedding
-        window_texts = []
-        for msg in conversation_history:
-            content = msg.get('content', '')
-            if isinstance(content, str) and content.strip():
-                window_texts.append(content)
-
-        # THE FIX: Always include the current message in the search query
+        # THE FIX: Only include the current message in the search query
+        # to avoid broad query averaging/multi-matching that dilutes relevance.
+        query_texts = []
         if current_message and current_message.strip():
-            window_texts.append(current_message)
+            query_texts.append(current_message)
 
-        if not window_texts:
+        # Fallback: if current_message is empty, use the most recent USER message from history
+        if not query_texts and conversation_history:
+            for msg in reversed(conversation_history):
+                # We specifically look for 'user' role to honor the intent of 
+                # searching for the user's latest query/intent.
+                if msg.get('role') == 'user':
+                    content = msg.get('content', '')
+                    if isinstance(content, str) and content.strip():
+                        query_texts.append(content)
+                        break
+
+        # Enhanced Diagnostic Logging
+        logger.debug(
+            f"### RETRIEVAL_TRACE: persona={persona.get_name()}, "
+            f"current_msg_len={len(current_message) if current_message else 0}, "
+            f"history_len={len(conversation_history)}, "
+            f"query_texts={query_texts}"
+        )
+
+        if not query_texts:
             logger.warning(f"### ChatSystem: Skipping retrieval for {persona.get_name()} (no text content to embed)")
             return None
 
-        # Embed the sliding window messages (1 batched API call)
+        # Embed the query messages (1 batched API call)
         try:
-            window_embeddings = await self._embedding_service.encode(window_texts)
+            query_embeddings = await self._embedding_service.encode(query_texts)
         except Exception as e:
             logger.warning(f"Memory retrieval: embedding failed: {e}")
             return None
 
-        if not window_embeddings:
+        if not query_embeddings:
             logger.warning("Memory retrieval: encode returned empty results")
             return None
 
@@ -316,7 +330,7 @@ class ChatSystem:
             include_ambient=persona.get_include_ambient_memory(),
             exclude_after_interaction_id=oldest_interaction_id,
             model_name=self._embedding_service.model_name,
-            query_embeddings=window_embeddings,
+            query_embeddings=query_embeddings,
             limit=MEMORY_MAX_SUMMARIES_IN_CONTEXT,
         )
 
