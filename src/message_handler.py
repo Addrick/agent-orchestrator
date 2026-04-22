@@ -37,14 +37,14 @@ class BotLogic:
             'hello': self._handle_start_conversation,
             'goodbye': self._handle_stop_conversation,
             'dump_last': self._handle_dump_last,
-            'dump_context': self._handle_dump_context,
+            'dump_history': self._handle_dump_history,
         }
         self.what_handlers = {
             'prompt': self._what_prompt,
             'model': self._what_model,
             'models': self._what_models,
             'personas': self._what_personas,
-            'context': self._what_context,
+            'history': self._what_history,
             'tokens': self._what_tokens,
             'temp': self._what_temp,
             'execution_mode': self._what_execution_mode,
@@ -63,7 +63,7 @@ class BotLogic:
             'default_prompt': self._set_default_prompt,
             'model': self._set_model,
             'tokens': self._set_tokens,
-            'context': self._set_context,
+            'history': self._set_history,
             'temp': self._set_temp,
             'top_p': self._set_top_p,
             'top_k': self._set_top_k,
@@ -123,14 +123,14 @@ class BotLogic:
                                                                        "hello (start new conversation), \n"
                                                                        "goodbye (end conversation), \n"
                                                                        "remember <+prompt>, \n"
-                                                                       "what prompt/model/models/personas/context/tokens/temp/top_p/top_k/execution_mode/tools/memory_mode/service_bindings/display_name/long_term_memory/include_ambient_memory/thinking_level, \n"
-                                                                       "set prompt/model/context/tokens/temp/top_p/top_k/display_name/execution_mode/tools/memory_mode/service_bindings/long_term_memory/include_ambient_memory/thinking_level, \n"
+                                                                       "what prompt/model/models/personas/history/tokens/temp/top_p/top_k/execution_mode/tools/memory_mode/service_bindings/display_name/long_term_memory/include_ambient_memory/thinking_level, \n"
+                                                                       "set prompt/model/history/tokens/temp/top_p/top_k/display_name/execution_mode/tools/memory_mode/service_bindings/long_term_memory/include_ambient_memory/thinking_level, \n"
                                                                        "add <persona>, \n"
                                                                        "delete <persona>, \n"
                                                                        "detail, \n"
                                                                        "update_models, \n"
                                                                        "dump_last, \n"
-                                                                       "dump_context")
+                                                                       "dump_history")
         return help_msg, False
 
     async def _query_llm_with_selection_tool(
@@ -184,9 +184,9 @@ class BotLogic:
         try:
             response, _ = await self.chat_system.text_engine.generate_response(
                 persona_config=persona.get_config_for_engine(),
-                context_object={
+                history_object={
                     "persona_prompt": persona.get_prompt(),
-                    "history": [{"role": "user", "content": prompt}],
+                    "message_history": [{"role": "user", "content": prompt}],
                     "current_message": {"text": prompt, "image_url": None},
                 },
                 tools=[selection_tool],
@@ -320,12 +320,12 @@ class BotLogic:
         else:
             tools_display = ", ".join(enabled_tools)
 
-        context_display: str
-        if persona.is_in_dynamic_context():
-            next_limit = persona.get_current_effective_context_length()
-            context_display = f"{next_limit} (Dynamic, will grow on next message)"
+        history_display: str
+        if persona.is_in_dynamic_history():
+            next_limit = persona.get_current_effective_history_messages()
+            history_display = f"{next_limit} (Dynamic, will grow on next message)"
         else:
-            context_display = str(persona.get_current_effective_context_length())
+            history_display = str(persona.get_current_effective_history_messages())
 
         details: str = (
             f"Details for Persona: {persona.get_name()}\n"
@@ -337,7 +337,7 @@ class BotLogic:
             f"Execution Mode: {persona.get_execution_mode().name}\n"
             f"Service Bindings: {', '.join(persona.get_service_bindings()) or 'none'}\n"
             f"Enabled Tools: {tools_display}\n"
-            f"Context Length: {context_display}\n"
+            f"History Length (Messages): {history_display}\n"
             f"Display Name in Chat: {persona.should_display_name_in_chat()}\n"
             f"Response Token Limit: {persona.get_response_token_limit() or 'default'}\n"
             f"Generation Parameters:\n"
@@ -381,8 +381,8 @@ class BotLogic:
     def _what_personas(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
         return f"Available personas are: {list(self.chat_system.personas.keys())}", False
 
-    def _what_context(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        return f"{persona.get_name()} default context length is {persona.get_base_context_length()}.", False
+    def _what_history(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
+        return f"{persona.get_name()} default history message count is {persona.get_base_history_messages()}.", False
 
     def _what_tokens(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
         return f"{persona.get_name()} is limited to {persona.get_response_token_limit()} response tokens.", False
@@ -518,9 +518,9 @@ class BotLogic:
             persona.set_response_token_limit(None)
             return f"Non-numeric token limit '{limit_str}' provided. The default token limit will be used for {persona.get_name()}.", True
 
-    def _set_context(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
+    def _set_history(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
         if len(args) < 2:
-            return "Usage: set context <number|dynamic> [start_value]", False
+            return "Usage: set history <number|dynamic> [start_value]", False
 
         mode = args[1].lower()
         if mode == 'dynamic':
@@ -531,17 +531,17 @@ class BotLogic:
                 except ValueError:
                     return f"Error: Invalid start value '{args[2]}'. Must be an integer.", False
             else:
-                start_value = persona.get_current_effective_context_length()
+                start_value = persona.get_current_effective_history_messages()
 
             persona.start_new_conversation(start_value)
-            return f"Dynamic context mode enabled for {persona.get_name()}, starting at size {start_value}.", True
+            return f"Dynamic history mode enabled for {persona.get_name()}, starting at size {start_value}.", True
         else:
             try:
                 history_messages = int(mode)
-                persona.set_context_length(history_messages)
-                return f"Set static context limit for {persona.get_name()} to '{history_messages}'.", True
+                persona.set_history_messages(history_messages)
+                return f"Set static history limit for {persona.get_name()} to '{history_messages}' messages.", True
             except ValueError:
-                return f"Error: Invalid context command '{mode}'. Use a number or 'dynamic'.", False
+                return f"Error: Invalid history command '{mode}'. Use a number or 'dynamic'.", False
 
     def _set_temp(self, args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
         temp_str: str
@@ -778,7 +778,7 @@ class BotLogic:
         if args:
             return None, False
         persona.end_new_conversation()
-        return f"{persona.get_name()}: Goodbye! Resetting context.", True
+        return f"{persona.get_name()}: Goodbye! Resetting history.", True
 
     def _handle_dump_last(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[str, bool]:
         if args:
@@ -825,27 +825,27 @@ class BotLogic:
             f"{persona_name}: Summary of Last API Request\n"
             f"----------------------------------------\n"
             f"Model Used: {model_name}\n"
-            f"Context Sent:\n"
-            f"  - Context Messages: {conversational_turns}\n"
+            f"History Sent:\n"
+            f"  - History Messages: {conversational_turns}\n"
             f"  - Memory Mode Used: {persona.get_memory_mode().name.lower()}\n"
             f"Generation Params:\n"
             f"  - Temperature: {temp}\n"
             f"  - Max Output Tokens: {max_tokens}\n"
             f"  - Tools Available: {tools}\n"
             f"----------------------------------------\n"
-            f"Tip: Use `dump context` to see the exact history file sent to the model."
+            f"Tip: Use `dump_history` to see the exact history file sent to the model."
         )
         return summary, False
 
         # In src/message_handler.py
 
-    def _handle_dump_context(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[
+    def _handle_dump_history(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[
         Optional[str], bool]:
         """
-        Generates a detailed text file containing the full context of the last API call.
+        Generates a detailed text file containing the full history/context of the last API call.
 
         Includes everything the LLM received: persona config, service bindings,
-        tool definitions (with full schemas), system prompt, and conversation history.
+        tool definitions (with full schemas), system prompt, and message history.
 
         Returns:
             A specially formatted string that signals to the Discord interface
@@ -853,7 +853,7 @@ class BotLogic:
             Format: "FILE_RESPONSE::filename.txt::file_content"
         """
         if args:
-            return "Usage: dump_context", False
+            return "Usage: dump_history", False
 
         persona_name = persona.get_name()
         last_request = self.chat_system.last_api_requests.get(user_identifier, {}).get(persona_name)
@@ -861,14 +861,14 @@ class BotLogic:
         if not last_request:
             return f"{persona_name}: No previous request to analyze.", False
 
-        output_lines = [f"=== Context Dump for {persona_name} ==="]
+        output_lines = [f"=== History Dump for {persona_name} ==="]
         self._dump_persona_config(output_lines, persona)
         self._dump_tools(output_lines, last_request.get('_tools_for_llm', []))
         self._dump_api_config(output_lines, last_request)
         self._dump_conversation(output_lines, last_request)
 
         file_content = "\n".join(output_lines)
-        return f"FILE_RESPONSE::context_dump.txt::{file_content}", False
+        return f"FILE_RESPONSE::history_dump.txt::{file_content}", False
 
     @staticmethod
     def _dump_persona_config(lines: List[str], persona: Persona) -> None:
@@ -881,7 +881,7 @@ class BotLogic:
         lines.append(f"Enabled Tools: {', '.join(enabled) if enabled else 'none'}")
         bindings = persona.get_service_bindings()
         lines.append(f"Service Bindings: {', '.join(bindings) if bindings else 'none'}")
-        lines.append(f"Context Length Setting: {persona.get_base_context_length()}")
+        lines.append(f"History Messages Setting: {persona.get_base_history_messages()}")
         lines.append(f"Response Token Limit: {persona.get_response_token_limit() or 'default'}")
         lines.append(
             f"Temp: {persona.get_temperature()}, Top P: {persona.get_top_p()}, Top K: {persona.get_top_k()}")
@@ -937,8 +937,8 @@ class BotLogic:
 
     @staticmethod
     def _dump_conversation(lines: List[str], last_request: Dict[str, Any]) -> None:
-        """Append conversation history section to dump output."""
-        lines.append("\n--- Context Sent to Model ---")
+        """Append message history section to dump output."""
+        lines.append("\n--- History (Messages) Sent to Model ---")
         contents = last_request.get('contents', last_request.get('messages', []))
 
         if not contents:

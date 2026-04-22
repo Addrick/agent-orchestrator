@@ -89,7 +89,7 @@ class ZammadBot(Agent):
         try:
             response, _ = await self.chat_system.text_engine.generate_response(
                 persona_config=persona.get_config_for_engine(),
-                context_object=self._build_llm_context(persona, prompt),
+                history_object=self._build_history_object(persona, prompt),
                 tools=None
             )
 
@@ -121,7 +121,7 @@ class ZammadBot(Agent):
         try:
             response, _ = await self.chat_system.text_engine.generate_response(
                 persona_config=persona.get_config_for_engine(),
-                context_object=self._build_llm_context(persona, prompt),
+                history_object=self._build_history_object(persona, prompt),
                 tools=None
             )
             if response.get('type') == 'text':
@@ -148,7 +148,7 @@ class ZammadBot(Agent):
         try:
             response, _ = await self.chat_system.text_engine.generate_response(
                 persona_config=persona.get_config_for_engine(),
-                context_object=self._build_llm_context(persona, prompt),
+                history_object=self._build_history_object(persona, prompt),
                 tools=None
             )
 
@@ -311,9 +311,10 @@ class ZammadBot(Agent):
             logger.debug("Sending context to Analyst LLM...")
             response, _ = await self.chat_system.text_engine.generate_response(
                 persona_config=analyst_persona.get_config_for_engine(),
-                context_object={
+                history_object={
                     "persona_prompt": analyst_persona.get_prompt(),
-                    "history": [{"role": "user", "content": context_message}],
+                    "message_history": [{"role": "user", "content": context_message}],
+                    "history": [{"role": "user", "content": context_message}],  # Legacy key
                     "current_message": {"text": context_message, "image_url": None}
                 },
                 tools=None

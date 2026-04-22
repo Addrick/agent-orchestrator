@@ -28980,8 +28980,8 @@ Current version indicated by LITEVER below.
 						<input type="number" id="maxTokensInput" class="form-control" step="64" min="64" placeholder="1024">
 					</div>
 					<div class="settingitem">
-						<div class="settinglabel" style="font-size: 11px;">Ctx. Slider (<span id="contextVal">10</span>)</div>
-						<input type="range" id="contextSlider" class="form-control" min="1" max="50" step="1" oninput="document.getElementById('contextVal').textContent=this.value">
+						<div class="settinglabel" style="font-size: 11px;">Hist. Messages (<span id="historyVal">10</span>)</div>
+						<input type="range" id="historySlider" class="form-control" min="1" max="50" step="1" oninput="document.getElementById('historyVal').textContent=this.value">
 					</div>
 				</div>
 
@@ -32267,8 +32267,8 @@ Current version indicated by LITEVER below.
             document.getElementById('topPInput').value = p.top_p || 0.95;
             document.getElementById('topKInput').value = p.top_k || 40;
             document.getElementById('maxTokensInput').value = p.max_tokens || 1024;
-            document.getElementById('contextSlider').value = p.context_length || 10;
-            document.getElementById('contextVal').textContent = p.context_length || 10;
+            document.getElementById('historySlider').value = p.history_messages || 10;
+            document.getElementById('historyVal').textContent = p.history_messages || 10;
 
             // Load DERPR history-source toggle state from browser storage
             const hs = document.getElementById('historySourceToggle');
@@ -32400,7 +32400,7 @@ Current version indicated by LITEVER below.
             top_p: parseFloat(document.getElementById('topPInput').value) || null,
             top_k: parseInt(document.getElementById('topKInput').value) || null,
             max_tokens: parseInt(document.getElementById('maxTokensInput').value) || null,
-            context_length: parseInt(document.getElementById('contextSlider').value) || null,
+            history_messages: parseInt(document.getElementById('historySlider').value) || null,
             memory_mode: mmEl ? mmEl.value : undefined,
 		};
 		try {

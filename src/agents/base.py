@@ -134,7 +134,7 @@ class Agent(ABC):
 
     # --- LLM Context Building ---
 
-    def _build_llm_context(
+    def _build_history_object(
         self, persona: Persona, prompt: str,
         task_data: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -154,9 +154,14 @@ class Agent(ABC):
 
         return {
             "persona_prompt": persona.get_prompt(),
-            "history": history,
+            "message_history": history,
+            "history": history,  # Legacy key for tests
             "current_message": {"text": prompt, "image_url": None}
         }
+
+    def _build_llm_context(self, *args, **kwargs):
+        """Legacy alias for _build_history_object."""
+        return self._build_history_object(*args, **kwargs)
 
     def _get_action_history_message(
         self, task_data: Optional[Dict[str, Any]] = None,

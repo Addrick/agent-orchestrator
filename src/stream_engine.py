@@ -168,26 +168,26 @@ class StreamEngine:
         return raw
 
     @staticmethod
-    def _build_messages(context: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _build_messages(history_object: Dict[str, Any]) -> List[Dict[str, Any]]:
         messages: List[Dict[str, Any]] = []
-        history = context.get("history") or []
+        history = history_object.get("message_history", history_object.get("history", []))
         if history and history[0].get("role") == "system":
             messages.append(history[0])
             history = history[1:]
         else:
-            messages.append({"role": "system", "content": context["persona_prompt"]})
+            messages.append({"role": "system", "content": history_object["persona_prompt"]})
         messages.extend(history)
         return messages
 
     async def stream_local(
         self,
         persona_config: Dict[str, Any],
-        context_object: Dict[str, Any],
+        history_object: Dict[str, Any],
         tools: Optional[List[Dict[str, Any]]] = None,
         local_inference_config: Optional[Dict[str, Any]] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
         """Streams from KoboldCPP's native generate/stream endpoint."""
-        messages = self._build_messages(context_object)
+        messages = self._build_messages(history_object)
         tool_list = [t for t in (tools or []) if t.get("function") or t.get("name")]
         if tool_list and messages and messages[0].get("role") == "system":
             messages = list(messages)

@@ -38,7 +38,7 @@ class Persona:
             model_name: str,
             prompt: str,
             token_limit: Optional[int] = None,
-            context_length: Optional[int] = global_config.DEFAULT_HISTORY_MESSAGES,
+            history_messages: Optional[int] = None,
             temperature: Optional[float] = None,
             top_p: Optional[float] = None,
             top_k: Optional[int] = None,
@@ -50,19 +50,28 @@ class Persona:
             include_ambient_memory: bool = True,
             thinking_level: Optional[str] = None,
             long_term_memory: bool = True,
+            **kwargs: Any,
     ) -> None:
         self._name: str = persona_name
         self._model_name: str = model_name
         self._prompt: str = prompt
         self._response_token_limit: int = global_config.DEFAULT_TOKEN_LIMIT
         self._set_and_sanitize_token_limit(token_limit)  # Silent call to private method
-        self._message_history: int = context_length if context_length is not None else global_config.DEFAULT_HISTORY_MESSAGES
+
+        # Handle legacy context_length from tests or old configs
+        effective_history = history_messages
+        if effective_history is None:
+            effective_history = kwargs.get("context_length")
+        if effective_history is None:
+            effective_history = global_config.DEFAULT_HISTORY_MESSAGES
+
+        self._history_messages: int = int(effective_history)
         self._execution_mode: ExecutionMode = self._resolve_enum(
             ExecutionMode, execution_mode, ExecutionMode.AUTONOMOUS)
         self._enabled_tools: List[str] = enabled_tools if enabled_tools is not None else []
         self._memory_mode: MemoryMode = self._resolve_enum(
             MemoryMode, memory_mode, MemoryMode.CHANNEL_ISOLATED)
-        self._temp_context_override: Optional[int] = None
+        self._temp_history_override: Optional[int] = None
 
         # Model-specific generation parameters
         self._temperature: Optional[float] = temperature
@@ -88,27 +97,31 @@ class Persona:
     def get_response_token_limit(self) -> int:
         return self._response_token_limit
 
-    def get_message_history(self) -> int:
+    def get_history_messages(self) -> int:
         """
-        Returns the effective history length (alias for message_history).
+        Returns the effective history message count.
         If a temporary override is active (from a 'hello' command), it returns
         the override value and increments it for the next turn.
         """
-        if self._temp_context_override is not None:
-            current_limit = self._temp_context_override
+        if self._temp_history_override is not None:
+            current_limit = self._temp_history_override
             # Increment by 2 for the user message and the assistant's reply.
-            self._temp_context_override += 2
+            self._temp_history_override += 2
             return current_limit
 
-        return self._message_history
+        return self._history_messages
 
     def get_context_length(self) -> int:
-        """Legacy alias for get_message_history."""
-        return self.get_message_history()
+        """Legacy alias for get_history_messages."""
+        return self.get_history_messages()
+
+    def get_base_history_messages(self) -> int:
+        """Returns the persona's static, default history message count."""
+        return self._history_messages
 
     def get_base_context_length(self) -> int:
-        """Returns the persona's static, default history length."""
-        return self._message_history
+        """Legacy alias for get_base_history_messages."""
+        return self.get_base_history_messages()
 
     def get_temperature(self) -> Optional[float]:
         return self._temperature
@@ -202,23 +215,23 @@ class Persona:
         self._prompt = str(new_prompt)
         logger.info(f"Persona '{self._name}' prompt has been updated.")
 
-    def set_message_history(self, new_length: Any) -> int:
+    def set_history_messages(self, new_length: Any) -> int:
         """
-        Sets the static default history length and disables any active dynamic context override.
+        Sets the static default history message count and disables any active dynamic override.
         """
         self.end_new_conversation()  # Ensure dynamic mode is off when setting a static length.
         try:
-            self._message_history = int(new_length)
-            logger.info(f"Persona '{self._name}' message history set to {self._message_history}.")
+            self._history_messages = int(new_length)
+            logger.info(f"Persona '{self._name}' history messages set to {self._history_messages}.")
         except (ValueError, TypeError):
-            self._message_history = global_config.DEFAULT_HISTORY_MESSAGES
+            self._history_messages = global_config.DEFAULT_HISTORY_MESSAGES
             logger.info(
-                f"Invalid history length provided: '{new_length}'. Setting to default value: {self._message_history}.")
-        return self._message_history
+                f"Invalid history length provided: '{new_length}'. Setting to default value: {self._history_messages}.")
+        return self._history_messages
 
     def set_context_length(self, new_length: Any) -> int:
-        """Legacy alias for set_message_history."""
-        return self.set_message_history(new_length)
+        """Legacy alias for set_history_messages."""
+        return self.set_history_messages(new_length)
 
     def set_temperature(self, new_temp: Any) -> Optional[float]:
         """
@@ -322,28 +335,36 @@ class Persona:
     # --- Conversation State Methods ---
 
     def start_new_conversation(self, start_value: int = 0) -> None:
-        """Initiates a 'fresh start' mode by setting a temporary context override."""
-        self._temp_context_override = start_value
-        logger.info(f"Persona '{self._name}' starting new conversation with temporary context at size {start_value}.")
+        """Initiates a 'fresh start' mode by setting a temporary history override."""
+        self._temp_history_override = start_value
+        logger.info(f"Persona '{self._name}' starting new conversation with temporary history at size {start_value}.")
 
     def end_new_conversation(self) -> None:
-        """Ends the 'fresh start' mode and reverts to the default context length."""
-        if self.is_in_dynamic_context():
-            self._temp_context_override = None
-            logger.info(f"Persona '{self._name}' ending temporary context, reverting to default.")
+        """Ends the 'fresh start' mode and reverts to the default history length."""
+        if self.is_in_dynamic_history():
+            self._temp_history_override = None
+            logger.info(f"Persona '{self._name}' ending temporary history, reverting to default.")
+
+    def is_in_dynamic_history(self) -> bool:
+        """Returns True if the persona is in a temporary, dynamic history conversation."""
+        return self._temp_history_override is not None
 
     def is_in_dynamic_context(self) -> bool:
-        """Returns True if the persona is in a temporary, dynamic context conversation."""
-        return self._temp_context_override is not None
+        """Legacy alias for is_in_dynamic_history."""
+        return self.is_in_dynamic_history()
 
-    def get_current_effective_context_length(self) -> int:
+    def get_current_effective_history_messages(self) -> int:
         """
-        Returns the next context value that will be used, without incrementing the counter.
+        Returns the next history value that will be used, without incrementing the counter.
         Useful for inspecting state with the 'detail' command.
         """
-        if self._temp_context_override is not None:
-            return self._temp_context_override
-        return self._context_length
+        if self._temp_history_override is not None:
+            return self._temp_history_override
+        return self._history_messages
+
+    def get_current_effective_context_length(self) -> int:
+        """Legacy alias for get_current_effective_history_messages."""
+        return self.get_current_effective_history_messages()
 
     # --- Utility Methods ---
 

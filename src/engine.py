@@ -173,7 +173,7 @@ class TextEngine:
                 await stack.enter_async_context(limiter)
             yield
 
-    async def generate_response(self, persona_config: Dict[str, Any], context_object: Dict[str, Any],
+    async def generate_response(self, persona_config: Dict[str, Any], history_object: Dict[str, Any],
                                 tools: Optional[List[Dict[str, Any]]] = None,
                                 local_inference_config: Optional[Dict[str, Any]] = None) -> Tuple[
         Dict[str, Any], Optional[Dict[str, Any]]]:
@@ -188,13 +188,13 @@ class TextEngine:
         """
         model_name: str = persona_config.get("model_name", "")
 
-        if context_object["current_message"].get("image_url") and not self.model_supports_images(model_name):
+        if history_object["current_message"].get("image_url") and not self.model_supports_images(model_name):
             logger.info(f"Model {model_name} does not support images. Modifying prompt.")
-            context_object["persona_prompt"] += (
+            history_object["persona_prompt"] += (
                 "\n\n[System note: The user has attached an image that you cannot see."
                 " Please inform them of this fact in your response.]"
             )
-            context_object["current_message"]["image_url"] = None
+            history_object["current_message"]["image_url"] = None
 
         handler, limiters = self._get_provider_route(model_name)
 
@@ -205,9 +205,9 @@ class TextEngine:
             try:
                 async with self._rate_limited(limiters):
                     if model_name == 'local':
-                        result, api_payload = await handler(persona_config, context_object, tools, local_inference_config)
+                        result, api_payload = await handler(persona_config, history_object, tools, local_inference_config)
                     else:
-                        result, api_payload = await handler(persona_config, context_object, tools)
+                        result, api_payload = await handler(persona_config, history_object, tools)
 
                 # Validate the response structure and content
                 if result.get('type') == 'text' and result.get('content', '').strip():
@@ -263,22 +263,27 @@ class TextEngine:
             last_message['content'] = [{"type": "text", "text": last_message['content']}]
         last_message['content'].append({"type": "image_url", "image_url": {"url": image_url}})
 
-    async def _generate_openai_response(self, config: Dict[str, Any], context: Dict[str, Any],
+    async def _generate_openai_response(self, config: Dict[str, Any], history_object: Dict[str, Any],
                                         tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
         Dict[str, Any], Dict[str, Any]]:
         client = await self._get_openai_client()
         messages: List[Dict[str, Any]] = []
-        if context["history"] and context["history"][0]["role"] == "system":
-            messages.append(context["history"][0])
-            history_to_process = context["history"][1:]
+        message_history = history_object.get("message_history", history_object.get("history", []))
+        if message_history and message_history[0]["role"] == "system":
+            messages.append(message_history[0])
+            history_to_process = message_history[1:]
         else:
-            messages.append({"role": "system", "content": context["persona_prompt"]})
-            history_to_process = context["history"]
+            messages.append({"role": "system", "content": history_object["persona_prompt"]})
+            history_to_process = message_history
 
-        messages.extend(history_to_process)
+        # Add remaining history
+        for msg in history_to_process:
+            if msg["role"] == "system":
+                continue
+            messages.append(msg)
 
-        if context["current_message"].get("image_url"):
-            self._attach_openai_image(messages, context["current_message"]["image_url"])
+        if history_object["current_message"].get("image_url"):
+            self._attach_openai_image(messages, history_object["current_message"]["image_url"])
 
         api_params: Dict[str, Any] = {
             "model": config["model_name"],
@@ -345,15 +350,15 @@ class TextEngine:
         except aiohttp.ClientError as e:
             logger.error(f"Failed to download image from {image_url}: {e}")
 
-    async def _generate_anthropic_response(self, config: Dict[str, Any], context: Dict[str, Any],
+    async def _generate_anthropic_response(self, config: Dict[str, Any], history_object: Dict[str, Any],
                                            tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
         Dict[str, Any], Dict[str, Any]]:
         client = self._get_anthropic_client()
 
-        system_prompt, history = self._extract_system_prompt(context)
+        system_prompt, history = self._extract_system_prompt(history_object)
 
-        if context["current_message"].get("image_url"):
-            await self._attach_anthropic_image(history, context["current_message"]["image_url"])
+        if history_object["current_message"].get("image_url"):
+            await self._attach_anthropic_image(history, history_object["current_message"]["image_url"])
 
         api_params: Dict[str, Any] = {
             "model": config["model_name"],
@@ -406,10 +411,10 @@ class TextEngine:
                                         api_payload=api_params) from e
 
     @staticmethod
-    def _extract_system_prompt(context: Dict[str, Any]) -> Tuple[str, List[Dict[str, Any]]]:
+    def _extract_system_prompt(history_object: Dict[str, Any]) -> Tuple[str, List[Dict[str, Any]]]:
         """Returns (merged_system_prompt, remaining_history)."""
-        system_prompt = context["persona_prompt"]
-        history = context["history"]
+        system_prompt = history_object["persona_prompt"]
+        history = history_object.get("message_history", history_object.get("history", []))
         if history and history[0]["role"] == "system":
             system_prompt = f"{system_prompt}\n\n{history[0]['content']}"
             history = history[1:]
@@ -550,7 +555,7 @@ class TextEngine:
             dump_config['tools'] = tool_names
         return {'model': model_name, 'contents': serializable_history, 'config': dump_config}
 
-    async def _generate_google_response(self, config: Dict[str, Any], context: Dict[str, Any],
+    async def _generate_google_response(self, config: Dict[str, Any], history_object: Dict[str, Any],
                                         tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
         Dict[str, Any], Dict[str, Any]]:
         """Generates a response using the Google Gemini API."""
@@ -560,8 +565,8 @@ class TextEngine:
         except (ValueError, AssertionError) as e:
             raise LLMCommunicationError(f"Error: Google not configured: {e}") from e
 
-        system_prompt, history_to_process = self._extract_system_prompt(context)
-        image_url = context["current_message"].get("image_url")
+        system_prompt, history_to_process = self._extract_system_prompt(history_object)
+        image_url = history_object["current_message"].get("image_url")
         history_for_api, serializable_history = await self._build_google_history(
             system_prompt, history_to_process, image_url
         )
@@ -622,7 +627,7 @@ class TextEngine:
         local_api_url = os.environ.get("LOCAL_LLM_URL", global_config.LOCAL_LLM_URL)
         return AsyncOpenAI(base_url=local_api_url, api_key="not-required")
 
-    async def _generate_local_response(self, config: Dict[str, Any], context: Dict[str, Any],
+    async def _generate_local_response(self, config: Dict[str, Any], history_object: Dict[str, Any],
                                        tools: Optional[List[Dict[str, Any]]] = None,
                                        local_inference_config: Optional[Dict[str, Any]] = None) -> Tuple[
         Dict[str, Any], Dict[str, Any]]:
@@ -645,7 +650,7 @@ class TextEngine:
             # We provide a placeholder for consistency.
             config['model_name'] = 'local-model'
             # We can now call our standard, well-tested OpenAI method!
-            return await self._generate_openai_response(config, context, tools)
+            return await self._generate_openai_response(config, history_object, tools)
         except LLMCommunicationError as e:
             logger.error(f"Local OpenAI-compatible API error: {e}", exc_info=True)
             # Re-raise with a more specific "Local API" message, but preserving the original payload.
