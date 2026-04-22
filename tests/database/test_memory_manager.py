@@ -5,7 +5,7 @@ import json
 import pytest
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 from src.database.memory_manager import MemoryManager
 from config.global_config import TEST_MEMORY_DATABASE_FILE, TEST_DATABASE_DIR, EMBEDDING_MODEL
@@ -996,6 +996,64 @@ def test_migration_memory_tables_idempotent(legacy_mem_manager):
     assert cursor.fetchone()[0] == 1
 
 
+def test_migration_creates_edit_history_embeddings_table(legacy_mem_manager):
+    """create_schema() creates the Edit_History_Embeddings table used by portal version swap."""
+    legacy_mem_manager.create_schema()
+
+    conn = legacy_mem_manager._get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='Edit_History_Embeddings'")
+    assert cursor.fetchone()[0] == 1
+
+    cursor.execute("PRAGMA table_info(Edit_History_Embeddings)")
+    cols = {row['name'] for row in cursor.fetchall()}
+    assert {'edit_id', 'embedding', 'model_name', 'created_at'} <= cols
+
+
+def test_migration_edit_history_embeddings_idempotent(legacy_mem_manager):
+    """Running create_schema() twice leaves Edit_History_Embeddings intact."""
+    legacy_mem_manager.create_schema()
+    legacy_mem_manager.create_schema()
+
+    conn = legacy_mem_manager._get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='Edit_History_Embeddings'")
+    assert cursor.fetchone()[0] == 1
+
+
+def test_migration_edit_history_embeddings_cascade_on_edit_delete(legacy_mem_manager):
+    """Edit_History_Embeddings rows cascade-delete when their parent Interaction_Edit_History row is removed."""
+    legacy_mem_manager.create_schema()
+
+    conn = legacy_mem_manager._get_connection()
+    cursor = conn.cursor()
+    # Seed a User_Interactions row, then an archive row, then an embedding row.
+    cursor.execute(
+        "INSERT INTO User_Interactions (user_identifier, persona_name, channel, author_role, content, timestamp) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("u1", "p1", "portal", "assistant", "canonical", datetime.now(timezone.utc)),
+    )
+    iid = cursor.lastrowid
+    cursor.execute(
+        "INSERT INTO Interaction_Edit_History (interaction_id, old_content, edited_at) VALUES (?, ?, ?)",
+        (iid, "old", datetime.now(timezone.utc)),
+    )
+    edit_id = cursor.lastrowid
+    cursor.execute(
+        "INSERT INTO Edit_History_Embeddings (edit_id, embedding, model_name, created_at) VALUES (?, ?, ?, ?)",
+        (edit_id, b"\x00" * 16, "test-model", datetime.now(timezone.utc)),
+    )
+    conn.commit()
+
+    cursor.execute("DELETE FROM Interaction_Edit_History WHERE edit_id = ?", (edit_id,))
+    conn.commit()
+
+    cursor.execute("SELECT count(*) FROM Edit_History_Embeddings WHERE edit_id = ?", (edit_id,))
+    assert cursor.fetchone()[0] == 0
+
+
 @pytest.fixture
 def legacy_mem_manager_pre_segment_timestamps(tmp_path):
     """MemoryManager with Memory_Segments table missing timestamp columns."""
@@ -1290,3 +1348,188 @@ def test_migration_segment_failures_usable_after_migration(legacy_mem_manager):
 
     legacy_mem_manager.clear_segment_failure("chan", "p1", None, 1, 50)
     assert len(legacy_mem_manager.get_failed_segment_ranges("chan", "p1")) == 0
+
+
+# --- Phase 2.3b: version list / swap / retry-embedding preservation ---
+
+def _seed_portal_assistant(mem_manager, content: str, emb: bytes = None) -> int:
+    """Log an assistant row for the portal session used in these tests, optionally with an embedding."""
+    iid = mem_manager.log_message(
+        "web_ui", "persona_a", "portal", "assistant", "persona_a",
+        content, datetime.now(),
+    )
+    if emb is not None:
+        mem_manager.store_message_embedding(iid, emb, EMBEDDING_MODEL, datetime.now())
+        conn = mem_manager._get_connection()
+        conn.execute(
+            "INSERT OR REPLACE INTO vec_Message_Embeddings (interaction_id, embedding) VALUES (?, ?)",
+            (iid, emb),
+        )
+        conn.commit()
+    return iid
+
+
+def test_handle_portal_retry_moves_embedding_to_edit_history(mem_manager):
+    """After retry, Message_Embeddings row is moved into Edit_History_Embeddings, not deleted."""
+    emb = _make_fake_embedding()
+    iid = _seed_portal_assistant(mem_manager, "first attempt", emb)
+
+    returned = mem_manager.handle_portal_retry("persona_a", "web_ui", "portal")
+    assert returned == iid
+
+    conn = mem_manager._get_connection()
+    cur = conn.cursor()
+
+    # Canonical Message_Embeddings row gone + vec shadow gone.
+    cur.execute("SELECT COUNT(*) FROM Message_Embeddings WHERE interaction_id = ?", (iid,))
+    assert cur.fetchone()[0] == 0
+    cur.execute("SELECT COUNT(*) FROM vec_Message_Embeddings WHERE interaction_id = ?", (iid,))
+    assert cur.fetchone()[0] == 0
+
+    # Exactly one archive with the original embedding preserved.
+    cur.execute(
+        "SELECT e.edit_id, e.old_content, eh.embedding"
+        " FROM Interaction_Edit_History e LEFT JOIN Edit_History_Embeddings eh ON e.edit_id = eh.edit_id"
+        " WHERE e.interaction_id = ?",
+        (iid,),
+    )
+    rows = cur.fetchall()
+    assert len(rows) == 1
+    assert rows[0]['old_content'] == "first attempt"
+    assert rows[0]['embedding'] == emb
+
+
+def test_handle_portal_retry_without_embedding_is_noop_for_archive_embedding(mem_manager):
+    """Retry with no prior embedding still archives content but no Edit_History_Embeddings row is inserted."""
+    iid = _seed_portal_assistant(mem_manager, "no-embed content", emb=None)
+
+    mem_manager.handle_portal_retry("persona_a", "web_ui", "portal")
+
+    conn = mem_manager._get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT eh.edit_id FROM Interaction_Edit_History e"
+        " LEFT JOIN Edit_History_Embeddings eh ON e.edit_id = eh.edit_id"
+        " WHERE e.interaction_id = ?",
+        (iid,),
+    )
+    rows = cur.fetchall()
+    assert len(rows) == 1
+    assert rows[0]['edit_id'] is None
+
+
+def test_list_interaction_versions_ordering_and_canonical_last(mem_manager):
+    """Archives are oldest-first; canonical appears last with edit_id=None."""
+    iid = _seed_portal_assistant(mem_manager, "v1", emb=_make_fake_embedding())
+
+    mem_manager.handle_portal_retry("persona_a", "web_ui", "portal")
+    mem_manager.update_interaction_content(iid, "v2")
+    mem_manager.store_message_embedding(iid, _make_fake_embedding(), EMBEDDING_MODEL, datetime.now())
+
+    mem_manager.handle_portal_retry("persona_a", "web_ui", "portal")
+    mem_manager.update_interaction_content(iid, "v3")
+
+    versions = mem_manager.list_interaction_versions(iid)
+    assert [v['content'] for v in versions] == ["v1", "v2", "v3"]
+    assert versions[-1]['edit_id'] is None
+    assert all(v['edit_id'] is not None for v in versions[:-1])
+
+
+def test_swap_interaction_version_round_trip_preserves_embedding(mem_manager):
+    """Select k=0 restores original content + original embedding as canonical."""
+    import struct, math
+    from config.global_config import EMBEDDING_DIMENSION
+    dim = EMBEDDING_DIMENSION
+    # Distinguishable embeddings so we can assert the correct one ends up canonical.
+    emb_v1 = struct.pack(f'{dim}f', *([1.0 / math.sqrt(dim)] * dim))
+    emb_v2 = struct.pack(f'{dim}f', *([-1.0 / math.sqrt(dim)] * dim))
+
+    iid = _seed_portal_assistant(mem_manager, "v1", emb=emb_v1)
+
+    mem_manager.handle_portal_retry("persona_a", "web_ui", "portal")
+    mem_manager.update_interaction_content(iid, "v2")
+    mem_manager.store_message_embedding(iid, emb_v2, EMBEDDING_MODEL, datetime.now())
+    conn = mem_manager._get_connection()
+    conn.execute(
+        "INSERT OR REPLACE INTO vec_Message_Embeddings (interaction_id, embedding) VALUES (?, ?)",
+        (iid, emb_v2),
+    )
+    conn.commit()
+
+    result = mem_manager.swap_interaction_version(iid, 0)
+
+    assert result['current_content'] == "v1"
+    assert result['interaction_id'] == iid
+    assert result['total_versions'] == 2  # v2 is now archived, v1 canonical.
+
+    cur = conn.cursor()
+    cur.execute("SELECT content FROM User_Interactions WHERE interaction_id = ?", (iid,))
+    assert cur.fetchone()['content'] == "v1"
+
+    cur.execute("SELECT embedding FROM Message_Embeddings WHERE interaction_id = ?", (iid,))
+    assert cur.fetchone()['embedding'] == emb_v1
+
+    cur.execute("SELECT embedding FROM vec_Message_Embeddings WHERE interaction_id = ?", (iid,))
+    assert cur.fetchone()['embedding'] == emb_v1
+
+    # v2 now lives in archive with its embedding intact.
+    cur.execute(
+        "SELECT e.old_content, eh.embedding FROM Interaction_Edit_History e"
+        " LEFT JOIN Edit_History_Embeddings eh ON e.edit_id = eh.edit_id"
+        " WHERE e.interaction_id = ?",
+        (iid,),
+    )
+    archived = cur.fetchall()
+    assert len(archived) == 1
+    assert archived[0]['old_content'] == "v2"
+    assert archived[0]['embedding'] == emb_v2
+
+
+def test_swap_interaction_version_out_of_bounds_raises_no_mutation(mem_manager):
+    """Out-of-bounds k raises IndexError and does not mutate archive count or canonical."""
+    emb = _make_fake_embedding()
+    iid = _seed_portal_assistant(mem_manager, "only", emb)
+
+    mem_manager.handle_portal_retry("persona_a", "web_ui", "portal")
+    mem_manager.update_interaction_content(iid, "canonical-v2")
+
+    conn = mem_manager._get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM Interaction_Edit_History WHERE interaction_id = ?", (iid,))
+    archives_before = cur.fetchone()[0]
+
+    with pytest.raises(IndexError):
+        mem_manager.swap_interaction_version(iid, 5)
+    with pytest.raises(IndexError):
+        mem_manager.swap_interaction_version(iid, -1)
+
+    cur.execute("SELECT COUNT(*) FROM Interaction_Edit_History WHERE interaction_id = ?", (iid,))
+    assert cur.fetchone()[0] == archives_before
+    cur.execute("SELECT content FROM User_Interactions WHERE interaction_id = ?", (iid,))
+    assert cur.fetchone()['content'] == "canonical-v2"
+
+
+def test_swap_interaction_version_unknown_id_raises(mem_manager):
+    """ValueError raised when the interaction does not exist."""
+    with pytest.raises(ValueError):
+        mem_manager.swap_interaction_version(99999, 0)
+
+
+def test_swap_total_versions_stable_across_multiple_swaps(mem_manager):
+    """Swapping back and forth keeps total_versions constant (archives + canonical = N)."""
+    iid = _seed_portal_assistant(mem_manager, "v1", _make_fake_embedding())
+
+    for content in ("v2", "v3"):
+        mem_manager.handle_portal_retry("persona_a", "web_ui", "portal")
+        mem_manager.update_interaction_content(iid, content)
+        mem_manager.store_message_embedding(iid, _make_fake_embedding(), EMBEDDING_MODEL, datetime.now())
+
+    versions_before = mem_manager.list_interaction_versions(iid)
+    total_before = len(versions_before)
+    assert total_before == 3
+
+    mem_manager.swap_interaction_version(iid, 0)
+    mem_manager.swap_interaction_version(iid, 0)
+
+    versions_after = mem_manager.list_interaction_versions(iid)
+    assert len(versions_after) == total_before
