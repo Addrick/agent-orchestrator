@@ -109,7 +109,7 @@ class KoboldAdapter:
                 "top_p": p.get_top_p(),
                 "top_k": p.get_top_k(),
                 "max_tokens": p.get_response_token_limit(),
-                "context_length": p.get_base_context_length(),
+                "history_messages": p.get_base_history_messages(),
                 "thinking_level": p.get_thinking_level(),
                 "memory_mode": p.get_memory_mode().name,
             }
@@ -128,9 +128,9 @@ class KoboldAdapter:
                 return JSONResponse(status_code=404, content={"error": f"Persona '{persona}' not found"})
             p = self.chat_system.personas[persona]
             
-            # USE PRESCRIBED message_history persona attribute for context length
+            # USE PRESCRIBED history_messages persona attribute for count
             history, oldest_id = self.chat_system._build_conversation_history(
-                p, "portal", "web_ui", None, p.get_message_history()
+                p, "portal", "web_ui", None, p.get_history_messages()
             )
 
             block = await self.chat_system._retrieve_memory_block(
@@ -156,12 +156,12 @@ class KoboldAdapter:
             return {"models": sorted(list(set(all_m)))}
 
         @self.app.post("/api/v1/persona/{name}/reset")
-        async def reset_persona_context(name: str):
+        async def reset_persona_history(name: str):
             if name not in self.chat_system.personas:
                 return {"error": "Persona not found"}
             p = self.chat_system.personas[name]
             p.start_new_conversation()
-            return {"result": f"Context for {name} reset sync successfully"}
+            return {"result": f"History for {name} reset successfully"}
 
         @self.app.get("/api/v1/session/{persona}/kobold_export")
         async def kobold_export(persona: str, max_turns: Optional[int] = None):
@@ -169,13 +169,13 @@ class KoboldAdapter:
 
             Phase 2.1 always pulls global history (all channels) — the portal has
             no channel concept. max_turns defaults to the persona's configured
-            sliding-window size (`get_base_context_length`); no new config key.
+            sliding-window size (`get_base_history_messages`); no new config key.
             """
             if persona not in self.chat_system.personas:
                 return JSONResponse(status_code=404, content={"error": f"Persona '{persona}' not found"})
 
             p = self.chat_system.personas[persona]
-            limit = max_turns if isinstance(max_turns, int) and max_turns > 0 else p.get_base_context_length()
+            limit = max_turns if isinstance(max_turns, int) and max_turns > 0 else p.get_base_history_messages()
             raw_history = await asyncio.to_thread(
                 self.chat_system.memory_manager.get_global_history, persona, limit
             )
@@ -199,7 +199,8 @@ class KoboldAdapter:
             if "top_p" in data: p.set_top_p(data["top_p"])
             if "top_k" in data: p.set_top_k(data["top_k"])
             if "max_tokens" in data: p.set_response_token_limit(data["max_tokens"])
-            if "context_length" in data: p.set_message_history(data["context_length"])
+            if "history_messages" in data: p.set_history_messages(data["history_messages"])
+            elif "context_length" in data: p.set_history_messages(data["context_length"])
             if "memory_mode" in data: p.set_memory_mode(data["memory_mode"])
 
             save_personas_to_file(self.chat_system.personas)
@@ -222,7 +223,7 @@ class KoboldAdapter:
             return await self._forward_get("/api/v1/config/soft_prompts", {"results": []})
 
         @self.app.get("/api/v1/config/max_context_length")
-        async def get_max_context_length():
+        async def get_max_history_messages():
             return await self._forward_get("/api/v1/config/max_context_length", {"result": 8192})
 
         @self.app.get("/api/extra/true_max_context_length")

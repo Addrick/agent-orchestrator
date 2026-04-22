@@ -214,9 +214,10 @@ class MemoryConsolidator:
 
         core_profile_resp, _ = await self.text_engine.generate_response(
             persona_config=llm_persona.get_config_for_engine(),
-            context_object={
+            history_object={
                 "persona_prompt": system_prompt,
-                "history": [{"role": "user", "content": user_message}],
+                "message_history": [{"role": "user", "content": user_message}],
+                "history": [{"role": "user", "content": user_message}],  # Legacy key
                 "current_message": {"text": "", "image_url": None}
             },
             tools=[l2_tool_def],

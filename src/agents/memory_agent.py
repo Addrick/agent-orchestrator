@@ -667,7 +667,7 @@ class MemoryAgent(Agent):
             }
             response, _ = await self.text_engine.generate_response(
                 persona_config=persona.get_config_for_engine(),
-                context_object=self._build_llm_context(persona, prompt),
+                history_object=self._build_history_object(persona, prompt),
                 tools=[summary_tool],
             )
 

@@ -234,7 +234,7 @@ class ChatSystem:
         """
         persona_name = persona.get_name()
 
-        effective_limit: int = persona.get_context_length()
+        effective_limit: int = persona.get_history_messages()
         if history_limit is not None:
             effective_limit = min(effective_limit, history_limit)
 
@@ -432,13 +432,14 @@ class ChatSystem:
         """
         history_start = len(ctx.conversation_history)
         for i in range(MAX_TOOL_CALLS):
-            context_object: Dict[str, Any] = {
+            history_object: Dict[str, Any] = {
                 "persona_prompt": ctx.persona.get_prompt(),
-                "history": ctx.conversation_history,
+                "message_history": ctx.conversation_history,
+                "history": ctx.conversation_history,  # Legacy key for tests
                 "current_message": {"text": "", "image_url": ctx.image_url if i == 0 else None}
             }
             llm_response, api_payload = await self.text_engine.generate_response(
-                ctx.persona.get_config_for_engine(), context_object,
+                ctx.persona.get_config_for_engine(), history_object,
                 tools=ctx.tools_for_llm,
                 local_inference_config=ctx.local_inference_config
             )
@@ -701,13 +702,13 @@ class ChatSystem:
             for i in range(MAX_TOOL_CALLS):
                 iter_text = ""
                 tool_calls: List[Dict[str, Any]] = []
-                context_object: Dict[str, Any] = {
+                history_object: Dict[str, Any] = {
                     "persona_prompt": ctx.persona.get_prompt(),
-                    "history": ctx.conversation_history,
+                    "message_history": ctx.conversation_history,
                     "current_message": {"text": "", "image_url": ctx.image_url if i == 0 else None},
                 }
                 async for event in self.stream_engine.stream_local(
-                    ctx.persona.get_config_for_engine(), context_object,
+                    ctx.persona.get_config_for_engine(), history_object,
                     tools=ctx.tools_for_llm, 
                     local_inference_config=ctx.local_inference_config
                 ):
@@ -830,13 +831,14 @@ class ChatSystem:
                 self._append_denied_tool_results(pending.write_calls, conversation_history)
 
             # Continue the LLM conversation with the tool results
-            context_object = {
+            history_object = {
                 "persona_prompt": persona.get_prompt(),
-                "history": conversation_history,
-                "current_message": {"text": "", "image_url": None}
+                "message_history": pending.conversation_history,
+                "history": pending.conversation_history,  # Legacy key
+                "current_message": {"text": "", "image_url": pending.image_url}
             }
             llm_response, api_payload = await self.text_engine.generate_response(
-                persona.get_config_for_engine(), context_object, tools=pending.tools_for_llm
+                persona.get_config_for_engine(), history_object, tools=pending.tools_for_llm
             )
             if api_payload:
                 self._store_api_request(

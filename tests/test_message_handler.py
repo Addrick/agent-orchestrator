@@ -14,7 +14,7 @@ def mock_chat_system_with_state():
     chat_system = MagicMock(spec=ChatSystem)
     # Start with a real dictionary to track state changes
     chat_system.personas = {
-        "derpr": Persona("derpr", "gpt-4", "You are derpr.", context_length=20),
+        "derpr": Persona("derpr", "gpt-4", "You are derpr.", history_messages=20),
         "testbot": Persona("testbot", "gpt-3", "You are testbot.")
     }
     return chat_system
@@ -81,64 +81,64 @@ async def test_non_mutating_command(bot_logic):
 
 # --- Test Cases for Dynamic Context Management ---
 
-def test_dynamic_context_lifecycle(bot_logic, mock_chat_system_with_state):
+def test_dynamic_history_lifecycle(bot_logic, mock_chat_system_with_state):
     """
-    Tests the full lifecycle of dynamic context: hello, growth, and goodbye.
+    Tests the full lifecycle of dynamic history: hello, growth, and goodbye.
     """
     persona = mock_chat_system_with_state.personas["derpr"]
-    assert persona.get_context_length() == 20, "Initial state should be the default context length."
+    assert persona.get_history_messages() == 20, "Initial state should be the default history length."
 
     bot_logic._handle_start_conversation([], persona, "user1")
-    assert persona.get_context_length() == 0, "First call after 'hello' should return 0."
-    assert persona.get_context_length() == 2, "Second call should return 2."
-    assert persona.get_context_length() == 4, "Third call should return 4."
+    assert persona.get_history_messages() == 0, "First call after 'hello' should return 0."
+    assert persona.get_history_messages() == 2, "Second call should return 2."
+    assert persona.get_history_messages() == 4, "Third call should return 4."
 
     bot_logic._handle_stop_conversation([], persona, "user1")
-    assert persona.get_context_length() == 20, "After 'goodbye', should revert to default."
-    assert persona.get_context_length() == 20, "Should stay at default after reverting."
+    assert persona.get_history_messages() == 20, "After 'goodbye', should revert to default."
+    assert persona.get_history_messages() == 20, "Should stay at default after reverting."
 
 
-def test_set_context_command_variations(bot_logic, mock_chat_system_with_state):
-    """Tests the enhanced `set context` command for static and dynamic modes."""
+def test_set_history_command_variations(bot_logic, mock_chat_system_with_state):
+    """Tests the enhanced `set history` command for static and dynamic modes."""
     persona = mock_chat_system_with_state.personas["derpr"]
 
-    # Test 1: Set a new static context length
-    bot_logic._set_context(["context", "50"], persona)
-    assert persona.get_current_effective_context_length() == 50
-    assert persona.is_in_dynamic_context() is False
+    # Test 1: Set a new static history length
+    bot_logic._set_history(["history", "50"], persona)
+    assert persona.get_current_effective_history_messages() == 50
+    assert persona.is_in_dynamic_history() is False
 
     # Test 2: Switch to dynamic mode, inheriting the current value (50)
-    bot_logic._set_context(["context", "dynamic"], persona)
-    assert persona.is_in_dynamic_context() is True
-    assert persona.get_context_length() == 50, "It should start at the captured value of 50."
-    assert persona.get_context_length() == 52, "Then it should grow to 52."
+    bot_logic._set_history(["history", "dynamic"], persona)
+    assert persona.is_in_dynamic_history() is True
+    assert persona.get_history_messages() == 50, "It should start at the captured value of 50."
+    assert persona.get_history_messages() == 52, "Then it should grow to 52."
 
-    # Test 3: Set a new static context, which should disable dynamic mode
-    bot_logic._set_context(["context", "30"], persona)
-    assert persona.is_in_dynamic_context() is False
-    assert persona.get_current_effective_context_length() == 30
+    # Test 3: Set a new static history, which should disable dynamic mode
+    bot_logic._set_history(["history", "30"], persona)
+    assert persona.is_in_dynamic_history() is False
+    assert persona.get_current_effective_history_messages() == 30
 
     # Test 4: Switch to dynamic mode with a specific start value
-    bot_logic._set_context(["context", "dynamic", "8"], persona)
-    assert persona.is_in_dynamic_context() is True
-    assert persona.get_context_length() == 8
-    assert persona.get_context_length() == 10
+    bot_logic._set_history(["history", "dynamic", "8"], persona)
+    assert persona.is_in_dynamic_history() is True
+    assert persona.get_history_messages() == 8
+    assert persona.get_history_messages() == 10
 
-    # Test 5 (Your Refinement): Verify dynamic start from a dynamic value
-    # The current context is 12 (from the previous step: 8 -> 10 -> 12)
-    assert persona.get_current_effective_context_length() == 12
+    # Test 5: Verify dynamic start from a dynamic value
+    # The current history is 12 (from the previous step: 8 -> 10 -> 12)
+    assert persona.get_current_effective_history_messages() == 12
     # Now, set dynamic again. It should capture 12.
-    bot_logic._set_context(["context", "dynamic"], persona)
-    assert persona.is_in_dynamic_context() is True
-    assert persona.get_context_length() == 12
-    assert persona.get_context_length() == 14
+    bot_logic._set_history(["history", "dynamic"], persona)
+    assert persona.is_in_dynamic_history() is True
+    assert persona.get_history_messages() == 12
+    assert persona.get_history_messages() == 14
 
 
 @pytest.mark.asyncio
-async def test_handle_dump_context_returns_file_response_format(bot_logic, mock_chat_system_with_state):
+async def test_handle_dump_history_returns_file_response_format(bot_logic, mock_chat_system_with_state):
     """
-    Tests that the dump_context command returns the special FILE_RESPONSE string
-    and correctly formats the context into a string.
+    Tests that the dump_history command returns the special FILE_RESPONSE string
+    and correctly formats the history into a string.
     """
     # 1. Setup a mock API payload with tools
     user_identifier = "user1"
@@ -191,17 +191,17 @@ async def test_handle_dump_context_returns_file_response_format(bot_logic, mock_
     current_persona = mock_chat_system_with_state.personas[persona_name]
 
     # 2. Action
-    response, mutated = bot_logic._handle_dump_context(args=[], persona=current_persona,
+    response, mutated = bot_logic._handle_dump_history(args=[], persona=current_persona,
                                                        user_identifier=user_identifier)
 
     # 3. Assertions
     assert mutated is False
-    assert response.startswith("FILE_RESPONSE::context_dump.txt::")
+    assert response.startswith("FILE_RESPONSE::history_dump.txt::")
 
     file_content = response.split("::", 2)[2]
 
     # Persona config section
-    assert "=== Context Dump for derpr ===" in file_content
+    assert "=== History Dump for derpr ===" in file_content
     assert "Enabled Tools:" in file_content
     assert "Service Bindings:" in file_content
 
@@ -223,7 +223,7 @@ async def test_handle_dump_context_returns_file_response_format(bot_logic, mock_
     assert "max_output_tokens: 1024" in file_content
 
     # Conversation history
-    assert "--- Context Sent to Model ---" in file_content
+    assert "--- History (Messages) Sent to Model ---" in file_content
     assert "[Message 1 - ROLE: USER]" in file_content
     assert "Hello there" in file_content
     assert "[Message 2 - ROLE: ASSISTANT]" in file_content
@@ -282,8 +282,8 @@ class TestExtractMessageContent:
 
 
 @pytest.mark.asyncio
-async def test_dump_context_with_tool_calls_in_history(bot_logic, mock_chat_system_with_state):
-    """dump_context renders tool call and tool result messages in conversation history."""
+async def test_dump_history_with_tool_calls_in_history(bot_logic, mock_chat_system_with_state):
+    """dump_history renders tool call and tool result messages in conversation history."""
     user_identifier = "user1"
     persona_name = "derpr"
     mock_payload = {
@@ -303,7 +303,7 @@ async def test_dump_context_with_tool_calls_in_history(bot_logic, mock_chat_syst
     mock_chat_system_with_state.last_api_requests = {user_identifier: {persona_name: mock_payload}}
     current_persona = mock_chat_system_with_state.personas[persona_name]
 
-    response, mutated = bot_logic._handle_dump_context(args=[], persona=current_persona,
+    response, mutated = bot_logic._handle_dump_history(args=[], persona=current_persona,
                                                        user_identifier=user_identifier)
 
     file_content = response.split("::", 2)[2]
@@ -328,8 +328,8 @@ async def test_dump_context_with_tool_calls_in_history(bot_logic, mock_chat_syst
 
 
 @pytest.mark.asyncio
-async def test_dump_context_no_tools(bot_logic, mock_chat_system_with_state):
-    """dump_context handles payloads with no tools gracefully."""
+async def test_dump_history_no_tools(bot_logic, mock_chat_system_with_state):
+    """dump_history handles payloads with no tools gracefully."""
     user_identifier = "user1"
     persona_name = "derpr"
     mock_payload = {
@@ -342,7 +342,7 @@ async def test_dump_context_no_tools(bot_logic, mock_chat_system_with_state):
     mock_chat_system_with_state.last_api_requests = {user_identifier: {persona_name: mock_payload}}
     current_persona = mock_chat_system_with_state.personas[persona_name]
 
-    response, _ = bot_logic._handle_dump_context(args=[], persona=current_persona,
+    response, _ = bot_logic._handle_dump_history(args=[], persona=current_persona,
                                                   user_identifier=user_identifier)
 
     file_content = response.split("::", 2)[2]
@@ -351,8 +351,8 @@ async def test_dump_context_no_tools(bot_logic, mock_chat_system_with_state):
 
 
 @pytest.mark.asyncio
-async def test_dump_context_openai_payload_shows_api_config(bot_logic, mock_chat_system_with_state):
-    """dump_context shows API config from OpenAI-shaped payloads (flat top-level keys, no 'config')."""
+async def test_dump_history_openai_payload_shows_api_config(bot_logic, mock_chat_system_with_state):
+    """dump_history shows API config from OpenAI-shaped payloads (flat top-level keys, no 'config')."""
     user_identifier = "user1"
     persona_name = "derpr"
     mock_payload = {
@@ -369,7 +369,7 @@ async def test_dump_context_openai_payload_shows_api_config(bot_logic, mock_chat
     mock_chat_system_with_state.last_api_requests = {user_identifier: {persona_name: mock_payload}}
     current_persona = mock_chat_system_with_state.personas[persona_name]
 
-    response, _ = bot_logic._handle_dump_context(args=[], persona=current_persona,
+    response, _ = bot_logic._handle_dump_history(args=[], persona=current_persona,
                                                   user_identifier=user_identifier)
     file_content = response.split("::", 2)[2]
 
@@ -384,8 +384,8 @@ async def test_dump_context_openai_payload_shows_api_config(bot_logic, mock_chat
 
 
 @pytest.mark.asyncio
-async def test_dump_context_google_payload_shows_api_config(bot_logic, mock_chat_system_with_state):
-    """dump_context shows API config from Google-shaped payloads (nested 'config' dict)."""
+async def test_dump_history_google_payload_shows_api_config(bot_logic, mock_chat_system_with_state):
+    """dump_history shows API config from Google-shaped payloads (nested 'config' dict)."""
     user_identifier = "user1"
     persona_name = "derpr"
     mock_payload = {
@@ -404,7 +404,7 @@ async def test_dump_context_google_payload_shows_api_config(bot_logic, mock_chat
     mock_chat_system_with_state.last_api_requests = {user_identifier: {persona_name: mock_payload}}
     current_persona = mock_chat_system_with_state.personas[persona_name]
 
-    response, _ = bot_logic._handle_dump_context(args=[], persona=current_persona,
+    response, _ = bot_logic._handle_dump_history(args=[], persona=current_persona,
                                                   user_identifier=user_identifier)
     file_content = response.split("::", 2)[2]
 
@@ -646,7 +646,7 @@ _SETTER_TO_COMMAND = {
     'set_prompt': 'prompt',
     'set_model_name': 'model',
     'set_response_token_limit': 'tokens',
-    'set_context_length': 'context',
+    'set_history_messages': 'history',
     'set_temperature': 'temp',
     'set_top_p': 'top_p',
     'set_top_k': 'top_k',
@@ -660,6 +660,11 @@ _SETTER_TO_COMMAND = {
     'set_thinking_level': 'thinking_level',
 }
 
+# Legacy aliases that should not have commands (as they are being deprecated).
+_SETTER_EXCEPTIONS = {
+    'set_context_length',
+}
+
 # Maps Persona getter method names → expected command name in what_handlers.
 # Not every getter needs a what command (e.g. get_name), so only include
 # properties that users should be able to query.
@@ -667,7 +672,7 @@ _GETTER_TO_COMMAND = {
     'get_prompt': 'prompt',
     'get_model_name': 'model',
     'get_response_token_limit': 'tokens',
-    'get_context_length': 'context',
+    'get_history_messages': 'history',
     'get_temperature': 'temp',
     'get_top_p': 'top_p',
     'get_top_k': 'top_k',
@@ -683,9 +688,13 @@ _GETTER_TO_COMMAND = {
 # Getters that intentionally have no what command (internal/derived values).
 _GETTER_EXCEPTIONS = {
     'get_name',
+    'get_base_history_messages',
+    'get_current_effective_history_messages',
+    'get_config_for_engine',
+    # Legacy aliases
     'get_base_context_length',
     'get_current_effective_context_length',
-    'get_config_for_engine',
+    'get_context_length',
 }
 
 
@@ -696,9 +705,9 @@ def test_all_persona_setters_have_commands(bot_logic):
         if name.startswith('set_') and callable(getattr(Persona, name))
     }
 
-    unmapped = persona_setters - set(_SETTER_TO_COMMAND.keys())
+    unmapped = persona_setters - set(_SETTER_TO_COMMAND.keys()) - _SETTER_EXCEPTIONS
     assert not unmapped, (
-        f"Persona has set_* methods with no entry in _SETTER_TO_COMMAND (and thus no 'set' command): {unmapped}. "
+        f"Persona has set_* methods with no entry in _SETTER_TO_COMMAND or _SETTER_EXCEPTIONS (and thus no 'set' command): {unmapped}. "
         f"Add them to _SETTER_TO_COMMAND in this test AND to set_handlers in BotLogic."
     )
 
@@ -741,7 +750,7 @@ async def test_detail_shows_all_properties(bot_logic):
         "execution mode:",
         "service bindings:",
         "enabled tools:",
-        "context length:",
+        "history length (messages):",
         "display name",
         "response token limit:",
         "temperature:",

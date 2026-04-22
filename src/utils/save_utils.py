@@ -83,7 +83,7 @@ def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
             "name": persona.get_name(),
             "prompt": persona.get_prompt(),
             "model_name": persona.get_model_name(),
-            "context_length": persona.get_base_context_length(),  # Save the base value, not the dynamic one
+            "history_messages": persona.get_base_history_messages(),  # Save the base value, not the dynamic one
             "token_limit": persona.get_response_token_limit(),
             "temperature": persona.get_temperature(),
             "top_p": persona.get_top_p(),
@@ -150,7 +150,7 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
                 model_name=new_persona.get("model_name"),
                 prompt=new_persona.get("prompt"),
                 token_limit=new_persona.get("token_limit"),
-                context_length=new_persona.get("context_length"),
+                history_messages=new_persona.get("history_messages", new_persona.get("context_length")),
                 temperature=new_persona.get("temperature"),
                 top_p=new_persona.get("top_p"),
                 top_k=new_persona.get("top_k"),
@@ -207,7 +207,7 @@ def load_system_personas_from_file() -> Dict[str, Any]:
                 model_name=new_persona.get("model_name", "local"),
                 prompt=new_persona.get("prompt", ""),
                 token_limit=new_persona.get("response_token_limit"),
-                context_length=new_persona.get("context_length", 0),
+                history_messages=new_persona.get("history_messages", new_persona.get("context_length", 0)),
                 temperature=new_persona.get("temperature"),
                 top_p=new_persona.get("top_p"),
                 top_k=new_persona.get("top_k"),
