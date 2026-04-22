@@ -32487,11 +32487,15 @@ Current version indicated by LITEVER below.
 	let _ltmFetchInFlight = false;
 	const _origPrepareSubmit = prepare_submit_generation;
 	prepare_submit_generation = async function() {
+		// Capture raw user input BEFORE kobold clears the textbox, so the
+		// adapter can log user turns via sidecar instead of guessing from
+		// the post-jinja messages array (which may contain zero user roles).
+		const rawInput = document.getElementById('input_text') ? document.getElementById('input_text').value : '';
+		window.derpr_last_user_input = rawInput;
 		const ltmToggle = document.getElementById('ltmGenerationToggle');
 		const persona = getActiveLtmPersona();
 		if (ltmToggle && ltmToggle.checked && !ltmToggle.disabled && persona && !_ltmFetchInFlight) {
 			_ltmFetchInFlight = true;
-			const rawInput = document.getElementById('input_text') ? document.getElementById('input_text').value : '';
 			try {
 				// Backup the user's author's note before first LTM injection
 				const backupKey = 'persona_ltm_anote_backup_' + persona;
@@ -32521,6 +32525,36 @@ Current version indicated by LITEVER below.
 	onHistorySourceToggle = async function() {
 		await _origHistoryToggle();
 		updateLtmCheckboxAvailability();
+	};
+
+	// DERPR retry signalling: btn_retry flips a flag that the oai_api
+	// hooks read and inject as `derpr_retry:true` on the outgoing body.
+	// Adapter uses this to archive the prior assistant row into
+	// Interaction_Edit_History and UPDATE it in place with the new reply.
+	window.derpr_pending_retry = false;
+	const _origBtnRetry = btn_retry;
+	btn_retry = function() {
+		window.derpr_pending_retry = true;
+		_origBtnRetry();
+	};
+	function _derprStampAndConsumeRetry(payload) {
+		if (window.derpr_pending_retry) {
+			payload.derpr_retry = true;
+			window.derpr_pending_retry = false;
+		} else if (window.derpr_last_user_input) {
+			payload.derpr_user_text = window.derpr_last_user_input;
+		}
+		window.derpr_last_user_input = '';
+	}
+	const _origOaiSyncReq = oai_api_sync_req;
+	oai_api_sync_req = function(targetep, oai_payload, oaiheaders) {
+		_derprStampAndConsumeRetry(oai_payload);
+		return _origOaiSyncReq(targetep, oai_payload, oaiheaders);
+	};
+	const _origOaiStreamSse = oai_api_stream_sse;
+	oai_api_stream_sse = function(sub_endpt, submit_payload, submit_headers) {
+		_derprStampAndConsumeRetry(submit_payload);
+		return _origOaiStreamSse(sub_endpt, submit_payload, submit_headers);
 	};
 
 	// Auto-trigger persona fetch on init

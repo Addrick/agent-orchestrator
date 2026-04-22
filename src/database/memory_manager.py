@@ -419,6 +419,71 @@ class MemoryManager:
                 conn.rollback()
                 return False
 
+    def handle_portal_retry(self, persona_name: str, user_identifier: str,
+                            channel: str) -> Optional[int]:
+        """Archive the most recent assistant turn for this portal session.
+
+        Finds the latest assistant row matching (persona, user_identifier, channel),
+        moves its content into Interaction_Edit_History, and invalidates its
+        embedding. Returns the interaction_id so the caller can UPDATE the
+        canonical row in place with the new response.
+
+        Returns None if no prior assistant row exists (first-turn retry is a no-op).
+        """
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT interaction_id, content FROM User_Interactions"
+                " WHERE persona_name = ? AND user_identifier = ? AND channel = ?"
+                "   AND author_role = 'assistant'"
+                " ORDER BY timestamp DESC, interaction_id DESC LIMIT 1",
+                (persona_name, user_identifier, channel),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+
+            interaction_id = row['interaction_id']
+            old_content = row['content']
+            now = datetime.now()
+            try:
+                cursor.execute(
+                    "INSERT INTO Interaction_Edit_History (interaction_id, old_content, edited_at) VALUES (?, ?, ?)",
+                    (interaction_id, old_content, now),
+                )
+                cursor.execute("DELETE FROM Message_Embeddings WHERE interaction_id = ?", (interaction_id,))
+                cursor.execute("DELETE FROM vec_Message_Embeddings WHERE interaction_id = ?", (interaction_id,))
+                conn.commit()
+                return interaction_id
+            except sqlite3.Error as e:
+                logger.error(f"handle_portal_retry failed for id={interaction_id}: {e}")
+                conn.rollback()
+                return None
+
+    def update_interaction_content(self, interaction_id: int, new_content: str) -> bool:
+        """Overwrite the content of an existing interaction row in place.
+
+        Used by portal retry flow after handle_portal_retry has archived the
+        prior content. Clears parent_summary_id so re-summarization picks up
+        the updated content.
+        """
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    "UPDATE User_Interactions SET content = ?, parent_summary_id = NULL"
+                    " WHERE interaction_id = ?",
+                    (new_content, interaction_id),
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+            except sqlite3.Error as e:
+                logger.error(f"update_interaction_content failed for id={interaction_id}: {e}")
+                conn.rollback()
+                return False
+
     def suppress_message_by_platform_id(self, platform_message_id: str) -> bool:
         """Suppresses ALL versions of messages associated with this platform ID."""
         with self._lock:
