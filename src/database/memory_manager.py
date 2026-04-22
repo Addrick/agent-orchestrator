@@ -146,6 +146,14 @@ class MemoryManager:
             );
             CREATE INDEX IF NOT EXISTS idx_edit_history_id ON Interaction_Edit_History (interaction_id);
 
+            CREATE TABLE IF NOT EXISTS Edit_History_Embeddings (
+                edit_id INTEGER PRIMARY KEY,
+                embedding BLOB NOT NULL,
+                model_name TEXT NOT NULL DEFAULT '{EMBEDDING_MODEL}',
+                created_at TIMESTAMP NOT NULL,
+                FOREIGN KEY (edit_id) REFERENCES Interaction_Edit_History(edit_id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS Segment_Failures (
                 failure_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 channel TEXT NOT NULL,
@@ -452,6 +460,19 @@ class MemoryManager:
                     "INSERT INTO Interaction_Edit_History (interaction_id, old_content, edited_at) VALUES (?, ?, ?)",
                     (interaction_id, old_content, now),
                 )
+                new_edit_id = cursor.lastrowid
+                # Move L0 embedding to Edit_History_Embeddings so chevron restore can bring it back.
+                # vec_Message_Embeddings is dropped — archives don't participate in retrieval k-NN.
+                cursor.execute(
+                    "SELECT embedding, model_name, created_at FROM Message_Embeddings WHERE interaction_id = ?",
+                    (interaction_id,),
+                )
+                emb = cursor.fetchone()
+                if emb is not None:
+                    cursor.execute(
+                        "INSERT INTO Edit_History_Embeddings (edit_id, embedding, model_name, created_at) VALUES (?, ?, ?, ?)",
+                        (new_edit_id, emb['embedding'], emb['model_name'], emb['created_at']),
+                    )
                 cursor.execute("DELETE FROM Message_Embeddings WHERE interaction_id = ?", (interaction_id,))
                 cursor.execute("DELETE FROM vec_Message_Embeddings WHERE interaction_id = ?", (interaction_id,))
                 conn.commit()
@@ -483,6 +504,149 @@ class MemoryManager:
                 logger.error(f"update_interaction_content failed for id={interaction_id}: {e}")
                 conn.rollback()
                 return False
+
+    def list_interaction_versions(self, interaction_id: int) -> List[Dict[str, Any]]:
+        """Return all versions for an interaction, oldest first, canonical last.
+
+        Archive rows ordered by (edited_at ASC, edit_id ASC). Canonical is synthesized
+        from User_Interactions with edit_id=None. Portal uses this to populate its
+        retry/redo stacks after an assistant stream reveals `assistant_id`.
+        """
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT edit_id, old_content AS content, edited_at AS created_at"
+                " FROM Interaction_Edit_History WHERE interaction_id = ?"
+                " ORDER BY edited_at ASC, edit_id ASC",
+                (interaction_id,),
+            )
+            versions: List[Dict[str, Any]] = [
+                {"edit_id": r['edit_id'], "content": r['content'], "created_at": r['created_at']}
+                for r in cursor.fetchall()
+            ]
+            cursor.execute(
+                "SELECT content, timestamp AS created_at FROM User_Interactions WHERE interaction_id = ?",
+                (interaction_id,),
+            )
+            canonical = cursor.fetchone()
+            if canonical is not None:
+                versions.append({
+                    "edit_id": None,
+                    "content": canonical['content'],
+                    "created_at": canonical['created_at'],
+                })
+            return versions
+
+    def swap_interaction_version(self, interaction_id: int, k: int) -> Dict[str, Any]:
+        """Swap archive position `k` with canonical for `interaction_id`.
+
+        `k` is 0-indexed over archives ordered ascending by archival time (pre-swap).
+        Single transaction:
+          1. Archive current canonical — insert new Interaction_Edit_History row;
+             move Message_Embeddings row (if any) into Edit_History_Embeddings keyed
+             by the new edit_id; delete from vec_Message_Embeddings.
+          2. Restore target archive k — copy old_content into User_Interactions.content;
+             move Edit_History_Embeddings(target) back into Message_Embeddings +
+             vec_Message_Embeddings if present; delete the target archive row.
+
+        Returns `{"current_content": str, "interaction_id": int, "total_versions": int}`.
+
+        Raises IndexError if k is out of bounds (no state mutation).
+        Raises ValueError if interaction_id does not exist.
+        """
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+
+            cursor.execute(
+                "SELECT content FROM User_Interactions WHERE interaction_id = ?",
+                (interaction_id,),
+            )
+            canonical_row = cursor.fetchone()
+            if canonical_row is None:
+                raise ValueError(f"interaction_id {interaction_id} not found")
+
+            cursor.execute(
+                "SELECT edit_id, old_content FROM Interaction_Edit_History"
+                " WHERE interaction_id = ?"
+                " ORDER BY edited_at ASC, edit_id ASC",
+                (interaction_id,),
+            )
+            archives = cursor.fetchall()
+            if k < 0 or k >= len(archives):
+                raise IndexError(f"version index {k} out of bounds (have {len(archives)} archives)")
+
+            target_edit_id = archives[k]['edit_id']
+            target_content = archives[k]['old_content']
+            current_canonical = canonical_row['content']
+            now = datetime.now()
+
+            try:
+                # 1. Archive current canonical
+                cursor.execute(
+                    "INSERT INTO Interaction_Edit_History (interaction_id, old_content, edited_at) VALUES (?, ?, ?)",
+                    (interaction_id, current_canonical, now),
+                )
+                new_edit_id = cursor.lastrowid
+
+                cursor.execute(
+                    "SELECT embedding, model_name, created_at FROM Message_Embeddings WHERE interaction_id = ?",
+                    (interaction_id,),
+                )
+                canonical_emb = cursor.fetchone()
+                if canonical_emb is not None:
+                    cursor.execute(
+                        "INSERT INTO Edit_History_Embeddings (edit_id, embedding, model_name, created_at) VALUES (?, ?, ?, ?)",
+                        (new_edit_id, canonical_emb['embedding'], canonical_emb['model_name'], canonical_emb['created_at']),
+                    )
+                cursor.execute("DELETE FROM Message_Embeddings WHERE interaction_id = ?", (interaction_id,))
+                cursor.execute("DELETE FROM vec_Message_Embeddings WHERE interaction_id = ?", (interaction_id,))
+
+                # 2. Restore target archive into canonical
+                cursor.execute(
+                    "UPDATE User_Interactions SET content = ?, parent_summary_id = NULL WHERE interaction_id = ?",
+                    (target_content, interaction_id),
+                )
+
+                cursor.execute(
+                    "SELECT embedding, model_name, created_at FROM Edit_History_Embeddings WHERE edit_id = ?",
+                    (target_edit_id,),
+                )
+                target_emb = cursor.fetchone()
+                if target_emb is not None:
+                    cursor.execute(
+                        "INSERT INTO Message_Embeddings (interaction_id, embedding, model_name, created_at) VALUES (?, ?, ?, ?)",
+                        (interaction_id, target_emb['embedding'], target_emb['model_name'], target_emb['created_at']),
+                    )
+                    cursor.execute(
+                        "INSERT INTO vec_Message_Embeddings (interaction_id, embedding) VALUES (?, ?)",
+                        (interaction_id, target_emb['embedding']),
+                    )
+
+                # Delete the target archive (its content is now canonical). Cascades to
+                # Edit_History_Embeddings(target_edit_id).
+                cursor.execute(
+                    "DELETE FROM Interaction_Edit_History WHERE edit_id = ?",
+                    (target_edit_id,),
+                )
+
+                conn.commit()
+            except sqlite3.Error as e:
+                logger.error(f"swap_interaction_version failed for id={interaction_id} k={k}: {e}")
+                conn.rollback()
+                raise
+
+            cursor.execute(
+                "SELECT COUNT(*) FROM Interaction_Edit_History WHERE interaction_id = ?",
+                (interaction_id,),
+            )
+            total_archives = cursor.fetchone()[0]
+            return {
+                "current_content": target_content,
+                "interaction_id": interaction_id,
+                "total_versions": total_archives + 1,
+            }
 
     def suppress_message_by_platform_id(self, platform_message_id: str) -> bool:
         """Suppresses ALL versions of messages associated with this platform ID."""
