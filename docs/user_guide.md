@@ -65,12 +65,16 @@ The **Memory Scope** dropdown in the Inference Matrix sets the persona's `memory
 
 | Mode | What memories are searched |
 |------|---------------------------|
-| `CHANNEL_ISOLATED` (default) | Only turns from `channel=web_ui` — **returns nothing until Phase 2.3 logs portal turns**. Change this to see existing memories. |
+| `CHANNEL_ISOLATED` (default) | Only turns from `channel=web_ui`. Portal turns are logged as of Phase 2.3a, so this returns portal-only history. |
 | `PERSONAL` | All turns attributed to the portal user, across all channels for this persona. |
 | `SERVER_WIDE` | All turns for this persona in any channel that shares a server context. |
 | `GLOBAL` | All turns across all channels and servers for this persona. Use this to surface Discord / email / Zammad history immediately. |
 
 Saving from the Inference Matrix persists the `memory_mode` to the backend. The LTM checkbox state is stored per persona in `localStorage` (not persisted to the backend).
+
+**Portal conversation logging (Phase 2.3a):** Portal turns are persisted to `message_history` with `channel="web_ui"`. Each submit writes a user row before forwarding to KoboldCPP; the streamed assistant reply is written on stream close with `reply_to_id` linking back to the user row. Aborted generations preserve the partial assistant buffer. Clicking **Retry** on the prior response archives the old assistant content into `Interaction_Edit_History` and overwrites the canonical row in place with the new reply — no new user row is created on retry, and `reply_to_id` linkage is preserved. LTM retrieval on subsequent turns therefore surfaces portal-originated content alongside Discord / email / Zammad history.
+
+> The portal only uses the OpenAI-style `/chat/completions` path (KoboldCPP jinja mode). The prior kobold-native `/api/v1/generate` and `/api/extra/generate/stream` routes have been removed from the adapter.
 
 ## Commands
 

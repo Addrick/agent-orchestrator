@@ -1,13 +1,12 @@
 # tests/interfaces/test_kobold_adapter.py
 
-"""Phase 2.1 route tests + regression passthrough test for KoboldAdapter.
+"""Adapter HTTP-boundary tests.
 
-Covers the adapter HTTP boundary, not just the exporter function:
-  - /api/v1/session/{persona}/kobold_export returns a valid savefile
-  - Unknown persona → 404
-  - ?max_turns=N overrides the default, default uses persona.context_length
-  - Passthrough regression: /api/extra/generate/stream forwards request body
-    verbatim (minus DERPR-only envelope fields)
+Phase 2.1: kobold_export savefile contract.
+Phase 2.2: ltm_block + persona memory_mode routes.
+Phase 2.3a: /chat/completions logging — user-turn detection in jinja-hijack
+mode (messages[-1] is the assistant prefix, not the user), reply_to_id
+threading, abort partial-buffer flush, and derpr_retry archive+update path.
 """
 
 from datetime import datetime, timedelta
@@ -42,6 +41,19 @@ def _make_adapter_with_seeded_db(persona_name: str = "test_persona",
     )
     adapter = KoboldAdapter(chat_system=chat_system)
     return adapter, mm, persona
+
+
+def _fetch_portal_rows(mm: MemoryManager, persona_name: str):
+    """Pull web_ui rows with the columns the 2.3a tests care about."""
+    conn = mm._get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT interaction_id, author_role, content, reply_to_id FROM User_Interactions"
+        " WHERE persona_name = ? AND channel = 'web_ui'"
+        " ORDER BY timestamp ASC, interaction_id ASC",
+        (persona_name,),
+    )
+    return [dict(r) for r in cur.fetchall()]
 
 
 def _seed_history(mm: MemoryManager, persona_name: str, turns: int):
@@ -148,20 +160,136 @@ def test_strip_envelope_drops_derpr_only_fields():
     assert stripped["params"]["temperature"] == 0.7
 
 
-def test_generate_stream_passthrough_forwards_body_verbatim(monkeypatch):
+def test_strip_envelope_drops_derpr_retry():
+    payload = {"messages": [], "derpr_retry": True, "stream": True}
+    stripped = KoboldAdapter._strip_envelope(payload)
+    assert "derpr_retry" not in stripped
+    assert stripped["stream"] is True
+
+
+def test_strip_envelope_drops_derpr_user_text():
+    # Sidecar field carries raw user input for logging; must not leak upstream.
+    payload = {"messages": [], "derpr_user_text": "hello", "stream": False}
+    stripped = KoboldAdapter._strip_envelope(payload)
+    assert "derpr_user_text" not in stripped
+
+
+def test_find_last_user_content_skips_assistant_prefix():
+    # jinja-hijack mode: messages[-1] is the assistant continuation prefix.
+    # Adapter must scan backward for the real user turn.
+    messages = [
+        {"role": "system", "content": "you are test"},
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi!"},
+        {"role": "user", "content": "what's up"},
+        {"role": "assistant", "content": "", "prefix": True},
+    ]
+    assert KoboldAdapter._find_last_user_content(messages) == "what's up"
+
+
+def test_find_last_user_content_handles_vision_array_content():
+    messages = [
+        {"role": "user", "content": [
+            {"type": "text", "text": "describe"},
+            {"type": "image_url", "image_url": {"url": "..."}},
+        ]},
+    ]
+    assert KoboldAdapter._find_last_user_content(messages) == "describe"
+
+
+def test_find_last_user_content_returns_none_when_no_user_msg():
+    messages = [{"role": "assistant", "content": "hi"}]
+    assert KoboldAdapter._find_last_user_content(messages) is None
+
+
+# -------- Phase 2.3a: /chat/completions logging --------
+
+def _chat_body(user_text: str, *, stream: bool = False, retry: bool = False):
+    msgs = [
+        {"role": "user", "content": user_text},
+        {"role": "assistant", "content": "", "prefix": True},
+    ]
+    body = {"messages": msgs, "stream": stream}
+    if retry:
+        body["derpr_retry"] = True
+    return body
+
+
+class _SyncChatResp:
+    def __init__(self, content: str):
+        self.status_code = 200
+        self._payload = {"choices": [{"message": {"content": content}}]}
+        self.content = b"x"
+
+    def json(self):
+        return self._payload
+
+
+def test_chat_completions_sync_logs_user_then_assistant_with_reply_to(monkeypatch):
     adapter, mm, _ = _make_adapter_with_seeded_db()
 
-    captured = {}
+    async def _fake_post(url, json=None, **kwargs):
+        return _SyncChatResp("here is my reply")
 
-    class _FakeStreamCtx:
-        def __init__(self, body):
-            captured["body"] = body
+    monkeypatch.setattr(adapter._http, "post", _fake_post)
 
+    with TestClient(adapter.app) as client:
+        r = client.post("/chat/completions", json=_chat_body("tell me a joke"))
+    assert r.status_code == 200
+
+    rows = _fetch_portal_rows(mm, "test_persona")
+    assert len(rows) == 2
+    assert rows[0]["author_role"] == "user"
+    assert rows[0]["content"] == "tell me a joke"
+    assert rows[1]["author_role"] == "assistant"
+    assert rows[1]["content"] == "here is my reply"
+    assert rows[1]["reply_to_id"] == rows[0]["interaction_id"]
+    mm.close()
+
+
+def test_chat_completions_sidecar_user_text_overrides_messages(monkeypatch):
+    # jinja-hijack mode: post-repack messages array often has zero user-role
+    # entries. The portal stamps raw input as derpr_user_text before the
+    # textbox clears. Adapter must prefer this over scanning messages.
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+
+    async def _fake_post(url, json=None, **kwargs):
+        # Forwarded body must NOT contain derpr_user_text.
+        assert "derpr_user_text" not in (json or {})
+        return _SyncChatResp("ack")
+
+    monkeypatch.setattr(adapter._http, "post", _fake_post)
+
+    body = {
+        "messages": [
+            {"role": "system", "content": "sys"},
+            {"role": "assistant", "content": "", "prefix": True},
+        ],
+        "stream": False,
+        "derpr_user_text": "real user turn",
+    }
+    with TestClient(adapter.app) as client:
+        r = client.post("/chat/completions", json=body)
+    assert r.status_code == 200
+
+    rows = _fetch_portal_rows(mm, "test_persona")
+    assert len(rows) == 2
+    assert rows[0]["author_role"] == "user"
+    assert rows[0]["content"] == "real user turn"
+    mm.close()
+
+
+def test_chat_completions_stream_logs_on_close_with_reply_to(monkeypatch):
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+
+    class _StreamCtx:
         async def __aenter__(self):
             resp = MagicMock()
 
             async def _aiter_raw():
-                yield b"event: message\ndata: {\"token\":\"ok\"}\n\n"
+                yield b'data: {"choices":[{"delta":{"content":"hello "}}]}\n\n'
+                yield b'data: {"choices":[{"delta":{"content":"world"}}]}\n\n'
+                yield b"data: [DONE]\n\n"
 
             resp.aiter_raw = _aiter_raw
             return resp
@@ -169,28 +297,110 @@ def test_generate_stream_passthrough_forwards_body_verbatim(monkeypatch):
         async def __aexit__(self, *a):
             return False
 
-    def _fake_stream(method, url, json=None, **kwargs):
-        return _FakeStreamCtx(json)
+    monkeypatch.setattr(adapter._http, "stream", lambda *a, **kw: _StreamCtx())
 
-    monkeypatch.setattr(adapter._http, "stream", _fake_stream)
-
-    body = {
-        "prompt": "hi there",
-        "model": "test_persona",
-        "history_override": True,
-        "params": {"temperature": 0.5, "history_override": True},
-        "max_length": 64,
-    }
     with TestClient(adapter.app) as client:
-        r = client.post("/api/extra/generate/stream", json=body)
+        r = client.post("/chat/completions", json=_chat_body("hi", stream=True))
     assert r.status_code == 200
-    # DERPR-only fields stripped; kobold params survive intact.
-    assert "model" not in captured["body"]
-    assert "history_override" not in captured["body"]
-    assert "history_override" not in captured["body"]["params"]
-    assert captured["body"]["prompt"] == "hi there"
-    assert captured["body"]["params"]["temperature"] == 0.5
-    assert captured["body"]["max_length"] == 64
+
+    rows = _fetch_portal_rows(mm, "test_persona")
+    assert len(rows) == 2
+    assert rows[1]["author_role"] == "assistant"
+    assert rows[1]["content"] == "hello world"
+    assert rows[1]["reply_to_id"] == rows[0]["interaction_id"]
+    mm.close()
+
+
+def test_chat_completions_retry_archives_and_updates_assistant(monkeypatch):
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+
+    # Seed a user+assistant pair representing the prior turn.
+    base = datetime(2026, 4, 20, 12, 0, 0)
+    user_id = mm.log_message(
+        user_identifier="portal", persona_name="test_persona", channel="web_ui",
+        author_role="user", author_name=None, content="prior prompt", timestamp=base,
+    )
+    assistant_id = mm.log_message(
+        user_identifier="portal", persona_name="test_persona", channel="web_ui",
+        author_role="assistant", author_name=None, content="first attempt",
+        timestamp=base + timedelta(seconds=1), reply_to_id=user_id,
+    )
+
+    async def _fake_post(url, json=None, **kwargs):
+        return _SyncChatResp("second attempt")
+
+    monkeypatch.setattr(adapter._http, "post", _fake_post)
+
+    with TestClient(adapter.app) as client:
+        r = client.post("/chat/completions", json=_chat_body("prior prompt", retry=True))
+    assert r.status_code == 200
+
+    rows = _fetch_portal_rows(mm, "test_persona")
+    assert len(rows) == 2  # No new user row, assistant row updated in place
+    assistant_row = next(r for r in rows if r["author_role"] == "assistant")
+    assert assistant_row["interaction_id"] == assistant_id
+    assert assistant_row["content"] == "second attempt"
+
+    # Prior content archived into Interaction_Edit_History
+    conn = mm._get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT old_content FROM Interaction_Edit_History WHERE interaction_id = ?",
+        (assistant_id,),
+    )
+    archived = cur.fetchall()
+    assert len(archived) == 1
+    assert archived[0]["old_content"] == "first attempt"
+    mm.close()
+
+
+def test_handle_portal_retry_returns_none_when_no_prior_assistant():
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    result = mm.handle_portal_retry("test_persona", "portal", "web_ui")
+    assert result is None
+    mm.close()
+
+
+def test_chat_completions_stream_abort_flushes_partial(monkeypatch):
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+
+    class _StreamCtx:
+        async def __aenter__(self):
+            resp = MagicMock()
+
+            async def _aiter_raw():
+                yield b'data: {"choices":[{"delta":{"content":"partial "}}]}\n\n'
+                raise __import__("asyncio").CancelledError()
+
+            resp.aiter_raw = _aiter_raw
+            return resp
+
+        async def __aexit__(self, *a):
+            return False
+
+    async def _fake_abort(url, json=None, **kwargs):
+        resp = MagicMock()
+        resp.content = b""
+        resp.json = lambda: {}
+        resp.status_code = 200
+        return resp
+
+    monkeypatch.setattr(adapter._http, "stream", lambda *a, **kw: _StreamCtx())
+    monkeypatch.setattr(adapter._http, "post", _fake_abort)
+
+    with TestClient(adapter.app) as client:
+        try:
+            with client.stream("POST", "/chat/completions", json=_chat_body("hi", stream=True)) as r:
+                for _ in r.iter_raw():
+                    pass
+        except Exception:
+            pass  # CancelledError propagates through test client — flush still happened
+
+    rows = _fetch_portal_rows(mm, "test_persona")
+    # User turn logged, assistant partial flushed on cancel
+    assert len(rows) == 2
+    assert rows[1]["author_role"] == "assistant"
+    assert rows[1]["content"] == "partial "
     mm.close()
 
 
