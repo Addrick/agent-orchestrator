@@ -37,6 +37,7 @@ def build_kobold_savefile(
     `memory`, so the memory block stays free for future use.
     """
     actions: List[str] = []
+    interaction_ids: List[int] = []
     skipped = 0
 
     for msg in raw_history:
@@ -51,6 +52,8 @@ def build_kobold_savefile(
             actions.append(f"{_INPUT_PLACEHOLDER}{content}{_OUTPUT_PLACEHOLDER}")
         else:  # assistant
             actions.append(content)
+        
+        interaction_ids.append(msg.get("interaction_id"))
 
     prompt = actions.pop(0) if actions else ""
 
@@ -61,6 +64,7 @@ def build_kobold_savefile(
         "authorsnote": "",
         "anotetemplate": "",
         "actions": actions,
+        "interaction_ids": interaction_ids,
         "actions_metadata": {},
         "worldinfo": [],
         "wifolders_d": {},

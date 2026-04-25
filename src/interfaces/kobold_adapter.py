@@ -186,6 +186,74 @@ class KoboldAdapter:
             )
             return JSONResponse(content=savefile)
 
+        @self.app.get("/api/v1/interaction/{interaction_id}/versions")
+        async def list_versions(interaction_id: int):
+            """List all stored versions for an interaction, canonical last.
+
+            Portal hydrates `retry_prev_text` / `redo_prev_text` stacks from
+            this after seeing `assistant_id` in the stream's derpr event.
+            """
+            try:
+                versions = await asyncio.to_thread(
+                    self.chat_system.memory_manager.list_interaction_versions,
+                    interaction_id,
+                )
+            except Exception as e:
+                logger.error(f"list_interaction_versions({interaction_id}) failed: {e}")
+                return JSONResponse(status_code=500, content={"error": str(e)})
+            if not versions:
+                return JSONResponse(
+                    status_code=404,
+                    content={"error": f"interaction {interaction_id} not found"},
+                )
+            return {"interaction_id": interaction_id, "versions": versions}
+
+        @self.app.post("/api/v1/interaction/{interaction_id}/select_version/{k}")
+        async def select_version(interaction_id: int, k: int):
+            """Swap archive position `k` with canonical (0-indexed pre-swap).
+
+            Returns new canonical + refreshed version list so portal can
+            re-sync its chevron stacks in one round-trip.
+            """
+            try:
+                result = await asyncio.to_thread(
+                    self.chat_system.memory_manager.swap_interaction_version,
+                    interaction_id,
+                    k,
+                )
+            except ValueError as e:
+                return JSONResponse(status_code=404, content={"error": str(e)})
+            except IndexError as e:
+                return JSONResponse(status_code=400, content={"error": str(e)})
+            except Exception as e:
+                logger.error(
+                    f"swap_interaction_version({interaction_id}, {k}) failed: {e}"
+                )
+                return JSONResponse(status_code=500, content={"error": str(e)})
+            versions = await asyncio.to_thread(
+                self.chat_system.memory_manager.list_interaction_versions,
+                interaction_id,
+            )
+            return {**result, "versions": versions}
+
+        @self.app.patch("/api/v1/interaction/{interaction_id}")
+        async def patch_interaction(interaction_id: int, request: Request):
+            """Update the content of an existing interaction (e.g. on manual edit)."""
+            data = await request.json()
+            content = data.get("content")
+            if content is None:
+                return JSONResponse(status_code=400, content={"error": "missing 'content' field"})
+            try:
+                await asyncio.to_thread(
+                    self.chat_system.memory_manager.update_interaction_content,
+                    interaction_id,
+                    content,
+                )
+                return {"result": "success", "interaction_id": interaction_id}
+            except Exception as e:
+                logger.error(f"patch_interaction({interaction_id}) failed: {e}")
+                return JSONResponse(status_code=500, content={"error": str(e)})
+
         @self.app.patch("/api/v1/persona/{name}")
         async def update_persona(name: str, request: Request):
             if name not in self.chat_system.personas:
@@ -324,26 +392,47 @@ class KoboldAdapter:
 
             async def relay() -> AsyncIterator[bytes]:
                 full_response: List[str] = []
+                done_seen = False
                 try:
                     async with self._http.stream("POST", url, json=body) as upstream:
                         async for chunk in upstream.aiter_raw():
                             if await request.is_disconnected():
                                 return
-                            if chunk:
-                                try:
-                                    decoded = chunk.decode("utf-8")
-                                    if decoded.startswith("data: "):
-                                        line = decoded[6:].strip()
-                                        if line and line != "[DONE]":
-                                            cdata = json.loads(line)
-                                            delta = cdata.get("choices", [{}])[0].get("delta", {}).get("content")
-                                            if delta:
-                                                full_response.append(delta)
-                                except Exception:
-                                    pass
-                                yield chunk
+                            if not chunk:
+                                continue
+                            decoded = ""
+                            try:
+                                decoded = chunk.decode("utf-8")
+                                if decoded.startswith("data: "):
+                                    line = decoded[6:].strip()
+                                    if line and line != "[DONE]":
+                                        cdata = json.loads(line)
+                                        delta = cdata.get("choices", [{}])[0].get("delta", {}).get("content")
+                                        if delta:
+                                            full_response.append(delta)
+                            except Exception:
+                                pass
+                            # Inject `event: derpr` frame immediately before the
+                            # `[DONE]` chunk so the portal can hydrate chevrons
+                            # with the canonical assistant_id.
+                            if "[DONE]" in decoded and not done_seen:
+                                done_seen = True
+                                if full_response:
+                                    aid = self._commit_assistant(
+                                        persona_name, "".join(full_response),
+                                        user_interaction_id, retry_assistant_id,
+                                    )
+                                    if aid is not None:
+                                        frame = (
+                                            f"event: derpr\n"
+                                            f"data: {json.dumps({'assistant_id': aid, 'user_id': user_interaction_id})}\n\n"
+                                        )
+                                        yield frame.encode("utf-8")
+                            yield chunk
 
-                    if full_response:
+                    # Fallback commit: upstream closed without emitting [DONE]
+                    # (e.g. truncated response). No derpr frame in this path.
+                    if full_response and not done_seen:
                         self._commit_assistant(
                             persona_name, "".join(full_response),
                             user_interaction_id, retry_assistant_id,
@@ -417,20 +506,25 @@ class KoboldAdapter:
 
     def _commit_assistant(self, persona_name: str, content: str,
                           user_interaction_id: Optional[int],
-                          retry_assistant_id: Optional[int]) -> None:
-        """Persist assistant text — UPDATE-in-place on retry, else INSERT."""
+                          retry_assistant_id: Optional[int]) -> Optional[int]:
+        """Persist assistant text — UPDATE-in-place on retry, else INSERT.
+
+        Returns the canonical interaction_id so the stream relay can emit it
+        in the SSE `event: derpr` frame for portal chevron hydration.
+        """
         if not content or not content.strip():
-            return
+            return None
         if retry_assistant_id is not None:
             try:
                 self.chat_system.memory_manager.update_interaction_content(
                     retry_assistant_id, content,
                 )
+                return retry_assistant_id
             except Exception as e:
                 logger.error(f"Retry UPDATE failed for id={retry_assistant_id}: {e}")
-            return
+                return None
         try:
-            self.chat_system.memory_manager.log_message(
+            return self.chat_system.memory_manager.log_message(
                 user_identifier="portal",
                 persona_name=persona_name,
                 channel="web_ui",
@@ -442,6 +536,7 @@ class KoboldAdapter:
             )
         except Exception as e:
             logger.error(f"Assistant log failed: {e}")
+            return None
 
     async def _forward_get(self, path: str, fallback: Dict[str, Any]) -> JSONResponse:
         url = f"{_kobold_base_url()}{path}"
