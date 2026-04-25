@@ -4,14 +4,12 @@ import pytest
 import discord
 from unittest.mock import MagicMock, AsyncMock, patch, PropertyMock
 from datetime import datetime, timezone
-import io
 from discord import File
 
 from src.interfaces.discord_bot import create_discord_bot, _safe_typing
 from src.chat_system import ChatSystem, ResponseType
-from src.database.memory_manager import MemoryManager
+from memory.memory_manager import MemoryManager
 from src.persona import Persona
-from src.engine import LLMCommunicationError
 
 
 @pytest.fixture

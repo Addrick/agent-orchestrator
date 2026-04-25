@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.database.memory_manager import MemoryManager
+from memory.memory_manager import MemoryManager
 from src.chat_system import ChatSystem, _relative_time
 from src.embedding_service import EmbeddingService
 from src.persona import MemoryMode

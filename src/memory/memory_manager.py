@@ -1,4 +1,4 @@
-# src/database/memory_manager.py
+# src/memory/memory_manager.py
 
 import sqlite3
 import logging

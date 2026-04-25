@@ -5,7 +5,6 @@ import time
 import asyncio
 import random
 from typing import Callable, List, Any
-from urllib.parse import urlparse
 
 import pytest
 import requests
@@ -13,7 +12,7 @@ from unittest.mock import patch
 
 from src.clients.zammad_client import ZammadClient
 from src.clients.zammad_service import ZammadIntegration
-from src.database.memory_manager import MemoryManager
+from memory.memory_manager import MemoryManager
 from src.engine import TextEngine
 from src.chat_system import ChatSystem
 from src.persona import Persona, MemoryMode
