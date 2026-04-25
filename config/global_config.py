@@ -119,6 +119,11 @@ DEFAULT_TOKEN_LIMIT = 4096
 DEFAULT_HISTORY_MESSAGES = 15
 GLOBAL_HISTORY_MESSAGES = 30  # Hard cap for history sent to APIs
 
+# Total per-persona context budget (prompt + reserved response). Matches
+# kobold-lite's localsettings.max_context_length semantic so the value can
+# round-trip to the slider. Old persona configs without the field default here.
+DEFAULT_MAX_CONTEXT_TOKENS = 131072
+
 # API Error Handling
 EMPTY_RESPONSE_RETRIES = 3
 EMPTY_RESPONSE_RETRY_DELAY = 2

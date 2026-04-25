@@ -206,3 +206,35 @@ def test_include_ambient_memory_absent_in_config(base_persona_args):
     # Simulates old config without include_ambient_memory key
     p = Persona(**base_persona_args)
     assert p.get_include_ambient_memory() is True
+
+
+# --- Phase 3: max_context_tokens ---
+
+def test_max_context_tokens_default(base_persona_args, monkeypatch):
+    monkeypatch.setattr(global_config, 'DEFAULT_MAX_CONTEXT_TOKENS', 131072)
+    p = Persona(**base_persona_args)
+    assert p.get_max_context_tokens() == 131072
+
+
+def test_max_context_tokens_explicit(base_persona_args):
+    p = Persona(**base_persona_args, max_context_tokens=8192)
+    assert p.get_max_context_tokens() == 8192
+
+
+def test_max_context_tokens_invalid_uses_default(base_persona_args, monkeypatch):
+    monkeypatch.setattr(global_config, 'DEFAULT_MAX_CONTEXT_TOKENS', 131072)
+    p = Persona(**base_persona_args, max_context_tokens="not-a-number")
+    assert p.get_max_context_tokens() == 131072
+
+
+def test_set_max_context_tokens_clamps_low(base_persona_args):
+    p = Persona(**base_persona_args, max_context_tokens=8192)
+    p.set_max_context_tokens(50)
+    assert p.get_max_context_tokens() == 100
+
+
+def test_set_max_context_tokens_invalid_resets(base_persona_args, monkeypatch):
+    monkeypatch.setattr(global_config, 'DEFAULT_MAX_CONTEXT_TOKENS', 131072)
+    p = Persona(**base_persona_args, max_context_tokens=8192)
+    p.set_max_context_tokens("garbage")
+    assert p.get_max_context_tokens() == 131072

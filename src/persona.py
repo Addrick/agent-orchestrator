@@ -50,6 +50,7 @@ class Persona:
             include_ambient_memory: bool = True,
             thinking_level: Optional[str] = None,
             long_term_memory: bool = True,
+            max_context_tokens: Optional[int] = None,
             **kwargs: Any,
     ) -> None:
         self._name: str = persona_name
@@ -82,6 +83,11 @@ class Persona:
         self._include_ambient_memory: bool = include_ambient_memory
         self._thinking_level: Optional[str] = thinking_level
         self._long_term_memory: bool = long_term_memory
+
+        try:
+            self._max_context_tokens: int = int(max_context_tokens) if max_context_tokens is not None else global_config.DEFAULT_MAX_CONTEXT_TOKENS
+        except (ValueError, TypeError):
+            self._max_context_tokens = global_config.DEFAULT_MAX_CONTEXT_TOKENS
 
     # --- Getters ---
 
@@ -161,6 +167,11 @@ class Persona:
     def get_memory_mode(self) -> MemoryMode:
         """Returns the persona's current memory retrieval strategy."""
         return self._memory_mode
+
+    def get_max_context_tokens(self) -> int:
+        """Total ctx budget (prompt + reserved response). Matches kobold-lite's
+        localsettings.max_context_length semantic — see context_budget.py."""
+        return self._max_context_tokens
 
     # --- Private Helpers ---
 
@@ -316,6 +327,21 @@ class Persona:
         """Sets the list of tools the persona is allowed to use."""
         self._enabled_tools = new_tools
         logger.info(f"Persona '{self._name}' enabled tools set to: {self._enabled_tools}")
+
+    def set_max_context_tokens(self, new_value: Any) -> int:
+        """Sets the total context budget. Falls back to default on invalid input."""
+        try:
+            parsed = int(new_value)
+            if parsed < 100:
+                logger.warning(f"max_context_tokens {parsed} too low; clamping to 100.")
+                parsed = 100
+            self._max_context_tokens = parsed
+            logger.info(f"Persona '{self._name}' max_context_tokens set to {self._max_context_tokens}.")
+        except (ValueError, TypeError):
+            self._max_context_tokens = global_config.DEFAULT_MAX_CONTEXT_TOKENS
+            logger.info(
+                f"Invalid max_context_tokens '{new_value}'. Using default: {self._max_context_tokens}.")
+        return self._max_context_tokens
 
     def set_memory_mode(self, new_mode: Any) -> None:
         """Sets the memory retrieval strategy from a string or a MemoryMode member."""

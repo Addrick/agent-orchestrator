@@ -11,6 +11,7 @@ from typing import Any, Coroutine, Dict, List, Optional, Set, Tuple
 
 from config.global_config import MAX_TOOL_CALLS, MAX_CACHED_API_REQUESTS, \
     PENDING_CONFIRMATION_TIMEOUT, MEMORY_RETRIEVAL_ENABLED, MEMORY_MAX_SUMMARIES_IN_CONTEXT
+from memory.context_budget import truncate_messages_to_budget
 from src.embedding_service import EmbeddingService
 from src.clients.service_integration import ServiceIntegration
 from memory.memory_manager import MemoryManager
@@ -505,6 +506,17 @@ class ChatSystem:
 
         ctx.tools_for_llm = self._filter_tools_for_persona(ctx.persona)
         ctx.conversation_history.append({"role": "user", "content": ctx.message})
+
+        prompt_budget = ctx.persona.get_max_context_tokens() - ctx.persona.get_response_token_limit()
+        ctx.conversation_history, dropped = truncate_messages_to_budget(
+            ctx.conversation_history, prompt_budget,
+        )
+        if dropped:
+            logger.info(
+                f"Token-prune: dropped {dropped} oldest messages to fit "
+                f"max_context_tokens={ctx.persona.get_max_context_tokens()} "
+                f"(prompt_budget={prompt_budget}) for persona={ctx.persona_name}"
+            )
 
     async def _execute_request(self, ctx: RequestContext) -> Tuple[str, ResponseType, Optional[str]]:
         """Run tool loop and return response."""

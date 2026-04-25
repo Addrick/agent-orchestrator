@@ -663,3 +663,85 @@ def test_retry_retry_select_version_round_trip_via_endpoints(monkeypatch):
     assistant_row = next(r for r in rows if r["author_role"] == "assistant")
     assert assistant_row["content"] == "v0"
     mm.close()
+
+
+# -------- Phase 3: max_context_tokens — endpoint shape + outbound prune --------
+
+def test_get_persona_includes_max_context_tokens():
+    adapter, mm, persona = _make_adapter_with_seeded_db()
+    persona.set_max_context_tokens(8192)
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/persona/test_persona")
+    assert r.status_code == 200
+    assert r.json()["max_context_tokens"] == 8192
+    mm.close()
+
+
+def test_patch_persona_updates_max_context_tokens():
+    adapter, mm, persona = _make_adapter_with_seeded_db()
+    with TestClient(adapter.app) as client:
+        r = client.patch("/api/v1/persona/test_persona", json={"max_context_tokens": 16384})
+    assert r.status_code == 200
+    assert persona.get_max_context_tokens() == 16384
+    mm.close()
+
+
+def test_chat_completions_prunes_oversized_messages(monkeypatch):
+    """Outbound prune drops oldest non-system messages to fit budget."""
+    adapter, mm, persona = _make_adapter_with_seeded_db()
+    # Tight budget: ctx 200 - response 100 → prompt budget 100 tokens (= 400 chars char/4).
+    persona.set_response_token_limit(100)
+    persona.set_max_context_tokens(200)
+
+    forwarded = {}
+
+    async def _fake_post(url, json=None, **kwargs):
+        forwarded["body"] = json
+        return _SyncChatResp("ack")
+
+    monkeypatch.setattr(adapter._http, "post", _fake_post)
+
+    big = "x" * 600  # 150 tokens each — 4 of these blow the budget.
+    body = {
+        "messages": [
+            {"role": "system", "content": "sys note"},
+            {"role": "user", "content": big},
+            {"role": "assistant", "content": big},
+            {"role": "user", "content": big},
+            {"role": "assistant", "content": big},
+            {"role": "user", "content": "latest"},
+        ],
+        "stream": False,
+        "derpr_user_text": "latest",
+    }
+    with TestClient(adapter.app) as client:
+        r = client.post("/chat/completions", json=body)
+    assert r.status_code == 200
+
+    fwd_msgs = forwarded["body"]["messages"]
+    # System + last user always preserved.
+    assert any(m["role"] == "system" and m["content"] == "sys note" for m in fwd_msgs)
+    assert fwd_msgs[-1]["content"] == "latest"
+    assert len(fwd_msgs) < len(body["messages"])
+    mm.close()
+
+
+def test_chat_completions_under_budget_no_prune(monkeypatch):
+    adapter, mm, persona = _make_adapter_with_seeded_db()
+    persona.set_response_token_limit(100)
+    persona.set_max_context_tokens(131072)  # comfortable
+
+    forwarded = {}
+
+    async def _fake_post(url, json=None, **kwargs):
+        forwarded["body"] = json
+        return _SyncChatResp("ack")
+
+    monkeypatch.setattr(adapter._http, "post", _fake_post)
+
+    body = _chat_body("hi there")
+    with TestClient(adapter.app) as client:
+        r = client.post("/chat/completions", json=body)
+    assert r.status_code == 200
+    assert len(forwarded["body"]["messages"]) == len(body["messages"])
+    mm.close()

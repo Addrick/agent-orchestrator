@@ -14,6 +14,7 @@ import uvicorn
 import asyncio
 
 from config import global_config
+from memory.context_budget import truncate_messages_to_budget
 from src.chat_system import ChatSystem
 from src.interfaces.kobold_export import build_kobold_savefile
 from src.utils.model_utils import get_model_list
@@ -112,6 +113,7 @@ class KoboldAdapter:
                 "history_messages": p.get_base_history_messages(),
                 "thinking_level": p.get_thinking_level(),
                 "memory_mode": p.get_memory_mode().name,
+                "max_context_tokens": p.get_max_context_tokens(),
             }
 
         @self.app.get("/api/v1/session/{persona}/ltm_block")
@@ -270,6 +272,7 @@ class KoboldAdapter:
             if "history_messages" in data: p.set_history_messages(data["history_messages"])
             elif "context_length" in data: p.set_history_messages(data["context_length"])
             if "memory_mode" in data: p.set_memory_mode(data["memory_mode"])
+            if "max_context_tokens" in data: p.set_max_context_tokens(data["max_context_tokens"])
 
             save_personas_to_file(self.chat_system.personas)
             logger.info(f"Updated and saved persona settings for {name}")
@@ -333,8 +336,21 @@ class KoboldAdapter:
             body = self._strip_envelope(data)
             url = f"{_kobold_base_url()}/v1/chat/completions"
             is_stream = bool(body.get("stream"))
-            messages = body.get("messages", [])
             persona_name = self._get_current_persona_name()
+
+            persona_obj = self.chat_system.personas.get(persona_name)
+            if persona_obj is not None and isinstance(body.get("messages"), list):
+                budget = persona_obj.get_max_context_tokens() - persona_obj.get_response_token_limit()
+                pruned, dropped = truncate_messages_to_budget(body["messages"], budget)
+                if dropped:
+                    logger.info(
+                        f"Token-prune: dropped {dropped} oldest messages to fit "
+                        f"max_context_tokens={persona_obj.get_max_context_tokens()} "
+                        f"(prompt_budget={budget}) for persona={persona_name}"
+                    )
+                body["messages"] = pruned
+
+            messages = body.get("messages", [])
 
             logger.info(
                 f"OAI chat passthrough -> {url} "

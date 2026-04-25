@@ -658,6 +658,7 @@ _SETTER_TO_COMMAND = {
     'set_long_term_memory': 'long_term_memory',
     'set_include_ambient_memory': 'include_ambient_memory',
     'set_thinking_level': 'thinking_level',
+    'set_max_context_tokens': 'max_context_tokens',
 }
 
 # Legacy aliases that should not have commands (as they are being deprecated).
@@ -683,6 +684,7 @@ _GETTER_TO_COMMAND = {
     'get_long_term_memory': 'long_term_memory',
     'get_include_ambient_memory': 'include_ambient_memory',
     'get_thinking_level': 'thinking_level',
+    'get_max_context_tokens': 'max_context_tokens',
 }
 
 # Getters that intentionally have no what command (internal/derived values).
