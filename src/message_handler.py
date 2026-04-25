@@ -57,6 +57,7 @@ class BotLogic:
             'long_term_memory': self._what_long_term_memory,
             'include_ambient_memory': self._what_include_ambient_memory,
             'thinking_level': self._what_thinking_level,
+            'max_context_tokens': self._what_max_context_tokens,
         }
         self.set_handlers = {
             'prompt': self._set_prompt,
@@ -75,6 +76,7 @@ class BotLogic:
             'long_term_memory': self._set_long_term_memory,
             'include_ambient_memory': self._set_include_ambient_memory,
             'thinking_level': self._set_thinking_level,
+            'max_context_tokens': self._set_max_context_tokens,
         }
 
     async def preprocess_message(
@@ -440,6 +442,9 @@ class BotLogic:
         display = f"'{level}'" if level else "not set (default)"
         return f"Thinking level for '{persona.get_name()}' is {display}.", False
 
+    def _what_max_context_tokens(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
+        return f"Max context tokens for '{persona.get_name()}' is {persona.get_max_context_tokens()}.", False
+
     async def _handle_set(
             self,
             args: List[str],
@@ -753,6 +758,14 @@ class BotLogic:
             persona.set_include_ambient_memory(False)
             return f"Ambient memory inclusion disabled for {persona.get_name()}.", True
         return f"Error: Invalid value '{args[1]}'. Use 'on' or 'off'.", False
+
+    def _set_max_context_tokens(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
+        try:
+            value = args[1]
+        except IndexError:
+            return "Error: Please specify an integer max_context_tokens value.", False
+        new_val = persona.set_max_context_tokens(value)
+        return f"Max context tokens for {persona.get_name()} set to {new_val}.", True
 
     def _set_thinking_level(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
         try:

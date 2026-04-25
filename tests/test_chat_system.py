@@ -633,6 +633,31 @@ async def test_prepare_request_populates_context(chat_system_with_mocks):
     assert ctx.conversation_history[-1] == {"role": "user", "content": "hello"}
 
 
+@pytest.mark.asyncio
+async def test_prepare_request_prunes_to_max_context_tokens(chat_system_with_mocks):
+    """Phase 3: oversized history is pruned to fit max_context_tokens - response_token_limit."""
+    system, memory_mock, _, persona, _ = chat_system_with_mocks
+    persona.set_response_token_limit(100)
+    persona.set_max_context_tokens(200)
+
+    big = "x" * 600  # 150 tokens char/4
+    memory_mock.get_channel_history.return_value = [
+        {"author_role": "user", "content": big, "interaction_id": 1, "timestamp": "t", "author_name": "u"},
+        {"author_role": "assistant", "content": big, "interaction_id": 2, "timestamp": "t", "author_name": "a"},
+        {"author_role": "user", "content": big, "interaction_id": 3, "timestamp": "t", "author_name": "u"},
+        {"author_role": "assistant", "content": big, "interaction_id": 4, "timestamp": "t", "author_name": "a"},
+    ]
+    ctx = RequestContext(
+        persona=persona, persona_name='test_persona', user_identifier='user',
+        channel='general', message='latest user msg', server_id='srv1',
+    )
+
+    await system._prepare_request(ctx)
+
+    assert ctx.conversation_history[-1]["content"] == "latest user msg"
+    assert len(ctx.conversation_history) < 5  # at least one drop
+
+
 # --- Internal Logging Tests ---
 
 @pytest.mark.asyncio

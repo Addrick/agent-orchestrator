@@ -108,6 +108,7 @@ All commands are entered as the message body when addressing a persona. Commands
 | `tools` | All available tools with enabled/disabled status |
 | `memory_mode` | History retrieval scope |
 | `service_bindings` | Bound external services |
+| `max_context_tokens` | Total context budget (prompt + reserved response, kobold-style) |
 
 ### Configuring Persona State
 
@@ -128,6 +129,7 @@ All commands are entered as the message body when addressing a persona. Commands
 | `tools <spec>` | all, none, tool_name, or `all -excluded` | Enable/disable tools. Supports exclusion syntax: `set tools all -web_search` |
 | `memory_mode <mode>` | See Memory Modes below | History retrieval scope |
 | `service_bindings <list\|none>` | Comma-separated service names | e.g., `set service_bindings zammad,agents` |
+| `max_context_tokens <integer>` | Integer >= 100 | Total context budget — prompt + reserved response (matches kobold-lite's `max_context_length` slider). Effective prompt prune budget = this minus `tokens`. Oldest non-system messages drop until prompt fits; system messages and the latest user message are always preserved. Default 131072. |
 
 ### Persona Management
 

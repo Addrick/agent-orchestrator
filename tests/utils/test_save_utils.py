@@ -122,3 +122,32 @@ def test_load_persona_attributes_integrity(tmp_path):
     assert p.get_execution_mode() == ExecutionMode.CONFIRM
     assert p.get_memory_mode() == MemoryMode.TICKET_ISOLATED
     assert p.get_enabled_tools() == ["create_ticket"]
+
+
+def test_max_context_tokens_round_trip(temp_save_file: Path):
+    """Phase 3: max_context_tokens survives save/load."""
+    p = Persona(
+        persona_name="ctx_persona",
+        model_name="m",
+        prompt="p",
+        max_context_tokens=8192,
+    )
+    save_utils.save_personas_to_file({"ctx_persona": p}, file_path_override=str(temp_save_file))
+    loaded = save_utils.load_personas_from_file(file_path_override=str(temp_save_file))
+    assert loaded["ctx_persona"].get_max_context_tokens() == 8192
+
+
+def test_max_context_tokens_missing_uses_default(tmp_path: Path):
+    """Old config without max_context_tokens loads with the default."""
+    from config import global_config
+
+    test_file = tmp_path / "old_config.json"
+    test_file.write_text(json.dumps({
+        "personas": [{
+            "name": "legacy",
+            "model_name": "m",
+            "prompt": "p",
+        }]
+    }))
+    loaded = save_utils.load_personas_from_file(str(test_file))
+    assert loaded["legacy"].get_max_context_tokens() == global_config.DEFAULT_MAX_CONTEXT_TOKENS

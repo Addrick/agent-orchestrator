@@ -28981,6 +28981,12 @@ Current version indicated by LITEVER below.
 						<input type="range" id="historySlider" class="form-control" min="1" max="50" step="1" oninput="document.getElementById('historyVal').textContent=this.value">
 					</div>
 				</div>
+                <div class="settingsbox flex wide">
+					<div class="settingitem wide">
+						<div class="settinglabel" style="font-size: 11px;" title="Total context budget (prompt + reserved response). Mirrors kobold's max_context_length slider on persona load.">Max Context Tokens</div>
+						<input type="number" id="maxContextTokensInput" class="form-control" step="1024" min="512" placeholder="131072">
+					</div>
+				</div>
 
                 <div class="settingitem wide" style="margin-top: 10px; border-top: 1px solid #333; padding-top: 10px;">
                     <div class="settinglabel" style="margin-bottom: 4px;">History Source</div>
@@ -32266,6 +32272,7 @@ Current version indicated by LITEVER below.
             document.getElementById('maxTokensInput').value = p.max_tokens || 1024;
             document.getElementById('historySlider').value = p.history_messages || 10;
             document.getElementById('historyVal').textContent = p.history_messages || 10;
+            document.getElementById('maxContextTokensInput').value = p.max_context_tokens || 131072;
 
             // Load DERPR history-source toggle state from browser storage
             const hs = document.getElementById('historySourceToggle');
@@ -32365,9 +32372,10 @@ Current version indicated by LITEVER below.
 		const top_p   = parseFloat(document.getElementById('topPInput').value);
 		const top_k   = parseInt(document.getElementById('topKInput').value);
 		const max_tok = parseInt(document.getElementById('maxTokensInput').value);
-		// NOTE: persona.context_length is DERPR-side message count, NOT kobold's
-		// max_context_length (token budget). Do not push to localsettings.
-		// Kobold's max_context_length is set via its own UI sliders.
+		// Phase 3: persona.max_context_tokens IS the kobold-style total ctx
+		// budget (prompt + reserved response). Push it into localsettings +
+		// slider DOM so kobold's own UI reflects the persona's cap.
+		const max_ctx = parseInt(document.getElementById('maxContextTokensInput').value);
 
 		// DOM mirror so kobold's own settings popup displays the persona values.
 		const setBoth = (id, v) => {
@@ -32380,6 +32388,16 @@ Current version indicated by LITEVER below.
 		if (!isNaN(top_p))   { setBoth('top_p', top_p);             localsettings.top_p              = top_p; }
 		if (!isNaN(top_k))   { setBoth('top_k', top_k);             localsettings.top_k              = top_k; }
 		if (!isNaN(max_tok)) { setBoth('max_length', max_tok);      localsettings.max_length         = max_tok; }
+		if (!isNaN(max_ctx)) {
+			const slideEl = document.getElementById('max_context_length_slide');
+			if (slideEl && max_ctx > parseInt(slideEl.max || 0)) {
+				slideEl.max = max_ctx;
+				const lbl = document.getElementById('max_context_length_slide_label');
+				if (lbl) lbl.innerText = max_ctx;
+			}
+			setBoth('max_context_length', max_ctx);
+			localsettings.max_context_length = max_ctx;
+		}
 
 		if (typeof render_gametext === 'function') render_gametext();
 		if (!silent && typeof msgbox === 'function') msgbox("Inference Matrix applied to session.");
@@ -32400,6 +32418,7 @@ Current version indicated by LITEVER below.
             max_tokens: parseInt(document.getElementById('maxTokensInput').value) || null,
             history_messages: parseInt(document.getElementById('historySlider').value) || null,
             memory_mode: mmEl ? mmEl.value : undefined,
+            max_context_tokens: parseInt(document.getElementById('maxContextTokensInput').value) || null,
 		};
 		try {
 			await fetch(`/api/v1/persona/${name}`, {
