@@ -14,7 +14,7 @@ from src.agents.agent_manager import AgentManager
 from src.agents.agent_service import AgentServiceIntegration
 from src.chat_system import ChatSystem
 from src.clients.zammad_service import ZammadIntegration
-from src.database.memory_manager import MemoryManager
+from memory.memory_manager import MemoryManager
 from src.engine import TextEngine
 from src.persona import Persona, MemoryMode
 from src.tools.definitions import ALL_TOOL_DEFINITIONS

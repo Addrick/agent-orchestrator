@@ -159,7 +159,7 @@ python -m eval_harnesses.retrieval_quality --compare results/baseline.json resul
 
 ### Key implementation details
 
-- `retrieve_relevant_summaries` is in `src/database/memory_manager.py` starting around line 740. It uses `vec_Memory_Summaries` for KNN search.
+- `retrieve_relevant_summaries` is in `src/memory/memory_manager.py` starting around line 740. It uses `vec_Memory_Summaries` for KNN search.
 - Results include `summary_id`, `segment_id`, `content`, `distance`. Distance = L2 on normalized vectors (monotonic with cosine).
 - Current retrieval params: `channel`, `persona_name`, `server_id`, `model_name`, `summary_level`, `before_interaction_id`, `window_size`, `limit`.
 - For harness: use same params as production retrieval path in `chat_system.py` around line 306.

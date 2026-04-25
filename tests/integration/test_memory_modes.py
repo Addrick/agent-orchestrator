@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, AsyncMock, patch
 from datetime import datetime, timedelta
 
 from src.chat_system import ChatSystem
-from src.database.memory_manager import MemoryManager
+from memory.memory_manager import MemoryManager
 from src.persona import Persona, MemoryMode
 from src.engine import TextEngine
 from src.clients.zammad_client import ZammadClient

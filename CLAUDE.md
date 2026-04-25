@@ -61,7 +61,7 @@ Live tests auto-skip when credentials are absent (via `tests/conftest.py`). Test
 When changing any of the following, you MUST add corresponding tests before committing:
 
 **Database schema changes** (`memory_manager.py` CREATE TABLE / ALTER TABLE):
-- Add migration tests using the `legacy_mem_manager` fixture pattern in `tests/database/test_memory_manager.py`
+- Add migration tests using the `legacy_mem_manager` fixture pattern in `tests/memory/test_memory_manager.py`
 - The fixture creates a DB with the OLD schema (before your change), then tests call `create_schema()` and verify the migration works
 - Must test: column/table added, existing data preserved, indexes created, new features usable on migrated DB, idempotent on second run
 - Unit tests with `:memory:` always start fresh and will NOT catch migration bugs against existing production databases
@@ -80,6 +80,26 @@ When changing any of the following, you MUST add corresponding tests before comm
 **Startup registration** (new `ServiceIntegration`, tool handler, or notifier):
 - If a component must be registered at startup to function, test that the registration actually happens — not just that the component works in isolation
 - The startup wiring test in `tests/integration/test_startup_wiring.py` asserts every tool `service_binding` in `ALL_TOOL_DEFINITIONS` has a registered handler; update it when adding new services
+
+
+## Parallel Agent Standards
+
+To support multiple agents working concurrently, the following rules are mandatory:
+
+### 1. The DP-ID Anchor
+- **Every** branch must follow: `feature/DP-XXX-slug` or `bugfix/DP-XXX-slug`.
+- **Every** commit message must follow: `<gitmoji> DP-XXX: description`.
+- **Every** task must have a corresponding file in `memory/project/tasks/DP-XXX.md`.
+
+### 2. Workspace Isolation
+- Parallel work **MUST** use Git Worktrees.
+- Worktree root: `worktrees/DP-XXX/`.
+- Never run `git checkout` or `git pull` in the main repository directory while a parallel agent is working, as this can corrupt their local file state.
+
+### 3. Integration & QA
+- No task is considered "QA_READY" until `pytest` passes within its dedicated worktree.
+- Human approval is required for all merges to `main` or `develop`.
+- After merge, the worktree directory `worktrees/DP-XXX/` should be removed via `git worktree remove`.
 
 ## Documentation
 

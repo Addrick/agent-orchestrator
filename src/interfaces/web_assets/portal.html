@@ -27343,10 +27343,7 @@ Current version indicated by LITEVER below.
 			retry_in_progress = erased_last;
 			retry_prev_text = last_retry_stack_temp;
 			retry_prev_text.push(temp);
-			if(retry_prev_text.length > 10) //undo limit for retries
-			{
-				retry_prev_text.shift();
-			}
+			// DERPR: no client-side undo cap — version history is DB-backed.
 			redo_arr = [];
 			document.getElementById("input_text").value = boxtextstash;
 		}
@@ -32308,6 +32305,7 @@ Current version indicated by LITEVER below.
 			// ignore_multiplayer_sync=true → portal is single-user;
 			// save_after_loading=false → no autosave for an ephemeral snapshot.
 			kai_json_load(storyobj, true, true, false);
+			window.derpr_interaction_ids = storyobj.interaction_ids || [];
 			localStorage.setItem('persona_history_source_' + persona, 'derpr');
 			return true;
 		} catch (e) {
@@ -32555,6 +32553,214 @@ Current version indicated by LITEVER below.
 	oai_api_stream_sse = function(sub_endpt, submit_payload, submit_headers) {
 		_derprStampAndConsumeRetry(submit_payload);
 		return _origOaiStreamSse(sub_endpt, submit_payload, submit_headers);
+	};
+
+	// Phase 2.3b: chevron (retry/redo) nav backed by DERPR DB.
+	// The stream response from /chat/completions includes an `event: derpr`
+	// frame carrying the canonical assistant_id. On receipt we fetch the
+	// full version list and hydrate retry_prev_text + redo_prev_text. Chevron
+	// clicks POST /select_version/{k} so the DB matches on-screen state, with
+	// kobold's local stack behavior preserved as a fallback.
+	window.derpr_current_assistant_id = null;
+	window.derpr_interaction_ids = []; 
+	window.derpr_version_chain = []; // [{content, edit_id}] chronological, canonical last on first hydrate
+	window.derpr_cursor = 0;
+
+	function _derprUpdateChevronStacks() {
+		const chain = window.derpr_version_chain;
+		const cursor = window.derpr_cursor;
+		if (!chain.length) {
+			retry_prev_text = [];
+			redo_prev_text = [];
+			return;
+		}
+		retry_prev_text = chain.slice(0, cursor).map(v => v.content);
+		const forward = chain.slice(cursor + 1).map(v => v.content);
+		redo_prev_text = forward.slice().reverse();
+	}
+
+	async function _derprHydrateVersions(assistantId) {
+		try {
+			const res = await fetch(`/api/v1/interaction/${assistantId}/versions`);
+			if (!res.ok) return;
+			const data = await res.json();
+			window.derpr_current_assistant_id = assistantId;
+			window.derpr_version_chain = (data.versions || []).map(v => ({
+				content: v.content,
+				edit_id: v.edit_id,
+			}));
+			window.derpr_cursor = Math.max(0, window.derpr_version_chain.length - 1);
+			_derprUpdateChevronStacks();
+			if (typeof render_gametext === 'function') render_gametext();
+		} catch (e) {
+			console.warn('DERPR versions hydrate failed:', e);
+		}
+	}
+
+	// SSE interception: tee the /chat/completions response body so we can
+	// sniff for the `event: derpr` frame without disturbing kobold's reader.
+	(function() {
+		const _origFetch = window.fetch;
+		window.fetch = async function(resource, init) {
+			const url = typeof resource === 'string' ? resource : (resource && resource.url);
+			const isChat = url && url.indexOf('/chat/completions') >= 0;
+			const resp = await _origFetch.apply(this, arguments);
+			if (!isChat || !resp.body) return resp;
+			const ct = resp.headers.get('content-type') || '';
+			if (!ct.includes('text/event-stream')) return resp;
+
+			const [a, b] = resp.body.tee();
+			(async function() {
+				const reader = b.getReader();
+				const decoder = new TextDecoder();
+				let buf = '';
+				try {
+					while (true) {
+						const { done, value } = await reader.read();
+						if (done) break;
+						buf += decoder.decode(value, { stream: true });
+						let idx;
+						while ((idx = buf.indexOf('\n\n')) >= 0) {
+							const block = buf.slice(0, idx);
+							buf = buf.slice(idx + 2);
+							_derprParseSseBlock(block);
+						}
+					}
+				} catch (e) { /* silent — kobold's branch still flows */ }
+			})();
+
+			return new Response(a, {
+				status: resp.status,
+				statusText: resp.statusText,
+				headers: resp.headers,
+			});
+		};
+
+		function _derprParseSseBlock(block) {
+			let ev = 'message';
+			const dataParts = [];
+			for (const line of block.split('\n')) {
+				if (line.startsWith('event: ')) ev = line.slice(7).trim();
+				else if (line.startsWith('data: ')) dataParts.push(line.slice(6));
+			}
+			if (ev !== 'derpr' || !dataParts.length) return;
+			try {
+				const payload = JSON.parse(dataParts.join('\n'));
+				if (payload.assistant_id) {
+					_derprHydrateVersions(payload.assistant_id);
+					// If we have a user_id, it's a new turn (User + Assistant)
+					if (payload.user_id) {
+						window.derpr_interaction_ids.push(payload.user_id);
+						window.derpr_interaction_ids.push(payload.assistant_id);
+					} else {
+						// Retry path: update the last assistant ID slot
+						window.derpr_interaction_ids[window.derpr_interaction_ids.length - 1] = payload.assistant_id;
+					}
+				}
+			} catch (e) { /* malformed frame — ignore */ }
+		}
+	})();
+
+	// Chevron wrapping: translate UI nav to server swap + local chain cursor.
+	async function _derprLookupK(targetContent) {
+		const res = await fetch(`/api/v1/interaction/${window.derpr_current_assistant_id}/versions`);
+		if (!res.ok) return -1;
+		const data = await res.json();
+		const archives = (data.versions || []).slice(0, -1);
+		return archives.findIndex(v => v.content === targetContent);
+	}
+
+	const _origBtnBack = btn_back;
+	btn_back = async function() {
+		if (!window.derpr_current_assistant_id || window.derpr_cursor <= 0) {
+			return _origBtnBack();
+		}
+		if (pending_response_id !== "" || !allow_redo_undo()) return;
+		const targetIdx = window.derpr_cursor - 1;
+		const targetContent = window.derpr_version_chain[targetIdx].content;
+		try {
+			const k = await _derprLookupK(targetContent);
+			if (k < 0) return _origBtnBack();
+			const sw = await fetch(
+				`/api/v1/interaction/${window.derpr_current_assistant_id}/select_version/${k}`,
+				{ method: 'POST' },
+			);
+			if (!sw.ok) return;
+			window.derpr_cursor = targetIdx;
+			if (gametext_arr.length) gametext_arr[gametext_arr.length - 1] = targetContent;
+			_derprUpdateChevronStacks();
+			warn_unsaved = true;
+			last_reply_was_empty = false;
+			retry_preserve_last = false;
+			render_gametext();
+			sync_multiplayer(false);
+		} catch (e) {
+			console.warn('DERPR chevron-back failed:', e);
+		}
+	};
+
+	const _origBtnRedo = btn_redo;
+	btn_redo = async function() {
+		const chainLen = window.derpr_version_chain.length;
+		if (!window.derpr_current_assistant_id || window.derpr_cursor >= chainLen - 1) {
+			return _origBtnRedo();
+		}
+		if (pending_response_id !== "" || !allow_redo_undo()) return;
+		const targetIdx = window.derpr_cursor + 1;
+		const targetContent = window.derpr_version_chain[targetIdx].content;
+		try {
+			const k = await _derprLookupK(targetContent);
+			if (k < 0) return _origBtnRedo();
+			const sw = await fetch(
+				`/api/v1/interaction/${window.derpr_current_assistant_id}/select_version/${k}`,
+				{ method: 'POST' },
+			);
+			if (!sw.ok) return;
+			window.derpr_cursor = targetIdx;
+			if (gametext_arr.length) gametext_arr[gametext_arr.length - 1] = targetContent;
+			_derprUpdateChevronStacks();
+			warn_unsaved = true;
+			last_reply_was_empty = false;
+			retry_preserve_last = false;
+			render_gametext();
+			sync_multiplayer(false);
+		} catch (e) {
+			console.warn('DERPR chevron-redo failed:', e);
+		}
+	};
+	// --------------------------------
+
+	// Phase 2.4: Propagate edits to DERPR DB
+	const _origEditChunkSave = edit_chunk_save;
+	edit_chunk_save = function(modified_turn, modified_message, allow_blank=false) {
+		const interactionId = window.derpr_interaction_ids[modified_turn];
+		const wasEmpty = modified_message.trim() === "";
+		
+		_origEditChunkSave(modified_turn, modified_message, allow_blank);
+		
+		if (interactionId) {
+			if (wasEmpty && !allow_blank) {
+				// Deletion path: sync the ID array to match gametext_arr shrinkage
+				window.derpr_interaction_ids.splice(modified_turn, 1);
+				// (Optional: call DELETE API here if desired)
+			} else {
+				// Update path: strip placeholders before persisting to DB
+				let cleaned = modified_message;
+				cleaned = cleaned.replace(/\{\{\[INPUT\]\}\}/g, "").replace(/\{\{\[OUTPUT\]\}\}/g, "").trim();
+				
+				fetch(`/api/v1/interaction/${interactionId}`, {
+					method: 'PATCH',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ content: cleaned })
+				}).catch(e => console.warn('Failed to propagate edit to DERPR:', e));
+			}
+		}
+	};
+	
+	const _origRestart = restart_new_game;
+	restart_new_game = function(save_story) {
+		_origRestart(save_story);
+		window.derpr_interaction_ids = [];
 	};
 
 	// Auto-trigger persona fetch on init

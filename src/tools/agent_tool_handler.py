@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from src.agents.agent_manager import AgentManager
-    from src.database.memory_manager import MemoryManager
+    from memory.memory_manager import MemoryManager
     from src.tools.tool_manager import ToolManager
 
 logger = logging.getLogger(__name__)

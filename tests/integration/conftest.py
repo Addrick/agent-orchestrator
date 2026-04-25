@@ -7,7 +7,7 @@ import random
 import pytest
 from unittest.mock import MagicMock, patch
 
-from src.database.memory_manager import MemoryManager
+from memory.memory_manager import MemoryManager
 from src.chat_system import ChatSystem
 from src.engine import TextEngine
 from src.persona import Persona, MemoryMode

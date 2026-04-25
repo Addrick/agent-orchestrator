@@ -6,7 +6,7 @@ import json
 
 from src.chat_system import ChatSystem, ResponseType, RequestContext
 from src.utils.model_utils import get_model_prefix
-from src.database.memory_manager import MemoryManager
+from memory.memory_manager import MemoryManager
 from src.engine import TextEngine, LLMCommunicationError
 from src.persona import Persona, ExecutionMode, MemoryMode
 from src.clients.service_integration import ServiceIntegration

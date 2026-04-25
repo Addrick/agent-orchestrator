@@ -1,15 +1,15 @@
-# tests/database/test_memory_consolidation.py
+# tests/memory/test_memory_consolidation.py
 
 import pytest
 import math
 import struct
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
-from src.database.memory_manager import (
+from memory.memory_manager import (
     MemoryManager, LEVEL_EPISODIC, LEVEL_CORE
 )
-from src.database.memory_consolidation import MemoryConsolidator
+from memory.memory_consolidation import MemoryConsolidator
 from src.persona import Persona
 from src.embedding_service import EmbeddingService
 

@@ -1,4 +1,4 @@
-# tests/database/test_memory_manager.py
+# tests/memory/test_memory_manager.py
 
 import concurrent.futures
 import json
@@ -7,8 +7,8 @@ import os
 import time
 from datetime import datetime, timezone
 
-from src.database.memory_manager import MemoryManager
-from config.global_config import TEST_MEMORY_DATABASE_FILE, TEST_DATABASE_DIR, EMBEDDING_MODEL
+from memory.memory_manager import MemoryManager
+from config.global_config import TEST_DATABASE_DIR, EMBEDDING_MODEL
 
 
 @pytest.fixture
@@ -1284,7 +1284,6 @@ def test_clear_segment_failure_removes_record(mem_manager):
 
 def test_get_failed_segment_ranges_respects_cooldown(mem_manager):
     """Failures with attempts < max_attempts that are old enough are not returned."""
-    from datetime import timezone
     mem_manager.record_segment_failure("chan", None, "p1", 1, 50, 50)
 
     # With a very short cooldown (0 hours) and attempts < max, should not block
