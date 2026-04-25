@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from src.database.memory_manager import MemoryManager
+from memory.memory_manager import MemoryManager
 from src.interfaces.kobold_export import build_kobold_savefile
 
 

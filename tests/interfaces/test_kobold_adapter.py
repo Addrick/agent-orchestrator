@@ -7,15 +7,19 @@ Phase 2.2: ltm_block + persona memory_mode routes.
 Phase 2.3a: /chat/completions logging — user-turn detection in jinja-hijack
 mode (messages[-1] is the assistant prefix, not the user), reply_to_id
 threading, abort partial-buffer flush, and derpr_retry archive+update path.
+Phase 2.3b: SSE `event: derpr` frame carrying assistant_id, and
+/api/v1/interaction/{id}/versions + select_version/{k} endpoints.
 """
 
+import json
+import re
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 from fastapi.testclient import TestClient
 
-from src.database.memory_manager import MemoryManager
+from memory.memory_manager import MemoryManager
 from src.interfaces.kobold_adapter import KoboldAdapter
 from src.persona import Persona
 
@@ -428,7 +432,6 @@ def test_patch_persona_updates_memory_mode():
 
 def test_patch_persona_unknown_mode_does_not_crash():
     # set_memory_mode logs a warning and keeps old mode on invalid input
-    from src.persona import MemoryMode
     adapter, mm, persona = _make_adapter_with_seeded_db()
     original = persona.get_memory_mode()
     with TestClient(adapter.app) as client:
@@ -488,4 +491,175 @@ def test_ltm_block_empty_query_passes_none():
     # empty query string → current_message=None (falsy branch in endpoint)
     kwargs = mock_retrieve.call_args.kwargs
     assert kwargs.get("current_message") is None
+    mm.close()
+
+
+# -------- Phase 2.3b: SSE derpr frame + version endpoints --------
+
+def _make_stream_ctx(chunks):
+    """Factory: context manager producing the given byte chunks from aiter_raw."""
+    class _StreamCtx:
+        async def __aenter__(self):
+            resp = MagicMock()
+
+            async def _aiter_raw():
+                for c in chunks:
+                    yield c
+
+            resp.aiter_raw = _aiter_raw
+            return resp
+
+        async def __aexit__(self, *a):
+            return False
+
+    return _StreamCtx()
+
+
+def test_stream_emits_derpr_frame_before_done_with_assistant_id(monkeypatch):
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+
+    chunks = [
+        b'data: {"choices":[{"delta":{"content":"hello "}}]}\n\n',
+        b'data: {"choices":[{"delta":{"content":"world"}}]}\n\n',
+        b"data: [DONE]\n\n",
+    ]
+    monkeypatch.setattr(adapter._http, "stream", lambda *a, **kw: _make_stream_ctx(chunks))
+
+    with TestClient(adapter.app) as client:
+        r = client.post("/chat/completions", json=_chat_body("hi", stream=True))
+    assert r.status_code == 200
+    body = r.text
+
+    # derpr frame must precede [DONE]
+    assert "event: derpr" in body
+    idx_derpr = body.index("event: derpr")
+    idx_done = body.index("[DONE]")
+    assert idx_derpr < idx_done
+
+    # Frame payload carries the canonical assistant_id
+    m = re.search(r"event: derpr\ndata: (\{.*?\})\n\n", body)
+    assert m, f"derpr frame not parseable: {body!r}"
+    payload = json.loads(m.group(1))
+    rows = _fetch_portal_rows(mm, "test_persona")
+    assistant_row = next(r for r in rows if r["author_role"] == "assistant")
+    assert payload["assistant_id"] == assistant_row["interaction_id"]
+    mm.close()
+
+
+def test_stream_without_content_does_not_emit_derpr_frame(monkeypatch):
+    # Empty upstream response → nothing to commit → no derpr frame.
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+
+    chunks = [b"data: [DONE]\n\n"]
+    monkeypatch.setattr(adapter._http, "stream", lambda *a, **kw: _make_stream_ctx(chunks))
+
+    with TestClient(adapter.app) as client:
+        r = client.post("/chat/completions", json=_chat_body("hi", stream=True))
+    assert r.status_code == 200
+    assert "event: derpr" not in r.text
+    mm.close()
+
+
+def test_list_versions_unknown_id_returns_404():
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/interaction/9999/versions")
+    assert r.status_code == 404
+    mm.close()
+
+
+def test_list_versions_canonical_only_returns_single_entry():
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    iid = mm.log_message(
+        user_identifier="portal", persona_name="test_persona", channel="web_ui",
+        author_role="assistant", author_name=None, content="only version",
+        timestamp=datetime(2026, 4, 22, 12, 0, 0),
+    )
+    with TestClient(adapter.app) as client:
+        r = client.get(f"/api/v1/interaction/{iid}/versions")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["interaction_id"] == iid
+    assert len(data["versions"]) == 1
+    assert data["versions"][0]["edit_id"] is None
+    assert data["versions"][0]["content"] == "only version"
+    mm.close()
+
+
+def test_select_version_out_of_bounds_returns_400():
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    iid = mm.log_message(
+        user_identifier="portal", persona_name="test_persona", channel="web_ui",
+        author_role="assistant", author_name=None, content="canonical",
+        timestamp=datetime(2026, 4, 22, 12, 0, 0),
+    )
+    with TestClient(adapter.app) as client:
+        r = client.post(f"/api/v1/interaction/{iid}/select_version/5")
+    assert r.status_code == 400
+    # Canonical unchanged
+    with TestClient(adapter.app) as client:
+        r2 = client.get(f"/api/v1/interaction/{iid}/versions")
+    assert r2.json()["versions"][-1]["content"] == "canonical"
+    mm.close()
+
+
+def test_select_version_unknown_id_returns_404():
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    with TestClient(adapter.app) as client:
+        r = client.post("/api/v1/interaction/9999/select_version/0")
+    assert r.status_code == 404
+    mm.close()
+
+
+def test_retry_retry_select_version_round_trip_via_endpoints(monkeypatch):
+    """End-to-end: two sequential retries then restore original via endpoint.
+
+    Initial assistant content = "v0". After retry #1 canonical = "v1",
+    archives = [v0]. After retry #2 canonical = "v2", archives = [v0, v1].
+    select_version(0) swaps archive[0] (v0) with canonical (v2):
+    new canonical = "v0", archives = [v1, v2].
+    """
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+
+    base = datetime(2026, 4, 22, 12, 0, 0)
+    user_id = mm.log_message(
+        user_identifier="portal", persona_name="test_persona", channel="web_ui",
+        author_role="user", author_name=None, content="question", timestamp=base,
+    )
+    assistant_id = mm.log_message(
+        user_identifier="portal", persona_name="test_persona", channel="web_ui",
+        author_role="assistant", author_name=None, content="v0",
+        timestamp=base + timedelta(seconds=1), reply_to_id=user_id,
+    )
+
+    responses = iter(["v1", "v2"])
+
+    async def _fake_post(url, json=None, **kwargs):
+        return _SyncChatResp(next(responses))
+
+    monkeypatch.setattr(adapter._http, "post", _fake_post)
+
+    with TestClient(adapter.app) as client:
+        r1 = client.post("/chat/completions", json=_chat_body("question", retry=True))
+        assert r1.status_code == 200
+        r2 = client.post("/chat/completions", json=_chat_body("question", retry=True))
+        assert r2.status_code == 200
+
+        versions = client.get(f"/api/v1/interaction/{assistant_id}/versions").json()
+        contents = [v["content"] for v in versions["versions"]]
+        assert contents == ["v0", "v1", "v2"]
+
+        swap = client.post(f"/api/v1/interaction/{assistant_id}/select_version/0").json()
+        assert swap["current_content"] == "v0"
+        assert swap["interaction_id"] == assistant_id
+        assert swap["total_versions"] == 3
+
+        after = client.get(f"/api/v1/interaction/{assistant_id}/versions").json()
+        after_contents = [v["content"] for v in after["versions"]]
+        assert after_contents == ["v1", "v2", "v0"]
+        assert after["versions"][-1]["edit_id"] is None  # v0 now canonical
+
+    rows = _fetch_portal_rows(mm, "test_persona")
+    assistant_row = next(r for r in rows if r["author_role"] == "assistant")
+    assert assistant_row["content"] == "v0"
     mm.close()
