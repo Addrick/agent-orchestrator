@@ -20,6 +20,23 @@ def cleanse_message_for_history(text: str) -> str:
     return text.strip()
 
 
+def strip_vertex_links(text: str) -> str:
+    """
+    Strip vertexai grounding redirect URLs from content.
+    Preserves link text and citation markers, removes only the URL.
+    [Text](https://vertexaisearch.cloud.google.com/...) -> [Text]
+    [[1](<https://vertexaisearch...>)] -> [[1]]
+    """
+    if not text:
+        return text
+    # This regex matches (https://vertexaisearch.cloud.google.com/...)
+    # including optional angle brackets < > often found in markdown.
+    return re.sub(
+        r'\(<?https://vertexaisearch\.cloud\.google\.com/[^)]*>?\)',
+        '', text
+    )
+
+
 def resolve_redirect_url(redirect_url: str, max_retries: int = 3, initial_delay: int = 5) -> str:
     """
     Follows a redirect URL using HEAD method to get the final URL,

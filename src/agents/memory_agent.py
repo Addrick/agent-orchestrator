@@ -19,6 +19,7 @@ from config.global_config import (
     EMBEDDING_MODEL,
     GEMINI_EMBEDDING_001_TPM,
 )
+from src.utils.message_utils import strip_vertex_links
 
 logger = logging.getLogger(__name__)
 
@@ -572,10 +573,7 @@ class MemoryAgent(Agent):
             # Preserves link text and citation markers, removes only the URL.
             # [Text](https://vertexaisearch.cloud.google.com/...) → [Text]
             # [[1](<https://vertexaisearch...>)] → [[1]]
-            content = re.sub(
-                r'\(<?https://vertexaisearch\.cloud\.google\.com/[^)]*>?\)',
-                '', content
-            )
+            content = strip_vertex_links(content)
             
             id_tag = f"[ID: {msg_id}]" if msg_id else ""
             

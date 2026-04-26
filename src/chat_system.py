@@ -23,6 +23,7 @@ from src.tools.definitions import WRITE_TOOLS, MODEL_INCOMPATIBLE_TOOLS
 from src.tools.tool_manager import ToolManager, WebSearchHandler
 from src.utils.model_utils import get_model_list, get_model_prefix
 from src.utils.save_utils import load_personas_from_file, save_personas_to_file
+from src.utils.message_utils import strip_vertex_links
 
 logger = logging.getLogger(__name__)
 
@@ -559,6 +560,11 @@ class ChatSystem:
             logger.warning(f"### ChatSystem.generate_response: Received message from {user_identifier} for {persona_name}")
             await self._prepare_request(ctx)
             response_text, response_type, tool_context_json = await self._execute_request(ctx)
+
+            # Strip vertexai links before logging to DB
+            message = strip_vertex_links(message)
+            if response_text:
+                response_text = strip_vertex_links(response_text)
 
             # Log user and assistant messages
             user_ts = timestamp or datetime.now()
