@@ -309,6 +309,116 @@ class KoboldAdapter:
         async def tokencount(request: Request):
             return await self._forward_post("/api/extra/tokencount", await request.json())
 
+        @self.app.post("/api/v1/generate")
+        async def kobold_generate(request: Request):
+            """Non-streaming KoboldCPP generation with DB logging."""
+            data = await request.json()
+            persona_name = self._get_current_persona_name()
+            prompt = data.get("prompt", "")
+            user_interaction_id: Optional[int] = None
+            if prompt and prompt.strip():
+                user_interaction_id = self._log_interaction(persona_name, "user", prompt)
+            url = f"{_kobold_base_url()}/api/v1/generate"
+            try:
+                r = await self._http.post(url, json=data)
+                resp = r.json() if r.content else {}
+                if r.status_code == 200:
+                    results = resp.get("results", [])
+                    if results:
+                        ai_text = results[0].get("text", "")
+                        if ai_text:
+                            self._commit_assistant(persona_name, ai_text, user_interaction_id, None)
+                return JSONResponse(status_code=r.status_code, content=resp)
+            except httpx.RequestError as e:
+                logger.error(f"/api/v1/generate upstream failed: {e}")
+                return JSONResponse(status_code=502, content={"error": str(e)})
+
+        @self.app.post("/api/extra/generate/stream")
+        async def kobold_generate_stream(request: Request):
+            """Streaming KoboldCPP SSE generation with DB logging.
+
+            Logs the user turn from `prompt` on entry, then collects all SSE
+            token deltas and commits the assembled assistant turn on [DONE].
+            The `model` field in the request body (if present) is used to
+            select the active persona; DERPR strips it before forwarding.
+            """
+            data = await request.json()
+            # Respect per-request persona override sent by portal_test.html
+            model_hint = data.get("model")
+            if model_hint and model_hint in self.chat_system.personas:
+                persona_name = model_hint
+            else:
+                persona_name = self._get_current_persona_name()
+
+            prompt: str = data.get("prompt") or ""
+            user_interaction_id: Optional[int] = None
+            if prompt.strip():
+                user_interaction_id = self._log_interaction(persona_name, "user", prompt)
+
+            # Strip DERPR envelope fields before forwarding
+            forward_body = {k: v for k, v in data.items() if k != "model"}
+            url = f"{_kobold_base_url()}/api/extra/generate/stream"
+
+            async def relay_stream() -> AsyncIterator[bytes]:
+                full_response: List[str] = []
+                done_seen = False
+                committed = False
+                try:
+                    async with self._http.stream("POST", url, json=forward_body) as upstream:
+                        async for chunk in upstream.aiter_raw():
+                            if await request.is_disconnected():
+                                return
+                            if not chunk:
+                                continue
+                            try:
+                                decoded = chunk.decode("utf-8")
+                                for line in decoded.splitlines():
+                                    if line.startswith("data: "):
+                                        raw = line[6:].strip()
+                                        if raw and raw != "[DONE]":
+                                            try:
+                                                tok_data = json.loads(raw)
+                                                token = tok_data.get("token")
+                                                if token:
+                                                    full_response.append(token)
+                                            except Exception:
+                                                pass
+                                        if raw == "[DONE]" or "[DONE]" in decoded:
+                                            done_seen = True
+                            except Exception:
+                                pass
+                            yield chunk
+
+                except httpx.RequestError as e:
+                    logger.error(f"/api/extra/generate/stream upstream failed: {e}")
+                    err_payload = json.dumps({"error": str(e)})
+                    yield f"data: {err_payload}\n\ndata: [DONE]\n\n".encode("utf-8")
+                except asyncio.CancelledError:
+                    if full_response and not committed:
+                        committed = True
+                        self._commit_assistant(
+                            persona_name, "".join(full_response),
+                            user_interaction_id, None,
+                        )
+                    raise
+                finally:
+                    if full_response and not committed:
+                        committed = True
+                        self._commit_assistant(
+                            persona_name, "".join(full_response),
+                            user_interaction_id, None,
+                        )
+
+            return StreamingResponse(
+                relay_stream(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                    "Connection": "keep-alive",
+                },
+            )
+
         @self.app.get("/api/extra/generate/check")
         @self.app.post("/api/extra/generate/check")
         async def generate_check(request: Request):
