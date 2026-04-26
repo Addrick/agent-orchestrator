@@ -256,6 +256,28 @@ class KoboldAdapter:
                 logger.error(f"patch_interaction({interaction_id}) failed: {e}")
                 return JSONResponse(status_code=500, content={"error": str(e)})
 
+        @self.app.delete("/api/v1/interaction/{interaction_id}")
+        async def delete_interaction(interaction_id: int):
+            """Soft-suppress an interaction (portal empty-edit / delete flow).
+
+            Idempotent: a second DELETE returns success with `already_suppressed: true`.
+            Reply chains stay intact; suppressed rows are filtered from history,
+            retrieval, and `kobold_export` via `_suppression_filter`.
+            """
+            try:
+                inserted = await asyncio.to_thread(
+                    self.chat_system.memory_manager.suppress_interaction,
+                    interaction_id,
+                )
+            except Exception as e:
+                logger.error(f"delete_interaction({interaction_id}) failed: {e}")
+                return JSONResponse(status_code=500, content={"error": str(e)})
+            return {
+                "result": "success",
+                "interaction_id": interaction_id,
+                "already_suppressed": not inserted,
+            }
+
         @self.app.patch("/api/v1/persona/{name}")
         async def update_persona(name: str, request: Request):
             if name not in self.chat_system.personas:

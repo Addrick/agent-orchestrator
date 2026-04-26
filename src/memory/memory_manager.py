@@ -485,9 +485,10 @@ class MemoryManager:
     def update_interaction_content(self, interaction_id: int, new_content: str) -> bool:
         """Overwrite the content of an existing interaction row in place.
 
-        Used by portal retry flow after handle_portal_retry has archived the
-        prior content. Clears parent_summary_id so re-summarization picks up
-        the updated content.
+        Used by portal retry and portal manual-edit flows. Clears
+        `parent_summary_id` so the next summarizer pass re-groups the row, and
+        drops the stale L0 embedding (`Message_Embeddings` + `vec_*`) so
+        `MemoryAgent._embed_unembedded` re-encodes against the new content.
         """
         with self._lock:
             conn = self._get_connection()
@@ -498,8 +499,11 @@ class MemoryManager:
                     " WHERE interaction_id = ?",
                     (new_content, interaction_id),
                 )
+                updated = cursor.rowcount > 0
+                cursor.execute("DELETE FROM Message_Embeddings WHERE interaction_id = ?", (interaction_id,))
+                cursor.execute("DELETE FROM vec_Message_Embeddings WHERE interaction_id = ?", (interaction_id,))
                 conn.commit()
-                return cursor.rowcount > 0
+                return updated
             except sqlite3.Error as e:
                 logger.error(f"update_interaction_content failed for id={interaction_id}: {e}")
                 conn.rollback()
@@ -583,23 +587,34 @@ class MemoryManager:
             now = datetime.now()
 
             try:
-                # 1. Archive current canonical
+                # 1. Archive current canonical (with content-hash dedupe — option B).
+                #    If an archive row with the same (interaction_id, old_content) already
+                #    exists, skip the insert; the chevron toggled back to a content we
+                #    already have on file. Drop stale L0 rows either way — the target
+                #    restore step below overwrites canonical content.
                 cursor.execute(
-                    "INSERT INTO Interaction_Edit_History (interaction_id, old_content, edited_at) VALUES (?, ?, ?)",
-                    (interaction_id, current_canonical, now),
+                    "SELECT 1 FROM Interaction_Edit_History"
+                    " WHERE interaction_id = ? AND old_content = ? LIMIT 1",
+                    (interaction_id, current_canonical),
                 )
-                new_edit_id = cursor.lastrowid
-
-                cursor.execute(
-                    "SELECT embedding, model_name, created_at FROM Message_Embeddings WHERE interaction_id = ?",
-                    (interaction_id,),
-                )
-                canonical_emb = cursor.fetchone()
-                if canonical_emb is not None:
+                dup_archive = cursor.fetchone()
+                if dup_archive is None:
                     cursor.execute(
-                        "INSERT INTO Edit_History_Embeddings (edit_id, embedding, model_name, created_at) VALUES (?, ?, ?, ?)",
-                        (new_edit_id, canonical_emb['embedding'], canonical_emb['model_name'], canonical_emb['created_at']),
+                        "INSERT INTO Interaction_Edit_History (interaction_id, old_content, edited_at) VALUES (?, ?, ?)",
+                        (interaction_id, current_canonical, now),
                     )
+                    new_edit_id = cursor.lastrowid
+
+                    cursor.execute(
+                        "SELECT embedding, model_name, created_at FROM Message_Embeddings WHERE interaction_id = ?",
+                        (interaction_id,),
+                    )
+                    canonical_emb = cursor.fetchone()
+                    if canonical_emb is not None:
+                        cursor.execute(
+                            "INSERT INTO Edit_History_Embeddings (edit_id, embedding, model_name, created_at) VALUES (?, ?, ?, ?)",
+                            (new_edit_id, canonical_emb['embedding'], canonical_emb['model_name'], canonical_emb['created_at']),
+                        )
                 cursor.execute("DELETE FROM Message_Embeddings WHERE interaction_id = ?", (interaction_id,))
                 cursor.execute("DELETE FROM vec_Message_Embeddings WHERE interaction_id = ?", (interaction_id,))
 
@@ -647,6 +662,27 @@ class MemoryManager:
                 "interaction_id": interaction_id,
                 "total_versions": total_archives + 1,
             }
+
+    def suppress_interaction(self, interaction_id: int) -> bool:
+        """Soft-suppress a single interaction by id. Idempotent.
+
+        Used by the portal's empty-edit (delete) flow. Suppressed rows are filtered
+        out of every history / retrieval / embedding-pipeline query via
+        `_suppression_filter`. Reply chains are left intact (no FK cascade, no
+        nulling of `reply_to_id`).
+        """
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    "INSERT INTO Suppressed_Interactions (interaction_id, suppressed_at) VALUES (?, ?)",
+                    (interaction_id, datetime.now()),
+                )
+                conn.commit()
+                return True
+            except sqlite3.IntegrityError:
+                return False
 
     def suppress_message_by_platform_id(self, platform_message_id: str) -> bool:
         """Suppresses ALL versions of messages associated with this platform ID."""

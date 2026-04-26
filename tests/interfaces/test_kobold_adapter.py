@@ -745,3 +745,97 @@ def test_chat_completions_under_budget_no_prune(monkeypatch):
     assert r.status_code == 200
     assert len(forwarded["body"]["messages"]) == len(body["messages"])
     mm.close()
+
+
+# -------- Phase 2.4: portal edit/delete round-trip --------
+
+def test_delete_interaction_suppresses_row():
+    """DELETE soft-suppresses the row and returns success."""
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    iid = mm.log_message("user_a", "test_persona", "web_ui", "user", "Alice",
+                         "to be deleted", datetime.now())
+
+    with TestClient(adapter.app) as client:
+        r = client.delete(f"/api/v1/interaction/{iid}")
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["result"] == "success"
+    assert payload["interaction_id"] == iid
+    assert payload["already_suppressed"] is False
+
+    # History queries now skip the row.
+    history = mm.get_personal_history("user_a", "test_persona")
+    assert all(row["interaction_id"] != iid for row in history)
+    mm.close()
+
+
+def test_delete_interaction_idempotent():
+    """Second DELETE on the same id reports already_suppressed=true."""
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    iid = mm.log_message("user_a", "test_persona", "web_ui", "user", "Alice",
+                         "x", datetime.now())
+
+    with TestClient(adapter.app) as client:
+        r1 = client.delete(f"/api/v1/interaction/{iid}")
+        r2 = client.delete(f"/api/v1/interaction/{iid}")
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+    assert r1.json()["already_suppressed"] is False
+    assert r2.json()["already_suppressed"] is True
+
+    conn = mm._get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT count(*) FROM Suppressed_Interactions WHERE interaction_id = ?", (iid,))
+    assert cur.fetchone()[0] == 1
+    mm.close()
+
+
+def test_patch_interaction_clears_l0_embedding():
+    """PATCH triggers L0 invalidation: Message_Embeddings + vec_* gone."""
+    import struct, math
+    from config.global_config import EMBEDDING_DIMENSION, EMBEDDING_MODEL
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    iid = mm.log_message("user_a", "test_persona", "web_ui", "assistant", "test_persona",
+                         "v1", datetime.now())
+    emb = struct.pack(f'{EMBEDDING_DIMENSION}f',
+                      *([1.0 / math.sqrt(EMBEDDING_DIMENSION)] * EMBEDDING_DIMENSION))
+    mm.store_message_embedding(iid, emb, EMBEDDING_MODEL, datetime.now())
+    conn = mm._get_connection()
+    conn.execute(
+        "INSERT OR REPLACE INTO vec_Message_Embeddings (interaction_id, embedding) VALUES (?, ?)",
+        (iid, emb),
+    )
+    conn.commit()
+
+    with TestClient(adapter.app) as client:
+        r = client.patch(f"/api/v1/interaction/{iid}", json={"content": "v1-edited"})
+    assert r.status_code == 200
+
+    cur = conn.cursor()
+    cur.execute("SELECT content FROM User_Interactions WHERE interaction_id = ?", (iid,))
+    assert cur.fetchone()["content"] == "v1-edited"
+    cur.execute("SELECT count(*) FROM Message_Embeddings WHERE interaction_id = ?", (iid,))
+    assert cur.fetchone()[0] == 0
+    cur.execute("SELECT count(*) FROM vec_Message_Embeddings WHERE interaction_id = ?", (iid,))
+    assert cur.fetchone()[0] == 0
+    mm.close()
+
+
+def test_kobold_export_excludes_suppressed_row():
+    """A row deleted via the DELETE endpoint disappears from kobold_export."""
+    adapter, mm, persona = _make_adapter_with_seeded_db(context_length=20)
+    base = datetime(2026, 4, 1, 12, 0, 0)
+    keep_id = mm.log_message("user_a", "test_persona", "chan", "user", "Alice",
+                             "keep me", base)
+    drop_id = mm.log_message("user_a", "test_persona", "chan", "user", "Alice",
+                             "delete me", base + timedelta(seconds=1))
+
+    with TestClient(adapter.app) as client:
+        r_del = client.delete(f"/api/v1/interaction/{drop_id}")
+        assert r_del.status_code == 200
+        r_export = client.get("/api/v1/session/test_persona/kobold_export")
+    assert r_export.status_code == 200
+    rendered = json.dumps(r_export.json())
+    assert "keep me" in rendered
+    assert "delete me" not in rendered
+    mm.close()
