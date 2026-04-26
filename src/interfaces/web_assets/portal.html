@@ -32759,9 +32759,13 @@ Current version indicated by LITEVER below.
 		
 		if (interactionId) {
 			if (wasEmpty && !allow_blank) {
-				// Deletion path: sync the ID array to match gametext_arr shrinkage
+				// Deletion path: sync the ID array to match gametext_arr shrinkage,
+				// then soft-suppress on the server (filtered from future history /
+				// retrieval / kobold_export).
 				window.derpr_interaction_ids.splice(modified_turn, 1);
-				// (Optional: call DELETE API here if desired)
+				fetch(`/api/v1/interaction/${interactionId}`, {
+					method: 'DELETE'
+				}).catch(e => console.warn('Failed to propagate delete to DERPR:', e));
 			} else {
 				// Update path: strip placeholders before persisting to DB
 				let cleaned = modified_message;

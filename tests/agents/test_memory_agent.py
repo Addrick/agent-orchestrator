@@ -165,6 +165,26 @@ class TestSegmentation:
         # All same direction -> one segment
         assert len(segments) == 1
 
+    def test_orphan_reply_to_id_does_not_crash(self,memory_agent: Any) -> None:
+        """Phase 2.4 regression: assistant whose reply_to_id points at a suppressed
+        (and therefore filtered-out) user row segments cleanly. The reply_link
+        bridge just evaluates False; segmenter must not raise."""
+        self._no_seed(memory_agent)
+        blob = _blob_dim(4, axis=0)
+        # Only the assistant survives; its reply_to_id targets the suppressed user (id=42).
+        messages = [
+            {'interaction_id': i, 'content': f'msg {i}', 'author_role': 'assistant',
+             'author_name': 'persona_a', 'reply_to_id': 42}
+            for i in range(5)
+        ]
+        embeddings = [blob] * 5
+
+        segments = memory_agent._segment_by_similarity(
+            messages, embeddings, "chan", "p1", None
+        )
+        assert len(segments) == 1
+        assert segments[0]['count'] == 5
+
 
 class TestCentroidSeeding:
     def test_seed_from_previous_segment(self,memory_agent: Any) -> None:

@@ -1532,3 +1532,102 @@ def test_swap_total_versions_stable_across_multiple_swaps(mem_manager):
 
     versions_after = mem_manager.list_interaction_versions(iid)
     assert len(versions_after) == total_before
+
+
+# --- Phase 2.4: portal edit/delete round-trip ---
+
+def test_suppress_interaction_inserts_row(mem_manager):
+    """First call inserts a Suppressed_Interactions row and returns True."""
+    iid = mem_manager.log_message("u1", "p1", "chan", "user", "Alice",
+                                  "hello", datetime.now())
+    assert mem_manager.suppress_interaction(iid) is True
+
+    conn = mem_manager._get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT count(*) FROM Suppressed_Interactions WHERE interaction_id = ?", (iid,))
+    assert cur.fetchone()[0] == 1
+
+
+def test_suppress_interaction_idempotent(mem_manager):
+    """Second call returns False and does not duplicate the row."""
+    iid = mem_manager.log_message("u1", "p1", "chan", "user", "Alice",
+                                  "hello", datetime.now())
+    assert mem_manager.suppress_interaction(iid) is True
+    assert mem_manager.suppress_interaction(iid) is False
+
+    conn = mem_manager._get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT count(*) FROM Suppressed_Interactions WHERE interaction_id = ?", (iid,))
+    assert cur.fetchone()[0] == 1
+
+
+def test_suppress_interaction_excludes_from_personal_history(mem_manager):
+    """A suppressed row no longer appears in get_personal_history."""
+    ts = datetime.now()
+    iid_a = mem_manager.log_message("u1", "p1", "chan", "user", "Alice", "keep", ts)
+    iid_b = mem_manager.log_message("u1", "p1", "chan", "user", "Alice", "drop", ts)
+
+    mem_manager.suppress_interaction(iid_b)
+    history = mem_manager.get_personal_history("u1", "p1")
+
+    contents = [row['content'] for row in history]
+    assert "keep" in contents
+    assert "drop" not in contents
+    assert all(row['interaction_id'] != iid_b for row in history)
+
+
+def test_update_interaction_content_clears_l0_embedding(mem_manager):
+    """PATCH-style content update drops Message_Embeddings + vec_* so the next
+    embedding batch re-encodes against the new content."""
+    emb = _make_fake_embedding()
+    iid = _seed_portal_assistant(mem_manager, "v1", emb=emb)
+
+    conn = mem_manager._get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT count(*) FROM Message_Embeddings WHERE interaction_id = ?", (iid,))
+    assert cur.fetchone()[0] == 1
+    cur.execute("SELECT count(*) FROM vec_Message_Embeddings WHERE interaction_id = ?", (iid,))
+    assert cur.fetchone()[0] == 1
+
+    assert mem_manager.update_interaction_content(iid, "v1-edited") is True
+
+    cur.execute("SELECT content FROM User_Interactions WHERE interaction_id = ?", (iid,))
+    assert cur.fetchone()['content'] == "v1-edited"
+    cur.execute("SELECT count(*) FROM Message_Embeddings WHERE interaction_id = ?", (iid,))
+    assert cur.fetchone()[0] == 0
+    cur.execute("SELECT count(*) FROM vec_Message_Embeddings WHERE interaction_id = ?", (iid,))
+    assert cur.fetchone()[0] == 0
+
+
+def test_swap_dedupe_does_not_grow_archive_count(mem_manager):
+    """Toggling between two contents repeatedly leaves Interaction_Edit_History at
+    one row — the dup-content check skips redundant archive inserts."""
+    iid = _seed_portal_assistant(mem_manager, "v1", _make_fake_embedding())
+    mem_manager.handle_portal_retry("persona_a", "web_ui", "portal")
+    mem_manager.update_interaction_content(iid, "v2")
+    mem_manager.store_message_embedding(iid, _make_fake_embedding(), EMBEDDING_MODEL, datetime.now())
+
+    conn = mem_manager._get_connection()
+    cur = conn.cursor()
+
+    for _ in range(5):
+        # Swap 0 -> v1 canonical, v2 archived.
+        mem_manager.swap_interaction_version(iid, 0)
+        cur.execute("SELECT count(*) FROM Interaction_Edit_History WHERE interaction_id = ?", (iid,))
+        assert cur.fetchone()[0] == 1
+        # Swap 0 -> v2 canonical, v1 archived (dedupe hits — v1 archive already exists).
+        mem_manager.swap_interaction_version(iid, 0)
+        cur.execute("SELECT count(*) FROM Interaction_Edit_History WHERE interaction_id = ?", (iid,))
+        assert cur.fetchone()[0] == 1
+
+
+def test_swap_dedupe_total_versions_stable_across_churn(mem_manager):
+    """Across N back-and-forth swaps total_versions stays at 2 (canonical + 1 archive)."""
+    iid = _seed_portal_assistant(mem_manager, "v1", _make_fake_embedding())
+    mem_manager.handle_portal_retry("persona_a", "web_ui", "portal")
+    mem_manager.update_interaction_content(iid, "v2")
+    mem_manager.store_message_embedding(iid, _make_fake_embedding(), EMBEDDING_MODEL, datetime.now())
+
+    for _ in range(6):
+        result = mem_manager.swap_interaction_version(iid, 0)
+        assert result['total_versions'] == 2
