@@ -27,7 +27,11 @@ from src.persona import Persona
 def _make_adapter_with_seeded_db(persona_name: str = "test_persona",
                                  context_length: int = 10,
                                  retrieve_memory_block=None):
-    """Build a KoboldAdapter backed by an in-memory DB and a stub ChatSystem."""
+    """Build a KoboldAdapter backed by an in-memory DB and a stub ChatSystem.
+
+    `retrieve_memory_block` lets a test inject the LTM result returned by the
+    public ChatSystem.get_session_memory_block seam.
+    """
     mm = MemoryManager(db_path=":memory:")
     mm.create_schema()
 
@@ -40,8 +44,7 @@ def _make_adapter_with_seeded_db(persona_name: str = "test_persona",
     chat_system = SimpleNamespace(
         personas={persona_name: persona},
         memory_manager=mm,
-        _retrieve_memory_block=retrieve_memory_block or AsyncMock(return_value=None),
-        _build_conversation_history=MagicMock(return_value=([], None)),
+        get_session_memory_block=retrieve_memory_block or AsyncMock(return_value=None),
     )
     adapter = KoboldAdapter(chat_system=chat_system)
     return adapter, mm, persona
@@ -148,18 +151,15 @@ def test_kobold_export_memory_field_empty_not_persona_prompt():
 
 def test_strip_envelope_drops_derpr_only_fields():
     # _strip_envelope is the gatekeeper that stops DERPR-internal fields from
-    # leaking upstream. Top-level and params-nested history_override must both
-    # be dropped; other fields pass through.
+    # leaking upstream: model selector and the two derpr_* sidecars. Other
+    # fields pass through unchanged.
     payload = {
         "prompt": "hello",
         "model": "test_persona",
-        "history_override": True,
-        "params": {"temperature": 0.7, "history_override": True},
+        "params": {"temperature": 0.7},
     }
     stripped = KoboldAdapter._strip_envelope(payload)
     assert "model" not in stripped
-    assert "history_override" not in stripped
-    assert "history_override" not in stripped["params"]
     assert stripped["prompt"] == "hello"
     assert stripped["params"]["temperature"] == 0.7
 
@@ -478,7 +478,7 @@ def test_ltm_block_passes_query_text_to_retrieval():
     with TestClient(adapter.app) as client:
         client.get("/api/v1/session/test_persona/ltm_block", params={"query": "my query text"})
     mock_retrieve.assert_awaited_once()
-    assert mock_retrieve.call_args.kwargs.get("current_message") == "my query text"
+    assert mock_retrieve.call_args.kwargs.get("query") == "my query text"
     mm.close()
 
 
@@ -488,9 +488,10 @@ def test_ltm_block_empty_query_passes_none():
     with TestClient(adapter.app) as client:
         client.get("/api/v1/session/test_persona/ltm_block")
     mock_retrieve.assert_awaited_once()
-    # empty query string → current_message=None (falsy branch in endpoint)
+    # empty query string is forwarded as "" to the public seam — the seam itself
+    # collapses falsy values to None before retrieval.
     kwargs = mock_retrieve.call_args.kwargs
-    assert kwargs.get("current_message") is None
+    assert kwargs.get("query") in ("", None)
     mm.close()
 
 

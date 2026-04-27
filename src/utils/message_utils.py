@@ -30,9 +30,11 @@ def strip_vertex_links(text: str) -> str:
     if not text:
         return text
     # This regex matches (https://vertexaisearch.cloud.google.com/...)
-    # including optional angle brackets < > often found in markdown.
+    # Handles both (URL) and (<URL>) formats.
+    # Uses a non-greedy match for the URL content to stop at the first closing paren.
+    # We also handle optional angle brackets inside the parens.
     return re.sub(
-        r'\(<?https://vertexaisearch\.cloud\.google\.com/[^)]*>?\)',
+        r'\(\s*<?https://vertexaisearch\.cloud\.google\.com/.*?>?\s*\)',
         '', text
     )
 

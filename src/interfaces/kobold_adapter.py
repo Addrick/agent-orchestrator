@@ -128,21 +128,12 @@ class KoboldAdapter:
             """
             if persona not in self.chat_system.personas:
                 return JSONResponse(status_code=404, content={"error": f"Persona '{persona}' not found"})
-            p = self.chat_system.personas[persona]
-            
-            # USE PRESCRIBED history_messages persona attribute for count
-            history, oldest_id = self.chat_system._build_conversation_history(
-                p, "portal", "web_ui", None, p.get_history_messages()
-            )
-
-            block = await self.chat_system._retrieve_memory_block(
-                persona=p,
+            block = await self.chat_system.get_session_memory_block(
+                persona_name=persona,
                 user_identifier="portal",
                 channel="web_ui",
                 server_id=None,
-                conversation_history=history,
-                current_message=query or None,
-                oldest_interaction_id=oldest_id,
+                query=query,
             )
             return {"block": block}
 
@@ -281,24 +272,50 @@ class KoboldAdapter:
         @self.app.patch("/api/v1/persona/{name}")
         async def update_persona(name: str, request: Request):
             if name not in self.chat_system.personas:
-                return {"error": "Persona not found"}
-            data = await request.json()
+                return JSONResponse(status_code=404, content={"error": "Persona not found"})
+            try:
+                data = await request.json()
+            except Exception as e:
+                return JSONResponse(status_code=400, content={"error": f"invalid JSON: {e}"})
             p = self.chat_system.personas[name]
+
+            # Numeric setters silently coerce bad input to None / defaults and
+            # return the resolved value. Capture rejections so the portal can
+            # surface them instead of pretending the save was clean.
+            rejected: List[str] = []
 
             if "prompt" in data: p.set_prompt(data["prompt"])
             if "model_name" in data: p.set_model_name(data["model_name"])
-            if "temperature" in data: p.set_temperature(data["temperature"])
-            if "top_p" in data: p.set_top_p(data["top_p"])
-            if "top_k" in data: p.set_top_k(data["top_k"])
-            if "max_tokens" in data: p.set_response_token_limit(data["max_tokens"])
-            if "history_messages" in data: p.set_history_messages(data["history_messages"])
-            elif "context_length" in data: p.set_history_messages(data["context_length"])
-            if "memory_mode" in data: p.set_memory_mode(data["memory_mode"])
-            if "max_context_tokens" in data: p.set_max_context_tokens(data["max_context_tokens"])
+            if "temperature" in data and p.set_temperature(data["temperature"]) is None and data["temperature"] is not None:
+                rejected.append("temperature")
+            if "top_p" in data and p.set_top_p(data["top_p"]) is None and data["top_p"] is not None:
+                rejected.append("top_p")
+            if "top_k" in data and p.set_top_k(data["top_k"]) is None and data["top_k"] is not None:
+                rejected.append("top_k")
+            if "max_tokens" in data:
+                p.set_response_token_limit(data["max_tokens"])
+            if "history_messages" in data:
+                p.set_history_messages(data["history_messages"])
+            elif "context_length" in data:
+                p.set_history_messages(data["context_length"])
+            if "memory_mode" in data:
+                before = p.get_memory_mode()
+                p.set_memory_mode(data["memory_mode"])
+                if p.get_memory_mode() == before and data["memory_mode"] not in (None, before.name):
+                    rejected.append("memory_mode")
+            if "max_context_tokens" in data:
+                p.set_max_context_tokens(data["max_context_tokens"])
 
-            save_personas_to_file(self.chat_system.personas)
-            logger.info(f"Updated and saved persona settings for {name}")
-            return {"result": "success"}
+            try:
+                save_personas_to_file(self.chat_system.personas)
+            except Exception as e:
+                logger.error(f"Persona save failed for {name}: {e}")
+                return JSONResponse(
+                    status_code=500,
+                    content={"error": "save_failed", "detail": str(e), "rejected_fields": rejected},
+                )
+            logger.info(f"Updated and saved persona settings for {name} (rejected={rejected})")
+            return {"result": "success", "rejected_fields": rejected}
 
         @self.app.get("/api/v1/info/version")
         async def get_info_version():
@@ -361,29 +378,22 @@ class KoboldAdapter:
 
             Logs the user turn from `prompt` on entry, then collects all SSE
             token deltas and commits the assembled assistant turn on [DONE].
-            The `model` field in the request body (if present) is used to
-            select the active persona; DERPR strips it before forwarding.
+            Persona is selected by adapter.active_persona — uniform with the
+            OAI path; per-request `model` override is rejected.
             """
             data = await request.json()
-            # Respect per-request persona override sent by portal_test.html
-            model_hint = data.get("model")
-            if model_hint and model_hint in self.chat_system.personas:
-                persona_name = model_hint
-            else:
-                persona_name = self._get_current_persona_name()
+            persona_name = self._get_current_persona_name()
 
             prompt: str = data.get("prompt") or ""
             user_interaction_id: Optional[int] = None
             if prompt.strip():
                 user_interaction_id = self._log_interaction(persona_name, "user", prompt)
 
-            # Strip DERPR envelope fields before forwarding
             forward_body = {k: v for k, v in data.items() if k != "model"}
             url = f"{_kobold_base_url()}/api/extra/generate/stream"
 
             async def relay_stream() -> AsyncIterator[bytes]:
                 full_response: List[str] = []
-                done_seen = False
                 committed = False
                 try:
                     async with self._http.stream("POST", url, json=forward_body) as upstream:
@@ -405,8 +415,6 @@ class KoboldAdapter:
                                                     full_response.append(token)
                                             except Exception:
                                                 pass
-                                        if raw == "[DONE]" or "[DONE]" in decoded:
-                                            done_seen = True
                             except Exception:
                                 pass
                             yield chunk
@@ -711,9 +719,6 @@ class KoboldAdapter:
         out.pop("model", None)  # our persona selector, not kobold's
         out.pop("derpr_retry", None)  # portal regen signal, not for upstream
         out.pop("derpr_user_text", None)  # portal sidecar for user logging
-        if isinstance(out.get("params"), dict):
-            out["params"] = {k: v for k, v in out["params"].items() if k != "history_override"}
-        out.pop("history_override", None)
         return out
 
     def _get_current_persona_name(self) -> str:
