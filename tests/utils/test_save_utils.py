@@ -151,3 +151,80 @@ def test_max_context_tokens_missing_uses_default(tmp_path: Path):
     }))
     loaded = save_utils.load_personas_from_file(str(test_file))
     assert loaded["legacy"].get_max_context_tokens() == global_config.DEFAULT_MAX_CONTEXT_TOKENS
+
+
+# --- Phase A: GenerationParams nested shape on disk ---
+
+
+def test_save_writes_nested_params_block(temp_save_file: Path):
+    """to_dict writes a `params` block, no legacy flat sampler keys."""
+    p = Persona(
+        persona_name="phase_a",
+        model_name="m",
+        prompt="p",
+        temperature=0.7,
+        top_p=0.9,
+        top_k=40,
+        token_limit=2048,
+    )
+    save_utils.save_personas_to_file({"phase_a": p}, file_path_override=str(temp_save_file))
+    with open(temp_save_file) as f:
+        on_disk = json.load(f)
+    entry = on_disk["personas"][0]
+    assert "params" in entry
+    assert entry["params"]["temperature"] == 0.7
+    assert entry["params"]["top_p"] == 0.9
+    assert entry["params"]["top_k"] == 40
+    assert entry["params"]["max_tokens"] == 2048
+    assert entry["params"]["stop_sequences"] == []
+    assert entry["params"]["seed"] is None
+    assert entry["params"]["provider_extras"] == {}
+    # Legacy flat sampler keys are no longer written.
+    for legacy_key in ("temperature", "top_p", "top_k", "token_limit"):
+        assert legacy_key not in entry, f"unexpected legacy key {legacy_key!r} in saved entry"
+
+
+def test_save_round_trip_preserves_provider_extras(temp_save_file: Path):
+    """Provider extras + new universal fields survive save/load."""
+    p = Persona(
+        persona_name="kbd",
+        model_name="local",
+        prompt="p",
+        params={
+            "temperature": 0.6,
+            "top_p": 0.95,
+            "top_k": 50,
+            "max_tokens": 1024,
+            "stop_sequences": ["</s>"],
+            "seed": 1234,
+            "provider_extras": {"kobold": {"rep_pen": 1.05, "min_p": 0.05}},
+        },
+    )
+    save_utils.save_personas_to_file({"kbd": p}, file_path_override=str(temp_save_file))
+    loaded = save_utils.load_personas_from_file(file_path_override=str(temp_save_file))
+    gp = loaded["kbd"].get_generation_params()
+    assert gp.stop_sequences == ["</s>"]
+    assert gp.seed == 1234
+    assert gp.provider_extras == {"kobold": {"rep_pen": 1.05, "min_p": 0.05}}
+
+
+def test_load_legacy_flat_shape_still_works(tmp_path: Path):
+    """Un-migrated personas.json files (legacy flat sampler keys) still load."""
+    test_file = tmp_path / "legacy.json"
+    test_file.write_text(json.dumps({
+        "personas": [{
+            "name": "legacy_bot",
+            "model_name": "m",
+            "prompt": "p",
+            "temperature": 0.3,
+            "top_p": 0.8,
+            "top_k": 25,
+            "token_limit": 777,
+        }]
+    }))
+    loaded = save_utils.load_personas_from_file(str(test_file))
+    p = loaded["legacy_bot"]
+    assert p.get_temperature() == 0.3
+    assert p.get_top_p() == 0.8
+    assert p.get_top_k() == 25
+    assert p.get_response_token_limit() == 777

@@ -5,6 +5,7 @@ from enum import Enum, auto
 from typing import Optional, Dict, Any, List, Type, TypeVar
 
 from config import global_config
+from src.generation_params import GenerationParams
 
 logger = logging.getLogger(__name__)
 
@@ -51,13 +52,34 @@ class Persona:
             thinking_level: Optional[str] = None,
             long_term_memory: bool = True,
             max_context_tokens: Optional[int] = None,
+            params: Any = None,
             **kwargs: Any,
     ) -> None:
         self._name: str = persona_name
         self._model_name: str = model_name
         self._prompt: str = prompt
-        self._response_token_limit: int = global_config.DEFAULT_TOKEN_LIMIT
-        self._set_and_sanitize_token_limit(token_limit)  # Silent call to private method
+
+        # Generation params: prefer the structured `params` dict/object when
+        # present (new save shape), otherwise start fresh from defaults.
+        # Flat kwargs (temperature/top_p/top_k/token_limit) override on top so
+        # legacy callers and per-field overrides keep working. Phase A facade
+        # — see src/generation_params.py.
+        if isinstance(params, GenerationParams):
+            self._params: GenerationParams = params
+        elif isinstance(params, dict):
+            self._params = GenerationParams.from_dict(params)
+        else:
+            self._params = GenerationParams()
+        if temperature is not None:
+            self._params.temperature = temperature
+        if top_p is not None:
+            self._params.top_p = top_p
+        if top_k is not None:
+            self._params.top_k = top_k
+
+        self._set_and_sanitize_token_limit(
+            token_limit if token_limit is not None else self._params.max_tokens
+        )
 
         # Handle legacy context_length from tests or old configs
         effective_history = history_messages
@@ -74,10 +96,6 @@ class Persona:
             MemoryMode, memory_mode, MemoryMode.CHANNEL_ISOLATED)
         self._temp_history_override: Optional[int] = None
 
-        # Model-specific generation parameters
-        self._temperature: Optional[float] = temperature
-        self._top_p: Optional[float] = top_p
-        self._top_k: Optional[int] = top_k
         self._display_name_in_chat: bool = display_name_in_chat
         self._service_bindings: List[str] = service_bindings if service_bindings is not None else []
         self._include_ambient_memory: bool = include_ambient_memory
@@ -101,7 +119,14 @@ class Persona:
         return self._prompt
 
     def get_response_token_limit(self) -> int:
-        return self._response_token_limit
+        # _set_and_sanitize_token_limit guarantees max_tokens is always int.
+        assert self._params.max_tokens is not None
+        return self._params.max_tokens
+
+    def get_generation_params(self) -> GenerationParams:
+        """Returns the underlying structured GenerationParams. Phase A seam
+        for Section B providers (stream_messages / stream_prompt)."""
+        return self._params
 
     def get_history_messages(self) -> int:
         """
@@ -130,13 +155,13 @@ class Persona:
         return self.get_base_history_messages()
 
     def get_temperature(self) -> Optional[float]:
-        return self._temperature
+        return self._params.temperature
 
     def get_top_p(self) -> Optional[float]:
-        return self._top_p
+        return self._params.top_p
 
     def get_top_k(self) -> Optional[int]:
-        return self._top_k
+        return self._params.top_k
 
     def should_display_name_in_chat(self) -> bool:
         return self._display_name_in_chat
@@ -196,25 +221,26 @@ class Persona:
         try:
             parsed_limit = int(new_limit)
             if parsed_limit < 100:
-                self._response_token_limit = 100
+                self._params.max_tokens = 100
                 logger.debug(f"Warning: low token limit {parsed_limit} provided, clamping to 100.")
             else:
-                self._response_token_limit = parsed_limit
+                self._params.max_tokens = parsed_limit
         except (ValueError, TypeError):
-            self._response_token_limit = global_config.DEFAULT_TOKEN_LIMIT
+            self._params.max_tokens = global_config.DEFAULT_TOKEN_LIMIT
 
     def set_response_token_limit(self, new_limit: Any) -> int:
         """
         Public setter for token limit. Logs the change and returns the final value.
         """
-        original_value = self._response_token_limit
+        original_value = self._params.max_tokens
         self._set_and_sanitize_token_limit(new_limit)
-        if self._response_token_limit != original_value:
-            logger.info(f"Persona '{self._name}' response token limit set to {self._response_token_limit}.")
+        if self._params.max_tokens != original_value:
+            logger.info(f"Persona '{self._name}' response token limit set to {self._params.max_tokens}.")
         else:
             logger.info(
-                f"Invalid or no token limit provided: '{new_limit}'. Using value: {self._response_token_limit}.")
-        return self._response_token_limit
+                f"Invalid or no token limit provided: '{new_limit}'. Using value: {self._params.max_tokens}.")
+        assert self._params.max_tokens is not None
+        return self._params.max_tokens
 
     def set_model_name(self, new_model_name: str) -> None:
         """Sets the model name for the persona."""
@@ -250,12 +276,12 @@ class Persona:
         or None if the input is invalid (in which case the temperature is also set to None).
         """
         try:
-            self._temperature = float(new_temp)
-            logger.info(f"Persona '{self._name}' temperature set to {self._temperature}.")
+            self._params.temperature = float(new_temp)
+            logger.info(f"Persona '{self._name}' temperature set to {self._params.temperature}.")
         except (ValueError, TypeError):
-            self._temperature = None
+            self._params.temperature = None
             logger.info(f"Invalid temperature value provided: '{new_temp}'. Must be a number. Setting to None.")
-        return self._temperature
+        return self._params.temperature
 
     def set_top_p(self, new_top_p: Any) -> Optional[float]:
         """
@@ -263,12 +289,12 @@ class Persona:
         or None if the input is invalid (in which case top_p is also set to None).
         """
         try:
-            self._top_p = float(new_top_p)
-            logger.info(f"Persona '{self._name}' top_p set to {self._top_p}.")
+            self._params.top_p = float(new_top_p)
+            logger.info(f"Persona '{self._name}' top_p set to {self._params.top_p}.")
         except (ValueError, TypeError):
-            self._top_p = None
+            self._params.top_p = None
             logger.info(f"Invalid top_p value provided: '{new_top_p}'. Must be a number. Setting to None.")
-        return self._top_p
+        return self._params.top_p
 
     def set_top_k(self, new_top_k: Any) -> Optional[int]:
         """
@@ -276,12 +302,12 @@ class Persona:
         or None if the input is invalid (in which case top_k is also set to None).
         """
         try:
-            self._top_k = int(new_top_k)
-            logger.info(f"Persona '{self._name}' top_k set to {self._top_k}.")
+            self._params.top_k = int(new_top_k)
+            logger.info(f"Persona '{self._name}' top_k set to {self._params.top_k}.")
         except (ValueError, TypeError):
-            self._top_k = None
+            self._params.top_k = None
             logger.info(f"Invalid top_k value provided: '{new_top_k}'. Must be an integer. Setting to None.")
-        return self._top_k
+        return self._params.top_k
 
     def set_display_name_in_chat(self, new_value: bool) -> None:
         """Sets whether the persona's name should be displayed in chat replies."""
@@ -402,10 +428,10 @@ class Persona:
         """Returns a dictionary of the current generation parameters for the TextEngine."""
         config: Dict[str, Any] = {
             "model_name": self._model_name,
-            "max_output_tokens": self._response_token_limit,
-            "temperature": self._temperature,
-            "top_p": self._top_p,
-            "top_k": self._top_k,
+            "max_output_tokens": self._params.max_tokens,
+            "temperature": self._params.temperature,
+            "top_p": self._params.top_p,
+            "top_k": self._params.top_k,
         }
         if self._thinking_level is not None:
             config["thinking_level"] = self._thinking_level

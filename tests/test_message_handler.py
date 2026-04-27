@@ -693,6 +693,7 @@ _GETTER_EXCEPTIONS = {
     'get_base_history_messages',
     'get_current_effective_history_messages',
     'get_config_for_engine',
+    'get_generation_params',
     # Legacy aliases
     'get_base_context_length',
     'get_current_effective_context_length',
