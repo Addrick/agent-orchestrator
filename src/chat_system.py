@@ -351,6 +351,36 @@ class ChatSystem:
             logger.warning(f"### ChatSystem: No relevant memories found for {persona.get_name()}")
         return memory_block
 
+    async def get_session_memory_block(
+            self,
+            persona_name: str,
+            user_identifier: str,
+            channel: str,
+            server_id: Optional[str],
+            query: Optional[str] = None,
+    ) -> Optional[str]:
+        """Public LTM seam for interfaces that bypass generate_response (portal).
+
+        Builds the persona's sliding-window history, then returns a formatted
+        memory block or None when retrieval is disabled / yields no matches.
+        Wraps the two private helpers so callers do not depend on private API.
+        """
+        persona = self.personas.get(persona_name)
+        if persona is None:
+            return None
+        history, oldest_id = self._build_conversation_history(
+            persona, user_identifier, channel, server_id, persona.get_history_messages(),
+        )
+        return await self._retrieve_memory_block(
+            persona=persona,
+            user_identifier=user_identifier,
+            channel=channel,
+            server_id=server_id,
+            conversation_history=history,
+            current_message=query or None,
+            oldest_interaction_id=oldest_id,
+        )
+
     @staticmethod
     def _format_memory_block(scored_summaries: List[Tuple[float, Dict[str, Any]]]) -> Optional[str]:
         """Format scored summaries into a <memory> block for injection."""
