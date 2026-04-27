@@ -78,7 +78,7 @@ Saving from the Inference Matrix persists the `memory_mode` to the backend. The 
 
 **Editing and deleting messages (Phase 2.4):** Editing a portal turn from the inline edit UI propagates the new content to the DERPR DB via `PATCH /api/v1/interaction/{id}`. The L0 embedding is invalidated on edit so the next batch from `MemoryAgent` re-encodes against the updated text; the row is also re-queued for L1 summarization (`parent_summary_id` is cleared). Saving an empty edit deletes the message: a soft-suppression flag is recorded server-side via `DELETE /api/v1/interaction/{id}`, after which the row no longer appears in subsequent `kobold_export`s, sliding-window history, or LTM retrieval. Reply chains are left intact (no nulling of `reply_to_id`); orphaned assistant turns whose paired user row was deleted still segment cleanly. Toggling the chevrons back and forth between two contents does not grow the archive — repeat-content swaps reuse the existing archive row instead of inserting a duplicate.
 
-> The portal only uses the OpenAI-style `/chat/completions` path (KoboldCPP jinja mode). The prior kobold-native `/api/v1/generate` and `/api/extra/generate/stream` routes have been removed from the adapter.
+> The portal's normal generation path is the OpenAI-style `/chat/completions` route (KoboldCPP jinja mode). The kobold-native `/api/v1/generate` and `/api/extra/generate/stream` routes are still served by the adapter for clients that prefer per-token SSE; both proxy to KoboldCPP and log user/assistant turns under `channel="web_ui"` the same way the OAI route does. Token-by-token portal usage falls on the native streaming route.
 
 ## Commands
 

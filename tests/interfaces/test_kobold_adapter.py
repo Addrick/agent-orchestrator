@@ -822,6 +822,156 @@ def test_patch_interaction_clears_l0_embedding():
     mm.close()
 
 
+# -------- /api/extra/generate/stream — kobold-native SSE relay --------
+#
+# Coverage-prep before portal_engine_reintegration Phase D. The native
+# streaming route proxies KoboldCPP's `/api/extra/generate/stream` endpoint
+# (per-token SSE) and was previously untested. These tests pin the
+# user/assistant logging contract so the migration to chat_system.stream_prompt
+# can be verified one-for-one. See memory/project/plans/portal_engine_reintegration.md.
+
+
+def _kobold_native_chunk(token: str) -> bytes:
+    """Build one kobold-native SSE event carrying a single token."""
+    return f'event: message\ndata: {json.dumps({"token": token})}\n\n'.encode("utf-8")
+
+
+def test_generate_stream_logs_user_turn_from_prompt(monkeypatch):
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+
+    chunks = [_kobold_native_chunk("hi"), b"data: [DONE]\n\n"]
+    monkeypatch.setattr(adapter._http, "stream", lambda *a, **kw: _make_stream_ctx(chunks))
+
+    with TestClient(adapter.app) as client:
+        r = client.post("/api/extra/generate/stream", json={"prompt": "hello there"})
+    assert r.status_code == 200
+
+    rows = _fetch_portal_rows(mm, "test_persona")
+    user_rows = [r for r in rows if r["author_role"] == "user"]
+    assert len(user_rows) == 1
+    assert user_rows[0]["content"] == "hello there"
+    mm.close()
+
+
+def test_generate_stream_commits_assistant_from_assembled_tokens(monkeypatch):
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+
+    chunks = [
+        _kobold_native_chunk("hello "),
+        _kobold_native_chunk("world"),
+        b"data: [DONE]\n\n",
+    ]
+    monkeypatch.setattr(adapter._http, "stream", lambda *a, **kw: _make_stream_ctx(chunks))
+
+    with TestClient(adapter.app) as client:
+        r = client.post("/api/extra/generate/stream", json={"prompt": "hi"})
+    assert r.status_code == 200
+
+    rows = _fetch_portal_rows(mm, "test_persona")
+    assert len(rows) == 2
+    assistant = next(r for r in rows if r["author_role"] == "assistant")
+    user = next(r for r in rows if r["author_role"] == "user")
+    assert assistant["content"] == "hello world"
+    assert assistant["reply_to_id"] == user["interaction_id"]
+    mm.close()
+
+
+def test_generate_stream_empty_prompt_skips_user_log(monkeypatch):
+    # Whitespace-only / missing prompt must NOT create an empty user row.
+    # Assistant log still flushes if upstream produced tokens.
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+
+    chunks = [_kobold_native_chunk("orphan"), b"data: [DONE]\n\n"]
+    monkeypatch.setattr(adapter._http, "stream", lambda *a, **kw: _make_stream_ctx(chunks))
+
+    with TestClient(adapter.app) as client:
+        r = client.post("/api/extra/generate/stream", json={"prompt": "   "})
+    assert r.status_code == 200
+
+    rows = _fetch_portal_rows(mm, "test_persona")
+    assert all(row["author_role"] != "user" for row in rows)
+    assistant_rows = [r for r in rows if r["author_role"] == "assistant"]
+    assert len(assistant_rows) == 1
+    assert assistant_rows[0]["content"] == "orphan"
+    assert assistant_rows[0]["reply_to_id"] is None
+    mm.close()
+
+
+def test_generate_stream_strips_model_field_before_forwarding(monkeypatch):
+    # `model` is the DERPR persona selector — must not leak upstream to KCPP.
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+
+    captured = {}
+
+    class _StreamCtx:
+        def __init__(self, body):
+            captured["body"] = body
+
+        async def __aenter__(self):
+            resp = MagicMock()
+
+            async def _aiter_raw():
+                yield b"data: [DONE]\n\n"
+
+            resp.aiter_raw = _aiter_raw
+            return resp
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(
+        adapter._http, "stream",
+        lambda method, url, json=None, **kw: _StreamCtx(json),
+    )
+
+    with TestClient(adapter.app) as client:
+        r = client.post(
+            "/api/extra/generate/stream",
+            json={"prompt": "hi", "model": "should_not_leak", "temperature": 0.5},
+        )
+    assert r.status_code == 200
+    assert "model" not in captured["body"]
+    assert captured["body"]["temperature"] == 0.5
+    mm.close()
+
+
+def test_generate_stream_abort_flushes_partial_assistant(monkeypatch):
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+
+    class _StreamCtx:
+        async def __aenter__(self):
+            resp = MagicMock()
+
+            async def _aiter_raw():
+                yield _kobold_native_chunk("partial ")
+                raise __import__("asyncio").CancelledError()
+
+            resp.aiter_raw = _aiter_raw
+            return resp
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(adapter._http, "stream", lambda *a, **kw: _StreamCtx())
+
+    with TestClient(adapter.app) as client:
+        try:
+            with client.stream(
+                "POST", "/api/extra/generate/stream",
+                json={"prompt": "hi"},
+            ) as r:
+                for _ in r.iter_raw():
+                    pass
+        except Exception:
+            pass
+
+    rows = _fetch_portal_rows(mm, "test_persona")
+    assistant_rows = [r for r in rows if r["author_role"] == "assistant"]
+    assert len(assistant_rows) == 1
+    assert assistant_rows[0]["content"] == "partial "
+    mm.close()
+
+
 def test_kobold_export_excludes_suppressed_row():
     """A row deleted via the DELETE endpoint disappears from kobold_export."""
     adapter, mm, persona = _make_adapter_with_seeded_db(context_length=20)
