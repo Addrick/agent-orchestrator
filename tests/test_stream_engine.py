@@ -8,6 +8,7 @@ import pytest
 
 from src.stream_engine import StreamEngine, _render_prompt
 from src.engine import LLMCommunicationError
+from src.generation_params import GenerationParams
 
 
 def test_render_prompt_default_chatml():
@@ -364,3 +365,82 @@ async def test_stream_local_no_tool_call_yields_no_tool_calls_event():
     engine, _ = _make_engine(resp)
     events = await _drain(engine.stream_local(_persona_config(), _history()))
     assert all(e["type"] != "tool_calls" for e in events)
+
+
+# --------------------------------------------------------------------------
+# Phase B — typed entries: stream_messages and stream_prompt
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stream_messages_typed_renders_via_persona_template():
+    # GenerationParams replaces the legacy persona_config + local_inference_config
+    # cocktail. The forwarded payload still gets the same temperature, top_p,
+    # top_k, prompt summary, and tool advertising as the legacy entry.
+    resp = _FakeResp(chunks=[_sse_token("ok"), _sse_token("", finish_reason="stop")])
+    engine, _ = _make_engine(resp)
+
+    messages = [
+        {"role": "system", "content": "you are test"},
+        {"role": "user", "content": "hi"},
+    ]
+    params = GenerationParams(temperature=0.42, top_p=0.88, top_k=11, max_tokens=64)
+    events = await _drain(engine.stream_messages(_persona_config(), messages, params))
+
+    payload = events[0]["payload"]
+    assert payload["temperature"] == 0.42
+    assert payload["top_p"] == 0.88
+    assert payload["top_k"] == 11
+    assert payload["max_length"] == 64
+    assert payload["prompt"].startswith("<") and "chars" in payload["prompt"]
+    # Stop sequences come from the chatml template since none were provided.
+    assert "<|im_end|>" in payload["stop_sequence"]
+
+
+@pytest.mark.asyncio
+async def test_stream_messages_kobold_extras_flow_through():
+    # rep_pen / min_p / etc live in provider_extras["kobold"] and must reach
+    # the kobold native payload unchanged.
+    resp = _FakeResp(chunks=[_sse_token("", finish_reason="stop")])
+    engine, _ = _make_engine(resp)
+
+    params = GenerationParams(
+        temperature=0.5,
+        provider_extras={"kobold": {
+            "rep_pen": 1.07, "min_p": 0.05, "max_context_length": 4096,
+        }},
+    )
+    events = await _drain(engine.stream_messages(
+        _persona_config(),
+        [{"role": "user", "content": "hi"}],
+        params,
+    ))
+    payload = events[0]["payload"]
+    assert payload["rep_pen"] == 1.07
+    assert payload["min_p"] == 0.05
+    assert payload["max_context_length"] == 4096
+
+
+@pytest.mark.asyncio
+async def test_stream_prompt_skips_template_rendering():
+    # Caller-supplied prompt is forwarded verbatim. No chat template is
+    # applied, so the dump's `template=` field reads `<caller>` and the raw
+    # prompt's character count matches what we sent.
+    raw = "<<RAW>>USER: hi<<END>>"
+    resp = _FakeResp(chunks=[_sse_token("", finish_reason="stop")])
+    engine, client = _make_engine(resp)
+
+    events = await _drain(engine.stream_prompt(
+        _persona_config(),
+        raw,
+        GenerationParams(temperature=0.3),
+        stop_sequences=["<<END>>"],
+        tools_advertised=["get_x"],
+    ))
+    payload = events[0]["payload"]
+    assert payload["temperature"] == 0.3
+    assert payload["stop_sequence"] == ["<<END>>"]
+    assert payload["tools_advertised"] == ["get_x"]
+    assert payload["prompt"] == f"<{len(raw)} chars, template=<caller>>"
+    # Real prompt was forwarded verbatim to kobold.
+    assert client.last_stream["json"]["prompt"] == raw

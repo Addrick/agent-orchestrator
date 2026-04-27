@@ -11,6 +11,7 @@ import httpx
 
 from config import global_config
 from src.engine import LLMCommunicationError
+from src.generation_params import GenerationParams
 
 logger = logging.getLogger(__name__)
 
@@ -179,66 +180,94 @@ class StreamEngine:
         messages.extend(history)
         return messages
 
-    async def stream_local(
-        self,
-        persona_config: Dict[str, Any],
-        history_object: Dict[str, Any],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        local_inference_config: Optional[Dict[str, Any]] = None,
-    ) -> AsyncIterator[Dict[str, Any]]:
-        """Streams from KoboldCPP's native generate/stream endpoint."""
-        messages = self._build_messages(history_object)
-        tool_list = [t for t in (tools or []) if t.get("function") or t.get("name")]
-        if tool_list and messages and messages[0].get("role") == "system":
-            messages = list(messages)
-            messages[0] = {
-                **messages[0],
-                "content": (messages[0].get("content") or "") + _format_tools_instruction(tool_list),
-            }
-
-        template_name: str = (
+    @staticmethod
+    def _resolve_template_name(persona_config: Dict[str, Any]) -> str:
+        return (
             persona_config.get("chat_template")
             or os.environ.get("KOBOLD_CHAT_TEMPLATE")
             or getattr(global_config, "KOBOLD_CHAT_TEMPLATE", "chatml")
             or "chatml"
         )
-        prompt, stop_seqs = _render_prompt(messages, template_name, local_inference_config)
 
+    @staticmethod
+    def _params_from_legacy_dicts(
+        persona_config: Dict[str, Any],
+        local_inference_config: Optional[Dict[str, Any]],
+    ) -> GenerationParams:
+        """Bridge legacy (persona_config dict + local_inference_config) callers
+        into a GenerationParams. local_inference_config keys override the
+        persona_config defaults — same precedence as the old payload builder.
+        Kobold-only knobs land in `provider_extras['kobold']`."""
+        lic = local_inference_config or {}
+        extras: Dict[str, Any] = {}
+        for k in ("rep_pen", "rep_pen_range", "rep_pen_slope",
+                  "min_p", "typical", "tfs", "max_context_length"):
+            if lic.get(k) is not None:
+                extras[k] = lic[k]
+        if lic.get("stop_sequence"):
+            extras["stop_sequence"] = list(lic["stop_sequence"])
+
+        def _override(key: str) -> Any:
+            return lic[key] if lic.get(key) is not None else persona_config.get(key)
+
+        return GenerationParams(
+            temperature=_override("temperature"),
+            top_p=_override("top_p"),
+            top_k=_override("top_k"),
+            max_tokens=persona_config.get("max_output_tokens"),
+            provider_extras={"kobold": extras} if extras else {},
+        )
+
+    def _build_kobold_payload(
+        self,
+        *,
+        persona_config: Dict[str, Any],
+        prompt: str,
+        stop_seqs: List[str],
+        params: GenerationParams,
+        template_name: str,
+        tools_advertised: List[str],
+    ) -> Tuple[Dict[str, Any], Dict[str, Any], str]:
+        """Assemble the kobold native /generate/stream POST body and a
+        log-safe dump (prompt summarized, tools listed by name)."""
         genkey = f"KCPP{random.randint(1000, 9999)}"
-        # Token budget comes from kobold-lite's UI slider (params.max_context_length).
-        # Persona.context_length is a *turn count* for the history window — a
-        # completely different concept — so it must not be used here.
-        ctx_len = (local_inference_config or {}).get("max_context_length")
+        kobold_extras = params.get_provider_extras("kobold")
+        # Token budget comes from kobold-lite's UI slider
+        # (params.max_context_length). Persona.context_length is a *turn count*
+        # for the history window — a different concept — so do not use it here.
+        ctx_len = kobold_extras.get("max_context_length")
         payload: Dict[str, Any] = {
             "prompt": prompt,
             "max_context_length": ctx_len,
-            "max_length": persona_config.get("max_output_tokens") or global_config.DEFAULT_TOKEN_LIMIT,
-            "temperature": persona_config.get("temperature"),
-            "top_p": persona_config.get("top_p"),
-            "top_k": persona_config.get("top_k"),
+            "max_length": params.max_tokens
+                or persona_config.get("max_output_tokens")
+                or global_config.DEFAULT_TOKEN_LIMIT,
+            "temperature": params.temperature,
+            "top_p": params.top_p,
+            "top_k": params.top_k,
             "stop_sequence": stop_seqs,
             "trim_stop": True,
             "genkey": genkey,
         }
-
-        if local_inference_config:
-            direct_params = [
-                "temperature", "top_p", "top_k", "rep_pen", "rep_pen_range",
-                "rep_pen_slope", "min_p", "typical", "tfs"
-            ]
-            for p in direct_params:
-                if local_inference_config.get(p) is not None:
-                    payload[p] = local_inference_config[p]
-
+        for p in ("rep_pen", "rep_pen_range", "rep_pen_slope",
+                  "min_p", "typical", "tfs"):
+            if kobold_extras.get(p) is not None:
+                payload[p] = kobold_extras[p]
         payload = {k: v for k, v in payload.items() if v is not None}
-
-        dump_payload = {
+        dump_payload: Dict[str, Any] = {
             **payload,
             "prompt": f"<{len(prompt)} chars, template={template_name}>",
-            "tools_advertised": [
-                (t.get("function") or t).get("name", "unknown") for t in tool_list
-            ],
+            "tools_advertised": list(tools_advertised),
         }
+        return payload, dump_payload, genkey
+
+    async def _kobold_stream(
+        self,
+        payload: Dict[str, Any],
+        dump_payload: Dict[str, Any],
+        genkey: str,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Run the kobold native SSE stream and emit the unified event shape."""
         yield {"type": "api_payload", "payload": dump_payload}
 
         url = f"{self._kobold_base_url()}/api/extra/generate/stream"
@@ -314,21 +343,92 @@ class StreamEngine:
                 except Exception:
                     pass
 
-        # Flush any buffered text sitting inside the parser's lookahead window.
         tail = tool_parser.flush()
         if tail:
             yield {"type": "text_delta", "text": tail}
 
         calls = tool_parser.finalize()
         logger.info(
-            "stream_local: %d SSE events from kobold native, %d chars total, "
-            "%d tool call(s) parsed",
+            "kobold stream: %d SSE events, %d chars total, %d tool call(s) parsed",
             event_count, len(accumulated_text), len(calls),
         )
         if calls:
             yield {"type": "tool_calls", "calls": calls}
 
         yield {"type": "done", "full_text": tool_parser.visible_text}
+
+    def stream_messages(
+        self,
+        persona_config: Dict[str, Any],
+        messages: List[Dict[str, Any]],
+        params: GenerationParams,
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Phase B entry — render OAI-style messages via the persona's chat
+        template and stream from kobold native. Tool list folds into the
+        system prompt as a `<tool_call>` instruction block."""
+        # Returns the underlying _kobold_stream generator directly — wrapping
+        # in another `async def` would block aclose() from reaching the
+        # native stream's finally (the abort POST). See test
+        # test_stream_local_aborts_upstream_when_caller_breaks_early.
+        tool_list = [t for t in (tools or []) if t.get("function") or t.get("name")]
+        rendered_messages = list(messages)
+        if tool_list and rendered_messages and rendered_messages[0].get("role") == "system":
+            rendered_messages[0] = {
+                **rendered_messages[0],
+                "content": (rendered_messages[0].get("content") or "")
+                    + _format_tools_instruction(tool_list),
+            }
+        template_name = self._resolve_template_name(persona_config)
+        kobold_extras = params.get_provider_extras("kobold")
+        prompt, stop_seqs = _render_prompt(rendered_messages, template_name, kobold_extras)
+
+        payload, dump_payload, genkey = self._build_kobold_payload(
+            persona_config=persona_config,
+            prompt=prompt,
+            stop_seqs=stop_seqs,
+            params=params,
+            template_name=template_name,
+            tools_advertised=[(t.get("function") or t).get("name", "unknown")
+                              for t in tool_list],
+        )
+        return self._kobold_stream(payload, dump_payload, genkey)
+
+    def stream_prompt(
+        self,
+        persona_config: Dict[str, Any],
+        rendered_prompt: str,
+        params: GenerationParams,
+        *,
+        stop_sequences: Optional[List[str]] = None,
+        tools_advertised: Optional[List[str]] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Phase B entry — stream from a caller-rendered prompt. Used by the
+        portal where kobold-lite owns templating; the engine never rewraps."""
+        payload, dump_payload, genkey = self._build_kobold_payload(
+            persona_config=persona_config,
+            prompt=rendered_prompt,
+            stop_seqs=list(stop_sequences or []),
+            params=params,
+            template_name="<caller>",
+            tools_advertised=list(tools_advertised or []),
+        )
+        return self._kobold_stream(payload, dump_payload, genkey)
+
+    def stream_local(
+        self,
+        persona_config: Dict[str, Any],
+        history_object: Dict[str, Any],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        local_inference_config: Optional[Dict[str, Any]] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Legacy entry preserved for backwards compatibility — bridges
+        history_object + local_inference_config callers into stream_messages.
+        New callers should construct a GenerationParams and call
+        `stream_messages` / `stream_prompt` directly."""
+        messages = self._build_messages(history_object)
+        params = self._params_from_legacy_dicts(persona_config, local_inference_config)
+        return self.stream_messages(persona_config, messages, params, tools)
 
 
 _EVENT_RE = re.compile(r"^event:\s*(.*)$", re.MULTILINE)

@@ -28,6 +28,7 @@ from google import genai
 from google.genai.types import GenerateContentConfig, Tool, GoogleSearch, Candidate, \
     FunctionDeclaration, Part, ThinkingConfig
 from src.utils.google_utils import process_grounding_metadata
+from src.generation_params import GenerationParams
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +53,13 @@ class TextEngine:
         "gemma-4-31b-it": "gemma-4-26b-a4b-it",
     }
 
-    def __init__(self) -> None:
+    def __init__(self, stream_engine: Optional[Any] = None) -> None:
         # --- Lazy-loaded clients ---
         self.openai_client: Optional[AsyncOpenAI] = None
         self.anthropic_client: Optional[anthropic.Anthropic] = None
+        # Local-streaming delegate. Optional — non-local streaming wraps
+        # generate_response so unit tests need not wire one up. Phase B.
+        self.stream_engine: Optional[Any] = stream_engine
 
         # --- Google Client (matching original implementation) ---
         self.google_client: Optional[genai.client.AsyncClient] = None
@@ -663,3 +667,153 @@ class TextEngine:
             # CRITICAL: Always restore the original client to avoid breaking
             # subsequent calls to the actual OpenAI API.
             self.openai_client = original_openai_client
+
+    # ------------------------------------------------------------------
+    # Phase B — provider streaming surface
+    #
+    # `stream_messages(persona, messages, params)` and
+    # `stream_prompt(persona, prompt, params)` are the unified entries.
+    # Local routes to the StreamEngine for real token-by-token SSE; the
+    # SDK-backed providers (OpenAI/Anthropic/Google) currently wrap
+    # generate_response and emit a single `text_delta` so the surface is
+    # uniform without forcing per-provider streaming SDK work in this
+    # phase. Phase C flips ownership: generate_response will become the
+    # collect-stream wrapper around stream_messages.
+    # See memory/project/plans/portal_engine_reintegration.md.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _persona_config_with_params(
+        persona_config: Dict[str, Any], params: GenerationParams
+    ) -> Dict[str, Any]:
+        """Overlay the structured params onto the legacy persona_config dict
+        so existing _generate_*_response handlers keep working."""
+        merged = dict(persona_config)
+        if params.temperature is not None:
+            merged["temperature"] = params.temperature
+        if params.top_p is not None:
+            merged["top_p"] = params.top_p
+        if params.top_k is not None:
+            merged["top_k"] = params.top_k
+        if params.max_tokens is not None:
+            merged["max_output_tokens"] = params.max_tokens
+        return merged
+
+    @staticmethod
+    def _messages_to_history_object(
+        messages: List[Dict[str, Any]],
+        image_url: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Adapter for handlers that still take the legacy history_object
+        shape. The system message (if present) is left in message_history
+        so handlers' existing system-extraction logic runs unchanged."""
+        if messages and messages[0].get("role") == "system":
+            persona_prompt = messages[0].get("content", "") or ""
+        else:
+            persona_prompt = ""
+        return {
+            "persona_prompt": persona_prompt,
+            "message_history": list(messages),
+            "current_message": {"text": "", "image_url": image_url},
+        }
+
+    async def stream_messages(
+        self,
+        persona_config: Dict[str, Any],
+        messages: List[Dict[str, Any]],
+        params: GenerationParams,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        *,
+        local_inference_config: Optional[Dict[str, Any]] = None,
+        image_url: Optional[str] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Provider-agnostic streaming entry. Yields:
+          - `{"type": "api_payload", "payload": ...}` first
+          - one or more `{"type": "text_delta", "text": ...}` chunks
+          - optional `{"type": "tool_calls", "calls": [...]}`
+          - terminal `{"type": "done", "full_text": ...}`
+
+        For `model_name == "local"` and a configured StreamEngine, this is a
+        true SSE token stream. Other providers wrap `generate_response`."""
+        merged_config = self._persona_config_with_params(persona_config, params)
+        model_name: str = merged_config.get("model_name", "")
+
+        if model_name == "local" and self.stream_engine is not None:
+            async for ev in self.stream_engine.stream_messages(
+                merged_config, messages, params, tools
+            ):
+                yield ev
+            return
+
+        history_object = self._messages_to_history_object(messages, image_url)
+        try:
+            result, api_payload = await self.generate_response(
+                merged_config, history_object, tools, local_inference_config,
+            )
+        except LLMCommunicationError as e:
+            if e.api_payload is not None:
+                yield {"type": "api_payload", "payload": e.api_payload}
+            raise
+
+        yield {"type": "api_payload", "payload": api_payload or {}}
+        if result.get("type") == "tool_calls":
+            yield {"type": "tool_calls", "calls": list(result.get("calls", []))}
+            yield {"type": "done", "full_text": ""}
+        else:
+            text = result.get("content", "") or ""
+            if text:
+                yield {"type": "text_delta", "text": text}
+            yield {"type": "done", "full_text": text}
+
+    def stream_prompt(
+        self,
+        persona_config: Dict[str, Any],
+        rendered_prompt: str,
+        params: GenerationParams,
+        *,
+        stop_sequences: Optional[List[str]] = None,
+        tools_advertised: Optional[List[str]] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Stream from a caller-rendered prompt. Local-only — the portal
+        path where kobold-lite owns templating. Non-local model raises."""
+        model_name = persona_config.get("model_name", "")
+        if model_name != "local":
+            raise LLMCommunicationError(
+                f"stream_prompt only supports local models, got '{model_name}'"
+            )
+        if self.stream_engine is None:
+            raise LLMCommunicationError(
+                "StreamEngine not configured — cannot stream pre-rendered prompts."
+            )
+        return self.stream_engine.stream_prompt(
+            persona_config, rendered_prompt, params,
+            stop_sequences=stop_sequences,
+            tools_advertised=tools_advertised,
+        )
+
+    @staticmethod
+    async def collect_stream(
+        stream: AsyncIterator[Dict[str, Any]],
+    ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+        """Drain a stream into `(result_dict, api_payload)` matching
+        generate_response's return shape. Single source of truth for
+        non-streaming consumers — they get the same tuple regardless of
+        whether the underlying provider streams or not."""
+        api_payload: Optional[Dict[str, Any]] = None
+        text_parts: List[str] = []
+        full_text: Optional[str] = None
+        calls: Optional[List[Dict[str, Any]]] = None
+        async for ev in stream:
+            etype = ev.get("type")
+            if etype == "api_payload":
+                api_payload = ev.get("payload")
+            elif etype == "text_delta":
+                text_parts.append(ev.get("text", "") or "")
+            elif etype == "tool_calls":
+                calls = list(ev.get("calls", []))
+            elif etype == "done":
+                full_text = ev.get("full_text")
+        if calls:
+            return {"type": "tool_calls", "calls": calls}, api_payload
+        text = full_text if full_text is not None else "".join(text_parts)
+        return {"type": "text", "content": text}, api_payload

@@ -153,8 +153,8 @@ async def main() -> None:
     logger.info("User memory database setup complete.")
 
     # 2. Initialize the centralized text generation engine
-    text_engine = TextEngine()
     stream_engine = StreamEngine()
+    text_engine = TextEngine(stream_engine=stream_engine)
 
     # 3. Initialize the Zammad client for ticketing (optional)
     zammad_client = _init_zammad_client()
