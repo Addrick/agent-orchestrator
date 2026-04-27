@@ -76,7 +76,13 @@ def save_personas_to_file(personas: Dict[str, Any], file_path_override: Optional
 
 
 def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Convert a dictionary of Persona objects to a list of dictionaries for JSON serialization."""
+    """Convert a dictionary of Persona objects to a list of dictionaries for JSON serialization.
+
+    Phase A (portal_engine_reintegration): generation params now live under a
+    nested `params` block — see src/generation_params.py. The flat
+    temperature/top_p/top_k/token_limit keys are no longer written. Load path
+    still reads them for back-compat with un-migrated personas.json files.
+    """
     persona_list: List[Dict[str, Any]] = []
     for persona_name, persona in personas.items():
         persona_json: Dict[str, Any] = {
@@ -84,10 +90,7 @@ def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
             "prompt": persona.get_prompt(),
             "model_name": persona.get_model_name(),
             "history_messages": persona.get_base_history_messages(),  # Save the base value, not the dynamic one
-            "token_limit": persona.get_response_token_limit(),
-            "temperature": persona.get_temperature(),
-            "top_p": persona.get_top_p(),
-            "top_k": persona.get_top_k(),
+            "params": persona.get_generation_params().to_dict(),
             "display_name_in_chat": persona.should_display_name_in_chat(),
             "execution_mode": persona.get_execution_mode().name,
             "enabled_tools": persona.get_enabled_tools(),
@@ -100,6 +103,26 @@ def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
         }
         persona_list.append(persona_json)
     return persona_list
+
+
+def _resolve_params_kwargs(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Map a persona JSON entry to the kwargs Persona() expects for params.
+
+    Prefers the nested `params` block (new shape). Falls back to legacy flat
+    keys (`temperature`, `top_p`, `top_k`, `token_limit`) when absent so old
+    personas.json files keep loading until the deployment migration runs.
+    """
+    if isinstance(entry.get("params"), dict):
+        return {
+            "params": entry["params"],
+            "token_limit": entry.get("token_limit"),  # legacy override still wins if present
+        }
+    return {
+        "temperature": entry.get("temperature"),
+        "top_p": entry.get("top_p"),
+        "top_k": entry.get("top_k"),
+        "token_limit": entry.get("token_limit"),
+    }
 
 
 def load_personas_from_file(file_path_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -150,11 +173,7 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
                 persona_name=name,
                 model_name=new_persona.get("model_name"),
                 prompt=new_persona.get("prompt"),
-                token_limit=new_persona.get("token_limit"),
                 history_messages=new_persona.get("history_messages", new_persona.get("context_length")),
-                temperature=new_persona.get("temperature"),
-                top_p=new_persona.get("top_p"),
-                top_k=new_persona.get("top_k"),
                 display_name_in_chat=new_persona.get("display_name_in_chat", False),
                 execution_mode=new_persona.get("execution_mode"),
                 enabled_tools=new_persona.get("enabled_tools", []),
@@ -164,6 +183,7 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
                 thinking_level=new_persona.get("thinking_level"),
                 long_term_memory=new_persona.get("long_term_memory", True),
                 max_context_tokens=new_persona.get("max_context_tokens"),
+                **_resolve_params_kwargs(new_persona),
             )
 
         return personas
@@ -204,15 +224,16 @@ def load_system_personas_from_file() -> Dict[str, Any]:
             if not name:
                 continue
 
+            params_kwargs = _resolve_params_kwargs(new_persona)
+            # System personas use `response_token_limit` rather than `token_limit`
+            # for the legacy flat path. Honor it when params block isn't present.
+            if "params" not in params_kwargs and params_kwargs.get("token_limit") is None:
+                params_kwargs["token_limit"] = new_persona.get("response_token_limit")
             personas[name] = Persona(
                 persona_name=name,
                 model_name=new_persona.get("model_name", "local"),
                 prompt=new_persona.get("prompt", ""),
-                token_limit=new_persona.get("response_token_limit"),
                 history_messages=new_persona.get("history_messages", new_persona.get("context_length", 0)),
-                temperature=new_persona.get("temperature"),
-                top_p=new_persona.get("top_p"),
-                top_k=new_persona.get("top_k"),
                 display_name_in_chat=new_persona.get("display_name_in_chat", False),
                 execution_mode=new_persona.get("execution_mode"),
                 enabled_tools=new_persona.get("enabled_tools", []),
@@ -222,6 +243,7 @@ def load_system_personas_from_file() -> Dict[str, Any]:
                 thinking_level=new_persona.get("thinking_level"),
                 long_term_memory=new_persona.get("long_term_memory", True),
                 max_context_tokens=new_persona.get("max_context_tokens"),
+                **params_kwargs,
             )
 
         return personas
