@@ -20,6 +20,7 @@ from src.agents.agent_service import AgentServiceIntegration
 from src.agents.dispatch_agent import DispatchAgent
 from src.agents.memory_agent import MemoryAgent
 from src.agents.zammad_bot import ZammadBot
+from src.agents.reminder_agent import ReminderAgent
 from src.clients.notification import NotificationRouter, DiscordNotifier, ZammadNotifier
 
 from src.interfaces.discord_bot import create_discord_bot
@@ -130,6 +131,7 @@ def _register_agents(
     if zammad_client is not None:
         agent_manager.register("zammad_bot", ZammadBot)
         agent_manager.register("dispatch", DispatchAgent)
+        agent_manager.register("reminder", ReminderAgent)
     else:
         logger.warning(
             "Zammad credentials missing. Zammad-dependent agents (zammad_bot, dispatch) "

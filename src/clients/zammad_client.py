@@ -167,6 +167,12 @@ class ZammadClient:
         """
         return self._make_request('get', 'users/me')
 
+    def get_user(self, user_id: int) -> Dict[str, Any]:
+        """
+        Retrieves a single user by their ID.
+        """
+        return self._make_request('get', f'users/{user_id}')
+
     def create_user(self, email: str, firstname: str, lastname: str, note: Optional[str] = None, roles: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         Creates a new user. Defaults to 'Customer' role if not specified.

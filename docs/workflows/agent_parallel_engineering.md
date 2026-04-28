@@ -46,11 +46,20 @@ If the **intersection** of the "Files Affected" lists in the DP tickets is **emp
 1. **CLAIM**: Mark a DP ticket as `IN_PROGRESS` and set yourself as `Assignee`.
 2. **ISOLATE**: Create a `git worktree`.
 3. **IMPLEMENT**: Code, test, and commit using the `✨ DP-XXX: description` format.
-4. **AUDIT**: Ask a "Senior Agent" persona to review your worktree changes.
-5. **SIGNAL**: Update the DP ticket to `REVIEW` and provide a link to the branch.
+4. **AUDIT (Stage 1)**: Ask a "Senior Agent" persona (e.g., `agency-senior-developer`) to review your worktree changes and document findings in the "Audit & Review Logs" section of the ticket.
+5. **SIGNAL (Stage 2)**: Once the agent audit is passed, update the DP ticket to `REVIEW` for Human sign-off.
 6. **MERGE**: Wait for human approval. After the merge, the user or a script will run `git worktree remove`.
 
-## 4. Audit & Quality Gate
+## 4. Integration & QA
+
+- No task is considered "QA_READY" until `pytest` passes within its dedicated worktree.
+- **Two-Stage Review Mandatory**:
+    1. **Senior Agent Review**: An independent agent (Senior Developer/Architect) must audit the code and provide feedback in the DP ticket.
+    2. **Human Approval**: Final sign-off by the user after the senior agent's audit is complete.
+- Human approval is required for all merges to `main` or `develop`.
+- After merge, the worktree directory `worktrees/DP-XXX/` should be removed via `git worktree remove`.
+
+## 5. Quality Gate
 
 Every task MUST pass the following before being presented for human review:
 - [ ] `pytest` passes in the worktree.
