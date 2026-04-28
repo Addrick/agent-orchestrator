@@ -705,15 +705,20 @@ class TextEngine:
         image_url: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Adapter for handlers that still take the legacy history_object
-        shape. The system message (if present) is left in message_history
-        so handlers' existing system-extraction logic runs unchanged."""
+        shape. Splits a leading system message into `persona_prompt` so that
+        `message_history` (and its legacy `history` alias) contain only
+        non-system turns — matching the contract `_run_tool_loop` used to
+        build before Phase C."""
         if messages and messages[0].get("role") == "system":
             persona_prompt = messages[0].get("content", "") or ""
+            rest = list(messages[1:])
         else:
             persona_prompt = ""
+            rest = list(messages)
         return {
             "persona_prompt": persona_prompt,
-            "message_history": list(messages),
+            "message_history": rest,
+            "history": rest,  # legacy alias used by integration test mocks
             "current_message": {"text": "", "image_url": image_url},
         }
 

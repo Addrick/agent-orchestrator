@@ -5,7 +5,7 @@ import time
 import random
 
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from memory.memory_manager import MemoryManager
 from src.chat_system import ChatSystem
@@ -18,7 +18,9 @@ from config.global_config import TEST_MEMORY_DATABASE_FILE
 def mocked_chat_system():
     """
     Sets up a ChatSystem with real MemoryManager and TextEngine.
-    No external service credentials required.
+    No external service credentials required. Phase C routes through
+    `text_engine.stream_messages`, which wraps the mocked
+    `generate_response` for non-local models.
     """
     db_path = f"{TEST_MEMORY_DATABASE_FILE}.{random.randint(1000, 9999)}"
     if os.path.exists(db_path):
@@ -27,7 +29,10 @@ def mocked_chat_system():
     memory_manager = MemoryManager(db_path=db_path)
     memory_manager.create_schema()
 
-    text_engine = MagicMock(spec=TextEngine)
+    text_engine = TextEngine()
+    text_engine.generate_response = AsyncMock(  # type: ignore[method-assign]
+        return_value=({'type': 'text', 'content': ''}, {}),
+    )
 
     test_personas = {
         "test_persona": Persona(
