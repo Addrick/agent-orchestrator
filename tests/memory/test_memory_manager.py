@@ -38,7 +38,15 @@ def test_create_schema(mem_manager):
         'interaction_id', 'user_identifier', 'persona_name', 'channel',
         'author_role', 'author_name', 'content', 'timestamp',
         'zammad_ticket_id', 'platform_message_id', 'server_id', 'tool_context',
-        'parent_summary_id', 'reply_to_id'
+        'parent_summary_id', 'reply_to_id', 'reasoning_content'
+    }
+    assert columns == expected_columns
+
+    # Check Interaction_Edit_History table
+    cursor.execute("PRAGMA table_info(Interaction_Edit_History)")
+    columns = {row['name'] for row in cursor.fetchall()}
+    expected_columns = {
+        'edit_id', 'interaction_id', 'old_content', 'old_reasoning_content', 'edited_at'
     }
     assert columns == expected_columns
 

@@ -43,10 +43,14 @@ def build_kobold_savefile(
     for msg in raw_history:
         role = msg.get("author_role")
         content = (msg.get("content") or "").strip()
+        reasoning = (msg.get("reasoning_content") or "").strip()
 
-        if role == "system" or not content or role not in ("user", "assistant"):
+        if role == "system" or (not content and not reasoning) or role not in ("user", "assistant"):
             skipped += 1
             continue
+
+        if reasoning and role == "assistant":
+            content = f"<think>\n{reasoning}\n</think>\n{content}"
 
         if role == "user":
             actions.append(f"{_INPUT_PLACEHOLDER}{content}{_OUTPUT_PLACEHOLDER}")

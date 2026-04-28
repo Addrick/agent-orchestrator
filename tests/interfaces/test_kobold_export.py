@@ -166,3 +166,18 @@ def test_export_from_seeded_memory_manager():
     assert savefile["memory"] == ""
 
     mm.close()
+
+def test_build_kobold_savefile_wraps_reasoning_in_think_tags():
+    from src.interfaces.kobold_export import build_kobold_savefile
+    history = [
+        {"author_role": "user", "content": "hello", "interaction_id": 1},
+        {
+            "author_role": "assistant", 
+            "content": "final answer", 
+            "reasoning_content": "my thoughts",
+            "interaction_id": 2
+        }
+    ]
+    savefile, skipped = build_kobold_savefile(history)
+    actions = [savefile["prompt"]] + savefile["actions"]
+    assert "<think>\nmy thoughts\n</think>\nfinal answer" in actions[1]

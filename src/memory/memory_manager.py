@@ -99,7 +99,8 @@ class MemoryManager:
                 zammad_ticket_id INTEGER,
                 platform_message_id TEXT,
                 server_id TEXT,
-                tool_context TEXT
+                tool_context TEXT,
+                reasoning_content TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_channel_timestamp ON User_Interactions (channel, timestamp);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_platform_message_id ON User_Interactions (platform_message_id);
@@ -141,6 +142,7 @@ class MemoryManager:
                 edit_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 interaction_id INTEGER NOT NULL,
                 old_content TEXT,
+                old_reasoning_content TEXT,
                 edited_at TIMESTAMP NOT NULL,
                 FOREIGN KEY (interaction_id) REFERENCES User_Interactions(interaction_id) ON DELETE CASCADE
             );
@@ -219,6 +221,14 @@ class MemoryManager:
                 conn.execute("ALTER TABLE User_Interactions ADD COLUMN parent_summary_id INTEGER")
             if 'reply_to_id' not in user_int_cols:
                 conn.execute("ALTER TABLE User_Interactions ADD COLUMN reply_to_id INTEGER")
+            if 'reasoning_content' not in user_int_cols:
+                conn.execute("ALTER TABLE User_Interactions ADD COLUMN reasoning_content TEXT")
+
+            # Interaction_Edit_History migrations
+            cursor.execute("PRAGMA table_info(Interaction_Edit_History)")
+            edit_hist_cols = {row['name'] for row in cursor.fetchall()}
+            if 'old_reasoning_content' not in edit_hist_cols:
+                conn.execute("ALTER TABLE Interaction_Edit_History ADD COLUMN old_reasoning_content TEXT")
 
             # Memory_Summaries migration and sqlite-vec setup
             cursor.execute("PRAGMA table_info(Memory_Summaries)")
@@ -304,7 +314,8 @@ class MemoryManager:
                     platform_message_id: Optional[str] = None,
                     zammad_ticket_id: Optional[int] = None,
                     tool_context: Optional[str] = None,
-                    reply_to_id: Optional[int] = None) -> Optional[int]:
+                    reply_to_id: Optional[int] = None,
+                    reasoning_content: Optional[str] = None) -> Optional[int]:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
@@ -313,12 +324,12 @@ class MemoryManager:
                 INSERT INTO User_Interactions
                 (user_identifier, persona_name, channel, author_role, author_name, content,
                  timestamp, zammad_ticket_id, platform_message_id, server_id, tool_context,
-                 reply_to_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 reply_to_id, reasoning_content)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (user_identifier, persona_name, channel, author_role, author_name, content,
                  timestamp, zammad_ticket_id, platform_message_id, server_id, tool_context,
-                 reply_to_id)
+                 reply_to_id, reasoning_content)
             )
             conn.commit()
             return cursor.lastrowid
@@ -386,7 +397,7 @@ class MemoryManager:
             
             # 1. Fetch current version
             cursor.execute(
-                "SELECT interaction_id, content, parent_summary_id FROM User_Interactions WHERE platform_message_id = ?",
+                "SELECT interaction_id, content, reasoning_content, parent_summary_id FROM User_Interactions WHERE platform_message_id = ?",
                 (platform_message_id,)
             )
             row = cursor.fetchone()
@@ -395,14 +406,15 @@ class MemoryManager:
             
             interaction_id = row['interaction_id']
             old_content = row['content']
+            old_reasoning = row['reasoning_content']
             old_summary_id = row['parent_summary_id']
             now = datetime.now()
 
             try:
                 # 2. Archive old version
                 cursor.execute(
-                    "INSERT INTO Interaction_Edit_History (interaction_id, old_content, edited_at) VALUES (?, ?, ?)",
-                    (interaction_id, old_content, now)
+                    "INSERT INTO Interaction_Edit_History (interaction_id, old_content, old_reasoning_content, edited_at) VALUES (?, ?, ?, ?)",
+                    (interaction_id, old_content, old_reasoning, now)
                 )
 
                 # 3. Update main interaction
@@ -442,7 +454,7 @@ class MemoryManager:
             conn = self._get_connection()
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT interaction_id, content FROM User_Interactions"
+                "SELECT interaction_id, content, reasoning_content FROM User_Interactions"
                 " WHERE persona_name = ? AND user_identifier = ? AND channel = ?"
                 "   AND author_role = 'assistant'"
                 " ORDER BY timestamp DESC, interaction_id DESC LIMIT 1",
@@ -454,11 +466,12 @@ class MemoryManager:
 
             interaction_id = row['interaction_id']
             old_content = row['content']
+            old_reasoning = row['reasoning_content']
             now = datetime.now()
             try:
                 cursor.execute(
-                    "INSERT INTO Interaction_Edit_History (interaction_id, old_content, edited_at) VALUES (?, ?, ?)",
-                    (interaction_id, old_content, now),
+                    "INSERT INTO Interaction_Edit_History (interaction_id, old_content, old_reasoning_content, edited_at) VALUES (?, ?, ?, ?)",
+                    (interaction_id, old_content, old_reasoning, now),
                 )
                 new_edit_id = cursor.lastrowid
                 # Move L0 embedding to Edit_History_Embeddings so chevron restore can bring it back.
@@ -482,7 +495,8 @@ class MemoryManager:
                 conn.rollback()
                 return None
 
-    def update_interaction_content(self, interaction_id: int, new_content: str) -> bool:
+    def update_interaction_content(self, interaction_id: int, new_content: str,
+                                   reasoning_content: Optional[str] = None) -> bool:
         """Overwrite the content of an existing interaction row in place.
 
         Used by portal retry and portal manual-edit flows. Clears
@@ -495,9 +509,9 @@ class MemoryManager:
             cursor = conn.cursor()
             try:
                 cursor.execute(
-                    "UPDATE User_Interactions SET content = ?, parent_summary_id = NULL"
+                    "UPDATE User_Interactions SET content = ?, reasoning_content = ?, parent_summary_id = NULL"
                     " WHERE interaction_id = ?",
-                    (new_content, interaction_id),
+                    (new_content, reasoning_content, interaction_id),
                 )
                 updated = cursor.rowcount > 0
                 cursor.execute("DELETE FROM Message_Embeddings WHERE interaction_id = ?", (interaction_id,))
@@ -520,17 +534,21 @@ class MemoryManager:
             conn = self._get_connection()
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT edit_id, old_content AS content, edited_at AS created_at"
-                " FROM Interaction_Edit_History WHERE interaction_id = ?"
-                " ORDER BY edited_at ASC, edit_id ASC",
+                "SELECT edit_id, old_content, old_reasoning_content, edited_at FROM Interaction_Edit_History"
+                " WHERE interaction_id = ? ORDER BY edited_at ASC, edit_id ASC",
                 (interaction_id,),
             )
             versions: List[Dict[str, Any]] = [
-                {"edit_id": r['edit_id'], "content": r['content'], "created_at": r['created_at']}
+                {
+                    "edit_id": r['edit_id'], 
+                    "content": r['old_content'], 
+                    "reasoning_content": r['old_reasoning_content'],
+                    "created_at": r['edited_at']
+                }
                 for r in cursor.fetchall()
             ]
             cursor.execute(
-                "SELECT content, timestamp AS created_at FROM User_Interactions WHERE interaction_id = ?",
+                "SELECT content, reasoning_content, timestamp FROM User_Interactions WHERE interaction_id = ?",
                 (interaction_id,),
             )
             canonical = cursor.fetchone()
@@ -538,7 +556,8 @@ class MemoryManager:
                 versions.append({
                     "edit_id": None,
                     "content": canonical['content'],
-                    "created_at": canonical['created_at'],
+                    "reasoning_content": canonical['reasoning_content'],
+                    "created_at": canonical['timestamp'],
                 })
             return versions
 
@@ -564,7 +583,7 @@ class MemoryManager:
             cursor = conn.cursor()
 
             cursor.execute(
-                "SELECT content FROM User_Interactions WHERE interaction_id = ?",
+                "SELECT content, reasoning_content FROM User_Interactions WHERE interaction_id = ?",
                 (interaction_id,),
             )
             canonical_row = cursor.fetchone()
@@ -572,7 +591,7 @@ class MemoryManager:
                 raise ValueError(f"interaction_id {interaction_id} not found")
 
             cursor.execute(
-                "SELECT edit_id, old_content FROM Interaction_Edit_History"
+                "SELECT edit_id, old_content, old_reasoning_content FROM Interaction_Edit_History"
                 " WHERE interaction_id = ?"
                 " ORDER BY edited_at ASC, edit_id ASC",
                 (interaction_id,),
@@ -583,6 +602,7 @@ class MemoryManager:
 
             target_edit_id = archives[k]['edit_id']
             target_content = archives[k]['old_content']
+            target_reasoning = archives[k]['old_reasoning_content']
             current_canonical = canonical_row['content']
             now = datetime.now()
 
@@ -659,6 +679,7 @@ class MemoryManager:
             total_archives = cursor.fetchone()[0]
             return {
                 "current_content": target_content,
+                "reasoning_content": target_reasoning,
                 "interaction_id": interaction_id,
                 "total_versions": total_archives + 1,
             }
@@ -724,7 +745,7 @@ class MemoryManager:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
-            query = ("SELECT interaction_id, author_role, author_name, content, tool_context FROM User_Interactions"
+            query = ("SELECT interaction_id, author_role, author_name, content, tool_context, reasoning_content FROM User_Interactions"
                      " WHERE user_identifier = ? AND persona_name = ?" + self._SUPPRESSION_SUBQUERY)
             params: List[Any] = [user_identifier, persona_name]
             query += " ORDER BY timestamp DESC"
@@ -738,7 +759,7 @@ class MemoryManager:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
-            query = ("SELECT interaction_id, author_role, author_name, content, tool_context FROM User_Interactions"
+            query = ("SELECT interaction_id, author_role, author_name, content, tool_context, reasoning_content FROM User_Interactions"
                      " WHERE zammad_ticket_id = ?" + self._SUPPRESSION_SUBQUERY)
             params: List[Any] = [ticket_id]
             query += " ORDER BY timestamp DESC"
@@ -753,7 +774,7 @@ class MemoryManager:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
-            query = ("SELECT interaction_id, author_role, author_name, content, tool_context FROM User_Interactions"
+            query = ("SELECT interaction_id, author_role, author_name, content, tool_context, reasoning_content FROM User_Interactions"
                      " WHERE channel = ? AND persona_name = ?")
             params: List[Any] = [channel, persona_name]
             if server_id:
@@ -774,7 +795,7 @@ class MemoryManager:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
-            query = ("SELECT interaction_id, author_role, author_name, content, tool_context FROM User_Interactions"
+            query = ("SELECT interaction_id, author_role, author_name, content, tool_context, reasoning_content FROM User_Interactions"
                      " WHERE server_id = ? AND persona_name = ?" + self._SUPPRESSION_SUBQUERY)
             params: List[Any] = [server_id, persona_name]
             query += " ORDER BY timestamp DESC"
@@ -788,7 +809,7 @@ class MemoryManager:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
-            query = ("SELECT interaction_id, author_role, author_name, content, tool_context FROM User_Interactions"
+            query = ("SELECT interaction_id, author_role, author_name, content, tool_context, reasoning_content FROM User_Interactions"
                      " WHERE persona_name = ?" + self._SUPPRESSION_SUBQUERY)
             params: List[Any] = [persona_name]
             query += " ORDER BY timestamp DESC"
