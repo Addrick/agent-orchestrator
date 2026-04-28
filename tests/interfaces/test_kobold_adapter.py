@@ -990,3 +990,35 @@ def test_kobold_export_excludes_suppressed_row():
     assert "keep me" in rendered
     assert "delete me" not in rendered
     mm.close()
+
+def test_chat_completions_stream_logs_reasoning_content(monkeypatch):
+    from unittest.mock import MagicMock
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+
+    class _StreamCtx:
+        async def __aenter__(self):
+            resp = MagicMock()
+            async def _aiter_raw():
+                yield b'data: {"choices":[{"delta":{"reasoning_content":"thinking..."}}]}\n\n'
+                yield b'data: {"choices":[{"delta":{"content":"done"}}]}\n\n'
+                yield b"data: [DONE]\n\n"
+            resp.aiter_raw = _aiter_raw
+            return resp
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(adapter._http, "stream", lambda *a, **kw: _StreamCtx())
+
+    from fastapi.testclient import TestClient
+    with TestClient(adapter.app) as client:
+        r = client.post("/chat/completions", json=_chat_body("hi", stream=True))
+    assert r.status_code == 200
+
+    conn = mm._get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT content, reasoning_content FROM User_Interactions WHERE author_role='assistant'")
+    row = cur.fetchone()
+    assert row is not None
+    assert row['content'] == "done"
+    assert row['reasoning_content'] == "thinking..."
+    mm.close()

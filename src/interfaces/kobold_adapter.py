@@ -199,6 +199,12 @@ class KoboldAdapter:
                     status_code=404,
                     content={"error": f"interaction {interaction_id} not found"},
                 )
+            
+            for v in versions:
+                reasoning = v.get("reasoning_content")
+                if reasoning:
+                    v["content"] = f"<think>\n{reasoning}\n</think>\n{v['content']}"
+            
             return {"interaction_id": interaction_id, "versions": versions}
 
         @self.app.post("/api/v1/interaction/{interaction_id}/select_version/{k}")
@@ -227,6 +233,14 @@ class KoboldAdapter:
                 self.chat_system.memory_manager.list_interaction_versions,
                 interaction_id,
             )
+            for v in versions:
+                reasoning = v.get("reasoning_content")
+                if reasoning:
+                    v["content"] = f"<think>\n{reasoning}\n</think>\n{v['content']}"
+                    
+            if result.get("reasoning_content"):
+                result["current_content"] = f"<think>\n{result['reasoning_content']}\n</think>\n{result['current_content']}"
+                
             return {**result, "versions": versions}
 
         @self.app.patch("/api/v1/interaction/{interaction_id}")
@@ -548,6 +562,7 @@ class KoboldAdapter:
 
             async def relay() -> AsyncIterator[bytes]:
                 full_response: List[str] = []
+                full_reasoning: List[str] = []
                 done_seen = False
                 try:
                     async with self._http.stream("POST", url, json=body) as upstream:
@@ -563,9 +578,15 @@ class KoboldAdapter:
                                     line = decoded[6:].strip()
                                     if line and line != "[DONE]":
                                         cdata = json.loads(line)
-                                        delta = cdata.get("choices", [{}])[0].get("delta", {}).get("content")
-                                        if delta:
-                                            full_response.append(delta)
+                                        delta = cdata.get("choices", [{}])[0].get("delta", {})
+                                        
+                                        content = delta.get("content")
+                                        reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                                        
+                                        if reasoning:
+                                            full_reasoning.append(reasoning)
+                                        if content:
+                                            full_response.append(content)
                             except Exception:
                                 pass
                             # Inject `event: derpr` frame immediately before the
@@ -573,10 +594,11 @@ class KoboldAdapter:
                             # with the canonical assistant_id.
                             if "[DONE]" in decoded and not done_seen:
                                 done_seen = True
-                                if full_response:
+                                if full_response or full_reasoning:
                                     aid = self._commit_assistant(
                                         persona_name, "".join(full_response),
                                         user_interaction_id, retry_assistant_id,
+                                        reasoning_content="".join(full_reasoning) if full_reasoning else None
                                     )
                                     if aid is not None:
                                         frame = (
@@ -588,10 +610,11 @@ class KoboldAdapter:
 
                     # Fallback commit: upstream closed without emitting [DONE]
                     # (e.g. truncated response). No derpr frame in this path.
-                    if full_response and not done_seen:
+                    if (full_response or full_reasoning) and not done_seen:
                         self._commit_assistant(
                             persona_name, "".join(full_response),
                             user_interaction_id, retry_assistant_id,
+                            reasoning_content="".join(full_reasoning) if full_reasoning else None
                         )
 
                 except httpx.RequestError as e:
@@ -600,10 +623,11 @@ class KoboldAdapter:
                     yield f"data: {err}\n\ndata: [DONE]\n\n".encode("utf-8")
                 except asyncio.CancelledError:
                     # Flush partial output before forwarding abort upstream.
-                    if full_response:
+                    if full_response or full_reasoning:
                         self._commit_assistant(
                             persona_name, "".join(full_response),
                             user_interaction_id, retry_assistant_id,
+                            reasoning_content="".join(full_reasoning) if full_reasoning else None
                         )
                     try:
                         await self._http.post(f"{_kobold_base_url()}/api/extra/abort", json={})
@@ -660,39 +684,34 @@ class KoboldAdapter:
             logger.error(f"Interaction logging failed (role={role}): {e}")
             return None
 
-    def _commit_assistant(self, persona_name: str, content: str,
-                          user_interaction_id: Optional[int],
-                          retry_assistant_id: Optional[int]) -> Optional[int]:
-        """Persist assistant text — UPDATE-in-place on retry, else INSERT.
-
-        Returns the canonical interaction_id so the stream relay can emit it
-        in the SSE `event: derpr` frame for portal chevron hydration.
-        """
-        if not content or not content.strip():
-            return None
+    def _commit_assistant(self, persona_name: str, content: str, user_interaction_id: int,
+                          retry_assistant_id: int | None, reasoning_content: str | None = None) -> int | None:
+        """Helper to append the full assistant stream into history."""
         if retry_assistant_id is not None:
             try:
                 self.chat_system.memory_manager.update_interaction_content(
-                    retry_assistant_id, content,
+                    retry_assistant_id, content, reasoning_content=reasoning_content
                 )
                 return retry_assistant_id
             except Exception as e:
-                logger.error(f"Retry UPDATE failed for id={retry_assistant_id}: {e}")
+                logger.error(f"Failed to patch assistant response for retry_id {retry_assistant_id}: {e}")
                 return None
-        try:
-            return self.chat_system.memory_manager.log_message(
-                user_identifier="portal",
-                persona_name=persona_name,
-                channel="web_ui",
-                author_role="assistant",
-                author_name=None,
-                content=content,
-                timestamp=datetime.now(timezone.utc),
-                reply_to_id=user_interaction_id,
-            )
-        except Exception as e:
-            logger.error(f"Assistant log failed: {e}")
-            return None
+        else:
+            try:
+                return self.chat_system.memory_manager.log_message(
+                    user_identifier="portal",
+                    persona_name=persona_name,
+                    channel="web_ui",
+                    author_role="assistant",
+                    author_name=None,
+                    content=content,
+                    timestamp=datetime.now(timezone.utc),
+                    reply_to_id=user_interaction_id,
+                    reasoning_content=reasoning_content
+                )
+            except Exception as e:
+                logger.error(f"Assistant log failed: {e}")
+                return None
 
     async def _forward_get(self, path: str, fallback: Dict[str, Any]) -> JSONResponse:
         url = f"{_kobold_base_url()}{path}"
