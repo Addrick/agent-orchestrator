@@ -31,3 +31,5 @@ tests/test_data/
 /bash.exe.stackdump
 /src/database/user_memory.db.bak
 /test_memory.db
+/src/memory/user_memory.db
+/portal_test.db
