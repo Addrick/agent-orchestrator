@@ -164,6 +164,14 @@ DISPATCH_POLL_INTERVAL = 30
 DISPATCH_TRIAGE_TAG = ZAMMAD_TRIAGE_TAG  # tickets must have this tag
 DISPATCH_DISPATCHED_TAG = "ai_dispatched"  # tag applied after dispatch
 DISPATCH_PERSONA_NAME = "dispatch_analyst"
+
+# =============================================================================
+# --- Reminder Agent Configuration ---
+# =============================================================================
+REMINDER_ENABLED = os.environ.get("REMINDER_ENABLED", "false").lower() == "true"
+REMINDER_POLL_INTERVAL = 3600  # Default to 1 hour
+REMINDER_STALE_THRESHOLD_HOURS = 24
+REMINDER_SENT_TAG = "ai_reminder_sent"
 # =============================================================================
 # --- Long-Term Memory Configuration ---
 # =============================================================================

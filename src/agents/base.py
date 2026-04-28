@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.chat_system import ChatSystem
@@ -103,14 +103,30 @@ class Agent(ABC):
     async def _wait_for_next_run(self) -> None:
         """Sleep until the next scheduled run, respecting shutdown.
 
-        Currently supports:
+        Supports:
         - {"interval": <seconds>} — fixed interval between runs
-
-        Future: {"daily_at": "09:00"}, {"weekly_at": "monday 09:00"}, etc.
+        - {"daily_at": "HH:MM"}   — run once a day at specific local time
         """
-        interval = self.schedule.get("interval", 60)
+        if "daily_at" in self.schedule:
+            try:
+                target_time_str = self.schedule["daily_at"]
+                target_hour, target_minute = map(int, target_time_str.split(':'))
+                
+                now = datetime.now() # Schedule relative to local time
+                target = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
+                
+                if target <= now:
+                    target += timedelta(days=1)
+                
+                wait_seconds = (target - now).total_seconds()
+            except Exception as e:
+                logger.error(f"Failed to parse daily_at schedule '{self.schedule.get('daily_at')}': {e}")
+                wait_seconds = 60
+        else:
+            wait_seconds = float(self.schedule.get("interval", 60))
+
         try:
-            await asyncio.wait_for(self._shutdown_event.wait(), timeout=float(interval))
+            await asyncio.wait_for(self._shutdown_event.wait(), timeout=wait_seconds)
         except asyncio.TimeoutError:
             pass
 
