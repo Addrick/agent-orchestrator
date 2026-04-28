@@ -21,7 +21,10 @@ def mem_test_system():
     memory_manager = MemoryManager(db_path=":memory:")
     memory_manager.create_schema()
 
-    mock_text_engine = MagicMock(spec=TextEngine)
+    mock_text_engine = TextEngine()
+    mock_text_engine.generate_response = AsyncMock(  # type: ignore[method-assign]
+        return_value=({'type': 'text', 'content': ''}, {}),
+    )
 
     chat_system = ChatSystem(
         memory_manager=memory_manager,
@@ -257,9 +260,9 @@ def memory_e2e_system():
     """ChatSystem with real in-memory DB and mocked text engine for memory tests."""
     memory_manager = MemoryManager(db_path=":memory:")
     memory_manager.create_schema()
-    mock_text_engine = MagicMock(spec=TextEngine)
-    mock_text_engine.generate_response = AsyncMock(
-        return_value=({'type': 'text', 'content': ''}, {})
+    mock_text_engine = TextEngine()
+    mock_text_engine.generate_response = AsyncMock(  # type: ignore[method-assign]
+        return_value=({'type': 'text', 'content': ''}, {}),
     )
     chat_system = ChatSystem(
         memory_manager=memory_manager,

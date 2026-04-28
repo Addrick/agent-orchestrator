@@ -4,7 +4,10 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 import json
 
-from src.chat_system import ChatSystem, ResponseType, RequestContext
+from src.chat_system import (
+    ChatSystem, ResponseType, RequestContext,
+    DoneEvent, ErrorEvent, TokenEvent,
+)
 from src.utils.model_utils import get_model_prefix
 from memory.memory_manager import MemoryManager
 from src.engine import TextEngine, LLMCommunicationError
@@ -17,13 +20,20 @@ def chat_system_with_mocks():
     """
     Provides a ChatSystem instance with its primary dependencies mocked.
     Helper methods on the ChatSystem itself are NOT mocked here.
+
+    Uses a real TextEngine with `generate_response` mocked: ChatSystem now
+    routes through `text_engine.stream_messages`, which for non-local models
+    internally calls `generate_response` and emits the unified event stream.
+    Keeping the real `stream_messages` wiring lets every existing assertion
+    on `text_engine.generate_response.*` keep working unchanged.
     """
     mock_memory_manager = MagicMock(spec=MemoryManager)
-    mock_text_engine = MagicMock(spec=TextEngine)
+    text_engine = TextEngine()
+    text_engine.generate_response = AsyncMock(  # type: ignore[method-assign]
+        return_value=({'type': 'text', 'content': 'LLM Reply'}, {}),
+    )
     mock_tool_manager = AsyncMock()
     mock_tool_manager.get_tool_definitions = MagicMock(return_value=[])
-
-    mock_text_engine.generate_response = AsyncMock(return_value=({'type': 'text', 'content': 'LLM Reply'}, {}))
 
     mock_persona = Persona('test_persona', 'mock_model', 'prompt')
 
@@ -31,12 +41,12 @@ def chat_system_with_mocks():
             patch('src.chat_system.ToolManager', return_value=mock_tool_manager):
         system = ChatSystem(
             memory_manager=mock_memory_manager,
-            text_engine=mock_text_engine,
+            text_engine=text_engine,
         )
         # Mock bot_logic by default to isolate ChatSystem logic
         system.bot_logic.preprocess_message = AsyncMock(return_value=None)
 
-        yield (system, mock_memory_manager, mock_text_engine,
+        yield (system, mock_memory_manager, text_engine,
                mock_persona, mock_tool_manager)
 
 
@@ -560,46 +570,6 @@ def test_append_denied_tool_results():
     assert history[1]['name'] == "create_ticket"
 
 
-# --- Tool Loop Tests ---
-
-@pytest.mark.asyncio
-async def test_run_tool_loop_text_response(chat_system_with_mocks):
-    """Tool loop returns immediately on text response."""
-    system, _, text_engine_mock, persona, _ = chat_system_with_mocks
-    text_engine_mock.generate_response.return_value = ({'type': 'text', 'content': 'Hi'}, {})
-    ctx = RequestContext(
-        persona=persona, persona_name='test_persona', user_identifier='user',
-        channel='ch', message='hi',
-        conversation_history=[{"role": "user", "content": "hi"}],
-    )
-
-    text, rtype, tool_ctx = await system._run_tool_loop(ctx)
-
-    assert rtype == ResponseType.LLM_GENERATION
-    assert text == 'Hi'
-    assert tool_ctx is None  # No tools used
-
-
-@pytest.mark.asyncio
-async def test_run_tool_loop_max_calls_exceeded(chat_system_with_mocks):
-    """Tool loop returns stuck message after MAX_TOOL_CALLS iterations."""
-    system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
-    persona.set_enabled_tools(['*'])
-    tool_call = {'type': 'tool_calls', 'calls': [{'id': 'c1', 'name': 'web_search', 'arguments': {}}]}
-    text_engine_mock.generate_response.return_value = (tool_call, {})
-    tool_manager_mock.execute_tool.return_value = {"result": "ok"}
-    ctx = RequestContext(
-        persona=persona, persona_name='test_persona', user_identifier='user',
-        channel='ch', message='search',
-        conversation_history=[{"role": "user", "content": "search"}],
-    )
-
-    text, rtype, _ = await system._run_tool_loop(ctx)
-
-    assert rtype == ResponseType.DEV_COMMAND
-    assert "stuck in a loop" in text
-
-
 # --- Orchestration Method Tests ---
 
 @pytest.mark.asyncio
@@ -778,3 +748,127 @@ def test_format_raw_history_no_tool_context(chat_system_with_mocks):
 
     assert len(formatted) == 1
     assert formatted[0] == {'role': 'assistant', 'content': 'Hi'}
+
+
+# --- Phase C: stream_response + _orchestrate kernel ---
+
+async def _drain_events(stream):
+    out = []
+    async for ev in stream:
+        out.append(ev)
+    return out
+
+
+@pytest.mark.asyncio
+async def test_stream_response_yields_token_then_done_for_text(chat_system_with_mocks):
+    """Plain text generation surfaces TokenEvent(s) then a DoneEvent."""
+    system, memory_mock, _, _, _ = chat_system_with_mocks
+    memory_mock.get_channel_history.return_value = []
+    memory_mock.log_message.side_effect = [10, 42]
+
+    events = await _drain_events(
+        system.stream_response("test_persona", "user", "channel", "hi")
+    )
+    types = [type(e).__name__ for e in events]
+    assert types[0] == "TokenEvent"
+    assert types[-1] == "DoneEvent"
+    assert events[0].delta == "LLM Reply"
+    assert events[-1].text == "LLM Reply"
+    assert events[-1].response_type == ResponseType.LLM_GENERATION
+    assert events[-1].assistant_id == 42
+    assert events[-1].user_interaction_id == 10
+
+
+@pytest.mark.asyncio
+async def test_stream_response_dev_command_skips_token_events(chat_system_with_mocks):
+    """Dev command short-circuits before any TokenEvent."""
+    system, _, _, _, _ = chat_system_with_mocks
+    system.bot_logic.preprocess_message.return_value = {
+        "response": "Dev output", "mutated": False,
+    }
+    events = await _drain_events(
+        system.stream_response("test_persona", "user", "channel", "what model")
+    )
+    assert len(events) == 1
+    assert isinstance(events[0], DoneEvent)
+    assert events[0].text == "Dev output"
+    assert events[0].response_type == ResponseType.DEV_COMMAND
+
+
+@pytest.mark.asyncio
+async def test_stream_response_refuses_tool_enabled_persona(chat_system_with_mocks):
+    """v1 policy: stream_response refuses any persona with enabled_tools."""
+    system, _, text_engine, persona, _ = chat_system_with_mocks
+    persona.set_enabled_tools(['*'])
+
+    events = await _drain_events(
+        system.stream_response("test_persona", "user", "channel", "hi")
+    )
+    assert len(events) == 1
+    assert isinstance(events[0], ErrorEvent)
+    assert "tool-enabled" in events[0].message
+    text_engine.generate_response.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stream_response_emits_error_on_llm_failure(chat_system_with_mocks):
+    """LLMCommunicationError surfaces as a single ErrorEvent."""
+    system, memory_mock, text_engine, _, _ = chat_system_with_mocks
+    memory_mock.get_channel_history.return_value = []
+    text_engine.generate_response.side_effect = LLMCommunicationError("boom")
+
+    events = await _drain_events(
+        system.stream_response("test_persona", "user", "channel", "hi")
+    )
+    err = [e for e in events if isinstance(e, ErrorEvent)]
+    assert len(err) == 1
+    assert "Error while generating" in err[0].message
+    # No DoneEvent on error
+    assert not any(isinstance(e, DoneEvent) for e in events)
+
+
+@pytest.mark.asyncio
+async def test_stream_response_is_retry_archives_via_handle_portal_retry(
+    chat_system_with_mocks,
+):
+    """is_retry=True archives the prior assistant row and updates in place."""
+    system, memory_mock, _, _, _ = chat_system_with_mocks
+    memory_mock.get_channel_history.return_value = []
+    memory_mock.handle_portal_retry.return_value = 99
+    memory_mock.update_interaction_content.return_value = True
+
+    events = await _drain_events(
+        system.stream_response(
+            "test_persona", "portal", "web_ui", "ignored",
+            is_retry=True,
+        )
+    )
+    done = [e for e in events if isinstance(e, DoneEvent)][-1]
+    memory_mock.handle_portal_retry.assert_called_once_with(
+        persona_name="test_persona",
+        user_identifier="portal",
+        channel="web_ui",
+    )
+    memory_mock.update_interaction_content.assert_called_once_with(99, "LLM Reply")
+    # No new user log_message on retry path
+    log_calls = [c for c in memory_mock.log_message.call_args_list
+                 if c.kwargs.get('author_role') == 'user']
+    assert log_calls == []
+    assert done.assistant_id == 99
+    assert done.user_interaction_id is None
+
+
+@pytest.mark.asyncio
+async def test_generate_response_round_trips_through_orchestrate(chat_system_with_mocks):
+    """generate_response is now a collect-stream wrapper — same 4-tuple."""
+    system, memory_mock, _, _, _ = chat_system_with_mocks
+    memory_mock.get_channel_history.return_value = []
+    memory_mock.log_message.side_effect = [11, 22]
+
+    text, rtype, aid, uid = await system.generate_response(
+        "test_persona", "user", "channel", "hello",
+    )
+    assert text == "LLM Reply"
+    assert rtype == ResponseType.LLM_GENERATION
+    assert aid == 22
+    assert uid == 11

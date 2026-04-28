@@ -7,7 +7,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, auto
-from typing import Any, Coroutine, Dict, List, Optional, Set, Tuple
+from typing import Any, AsyncIterator, Coroutine, Dict, List, Optional, Set, Tuple, Union
 
 from config.global_config import MAX_TOOL_CALLS, MAX_CACHED_API_REQUESTS, \
     PENDING_CONFIRMATION_TIMEOUT, MEMORY_RETRIEVAL_ENABLED, MEMORY_MAX_SUMMARIES_IN_CONTEXT
@@ -61,6 +61,30 @@ class ResponseType(Enum):
     DEV_COMMAND = auto()
     LLM_GENERATION = auto()
     PENDING_CONFIRMATION = auto()
+
+
+@dataclass
+class TokenEvent:
+    """Incremental text delta in a streaming response."""
+    delta: str
+
+
+@dataclass
+class DoneEvent:
+    """Terminal event for stream_response — final committed text + ids."""
+    text: str
+    response_type: ResponseType
+    assistant_id: Optional[int] = None
+    user_interaction_id: Optional[int] = None
+
+
+@dataclass
+class ErrorEvent:
+    """Terminal event for stream_response when generation fails."""
+    message: str
+
+
+GenerationEvent = Union[TokenEvent, DoneEvent, ErrorEvent]
 
 
 @dataclass
@@ -456,68 +480,6 @@ class ChatSystem:
                 "content": json.dumps(tool_result)
             })
 
-    async def _run_tool_loop(self, ctx: RequestContext) -> Tuple[str, ResponseType, Optional[str]]:
-        """Runs the LLM call / tool execution loop up to MAX_TOOL_CALLS iterations.
-
-        Returns (response_text, response_type, tool_context_json).
-        tool_context_json is a JSON string of tool call/result messages, or None if no tools were used.
-        """
-        history_start = len(ctx.conversation_history)
-        for i in range(MAX_TOOL_CALLS):
-            history_object: Dict[str, Any] = {
-                "persona_prompt": ctx.persona.get_prompt(),
-                "message_history": ctx.conversation_history,
-                "history": ctx.conversation_history,  # Legacy key for tests
-                "current_message": {"text": "", "image_url": ctx.image_url if i == 0 else None}
-            }
-            llm_response, api_payload = await self.text_engine.generate_response(
-                ctx.persona.get_config_for_engine(), history_object,
-                tools=ctx.tools_for_llm,
-                local_inference_config=ctx.local_inference_config
-            )
-            if api_payload:
-                self._store_api_request(
-                    ctx.user_identifier, ctx.persona_name, api_payload,
-                    tools_for_llm=ctx.tools_for_llm if i == 0 else None
-                )
-
-            if llm_response.get("type") == "text":
-                tool_msgs = ctx.conversation_history[history_start:]
-                tool_context_json = json.dumps(tool_msgs) if tool_msgs else None
-                return llm_response.get("content", ""), ResponseType.LLM_GENERATION, tool_context_json
-
-            elif llm_response.get("type") == "tool_calls":
-                calls = llm_response.get("calls", [])
-                ctx.conversation_history.append({"role": "assistant", "tool_calls": calls})
-
-                read_calls = [c for c in calls if c.get("name") not in WRITE_TOOLS]
-                write_calls = [c for c in calls if c.get("name") in WRITE_TOOLS]
-
-                await self._execute_read_calls(read_calls, ctx.conversation_history)
-
-                if ctx.persona.get_execution_mode() == ExecutionMode.CONFIRM and write_calls:
-                    pending = PendingConfirmation(
-                        write_calls=write_calls,
-                        conversation_history=ctx.conversation_history,
-                        persona_name=ctx.persona_name,
-                        tools_for_llm=ctx.tools_for_llm,
-                        image_url=ctx.image_url,
-                    )
-                    self._pending_confirmations[(ctx.user_identifier, ctx.persona_name)] = pending
-                    descriptions = [
-                        f"- **{wc.get('name')}**: {json.dumps(wc.get('arguments', {}))}"
-                        for wc in write_calls
-                    ]
-                    confirm_msg = "I'd like to perform the following actions:\n" + "\n".join(descriptions)
-                    return confirm_msg, ResponseType.PENDING_CONFIRMATION, None
-
-                await self._execute_write_calls(write_calls, ctx.conversation_history)
-            else:
-                raise LLMCommunicationError("LLM returned an invalid response structure.")
-
-        logger.error(f"Exceeded max tool calls ({MAX_TOOL_CALLS}) for user {ctx.user_identifier}.")
-        return "I seem to be stuck in a loop. Could you please clarify your request?", ResponseType.DEV_COMMAND, None
-
     async def _prepare_request(self, ctx: RequestContext) -> None:
         """Build history, inject long-term memory, filter tools, append user message."""
         ctx.conversation_history, ctx.oldest_interaction_id = self._build_conversation_history(
@@ -549,9 +511,291 @@ class ChatSystem:
                 f"(prompt_budget={prompt_budget}) for persona={ctx.persona_name}"
             )
 
-    async def _execute_request(self, ctx: RequestContext) -> Tuple[str, ResponseType, Optional[str]]:
-        """Run tool loop and return response."""
-        return await self._run_tool_loop(ctx)
+    async def _orchestrate(
+            self,
+            persona_name: str,
+            user_identifier: str,
+            channel: str,
+            message: str,
+            *,
+            server_id: Optional[str] = None,
+            image_url: Optional[str] = None,
+            history_limit: Optional[int] = None,
+            user_display_name: Optional[str] = None,
+            platform_message_id: Optional[str] = None,
+            timestamp: Optional[datetime] = None,
+            local_inference_config: Optional[Dict[str, Any]] = None,
+            is_retry: bool = False,
+    ) -> AsyncIterator[GenerationEvent]:
+        """Shared streaming kernel — single source of truth for the request
+        pipeline. Yields TokenEvent for each text delta, terminal DoneEvent
+        with final ids, or ErrorEvent on failure. Phase C kernel; both
+        `generate_response` (collect-stream wrapper) and `stream_response`
+        (portal entry) delegate here.
+        """
+        # 1. Dev command preprocessing — short-circuits before any LLM call.
+        command_result: Optional[Dict[str, Any]] = await self.bot_logic.preprocess_message(
+            persona_name, user_identifier, message
+        )
+        if command_result:
+            if command_result.get("mutated", False):
+                save_personas_to_file(self.personas)
+            yield DoneEvent(
+                text=command_result["response"],
+                response_type=ResponseType.DEV_COMMAND,
+            )
+            return
+
+        persona: Optional[Persona] = self.personas.get(persona_name)
+        if persona is None:
+            yield DoneEvent(
+                text="Error: Persona not found.",
+                response_type=ResponseType.DEV_COMMAND,
+            )
+            return
+
+        ctx = RequestContext(
+            persona=persona, persona_name=persona_name,
+            user_identifier=user_identifier, channel=channel, message=message,
+            server_id=server_id, image_url=image_url,
+            history_limit=history_limit, user_display_name=user_display_name,
+            local_inference_config=local_inference_config,
+        )
+
+        try:
+            await self._prepare_request(ctx)
+        except Exception as e:
+            logger.error(
+                f"_prepare_request failed for {user_identifier}: {e}", exc_info=True,
+            )
+            yield ErrorEvent(message="An internal error occurred while processing your request.")
+            return
+
+        # 2. Log user turn (or archive for retry). Done before the LLM call so
+        #    the row exists if the model errors mid-flight; matches the
+        #    portal's existing semantics where the user row is always pinned.
+        user_message_clean = strip_vertex_links(message) if message else message
+        user_ts = timestamp or datetime.now()
+        user_interaction_id: Optional[int] = None
+        retry_assistant_id: Optional[int] = None
+        if is_retry:
+            try:
+                retry_assistant_id = self.memory_manager.handle_portal_retry(
+                    persona_name=persona_name,
+                    user_identifier=user_identifier,
+                    channel=channel,
+                )
+            except Exception as e:
+                logger.error(f"handle_portal_retry failed: {e}", exc_info=True)
+        else:
+            try:
+                user_interaction_id = self.memory_manager.log_message(
+                    user_identifier=user_identifier, persona_name=persona_name,
+                    channel=channel, author_role='user',
+                    author_name=user_display_name, content=user_message_clean,
+                    timestamp=user_ts, server_id=server_id,
+                    platform_message_id=platform_message_id,
+                )
+            except Exception as e:
+                logger.error(f"User log_message failed: {e}", exc_info=True)
+
+        # 3. Tool loop driven by stream_messages. Token deltas surface as
+        #    TokenEvent; tool calls + results stay internal until either text
+        #    settles, CONFIRM mode parks writes, or MAX_TOOL_CALLS trips.
+        history_start = len(ctx.conversation_history)
+        final_text = ""
+        response_type = ResponseType.LLM_GENERATION
+        tool_context_json: Optional[str] = None
+
+        loop_completed = False
+        for iter_idx in range(MAX_TOOL_CALLS):
+            accumulated_parts: List[str] = []
+            api_payload: Optional[Dict[str, Any]] = None
+            full_text_from_done: Optional[str] = None
+            tool_calls_collected: Optional[List[Dict[str, Any]]] = None
+
+            messages_for_llm: List[Dict[str, Any]] = (
+                [{"role": "system", "content": ctx.persona.get_prompt()}]
+                + list(ctx.conversation_history)
+            )
+            params = ctx.persona.get_generation_params()
+            try:
+                stream = self.text_engine.stream_messages(
+                    ctx.persona.get_config_for_engine(),
+                    messages_for_llm,
+                    params,
+                    tools=ctx.tools_for_llm,
+                    local_inference_config=ctx.local_inference_config,
+                    image_url=ctx.image_url if iter_idx == 0 else None,
+                )
+                async for ev in stream:
+                    etype = ev.get("type")
+                    if etype == "api_payload":
+                        api_payload = ev.get("payload")
+                    elif etype == "text_delta":
+                        text_chunk = ev.get("text") or ""
+                        if text_chunk:
+                            accumulated_parts.append(text_chunk)
+                            yield TokenEvent(delta=text_chunk)
+                    elif etype == "tool_calls":
+                        tool_calls_collected = list(ev.get("calls") or [])
+                    elif etype == "done":
+                        full_text_from_done = ev.get("full_text")
+            except LLMCommunicationError as e:
+                logger.error(
+                    f"LLM communication error for {user_identifier}: {e}",
+                )
+                payload_to_store = e.api_payload or api_payload
+                if payload_to_store:
+                    self._store_api_request(
+                        user_identifier, persona_name, payload_to_store,
+                        tools_for_llm=ctx.tools_for_llm,
+                    )
+                err_msg = (
+                    "I'm not sure how to continue. Could you please rephrase?"
+                    if "empty response" in str(e)
+                    else "Error while generating a response: " + str(e)
+                )
+                yield ErrorEvent(message=err_msg)
+                return
+            except Exception as e:
+                logger.error(
+                    f"Unexpected error during stream_messages for {user_identifier}: {e}",
+                    exc_info=True,
+                )
+                yield ErrorEvent(
+                    message="An internal error occurred while processing your request."
+                )
+                return
+
+            if api_payload:
+                self._store_api_request(
+                    user_identifier, persona_name, api_payload,
+                    tools_for_llm=ctx.tools_for_llm if iter_idx == 0 else None,
+                )
+
+            if not tool_calls_collected:
+                final_text = (
+                    full_text_from_done if full_text_from_done is not None
+                    else "".join(accumulated_parts)
+                )
+                tool_msgs = ctx.conversation_history[history_start:]
+                tool_context_json = json.dumps(tool_msgs) if tool_msgs else None
+                loop_completed = True
+                break
+
+            ctx.conversation_history.append(
+                {"role": "assistant", "tool_calls": tool_calls_collected}
+            )
+            read_calls = [c for c in tool_calls_collected if c.get("name") not in WRITE_TOOLS]
+            write_calls = [c for c in tool_calls_collected if c.get("name") in WRITE_TOOLS]
+            await self._execute_read_calls(read_calls, ctx.conversation_history)
+
+            if ctx.persona.get_execution_mode() == ExecutionMode.CONFIRM and write_calls:
+                pending = PendingConfirmation(
+                    write_calls=write_calls,
+                    conversation_history=ctx.conversation_history,
+                    persona_name=ctx.persona_name,
+                    tools_for_llm=ctx.tools_for_llm,
+                    image_url=ctx.image_url,
+                )
+                self._pending_confirmations[(ctx.user_identifier, ctx.persona_name)] = pending
+                descriptions = [
+                    f"- **{wc.get('name')}**: {json.dumps(wc.get('arguments', {}))}"
+                    for wc in write_calls
+                ]
+                final_text = (
+                    "I'd like to perform the following actions:\n"
+                    + "\n".join(descriptions)
+                )
+                response_type = ResponseType.PENDING_CONFIRMATION
+                loop_completed = True
+                break
+
+            await self._execute_write_calls(write_calls, ctx.conversation_history)
+
+        if not loop_completed:
+            logger.error(f"Exceeded max tool calls ({MAX_TOOL_CALLS}) for {user_identifier}.")
+            final_text = "I seem to be stuck in a loop. Could you please clarify your request?"
+            response_type = ResponseType.DEV_COMMAND
+
+        # 4. Strip vertex links from the resolved assistant text, log/update.
+        final_text_clean = strip_vertex_links(final_text) if final_text else final_text
+        assistant_id: Optional[int] = None
+
+        if retry_assistant_id is not None and final_text_clean and final_text_clean.strip():
+            try:
+                self.memory_manager.update_interaction_content(
+                    retry_assistant_id, final_text_clean,
+                )
+                assistant_id = retry_assistant_id
+            except Exception as e:
+                logger.error(f"Retry update_interaction_content failed: {e}")
+        elif (
+            response_type == ResponseType.LLM_GENERATION
+            and final_text_clean
+            and final_text_clean.strip()
+        ):
+            try:
+                assistant_id = self.memory_manager.log_message(
+                    user_identifier=user_identifier, persona_name=persona_name,
+                    channel=channel, author_role='assistant',
+                    author_name=persona_name, content=final_text_clean,
+                    timestamp=datetime.now(), server_id=server_id,
+                    tool_context=tool_context_json,
+                    reply_to_id=user_interaction_id,
+                )
+            except Exception as e:
+                logger.error(f"Assistant log_message failed: {e}", exc_info=True)
+
+        yield DoneEvent(
+            text=final_text_clean if final_text_clean else "",
+            response_type=response_type,
+            assistant_id=assistant_id,
+            user_interaction_id=user_interaction_id,
+        )
+
+    async def stream_response(
+            self,
+            persona_name: str,
+            user_identifier: str,
+            channel: str,
+            message: str,
+            *,
+            is_retry: bool = False,
+            server_id: Optional[str] = None,
+            image_url: Optional[str] = None,
+            history_limit: Optional[int] = None,
+            user_display_name: Optional[str] = None,
+            platform_message_id: Optional[str] = None,
+            timestamp: Optional[datetime] = None,
+            local_inference_config: Optional[Dict[str, Any]] = None,
+    ) -> AsyncIterator[GenerationEvent]:
+        """Portal-facing streaming entry. Yields TokenEvent / DoneEvent /
+        ErrorEvent. v1 policy: refuse tool-enabled personas — tool revamp
+        and tool-call-in-stream design land later (see plan Phase C/Future).
+        """
+        persona = self.personas.get(persona_name)
+        if persona is not None and persona.get_enabled_tools():
+            yield ErrorEvent(
+                message="stream_response does not support tool-enabled personas yet"
+            )
+            return
+        async for ev in self._orchestrate(
+            persona_name=persona_name,
+            user_identifier=user_identifier,
+            channel=channel,
+            message=message,
+            is_retry=is_retry,
+            server_id=server_id,
+            image_url=image_url,
+            history_limit=history_limit,
+            user_display_name=user_display_name,
+            platform_message_id=platform_message_id,
+            timestamp=timestamp,
+            local_inference_config=local_inference_config,
+        ):
+            yield ev
 
     async def generate_response(
             self,
@@ -567,71 +811,43 @@ class ChatSystem:
             timestamp: Optional[datetime] = None,
             local_inference_config: Optional[Dict[str, Any]] = None
     ) -> Tuple[str, ResponseType, Optional[int], Optional[int]]:
-        command_result: Optional[Dict[str, Any]] = await self.bot_logic.preprocess_message(
-            persona_name, user_identifier, message
+        """Non-streaming surface — drains the orchestration kernel into the
+        existing 4-tuple. Phase C made this a collect-stream wrapper so
+        Discord/Gmail/agents share a single pipeline with the portal.
+        """
+        logger.warning(
+            f"### ChatSystem.generate_response: Received message from {user_identifier} for {persona_name}"
         )
-        if command_result:
-            if command_result.get("mutated", False):
-                save_personas_to_file(self.personas)
-            return command_result["response"], ResponseType.DEV_COMMAND, None, None
-
-        persona: Optional[Persona] = self.personas.get(persona_name)
-        if not persona:
-            return "Error: Persona not found.", ResponseType.DEV_COMMAND, None, None
-
-        ctx = RequestContext(
-            persona=persona, persona_name=persona_name,
-            user_identifier=user_identifier, channel=channel, message=message,
-            server_id=server_id, image_url=image_url,
-            history_limit=history_limit, user_display_name=user_display_name,
+        final_text = ""
+        response_type = ResponseType.DEV_COMMAND
+        assistant_id: Optional[int] = None
+        user_interaction_id: Optional[int] = None
+        async for ev in self._orchestrate(
+            persona_name=persona_name,
+            user_identifier=user_identifier,
+            channel=channel,
+            message=message,
+            server_id=server_id,
+            image_url=image_url,
+            history_limit=history_limit,
+            user_display_name=user_display_name,
+            platform_message_id=platform_message_id,
+            timestamp=timestamp,
             local_inference_config=local_inference_config,
-        )
-        try:
-            logger.warning(f"### ChatSystem.generate_response: Received message from {user_identifier} for {persona_name}")
-            await self._prepare_request(ctx)
-            response_text, response_type, tool_context_json = await self._execute_request(ctx)
-
-            # Strip vertexai links before logging to DB
-            message = strip_vertex_links(message)
-            if response_text:
-                response_text = strip_vertex_links(response_text)
-
-            # Log user and assistant messages
-            user_ts = timestamp or datetime.now()
-            user_interaction_id = self.memory_manager.log_message(
-                user_identifier=user_identifier, persona_name=persona_name,
-                channel=channel, author_role='user',
-                author_name=user_display_name, content=message,
-                timestamp=user_ts, server_id=server_id,
-                platform_message_id=platform_message_id,
-            )
-            assistant_id: Optional[int] = None
-            if response_type == ResponseType.LLM_GENERATION and response_text and response_text.strip():
-                assistant_id = self.memory_manager.log_message(
-                    user_identifier=user_identifier, persona_name=persona_name,
-                    channel=channel, author_role='assistant',
-                    author_name=persona_name, content=response_text,
-                    timestamp=datetime.now(), server_id=server_id,
-                    tool_context=tool_context_json,
-                    reply_to_id=user_interaction_id,
-                )
-
-            return response_text, response_type, assistant_id, user_interaction_id
-
-        except LLMCommunicationError as e:
-            logger.error(f"A recoverable LLM communication error occurred for {user_identifier}: {e}")
-            if e.api_payload:
-                self._store_api_request(
-                    user_identifier, persona_name, e.api_payload,
-                    tools_for_llm=ctx.tools_for_llm
-                )
-            error_msg = ("I'm not sure how to continue. Could you please rephrase?" if "empty response" in str(e) else
-                         "Error while generating a response: " + str(e))
-            return error_msg, ResponseType.DEV_COMMAND, None, None
-        except Exception as e:
-            logger.error(f"A critical error occurred in generate_response for {user_identifier}: {e}", exc_info=True)
-            return ("An internal error occurred while processing your request.",
-                    ResponseType.DEV_COMMAND, None, None)
+        ):
+            if isinstance(ev, TokenEvent):
+                continue
+            if isinstance(ev, DoneEvent):
+                final_text = ev.text
+                response_type = ev.response_type
+                assistant_id = ev.assistant_id
+                user_interaction_id = ev.user_interaction_id
+            elif isinstance(ev, ErrorEvent):
+                final_text = ev.message
+                response_type = ResponseType.DEV_COMMAND
+                assistant_id = None
+                user_interaction_id = None
+        return final_text, response_type, assistant_id, user_interaction_id
 
     async def resume_pending_confirmation(
             self, user_identifier: str, persona_name: str, approved: bool

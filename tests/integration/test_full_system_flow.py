@@ -150,7 +150,8 @@ async def test_no_service_bindings_excludes_service_tools(mocked_chat_system):
     with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
                       return_value=({'type': 'text', 'content': 'ok'}, {})) as mock_llm_call:
         await chat_system.generate_response("test_persona", "user1", "channel", "test")
-        tools_passed = mock_llm_call.call_args.kwargs.get('tools', [])
+        # Phase C: stream_messages forwards tools positionally to generate_response.
+        tools_passed = mock_llm_call.call_args.args[2] if len(mock_llm_call.call_args.args) > 2 else []
         tool_names_passed = {t.get('function', {}).get('name') for t in tools_passed}
         assert tool_names_passed.isdisjoint(zammad_tool_names), \
             f"Zammad tools should be excluded but found: {tool_names_passed & zammad_tool_names}"
@@ -169,7 +170,8 @@ async def test_zammad_service_binding_includes_zammad_tools(mocked_chat_system):
     with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
                       return_value=({'type': 'text', 'content': 'ok'}, {})) as mock_llm_call:
         await chat_system.generate_response("test_persona", "user1", "channel", "test")
-        tools_passed = mock_llm_call.call_args.kwargs.get('tools', [])
+        # Phase C: stream_messages forwards tools positionally to generate_response.
+        tools_passed = mock_llm_call.call_args.args[2] if len(mock_llm_call.call_args.args) > 2 else []
         tool_names_passed = {t.get('function', {}).get('name') for t in tools_passed}
         assert 'create_ticket' in tool_names_passed
         assert 'search_tickets' in tool_names_passed

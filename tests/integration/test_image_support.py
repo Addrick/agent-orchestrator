@@ -17,8 +17,14 @@ def mock_memory_manager():
 
 @pytest.fixture
 def mock_text_engine():
-    engine = MagicMock(spec=TextEngine)
-    engine.generate_response = AsyncMock(return_value=({"type": "text", "content": "Test response"}, {}))
+    """Real TextEngine with `generate_response` mocked. ChatSystem now
+    routes through `stream_messages`, which wraps generate_response for
+    non-local models — keeping the real wrapper preserves test contracts
+    that read `call_args[0][1]` (history_object)."""
+    engine = TextEngine()
+    engine.generate_response = AsyncMock(  # type: ignore[method-assign]
+        return_value=({"type": "text", "content": "Test response"}, {}),
+    )
     return engine
 
 
