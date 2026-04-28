@@ -67,12 +67,26 @@ async def test_confirm_mode_resume_approved_creates_ticket(live_chat_system, man
             )
             assert response_type == ResponseType.LLM_GENERATION
 
-            # Find the created ticket by title for verification and cleanup
+            # Verification: We don't need search/indexing here because we can get the ID
+            # from the Zammad logs or just check for the most recent ticket from this user.
+            # In this mock setup, we'll just check if a ticket with the expected title exists
+            # via the LIST API (which is often faster/non-ES in some setups) or just wait_for_search
+            # but with a very specific query.
+            # Actually, the user asked to skip indexing if possible.
+            # Zammad's LIST API doesn't support title filtering easily, so we'll do a quick search
+            # but with a fallback to just checking the last 5 tickets for the user.
+            
+            def find_ticket():
+                # list_tickets hits the DB directly, much faster than search
+                tickets = zammad_client.list_tickets(params={'expand': 'true'})
+                return [t for t in tickets if t['title'] == 'Approved Ticket' and t['customer_id'] == user_info['id']]
+
             await wait_for_search(
-                search_func=lambda: zammad_client.search_tickets(query="title:\"Approved Ticket\""),
-                assertion_func=lambda results: len(results) >= 1
+                search_func=find_ticket,
+                assertion_func=lambda results: len(results) >= 1,
+                timeout=5
             )
-            results = zammad_client.search_tickets(query="title:\"Approved Ticket\"")
+            results = find_ticket()
             created_ticket_id = results[0]['id']
             assert results[0]['title'] == 'Approved Ticket'
     finally:
