@@ -23,9 +23,10 @@ def pytest_collection_modifyitems(config, items):
     has_llm_keys = bool(
         os.environ.get("OPENAI_API_KEY")
         or os.environ.get("GOOGLE_API_KEY")
+        or os.environ.get("GOOGLE_GENERATIVEAI_API_KEY")
         or os.environ.get("ANTHROPIC_API_KEY")
     )
-    has_discord = bool(os.environ.get("DISCORD_API_KEY"))
+    has_discord = bool(os.environ.get("DISCORD_API_KEY") or os.environ.get("DISCORD_BOT_TOKEN"))
 
     skip_zammad = pytest.mark.skip(reason="ZAMMAD_URL/ZAMMAD_API_KEY not set")
     skip_llm = pytest.mark.skip(reason="No LLM API keys set (OPENAI_API_KEY, GOOGLE_API_KEY, ANTHROPIC_API_KEY)")

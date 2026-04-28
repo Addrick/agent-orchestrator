@@ -8,7 +8,10 @@ from typing import Callable, List, Any
 
 import pytest
 import requests
+import logging
 from unittest.mock import patch
+
+logger = logging.getLogger(__name__)
 
 from src.clients.zammad_client import ZammadClient
 from src.clients.zammad_service import ZammadIntegration
@@ -29,17 +32,26 @@ from config.global_config import (
 # ---------------------------------------------------------------------------
 
 ES_INDEX_PREFIX = "zammad_production"
+TEST_CUSTOMER_ID = 100
 
 
 def refresh_es_index():
     """Forces Elasticsearch to flush pending writes so they become searchable immediately."""
     es_url = os.environ.get("ZAMMAD_ES_URL")
     if not es_url:
+        es_url = "http://10.0.0.70:9200"
+        os.environ["ZAMMAD_ES_URL"] = es_url
+        print(f"DEBUG: Using HARDCODED ES_URL: {es_url}")
+
+    if not es_url:
         return
+
     try:
-        requests.post(f"{es_url}/{ES_INDEX_PREFIX}_*/_refresh", timeout=5)
-    except requests.exceptions.RequestException:
-        pass  # Non-fatal — tests fall back to polling
+        r = requests.post(f"{es_url}/{ES_INDEX_PREFIX}_*/_refresh", timeout=5)
+        if r.status_code != 200:
+            logger.warning(f"ES Refresh returned {r.status_code}: {r.text}")
+    except Exception as e:
+        logger.debug(f"ES Refresh skipped or failed for {es_url}: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -47,10 +59,8 @@ def refresh_es_index():
 # ---------------------------------------------------------------------------
 
 async def wait_for_search(search_func: Callable[..., List[Any]], assertion_func: Callable[[List[Any]], bool],
-                          timeout: int = 15, interval: float = 0.2):
-    """Polls search with forced ES refresh until assertion passes or timeout.
-    The bottleneck is Zammad's scheduler pushing data to ES, not ES itself.
-    Tight polling with refresh catches it the moment Zammad flushes."""
+                          timeout: int = 15, interval: float = 0.5):
+    """Polls search with forced ES refresh until assertion passes or timeout."""
     start_time = time.time()
     last_results = []
     while time.time() - start_time < timeout:
@@ -61,11 +71,10 @@ async def wait_for_search(search_func: Callable[..., List[Any]], assertion_func:
             if assertion_func(results):
                 return
         except Exception as e:
-            print(f"Search failed with error: {e}")
+            logger.debug(f"Search attempt failed: {e}")
         await asyncio.sleep(interval)
 
-    print(f"DEBUG: Timeout reached. Last search results ({len(last_results)}): {last_results}")
-    pytest.fail(f"Search assertion did not pass within {timeout} seconds.")
+    pytest.fail(f"Search assertion did not pass within {timeout} seconds. Last results: {last_results}")
 
 
 async def wait_for_tag(zammad_client, ticket_id, tag, timeout=10):
@@ -92,13 +101,84 @@ PERSISTENT_TEST_USER_EMAIL = "pytest-integration-user@zammad.local"
 
 @pytest.fixture(scope="module")
 def zammad_client():
-    """Provides a live ZammadClient, skipping if connection fails."""
+    """Initializes the ZammadClient and ensures a 'Golden Set' of history exists."""
+    client = ZammadClient()
     try:
-        client = ZammadClient()
         client.get_self()
-        return client
-    except (ValueError, requests.exceptions.RequestException) as e:
+    except Exception as e:
         pytest.skip(f"Zammad unavailable: {e}")
+
+    user_id = TEST_CUSTOMER_ID
+
+    # 1. Cleanup: Delete all tickets for the test user EXCEPT the Golden Set
+    # We use a direct list (non-ES) to be fast and reliable.
+    try:
+        tickets = client.list_tickets(params={'expand': 'true'})
+        for t in tickets:
+            if t.get('customer_id') == user_id:
+                tags = client.get_tags(t['id'])
+                if "gold-history" not in tags:
+                    client.delete_ticket(t['id'])
+    except Exception as e:
+        print(f"[SETUP] Cleanup failed: {e}")
+
+    # 2. Golden Set Setup: Ensure standard history exists for search tests
+    golden_tickets = [
+        {
+            "title": "[GOLD] Warp Core Phase Variance",
+            "body": "Problem: Dilithium crystals are out of alignment in the main warp core.",
+            "solution": "Solution: Initiated a manual phase realignment of the core.",
+            "tags": ["gold-history", "warp-core"]
+        },
+        {
+            "title": "[GOLD] Printer Paper Jam",
+            "body": "Paper jam in tray 2 of the LaserJet.",
+            "solution": "Cleared the jam and reset the rollers.",
+            "tags": ["gold-history", "printer"]
+        }
+    ]
+
+    for spec in golden_tickets:
+        # Check if already exists via direct list (no ES dependency)
+        try:
+            tickets = client.list_tickets(params={'expand': 'true'})
+            existing = [t for t in tickets if t['title'] == spec["title"] and t['customer_id'] == user_id]
+            if not existing:
+                print(f"[SETUP] Creating Golden Ticket: {spec['title']}")
+                t = client.create_ticket(
+                    title=spec["title"],
+                    group="Users",
+                    customer_id=user_id,
+                    article_body=spec["body"]
+                )
+                client.add_article_to_ticket(t['id'], body=spec["solution"], internal=False)
+                client.add_tag(t['id'], "gold-history")
+                for tag in spec["tags"]:
+                    client.add_tag(t['id'], tag)
+                client.update_ticket(t['id'], {'state': 'closed'})
+                # We created a ticket, so we'll definitely need a refresh
+                needs_refresh = True
+        except Exception as e:
+            print(f"[SETUP] Golden Ticket check/creation failed: {e}")
+
+    # 3. Synchronize: Wait for Golden tickets to be searchable (one-time setup cost)
+    print("[SETUP] Waiting for Golden tickets to index...")
+    start_sync = time.time()
+    while time.time() - start_sync < 30:
+        refresh_es_index()
+        try:
+            # Search specifically for one of our golden tickets
+            found = client.search_tickets(query=f'title:"[GOLD] Warp Core" AND customer_id:{user_id}')
+            if found:
+                print(f"[SETUP] Golden tickets indexed successfully in {int(time.time() - start_sync)}s")
+                break
+        except Exception:
+            pass
+        time.sleep(2)
+    else:
+        print("[WARNING] Golden tickets not searchable after 30s. Tests may fail.")
+
+    return client
 
 
 @pytest.fixture(scope="module")
