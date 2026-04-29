@@ -504,6 +504,20 @@ class KoboldAdapter:
             else:
                 user_text = self._find_last_user_content(data.get("messages") or []) or ""
 
+            # Extract sampling parameters from the OAI request for the local engine
+            local_inference_config = {
+                "temperature": data.get("temperature"),
+                "top_p": data.get("top_p"),
+                "top_k": data.get("top_k"),
+                "max_tokens": data.get("max_tokens") or data.get("max_completion_tokens"),
+                "stop_sequence": data.get("stop"),
+            }
+            # Kobold-specific extras (from kobold-lite's UI)
+            for k in ("rep_pen", "rep_pen_range", "rep_pen_slope",
+                      "min_p", "typical", "tfs", "max_context_length"):
+                if data.get(k) is not None:
+                    local_inference_config[k] = data[k]
+
             logger.info(
                 f"OAI chat -> stream_response (stream={is_stream}, "
                 f"retry={is_retry}, persona={persona_name}, "
@@ -519,6 +533,7 @@ class KoboldAdapter:
                     channel="web_ui",
                     message=user_text,
                     is_retry=is_retry,
+                    local_inference_config=local_inference_config,
                 ):
                     if isinstance(ev, DoneEvent):
                         full_text = ev.text
@@ -546,7 +561,9 @@ class KoboldAdapter:
                         channel="web_ui",
                         message=user_text,
                         is_retry=is_retry,
+                        local_inference_config=local_inference_config,
                     ):
+
                         if await request.is_disconnected():
                             return
                         if isinstance(ev, TokenEvent):

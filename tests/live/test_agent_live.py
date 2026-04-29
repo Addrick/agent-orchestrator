@@ -95,6 +95,26 @@ class _DiscordClientHolder:
 
         intents = discord.Intents.default()
         self.client = discord.Client(intents=intents)
+        
+        # Inject helper methods so the notifier pipeline can use this raw client
+        async def send_dm(user_id: int, content: str) -> bool:
+            try:
+                user = await self.client.fetch_user(user_id)
+                await user.send(content)
+                return True
+            except:
+                return False
+
+        async def send_to_channel(channel_id: int, content: str) -> bool:
+            try:
+                channel = self.client.get_channel(channel_id) or await self.client.fetch_channel(channel_id)
+                await channel.send(content)
+                return True
+            except:
+                return False
+
+        self.client.send_dm = send_dm
+        self.client.send_to_channel = send_to_channel
 
         @self.client.event
         async def on_ready():

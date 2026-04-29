@@ -207,14 +207,17 @@ class StreamEngine:
         if lic.get("stop_sequence"):
             extras["stop_sequence"] = list(lic["stop_sequence"])
 
-        def _override(key: str) -> Any:
-            return lic[key] if lic.get(key) is not None else persona_config.get(key)
+        def _override(key: str, fallback_key: Optional[str] = None) -> Any:
+            val = lic.get(key)
+            if val is not None:
+                return val
+            return persona_config.get(fallback_key or key)
 
         return GenerationParams(
             temperature=_override("temperature"),
             top_p=_override("top_p"),
             top_k=_override("top_k"),
-            max_tokens=persona_config.get("max_output_tokens"),
+            max_tokens=_override("max_tokens", "max_output_tokens"),
             provider_extras={"kobold": extras} if extras else {},
         )
 
@@ -300,6 +303,8 @@ class StreamEngine:
                         buf = buf[sep + 2:]
                         parsed = _parse_sse_event(raw)
                         if parsed is None:
+                            if raw.strip():
+                                logger.debug("Failed to parse SSE event: %r", raw)
                             continue
                         event_count += 1
                         etype, data = parsed
@@ -311,6 +316,9 @@ class StreamEngine:
                             visible = tool_parser.feed(token)
                             if visible:
                                 yield {"type": "text_delta", "text": visible}
+                        elif data.get("finish_reason") != "stop":
+                            # Log empty tokens that aren't terminal
+                            logger.debug("Received empty token in message event: %r", data)
                         if data.get("finish_reason") == "stop":
                             done = True
                     if done:

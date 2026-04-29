@@ -39,15 +39,8 @@ class DiscordNotifier(Notifier):
         self._client = discord_client
 
     async def send(self, recipient: str, subject: str, body: str) -> bool:
-        try:
-            user = await self._client.fetch_user(int(recipient))
-            message = f"**{subject}**\n{body}" if subject else body
-            await user.send(message)
-            logger.info(f"Discord DM sent to user {recipient}.")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to send Discord DM to {recipient}: {e}")
-            return False
+        full_content = f"**{subject}**\n{body}" if subject else body
+        return await self._client.send_dm(int(recipient), full_content)
 
 
 class DiscordChannelNotifier(Notifier):
@@ -57,15 +50,8 @@ class DiscordChannelNotifier(Notifier):
         self._client = discord_client
 
     async def send(self, recipient: str, subject: str, body: str) -> bool:
-        try:
-            channel = await self._client.fetch_channel(int(recipient))
-            message = f"**{subject}**\n{body}" if subject else body
-            await channel.send(message)
-            logger.info(f"Discord message sent to channel {recipient}.")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to send Discord message to channel {recipient}: {e}")
-            return False
+        full_content = f"**{subject}**\n{body}" if subject else body
+        return await self._client.send_to_channel(int(recipient), full_content)
 
 
 class ZammadNotifier(Notifier):

@@ -34,12 +34,11 @@
             "description": "Polls Zammad for new tickets and runs the multi-stage AI triage pipeline."
         },
         "reminder": {
-            "schedule": {"daily_at": "18:00"},
+            "schedule": {"daily_at": "17:00"},
             "auto_start": true,
-            "notification_defaults": {
-                "channel": "discord_dm",
-                "recipient": "adrich"
-            },
+            "notification_targets": [
+                {"channel": "discord_channel", "recipient": "client-tix"}
+            ],
             "description": "Polls Zammad for open tickets that haven't been updated and sends a summary nudge to Discord."
         }
     },
@@ -48,6 +47,10 @@
         "adrich": {
             "discord_user_id": "321783731146850305",
             "discord_username": "adrich",
+            "email": null
+        },
+        "client-tix": {
+            "discord_channel_id": "1498777752197796003",
             "email": null
         }
     },

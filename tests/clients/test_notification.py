@@ -8,6 +8,7 @@ from src.clients.notification import (
     ZammadNotifier,
     LogNotifier,
     NotificationRouter,
+    DiscordChannelNotifier
 )
 
 
@@ -23,39 +24,35 @@ class TestDiscordNotifier:
     @pytest.mark.asyncio
     async def test_successful_dm(self):
         mock_client = MagicMock()
-        mock_user = MagicMock()
-        mock_user.send = AsyncMock()
-        mock_client.fetch_user = AsyncMock(return_value=mock_user)
+        mock_client.send_dm = AsyncMock(return_value=True)
 
         notifier = DiscordNotifier(mock_client)
         result = await notifier.send("12345", "Alert", "Server is down")
 
         assert result is True
-        mock_client.fetch_user.assert_called_once_with(12345)
-        mock_user.send.assert_called_once_with("**Alert**\nServer is down")
+        mock_client.send_dm.assert_called_once_with(12345, "**Alert**\nServer is down")
 
     @pytest.mark.asyncio
     async def test_dm_without_subject(self):
         mock_client = MagicMock()
-        mock_user = MagicMock()
-        mock_user.send = AsyncMock()
-        mock_client.fetch_user = AsyncMock(return_value=mock_user)
+        mock_client.send_dm = AsyncMock(return_value=True)
 
         notifier = DiscordNotifier(mock_client)
         result = await notifier.send("12345", "", "Just a message")
 
         assert result is True
-        mock_user.send.assert_called_once_with("Just a message")
+        mock_client.send_dm.assert_called_once_with(12345, "Just a message")
 
     @pytest.mark.asyncio
     async def test_dm_failure(self):
         mock_client = MagicMock()
-        mock_client.fetch_user = AsyncMock(side_effect=Exception("User not found"))
+        mock_client.send_dm = AsyncMock(return_value=False)
 
         notifier = DiscordNotifier(mock_client)
         result = await notifier.send("99999", "Alert", "Body")
 
         assert result is False
+        mock_client.send_dm.assert_called_once()
 
 
 class TestZammadNotifier:
