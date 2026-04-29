@@ -127,6 +127,7 @@ class BotLogic:
                                                                        "remember <+prompt>, \n"
                                                                        "what prompt/model/models/personas/history/tokens/temp/top_p/top_k/execution_mode/tools/memory_mode/service_bindings/display_name/long_term_memory/include_ambient_memory/thinking_level, \n"
                                                                        "set prompt/model/history/tokens/temp/top_p/top_k/display_name/execution_mode/tools/memory_mode/service_bindings/long_term_memory/include_ambient_memory/thinking_level, \n"
+                                                                       "set <provider>.<key> <value> (e.g. 'set kobold.mirostat 2', 'set kobold.rep_pen none' to clear), \n"
                                                                        "add <persona>, \n"
                                                                        "delete <persona>, \n"
                                                                        "detail, \n"
@@ -359,7 +360,19 @@ class BotLogic:
         handler = self.what_handlers.get(sub_command)
         if handler:
             return handler(args, persona)
+        if '.' in sub_command:
+            return self._what_provider_extra(sub_command, persona)
         return None, False
+
+    @staticmethod
+    def _what_provider_extra(dotted: str, persona: Persona) -> Tuple[Optional[str], bool]:
+        provider, _, key = dotted.partition('.')
+        if not provider or not key:
+            return None, False
+        value = persona.get_provider_extra(provider, key)
+        if value is None:
+            return f"{provider}.{key} for '{persona.get_name()}' is not set.", False
+        return f"{provider}.{key} for '{persona.get_name()}' is {value!r}.", False
 
     def _what_prompt(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
         return f"Prompt for '{persona.get_name()}': {persona.get_prompt()}", False
@@ -465,7 +478,50 @@ class BotLogic:
                 result = set_handler(args, persona)
             return result
 
+        if '.' in sub_command:
+            return self._set_provider_extra(args, persona)
+
         return f"Error: Unknown 'set' command: {sub_command}", False
+
+    @staticmethod
+    def _set_provider_extra(args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
+        """Fallback dotted-path setter: `set <provider>.<key> <value>`.
+        Stores in persona.params.provider_extras[provider][key]. Phase E
+        of plans/portal_engine_reintegration.md."""
+        dotted = args[0]
+        provider, _, key = dotted.partition('.')
+        if not provider or not key:
+            return f"Error: Invalid dotted path '{dotted}'. Use '<provider>.<key>'.", False
+        if len(args) < 2:
+            return f"Usage: set {dotted} <value> (or 'none' to clear).", False
+
+        raw = args[1]
+        if raw in ('none', 'null', 'clear'):
+            cleared = persona.clear_provider_extra(provider, key)
+            if cleared:
+                return f"{provider}.{key} cleared for {persona.get_name()}.", True
+            return f"{provider}.{key} was not set for {persona.get_name()}.", False
+
+        value = BotLogic._coerce_extra_value(raw)
+        persona.set_provider_extra(provider, key, value)
+        return f"{provider}.{key} for {persona.get_name()} set to {value!r}.", True
+
+    @staticmethod
+    def _coerce_extra_value(raw: str) -> Any:
+        """Best-effort coerce an arg string into int/float/bool, fall back to str."""
+        try:
+            return int(raw)
+        except ValueError:
+            pass
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+        if raw in ('true', 'on', 'yes'):
+            return True
+        if raw in ('false', 'off', 'no'):
+            return False
+        return raw
 
     def _set_prompt(self, args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
         prompt: str = ' '.join(args[1:])

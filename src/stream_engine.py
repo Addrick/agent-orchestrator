@@ -54,12 +54,36 @@ CHAT_TEMPLATES: Dict[str, Dict[str, Any]] = {
 }
 
 
+def _template_from_instruct_tags(tags: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a CHAT_TEMPLATES-shape dict from raw kobold-lite instruct tag
+    strings (system_start/end, user_start/end, assistant_start/end). Stops
+    fall back to whatever closing tags were provided."""
+    sys_s = tags.get("system_start") or ""
+    sys_e = tags.get("system_end") or ""
+    usr_s = tags.get("user_start") or ""
+    usr_e = tags.get("user_end") or ""
+    ast_s = tags.get("assistant_start") or ""
+    ast_e = tags.get("assistant_end") or ""
+    stops = [s for s in (usr_s, ast_e, usr_e) if s]
+    return {
+        "system": (sys_s + "{content}" + sys_e) if (sys_s or sys_e) else "",
+        "user": usr_s + "{content}" + usr_e,
+        "assistant": ast_s + "{content}" + ast_e,
+        "assistant_start": ast_s,
+        "stop": stops,
+    }
+
+
 def _render_prompt(
     messages: List[Dict[str, Any]],
     template_name: str,
     inference_config: Optional[Dict[str, Any]] = None
 ) -> Tuple[str, List[str]]:
-    tpl = CHAT_TEMPLATES.get(template_name, CHAT_TEMPLATES["chatml"])
+    instruct_tags = (inference_config or {}).get("instruct_tags")
+    if isinstance(instruct_tags, dict) and any(instruct_tags.values()):
+        tpl = _template_from_instruct_tags(instruct_tags)
+    else:
+        tpl = CHAT_TEMPLATES.get(template_name, CHAT_TEMPLATES["chatml"])
 
     parts: List[str] = []
     deferred_system = ""
@@ -206,6 +230,14 @@ class StreamEngine:
                 extras[k] = lic[k]
         if lic.get("stop_sequence"):
             extras["stop_sequence"] = list(lic["stop_sequence"])
+
+        persona_kobold_extras = (persona_config.get("provider_extras") or {}).get("kobold") or {}
+        persona_tags = persona_kobold_extras.get("instruct_tags")
+        req_tags = lic.get("instruct_tags")
+        if isinstance(req_tags, dict) and any(req_tags.values()):
+            extras["instruct_tags"] = req_tags
+        elif isinstance(persona_tags, dict) and any(persona_tags.values()):
+            extras["instruct_tags"] = persona_tags
 
         def _override(key: str, fallback_key: Optional[str] = None) -> Any:
             val = lic.get(key)

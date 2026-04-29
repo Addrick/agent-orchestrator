@@ -216,9 +216,11 @@ class ChatSystem:
         if mode == MemoryMode.TICKET_ISOLATED:
             return [], "ticket"
         elif mode == MemoryMode.SERVER_WIDE:
-            if server_id:
-                return self.memory_manager.get_server_history(server_id, persona_name, effective_limit), "server"
-            return [], "server (unavailable)"
+            # SERVER_WIDE returns history for the specific server.
+            # If server_id is None (Web UI/local), we still query, as the DB
+            # stores these rows with server_id=NULL. MemoryManager handles
+            # the NULL check via IS NULL in its queries.
+            return self.memory_manager.get_server_history(server_id, persona_name, effective_limit), "server"
         elif mode == MemoryMode.PERSONAL:
             return self.memory_manager.get_personal_history(user_identifier, persona_name, effective_limit), "personal"
         elif mode == MemoryMode.GLOBAL:
@@ -490,19 +492,34 @@ class ChatSystem:
         # here would miss cross-channel turns. DB history is still used when no
         # client messages are present (Discord, Gmail, other bot callers).
         if ctx.client_messages:
-            fallback = list(ctx.client_messages)
+            fallback = []
+            for m in ctx.client_messages:
+                m_copy = dict(m)
+                content = m_copy.get("content", "")
+                if isinstance(content, str):
+                    # Strip kobold-lite internal placeholders used for dynamic templating.
+                    # These are injected by kobold_export.py but redundant for engine-side templating.
+                    content = content.replace("{{[INPUT]}}", "").replace("{{[OUTPUT]}}", "").strip()
+                    m_copy["content"] = content
+                fallback.append(m_copy)
+
             # Strip leading system message — engine re-injects from persona.
             if fallback and fallback[0].get("role") == "system":
                 fallback.pop(0)
             # Strip trailing assistant continuation prefix (continue_assistant_turn).
-            if fallback and fallback[-1].get("role") == "assistant":
+            if fallback and fallback[-1].get("role") == "assistant" and not fallback[-1].get("content"):
                 fallback.pop()
             # Strip trailing user message — engine will re-append from ctx.message.
             if fallback and fallback[-1].get("role") == "user":
-                fallback.pop()
+                # Ensure the fallback's last user matches current message to avoid double-appending
+                # if the client already included it in the array.
+                last_content = fallback[-1].get("content", "").strip()
+                if last_content == ctx.message.strip():
+                    fallback.pop()
+            
             ctx.conversation_history = fallback
             logger.info(
-                "_prepare_request: using %d client messages (kobold-lite history) "
+                "_prepare_request: using %d client messages (cleaned kobold-lite history) "
                 "for %s / %s — DB result (%d rows) discarded",
                 len(ctx.conversation_history), ctx.persona_name, ctx.channel,
                 len(ctx.conversation_history),

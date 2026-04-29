@@ -795,9 +795,14 @@ class MemoryManager:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
-            query = ("SELECT interaction_id, author_role, author_name, content, tool_context, reasoning_content FROM User_Interactions"
-                     " WHERE server_id = ? AND persona_name = ?" + self._SUPPRESSION_SUBQUERY)
-            params: List[Any] = [server_id, persona_name]
+            if server_id is not None:
+                query = ("SELECT interaction_id, author_role, author_name, content, tool_context, reasoning_content FROM User_Interactions"
+                         " WHERE server_id = ? AND persona_name = ?" + self._SUPPRESSION_SUBQUERY)
+                params: List[Any] = [server_id, persona_name]
+            else:
+                query = ("SELECT interaction_id, author_role, author_name, content, tool_context, reasoning_content FROM User_Interactions"
+                         " WHERE server_id IS NULL AND persona_name = ?" + self._SUPPRESSION_SUBQUERY)
+                params = [persona_name]
             query += " ORDER BY timestamp DESC"
             if isinstance(limit, int):
                 query += " LIMIT ?"

@@ -31,6 +31,7 @@ from src.clients.notification import (
 from src.interfaces.discord_bot import create_discord_bot
 from src.interfaces.gmail_bot import create_gmail_bot
 from src.interfaces.kobold_adapter import create_kobold_adapter
+from src.interfaces.kobold_engine_adapter import create_kobold_engine_adapter
 from config.global_config import (
     CHAT_LOG_LOCATION,
     DISCORD_BOT,
@@ -124,6 +125,13 @@ def _register_interfaces(
         # Configure the adapter's port from the config
         kobold_adapter.port = KOBOLD_PORT
         app.register_task("kobold_api", kobold_adapter.start())
+
+        # Also start the engine-orchestrated version on a parallel port
+        engine_port = KOBOLD_PORT + 1
+        logger.info(f"Initializing Kobold Engine API on port {engine_port}...")
+        engine_adapter = create_kobold_engine_adapter(bot)
+        engine_adapter.port = engine_port
+        app.register_task("kobold_engine_api", engine_adapter.start())
 
 
 def _register_agents(

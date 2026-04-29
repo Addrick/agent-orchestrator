@@ -238,3 +238,36 @@ def test_set_max_context_tokens_invalid_resets(base_persona_args, monkeypatch):
     p = Persona(**base_persona_args, max_context_tokens=8192)
     p.set_max_context_tokens("garbage")
     assert p.get_max_context_tokens() == 131072
+
+
+# --- provider_extras helpers (Phase E) ---
+
+def test_provider_extra_set_and_get(persona):
+    persona.set_provider_extra("kobold", "mirostat", 2)
+    assert persona.get_provider_extra("kobold", "mirostat") == 2
+    assert persona.get_generation_params().provider_extras == {"kobold": {"mirostat": 2}}
+
+
+def test_provider_extra_get_unset_returns_none(persona):
+    assert persona.get_provider_extra("kobold", "missing") is None
+    assert persona.get_provider_extra("nonexistent", "anything") is None
+
+
+def test_provider_extra_clear_existing_and_prunes_empty_block(persona):
+    persona.set_provider_extra("kobold", "rep_pen", 1.1)
+    assert persona.clear_provider_extra("kobold", "rep_pen") is True
+    assert persona.get_provider_extra("kobold", "rep_pen") is None
+    # block pruned when empty
+    assert "kobold" not in persona.get_generation_params().provider_extras
+
+
+def test_provider_extra_clear_missing_returns_false(persona):
+    assert persona.clear_provider_extra("kobold", "never_set") is False
+
+
+def test_provider_extra_clear_keeps_other_keys(persona):
+    persona.set_provider_extra("kobold", "a", 1)
+    persona.set_provider_extra("kobold", "b", 2)
+    persona.clear_provider_extra("kobold", "a")
+    assert persona.get_provider_extra("kobold", "b") == 2
+    assert persona.get_generation_params().provider_extras == {"kobold": {"b": 2}}

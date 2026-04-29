@@ -14,8 +14,10 @@ import uvicorn
 import asyncio
 
 from config import global_config
-from memory.context_budget import truncate_messages_to_budget
-from src.chat_system import ChatSystem
+from src.chat_system import (
+    ChatSystem, DoneEvent, ErrorEvent, TokenEvent,
+    ToolCallResultEvent, ToolCallStartEvent,
+)
 from src.interfaces.kobold_export import build_kobold_savefile
 from src.utils.model_utils import get_model_list
 from src.utils.save_utils import save_personas_to_file
@@ -31,25 +33,26 @@ def _kobold_base_url() -> str:
     return raw
 
 
-class KoboldAdapter:
-    """Verbatim-passthrough adapter between kobold-lite and local KoboldCPP.
+class KoboldEngineAdapter:
+    """HTTP boundary between kobold-lite and the DERPR engine.
 
-    Stage 1 scope: forward kobold-lite's rendered prompt + params directly to
-    KoboldCPP, relay SSE back unchanged. Persona sampling defaults are pushed
-    into lite's UI sliders by the frontend on persona switch, so server-side
-    merging is not needed. History Override / DB-driven prompt rebuild is
-    deferred pending the local-model tag-schema system.
-    See memory/project/decisions/2026-04-19-kobold-portal-passthrough.md.
+    Phase D split (2026-04-28): the OAI route (`/v1/chat/completions`) is a
+    thin SSE transcoder over `chat_system.stream_response` — engine rebuilds
+    history from DB, only `derpr_user_text` (or last-user fallback) drives
+    the user turn. The native route (`/api/extra/generate/stream`) and
+    `/api/v1/generate` remain verbatim passthrough to KoboldCPP because the
+    pre-rendered kobold prompt cannot be safely reconstructed from DB.
+    See decisions/2026-04-28-portal-engine-as-source-of-truth.md.
     """
 
-    def __init__(self, chat_system: ChatSystem, host: str = "0.0.0.0", port: int = 5002):
+    def __init__(self, chat_system: ChatSystem, host: str = "0.0.0.0", port: int = 5003):
         self.chat_system = chat_system
         self.host = host
         self.port = port
         self.active_persona: Optional[str] = None
-        self.app = FastAPI(title="DERPR Kobold Adapter")
+        self.app = FastAPI(title="DERPR Kobold Engine Adapter")
 
-        # CORS open ΓÇö required for lite.koboldai.net to reach a local instance.
+        # CORS open — required for lite.koboldai.net to reach a local instance.
         self.app.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],
@@ -114,6 +117,8 @@ class KoboldAdapter:
                 "thinking_level": p.get_thinking_level(),
                 "memory_mode": p.get_memory_mode().name,
                 "max_context_tokens": p.get_max_context_tokens(),
+                "chat_template": p.get_chat_template(),
+                "instruct_tags": p.get_provider_extra("kobold", "instruct_tags"),
             }
 
         @self.app.get("/api/v1/session/{persona}/ltm_block")
@@ -160,7 +165,7 @@ class KoboldAdapter:
         async def kobold_export(persona: str, max_turns: Optional[int] = None):
             """Build a kobold-lite savefile from DERPR's global history for `persona`.
 
-            Phase 2.1 always pulls global history (all channels) ΓÇö the portal has
+            Phase 2.1 always pulls global history (all channels) — the portal has
             no channel concept. max_turns defaults to the persona's configured
             sliding-window size (`get_base_history_messages`); no new config key.
             """
@@ -319,6 +324,14 @@ class KoboldAdapter:
                     rejected.append("memory_mode")
             if "max_context_tokens" in data:
                 p.set_max_context_tokens(data["max_context_tokens"])
+            if "chat_template" in data:
+                p.set_chat_template(data["chat_template"])
+            if "instruct_tags" in data:
+                tags = data["instruct_tags"]
+                if isinstance(tags, dict) and any(tags.values()):
+                    p.set_provider_extra("kobold", "instruct_tags", tags)
+                else:
+                    p.clear_provider_extra("kobold", "instruct_tags")
 
             try:
                 save_personas_to_file(self.chat_system.personas)
@@ -392,7 +405,7 @@ class KoboldAdapter:
 
             Logs the user turn from `prompt` on entry, then collects all SSE
             token deltas and commits the assembled assistant turn on [DONE].
-            Persona is selected by adapter.active_persona ΓÇö uniform with the
+            Persona is selected by adapter.active_persona — uniform with the
             OAI path; per-request `model` override is rejected.
             """
             data = await request.json()
@@ -484,155 +497,181 @@ class KoboldAdapter:
         @self.app.post("/chat/completions")
         @self.app.post("/v1/chat/completions")
         async def oai_chat_completions(request: Request):
+            """Thin SSE transcoder over `chat_system.stream_response`.
+
+            Phase D (2026-04-28): the engine is the single source of truth.
+            Client `data["messages"]` is discarded — history is rebuilt from
+            DB. Only `derpr_user_text` (or fallback last-user scan for
+            non-portal clients) drives the user turn. Retry/edit/delete
+            already round-trip via PATCH/DELETE/version routes, so DB == UI.
+            See decisions/2026-04-28-portal-engine-as-source-of-truth.md.
+            """
             data = await request.json()
             is_retry = bool(data.get("derpr_retry"))
             sidecar_user = data.get("derpr_user_text")
-            body = self._strip_envelope(data)
-            url = f"{_kobold_base_url()}/v1/chat/completions"
-            is_stream = bool(body.get("stream"))
+            is_stream = bool(data.get("stream"))
             persona_name = self._get_current_persona_name()
 
-            persona_obj = self.chat_system.personas.get(persona_name)
-            if persona_obj is not None and isinstance(body.get("messages"), list):
-                budget = persona_obj.get_max_context_tokens() - persona_obj.get_response_token_limit()
-                pruned, dropped = truncate_messages_to_budget(body["messages"], budget)
-                if dropped:
-                    logger.info(
-                        f"Token-prune: dropped {dropped} oldest messages to fit "
-                        f"max_context_tokens={persona_obj.get_max_context_tokens()} "
-                        f"(prompt_budget={budget}) for persona={persona_name}"
-                    )
-                body["messages"] = pruned
-
-            messages = body.get("messages", [])
-
-            logger.info(
-                f"OAI chat passthrough -> {url} "
-                f"(stream={is_stream}, msgs={len(messages)}, retry={is_retry})"
-            )
-
-            # Prefer the sidecar `derpr_user_text` field populated by the
-            # portal before the textbox clears. Fall back to scanning the
-            # messages array for backwards compatibility / non-portal clients.
-            # In jinja-hijack mode the messages array often contains zero
-            # user-role entries, so the sidecar is the authoritative source.
-            user_content: Optional[str] = None
             if isinstance(sidecar_user, str) and sidecar_user.strip():
-                user_content = sidecar_user
-                source = "sidecar"
+                user_text: str = sidecar_user
             else:
-                user_content = self._find_last_user_content(messages)
-                source = "messages"
-            role_tail = [m.get("role") for m in messages[-4:]]
+                user_text = self._find_last_user_content(data.get("messages") or []) or ""
+
+            # --- DEBUG: dump incoming messages so we can diagnose empty user_text ---
+            msgs_in = data.get("messages") or []
+            logger.warning(
+                "OAI /chat/completions DEBUG — "
+                "derpr_user_text=%r  user_text=%r  msg_count=%d  "
+                "roles=%s  continue_assistant_turn=%r",
+                sidecar_user,
+                user_text[:120] if user_text else "",
+                len(msgs_in),
+                [m.get("role") for m in msgs_in],
+                data.get("continue_assistant_turn"),
+            )
+            if msgs_in:
+                last = msgs_in[-1]
+                logger.warning(
+                    "OAI DEBUG last message — role=%r  content_type=%s  content_preview=%r",
+                    last.get("role"),
+                    type(last.get("content")).__name__,
+                    str(last.get("content"))[:200] if last.get("content") else None,
+                )
+            # --- END DEBUG ---
+
+            # Extract sampling parameters from the OAI request for the local engine
+            local_inference_config = {
+                "temperature": data.get("temperature"),
+                "top_p": data.get("top_p"),
+                "top_k": data.get("top_k"),
+                "max_tokens": data.get("max_tokens") or data.get("max_completion_tokens"),
+                "stop_sequence": data.get("stop"),
+            }
+            # Kobold-specific extras (from kobold-lite's UI)
+            for k in ("rep_pen", "rep_pen_range", "rep_pen_slope",
+                      "min_p", "typical", "tfs", "max_context_length"):
+                if data.get(k) is not None:
+                    local_inference_config[k] = data[k]
+
             logger.info(
-                f"OAI logging: persona={persona_name} role_tail={role_tail} "
-                f"source={source} user_content_len={len(user_content) if user_content else 0}"
+                f"OAI chat -> stream_response (stream={is_stream}, "
+                f"retry={is_retry}, persona={persona_name}, "
+                f"user_text_len={len(user_text)})"
             )
 
-            # Retry: archive prior assistant row, skip user-turn logging (user
-            # row is unchanged), UPDATE canonical assistant row on close.
-            retry_assistant_id: Optional[int] = None
-            user_interaction_id: Optional[int] = None
-            if is_retry:
-                retry_assistant_id = self.chat_system.memory_manager.handle_portal_retry(
+            if not is_stream:
+                full_text = ""
+                assistant_id: Optional[int] = None
+                async for ev in self.chat_system.stream_response(
                     persona_name=persona_name,
                     user_identifier="portal",
                     channel="web_ui",
-                )
-                if retry_assistant_id is None:
-                    logger.warning("derpr_retry=true but no prior assistant row found; falling back to new-turn path")
-            else:
-                if user_content:
-                    user_interaction_id = self._log_interaction(persona_name, "user", user_content)
-
-            if not is_stream:
-                try:
-                    r = await self._http.post(url, json=body)
-                    resp = r.json() if r.content else {}
-                    if r.status_code == 200 and resp.get("choices"):
-                        ai_msg = resp["choices"][0].get("message", {}).get("content")
-                        if ai_msg:
-                            self._commit_assistant(
-                                persona_name, ai_msg, user_interaction_id, retry_assistant_id
-                            )
-                    return JSONResponse(status_code=r.status_code, content=resp)
-                except httpx.RequestError as e:
-                    logger.error(f"OAI sync upstream failed: {e}")
-                    return JSONResponse(status_code=502, content={"error": str(e)})
+                    message=user_text,
+                    is_retry=is_retry,
+                    local_inference_config=local_inference_config,
+                    client_messages=msgs_in or None,
+                ):
+                    if isinstance(ev, DoneEvent):
+                        full_text = ev.text
+                        assistant_id = ev.assistant_id
+                    elif isinstance(ev, ErrorEvent):
+                        return JSONResponse(
+                            status_code=502,
+                            content={"error": {"message": ev.message}},
+                        )
+                return JSONResponse(content={
+                    "object": "chat.completion",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": full_text},
+                        "finish_reason": "stop",
+                    }],
+                    "derpr_assistant_id": assistant_id,
+                })
 
             async def relay() -> AsyncIterator[bytes]:
-                full_response: List[str] = []
-                full_reasoning: List[str] = []
-                done_seen = False
                 try:
-                    async with self._http.stream("POST", url, json=body) as upstream:
-                        async for chunk in upstream.aiter_raw():
-                            if await request.is_disconnected():
-                                return
-                            if not chunk:
-                                continue
-                            decoded = ""
-                            try:
-                                decoded = chunk.decode("utf-8")
-                                if decoded.startswith("data: "):
-                                    line = decoded[6:].strip()
-                                    if line and line != "[DONE]":
-                                        cdata = json.loads(line)
-                                        delta = cdata.get("choices", [{}])[0].get("delta", {})
-                                        
-                                        content = delta.get("content")
-                                        reasoning = delta.get("reasoning_content") or delta.get("reasoning")
-                                        
-                                        if reasoning:
-                                            full_reasoning.append(reasoning)
-                                        if content:
-                                            full_response.append(content)
-                            except Exception:
-                                pass
-                            # Inject `event: derpr` frame immediately before the
-                            # `[DONE]` chunk so the portal can hydrate chevrons
-                            # with the canonical assistant_id.
-                            if "[DONE]" in decoded and not done_seen:
-                                done_seen = True
-                                if full_response or full_reasoning:
-                                    aid = self._commit_assistant(
-                                        persona_name, "".join(full_response),
-                                        user_interaction_id, retry_assistant_id,
-                                        reasoning_content="".join(full_reasoning) if full_reasoning else None
-                                    )
-                                    if aid is not None:
-                                        frame = (
-                                            f"event: derpr\n"
-                                            f"data: {json.dumps({'assistant_id': aid, 'user_id': user_interaction_id})}\n\n"
-                                        )
-                                        yield frame.encode("utf-8")
-                            yield chunk
+                    async for ev in self.chat_system.stream_response(
+                        persona_name=persona_name,
+                        user_identifier="portal",
+                        channel="web_ui",
+                        message=user_text,
+                        is_retry=is_retry,
+                        local_inference_config=local_inference_config,
+                        client_messages=msgs_in or None,
+                    ):
 
-                    # Fallback commit: upstream closed without emitting [DONE]
-                    # (e.g. truncated response). No derpr frame in this path.
-                    if (full_response or full_reasoning) and not done_seen:
-                        self._commit_assistant(
-                            persona_name, "".join(full_response),
-                            user_interaction_id, retry_assistant_id,
-                            reasoning_content="".join(full_reasoning) if full_reasoning else None
-                        )
-
-                except httpx.RequestError as e:
-                    logger.error(f"OAI stream upstream failed: {e}")
-                    err = json.dumps({"error": {"message": str(e)}})
-                    yield f"data: {err}\n\ndata: [DONE]\n\n".encode("utf-8")
+                        if await request.is_disconnected():
+                            return
+                        if isinstance(ev, TokenEvent):
+                            chunk = json.dumps({
+                                "object": "chat.completion.chunk",
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {"content": ev.delta},
+                                }],
+                            })
+                            yield f"data: {chunk}\n\n".encode("utf-8")
+                        elif isinstance(ev, ToolCallStartEvent):
+                            payload = json.dumps({
+                                "tool_name": ev.tool_name,
+                                "arguments": ev.arguments,
+                                "call_id": ev.call_id,
+                            })
+                            yield f"event: derpr-tool-start\ndata: {payload}\n\n".encode("utf-8")
+                            # Inline visual block for kobold-lite: open a
+                            # `<think>` block (rendered by the portal as a
+                            # `<details>` collapsible). Closes on the
+                            # matching ToolCallResultEvent. Sequential
+                            # call assumption — parallel calls would need
+                            # call_id-tagged blocks (sibling plan work).
+                            inline_open = (
+                                f"\n\n<think>\n🔧 **{ev.tool_name}**\n"
+                                f"Arguments: `{json.dumps(ev.arguments)}`\n"
+                            )
+                            chunk = json.dumps({
+                                "object": "chat.completion.chunk",
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {"content": inline_open},
+                                }],
+                            })
+                            yield f"data: {chunk}\n\n".encode("utf-8")
+                        elif isinstance(ev, ToolCallResultEvent):
+                            payload = json.dumps({
+                                "call_id": ev.call_id,
+                                "tool_name": ev.tool_name,
+                                "result": ev.result,
+                                "error": ev.error,
+                            })
+                            yield f"event: derpr-tool-result\ndata: {payload}\n\n".encode("utf-8")
+                            result_label = "Error" if ev.error else "Result"
+                            result_body = ev.error if ev.error else ev.result
+                            inline_close = (
+                                f"\n{result_label}: `{result_body}`\n</think>\n\n"
+                            )
+                            chunk = json.dumps({
+                                "object": "chat.completion.chunk",
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {"content": inline_close},
+                                }],
+                            })
+                            yield f"data: {chunk}\n\n".encode("utf-8")
+                        elif isinstance(ev, DoneEvent):
+                            if ev.assistant_id is not None:
+                                frame = (
+                                    f"event: derpr\n"
+                                    f"data: {json.dumps({'assistant_id': ev.assistant_id, 'user_id': ev.user_interaction_id})}\n\n"
+                                )
+                                yield frame.encode("utf-8")
+                            yield b"data: [DONE]\n\n"
+                        elif isinstance(ev, ErrorEvent):
+                            err = json.dumps({"error": {"message": ev.message}})
+                            yield f"data: {err}\n\n".encode("utf-8")
+                            yield b"data: [DONE]\n\n"
                 except asyncio.CancelledError:
-                    # Flush partial output before forwarding abort upstream.
-                    if full_response or full_reasoning:
-                        self._commit_assistant(
-                            persona_name, "".join(full_response),
-                            user_interaction_id, retry_assistant_id,
-                            reasoning_content="".join(full_reasoning) if full_reasoning else None
-                        )
-                    try:
-                        await self._http.post(f"{_kobold_base_url()}/api/extra/abort", json={})
-                    except Exception:
-                        pass
+                    # Engine kernel flushes the partial assistant row on cancel.
                     raise
 
             return StreamingResponse(
@@ -665,7 +704,7 @@ class KoboldAdapter:
     def _log_interaction(self, persona_name: str, role: str, content: str) -> Optional[int]:
         """Log an interaction synchronously and return its interaction_id.
 
-        Synchronous call ΓÇö MemoryManager.log_message is a fast SQLite insert
+        Synchronous call — MemoryManager.log_message is a fast SQLite insert
         under a thread lock. Return value lets callers thread reply_to_id.
         """
         if not content or not content.strip():
@@ -731,15 +770,6 @@ class KoboldAdapter:
             logger.warning(f"Forward POST {path} failed: {e}")
             return JSONResponse(status_code=502, content={"error": str(e)})
 
-    @staticmethod
-    def _strip_envelope(data: Dict[str, Any]) -> Dict[str, Any]:
-        """Remove DERPR-only routing fields before forwarding to KoboldCPP."""
-        out = dict(data)
-        out.pop("model", None)  # our persona selector, not kobold's
-        out.pop("derpr_retry", None)  # portal regen signal, not for upstream
-        out.pop("derpr_user_text", None)  # portal sidecar for user logging
-        return out
-
     def _get_current_persona_name(self) -> str:
         if self.active_persona and self.active_persona in self.chat_system.personas:
             return self.active_persona
@@ -749,7 +779,7 @@ class KoboldAdapter:
         return next(iter(self.chat_system.personas.keys()), "assistant")
 
     async def start(self):
-        logger.info(f"Starting Kobold Adapter on http://{self.host}:{self.port}")
+        logger.info(f"Starting Kobold Engine Adapter on http://{self.host}:{self.port}")
         config = uvicorn.Config(self.app, host=self.host, port=self.port, log_level="warning")
         server = uvicorn.Server(config)
         try:
@@ -758,5 +788,5 @@ class KoboldAdapter:
             await self._http.aclose()
 
 
-def create_kobold_adapter(chat_system: ChatSystem) -> KoboldAdapter:
-    return KoboldAdapter(chat_system)
+def create_kobold_engine_adapter(chat_system: ChatSystem) -> KoboldEngineAdapter:
+    return KoboldEngineAdapter(chat_system)
