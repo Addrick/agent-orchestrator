@@ -795,19 +795,6 @@ async def test_stream_response_dev_command_skips_token_events(chat_system_with_m
     assert events[0].response_type == ResponseType.DEV_COMMAND
 
 
-@pytest.mark.asyncio
-async def test_stream_response_refuses_tool_enabled_persona(chat_system_with_mocks):
-    """v1 policy: stream_response refuses any persona with enabled_tools."""
-    system, _, text_engine, persona, _ = chat_system_with_mocks
-    persona.set_enabled_tools(['*'])
-
-    events = await _drain_events(
-        system.stream_response("test_persona", "user", "channel", "hi")
-    )
-    assert len(events) == 1
-    assert isinstance(events[0], ErrorEvent)
-    assert "tool-enabled" in events[0].message
-    text_engine.generate_response.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -868,11 +868,7 @@ class ChatSystem:
         and tool-call-in-stream design land later (see plan Phase C/Future).
         """
         persona = self.personas.get(persona_name)
-        if persona is not None and persona.get_enabled_tools():
-            yield ErrorEvent(
-                message="stream_response does not support tool-enabled personas yet"
-            )
-            return
+
         async for ev in self._orchestrate(
             persona_name=persona_name,
             user_identifier=user_identifier,

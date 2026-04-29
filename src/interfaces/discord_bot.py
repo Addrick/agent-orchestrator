@@ -37,6 +37,42 @@ class CustomDiscordBot(discord.Client):
         super().__init__(*args, **kwargs)
         self.chat_system: ChatSystem = chat_system
 
+    async def send_dm(self, user_id: int, content: str) -> bool:
+        """Sends a message to a user via DM, with automatic chunking."""
+        try:
+            # Ensure the bot is connected before checking mutual guilds
+            await self.wait_until_ready()
+            
+            # Try cache first, then API
+            user = self.get_user(user_id) or await self.fetch_user(user_id)
+            
+            if not user:
+                logger.error(f"Could not find user {user_id} in cache or API.")
+                return False
+
+            chunks = split_string_by_limit(content, DISCORD_CHAR_LIMIT)
+            for chunk in chunks:
+                await user.send(chunk)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send DM to {user_id}: {e}")
+            return False
+
+    async def send_to_channel(self, channel_id: int, content: str) -> bool:
+        """Sends a message to a specific channel, with automatic chunking."""
+        try:
+            # Ensure the bot is connected
+            await self.wait_until_ready()
+            
+            channel = await self.fetch_channel(channel_id)
+            chunks = split_string_by_limit(content, DISCORD_CHAR_LIMIT)
+            for chunk in chunks:
+                await channel.send(chunk)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send message to channel {channel_id}: {e}")
+            return False
+
 
 async def get_image_url(message: discord.Message) -> Optional[str]:
     if message.attachments:
@@ -123,6 +159,7 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
     intents = discord.Intents.default()
     intents.message_content = True
     intents.messages = True  # Required for on_message_delete
+    intents.members = True   # Required for verifying mutual guilds for DMs
     client = CustomDiscordBot(chat_system, intents=intents)
 
     discord_client_logger = logging.getLogger('discord.client')
@@ -131,7 +168,9 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
 
     @client.event
     async def on_ready() -> None:
+        guild_names = [g.name for g in client.guilds]
         logger.info(f'Logged in as {client.user}!')
+        logger.info(f'Bot is currently in {len(client.guilds)} guilds: {", ".join(guild_names)}')
         await reset_discord_status(client, chat_system)
 
     @client.event

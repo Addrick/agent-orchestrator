@@ -21,7 +21,12 @@ from src.agents.dispatch_agent import DispatchAgent
 from src.agents.memory_agent import MemoryAgent
 from src.agents.zammad_bot import ZammadBot
 from src.agents.reminder_agent import ReminderAgent
-from src.clients.notification import NotificationRouter, DiscordNotifier, ZammadNotifier
+from src.clients.notification import (
+    NotificationRouter,
+    DiscordNotifier,
+    DiscordChannelNotifier,
+    ZammadNotifier
+)
 
 from src.interfaces.discord_bot import create_discord_bot
 from src.interfaces.gmail_bot import create_gmail_bot
@@ -104,7 +109,8 @@ def _register_interfaces(
         if not discord_token:
             logger.error("DISCORD_API_KEY not set. Cannot start Discord bot.")
         else:
-            notification_router.register("discord", DiscordNotifier(discord_bot))
+            notification_router.register("discord_dm", DiscordNotifier(discord_bot))
+            notification_router.register("discord_channel", DiscordChannelNotifier(discord_bot))
             app.register_task("discord", discord_bot.start(discord_token))
 
     if GMAIL_BOT:
