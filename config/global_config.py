@@ -139,7 +139,6 @@ TOOL_SELECTOR_PERSONA_NAME = "tool_selector"
 # =============================================================================
 # --- Zammad Bot Configuration ---
 # =============================================================================
-ZAMMAD_BOT_ENABLED = os.environ.get("ZAMMAD_BOT_ENABLED", "false").lower() == "true"
 ZAMMAD_POLL_INTERVAL = 10
 ZAMMAD_TRIAGE_TAG = "autotriaged"
 TRIAGE_GLOBAL_HISTORY_COUNT = 5
@@ -159,7 +158,6 @@ ZAMMAD_BOT_LASTNAME = "LLM"
 # =============================================================================
 # --- Dispatch Agent Configuration ---
 # =============================================================================
-DISPATCH_ENABLED = os.environ.get("DISPATCH_ENABLED", "false").lower() == "true"
 DISPATCH_POLL_INTERVAL = 30
 DISPATCH_TRIAGE_TAG = ZAMMAD_TRIAGE_TAG  # tickets must have this tag
 DISPATCH_DISPATCHED_TAG = "ai_dispatched"  # tag applied after dispatch
@@ -168,7 +166,6 @@ DISPATCH_PERSONA_NAME = "dispatch_analyst"
 # =============================================================================
 # --- Reminder Agent Configuration ---
 # =============================================================================
-REMINDER_ENABLED = os.environ.get("REMINDER_ENABLED", "false").lower() == "true"
 REMINDER_POLL_INTERVAL = 3600  # Default to 1 hour
 REMINDER_STALE_THRESHOLD_HOURS = 24
 REMINDER_SENT_TAG = "ai_reminder_sent"
