@@ -159,6 +159,13 @@ class ZammadClient:
             params['order_by'] = order_by
         return self._make_request('get', 'tickets/search', params=params)
 
+    def list_tickets(self, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """
+        Lists tickets directly from the database (non-search).
+        Useful for immediate verification after creation.
+        """
+        return self._make_request('get', 'tickets', params=params)
+
     # --- User Methods ---
 
     def get_self(self) -> Dict[str, Any]:
