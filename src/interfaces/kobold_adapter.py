@@ -14,7 +14,10 @@ import uvicorn
 import asyncio
 
 from config import global_config
-from src.chat_system import ChatSystem, DoneEvent, ErrorEvent, TokenEvent
+from src.chat_system import (
+    ChatSystem, DoneEvent, ErrorEvent, TokenEvent,
+    ToolCallResultEvent, ToolCallStartEvent,
+)
 from src.interfaces.kobold_export import build_kobold_savefile
 from src.utils.model_utils import get_model_list
 from src.utils.save_utils import save_personas_to_file
@@ -114,6 +117,7 @@ class KoboldAdapter:
                 "thinking_level": p.get_thinking_level(),
                 "memory_mode": p.get_memory_mode().name,
                 "max_context_tokens": p.get_max_context_tokens(),
+                "chat_template": p.get_chat_template(),
             }
 
         @self.app.get("/api/v1/session/{persona}/ltm_block")
@@ -319,6 +323,8 @@ class KoboldAdapter:
                     rejected.append("memory_mode")
             if "max_context_tokens" in data:
                 p.set_max_context_tokens(data["max_context_tokens"])
+            if "chat_template" in data:
+                p.set_chat_template(data["chat_template"])
 
             try:
                 save_personas_to_file(self.chat_system.personas)
@@ -504,6 +510,28 @@ class KoboldAdapter:
             else:
                 user_text = self._find_last_user_content(data.get("messages") or []) or ""
 
+            # --- DEBUG: dump incoming messages so we can diagnose empty user_text ---
+            msgs_in = data.get("messages") or []
+            logger.warning(
+                "OAI /chat/completions DEBUG — "
+                "derpr_user_text=%r  user_text=%r  msg_count=%d  "
+                "roles=%s  continue_assistant_turn=%r",
+                sidecar_user,
+                user_text[:120] if user_text else "",
+                len(msgs_in),
+                [m.get("role") for m in msgs_in],
+                data.get("continue_assistant_turn"),
+            )
+            if msgs_in:
+                last = msgs_in[-1]
+                logger.warning(
+                    "OAI DEBUG last message — role=%r  content_type=%s  content_preview=%r",
+                    last.get("role"),
+                    type(last.get("content")).__name__,
+                    str(last.get("content"))[:200] if last.get("content") else None,
+                )
+            # --- END DEBUG ---
+
             # Extract sampling parameters from the OAI request for the local engine
             local_inference_config = {
                 "temperature": data.get("temperature"),
@@ -534,6 +562,7 @@ class KoboldAdapter:
                     message=user_text,
                     is_retry=is_retry,
                     local_inference_config=local_inference_config,
+                    client_messages=msgs_in or None,
                 ):
                     if isinstance(ev, DoneEvent):
                         full_text = ev.text
@@ -562,6 +591,7 @@ class KoboldAdapter:
                         message=user_text,
                         is_retry=is_retry,
                         local_inference_config=local_inference_config,
+                        client_messages=msgs_in or None,
                     ):
 
                         if await request.is_disconnected():
@@ -572,6 +602,52 @@ class KoboldAdapter:
                                 "choices": [{
                                     "index": 0,
                                     "delta": {"content": ev.delta},
+                                }],
+                            })
+                            yield f"data: {chunk}\n\n".encode("utf-8")
+                        elif isinstance(ev, ToolCallStartEvent):
+                            payload = json.dumps({
+                                "tool_name": ev.tool_name,
+                                "arguments": ev.arguments,
+                                "call_id": ev.call_id,
+                            })
+                            yield f"event: derpr-tool-start\ndata: {payload}\n\n".encode("utf-8")
+                            # Inline visual block for kobold-lite: open a
+                            # `<think>` block (rendered by the portal as a
+                            # `<details>` collapsible). Closes on the
+                            # matching ToolCallResultEvent. Sequential
+                            # call assumption — parallel calls would need
+                            # call_id-tagged blocks (sibling plan work).
+                            inline_open = (
+                                f"\n\n<think>\n🔧 **{ev.tool_name}**\n"
+                                f"Arguments: `{json.dumps(ev.arguments)}`\n"
+                            )
+                            chunk = json.dumps({
+                                "object": "chat.completion.chunk",
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {"content": inline_open},
+                                }],
+                            })
+                            yield f"data: {chunk}\n\n".encode("utf-8")
+                        elif isinstance(ev, ToolCallResultEvent):
+                            payload = json.dumps({
+                                "call_id": ev.call_id,
+                                "tool_name": ev.tool_name,
+                                "result": ev.result,
+                                "error": ev.error,
+                            })
+                            yield f"event: derpr-tool-result\ndata: {payload}\n\n".encode("utf-8")
+                            result_label = "Error" if ev.error else "Result"
+                            result_body = ev.error if ev.error else ev.result
+                            inline_close = (
+                                f"\n{result_label}: `{result_body}`\n</think>\n\n"
+                            )
+                            chunk = json.dumps({
+                                "object": "chat.completion.chunk",
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {"content": inline_close},
                                 }],
                             })
                             yield f"data: {chunk}\n\n".encode("utf-8")

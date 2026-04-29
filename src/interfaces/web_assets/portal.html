@@ -32662,9 +32662,12 @@ Current version indicated by LITEVER below.
 				if (line.startsWith('event: ')) ev = line.slice(7).trim();
 				else if (line.startsWith('data: ')) dataParts.push(line.slice(6));
 			}
-			if (ev !== 'derpr' || !dataParts.length) return;
-			try {
-				const payload = JSON.parse(dataParts.join('\n'));
+			if (!dataParts.length) return;
+			let payload;
+			try { payload = JSON.parse(dataParts.join('\n')); }
+			catch (e) { return; /* malformed frame — ignore */ }
+
+			if (ev === 'derpr') {
 				if (payload.assistant_id) {
 					_derprHydrateVersions(payload.assistant_id);
 					// If we have a user_id, it's a new turn (User + Assistant)
@@ -32676,7 +32679,39 @@ Current version indicated by LITEVER below.
 						window.derpr_interaction_ids[window.derpr_interaction_ids.length - 1] = payload.assistant_id;
 					}
 				}
-			} catch (e) { /* malformed frame — ignore */ }
+				return;
+			}
+
+			// Tool-call lifecycle (tool_revamp_v1 Phase 4). The visible
+			// `<details>` block is rendered inline via `<think>` chunks
+			// emitted on the OAI delta stream — this hook just exposes
+			// the structured payload for any portal-aware listener and
+			// keeps a per-call_id record on window for diagnostics.
+			if (ev === 'derpr-tool-start' || ev === 'derpr-tool-result') {
+				window.derpr_tool_calls = window.derpr_tool_calls || {};
+				const cid = payload.call_id;
+				if (cid) {
+					if (ev === 'derpr-tool-start') {
+						window.derpr_tool_calls[cid] = {
+							tool_name: payload.tool_name,
+							arguments: payload.arguments,
+							status: 'in_progress',
+						};
+					} else {
+						const entry = window.derpr_tool_calls[cid] || {};
+						entry.result = payload.result;
+						entry.error = payload.error;
+						entry.status = payload.error ? 'error' : 'done';
+						window.derpr_tool_calls[cid] = entry;
+					}
+				}
+				const hookName = ev === 'derpr-tool-start'
+					? 'derprOnToolStart' : 'derprOnToolResult';
+				if (typeof window[hookName] === 'function') {
+					try { window[hookName](payload); }
+					catch (e) { console.warn(`${hookName} hook failed:`, e); }
+				}
+			}
 		}
 	})();
 

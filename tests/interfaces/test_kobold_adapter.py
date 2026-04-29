@@ -367,6 +367,68 @@ def test_handle_portal_retry_returns_none_when_no_prior_assistant():
     mm.close()
 
 
+def test_chat_completions_stream_emits_derpr_tool_frames():
+    """tool_revamp_v1 Phase 3: portal SSE relay forwards
+    `event: derpr-tool-start` / `event: derpr-tool-result` for tool calls."""
+    call_count = {"n": 0}
+
+    async def stream_messages(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            yield {"type": "api_payload", "payload": {}}
+            yield {"type": "tool_calls", "calls": [
+                {"id": "call_42", "name": "search_tickets",
+                 "arguments": {"query": "open"}}
+            ]}
+            yield {"type": "done", "full_text": ""}
+        else:
+            yield {"type": "api_payload", "payload": {}}
+            yield {"type": "text_delta", "text": "done!"}
+            yield {"type": "done", "full_text": "done!"}
+
+    adapter, mm, persona, chat_system = _make_real_adapter(
+        stream_messages=stream_messages,
+    )
+    persona.set_enabled_tools(["*"])
+    chat_system.tool_manager.execute_tool = AsyncMock(
+        return_value={"result": [{"id": 7}]},
+    )
+
+    body = _chat_body("find open tickets", stream=True)
+    body["derpr_user_text"] = "find open tickets"
+    with TestClient(adapter.app) as client:
+        with client.stream("POST", "/chat/completions", json=body) as r:
+            raw = b"".join(chunk for chunk in r.iter_raw())
+
+    text = raw.decode("utf-8")
+    # Tool-start frame uses the new event name and carries call_id + args.
+    start_match = re.search(
+        r"event: derpr-tool-start\ndata: (\{.*?\})\n\n", text,
+    )
+    assert start_match is not None, f"missing derpr-tool-start in:\n{text}"
+    start_payload = json.loads(start_match.group(1))
+    assert start_payload["tool_name"] == "search_tickets"
+    assert start_payload["call_id"] == "call_42"
+    assert start_payload["arguments"] == {"query": "open"}
+
+    result_match = re.search(
+        r"event: derpr-tool-result\ndata: (\{.*?\})\n\n", text,
+    )
+    assert result_match is not None, f"missing derpr-tool-result in:\n{text}"
+    result_payload = json.loads(result_match.group(1))
+    assert result_payload["call_id"] == "call_42"
+    assert result_payload["error"] is None
+    # Inner result string is the json-serialized tool_manager output.
+    assert json.loads(result_payload["result"]) == {"result": [{"id": 7}]}
+
+    # Frame ordering: start before result, both before [DONE].
+    start_pos = text.index("event: derpr-tool-start")
+    result_pos = text.index("event: derpr-tool-result")
+    done_pos = text.index("[DONE]")
+    assert start_pos < result_pos < done_pos
+    mm.close()
+
+
 def test_chat_completions_stream_abort_flushes_partial():
     async def stream_messages_then_cancel(*args, **kwargs):
         yield {"type": "api_payload", "payload": {}}
@@ -915,3 +977,242 @@ def test_kobold_export_excludes_suppressed_row():
 # `<think>` blocks inline rather than as a structured `reasoning_content`
 # field. Reasoning extraction can be revisited if/when an engine-side
 # parser is added.
+
+
+# -------- Wire-fidelity: kobold-native passthrough prompt integrity --------
+#
+# These tests verify that /api/extra/generate/stream forwards the incoming
+# kobold-ui payload to KoboldCPP unmodified — instruct tags, history,
+# generation parameters — and only strips the `model` field (DERPR's
+# persona selector, which must not leak upstream).
+#
+# Strategy: monkeypatch `adapter._http.stream` with a capturing context
+# manager, then compare the intercepted `json=` body to the original
+# request payload field-by-field.
+
+
+class _CapturingStreamCtx:
+    """Fake httpx.stream context that records its `json=` kwarg and returns
+    a single [DONE] event so the relay_stream generator terminates cleanly.
+    """
+
+    def __init__(self):
+        self.captured_body: dict = {}
+
+    def __call__(self, method, url, json=None, **kw):
+        self.captured_body = json or {}
+        return self
+
+    async def __aenter__(self):
+        resp = MagicMock()
+
+        async def _aiter_raw():
+            yield b"data: [DONE]\n\n"
+
+        resp.aiter_raw = _aiter_raw
+        return resp
+
+    async def __aexit__(self, *a):
+        return False
+
+
+def _make_rich_kobold_payload(**overrides) -> dict:
+    """Realistic kobold-ui payload with instruct tags embedded in the prompt
+    and a full suite of generation parameters — mirrors what kobold-lite
+    sends when submitting a chat turn through the native stream endpoint.
+    """
+    prompt = (
+        "### System:\nYou are a helpful assistant.\n\n"
+        "### User:\nHello, can you recap our conversation?\n\n"
+        "### Response:\nOf course! Here is what we discussed:\n\n"
+        "### User:\nWhat did we say about dragons?\n\n"
+        "### Response:\n"  # trailing generation cursor — must be preserved verbatim
+    )
+    payload = {
+        "prompt": prompt,
+        "max_length": 200,
+        "max_context_length": 4096,
+        "temperature": 0.72,
+        "top_p": 0.9,
+        "top_k": 40,
+        "rep_pen": 1.1,
+        "rep_pen_range": 512,
+        "stop_sequence": ["### User:", "### System:"],
+        "stream": True,
+        "trim_stop": True,
+        "quiet": True,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_generate_stream_forwards_prompt_verbatim(monkeypatch):
+    """The raw `prompt` string — instruct tags, history turns, trailing cursor
+    — must arrive at KoboldCPP byte-for-byte identical to what kobold-ui sent.
+    """
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    ctx = _CapturingStreamCtx()
+    monkeypatch.setattr(adapter._http, "stream", ctx)
+
+    payload = _make_rich_kobold_payload()
+
+    with TestClient(adapter.app) as client:
+        r = client.post("/api/extra/generate/stream", json=payload)
+    assert r.status_code == 200
+
+    assert ctx.captured_body["prompt"] == payload["prompt"], (
+        "Prompt was mutated before forwarding to KoboldCPP!\n"
+        f"sent:     {payload['prompt']!r}\n"
+        f"received: {ctx.captured_body['prompt']!r}"
+    )
+    mm.close()
+
+
+def test_generate_stream_forwards_all_generation_params_intact(monkeypatch):
+    """Every generation parameter (temperature, top_p, top_k, rep_pen, etc.)
+    must pass through to KoboldCPP unchanged.
+    """
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    ctx = _CapturingStreamCtx()
+    monkeypatch.setattr(adapter._http, "stream", ctx)
+
+    payload = _make_rich_kobold_payload()
+    gen_params = [
+        "max_length", "max_context_length", "temperature",
+        "top_p", "top_k", "rep_pen", "rep_pen_range",
+        "stop_sequence", "trim_stop", "quiet",
+    ]
+
+    with TestClient(adapter.app) as client:
+        client.post("/api/extra/generate/stream", json=payload)
+
+    for key in gen_params:
+        assert key in ctx.captured_body, f"Generation param {key!r} missing from forwarded body"
+        assert ctx.captured_body[key] == payload[key], (
+            f"Generation param {key!r} was mutated!\n"
+            f"sent:     {payload[key]!r}\n"
+            f"received: {ctx.captured_body[key]!r}"
+        )
+    mm.close()
+
+
+def test_generate_stream_strips_only_model_field(monkeypatch):
+    """The `model` field (DERPR's persona selector) must be stripped from the
+    forwarded body — all other fields including unknown/extra keys must pass
+    through untouched.  This is the one intentional transformation the relay
+    makes to the kobold-ui payload.
+    """
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    ctx = _CapturingStreamCtx()
+    monkeypatch.setattr(adapter._http, "stream", ctx)
+
+    payload = _make_rich_kobold_payload(model="test_persona", extra_custom_field="keep_me")
+
+    with TestClient(adapter.app) as client:
+        r = client.post("/api/extra/generate/stream", json=payload)
+    assert r.status_code == 200
+
+    assert "model" not in ctx.captured_body, (
+        "The `model` field leaked to KoboldCPP; it should be stripped by the relay"
+    )
+    assert ctx.captured_body.get("extra_custom_field") == "keep_me", (
+        "A non-model field was unexpectedly dropped from the forwarded body"
+    )
+    mm.close()
+
+
+def test_generate_stream_payload_contains_no_extra_fields_beyond_input(monkeypatch):
+    """The forwarded body must not contain fields that were not in the
+    original kobold-ui request (derpr must not inject new keys).  Only the
+    `model` strip is allowed; no additions.
+    """
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    ctx = _CapturingStreamCtx()
+    monkeypatch.setattr(adapter._http, "stream", ctx)
+
+    payload = _make_rich_kobold_payload()
+
+    with TestClient(adapter.app) as client:
+        client.post("/api/extra/generate/stream", json=payload)
+
+    expected_keys = {k for k in payload if k != "model"}
+    forwarded_keys = set(ctx.captured_body.keys())
+
+    injected = forwarded_keys - expected_keys
+    assert not injected, (
+        f"DERPR injected unexpected keys into the forwarded payload: {injected}"
+    )
+    mm.close()
+
+
+def test_generate_stream_instruct_tags_preserved_in_prompt(monkeypatch):
+    """Instruct-format tags embedded in the prompt must not be escaped,
+    stripped, or reordered.  This guards against any accidental sanitisation
+    that would break the kobold-lite jinja template output.
+    """
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    ctx = _CapturingStreamCtx()
+    monkeypatch.setattr(adapter._http, "stream", ctx)
+
+    instruct_tags = [
+        "### System:\n",
+        "### User:\n",
+        "### Response:\n",
+        "<|im_start|>system\n",
+        "<|im_end|>\n",
+        "<|im_start|>user\n",
+        "[INST]",
+        "[/INST]",
+    ]
+    # Build a prompt containing all common tag styles
+    prompt = "".join(instruct_tags) + "answer here\n\n### Response:\n"
+    payload = _make_rich_kobold_payload(prompt=prompt)
+
+    with TestClient(adapter.app) as client:
+        client.post("/api/extra/generate/stream", json=payload)
+
+    forwarded_prompt = ctx.captured_body.get("prompt", "")
+    for tag in instruct_tags:
+        assert tag in forwarded_prompt, (
+            f"Instruct tag {tag!r} was dropped or mutated in the forwarded prompt.\n"
+            f"Forwarded prompt: {forwarded_prompt!r}"
+        )
+    mm.close()
+
+
+def test_generate_stream_upstream_url_targets_kobold_base(monkeypatch):
+    """The relay must POST to `{LOCAL_LLM_URL}/api/extra/generate/stream`,
+    not any DERPR-internal endpoint.  Captures the `url` positional arg.
+    """
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+
+    captured = {}
+
+    class _URLCapture:
+        def __call__(self, method, url, **kw):
+            captured["method"] = method
+            captured["url"] = url
+            return self
+
+        async def __aenter__(self):
+            resp = MagicMock()
+
+            async def _aiter_raw():
+                yield b"data: [DONE]\n\n"
+
+            resp.aiter_raw = _aiter_raw
+            return resp
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(adapter._http, "stream", _URLCapture())
+
+    with TestClient(adapter.app) as client:
+        client.post("/api/extra/generate/stream", json={"prompt": "hello"})
+
+    assert captured.get("method") == "POST"
+    assert "/api/extra/generate/stream" in captured["url"], (
+        f"Relay did not target the expected KoboldCPP path: {captured.get('url')!r}"
+    )
+    mm.close()
