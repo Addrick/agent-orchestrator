@@ -489,9 +489,9 @@ class TestTriageDispatchMockedLLM:
         discord_holder = pipeline_env["discord_holder"]
         ticket_id = test_ticket["id"]
 
-        async def mock_generate(persona_config, context_object, tools=None):
+        async def mock_generate(persona_config, history_object, tools=None):
             """Deterministic LLM mock that dispatches on persona prompt content."""
-            sys_prompt = context_object.get('persona_prompt', '')
+            sys_prompt = history_object.get('persona_prompt', '')
 
             if 'keyword extraction' in sys_prompt:
                 return {"type": "text", "content": "printer offline LaserJet error"}, {}
