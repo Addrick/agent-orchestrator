@@ -70,7 +70,7 @@ class ZammadToolHandler:
         manager.register("delete_user", self._delete_user)
 
     async def _get_ticket_details(self, ticket_number: int) -> Dict[str, Any]:
-        """Translates user-facing ticket number to internal ID, then fetches details."""
+        """Translates user-facing ticket number to internal ID, then fetches complete details (articles + customer)."""
         logger.info(f"Executing tool: get_ticket_details for ticket_number={ticket_number}")
         search_results = await asyncio.to_thread(
             self.zammad_client.search_tickets, query=f"number:{ticket_number}"
@@ -78,14 +78,28 @@ class ZammadToolHandler:
         if not search_results:
             raise ValueError(f"No ticket found with number {ticket_number}.")
 
-        ticket_id = search_results[0]['id']
-        logger.info(f"Found ticket ID {ticket_id} for ticket number {ticket_number}.")
+        ticket: Dict[str, Any] = search_results[0]
+        ticket_id = ticket['id']
+        
+        # 1. Fetch Articles
+        articles = await asyncio.to_thread(self.zammad_client.get_ticket_articles, ticket_id=ticket_id)
+        ticket['articles'] = articles
 
-        ticket: Dict[str, Any] = await asyncio.to_thread(
-            self.zammad_client.get_ticket, ticket_id=ticket_id
-        )
-        if not ticket:
-            raise ValueError(f"Could not retrieve details for ticket ID {ticket_id} after finding it.")
+        # 2. Fetch Customer Info
+        customer_id = ticket.get('customer_id')
+        if customer_id:
+            customer = await asyncio.to_thread(self.zammad_client.get_user, user_id=customer_id)
+            ticket['customer_info'] = customer
+
+        # 3. Fetch Tags
+        tags = await asyncio.to_thread(self.zammad_client.get_tags, ticket_id=ticket_id)
+        ticket['tags'] = tags
+
+        # 4. Ensure human-readable state
+        state_map = {1: 'new', 2: 'open', 3: 'pending reminder', 4: 'closed', 7: 'merged'}
+        if 'state_id' in ticket:
+            ticket['state'] = state_map.get(ticket['state_id'], 'unknown')
+
         return ticket
 
     async def _update_ticket(self, ticket_id: int, **kwargs: Any) -> Dict[str, Any]:
@@ -113,9 +127,15 @@ class ZammadToolHandler:
 
     async def _search_tickets(self, query: str) -> List[Dict[str, Any]]:
         logger.info(f"Executing tool: search_tickets with query='{query}'")
-        return await asyncio.to_thread(
+        results = await asyncio.to_thread(
             self.zammad_client.search_tickets, query=query
         )
+        # Map state_id to human-readable 'state' for the LLM
+        state_map = {1: 'new', 2: 'open', 3: 'pending reminder', 4: 'closed', 7: 'merged'}
+        for t in results:
+            if 'state_id' in t:
+                t['state'] = state_map.get(t['state_id'], 'unknown')
+        return results
 
     async def _create_ticket(self, title: str, body: str, customer_id: Optional[int] = None) -> Dict[str, Any]:
         logger.info(f"Executing tool: create_ticket with title='{title}' for customer_id={customer_id}")
