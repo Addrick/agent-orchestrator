@@ -7,6 +7,7 @@ import json
 from src.chat_system import (
     ChatSystem, ResponseType, RequestContext,
     DoneEvent, ErrorEvent, TokenEvent,
+    ToolCallResultEvent, ToolCallStartEvent,
 )
 from src.utils.model_utils import get_model_prefix
 from memory.memory_manager import MemoryManager
@@ -880,6 +881,44 @@ async def test_stream_response_is_retry_pops_trailing_assistant(chat_system_with
     assert user_count == 1
     assistant_count = sum(1 for m in history if m.get("role") == "assistant")
     assert assistant_count == 0
+
+
+@pytest.mark.asyncio
+async def test_stream_response_interleaves_tool_events_with_tokens(chat_system_with_mocks):
+    """tool_revamp_v1: tool-enabled persona surfaces ToolCallStart /
+    ToolCallResult between TokenEvent runs in a single linear stream."""
+    system, memory_mock, text_engine, persona, tool_manager_mock = chat_system_with_mocks
+    persona.set_enabled_tools(['*'])
+    memory_mock.get_channel_history.return_value = []
+    memory_mock.log_message.side_effect = [10, 42]
+
+    tool_call = {'type': 'tool_calls',
+                 'calls': [{'id': 'call_xyz', 'name': 'search_tickets',
+                            'arguments': {'query': 'open'}}]}
+    final = {'type': 'text', 'content': 'Found two tickets.'}
+    text_engine.generate_response.side_effect = [(tool_call, {}), (final, {})]
+    tool_manager_mock.execute_tool.return_value = {"result": [{"id": 1}, {"id": 2}]}
+
+    events = await _drain_events(
+        system.stream_response("test_persona", "user", "channel", "find tickets")
+    )
+    types = [type(e).__name__ for e in events]
+    # ToolCallStart precedes ToolCallResult; both precede the final
+    # TokenEvent + DoneEvent (no parallel calls in this scenario).
+    start_idx = types.index("ToolCallStartEvent")
+    result_idx = types.index("ToolCallResultEvent")
+    token_idx = types.index("TokenEvent")
+    done_idx = types.index("DoneEvent")
+    assert start_idx < result_idx < token_idx < done_idx
+
+    start = events[start_idx]
+    result = events[result_idx]
+    assert start.tool_name == "search_tickets"
+    assert start.arguments == {"query": "open"}
+    assert start.call_id == "call_xyz"
+    assert result.call_id == start.call_id
+    assert result.error is None
+    assert events[done_idx].text == "Found two tickets."
 
 
 @pytest.mark.asyncio
