@@ -53,6 +53,7 @@ class Persona:
             long_term_memory: bool = True,
             max_context_tokens: Optional[int] = None,
             params: Any = None,
+            chat_template: Optional[str] = None,
             **kwargs: Any,
     ) -> None:
         self._name: str = persona_name
@@ -101,6 +102,7 @@ class Persona:
         self._include_ambient_memory: bool = include_ambient_memory
         self._thinking_level: Optional[str] = thinking_level
         self._long_term_memory: bool = long_term_memory
+        self._chat_template: Optional[str] = chat_template if chat_template else None
 
         try:
             self._max_context_tokens: int = int(max_context_tokens) if max_context_tokens is not None else global_config.DEFAULT_MAX_CONTEXT_TOKENS
@@ -189,6 +191,14 @@ class Persona:
         """Returns the thinking level override for extended thinking models (e.g. 'minimal')."""
         return self._thinking_level
 
+    def get_chat_template(self) -> Optional[str]:
+        """Returns the instruct template name used when rendering prompts for local inference.
+
+        Maps to StreamEngine.CHAT_TEMPLATES keys: 'chatml', 'gemma', 'llama3', 'alpaca'.
+        None means fall back to KOBOLD_CHAT_TEMPLATE env/config or 'chatml'.
+        """
+        return self._chat_template
+
     def get_memory_mode(self) -> MemoryMode:
         """Returns the persona's current memory retrieval strategy."""
         return self._memory_mode
@@ -197,6 +207,28 @@ class Persona:
         """Total ctx budget (prompt + reserved response). Matches kobold-lite's
         localsettings.max_context_length semantic — see context_budget.py."""
         return self._max_context_tokens
+
+    def get_provider_extra(self, provider: str, key: str) -> Any:
+        """Read a single provider-specific knob from `provider_extras[provider][key]`."""
+        return self._params.provider_extras.get(provider, {}).get(key)
+
+    def set_provider_extra(self, provider: str, key: str, value: Any) -> None:
+        """Write a single provider-specific knob into `provider_extras[provider][key]`.
+        Phase E dotted-path setter (see plans/portal_engine_reintegration.md)."""
+        block = self._params.provider_extras.setdefault(provider, {})
+        block[key] = value
+        logger.info(f"Persona '{self._name}' provider_extras[{provider}][{key}] set to {value!r}.")
+
+    def clear_provider_extra(self, provider: str, key: str) -> bool:
+        """Remove `provider_extras[provider][key]`. Returns True if it existed."""
+        block = self._params.provider_extras.get(provider)
+        if not block or key not in block:
+            return False
+        del block[key]
+        if not block:
+            del self._params.provider_extras[provider]
+        logger.info(f"Persona '{self._name}' provider_extras[{provider}][{key}] cleared.")
+        return True
 
     # --- Private Helpers ---
 
@@ -344,6 +376,15 @@ class Persona:
         self._thinking_level = value
         logger.info(f"Persona '{self._name}' thinking_level set to {value}.")
 
+    def set_chat_template(self, value: Optional[str]) -> None:
+        """Sets the instruct template name for local inference prompt rendering.
+
+        Accepted values: 'chatml', 'gemma', 'llama3', 'alpaca', or None to clear.
+        Invalid/unknown values are accepted and will fall back at render time.
+        """
+        self._chat_template = value if value else None
+        logger.info(f"Persona '{self._name}' chat_template set to {value!r}.")
+
     def set_service_bindings(self, bindings: List[str]) -> None:
         """Sets the list of service integrations this persona is bound to."""
         self._service_bindings = bindings
@@ -435,4 +476,10 @@ class Persona:
         }
         if self._thinking_level is not None:
             config["thinking_level"] = self._thinking_level
+        if self._chat_template is not None:
+            config["chat_template"] = self._chat_template
+        if self._params.provider_extras:
+            config["provider_extras"] = {
+                k: dict(v) for k, v in self._params.provider_extras.items()
+            }
         return config

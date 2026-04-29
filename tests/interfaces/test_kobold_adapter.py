@@ -23,7 +23,7 @@ from fastapi.testclient import TestClient
 from memory.memory_manager import MemoryManager
 from src.chat_system import ChatSystem
 from src.engine import TextEngine
-from src.interfaces.kobold_adapter import KoboldAdapter
+from src.interfaces.kobold_engine_adapter import KoboldEngineAdapter as KoboldAdapter
 from src.persona import Persona
 
 

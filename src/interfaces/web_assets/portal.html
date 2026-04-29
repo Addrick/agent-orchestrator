@@ -16626,6 +16626,32 @@ Current version indicated by LITEVER below.
 		localsettings.instruct_endtag_end = document.getElementById("instruct_endtag_end").value;
 		localsettings.instruct_systag_end = document.getElementById("instruct_systag_end").value;
 		localsettings.instruct_gentag = document.getElementById("instruct_gentag").value;
+		persist_instruct_tags_to_persona();
+	}
+
+	// DERPR: push the kobold-lite Instruct Tag preset into the active
+	// persona's provider_extras["kobold"]["instruct_tags"] so the engine
+	// renders prompts with the user-selected tags instead of falling back
+	// to the default chatml `<|im_start|>` template.
+	function persist_instruct_tags_to_persona() {
+		try {
+			const sel = document.getElementById('personaSelectTopNav');
+			const name = sel ? sel.value : null;
+			if (!name) return;
+			const tags = {
+				user_start: localsettings.instruct_starttag || "",
+				user_end: localsettings.instruct_starttag_end || "",
+				assistant_start: localsettings.instruct_endtag || "",
+				assistant_end: localsettings.instruct_endtag_end || "",
+				system_start: localsettings.instruct_systag || "",
+				system_end: localsettings.instruct_systag_end || "",
+			};
+			fetch(`/api/v1/persona/${name}`, {
+				method: 'PATCH',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ instruct_tags: tags }),
+			}).catch(()=>{});
+		} catch (e) { /* non-fatal */ }
 	}
 
 	function confirm_settings() {

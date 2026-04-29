@@ -664,6 +664,10 @@ _SETTER_TO_COMMAND = {
 # Legacy aliases that should not have commands (as they are being deprecated).
 _SETTER_EXCEPTIONS = {
     'set_context_length',
+    # provider_extras is reached via the dotted-path fallback in _handle_set,
+    # not a dedicated set_<name> command. See Phase E in
+    # plans/portal_engine_reintegration.md.
+    'set_provider_extra',
 }
 
 # Maps Persona getter method names → expected command name in what_handlers.
@@ -694,6 +698,10 @@ _GETTER_EXCEPTIONS = {
     'get_current_effective_history_messages',
     'get_config_for_engine',
     'get_generation_params',
+    # provider_extras is reached via the dotted-path fallback in _handle_what,
+    # not a dedicated what_<name> command. See Phase E in
+    # plans/portal_engine_reintegration.md.
+    'get_provider_extra',
     # Legacy aliases
     'get_base_context_length',
     'get_current_effective_context_length',
@@ -919,3 +927,91 @@ async def test_selection_tool_schema_enum_includes_sentinel(bot_logic_with_selec
 async def test_selection_engine_exception_returns_none(bot_logic_with_selector, mock_chat_system_with_state):
     mock_chat_system_with_state.text_engine.generate_response.side_effect = RuntimeError("boom")
     assert await bot_logic_with_selector._query_llm_for_model_selection("q") is None
+
+
+# --- Dotted-path provider_extras setter (Phase E) ---
+
+
+@pytest.mark.asyncio
+async def test_set_dotted_path_int_value(bot_logic, mock_chat_system_with_state):
+    result = await bot_logic.preprocess_message("derpr", "user1", "set kobold.mirostat 2")
+    assert result is not None and result["mutated"] is True
+    persona = mock_chat_system_with_state.personas["derpr"]
+    assert persona.get_provider_extra("kobold", "mirostat") == 2
+
+
+@pytest.mark.asyncio
+async def test_set_dotted_path_float_value(bot_logic, mock_chat_system_with_state):
+    result = await bot_logic.preprocess_message("derpr", "user1", "set kobold.rep_pen 1.15")
+    assert result is not None and result["mutated"] is True
+    persona = mock_chat_system_with_state.personas["derpr"]
+    assert persona.get_provider_extra("kobold", "rep_pen") == 1.15
+
+
+@pytest.mark.asyncio
+async def test_set_dotted_path_bool_value(bot_logic, mock_chat_system_with_state):
+    result = await bot_logic.preprocess_message("derpr", "user1", "set kobold.use_default_badwordsids true")
+    assert result is not None and result["mutated"] is True
+    persona = mock_chat_system_with_state.personas["derpr"]
+    assert persona.get_provider_extra("kobold", "use_default_badwordsids") is True
+
+
+@pytest.mark.asyncio
+async def test_set_dotted_path_string_fallback(bot_logic, mock_chat_system_with_state):
+    result = await bot_logic.preprocess_message("derpr", "user1", "set kobold.sampler_order topk")
+    assert result is not None and result["mutated"] is True
+    persona = mock_chat_system_with_state.personas["derpr"]
+    assert persona.get_provider_extra("kobold", "sampler_order") == "topk"
+
+
+@pytest.mark.asyncio
+async def test_set_dotted_path_clear_with_none(bot_logic, mock_chat_system_with_state):
+    persona = mock_chat_system_with_state.personas["derpr"]
+    persona.set_provider_extra("kobold", "mirostat", 2)
+    result = await bot_logic.preprocess_message("derpr", "user1", "set kobold.mirostat none")
+    assert result is not None and result["mutated"] is True
+    assert persona.get_provider_extra("kobold", "mirostat") is None
+
+
+@pytest.mark.asyncio
+async def test_set_dotted_path_clear_unset_not_mutated(bot_logic, mock_chat_system_with_state):
+    result = await bot_logic.preprocess_message("derpr", "user1", "set kobold.never_set none")
+    assert result is not None and result["mutated"] is False
+
+
+@pytest.mark.asyncio
+async def test_set_dotted_path_missing_value(bot_logic):
+    result = await bot_logic.preprocess_message("derpr", "user1", "set kobold.mirostat")
+    assert result is not None and result["mutated"] is False
+    assert "Usage" in result["response"]
+
+
+@pytest.mark.asyncio
+async def test_set_dotted_path_empty_key(bot_logic):
+    result = await bot_logic.preprocess_message("derpr", "user1", "set kobold. 2")
+    assert result is not None and result["mutated"] is False
+    assert "Invalid dotted path" in result["response"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_set_subcommand_without_dot_returns_error(bot_logic):
+    result = await bot_logic.preprocess_message("derpr", "user1", "set bogus 1")
+    assert result is not None and result["mutated"] is False
+    assert "Unknown 'set' command" in result["response"]
+
+
+@pytest.mark.asyncio
+async def test_what_dotted_path_returns_value(bot_logic, mock_chat_system_with_state):
+    persona = mock_chat_system_with_state.personas["derpr"]
+    persona.set_provider_extra("kobold", "mirostat", 2)
+    result = await bot_logic.preprocess_message("derpr", "user1", "what kobold.mirostat")
+    assert result is not None and result["mutated"] is False
+    assert "kobold.mirostat" in result["response"]
+    assert "2" in result["response"]
+
+
+@pytest.mark.asyncio
+async def test_what_dotted_path_unset(bot_logic):
+    result = await bot_logic.preprocess_message("derpr", "user1", "what kobold.mirostat")
+    assert result is not None and result["mutated"] is False
+    assert "not set" in result["response"]
