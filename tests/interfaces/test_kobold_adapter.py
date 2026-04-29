@@ -4,22 +4,25 @@
 
 Phase 2.1: kobold_export savefile contract.
 Phase 2.2: ltm_block + persona memory_mode routes.
-Phase 2.3a: /chat/completions logging — user-turn detection in jinja-hijack
-mode (messages[-1] is the assistant prefix, not the user), reply_to_id
-threading, abort partial-buffer flush, and derpr_retry archive+update path.
-Phase 2.3b: SSE `event: derpr` frame carrying assistant_id, and
-/api/v1/interaction/{id}/versions + select_version/{k} endpoints.
+Phase 2.3a/b: pre-Phase-D logging contract (now exercised end-to-end through
+the engine kernel — see Phase D fixture below).
+Phase D (2026-04-28): OAI route is a thin SSE transcoder over
+`chat_system.stream_response`. Tests use a real ChatSystem + in-memory DB
+with the LLM step stubbed at `text_engine.stream_messages`.
 """
 
+import asyncio
 import json
 import re
 from datetime import datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 
 from memory.memory_manager import MemoryManager
+from src.chat_system import ChatSystem
+from src.engine import TextEngine
 from src.interfaces.kobold_adapter import KoboldAdapter
 from src.persona import Persona
 
@@ -61,6 +64,73 @@ def _fetch_portal_rows(mm: MemoryManager, persona_name: str):
         (persona_name,),
     )
     return [dict(r) for r in cur.fetchall()]
+
+
+def _events_for_text(text: str):
+    """Engine-shape events that drive `chat_system._orchestrate` to commit `text`."""
+    return [
+        {"type": "api_payload", "payload": {}},
+        {"type": "text_delta", "text": text},
+        {"type": "done", "full_text": text},
+    ]
+
+
+def _make_stream_messages(call_event_lists):
+    """Stateful stub: each invocation drains the next list of engine events.
+
+    Falls back to the last list when more calls arrive than were configured,
+    so tests describing only one LLM call don't need to repeat themselves.
+    """
+    state = {"i": 0}
+
+    async def stream_messages(*args, **kwargs):
+        idx = state["i"]
+        state["i"] = idx + 1
+        events = call_event_lists[idx] if idx < len(call_event_lists) else call_event_lists[-1]
+        for ev in events:
+            yield ev
+
+    return stream_messages
+
+
+def _make_real_adapter(persona_name: str = "test_persona",
+                       stream_messages=None,
+                       deltas=("ack",),
+                       commit_text=None):
+    """Build a KoboldAdapter wired to a real ChatSystem + in-memory MemoryManager.
+
+    The LLM call is stubbed at `text_engine.stream_messages`. Either pass a
+    custom `stream_messages` async-generator function or rely on the default
+    that emits `deltas` and commits `commit_text` (defaults to concat).
+    Returns `(adapter, memory_manager, persona, chat_system)`.
+    """
+    mm = MemoryManager(db_path=":memory:")
+    mm.create_schema()
+
+    persona = Persona(
+        persona_name=persona_name,
+        model_name="local",
+        prompt="you are test",
+        context_length=10,
+    )
+
+    if stream_messages is None:
+        full = commit_text if commit_text is not None else "".join(deltas)
+        events = [{"type": "api_payload", "payload": {}}]
+        for d in deltas:
+            events.append({"type": "text_delta", "text": d})
+        events.append({"type": "done", "full_text": full})
+        stream_messages = _make_stream_messages([events])
+
+    text_engine = TextEngine()
+    text_engine.stream_messages = stream_messages  # type: ignore[method-assign]
+
+    with patch('src.chat_system.load_personas_from_file', return_value={persona_name: persona}):
+        chat_system = ChatSystem(memory_manager=mm, text_engine=text_engine)
+    chat_system.bot_logic.preprocess_message = AsyncMock(return_value=None)
+
+    adapter = KoboldAdapter(chat_system=chat_system)
+    return adapter, mm, persona, chat_system
 
 
 def _seed_history(mm: MemoryManager, persona_name: str, turns: int):
@@ -149,35 +219,6 @@ def test_kobold_export_memory_field_empty_not_persona_prompt():
 
 # -------- Passthrough regression (Phase 1 contract unchanged) --------
 
-def test_strip_envelope_drops_derpr_only_fields():
-    # _strip_envelope is the gatekeeper that stops DERPR-internal fields from
-    # leaking upstream: model selector and the two derpr_* sidecars. Other
-    # fields pass through unchanged.
-    payload = {
-        "prompt": "hello",
-        "model": "test_persona",
-        "params": {"temperature": 0.7},
-    }
-    stripped = KoboldAdapter._strip_envelope(payload)
-    assert "model" not in stripped
-    assert stripped["prompt"] == "hello"
-    assert stripped["params"]["temperature"] == 0.7
-
-
-def test_strip_envelope_drops_derpr_retry():
-    payload = {"messages": [], "derpr_retry": True, "stream": True}
-    stripped = KoboldAdapter._strip_envelope(payload)
-    assert "derpr_retry" not in stripped
-    assert stripped["stream"] is True
-
-
-def test_strip_envelope_drops_derpr_user_text():
-    # Sidecar field carries raw user input for logging; must not leak upstream.
-    payload = {"messages": [], "derpr_user_text": "hello", "stream": False}
-    stripped = KoboldAdapter._strip_envelope(payload)
-    assert "derpr_user_text" not in stripped
-
-
 def test_find_last_user_content_skips_assistant_prefix():
     # jinja-hijack mode: messages[-1] is the assistant continuation prefix.
     # Adapter must scan backward for the real user turn.
@@ -206,7 +247,11 @@ def test_find_last_user_content_returns_none_when_no_user_msg():
     assert KoboldAdapter._find_last_user_content(messages) is None
 
 
-# -------- Phase 2.3a: /chat/completions logging --------
+# -------- Phase D: /chat/completions over chat_system.stream_response --------
+#
+# OAI route is now a thin SSE transcoder. Engine rebuilds history from DB.
+# Tests stub at the engine boundary (`text_engine.stream_messages`) so the
+# orchestration kernel runs end-to-end against a real MemoryManager.
 
 def _chat_body(user_text: str, *, stream: bool = False, retry: bool = False):
     msgs = [
@@ -219,23 +264,8 @@ def _chat_body(user_text: str, *, stream: bool = False, retry: bool = False):
     return body
 
 
-class _SyncChatResp:
-    def __init__(self, content: str):
-        self.status_code = 200
-        self._payload = {"choices": [{"message": {"content": content}}]}
-        self.content = b"x"
-
-    def json(self):
-        return self._payload
-
-
-def test_chat_completions_sync_logs_user_then_assistant_with_reply_to(monkeypatch):
-    adapter, mm, _ = _make_adapter_with_seeded_db()
-
-    async def _fake_post(url, json=None, **kwargs):
-        return _SyncChatResp("here is my reply")
-
-    monkeypatch.setattr(adapter._http, "post", _fake_post)
+def test_chat_completions_sync_logs_user_then_assistant_with_reply_to():
+    adapter, mm, _, _ = _make_real_adapter(deltas=("here is my reply",))
 
     with TestClient(adapter.app) as client:
         r = client.post("/chat/completions", json=_chat_body("tell me a joke"))
@@ -251,18 +281,11 @@ def test_chat_completions_sync_logs_user_then_assistant_with_reply_to(monkeypatc
     mm.close()
 
 
-def test_chat_completions_sidecar_user_text_overrides_messages(monkeypatch):
+def test_chat_completions_sidecar_user_text_overrides_messages():
     # jinja-hijack mode: post-repack messages array often has zero user-role
     # entries. The portal stamps raw input as derpr_user_text before the
     # textbox clears. Adapter must prefer this over scanning messages.
-    adapter, mm, _ = _make_adapter_with_seeded_db()
-
-    async def _fake_post(url, json=None, **kwargs):
-        # Forwarded body must NOT contain derpr_user_text.
-        assert "derpr_user_text" not in (json or {})
-        return _SyncChatResp("ack")
-
-    monkeypatch.setattr(adapter._http, "post", _fake_post)
+    adapter, mm, _, _ = _make_real_adapter(deltas=("ack",))
 
     body = {
         "messages": [
@@ -283,25 +306,8 @@ def test_chat_completions_sidecar_user_text_overrides_messages(monkeypatch):
     mm.close()
 
 
-def test_chat_completions_stream_logs_on_close_with_reply_to(monkeypatch):
-    adapter, mm, _ = _make_adapter_with_seeded_db()
-
-    class _StreamCtx:
-        async def __aenter__(self):
-            resp = MagicMock()
-
-            async def _aiter_raw():
-                yield b'data: {"choices":[{"delta":{"content":"hello "}}]}\n\n'
-                yield b'data: {"choices":[{"delta":{"content":"world"}}]}\n\n'
-                yield b"data: [DONE]\n\n"
-
-            resp.aiter_raw = _aiter_raw
-            return resp
-
-        async def __aexit__(self, *a):
-            return False
-
-    monkeypatch.setattr(adapter._http, "stream", lambda *a, **kw: _StreamCtx())
+def test_chat_completions_stream_logs_on_close_with_reply_to():
+    adapter, mm, _, _ = _make_real_adapter(deltas=("hello ", "world"))
 
     with TestClient(adapter.app) as client:
         r = client.post("/chat/completions", json=_chat_body("hi", stream=True))
@@ -315,8 +321,8 @@ def test_chat_completions_stream_logs_on_close_with_reply_to(monkeypatch):
     mm.close()
 
 
-def test_chat_completions_retry_archives_and_updates_assistant(monkeypatch):
-    adapter, mm, _ = _make_adapter_with_seeded_db()
+def test_chat_completions_retry_archives_and_updates_assistant():
+    adapter, mm, _, _ = _make_real_adapter(deltas=("second attempt",))
 
     # Seed a user+assistant pair representing the prior turn.
     base = datetime(2026, 4, 20, 12, 0, 0)
@@ -329,11 +335,6 @@ def test_chat_completions_retry_archives_and_updates_assistant(monkeypatch):
         author_role="assistant", author_name=None, content="first attempt",
         timestamp=base + timedelta(seconds=1), reply_to_id=user_id,
     )
-
-    async def _fake_post(url, json=None, **kwargs):
-        return _SyncChatResp("second attempt")
-
-    monkeypatch.setattr(adapter._http, "post", _fake_post)
 
     with TestClient(adapter.app) as client:
         r = client.post("/chat/completions", json=_chat_body("prior prompt", retry=True))
@@ -359,38 +360,20 @@ def test_chat_completions_retry_archives_and_updates_assistant(monkeypatch):
 
 
 def test_handle_portal_retry_returns_none_when_no_prior_assistant():
-    adapter, mm, _ = _make_adapter_with_seeded_db()
+    mm = MemoryManager(db_path=":memory:")
+    mm.create_schema()
     result = mm.handle_portal_retry("test_persona", "portal", "web_ui")
     assert result is None
     mm.close()
 
 
-def test_chat_completions_stream_abort_flushes_partial(monkeypatch):
-    adapter, mm, _ = _make_adapter_with_seeded_db()
+def test_chat_completions_stream_abort_flushes_partial():
+    async def stream_messages_then_cancel(*args, **kwargs):
+        yield {"type": "api_payload", "payload": {}}
+        yield {"type": "text_delta", "text": "partial "}
+        raise asyncio.CancelledError()
 
-    class _StreamCtx:
-        async def __aenter__(self):
-            resp = MagicMock()
-
-            async def _aiter_raw():
-                yield b'data: {"choices":[{"delta":{"content":"partial "}}]}\n\n'
-                raise __import__("asyncio").CancelledError()
-
-            resp.aiter_raw = _aiter_raw
-            return resp
-
-        async def __aexit__(self, *a):
-            return False
-
-    async def _fake_abort(url, json=None, **kwargs):
-        resp = MagicMock()
-        resp.content = b""
-        resp.json = lambda: {}
-        resp.status_code = 200
-        return resp
-
-    monkeypatch.setattr(adapter._http, "stream", lambda *a, **kw: _StreamCtx())
-    monkeypatch.setattr(adapter._http, "post", _fake_abort)
+    adapter, mm, _, _ = _make_real_adapter(stream_messages=stream_messages_then_cancel)
 
     with TestClient(adapter.app) as client:
         try:
@@ -398,10 +381,10 @@ def test_chat_completions_stream_abort_flushes_partial(monkeypatch):
                 for _ in r.iter_raw():
                     pass
         except Exception:
-            pass  # CancelledError propagates through test client — flush still happened
+            pass  # CancelledError propagates through test client — engine flushed already
 
     rows = _fetch_portal_rows(mm, "test_persona")
-    # User turn logged, assistant partial flushed on cancel
+    # User turn logged before LLM call, assistant partial flushed on cancel
     assert len(rows) == 2
     assert rows[1]["author_role"] == "assistant"
     assert rows[1]["content"] == "partial "
@@ -495,10 +478,14 @@ def test_ltm_block_empty_query_passes_none():
     mm.close()
 
 
-# -------- Phase 2.3b: SSE derpr frame + version endpoints --------
+# -------- Phase 2.3b → D: SSE derpr frame + version endpoints --------
 
 def _make_stream_ctx(chunks):
-    """Factory: context manager producing the given byte chunks from aiter_raw."""
+    """Factory: context manager producing the given byte chunks from aiter_raw.
+
+    Used by the native `/api/extra/generate/stream` tests further down — that
+    route is still verbatim passthrough to KoboldCPP and mocks `_http.stream`.
+    """
     class _StreamCtx:
         async def __aenter__(self):
             resp = MagicMock()
@@ -516,15 +503,8 @@ def _make_stream_ctx(chunks):
     return _StreamCtx()
 
 
-def test_stream_emits_derpr_frame_before_done_with_assistant_id(monkeypatch):
-    adapter, mm, _ = _make_adapter_with_seeded_db()
-
-    chunks = [
-        b'data: {"choices":[{"delta":{"content":"hello "}}]}\n\n',
-        b'data: {"choices":[{"delta":{"content":"world"}}]}\n\n',
-        b"data: [DONE]\n\n",
-    ]
-    monkeypatch.setattr(adapter._http, "stream", lambda *a, **kw: _make_stream_ctx(chunks))
+def test_stream_emits_derpr_frame_before_done_with_assistant_id():
+    adapter, mm, _, _ = _make_real_adapter(deltas=("hello ", "world"))
 
     with TestClient(adapter.app) as client:
         r = client.post("/chat/completions", json=_chat_body("hi", stream=True))
@@ -547,12 +527,9 @@ def test_stream_emits_derpr_frame_before_done_with_assistant_id(monkeypatch):
     mm.close()
 
 
-def test_stream_without_content_does_not_emit_derpr_frame(monkeypatch):
-    # Empty upstream response → nothing to commit → no derpr frame.
-    adapter, mm, _ = _make_adapter_with_seeded_db()
-
-    chunks = [b"data: [DONE]\n\n"]
-    monkeypatch.setattr(adapter._http, "stream", lambda *a, **kw: _make_stream_ctx(chunks))
+def test_stream_without_content_does_not_emit_derpr_frame():
+    # Engine emits a DoneEvent with assistant_id=None when no text was produced.
+    adapter, mm, _, _ = _make_real_adapter(deltas=(), commit_text="")
 
     with TestClient(adapter.app) as client:
         r = client.post("/chat/completions", json=_chat_body("hi", stream=True))
@@ -612,7 +589,7 @@ def test_select_version_unknown_id_returns_404():
     mm.close()
 
 
-def test_retry_retry_select_version_round_trip_via_endpoints(monkeypatch):
+def test_retry_retry_select_version_round_trip_via_endpoints():
     """End-to-end: two sequential retries then restore original via endpoint.
 
     Initial assistant content = "v0". After retry #1 canonical = "v1",
@@ -620,7 +597,12 @@ def test_retry_retry_select_version_round_trip_via_endpoints(monkeypatch):
     select_version(0) swaps archive[0] (v0) with canonical (v2):
     new canonical = "v0", archives = [v1, v2].
     """
-    adapter, mm, _ = _make_adapter_with_seeded_db()
+    adapter, mm, _, _ = _make_real_adapter(
+        stream_messages=_make_stream_messages([
+            _events_for_text("v1"),
+            _events_for_text("v2"),
+        ]),
+    )
 
     base = datetime(2026, 4, 22, 12, 0, 0)
     user_id = mm.log_message(
@@ -632,13 +614,6 @@ def test_retry_retry_select_version_round_trip_via_endpoints(monkeypatch):
         author_role="assistant", author_name=None, content="v0",
         timestamp=base + timedelta(seconds=1), reply_to_id=user_id,
     )
-
-    responses = iter(["v1", "v2"])
-
-    async def _fake_post(url, json=None, **kwargs):
-        return _SyncChatResp(next(responses))
-
-    monkeypatch.setattr(adapter._http, "post", _fake_post)
 
     with TestClient(adapter.app) as client:
         r1 = client.post("/chat/completions", json=_chat_body("question", retry=True))
@@ -687,66 +662,10 @@ def test_patch_persona_updates_max_context_tokens():
     mm.close()
 
 
-def test_chat_completions_prunes_oversized_messages(monkeypatch):
-    """Outbound prune drops oldest non-system messages to fit budget."""
-    adapter, mm, persona = _make_adapter_with_seeded_db()
-    # Tight budget: ctx 200 - response 100 → prompt budget 100 tokens (= 400 chars char/4).
-    persona.set_response_token_limit(100)
-    persona.set_max_context_tokens(200)
-
-    forwarded = {}
-
-    async def _fake_post(url, json=None, **kwargs):
-        forwarded["body"] = json
-        return _SyncChatResp("ack")
-
-    monkeypatch.setattr(adapter._http, "post", _fake_post)
-
-    big = "x" * 600  # 150 tokens each — 4 of these blow the budget.
-    body = {
-        "messages": [
-            {"role": "system", "content": "sys note"},
-            {"role": "user", "content": big},
-            {"role": "assistant", "content": big},
-            {"role": "user", "content": big},
-            {"role": "assistant", "content": big},
-            {"role": "user", "content": "latest"},
-        ],
-        "stream": False,
-        "derpr_user_text": "latest",
-    }
-    with TestClient(adapter.app) as client:
-        r = client.post("/chat/completions", json=body)
-    assert r.status_code == 200
-
-    fwd_msgs = forwarded["body"]["messages"]
-    # System + last user always preserved.
-    assert any(m["role"] == "system" and m["content"] == "sys note" for m in fwd_msgs)
-    assert fwd_msgs[-1]["content"] == "latest"
-    assert len(fwd_msgs) < len(body["messages"])
-    mm.close()
-
-
-def test_chat_completions_under_budget_no_prune(monkeypatch):
-    adapter, mm, persona = _make_adapter_with_seeded_db()
-    persona.set_response_token_limit(100)
-    persona.set_max_context_tokens(131072)  # comfortable
-
-    forwarded = {}
-
-    async def _fake_post(url, json=None, **kwargs):
-        forwarded["body"] = json
-        return _SyncChatResp("ack")
-
-    monkeypatch.setattr(adapter._http, "post", _fake_post)
-
-    body = _chat_body("hi there")
-    with TestClient(adapter.app) as client:
-        r = client.post("/chat/completions", json=body)
-    assert r.status_code == 200
-    assert len(forwarded["body"]["messages"]) == len(body["messages"])
-    mm.close()
-
+# Phase D dropped Phase 3 prune tests: pruning is now an engine-side
+# concern (`_prepare_request` → `truncate_messages_to_budget`) — see
+# tests/test_chat_system.py for coverage. The OAI adapter no longer touches
+# the messages array.
 
 # -------- Phase 2.4: portal edit/delete round-trip --------
 
@@ -991,34 +910,8 @@ def test_kobold_export_excludes_suppressed_row():
     assert "delete me" not in rendered
     mm.close()
 
-def test_chat_completions_stream_logs_reasoning_content(monkeypatch):
-    from unittest.mock import MagicMock
-    adapter, mm, _ = _make_adapter_with_seeded_db()
-
-    class _StreamCtx:
-        async def __aenter__(self):
-            resp = MagicMock()
-            async def _aiter_raw():
-                yield b'data: {"choices":[{"delta":{"reasoning_content":"thinking..."}}]}\n\n'
-                yield b'data: {"choices":[{"delta":{"content":"done"}}]}\n\n'
-                yield b"data: [DONE]\n\n"
-            resp.aiter_raw = _aiter_raw
-            return resp
-        async def __aexit__(self, *a):
-            return False
-
-    monkeypatch.setattr(adapter._http, "stream", lambda *a, **kw: _StreamCtx())
-
-    from fastapi.testclient import TestClient
-    with TestClient(adapter.app) as client:
-        r = client.post("/chat/completions", json=_chat_body("hi", stream=True))
-    assert r.status_code == 200
-
-    conn = mm._get_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT content, reasoning_content FROM User_Interactions WHERE author_role='assistant'")
-    row = cur.fetchone()
-    assert row is not None
-    assert row['content'] == "done"
-    assert row['reasoning_content'] == "thinking..."
-    mm.close()
+# Phase D dropped reasoning_content separation from the OAI route. The
+# engine streams tokens from kobold's native endpoint, which delivers any
+# `<think>` blocks inline rather than as a structured `reasoning_content`
+# field. Reasoning extraction can be revisited if/when an engine-side
+# parser is added.

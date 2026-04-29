@@ -859,6 +859,43 @@ async def test_stream_response_is_retry_archives_via_handle_portal_retry(
 
 
 @pytest.mark.asyncio
+async def test_stream_response_is_retry_pops_trailing_assistant(chat_system_with_mocks):
+    """On retry, history from DB ends with the about-to-be-overwritten
+    assistant row. Kernel must pop it from `messages_for_llm` so the model
+    regenerates from the user turn instead of continuing its own response,
+    and must NOT append a fresh user turn (DB already terminates with one).
+    """
+    system, memory_mock, text_engine, _, _ = chat_system_with_mocks
+    # DB ends with a user/assistant pair — the prior turn being retried.
+    memory_mock.get_channel_history.return_value = [
+        {"author_role": "user", "author_name": "user", "content": "prior prompt", "interaction_id": 1},
+        {"author_role": "assistant", "author_name": "test_persona", "content": "first attempt", "interaction_id": 2},
+    ]
+    memory_mock.handle_portal_retry.return_value = 2
+    memory_mock.update_interaction_content.return_value = True
+
+    await _drain_events(
+        system.stream_response(
+            "test_persona", "portal", "web_ui", "prior prompt",
+            is_retry=True,
+        )
+    )
+
+    # text_engine.generate_response is the AsyncMock under stream_messages.
+    text_engine.generate_response.assert_called_once()
+    history_object = text_engine.generate_response.call_args.args[1]
+    history = history_object["message_history"]
+    # Trailing assistant ("first attempt") must have been popped, leaving
+    # the prior user turn as the last message — and no duplicate user.
+    assert history[-1].get("role") == "user"
+    assert history[-1].get("content") == "prior prompt"
+    user_count = sum(1 for m in history if m.get("role") == "user")
+    assert user_count == 1
+    assistant_count = sum(1 for m in history if m.get("role") == "assistant")
+    assert assistant_count == 0
+
+
+@pytest.mark.asyncio
 async def test_generate_response_round_trips_through_orchestrate(chat_system_with_mocks):
     """generate_response is now a collect-stream wrapper — same 4-tuple."""
     system, memory_mock, _, _, _ = chat_system_with_mocks

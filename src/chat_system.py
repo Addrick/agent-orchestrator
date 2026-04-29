@@ -1,5 +1,6 @@
 # src/chat_system.py
 
+import asyncio
 import json
 import logging
 import time
@@ -480,8 +481,15 @@ class ChatSystem:
                 "content": json.dumps(tool_result)
             })
 
-    async def _prepare_request(self, ctx: RequestContext) -> None:
-        """Build history, inject long-term memory, filter tools, append user message."""
+    async def _prepare_request(self, ctx: RequestContext, is_retry: bool = False) -> None:
+        """Build history, inject long-term memory, filter tools, append user message.
+
+        On `is_retry=True`: the prior user turn is already in DB, and the
+        prior assistant turn is the row we are about to UPDATE in place.
+        Pop the trailing assistant so the model regenerates from the user
+        instead of continuing its own discarded response, and skip appending
+        a fresh user turn (DB already terminates with the matching user row).
+        """
         ctx.conversation_history, ctx.oldest_interaction_id = self._build_conversation_history(
             ctx.persona, ctx.user_identifier, ctx.channel,
             ctx.server_id, ctx.history_limit
@@ -498,7 +506,12 @@ class ChatSystem:
             ctx.conversation_history.insert(0, {"role": "user", "content": memory_block})
 
         ctx.tools_for_llm = self._filter_tools_for_persona(ctx.persona)
-        ctx.conversation_history.append({"role": "user", "content": ctx.message})
+
+        if is_retry:
+            if ctx.conversation_history and ctx.conversation_history[-1].get("role") == "assistant":
+                ctx.conversation_history.pop()
+        else:
+            ctx.conversation_history.append({"role": "user", "content": ctx.message})
 
         prompt_budget = ctx.persona.get_max_context_tokens() - ctx.persona.get_response_token_limit()
         ctx.conversation_history, dropped = truncate_messages_to_budget(
@@ -510,6 +523,100 @@ class ChatSystem:
                 f"max_context_tokens={ctx.persona.get_max_context_tokens()} "
                 f"(prompt_budget={prompt_budget}) for persona={ctx.persona_name}"
             )
+
+    def _log_user_turn(
+            self,
+            *,
+            is_retry: bool,
+            persona_name: str,
+            user_identifier: str,
+            channel: str,
+            user_display_name: Optional[str],
+            message: str,
+            server_id: Optional[str],
+            platform_message_id: Optional[str],
+            timestamp: datetime,
+    ) -> Tuple[Optional[int], Optional[int]]:
+        """Log the new user turn or archive prior assistant for retry.
+
+        Returns `(user_interaction_id, retry_assistant_id)`. Exactly one of
+        the two will be set on success: retries archive the prior assistant
+        and skip user-row insertion; non-retries log a fresh user row.
+        """
+        if is_retry:
+            try:
+                retry_assistant_id = self.memory_manager.handle_portal_retry(
+                    persona_name=persona_name,
+                    user_identifier=user_identifier,
+                    channel=channel,
+                )
+            except Exception as e:
+                logger.error(f"handle_portal_retry failed: {e}", exc_info=True)
+                retry_assistant_id = None
+            return None, retry_assistant_id
+
+        user_message_clean = strip_vertex_links(message) if message else message
+        try:
+            user_interaction_id = self.memory_manager.log_message(
+                user_identifier=user_identifier, persona_name=persona_name,
+                channel=channel, author_role='user',
+                author_name=user_display_name, content=user_message_clean,
+                timestamp=timestamp, server_id=server_id,
+                platform_message_id=platform_message_id,
+            )
+        except Exception as e:
+            logger.error(f"User log_message failed: {e}", exc_info=True)
+            user_interaction_id = None
+        return user_interaction_id, None
+
+    def _commit_or_update_assistant(
+            self,
+            *,
+            persona_name: str,
+            user_identifier: str,
+            channel: str,
+            server_id: Optional[str],
+            final_text: str,
+            response_type: ResponseType,
+            user_interaction_id: Optional[int],
+            retry_assistant_id: Optional[int],
+            tool_context_json: Optional[str],
+    ) -> Optional[int]:
+        """Persist the assistant turn (UPDATE on retry, INSERT otherwise).
+
+        Returns the canonical assistant interaction_id, or None when the
+        text is empty or the response_type isn't a normal LLM generation.
+        """
+        final_text_clean = strip_vertex_links(final_text) if final_text else final_text
+        if not final_text_clean or not final_text_clean.strip():
+            return None
+
+        if retry_assistant_id is not None:
+            try:
+                self.memory_manager.update_interaction_content(
+                    retry_assistant_id, final_text_clean,
+                )
+                return retry_assistant_id
+            except Exception as e:
+                logger.error(f"Retry update_interaction_content failed: {e}")
+                return None
+
+        if response_type != ResponseType.LLM_GENERATION:
+            return None
+
+        try:
+            assistant_id: Optional[int] = self.memory_manager.log_message(
+                user_identifier=user_identifier, persona_name=persona_name,
+                channel=channel, author_role='assistant',
+                author_name=persona_name, content=final_text_clean,
+                timestamp=datetime.now(), server_id=server_id,
+                tool_context=tool_context_json,
+                reply_to_id=user_interaction_id,
+            )
+            return assistant_id
+        except Exception as e:
+            logger.error(f"Assistant log_message failed: {e}", exc_info=True)
+            return None
 
     async def _orchestrate(
             self,
@@ -563,7 +670,7 @@ class ChatSystem:
         )
 
         try:
-            await self._prepare_request(ctx)
+            await self._prepare_request(ctx, is_retry=is_retry)
         except Exception as e:
             logger.error(
                 f"_prepare_request failed for {user_identifier}: {e}", exc_info=True,
@@ -571,33 +678,18 @@ class ChatSystem:
             yield ErrorEvent(message="An internal error occurred while processing your request.")
             return
 
-        # 2. Log user turn (or archive for retry). Done before the LLM call so
-        #    the row exists if the model errors mid-flight; matches the
-        #    portal's existing semantics where the user row is always pinned.
-        user_message_clean = strip_vertex_links(message) if message else message
+        # 2. Log user turn (or archive for retry). Done after history is built
+        #    (so the freshly-inserted row doesn't show up twice) but before
+        #    the LLM call so the user row is always pinned even if the model
+        #    errors mid-flight.
         user_ts = timestamp or datetime.now()
-        user_interaction_id: Optional[int] = None
-        retry_assistant_id: Optional[int] = None
-        if is_retry:
-            try:
-                retry_assistant_id = self.memory_manager.handle_portal_retry(
-                    persona_name=persona_name,
-                    user_identifier=user_identifier,
-                    channel=channel,
-                )
-            except Exception as e:
-                logger.error(f"handle_portal_retry failed: {e}", exc_info=True)
-        else:
-            try:
-                user_interaction_id = self.memory_manager.log_message(
-                    user_identifier=user_identifier, persona_name=persona_name,
-                    channel=channel, author_role='user',
-                    author_name=user_display_name, content=user_message_clean,
-                    timestamp=user_ts, server_id=server_id,
-                    platform_message_id=platform_message_id,
-                )
-            except Exception as e:
-                logger.error(f"User log_message failed: {e}", exc_info=True)
+        user_interaction_id, retry_assistant_id = self._log_user_turn(
+            is_retry=is_retry, persona_name=persona_name,
+            user_identifier=user_identifier, channel=channel,
+            user_display_name=user_display_name, message=message,
+            server_id=server_id, platform_message_id=platform_message_id,
+            timestamp=user_ts,
+        )
 
         # 3. Tool loop driven by stream_messages. Token deltas surface as
         #    TokenEvent; tool calls + results stay internal until either text
@@ -606,113 +698,131 @@ class ChatSystem:
         final_text = ""
         response_type = ResponseType.LLM_GENERATION
         tool_context_json: Optional[str] = None
+        accumulated_parts: List[str] = []
 
         loop_completed = False
-        for iter_idx in range(MAX_TOOL_CALLS):
-            accumulated_parts: List[str] = []
-            api_payload: Optional[Dict[str, Any]] = None
-            full_text_from_done: Optional[str] = None
-            tool_calls_collected: Optional[List[Dict[str, Any]]] = None
+        try:
+            for iter_idx in range(MAX_TOOL_CALLS):
+                accumulated_parts = []
+                api_payload: Optional[Dict[str, Any]] = None
+                full_text_from_done: Optional[str] = None
+                tool_calls_collected: Optional[List[Dict[str, Any]]] = None
 
-            messages_for_llm: List[Dict[str, Any]] = (
-                [{"role": "system", "content": ctx.persona.get_prompt()}]
-                + list(ctx.conversation_history)
-            )
-            params = ctx.persona.get_generation_params()
-            try:
-                stream = self.text_engine.stream_messages(
-                    ctx.persona.get_config_for_engine(),
-                    messages_for_llm,
-                    params,
-                    tools=ctx.tools_for_llm,
-                    local_inference_config=ctx.local_inference_config,
-                    image_url=ctx.image_url if iter_idx == 0 else None,
+                messages_for_llm: List[Dict[str, Any]] = (
+                    [{"role": "system", "content": ctx.persona.get_prompt()}]
+                    + list(ctx.conversation_history)
                 )
-                async for ev in stream:
-                    etype = ev.get("type")
-                    if etype == "api_payload":
-                        api_payload = ev.get("payload")
-                    elif etype == "text_delta":
-                        text_chunk = ev.get("text") or ""
-                        if text_chunk:
-                            accumulated_parts.append(text_chunk)
-                            yield TokenEvent(delta=text_chunk)
-                    elif etype == "tool_calls":
-                        tool_calls_collected = list(ev.get("calls") or [])
-                    elif etype == "done":
-                        full_text_from_done = ev.get("full_text")
-            except LLMCommunicationError as e:
-                logger.error(
-                    f"LLM communication error for {user_identifier}: {e}",
-                )
-                payload_to_store = e.api_payload or api_payload
-                if payload_to_store:
-                    self._store_api_request(
-                        user_identifier, persona_name, payload_to_store,
-                        tools_for_llm=ctx.tools_for_llm,
+                params = ctx.persona.get_generation_params()
+                try:
+                    stream = self.text_engine.stream_messages(
+                        ctx.persona.get_config_for_engine(),
+                        messages_for_llm,
+                        params,
+                        tools=ctx.tools_for_llm,
+                        local_inference_config=ctx.local_inference_config,
+                        image_url=ctx.image_url if iter_idx == 0 else None,
                     )
-                err_msg = (
-                    "I'm not sure how to continue. Could you please rephrase?"
-                    if "empty response" in str(e)
-                    else "Error while generating a response: " + str(e)
-                )
-                yield ErrorEvent(message=err_msg)
-                return
-            except Exception as e:
-                logger.error(
-                    f"Unexpected error during stream_messages for {user_identifier}: {e}",
-                    exc_info=True,
-                )
-                yield ErrorEvent(
-                    message="An internal error occurred while processing your request."
-                )
-                return
+                    async for ev in stream:
+                        etype = ev.get("type")
+                        if etype == "api_payload":
+                            api_payload = ev.get("payload")
+                        elif etype == "text_delta":
+                            text_chunk = ev.get("text") or ""
+                            if text_chunk:
+                                accumulated_parts.append(text_chunk)
+                                yield TokenEvent(delta=text_chunk)
+                        elif etype == "tool_calls":
+                            tool_calls_collected = list(ev.get("calls") or [])
+                        elif etype == "done":
+                            full_text_from_done = ev.get("full_text")
+                except LLMCommunicationError as e:
+                    logger.error(
+                        f"LLM communication error for {user_identifier}: {e}",
+                    )
+                    payload_to_store = e.api_payload or api_payload
+                    if payload_to_store:
+                        self._store_api_request(
+                            user_identifier, persona_name, payload_to_store,
+                            tools_for_llm=ctx.tools_for_llm,
+                        )
+                    err_msg = (
+                        "I'm not sure how to continue. Could you please rephrase?"
+                        if "empty response" in str(e)
+                        else "Error while generating a response: " + str(e)
+                    )
+                    yield ErrorEvent(message=err_msg)
+                    return
+                except Exception as e:
+                    logger.error(
+                        f"Unexpected error during stream_messages for {user_identifier}: {e}",
+                        exc_info=True,
+                    )
+                    yield ErrorEvent(
+                        message="An internal error occurred while processing your request."
+                    )
+                    return
 
-            if api_payload:
-                self._store_api_request(
-                    user_identifier, persona_name, api_payload,
-                    tools_for_llm=ctx.tools_for_llm if iter_idx == 0 else None,
-                )
+                if api_payload:
+                    self._store_api_request(
+                        user_identifier, persona_name, api_payload,
+                        tools_for_llm=ctx.tools_for_llm if iter_idx == 0 else None,
+                    )
 
-            if not tool_calls_collected:
-                final_text = (
-                    full_text_from_done if full_text_from_done is not None
-                    else "".join(accumulated_parts)
-                )
-                tool_msgs = ctx.conversation_history[history_start:]
-                tool_context_json = json.dumps(tool_msgs) if tool_msgs else None
-                loop_completed = True
-                break
+                if not tool_calls_collected:
+                    final_text = (
+                        full_text_from_done if full_text_from_done is not None
+                        else "".join(accumulated_parts)
+                    )
+                    tool_msgs = ctx.conversation_history[history_start:]
+                    tool_context_json = json.dumps(tool_msgs) if tool_msgs else None
+                    loop_completed = True
+                    break
 
-            ctx.conversation_history.append(
-                {"role": "assistant", "tool_calls": tool_calls_collected}
-            )
-            read_calls = [c for c in tool_calls_collected if c.get("name") not in WRITE_TOOLS]
-            write_calls = [c for c in tool_calls_collected if c.get("name") in WRITE_TOOLS]
-            await self._execute_read_calls(read_calls, ctx.conversation_history)
-
-            if ctx.persona.get_execution_mode() == ExecutionMode.CONFIRM and write_calls:
-                pending = PendingConfirmation(
-                    write_calls=write_calls,
-                    conversation_history=ctx.conversation_history,
-                    persona_name=ctx.persona_name,
-                    tools_for_llm=ctx.tools_for_llm,
-                    image_url=ctx.image_url,
+                ctx.conversation_history.append(
+                    {"role": "assistant", "tool_calls": tool_calls_collected}
                 )
-                self._pending_confirmations[(ctx.user_identifier, ctx.persona_name)] = pending
-                descriptions = [
-                    f"- **{wc.get('name')}**: {json.dumps(wc.get('arguments', {}))}"
-                    for wc in write_calls
-                ]
-                final_text = (
-                    "I'd like to perform the following actions:\n"
-                    + "\n".join(descriptions)
-                )
-                response_type = ResponseType.PENDING_CONFIRMATION
-                loop_completed = True
-                break
+                read_calls = [c for c in tool_calls_collected if c.get("name") not in WRITE_TOOLS]
+                write_calls = [c for c in tool_calls_collected if c.get("name") in WRITE_TOOLS]
+                await self._execute_read_calls(read_calls, ctx.conversation_history)
 
-            await self._execute_write_calls(write_calls, ctx.conversation_history)
+                if ctx.persona.get_execution_mode() == ExecutionMode.CONFIRM and write_calls:
+                    pending = PendingConfirmation(
+                        write_calls=write_calls,
+                        conversation_history=ctx.conversation_history,
+                        persona_name=ctx.persona_name,
+                        tools_for_llm=ctx.tools_for_llm,
+                        image_url=ctx.image_url,
+                    )
+                    self._pending_confirmations[(ctx.user_identifier, ctx.persona_name)] = pending
+                    descriptions = [
+                        f"- **{wc.get('name')}**: {json.dumps(wc.get('arguments', {}))}"
+                        for wc in write_calls
+                    ]
+                    final_text = (
+                        "I'd like to perform the following actions:\n"
+                        + "\n".join(descriptions)
+                    )
+                    response_type = ResponseType.PENDING_CONFIRMATION
+                    loop_completed = True
+                    break
+
+                await self._execute_write_calls(write_calls, ctx.conversation_history)
+        except asyncio.CancelledError:
+            # Client disconnect / abort. Flush whatever assistant text has
+            # accumulated so the row reflects what the user actually saw,
+            # then re-raise so the surrounding StreamingResponse aborts.
+            partial = "".join(accumulated_parts)
+            if partial.strip():
+                self._commit_or_update_assistant(
+                    persona_name=persona_name, user_identifier=user_identifier,
+                    channel=channel, server_id=server_id,
+                    final_text=partial,
+                    response_type=ResponseType.LLM_GENERATION,
+                    user_interaction_id=user_interaction_id,
+                    retry_assistant_id=retry_assistant_id,
+                    tool_context_json=None,
+                )
+            raise
 
         if not loop_completed:
             logger.error(f"Exceeded max tool calls ({MAX_TOOL_CALLS}) for {user_identifier}.")
@@ -720,33 +830,15 @@ class ChatSystem:
             response_type = ResponseType.DEV_COMMAND
 
         # 4. Strip vertex links from the resolved assistant text, log/update.
+        assistant_id = self._commit_or_update_assistant(
+            persona_name=persona_name, user_identifier=user_identifier,
+            channel=channel, server_id=server_id,
+            final_text=final_text, response_type=response_type,
+            user_interaction_id=user_interaction_id,
+            retry_assistant_id=retry_assistant_id,
+            tool_context_json=tool_context_json,
+        )
         final_text_clean = strip_vertex_links(final_text) if final_text else final_text
-        assistant_id: Optional[int] = None
-
-        if retry_assistant_id is not None and final_text_clean and final_text_clean.strip():
-            try:
-                self.memory_manager.update_interaction_content(
-                    retry_assistant_id, final_text_clean,
-                )
-                assistant_id = retry_assistant_id
-            except Exception as e:
-                logger.error(f"Retry update_interaction_content failed: {e}")
-        elif (
-            response_type == ResponseType.LLM_GENERATION
-            and final_text_clean
-            and final_text_clean.strip()
-        ):
-            try:
-                assistant_id = self.memory_manager.log_message(
-                    user_identifier=user_identifier, persona_name=persona_name,
-                    channel=channel, author_role='assistant',
-                    author_name=persona_name, content=final_text_clean,
-                    timestamp=datetime.now(), server_id=server_id,
-                    tool_context=tool_context_json,
-                    reply_to_id=user_interaction_id,
-                )
-            except Exception as e:
-                logger.error(f"Assistant log_message failed: {e}", exc_info=True)
 
         yield DoneEvent(
             text=final_text_clean if final_text_clean else "",
