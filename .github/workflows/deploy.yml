@@ -41,6 +41,8 @@ jobs:
           flake8 src/ --count --select=E9,F63,F7,F82 --show-source --statistics
           # Treat all other issues as warnings
           flake8 src/ --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+      - name: Check for missing dependencies
+        run: python scripts/check_missing_deps.py
       - name: Type check with mypy
         run: mypy src/ --config-file mypy.ini
 

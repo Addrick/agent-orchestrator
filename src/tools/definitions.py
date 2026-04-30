@@ -262,6 +262,29 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "is_write": True,
+        "service_binding": "zammad",
+        "function": {
+            "name": "merge_tickets",
+            "description": "Merges a source ticket into a target ticket. Moves all conversation history (articles) to the target, links the tickets, and sets the source ticket state to 'merged'. Requires internal numerical IDs for both tickets.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "source_ticket_id": {
+                        "type": "integer",
+                        "description": "The unique internal numerical ID of the ticket to be merged (the duplicate).",
+                    },
+                    "target_ticket_id": {
+                        "type": "integer",
+                        "description": "The unique internal numerical ID of the ticket that will receive the content (the original).",
+                    },
+                },
+                "required": ["source_ticket_id", "target_ticket_id"],
+            },
+        },
+    },
     # =========================================================================
     # Agent Management Tools
     # =========================================================================
@@ -401,3 +424,7 @@ MODEL_INCOMPATIBLE_TOOLS = {
 
 # Derived from tool metadata — no manual maintenance needed when adding new tools.
 WRITE_TOOLS = {t['function']['name'] for t in ALL_TOOL_DEFINITIONS if t.get('is_write')}
+
+# Tools that ALWAYS require confirmation, even in AUTONOMOUS mode.
+# These are typically high-impact or destructive operations.
+ALWAYS_CONFIRM_TOOLS = {"merge_tickets", "delete_user"}

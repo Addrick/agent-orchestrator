@@ -68,6 +68,7 @@ class ZammadToolHandler:
         manager.register("create_user", self._create_user)
         manager.register("update_user", self._update_user)
         manager.register("delete_user", self._delete_user)
+        manager.register("merge_tickets", self._merge_tickets)
 
     async def _get_ticket_details(self, ticket_number: int) -> Dict[str, Any]:
         """Translates user-facing ticket number to internal ID, then fetches complete details (articles + customer)."""
@@ -81,9 +82,21 @@ class ZammadToolHandler:
         ticket: Dict[str, Any] = search_results[0]
         ticket_id = ticket['id']
         
-        # 1. Fetch Articles
+        # 1. Fetch Articles - Prune to prevent context overflow
         articles = await asyncio.to_thread(self.zammad_client.get_ticket_articles, ticket_id=ticket_id)
-        ticket['articles'] = articles
+        # Only keep necessary fields and limit count
+        pruned_articles = []
+        for art in articles[-10:]: # Last 10 articles
+            pruned_articles.append({
+                'id': art.get('id'),
+                'from': art.get('from'),
+                'to': art.get('to'),
+                'subject': art.get('subject'),
+                'body': art.get('body', '')[:1000], # Limit body length per article
+                'created_at': art.get('created_at'),
+                'internal': art.get('internal')
+            })
+        ticket['articles'] = pruned_articles
 
         # 2. Fetch Customer Info
         customer_id = ticket.get('customer_id')
@@ -174,6 +187,15 @@ class ZammadToolHandler:
         logger.info(f"Executing tool: delete_user on user_id={user_id}")
         await asyncio.to_thread(self.zammad_client.delete_user, user_id=user_id)
         return {"status": "success", "message": f"User {user_id} deleted."}
+
+    async def _merge_tickets(self, source_ticket_id: int, target_ticket_id: int) -> Dict[str, Any]:
+        """Merges one ticket into another by moving articles, linking them, and closing the source."""
+        logger.info(f"Executing tool: merge_tickets (source={source_ticket_id} -> target={target_ticket_id})")
+        return await asyncio.to_thread(
+            self.zammad_client.merge_tickets,
+            source_ticket_id=source_ticket_id,
+            target_ticket_id=target_ticket_id
+        )
 
 
 class WebSearchHandler:

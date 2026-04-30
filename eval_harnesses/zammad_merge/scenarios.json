@@ -1,0 +1,37 @@
+[
+  {
+    "name": "Bulk Phishing Consolidation",
+    "user_request": "Identify which of those tickets are phishing, tag them with 'phishing', and then merge them all into the existing phishing master ticket immediately. You MUST search for each ticket number individually to retrieve its internal numerical ID before merging. Do not use the ticket number (e.g., 731183) as the ticket_id parameter.",
+    "context": "Daily Ticket Summary\n• #731183 Fwd: Coordination ID: #4/24/2026 — Tina Azarvand\n• #731182 Fwd: Document Status: 5d0ec1fc-27ad-4d0d-a9c9-5680519b1270 - Final\n• #731181 Fwd: Document Status: 5d0ec1fc-27ad-4d0d-a9c9-5680519b1270 - Final\n• #731179 URGENT: Internal Security Test (Action Required)\n• #731176 Re: Your Google Account password for azarvandtaxlaw.com has changed",
+    "expected_merges": [
+      {"source_pattern": "731182", "target": 70000},
+      {"source_pattern": "731181", "target": 70000},
+      {"source_pattern": "731179", "target": 70000},
+      {"source_pattern": "731176", "target": 70000}
+    ],
+    "mock_data": {
+      "tickets": [
+        {"id": 70000, "number": "70000", "title": "Phishing Master Ticket", "state": "open"},
+        {"id": 183, "number": "731183", "title": "Coordination ID", "state": "new"},
+        {"id": 182, "number": "731182", "title": "Document Status Final", "state": "new"},
+        {"id": 181, "number": "731181", "title": "Document Status Final", "state": "new"},
+        {"id": 179, "number": "731179", "title": "URGENT Security Test", "state": "new"},
+        {"id": 176, "number": "731176", "title": "Google Password Changed", "state": "new"}
+      ]
+    }
+  },
+  {
+    "name": "Single Specific Merge",
+    "user_request": "Merge ticket #731183 into #731178 please.",
+    "context": "",
+    "expected_merges": [
+      {"source_pattern": "731183", "target_pattern": "731178"}
+    ],
+    "mock_data": {
+      "tickets": [
+        {"id": 183, "number": "731183", "title": "Coordination ID", "state": "new"},
+        {"id": 178, "number": "731178", "title": "Email Accounts", "state": "open"}
+      ]
+    }
+  }
+]
