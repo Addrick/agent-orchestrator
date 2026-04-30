@@ -64,17 +64,19 @@ class KoboldAdapter:
 
     def _setup_portal(self) -> None:
         portal_path = os.path.join(os.path.dirname(__file__), "web_assets", "portal.html")
+        app = self.app
 
-        @self.app.get("/portal")
+        @app.get("/portal")
         async def get_portal() -> FileResponse:
             return FileResponse(portal_path)
 
-        @self.app.get("/")
+        @app.get("/")
         async def root_redirect() -> FileResponse:
             return FileResponse(portal_path)
 
     def _setup_routes(self) -> None:
-        @self.app.get("/api/v1/model")
+        app = self.app
+        @app.get("/api/v1/model")
         async def get_model() -> Any:
             return {"result": self._get_current_persona_name()}
 
