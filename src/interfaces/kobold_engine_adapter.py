@@ -65,24 +65,24 @@ class KoboldEngineAdapter:
         self._setup_routes()
         self._setup_portal()
 
-    def _setup_portal(self):
+    def _setup_portal(self) -> None:
         portal_path = os.path.join(os.path.dirname(__file__), "web_assets", "portal.html")
 
         @self.app.get("/portal")
-        async def get_portal():
+        async def get_portal() -> FileResponse:
             return FileResponse(portal_path)
 
         @self.app.get("/")
-        async def root_redirect():
+        async def root_redirect() -> FileResponse:
             return FileResponse(portal_path)
 
-    def _setup_routes(self):
+    def _setup_routes(self) -> None:
         @self.app.get("/api/v1/model")
-        async def get_model():
+        async def get_model() -> Any:
             return {"result": self._get_current_persona_name()}
 
         @self.app.put("/api/v1/model")
-        async def set_model(request: Request):
+        async def set_model(request: Request) -> Any:
             data = await request.json()
             new_persona = data.get("model") or data.get("result")
             if new_persona in self.chat_system.personas:
@@ -92,7 +92,7 @@ class KoboldEngineAdapter:
             return {"error": f"Persona '{new_persona}' not found", "available": list(self.chat_system.personas.keys())}
 
         @self.app.get("/v1/models")
-        async def list_models():
+        async def list_models() -> Any:
             models = [
                 {"id": name, "object": "model", "owned_by": "derpr", "permission": []}
                 for name in self.chat_system.personas.keys()
@@ -100,7 +100,7 @@ class KoboldEngineAdapter:
             return {"object": "list", "data": models}
 
         @self.app.get("/api/v1/persona/{name}")
-        async def get_persona_detail(name: str):
+        async def get_persona(name: str) -> Any:
             if name not in self.chat_system.personas:
                 return {"error": f"Persona '{name}' not found"}
             p = self.chat_system.personas[name]
@@ -122,7 +122,7 @@ class KoboldEngineAdapter:
             }
 
         @self.app.get("/api/v1/session/{persona}/ltm_block")
-        async def ltm_block(persona: str, query: str = ""):
+        async def ltm_block(persona: str, query: str = "") -> Any:
             """Retrieve an LTM memory block for the given persona and query text.
 
             Returns {"block": "<memory>...</memory>"} or {"block": null} when
@@ -143,7 +143,7 @@ class KoboldEngineAdapter:
             return {"block": block}
 
         @self.app.get("/api/v1/models/list")
-        async def list_all_models():
+        async def list_all_models() -> Dict[str, Any]:
             avail = get_model_list() or {}
             all_m = []
             for sub in avail.values():
@@ -154,7 +154,7 @@ class KoboldEngineAdapter:
             return {"models": sorted(list(set(all_m)))}
 
         @self.app.post("/api/v1/persona/{name}/reset")
-        async def reset_persona_history(name: str):
+        async def reset_persona_history(name: str) -> Any:
             if name not in self.chat_system.personas:
                 return {"error": "Persona not found"}
             p = self.chat_system.personas[name]
@@ -162,7 +162,7 @@ class KoboldEngineAdapter:
             return {"result": f"History for {name} reset successfully"}
 
         @self.app.get("/api/v1/session/{persona}/kobold_export")
-        async def kobold_export(persona: str, max_turns: Optional[int] = None):
+        async def kobold_export(persona: str, max_turns: Optional[int] = None) -> Any:
             """Build a kobold-lite savefile from DERPR's global history for `persona`.
 
             Phase 2.1 always pulls global history (all channels) — the portal has
@@ -186,7 +186,7 @@ class KoboldEngineAdapter:
             return JSONResponse(content=savefile)
 
         @self.app.get("/api/v1/interaction/{interaction_id}/versions")
-        async def list_versions(interaction_id: int):
+        async def list_interaction_versions(interaction_id: int) -> Any:
             """List all stored versions for an interaction, canonical last.
 
             Portal hydrates `retry_prev_text` / `redo_prev_text` stacks from
@@ -214,7 +214,7 @@ class KoboldEngineAdapter:
             return {"interaction_id": interaction_id, "versions": versions}
 
         @self.app.post("/api/v1/interaction/{interaction_id}/select_version/{k}")
-        async def select_version(interaction_id: int, k: int):
+        async def select_interaction_version(interaction_id: int, k: int) -> Any:
             """Swap archive position `k` with canonical (0-indexed pre-swap).
 
             Returns new canonical + refreshed version list so portal can
@@ -250,7 +250,7 @@ class KoboldEngineAdapter:
             return {**result, "versions": versions}
 
         @self.app.patch("/api/v1/interaction/{interaction_id}")
-        async def patch_interaction(interaction_id: int, request: Request):
+        async def patch_interaction(interaction_id: int, request: Request) -> Any:
             """Update the content of an existing interaction (e.g. on manual edit)."""
             data = await request.json()
             content = data.get("content")
@@ -268,7 +268,7 @@ class KoboldEngineAdapter:
                 return JSONResponse(status_code=500, content={"error": str(e)})
 
         @self.app.delete("/api/v1/interaction/{interaction_id}")
-        async def delete_interaction(interaction_id: int):
+        async def delete_interaction(interaction_id: int) -> Any:
             """Soft-suppress an interaction (portal empty-edit / delete flow).
 
             Idempotent: a second DELETE returns success with `already_suppressed: true`.
@@ -290,7 +290,7 @@ class KoboldEngineAdapter:
             }
 
         @self.app.patch("/api/v1/persona/{name}")
-        async def update_persona(name: str, request: Request):
+        async def patch_persona(name: str, request: Request) -> Any:
             if name not in self.chat_system.personas:
                 return JSONResponse(status_code=404, content={"error": "Persona not found"})
             try:
@@ -346,38 +346,38 @@ class KoboldEngineAdapter:
             return {"result": "success", "rejected_fields": rejected}
 
         @self.app.get("/api/v1/info/version")
-        async def get_info_version():
+        async def get_info_version() -> Any:
             return await self._forward_get("/api/v1/info/version", {"version": "1.70", "lib_version": "1.70"})
 
         @self.app.get("/api/extra/version")
-        async def get_extra_version():
+        async def get_extra_version() -> Any:
             # Forward verbatim so portal can detect KCPP version + jinja/mcp/etc.
             # Fallback only on upstream failure. Without real version portal
             # falls back to legacy prompt-field format and instruct tags break.
             return await self._forward_get("/api/extra/version", {"version": "1.70", "platform": "DERPR"})
 
         @self.app.get("/api/v1/config/soft_prompts")
-        async def get_soft_prompts():
+        async def get_soft_prompts() -> Any:
             return await self._forward_get("/api/v1/config/soft_prompts", {"results": []})
 
         @self.app.get("/api/v1/config/max_context_length")
-        async def get_max_history_messages():
+        async def get_max_history_messages() -> Any:
             return await self._forward_get("/api/v1/config/max_context_length", {"result": global_config.DEFAULT_MAX_CONTEXT_TOKENS})
 
         @self.app.get("/api/extra/true_max_context_length")
-        async def get_true_max_ctx():
+        async def get_true_max_ctx() -> Any:
             return await self._forward_get("/api/extra/true_max_context_length", {"value": global_config.DEFAULT_MAX_CONTEXT_TOKENS})
 
         @self.app.get("/api/extra/perf")
-        async def get_perf():
+        async def get_perf() -> Any:
             return await self._forward_get("/api/extra/perf", {})
 
         @self.app.post("/api/extra/tokencount")
-        async def tokencount(request: Request):
+        async def tokencount(request: Request) -> Any:
             return await self._forward_post("/api/extra/tokencount", await request.json())
 
         @self.app.post("/api/v1/generate")
-        async def kobold_generate(request: Request):
+        async def kobold_generate(request: Request) -> Any:
             """Non-streaming KoboldCPP generation with DB logging."""
             data = await request.json()
             persona_name = self._get_current_persona_name()
@@ -401,7 +401,7 @@ class KoboldEngineAdapter:
                 return JSONResponse(status_code=502, content={"error": str(e)})
 
         @self.app.post("/api/extra/generate/stream")
-        async def kobold_generate_stream(request: Request):
+        async def kobold_generate_stream(request: Request) -> StreamingResponse:
             """Streaming KoboldCPP SSE generation with DB logging.
 
             Logs the user turn from `prompt` on entry, then collects all SSE
@@ -479,14 +479,14 @@ class KoboldEngineAdapter:
 
         @self.app.get("/api/extra/generate/check")
         @self.app.post("/api/extra/generate/check")
-        async def generate_check(request: Request):
+        async def generate_check(request: Request) -> Any:
             body = await request.json() if request.method == "POST" else {}
             return await self._forward_post("/api/extra/generate/check", body) if request.method == "POST" \
                 else await self._forward_get("/api/extra/generate/check", {})
 
         @self.app.post("/api/v1/abort")
         @self.app.post("/api/extra/abort")
-        async def abort_generation():
+        async def abort_generation() -> Any:
             url = f"{_kobold_base_url()}/api/extra/abort"
             try:
                 r = await self._http.post(url, json={})
@@ -497,7 +497,7 @@ class KoboldEngineAdapter:
 
         @self.app.post("/chat/completions")
         @self.app.post("/v1/chat/completions")
-        async def oai_chat_completions(request: Request):
+        async def oai_chat_completions(request: Request) -> Any:
             """Thin SSE transcoder over `chat_system.stream_response`.
 
             Phase D (2026-04-28): the engine is the single source of truth.
@@ -716,7 +716,7 @@ class KoboldEngineAdapter:
         if not content or not content.strip():
             return None
         try:
-            return self.chat_system.memory_manager.log_message(
+            res = self.chat_system.memory_manager.log_message(
                 user_identifier="portal",
                 persona_name=persona_name,
                 channel="web_ui",
@@ -725,12 +725,13 @@ class KoboldEngineAdapter:
                 content=content,
                 timestamp=datetime.now(timezone.utc),
             )
+            return int(res) if res is not None else None
         except Exception as e:
             logger.error(f"Interaction logging failed (role={role}): {e}")
             return None
 
-    def _commit_assistant(self, persona_name: str, content: str, user_interaction_id: int,
-                          retry_assistant_id: int | None, reasoning_content: str | None = None) -> int | None:
+    def _commit_assistant(self, persona_name: str, content: str, user_interaction_id: Optional[int],
+                          retry_assistant_id: Optional[int], reasoning_content: Optional[str] = None) -> Optional[int]:
         """Helper to append the full assistant stream into history."""
         if retry_assistant_id is not None:
             try:
@@ -743,17 +744,15 @@ class KoboldEngineAdapter:
                 return None
         else:
             try:
-                return self.chat_system.memory_manager.log_message(
-                    user_identifier="portal",
-                    persona_name=persona_name,
-                    channel="web_ui",
-                    author_role="assistant",
-                    author_name=None,
-                    content=content,
+                res = self.chat_system.memory_manager.log_message(
+                    user_identifier="portal", persona_name=persona_name,
+                    channel="web_ui", author_role='assistant',
+                    author_name=persona_name, content=content,
                     timestamp=datetime.now(timezone.utc),
                     reply_to_id=user_interaction_id,
                     reasoning_content=reasoning_content
                 )
+                return int(res) if res is not None else None
             except Exception as e:
                 logger.error(f"Assistant log failed: {e}")
                 return None
@@ -781,10 +780,10 @@ class KoboldEngineAdapter:
             return self.active_persona
         default = getattr(global_config, "KOBOLD_DEFAULT_PERSONA", None)
         if default and default in self.chat_system.personas:
-            return default
-        return next(iter(self.chat_system.personas.keys()), "assistant")
+            return str(default)
+        return str(next(iter(self.chat_system.personas.keys()), "assistant"))
 
-    async def start(self):
+    async def start(self) -> None:
         logger.info(f"Starting Kobold Engine Adapter on http://{self.host}:{self.port}")
         config = uvicorn.Config(self.app, host=self.host, port=self.port, log_level="warning")
         server = uvicorn.Server(config)

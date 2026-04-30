@@ -57,7 +57,9 @@ def build_kobold_savefile(
         else:  # assistant
             actions.append(content)
         
-        interaction_ids.append(msg.get("interaction_id"))
+        iid = msg.get("interaction_id")
+        if isinstance(iid, int):
+            interaction_ids.append(iid)
 
     prompt = actions.pop(0) if actions else ""
 

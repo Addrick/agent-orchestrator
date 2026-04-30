@@ -40,7 +40,7 @@ class DiscordNotifier(Notifier):
 
     async def send(self, recipient: str, subject: str, body: str) -> bool:
         full_content = f"**{subject}**\n{body}" if subject else body
-        return await self._client.send_dm(int(recipient), full_content)
+        return bool(await self._client.send_dm(int(recipient), full_content))
 
 
 class DiscordChannelNotifier(Notifier):
@@ -51,7 +51,7 @@ class DiscordChannelNotifier(Notifier):
 
     async def send(self, recipient: str, subject: str, body: str) -> bool:
         full_content = f"**{subject}**\n{body}" if subject else body
-        return await self._client.send_to_channel(int(recipient), full_content)
+        return bool(await self._client.send_to_channel(int(recipient), full_content))
 
 
 class ZammadNotifier(Notifier):

@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from typing import Any, Coroutine, Dict, List, Callable, Optional
+from typing import Any, Coroutine, Dict, List, Callable, Optional, cast
 
 from src.tools.definitions import ALL_TOOL_DEFINITIONS
 
@@ -135,7 +135,7 @@ class ZammadToolHandler:
         for t in results:
             if 'state_id' in t:
                 t['state'] = state_map.get(t['state_id'], 'unknown')
-        return results
+        return cast(List[Dict[str, Any]], results)
 
     async def _create_ticket(self, title: str, body: str, customer_id: Optional[int] = None) -> Dict[str, Any]:
         logger.info(f"Executing tool: create_ticket with title='{title}' for customer_id={customer_id}")
