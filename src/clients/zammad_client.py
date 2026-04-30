@@ -29,11 +29,14 @@ class ZammadClient:
         Raises:
             ValueError: If ZAMMAD_URL or ZAMMAD_API_TOKEN are not set in the environment.
         """
-        self.api_url: Optional[str] = os.environ.get("ZAMMAD_URL")
-        self.api_token: Optional[str] = os.environ.get("ZAMMAD_API_KEY")
+        url = os.environ.get("ZAMMAD_URL")
+        token = os.environ.get("ZAMMAD_API_KEY")
 
-        if not self.api_url or not self.api_token:
+        if not url or not token:
             raise ValueError("ZAMMAD_URL and ZAMMAD_API_KEY must be set in .env")
+
+        self.api_url: str = url
+        self.api_token: str = token
 
         # Prepare the authentication header for all subsequent requests
         self.base_headers: Dict[str, str] = {

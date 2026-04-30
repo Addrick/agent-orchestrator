@@ -5,7 +5,7 @@ import logging
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, Generator, List, Optional, Tuple
+from typing import Any, Coroutine, Dict, List, Callable, Optional, cast, Tuple, Generator
 from pathlib import Path
 
 # --- NEW: Import the global embedding model variable ---
@@ -332,7 +332,7 @@ class MemoryManager:
                  reply_to_id, reasoning_content)
             )
             conn.commit()
-            return cursor.lastrowid
+            return int(cursor.lastrowid) if cursor.lastrowid is not None else None
 
     def update_platform_message_id(self, interaction_id: int, platform_message_id: str) -> None:
         with self._lock:
@@ -355,7 +355,7 @@ class MemoryManager:
                 success = self._invalidate_summary_internal(cursor, summary_id)
                 if success:
                     conn.commit()
-                return success
+                return bool(success)
             except sqlite3.Error as e:
                 logger.error(f"Failed to invalidate summary {summary_id}: {e}")
                 conn.rollback()
@@ -489,7 +489,7 @@ class MemoryManager:
                 cursor.execute("DELETE FROM Message_Embeddings WHERE interaction_id = ?", (interaction_id,))
                 cursor.execute("DELETE FROM vec_Message_Embeddings WHERE interaction_id = ?", (interaction_id,))
                 conn.commit()
-                return interaction_id
+                return int(interaction_id)
             except sqlite3.Error as e:
                 logger.error(f"handle_portal_retry failed for id={interaction_id}: {e}")
                 conn.rollback()
@@ -517,7 +517,7 @@ class MemoryManager:
                 cursor.execute("DELETE FROM Message_Embeddings WHERE interaction_id = ?", (interaction_id,))
                 cursor.execute("DELETE FROM vec_Message_Embeddings WHERE interaction_id = ?", (interaction_id,))
                 conn.commit()
-                return updated
+                return bool(updated)
             except sqlite3.Error as e:
                 logger.error(f"update_interaction_content failed for id={interaction_id}: {e}")
                 conn.rollback()
@@ -538,7 +538,7 @@ class MemoryManager:
                 " WHERE interaction_id = ? ORDER BY edited_at ASC, edit_id ASC",
                 (interaction_id,),
             )
-            versions: List[Dict[str, Any]] = [
+            results: List[Dict[str, Any]] = [
                 {
                     "edit_id": r['edit_id'], 
                     "content": r['old_content'], 
@@ -553,13 +553,13 @@ class MemoryManager:
             )
             canonical = cursor.fetchone()
             if canonical is not None:
-                versions.append({
+                results.append({
                     "edit_id": None,
                     "content": canonical['content'],
                     "reasoning_content": canonical['reasoning_content'],
                     "created_at": canonical['timestamp'],
                 })
-            return versions
+            return results
 
     def swap_interaction_version(self, interaction_id: int, k: int) -> Dict[str, Any]:
         """Swap archive position `k` with canonical for `interaction_id`.
@@ -681,7 +681,7 @@ class MemoryManager:
                 "current_content": target_content,
                 "reasoning_content": target_reasoning,
                 "interaction_id": interaction_id,
-                "total_versions": total_archives + 1,
+                "total_versions": int(total_archives) + 1,
             }
 
     def suppress_interaction(self, interaction_id: int) -> bool:
@@ -790,7 +790,7 @@ class MemoryManager:
             cursor.execute(query, params)
             return [dict(row) for row in reversed(cursor.fetchall())]
 
-    def get_server_history(self, server_id: str, persona_name: str, limit: Optional[int] = None) -> List[
+    def get_server_history(self, server_id: Optional[str], persona_name: str, limit: Optional[int] = None) -> List[
         Dict[str, Any]]:
         with self._lock:
             conn = self._get_connection()
@@ -835,8 +835,7 @@ class MemoryManager:
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (parent_id, agent_name, action_type, trigger_context, action_payload, outcome, outcome_payload)
             )
-            conn.commit()
-            return cursor.lastrowid  # type: ignore[return-value]
+            return int(cursor.lastrowid) if cursor.lastrowid is not None else 0
 
     def update_agent_action_outcome(self, action_id: int, outcome: str, outcome_payload: Optional[str] = None) -> None:
         with self._lock:
@@ -972,7 +971,7 @@ class MemoryManager:
                 (channel, server_id, persona_name, start_id, end_id, message_count, created_at, None, None)
             )
             conn.commit()
-            return cursor.lastrowid  # type: ignore[return-value]
+            return int(cursor.lastrowid) if cursor.lastrowid is not None else 0
 
     def store_summary(self, segment_id: int, content: str, embedding: bytes, model_name: str,
                       created_at: datetime, summary_level: Optional[int] = None,
@@ -1006,7 +1005,7 @@ class MemoryManager:
                 (summary_id, embedding)
             )
             conn.commit()
-            return summary_id  # type: ignore[return-value]
+            return int(summary_id) if summary_id is not None else 0
 
     def get_summaries_for_channel(self, channel: str, persona_name: str, server_id: Optional[str] = None,
                                   exclude_after_interaction_id: Optional[int] = None,

@@ -47,6 +47,10 @@ class ReminderAgent(Agent):
 
     async def _send_batch_summary(self, target_override: Optional[Dict[str, str]] = None) -> None:
         """Find all new and open tickets and send a formatted batch summary."""
+        if not self.zammad_client.api_url:
+            logger.error("Zammad API URL is not configured. Cannot send summary.")
+            return
+
         query = "state.name:(new OR open)"
         
         try:
@@ -143,7 +147,7 @@ class ReminderAgent(Agent):
         """Fetch human-readable name and profile link for a user."""
         name = "Unknown"
         link = "#"
-        if not customer_id:
+        if not customer_id or not self.zammad_client.api_url:
             return name, link
 
         base_url = self.zammad_client.api_url.rstrip('/')

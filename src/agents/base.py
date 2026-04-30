@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from src.chat_system import ChatSystem
 from src.persona import Persona
 from src.utils.save_utils import load_system_personas_from_file
+from memory.memory_manager import MemoryManager
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ class Agent(ABC):
     def __init__(self, chat_system: ChatSystem, inject_personas: bool = True) -> None:
         self.chat_system = chat_system
         self.text_engine = chat_system.text_engine
-        self.memory_manager = chat_system.memory_manager
+        self.memory_manager: MemoryManager = chat_system.memory_manager
         self._shutdown_event = asyncio.Event()
 
         # Observable status properties — read by AgentManager or any monitor
@@ -139,14 +140,14 @@ class Agent(ABC):
         outcome_payload: Optional[str] = None,
     ) -> int:
         """Log a child step under a parent task action."""
-        return self.memory_manager.log_agent_action(
+        return int(self.memory_manager.log_agent_action(
             agent_name=self.agent_name,
             action_type=action_type,
             action_payload=action_payload,
             outcome=outcome,
             outcome_payload=outcome_payload,
             parent_id=parent_id,
-        )
+        ))
 
     # --- LLM Context Building ---
 
@@ -175,7 +176,7 @@ class Agent(ABC):
             "current_message": {"text": prompt, "image_url": None}
         }
 
-    def _build_llm_context(self, *args, **kwargs):
+    def _build_llm_context(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
         """Legacy alias for _build_history_object."""
         return self._build_history_object(*args, **kwargs)
 

@@ -65,10 +65,14 @@ class CustomDiscordBot(discord.Client):
             await self.wait_until_ready()
             
             channel = await self.fetch_channel(channel_id)
-            chunks = split_string_by_limit(content, DISCORD_CHAR_LIMIT)
-            for chunk in chunks:
-                await channel.send(chunk)
-            return True
+            if isinstance(channel, discord.abc.Messageable):
+                chunks = split_string_by_limit(content, DISCORD_CHAR_LIMIT)
+                for chunk in chunks:
+                    await channel.send(chunk)
+                return True
+            else:
+                logger.error(f"Channel {channel_id} is not messageable.")
+                return False
         except Exception as e:
             logger.error(f"Failed to send message to channel {channel_id}: {e}")
             return False
