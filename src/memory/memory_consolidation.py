@@ -3,7 +3,7 @@ import numpy as np
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
-from memory.memory_manager import (
+from src.memory.memory_manager import (
     MemoryManager, LEVEL_EPISODIC, LEVEL_CORE
 )
 from src.embedding_service import EmbeddingService

@@ -9,8 +9,8 @@ from typing import Optional, Dict, Any
 from src.chat_system import ChatSystem
 from src.engine import TextEngine
 from src.stream_engine import StreamEngine
-from memory.memory_manager import MemoryManager
-from memory.memory_consolidation import MemoryConsolidator
+from src.memory.memory_manager import MemoryManager
+from src.memory.memory_consolidation import MemoryConsolidator
 from src.embedding_service import EmbeddingService, GeminiEmbeddingProvider
 from src.clients.zammad_client import ZammadClient
 from src.clients.zammad_service import ZammadIntegration

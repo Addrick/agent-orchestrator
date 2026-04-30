@@ -14,7 +14,7 @@ import uvicorn
 import asyncio
 
 from config import global_config
-from memory.context_budget import truncate_messages_to_budget
+from src.memory.context_budget import truncate_messages_to_budget
 from src.chat_system import ChatSystem
 from src.interfaces.kobold_export import build_kobold_savefile
 from src.utils.model_utils import get_model_list

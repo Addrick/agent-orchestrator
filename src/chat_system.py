@@ -11,10 +11,10 @@ from typing import Any, AsyncIterator, Coroutine, Dict, List, Optional, Set, Tup
 
 from config.global_config import MAX_CACHED_API_REQUESTS, \
     PENDING_CONFIRMATION_TIMEOUT, MEMORY_RETRIEVAL_ENABLED, MEMORY_MAX_SUMMARIES_IN_CONTEXT
-from memory.context_budget import truncate_messages_to_budget
+from src.memory.context_budget import truncate_messages_to_budget
 from src.embedding_service import EmbeddingService
 from src.clients.service_integration import ServiceIntegration
-from memory.memory_manager import MemoryManager
+from src.memory.memory_manager import MemoryManager
 from src.engine import TextEngine
 from src.generation_events import (
     DoneEvent as DoneEvent,
