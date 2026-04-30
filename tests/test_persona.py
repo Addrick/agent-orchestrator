@@ -183,6 +183,7 @@ def test_get_config_for_engine(base_persona_args):
         "temperature": 0.8,
         "top_p": 0.9,
         "top_k": 40,
+        "max_context_tokens": p.get_max_context_tokens(),
     }
     assert p.get_config_for_engine() == expected_config
 

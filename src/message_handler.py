@@ -58,6 +58,7 @@ class BotLogic:
             'include_ambient_memory': self._what_include_ambient_memory,
             'thinking_level': self._what_thinking_level,
             'max_context_tokens': self._what_max_context_tokens,
+            'chat_template': self._what_chat_template,
         }
         self.set_handlers = {
             'prompt': self._set_prompt,
@@ -77,6 +78,7 @@ class BotLogic:
             'include_ambient_memory': self._set_include_ambient_memory,
             'thinking_level': self._set_thinking_level,
             'max_context_tokens': self._set_max_context_tokens,
+            'chat_template': self._set_chat_template,
         }
 
     async def preprocess_message(
@@ -125,8 +127,8 @@ class BotLogic:
                                                                        "hello (start new conversation), \n"
                                                                        "goodbye (end conversation), \n"
                                                                        "remember <+prompt>, \n"
-                                                                       "what prompt/model/models/personas/history/tokens/temp/top_p/top_k/execution_mode/tools/memory_mode/service_bindings/display_name/long_term_memory/include_ambient_memory/thinking_level, \n"
-                                                                       "set prompt/model/history/tokens/temp/top_p/top_k/display_name/execution_mode/tools/memory_mode/service_bindings/long_term_memory/include_ambient_memory/thinking_level, \n"
+                                                                       "what prompt/model/models/personas/history/tokens/temp/top_p/top_k/execution_mode/tools/memory_mode/service_bindings/display_name/long_term_memory/include_ambient_memory/thinking_level/chat_template, \n"
+                                                                       "set prompt/model/history/tokens/temp/top_p/top_k/display_name/execution_mode/tools/memory_mode/service_bindings/long_term_memory/include_ambient_memory/thinking_level/chat_template, \n"
                                                                        "set <provider>.<key> <value> (e.g. 'set kobold.mirostat 2', 'set kobold.rep_pen none' to clear), \n"
                                                                        "add <persona>, \n"
                                                                        "delete <persona>, \n"
@@ -348,6 +350,7 @@ class BotLogic:
             f"  - Top P: {persona.get_top_p() or 'default'}\n"
             f"  - Top K: {persona.get_top_k() or 'default'}\n"
             f"  - Thinking Level: {persona.get_thinking_level() or 'default'}\n"
+            f"  - Chat Template: {persona.get_chat_template() or 'default'}\n"
             f"----------------------------------------\n"
             f"Prompt:\n{persona.get_prompt()}"
         )
@@ -457,6 +460,11 @@ class BotLogic:
 
     def _what_max_context_tokens(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
         return f"Max context tokens for '{persona.get_name()}' is {persona.get_max_context_tokens()}.", False
+    
+    def _what_chat_template(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
+        template = persona.get_chat_template()
+        display = f"'{template}'" if template else "not set (default)"
+        return f"Chat template for '{persona.get_name()}' is {display}.", False
 
     async def _handle_set(
             self,
@@ -799,7 +807,17 @@ class BotLogic:
         elif value_str in ('off', 'false', 'no', '0'):
             persona.set_long_term_memory(False)
             return f"Long-term memory retrieval disabled for {persona.get_name()}.", True
-        return f"Error: Invalid value '{args[1]}'. Use 'on' or 'off'.", False
+        return f"Error: Invalid value '{value_str}'. Please use 'on' or 'off'.", False
+
+    def _set_chat_template(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
+        if len(args) < 2:
+            return "Error: Please specify a chat template (e.g. 'chatml', 'llama3') or 'none' to clear.", False
+        value_str = args[1].lower().strip()
+        if value_str in ('none', 'null', 'clear'):
+            persona.set_chat_template(None)
+            return f"Chat template for {persona.get_name()} cleared (reverting to global default).", True
+        persona.set_chat_template(value_str)
+        return f"Chat template for {persona.get_name()} set to '{value_str}'.", True
 
     def _set_include_ambient_memory(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
         try:
@@ -813,7 +831,7 @@ class BotLogic:
         elif value_str in ('off', 'false', 'no', '0'):
             persona.set_include_ambient_memory(False)
             return f"Ambient memory inclusion disabled for {persona.get_name()}.", True
-        return f"Error: Invalid value '{args[1]}'. Use 'on' or 'off'.", False
+        return f"Error: Invalid value '{value_str}'. Please use 'on' or 'off'.", False
 
     def _set_max_context_tokens(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
         try:

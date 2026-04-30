@@ -659,6 +659,7 @@ _SETTER_TO_COMMAND = {
     'set_include_ambient_memory': 'include_ambient_memory',
     'set_thinking_level': 'thinking_level',
     'set_max_context_tokens': 'max_context_tokens',
+    'set_chat_template': 'chat_template',
 }
 
 # Legacy aliases that should not have commands (as they are being deprecated).
@@ -689,6 +690,7 @@ _GETTER_TO_COMMAND = {
     'get_include_ambient_memory': 'include_ambient_memory',
     'get_thinking_level': 'thinking_level',
     'get_max_context_tokens': 'max_context_tokens',
+    'get_chat_template': 'chat_template',
 }
 
 # Getters that intentionally have no what command (internal/derived values).
@@ -767,6 +769,7 @@ async def test_detail_shows_all_properties(bot_logic):
         "temperature:",
         "top p:",
         "top k:",
+        "chat template:",
     ]
     missing = [f for f in required_fields if f.lower() not in detail_text]
     assert not missing, (

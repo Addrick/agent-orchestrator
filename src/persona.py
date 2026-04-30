@@ -478,6 +478,7 @@ class Persona:
             config["thinking_level"] = self._thinking_level
         if self._chat_template is not None:
             config["chat_template"] = self._chat_template
+        config["max_context_tokens"] = self._max_context_tokens
         if self._params.provider_extras:
             config["provider_extras"] = {
                 k: dict(v) for k, v in self._params.provider_extras.items()
