@@ -458,7 +458,8 @@ class TextEngine:
                     }
                     ser_part: Dict[str, Any] = {'function_call': part_kwargs['function_call']}
                     if call.get('thought_signature') is not None:
-                        part_kwargs['thought_signature'] = call['thought_signature']
+                        # Convert back from base64 string to bytes for the Google API
+                        part_kwargs['thought_signature'] = base64.b64decode(call['thought_signature'])
                         ser_part['thought_signature'] = '...present...'
                     api_parts.append(Part(**part_kwargs))
                     serializable_parts.append(ser_part)
@@ -526,7 +527,8 @@ class TextEngine:
                     "arguments": arguments,
                 }
                 if getattr(part, 'thought_signature', None) is not None:
-                    call_dict["thought_signature"] = part.thought_signature
+                    # thought_signature is bytes, must be serializable for our history storage
+                    call_dict["thought_signature"] = base64.b64encode(part.thought_signature).decode('utf-8')
                 tool_calls.append(call_dict)
         if tool_calls:
             return {"type": "tool_calls", "calls": tool_calls}, api_params
