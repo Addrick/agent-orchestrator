@@ -55,21 +55,31 @@ CHAT_TEMPLATES: Dict[str, Dict[str, Any]] = {
 
 
 def _template_from_instruct_tags(tags: Dict[str, Any]) -> Dict[str, Any]:
-    """Build a CHAT_TEMPLATES-shape dict from raw kobold-lite instruct tag
-    strings (system_start/end, user_start/end, assistant_start/end). Stops
-    fall back to whatever closing tags were provided."""
-    sys_s = tags.get("system_start") or ""
-    sys_e = tags.get("system_end") or ""
-    usr_s = tags.get("user_start") or ""
-    usr_e = tags.get("user_end") or ""
-    ast_s = tags.get("assistant_start") or ""
-    ast_e = tags.get("assistant_end") or ""
+    """Build a CHAT_TEMPLATES-shape dict from kobold-lite's raw `instruct_*`
+    vocabulary. Portal forwards `localsettings.instruct_*` verbatim — this is
+    the single translation point.
+
+    Field semantics (kobold-lite):
+      - `instruct_starttag` / `instruct_starttag_end` — user-turn open / close
+      - `instruct_endtag`   / `instruct_endtag_end`   — assistant-turn open / close
+      - `instruct_systag`   / `instruct_systag_end`   — system-turn open / close
+      - `instruct_gentag`   — gen-time assistant prefix; carries the `<think>`
+        trigger for thinking presets (or the empty `<think></think>` for the
+        non-thinking variants). Falls back to assistant-open when blank.
+    """
+    usr_s = tags.get("instruct_starttag") or ""
+    usr_e = tags.get("instruct_starttag_end") or ""
+    ast_s = tags.get("instruct_endtag") or ""
+    ast_e = tags.get("instruct_endtag_end") or ""
+    sys_s = tags.get("instruct_systag") or ""
+    sys_e = tags.get("instruct_systag_end") or ""
+    ast_gen = tags.get("instruct_gentag") or ast_s
     stops = [s for s in (usr_s, ast_e, usr_e) if s]
     return {
         "system": (sys_s + "{content}" + sys_e) if (sys_s or sys_e) else "",
         "user": usr_s + "{content}" + usr_e,
         "assistant": ast_s + "{content}" + ast_e,
-        "assistant_start": ast_s,
+        "assistant_start": ast_gen,
         "stop": stops,
     }
 
@@ -270,10 +280,17 @@ class StreamEngine:
         # Token budget comes from kobold-lite's UI slider
         # (params.max_context_length). Persona.context_length is a *turn count*
         # for the history window — a different concept — so do not use it here.
-        ctx_len = kobold_extras.get("max_context_length")
+        ctx_len = (
+            kobold_extras.get("max_context_length")
+            or persona_config.get("max_context_tokens")
+        )
+        final_ctx_len = ctx_len or persona_config.get("max_context_tokens", 2048)
+        # Hard-cap at global default (131k) to avoid artificial truncation.
+        final_ctx_len = min(final_ctx_len, global_config.DEFAULT_MAX_CONTEXT_TOKENS)
+
         payload: Dict[str, Any] = {
             "prompt": prompt,
-            "max_context_length": ctx_len,
+            "max_context_length": final_ctx_len,
             "max_length": params.max_tokens
                 or persona_config.get("max_output_tokens")
                 or global_config.DEFAULT_TOKEN_LIMIT,

@@ -4560,8 +4560,8 @@ Current version indicated by LITEVER below.
 		second_ep_model:"gpt2",
 		second_ep_url:"",
 
-		max_context_length: (localflag?8192:3800),
-		max_length: (localflag?1024:500),
+		max_context_length: (localflag?131072:3800),
+		max_length: (localflag?8192:500),
 		last_maxctx: 0,
 		auto_ctxlen: true,
 		auto_genamt: true,
@@ -14060,6 +14060,11 @@ Current version indicated by LITEVER below.
 											document.getElementById("max_length_slide").max = 4096;
 											document.getElementById("max_length_slide_label").innerText = 4096;
 										}
+										if(ep_maxctx && ep_maxctx>=32768 && document.getElementById("max_length_slide").max<8192)
+										{
+											document.getElementById("max_length_slide").max = 8192;
+											document.getElementById("max_length_slide_label").innerText = 8192;
+										}
 										if(localflag && ep_maxctx>=4096 && localsettings.max_context_length<ep_maxctx && (localsettings.last_maxctx!=ep_maxctx || localsettings.max_context_length==defaultsettings.max_context_length))
 										{
 											localsettings.max_context_length = ep_maxctx;
@@ -16638,13 +16643,17 @@ Current version indicated by LITEVER below.
 			const sel = document.getElementById('personaSelectTopNav');
 			const name = sel ? sel.value : null;
 			if (!name) return;
+			// Raw kobold-lite vocabulary — engine owns the field-name → template
+			// translation. Adding new instruct_* fields server-side requires no
+			// portal change.
 			const tags = {
-				user_start: localsettings.instruct_starttag || "",
-				user_end: localsettings.instruct_starttag_end || "",
-				assistant_start: localsettings.instruct_endtag || "",
-				assistant_end: localsettings.instruct_endtag_end || "",
-				system_start: localsettings.instruct_systag || "",
-				system_end: localsettings.instruct_systag_end || "",
+				instruct_starttag: localsettings.instruct_starttag || "",
+				instruct_starttag_end: localsettings.instruct_starttag_end || "",
+				instruct_endtag: localsettings.instruct_endtag || "",
+				instruct_endtag_end: localsettings.instruct_endtag_end || "",
+				instruct_systag: localsettings.instruct_systag || "",
+				instruct_systag_end: localsettings.instruct_systag_end || "",
+				instruct_gentag: localsettings.instruct_gentag || "",
 			};
 			fetch(`/api/v1/persona/${name}`, {
 				method: 'PATCH',
@@ -29879,11 +29888,11 @@ Current version indicated by LITEVER below.
 									<input title="Context Size" inputmode="numeric" class="justifyright push-right" id="max_context_length" style="width: 8ch;" oninput="
 									document.getElementById('max_context_length_slide').value = this.value;">
 								</div>
-								<div><input title="Context Size Slider" type="range" min="512" max="8192" step="8" id="max_context_length_slide" oninput="
+								<div><input title="Context Size Slider" type="range" min="512" max="131072" step="8" id="max_context_length_slide" oninput="
 									document.getElementById('max_context_length').value = this.value;"></div>
 								<div class="settingminmax">
 									<div class="justifyleft">512</div>
-									<div class="justifyright" id="max_context_length_slide_label">8192</div>
+									<div class="justifyright" id="max_context_length_slide_label">131072</div>
 								</div>
 								<div id="auto_ctxlen_panel" class="settinglabel">
 									<div class="justifyleft" title="Automatically lowers settings if incompatible with existing workers">Auto-Adjust Limits </div>
@@ -29898,11 +29907,11 @@ Current version indicated by LITEVER below.
 									<input title="Max Output" inputmode="numeric" class="justifyright push-right" id="max_length" oninput="
 									document.getElementById('max_length_slide').value = this.value;">
 								</div>
-								<div><input title="Max Output Slider" type="range" min="16" max="1024" step="2"	id="max_length_slide" oninput="
+								<div><input title="Max Output Slider" type="range" min="16" max="8192" step="2"	id="max_length_slide" oninput="
 									document.getElementById('max_length').value = this.value;"></div>
 								<div class="settingminmax">
 									<div class="justifyleft">16</div>
-									<div class="justifyright" id="max_length_slide_label">1024</div>
+									<div class="justifyright" id="max_length_slide_label">8192</div>
 								</div>
 								<div id="auto_genamt_panel" class="settinglabel">
 									<div class="justifyleft" title="Automatically lowers settings if incompatible with existing workers">Auto-Adjust Limits </div>
@@ -32193,6 +32202,12 @@ Current version indicated by LITEVER below.
 			if (active) {
 				await onPersonaChange();
 				applyPersonaToUI(true);  // silent auto-apply on load
+				
+				// DERPR FIX: Load the session on startup if history source is derpr
+				const stored = localStorage.getItem('persona_history_source_' + active);
+				const isDerpr = stored === 'derpr' || stored === null;
+				if (isDerpr) await loadDerprSession(active);
+				
 				derpr_prior_persona = active;
 			}
 
@@ -32230,9 +32245,12 @@ Current version indicated by LITEVER below.
         if (!val) return;
         const selectEl = document.getElementById('personaSelectTopNav');
 
-        const priorWasDerpr = derpr_prior_persona
-            && localStorage.getItem('persona_history_source_' + derpr_prior_persona) === 'derpr';
-        const newIsDerpr = localStorage.getItem('persona_history_source_' + val) === 'derpr';
+        const priorSource = derpr_prior_persona ? localStorage.getItem('persona_history_source_' + derpr_prior_persona) : null;
+        const priorWasDerpr = priorSource === 'derpr' || (derpr_prior_persona && priorSource === null);
+        
+        const newSource = localStorage.getItem('persona_history_source_' + val);
+        const newIsDerpr = newSource === 'derpr' || newSource === null;
+        
         const hasSession = (typeof gametext_arr !== 'undefined' && gametext_arr.length > 0);
         // Session clobber happens if the prior persona owned a DERPR load (its
         // content is tied to that persona), or if the new persona will trigger
@@ -32267,7 +32285,8 @@ Current version indicated by LITEVER below.
                 // doesn't inherit someone else's context. Pure kobold→kobold
                 // (neither side ever DERPR) leaves session alone — matches
                 // pre-Phase-2 behavior.
-                const priorWasDerpr = localStorage.getItem('persona_history_source_' + derpr_prior_persona) === 'derpr';
+                const priorSource = localStorage.getItem('persona_history_source_' + derpr_prior_persona);
+                const priorWasDerpr = priorSource === 'derpr' || priorSource === null;
                 if (priorWasDerpr) restart_new_game(false);
             }
             derpr_prior_persona = val;
@@ -32303,8 +32322,9 @@ Current version indicated by LITEVER below.
             // Load DERPR history-source toggle state from browser storage
             const hs = document.getElementById('historySourceToggle');
             if (hs) {
-                const stored = localStorage.getItem('persona_history_source_' + name) === 'derpr';
-                hs.checked = stored;
+                const stored = localStorage.getItem('persona_history_source_' + name);
+                const isDerpr = stored === 'derpr' || stored === null;
+                hs.checked = isDerpr;
                 updateLtmCheckboxAvailability();
             }
 
@@ -32413,7 +32433,16 @@ Current version indicated by LITEVER below.
 		if (!isNaN(temp))    { setBoth('temperature', temp);        localsettings.temperature        = temp; }
 		if (!isNaN(top_p))   { setBoth('top_p', top_p);             localsettings.top_p              = top_p; }
 		if (!isNaN(top_k))   { setBoth('top_k', top_k);             localsettings.top_k              = top_k; }
-		if (!isNaN(max_tok)) { setBoth('max_length', max_tok);      localsettings.max_length         = max_tok; }
+		if (!isNaN(max_tok)) {
+			const slideEl = document.getElementById('max_length_slide');
+			if (slideEl && max_tok > parseInt(slideEl.max || 0)) {
+				slideEl.max = max_tok;
+				const lbl = document.getElementById('max_length_slide_label');
+				if (lbl) lbl.innerText = max_tok;
+			}
+			setBoth('max_length', max_tok);
+			localsettings.max_length = max_tok;
+		}
 		if (!isNaN(max_ctx)) {
 			const slideEl = document.getElementById('max_context_length_slide');
 			if (slideEl && max_ctx > parseInt(slideEl.max || 0)) {

@@ -178,9 +178,10 @@ class KoboldEngineAdapter:
                 self.chat_system.memory_manager.get_global_history, persona, limit
             )
             savefile, skipped = build_kobold_savefile(raw_history)
-            logger.info(
+            logger.warning(
                 f"kobold_export persona={persona} limit={limit} "
-                f"rows={len(raw_history)} skipped={skipped}"
+                f"rows={len(raw_history)} actions={len(savefile.get('actions', []))} "
+                f"ids={len(savefile.get('interaction_ids', []))} skipped={skipped}"
             )
             return JSONResponse(content=savefile)
 
@@ -361,11 +362,11 @@ class KoboldEngineAdapter:
 
         @self.app.get("/api/v1/config/max_context_length")
         async def get_max_history_messages():
-            return await self._forward_get("/api/v1/config/max_context_length", {"result": 8192})
+            return await self._forward_get("/api/v1/config/max_context_length", {"result": global_config.DEFAULT_MAX_CONTEXT_TOKENS})
 
         @self.app.get("/api/extra/true_max_context_length")
         async def get_true_max_ctx():
-            return await self._forward_get("/api/extra/true_max_context_length", {"value": 8192})
+            return await self._forward_get("/api/extra/true_max_context_length", {"value": global_config.DEFAULT_MAX_CONTEXT_TOKENS})
 
         @self.app.get("/api/extra/perf")
         async def get_perf():
@@ -591,6 +592,11 @@ class KoboldEngineAdapter:
 
             async def relay() -> AsyncIterator[bytes]:
                 try:
+                    # Pass through the request to the central ChatSystem.
+                    # In the Engine Adapter, we DISCARD the client-side message array
+                    # (msgs_in) to ensure the engine's DB is the source of truth for
+                    # history. This prevents the 'hollow history' issue where the
+                    # UI might be empty but the DB has rich context.
                     async for ev in self.chat_system.stream_response(
                         persona_name=persona_name,
                         user_identifier="portal",
@@ -598,7 +604,7 @@ class KoboldEngineAdapter:
                         message=user_text,
                         is_retry=is_retry,
                         local_inference_config=local_inference_config,
-                        client_messages=msgs_in or None,
+                        client_messages=None, # Explicitly None to force DB history rebuild
                     ):
 
                         if await request.is_disconnected():

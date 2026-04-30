@@ -543,7 +543,9 @@ class ChatSystem:
         else:
             ctx.conversation_history.append({"role": "user", "content": ctx.message})
 
-        prompt_budget = ctx.persona.get_max_context_tokens() - ctx.persona.get_response_token_limit()
+        # Respect per-request context overrides from the portal for history truncation.
+        ctx_limit = (ctx.local_inference_config or {}).get("max_context_length") or ctx.persona.get_max_context_tokens()
+        prompt_budget = ctx_limit - ctx.persona.get_response_token_limit()
         ctx.conversation_history, dropped = truncate_messages_to_budget(
             ctx.conversation_history, prompt_budget,
         )
@@ -728,7 +730,9 @@ class ChatSystem:
         #    siphons api_payload into the request cache, and unpacks the
         #    terminal _LoopFinishedEvent to drive CONFIRM-mode parking +
         #    assistant persistence.
-        params = ctx.persona.get_generation_params()
+        params = ctx.persona.get_generation_params().copy()
+        if ctx.local_inference_config:
+            params.merge_inference_config(ctx.local_inference_config)
         params_first_iter = True
         final_text = ""
         response_type = ResponseType.LLM_GENERATION

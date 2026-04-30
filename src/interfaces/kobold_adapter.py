@@ -348,11 +348,11 @@ class KoboldAdapter:
 
         @self.app.get("/api/v1/config/max_context_length")
         async def get_max_history_messages():
-            return await self._forward_get("/api/v1/config/max_context_length", {"result": 8192})
+            return await self._forward_get("/api/v1/config/max_context_length", {"result": global_config.DEFAULT_MAX_CONTEXT_TOKENS})
 
         @self.app.get("/api/extra/true_max_context_length")
         async def get_true_max_ctx():
-            return await self._forward_get("/api/extra/true_max_context_length", {"value": 8192})
+            return await self._forward_get("/api/extra/true_max_context_length", {"value": global_config.DEFAULT_MAX_CONTEXT_TOKENS})
 
         @self.app.get("/api/extra/perf")
         async def get_perf():
