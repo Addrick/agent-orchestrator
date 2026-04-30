@@ -67,21 +67,23 @@ class KoboldEngineAdapter:
 
     def _setup_portal(self) -> None:
         portal_path = os.path.join(os.path.dirname(__file__), "web_assets", "portal.html")
+        app = self.app
 
-        @self.app.get("/portal")
+        @app.get("/portal")
         async def get_portal() -> FileResponse:
             return FileResponse(portal_path)
 
-        @self.app.get("/")
+        @app.get("/")
         async def root_redirect() -> FileResponse:
             return FileResponse(portal_path)
 
     def _setup_routes(self) -> None:
-        @self.app.get("/api/v1/model")
+        app = self.app
+        @app.get("/api/v1/model")
         async def get_model() -> Any:
             return {"result": self._get_current_persona_name()}
 
-        @self.app.put("/api/v1/model")
+        @app.put("/api/v1/model")
         async def set_model(request: Request) -> Any:
             data = await request.json()
             new_persona = data.get("model") or data.get("result")
@@ -91,7 +93,7 @@ class KoboldEngineAdapter:
                 return {"result": self.active_persona}
             return {"error": f"Persona '{new_persona}' not found", "available": list(self.chat_system.personas.keys())}
 
-        @self.app.get("/v1/models")
+        @app.get("/v1/models")
         async def list_models() -> Any:
             models = [
                 {"id": name, "object": "model", "owned_by": "derpr", "permission": []}
@@ -99,7 +101,7 @@ class KoboldEngineAdapter:
             ]
             return {"object": "list", "data": models}
 
-        @self.app.get("/api/v1/persona/{name}")
+        @app.get("/api/v1/persona/{name}")
         async def get_persona(name: str) -> Any:
             if name not in self.chat_system.personas:
                 return {"error": f"Persona '{name}' not found"}
@@ -121,7 +123,7 @@ class KoboldEngineAdapter:
                 "instruct_tags": p.get_provider_extra("kobold", "instruct_tags"),
             }
 
-        @self.app.get("/api/v1/session/{persona}/ltm_block")
+        @app.get("/api/v1/session/{persona}/ltm_block")
         async def ltm_block(persona: str, query: str = "") -> Any:
             """Retrieve an LTM memory block for the given persona and query text.
 
@@ -142,7 +144,7 @@ class KoboldEngineAdapter:
             )
             return {"block": block}
 
-        @self.app.get("/api/v1/models/list")
+        @app.get("/api/v1/models/list")
         async def list_all_models() -> Dict[str, Any]:
             avail = get_model_list() or {}
             all_m = []
@@ -153,7 +155,7 @@ class KoboldEngineAdapter:
                     all_m.append(sub)
             return {"models": sorted(list(set(all_m)))}
 
-        @self.app.post("/api/v1/persona/{name}/reset")
+        @app.post("/api/v1/persona/{name}/reset")
         async def reset_persona_history(name: str) -> Any:
             if name not in self.chat_system.personas:
                 return {"error": "Persona not found"}
@@ -161,7 +163,7 @@ class KoboldEngineAdapter:
             p.start_new_conversation()
             return {"result": f"History for {name} reset successfully"}
 
-        @self.app.get("/api/v1/session/{persona}/kobold_export")
+        @app.get("/api/v1/session/{persona}/kobold_export")
         async def kobold_export(persona: str, max_turns: Optional[int] = None) -> Any:
             """Build a kobold-lite savefile from DERPR's global history for `persona`.
 
@@ -185,7 +187,7 @@ class KoboldEngineAdapter:
             )
             return JSONResponse(content=savefile)
 
-        @self.app.get("/api/v1/interaction/{interaction_id}/versions")
+        @app.get("/api/v1/interaction/{interaction_id}/versions")
         async def list_interaction_versions(interaction_id: int) -> Any:
             """List all stored versions for an interaction, canonical last.
 
@@ -213,7 +215,7 @@ class KoboldEngineAdapter:
             
             return {"interaction_id": interaction_id, "versions": versions}
 
-        @self.app.post("/api/v1/interaction/{interaction_id}/select_version/{k}")
+        @app.post("/api/v1/interaction/{interaction_id}/select_version/{k}")
         async def select_interaction_version(interaction_id: int, k: int) -> Any:
             """Swap archive position `k` with canonical (0-indexed pre-swap).
 
@@ -249,7 +251,7 @@ class KoboldEngineAdapter:
                 
             return {**result, "versions": versions}
 
-        @self.app.patch("/api/v1/interaction/{interaction_id}")
+        @app.patch("/api/v1/interaction/{interaction_id}")
         async def patch_interaction(interaction_id: int, request: Request) -> Any:
             """Update the content of an existing interaction (e.g. on manual edit)."""
             data = await request.json()
@@ -267,7 +269,7 @@ class KoboldEngineAdapter:
                 logger.error(f"patch_interaction({interaction_id}) failed: {e}")
                 return JSONResponse(status_code=500, content={"error": str(e)})
 
-        @self.app.delete("/api/v1/interaction/{interaction_id}")
+        @app.delete("/api/v1/interaction/{interaction_id}")
         async def delete_interaction(interaction_id: int) -> Any:
             """Soft-suppress an interaction (portal empty-edit / delete flow).
 
@@ -289,7 +291,7 @@ class KoboldEngineAdapter:
                 "already_suppressed": not inserted,
             }
 
-        @self.app.patch("/api/v1/persona/{name}")
+        @app.patch("/api/v1/persona/{name}")
         async def patch_persona(name: str, request: Request) -> Any:
             if name not in self.chat_system.personas:
                 return JSONResponse(status_code=404, content={"error": "Persona not found"})
@@ -345,38 +347,38 @@ class KoboldEngineAdapter:
             logger.info(f"Updated and saved persona settings for {name} (rejected={rejected})")
             return {"result": "success", "rejected_fields": rejected}
 
-        @self.app.get("/api/v1/info/version")
+        @app.get("/api/v1/info/version")
         async def get_info_version() -> Any:
             return await self._forward_get("/api/v1/info/version", {"version": "1.70", "lib_version": "1.70"})
 
-        @self.app.get("/api/extra/version")
+        @app.get("/api/extra/version")
         async def get_extra_version() -> Any:
             # Forward verbatim so portal can detect KCPP version + jinja/mcp/etc.
             # Fallback only on upstream failure. Without real version portal
             # falls back to legacy prompt-field format and instruct tags break.
             return await self._forward_get("/api/extra/version", {"version": "1.70", "platform": "DERPR"})
 
-        @self.app.get("/api/v1/config/soft_prompts")
+        @app.get("/api/v1/config/soft_prompts")
         async def get_soft_prompts() -> Any:
             return await self._forward_get("/api/v1/config/soft_prompts", {"results": []})
 
-        @self.app.get("/api/v1/config/max_context_length")
+        @app.get("/api/v1/config/max_context_length")
         async def get_max_history_messages() -> Any:
             return await self._forward_get("/api/v1/config/max_context_length", {"result": global_config.DEFAULT_MAX_CONTEXT_TOKENS})
 
-        @self.app.get("/api/extra/true_max_context_length")
+        @app.get("/api/extra/true_max_context_length")
         async def get_true_max_ctx() -> Any:
             return await self._forward_get("/api/extra/true_max_context_length", {"value": global_config.DEFAULT_MAX_CONTEXT_TOKENS})
 
-        @self.app.get("/api/extra/perf")
+        @app.get("/api/extra/perf")
         async def get_perf() -> Any:
             return await self._forward_get("/api/extra/perf", {})
 
-        @self.app.post("/api/extra/tokencount")
+        @app.post("/api/extra/tokencount")
         async def tokencount(request: Request) -> Any:
             return await self._forward_post("/api/extra/tokencount", await request.json())
 
-        @self.app.post("/api/v1/generate")
+        @app.post("/api/v1/generate")
         async def kobold_generate(request: Request) -> Any:
             """Non-streaming KoboldCPP generation with DB logging."""
             data = await request.json()
@@ -400,7 +402,7 @@ class KoboldEngineAdapter:
                 logger.error(f"/api/v1/generate upstream failed: {e}")
                 return JSONResponse(status_code=502, content={"error": str(e)})
 
-        @self.app.post("/api/extra/generate/stream")
+        @app.post("/api/extra/generate/stream")
         async def kobold_generate_stream(request: Request) -> StreamingResponse:
             """Streaming KoboldCPP SSE generation with DB logging.
 
@@ -477,15 +479,15 @@ class KoboldEngineAdapter:
                 },
             )
 
-        @self.app.get("/api/extra/generate/check")
-        @self.app.post("/api/extra/generate/check")
+        @app.get("/api/extra/generate/check")
+        @app.post("/api/extra/generate/check")
         async def generate_check(request: Request) -> Any:
             body = await request.json() if request.method == "POST" else {}
             return await self._forward_post("/api/extra/generate/check", body) if request.method == "POST" \
                 else await self._forward_get("/api/extra/generate/check", {})
 
-        @self.app.post("/api/v1/abort")
-        @self.app.post("/api/extra/abort")
+        @app.post("/api/v1/abort")
+        @app.post("/api/extra/abort")
         async def abort_generation() -> Any:
             url = f"{_kobold_base_url()}/api/extra/abort"
             try:
@@ -495,8 +497,8 @@ class KoboldEngineAdapter:
                 logger.warning(f"Abort forward failed: {e}")
                 return {"result": "abort_failed", "error": str(e)}
 
-        @self.app.post("/chat/completions")
-        @self.app.post("/v1/chat/completions")
+        @app.post("/chat/completions")
+        @app.post("/v1/chat/completions")
         async def oai_chat_completions(request: Request) -> Any:
             """Thin SSE transcoder over `chat_system.stream_response`.
 
