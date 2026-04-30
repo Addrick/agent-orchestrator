@@ -50,7 +50,7 @@ class KoboldEngineAdapter:
         self.host = host
         self.port = port
         self.active_persona: Optional[str] = None
-        self.app = FastAPI(title="DERPR Kobold Engine Adapter")
+        self.app: FastAPI = FastAPI(title="DERPR Kobold Engine Adapter")
 
         # CORS open — required for lite.koboldai.net to reach a local instance.
         self.app.add_middleware(
