@@ -153,22 +153,24 @@ class ChatSystem:
             author_role = msg.get('author_role')
             author_name = msg.get('author_name')
             content = msg.get('content', '')
+            # Noise reduction: Strip vertexai grounding redirect URLs from history before sending to LLM.
+            content_clean = strip_vertex_links(content) if content else content
 
             if author_role == 'user':
                 if is_group_chat and author_name:
-                    formatted_content = f"{author_name}: {content}"
+                    formatted_content = f"{author_name}: {content_clean}"
                     final_history.append({'role': 'user', 'content': formatted_content})
                 else:
-                    final_history.append({'role': 'user', 'content': content})
+                    final_history.append({'role': 'user', 'content': content_clean})
             elif author_role == 'assistant':
                 if author_name == persona_name:
                     tool_context_json = msg.get('tool_context')
                     if tool_context_json:
                         final_history.extend(json.loads(tool_context_json))
-                    final_history.append({'role': 'assistant', 'content': content})
+                    final_history.append({'role': 'assistant', 'content': content_clean})
                 else:
                     # In a group chat, messages from other personas are treated as user messages
-                    formatted_content = f"{author_name}: {content}"
+                    formatted_content = f"{author_name}: {content_clean}"
                     final_history.append({'role': 'user', 'content': formatted_content})
         return final_history
 
@@ -294,7 +296,8 @@ class ChatSystem:
         # to avoid broad query averaging/multi-matching that dilutes relevance.
         query_texts = []
         if current_message and current_message.strip():
-            query_texts.append(current_message)
+            # Noise reduction for embedding search
+            query_texts.append(strip_vertex_links(current_message))
 
         # Fallback: if current_message is empty, use the most recent USER message from history
         if not query_texts and conversation_history:
@@ -304,7 +307,9 @@ class ChatSystem:
                 if msg.get('role') == 'user':
                     content = msg.get('content', '')
                     if isinstance(content, str) and content.strip():
-                        query_texts.append(content)
+                        # conversation_history messages are already cleaned in _format_raw_history_for_llm
+                        # but we strip again just in case (e.g. from client_messages)
+                        query_texts.append(strip_vertex_links(content))
                         break
 
         # Enhanced Diagnostic Logging
@@ -500,6 +505,8 @@ class ChatSystem:
                     # Strip kobold-lite internal placeholders used for dynamic templating.
                     # These are injected by kobold_export.py but redundant for engine-side templating.
                     content = content.replace("{{[INPUT]}}", "").replace("{{[OUTPUT]}}", "").strip()
+                    # Noise reduction for client-supplied history
+                    content = strip_vertex_links(content)
                     m_copy["content"] = content
                 fallback.append(m_copy)
 
@@ -541,7 +548,8 @@ class ChatSystem:
             if ctx.conversation_history and ctx.conversation_history[-1].get("role") == "assistant":
                 ctx.conversation_history.pop()
         else:
-            ctx.conversation_history.append({"role": "user", "content": ctx.message})
+            # Noise reduction: Strip vertexai grounding redirect URLs from user message for LLM context.
+            ctx.conversation_history.append({"role": "user", "content": strip_vertex_links(ctx.message)})
 
         # Respect per-request context overrides from the portal for history truncation.
         ctx_limit = (ctx.local_inference_config or {}).get("max_context_length") or ctx.persona.get_max_context_tokens()
@@ -587,12 +595,11 @@ class ChatSystem:
                 retry_assistant_id = None
             return None, retry_assistant_id
 
-        user_message_clean = strip_vertex_links(message) if message else message
         try:
             user_interaction_id = self.memory_manager.log_message(
                 user_identifier=user_identifier, persona_name=persona_name,
                 channel=channel, author_role='user',
-                author_name=user_display_name, content=user_message_clean,
+                author_name=user_display_name, content=message,
                 timestamp=timestamp, server_id=server_id,
                 platform_message_id=platform_message_id,
             )
@@ -619,14 +626,13 @@ class ChatSystem:
         Returns the canonical assistant interaction_id, or None when the
         text is empty or the response_type isn't a normal LLM generation.
         """
-        final_text_clean = strip_vertex_links(final_text) if final_text else final_text
-        if not final_text_clean or not final_text_clean.strip():
+        if not final_text or not final_text.strip():
             return None
 
         if retry_assistant_id is not None:
             try:
                 self.memory_manager.update_interaction_content(
-                    retry_assistant_id, final_text_clean,
+                    retry_assistant_id, final_text,
                 )
                 return retry_assistant_id
             except Exception as e:
@@ -640,7 +646,7 @@ class ChatSystem:
             assistant_id: Optional[int] = self.memory_manager.log_message(
                 user_identifier=user_identifier, persona_name=persona_name,
                 channel=channel, author_role='assistant',
-                author_name=persona_name, content=final_text_clean,
+                author_name=persona_name, content=final_text,
                 timestamp=datetime.now(), server_id=server_id,
                 tool_context=tool_context_json,
                 reply_to_id=user_interaction_id,
@@ -799,7 +805,7 @@ class ChatSystem:
                 )
             )
 
-        # 4. Strip vertex links from the resolved assistant text, log/update.
+        # 4. Log/update assistant turn. Original text (including links) is preserved.
         assistant_id = self._commit_or_update_assistant(
             persona_name=persona_name, user_identifier=user_identifier,
             channel=channel, server_id=server_id,
@@ -808,10 +814,9 @@ class ChatSystem:
             retry_assistant_id=retry_assistant_id,
             tool_context_json=tool_context_json,
         )
-        final_text_clean = strip_vertex_links(final_text) if final_text else final_text
 
         yield DoneEvent(
-            text=final_text_clean if final_text_clean else "",
+            text=final_text if final_text else "",
             response_type=response_type,
             assistant_id=assistant_id,
             user_interaction_id=user_interaction_id,

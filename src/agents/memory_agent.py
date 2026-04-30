@@ -226,7 +226,7 @@ class MemoryAgent(Agent):
 
         chunks = self._chunk_messages(messages, chunk_size, self._max_tokens_per_chunk)
         for chunk_idx, chunk_msgs in enumerate(chunks):
-            chunk_texts = [msg['content'] for msg in chunk_msgs]
+            chunk_texts = [strip_vertex_links(msg['content']) for msg in chunk_msgs]
             est_tokens = sum(len(t) for t in chunk_texts) // 4
 
             logger.debug(

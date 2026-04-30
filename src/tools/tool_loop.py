@@ -24,7 +24,7 @@ from src.generation_events import (
     ToolCallResultEvent, ToolCallStartEvent,
 )
 from src.persona import ExecutionMode, Persona
-from src.tools.definitions import WRITE_TOOLS
+from src.tools.definitions import WRITE_TOOLS, ALWAYS_CONFIRM_TOOLS
 from src.tools.tool_manager import ToolManager
 
 logger = logging.getLogger(__name__)
@@ -165,7 +165,14 @@ class ToolLoop:
             async for tool_ev in self._execute_calls(read_calls, conversation_history):
                 yield tool_ev
 
-            if persona.get_execution_mode() == ExecutionMode.CONFIRM and write_calls:
+            # Determine if we need to halt for confirmation.
+            # We halt if:
+            # 1. The persona is in CONFIRM mode and there are ANY write calls.
+            # 2. There are specific tools in write_calls that are in ALWAYS_CONFIRM_TOOLS.
+            needs_confirmation = (persona.get_execution_mode() == ExecutionMode.CONFIRM and write_calls) or \
+                                any(wc.get("name") in ALWAYS_CONFIRM_TOOLS for wc in write_calls)
+
+            if needs_confirmation and write_calls:
                 descriptions = [
                     f"- **{wc.get('name')}**: {json.dumps(wc.get('arguments', {}))}"
                     for wc in write_calls

@@ -12,6 +12,7 @@ aiohttp
 aiolimiter
 fastapi
 uvicorn
+httpx
 
 # Bot interfaces
 discord.py

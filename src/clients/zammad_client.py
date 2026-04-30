@@ -64,7 +64,10 @@ class ZammadClient:
 
             return response.json()
         except requests.exceptions.RequestException as e:
-            logger.error(f"Zammad API Request Error to {method.upper()} {url}: {e}", exc_info=True)
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Zammad API Request Error to {method.upper()} {url}: {e} - Response: {e.response.text}", exc_info=True)
+            else:
+                logger.error(f"Zammad API Request Error to {method.upper()} {url}: {e}", exc_info=True)
             raise
 
     # --- Ticket Methods ---
@@ -216,3 +219,48 @@ class ZammadClient:
         """
         params = {'query': query}
         return self._make_request('get', 'users/search', params=params)
+
+    def link_tickets(self, source_ticket_id: int, target_ticket_id: int, link_type: str = "normal") -> Dict[str, Any]:
+        """
+        Creates a link between two tickets.
+        """
+        # Fetch source ticket number as the API requires it
+        source_ticket = self.get_ticket(source_ticket_id)
+        source_ticket_number = source_ticket.get('number')
+        
+        payload = {
+            "link_type": link_type,
+            "link_object_target": "Ticket",
+            "link_object_target_value": int(target_ticket_id),
+            "link_object_source": "Ticket",
+            "link_object_source_number": str(source_ticket_number)
+        }
+        return self._make_request('post', 'links/add', json=payload)
+
+    def merge_tickets(self, source_ticket_id: int, target_ticket_id: int) -> Dict[str, Any]:
+        """
+        Merges a source ticket into a target ticket.
+        This follows the Zammad logic: link them, (optionally) move articles, and set source state to 'merged'.
+        """
+        # 1. Link the tickets
+        try:
+            self.link_tickets(source_ticket_id, target_ticket_id)
+        except Exception as e:
+            logger.warning(f"Link creation failed during merge of {source_ticket_id} into {target_ticket_id}: {e}")
+
+        # 2. Move articles
+        # Note: Updating ticket_id on articles may require elevated permissions.
+        try:
+            articles = self.get_ticket_articles(source_ticket_id)
+            for art in articles:
+                self._make_request('put', f"ticket_articles/{art['id']}", json={'ticket_id': target_ticket_id})
+        except Exception as e:
+            logger.warning(f"Article migration failed during merge of {source_ticket_id} into {target_ticket_id}: {e}")
+
+        # 3. Update source ticket state to 'merged'
+        # Try setting state by name 'merged' to avoid 422 ID rejection
+        try:
+            return self.update_ticket(source_ticket_id, {'state': 'merged'})
+        except Exception as e:
+            logger.warning(f"State update to 'merged' failed: {e}. Falling back to 'closed'.")
+            return self.update_ticket(source_ticket_id, {'state': 'closed'})
