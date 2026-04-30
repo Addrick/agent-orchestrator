@@ -391,7 +391,7 @@ class TestGoogle:
             {"type": "function", "function": {"name": "web_search"}}])
 
         assert response['type'] == 'tool_calls'
-        assert response['calls'][0]['thought_signature'] == b'sig_abc123'
+        assert response['calls'][0]['thought_signature'] == base64.b64encode(b'sig_abc123').decode('utf-8')
 
     @pytest.mark.asyncio
     async def test_thought_signature_echoed_in_history(self, mock_google_client_class, text_engine, google_config,
@@ -411,7 +411,7 @@ class TestGoogle:
             {"role": "user", "content": "Search for test"},
             {"role": "assistant", "tool_calls": [
                 {"id": "call_1", "name": "web_search", "arguments": {"query": "test"},
-                 "thought_signature": b'sig_abc123'}
+                 "thought_signature": base64.b64encode(b'sig_abc123').decode('utf-8')}
             ]},
             {"role": "tool", "tool_call_id": "call_1", "name": "web_search",
              "content": '{"result": "found"}'},
