@@ -16663,6 +16663,31 @@ Current version indicated by LITEVER below.
 		} catch (e) { /* non-fatal */ }
 	}
 
+	// DERPR: Phase 1 — save core sampler sliders back to the active persona.
+	// Hooked into confirm_settings() so every popup 'Save' persists the tuned
+	// values to the persona DB.
+	function persist_sampler_settings_to_persona() {
+		try {
+			const sel = document.getElementById('personaSelectTopNav');
+			const name = sel ? sel.value : null;
+			if (!name) return;
+
+			const body = {
+				temperature: localsettings.temperature,
+				top_p: localsettings.top_p,
+				top_k: localsettings.top_k,
+				max_tokens: localsettings.max_length,
+				max_context_tokens: localsettings.max_context_length
+			};
+
+			fetch(`/api/v1/persona/${name}`, {
+				method: 'PATCH',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(body),
+			}).catch(()=>{});
+		} catch (e) { /* non-fatal */ }
+	}
+
 	function confirm_settings() {
 		hide_popups();
 
@@ -16982,6 +17007,7 @@ Current version indicated by LITEVER below.
 		autosave();//need to always autosave, so that we can switch back to non persistent sessions
 		render_gametext(false);
 		sync_multiplayer(true);
+		persist_sampler_settings_to_persona();
 	}
 
 	function get_preset_instruct_tag_format(sel)
