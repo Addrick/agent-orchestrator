@@ -526,9 +526,10 @@ class TextEngine:
                     "name": part.function_call.name,
                     "arguments": arguments,
                 }
-                if getattr(part, 'thought_signature', None) is not None:
+                thought_sig = getattr(part, 'thought_signature', None)
+                if isinstance(thought_sig, (bytes, bytearray)):
                     # thought_signature is bytes, must be serializable for our history storage
-                    call_dict["thought_signature"] = base64.b64encode(part.thought_signature).decode('utf-8')
+                    call_dict["thought_signature"] = base64.b64encode(thought_sig).decode('utf-8')
                 tool_calls.append(call_dict)
         if tool_calls:
             return {"type": "tool_calls", "calls": tool_calls}, api_params
