@@ -10,6 +10,8 @@ google-genai
 # Async / networking
 aiohttp
 aiolimiter
+fastapi
+uvicorn
 
 # Bot interfaces
 discord.py
