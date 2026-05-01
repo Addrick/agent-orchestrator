@@ -197,16 +197,26 @@ def test_search_user(mock_make_request, zammad_client):
 
 @patch('src.clients.zammad_client.ZammadClient._make_request')
 def test_link_tickets(mock_make_request, zammad_client):
-    """Test the payload construction for linking two tickets."""
+    """Test the payload construction for linking two tickets using the new /links/add endpoint."""
+    # Mock the return values for the sequence of calls
+    # 1st call: get_ticket -> returns ticket dict
+    # 2nd call: post links/add -> returns success dict
+    mock_make_request.side_effect = [{"number": "T101"}, {"id": 1}]
+    
     zammad_client.link_tickets(101, 202, link_type="parent")
+    
+    # 1. Verifying it fetched the ticket number
+    mock_make_request.assert_any_call('get', 'tickets/101?expand=true')
+    
+    # 2. Verifying the link call
     expected_payload = {
-        "link_object": "Ticket",
-        "link_object_value": "101",
+        "link_type": "parent",
+        "link_object_source": "Ticket",
+        "link_object_source_number": "T101",
         "link_object_target": "Ticket",
-        "link_object_target_value": "202",
-        "link_type": "parent"
+        "link_object_target_value": 202
     }
-    mock_make_request.assert_called_once_with('post', 'links', json=expected_payload)
+    mock_make_request.assert_any_call('post', 'links/add', json=expected_payload)
 
 
 @patch('src.clients.zammad_client.ZammadClient._make_request')
@@ -214,23 +224,35 @@ def test_link_tickets(mock_make_request, zammad_client):
 def test_merge_tickets(mock_get_articles, mock_make_request, zammad_client):
     """Test the orchestration of linking, moving articles, and closing the source ticket."""
     mock_get_articles.return_value = [{'id': 1, 'body': 'Note 1'}, {'id': 2, 'body': 'Note 2'}]
+    # Mock the sequence of _make_request calls:
+    # 1. get_ticket (inside link_tickets)
+    # 2. post links/add (inside link_tickets)
+    # 3. put ticket_articles/1
+    # 4. put ticket_articles/2
+    # 5. put tickets/101
+    mock_make_request.side_effect = [
+        {"number": "T101"}, # get_ticket
+        {"id": 1},          # link
+        {"id": 1},          # article 1
+        {"id": 2},          # article 2
+        {"id": 101}         # state update
+    ]
     
     zammad_client.merge_tickets(source_ticket_id=101, target_ticket_id=202)
 
-    # 1. Check link call
-    # The first call should be the link creation
+    # 1. Check link call (via links/add)
     link_payload = {
-        "link_object": "Ticket",
-        "link_object_value": "101",
+        "link_type": "normal", # default for merge
+        "link_object_source": "Ticket",
+        "link_object_source_number": "T101",
         "link_object_target": "Ticket",
-        "link_object_target_value": "202",
-        "link_type": "parent"
+        "link_object_target_value": 202
     }
-    mock_make_request.assert_any_call('post', 'links', json=link_payload)
+    mock_make_request.assert_any_call('post', 'links/add', json=link_payload)
 
     # 2. Check article move calls
     mock_make_request.assert_any_call('put', 'ticket_articles/1', json={'ticket_id': 202})
     mock_make_request.assert_any_call('put', 'ticket_articles/2', json={'ticket_id': 202})
 
-    # 3. Check source ticket state update (ID 7 = merged)
-    mock_make_request.assert_any_call('put', 'tickets/101', json={'state_id': 7})
+    # 3. Check source ticket state update (State by name)
+    mock_make_request.assert_any_call('put', 'tickets/101', json={'state': 'merged'})
