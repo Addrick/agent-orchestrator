@@ -16677,13 +16677,34 @@ Current version indicated by LITEVER below.
 				top_p: localsettings.top_p,
 				top_k: localsettings.top_k,
 				max_tokens: localsettings.max_length,
-				max_context_tokens: localsettings.max_context_length
+				max_context_tokens: localsettings.max_context_length,
+				rep_pen: localsettings.rep_pen,
+				rep_pen_range: localsettings.rep_pen_range,
+				rep_pen_slope: localsettings.rep_pen_slope,
+				min_p: localsettings.min_p,
+				typical: localsettings.typical,
+				tfs: localsettings.tfs,
 			};
+
+			// Guard against fresh-tab default-slider overwrite: skip PATCH when
+			// no tracked field differs from the persona-load baseline. Baseline
+			// is captured by applyPersonaToUI on persona switch.
+			const baseline = window._derpr_persona_sampler_baseline;
+			if (baseline && baseline.name === name) {
+				let diff = false;
+				for (const k of Object.keys(body)) {
+					if (body[k] !== baseline.fields[k]) { diff = true; break; }
+				}
+				if (!diff) return;
+			}
 
 			fetch(`/api/v1/persona/${name}`, {
 				method: 'PATCH',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify(body),
+			}).then(() => {
+				// Refresh baseline so the next save without changes is also a no-op.
+				window._derpr_persona_sampler_baseline = { name: name, fields: { ...body } };
 			}).catch(()=>{});
 		} catch (e) { /* non-fatal */ }
 	}
@@ -32334,6 +32355,9 @@ Current version indicated by LITEVER below.
 		try {
 			const res = await fetch(`/api/v1/persona/${name}`);
 			const p = await res.json();
+			// Stash full GET payload so applyPersonaToUI can read kobold_extras
+			// (provider_extras["kobold"] sampler block) without re-fetching.
+			window._derpr_active_persona = p;
 			document.getElementById('personaRole').value = p.role || p.name || '';
 			document.getElementById('systemPromptInput').value = p.prompt || '';
 			document.getElementById('modelTargetSelect').value = p.model_name || 'local';
@@ -32479,6 +32503,43 @@ Current version indicated by LITEVER below.
 			setBoth('max_context_length', max_ctx);
 			localsettings.max_context_length = max_ctx;
 		}
+
+		// Phase 2: kobold-only sampler extras stored in
+		// provider_extras["kobold"] on the persona. Push each set value into
+		// localsettings + slider DOM. Unset keys leave kobold-lite's own
+		// defaults / user-tuned slider values alone.
+		const kobold_extras = (window._derpr_active_persona && window._derpr_active_persona.kobold_extras) || {};
+		for (const k of ["rep_pen", "rep_pen_range", "rep_pen_slope", "min_p", "typical", "tfs"]) {
+			if (kobold_extras[k] !== undefined && kobold_extras[k] !== null) {
+				setBoth(k, kobold_extras[k]);
+				localsettings[k] = kobold_extras[k];
+			}
+		}
+
+		// Capture sampler baseline for confirm_settings() guard. Snapshot AFTER
+		// pushing into localsettings so the baseline reflects what's now live.
+		try {
+			const sel = document.getElementById('personaSelectTopNav');
+			const personaName = sel ? sel.value : null;
+			if (personaName) {
+				window._derpr_persona_sampler_baseline = {
+					name: personaName,
+					fields: {
+						temperature: localsettings.temperature,
+						top_p: localsettings.top_p,
+						top_k: localsettings.top_k,
+						max_tokens: localsettings.max_length,
+						max_context_tokens: localsettings.max_context_length,
+						rep_pen: localsettings.rep_pen,
+						rep_pen_range: localsettings.rep_pen_range,
+						rep_pen_slope: localsettings.rep_pen_slope,
+						min_p: localsettings.min_p,
+						typical: localsettings.typical,
+						tfs: localsettings.tfs,
+					},
+				};
+			}
+		} catch (e) { /* non-fatal */ }
 
 		if (typeof render_gametext === 'function') render_gametext();
 		if (!silent && typeof msgbox === 'function') msgbox("Inference Matrix applied to session.");
