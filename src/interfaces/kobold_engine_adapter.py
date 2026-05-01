@@ -21,6 +21,11 @@ from src.chat_system import (
 from src.interfaces.kobold_export import build_kobold_savefile
 from src.utils.model_utils import get_model_list
 from src.utils.save_utils import save_personas_to_file
+from src.interfaces._persona_patch import (
+    _KNOWN_PATCH_KEYS_ENGINE as _KNOWN_PATCH_KEYS,
+    _apply_kobold_sampler_extras,
+    get_kobold_extras_for_get,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +124,7 @@ class KoboldEngineAdapter:
                 "max_context_tokens": p.get_max_context_tokens(),
                 "chat_template": p.get_chat_template(),
                 "instruct_tags": p.get_provider_extra("kobold", "instruct_tags"),
+                "kobold_extras": get_kobold_extras_for_get(p),
             }
 
         @self.app.get("/api/v1/session/{persona}/ltm_block")
@@ -334,16 +340,22 @@ class KoboldEngineAdapter:
                 else:
                     p.clear_provider_extra("kobold", "instruct_tags")
 
+            _apply_kobold_sampler_extras(p, data, rejected)
+
+            unknown = sorted(set(data.keys()) - _KNOWN_PATCH_KEYS)
+            if unknown:
+                logger.warning(f"PATCH /persona/{name}: unknown fields ignored: {unknown}")
+
             try:
                 save_personas_to_file(self.chat_system.personas)
             except Exception as e:
                 logger.error(f"Persona save failed for {name}: {e}")
                 return JSONResponse(
                     status_code=500,
-                    content={"error": "save_failed", "detail": str(e), "rejected_fields": rejected},
+                    content={"error": "save_failed", "detail": str(e), "rejected_fields": rejected, "unknown_fields": unknown},
                 )
-            logger.info(f"Updated and saved persona settings for {name} (rejected={rejected})")
-            return {"result": "success", "rejected_fields": rejected}
+            logger.info(f"Updated and saved persona settings for {name} (rejected={rejected}, unknown={unknown})")
+            return {"result": "success", "rejected_fields": rejected, "unknown_fields": unknown}
 
         @self.app.get("/api/v1/info/version")
         async def get_info_version() -> Any:

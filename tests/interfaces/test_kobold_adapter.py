@@ -724,6 +724,84 @@ def test_patch_persona_updates_max_context_tokens():
     mm.close()
 
 
+# -------- Portal persona settings sync (Phase 2): kobold sampler extras --------
+
+def test_patch_persona_writes_kobold_sampler_extras():
+    """rep_pen / min_p / typical / tfs land in provider_extras["kobold"]."""
+    adapter, mm, persona = _make_adapter_with_seeded_db()
+    body = {
+        "rep_pen": 1.15,
+        "rep_pen_range": 1024,
+        "rep_pen_slope": 0.7,
+        "min_p": 0.05,
+        "typical": 0.95,
+        "tfs": 0.97,
+    }
+    with TestClient(adapter.app) as client:
+        r = client.patch("/api/v1/persona/test_persona", json=body)
+    assert r.status_code == 200
+    assert persona.get_provider_extra("kobold", "rep_pen") == 1.15
+    assert persona.get_provider_extra("kobold", "rep_pen_range") == 1024
+    assert persona.get_provider_extra("kobold", "rep_pen_slope") == 0.7
+    assert persona.get_provider_extra("kobold", "min_p") == 0.05
+    assert persona.get_provider_extra("kobold", "typical") == 0.95
+    assert persona.get_provider_extra("kobold", "tfs") == 0.97
+    mm.close()
+
+
+def test_patch_persona_clear_kobold_extra_via_none():
+    """None / "clear" / "" remove the key from provider_extras["kobold"]."""
+    adapter, mm, persona = _make_adapter_with_seeded_db()
+    persona.set_provider_extra("kobold", "rep_pen", 1.2)
+    persona.set_provider_extra("kobold", "min_p", 0.05)
+    with TestClient(adapter.app) as client:
+        r = client.patch("/api/v1/persona/test_persona",
+                         json={"rep_pen": None, "min_p": "clear"})
+    assert r.status_code == 200
+    assert persona.get_provider_extra("kobold", "rep_pen") is None
+    assert persona.get_provider_extra("kobold", "min_p") is None
+    mm.close()
+
+
+def test_patch_persona_kobold_extra_bad_input_rejected():
+    """Non-coercible input → field appears in rejected_fields, prior value kept."""
+    adapter, mm, persona = _make_adapter_with_seeded_db()
+    persona.set_provider_extra("kobold", "rep_pen", 1.2)
+    with TestClient(adapter.app) as client:
+        r = client.patch("/api/v1/persona/test_persona",
+                         json={"rep_pen": "not-a-number"})
+    assert r.status_code == 200
+    assert "rep_pen" in r.json()["rejected_fields"]
+    assert persona.get_provider_extra("kobold", "rep_pen") == 1.2
+    mm.close()
+
+
+def test_patch_persona_unknown_field_returned():
+    """Unknown keys land in unknown_fields list and are otherwise ignored."""
+    adapter, mm, persona = _make_adapter_with_seeded_db()
+    with TestClient(adapter.app) as client:
+        r = client.patch("/api/v1/persona/test_persona",
+                         json={"made_up_knob": 42, "another_one": "x"})
+    assert r.status_code == 200
+    unknown = r.json()["unknown_fields"]
+    assert "made_up_knob" in unknown
+    assert "another_one" in unknown
+    mm.close()
+
+
+def test_get_persona_includes_kobold_extras():
+    """GET surfaces only set kobold extras (omits unset keys)."""
+    adapter, mm, persona = _make_adapter_with_seeded_db()
+    persona.set_provider_extra("kobold", "rep_pen", 1.1)
+    persona.set_provider_extra("kobold", "min_p", 0.04)
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/persona/test_persona")
+    assert r.status_code == 200
+    extras = r.json()["kobold_extras"]
+    assert extras == {"rep_pen": 1.1, "min_p": 0.04}
+    mm.close()
+
+
 # Phase D dropped Phase 3 prune tests: pruning is now an engine-side
 # concern (`_prepare_request` → `truncate_messages_to_budget`) — see
 # tests/test_chat_system.py for coverage. The OAI adapter no longer touches
