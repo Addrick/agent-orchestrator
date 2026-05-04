@@ -428,23 +428,18 @@ class ChatSystem:
         return "\n".join(lines)
 
     def _filter_tools_for_persona(self, persona: Persona) -> List[Dict[str, Any]]:
-        """Filters available tools by persona config, service bindings, and model compatibility."""
+        """Filters available tools by persona policy, service bindings, and model compatibility."""
         all_tools = self.tool_manager.get_tool_definitions()
-        enabled_tool_names = persona.get_enabled_tools()
+        
+        # 1. Primary filtering via ToolPolicy
+        tools_for_llm = persona.get_tool_policy().filter_tools(all_tools)
 
-        if enabled_tool_names == ['*']:
-            tools_for_llm = all_tools
-        elif enabled_tool_names:
-            tools_for_llm = [tool for tool in all_tools if
-                             tool.get('function', {}).get('name') in enabled_tool_names]
-        else:
-            tools_for_llm = []
-
-        # Filter out tools whose service_binding isn't in the persona's bindings
+        # 2. Filter out tools whose service_binding isn't in the persona's bindings
         bindings = set(persona.get_service_bindings())
         tools_for_llm = [t for t in tools_for_llm
                          if not t.get('service_binding') or t.get('service_binding') in bindings]
 
+        # 3. Model compatibility check
         model_prefix = get_model_prefix(persona.get_model_name())
         tools_for_llm = [t for t in tools_for_llm
                          if model_prefix not in MODEL_INCOMPATIBLE_TOOLS.get(

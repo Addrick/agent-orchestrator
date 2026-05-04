@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 
 from config import global_config
+from src.tools.definitions import ALL_TOOL_DEFINITIONS
+from src.tools.policy import ToolPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +102,7 @@ def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
             "thinking_level": persona.get_thinking_level(),
             "long_term_memory": persona.get_long_term_memory(),
             "max_context_tokens": persona.get_max_context_tokens(),
+            "tool_policy": persona.get_tool_policy().to_dict(),
         }
         persona_list.append(persona_json)
     return persona_list
@@ -169,6 +172,24 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
                 logger.warning(f"Skipping malformed persona entry (missing name) in '{file_path}'.")
                 continue
 
+            # --- Composition Validation ---
+            policy_data = new_persona.get("tool_policy")
+            temp_policy = ToolPolicy.from_dict(policy_data) if policy_data else ToolPolicy.from_legacy_list(new_persona.get("enabled_tools", []))
+            
+            # Get definitions for the tools this persona wants to use
+            if temp_policy.default == "allow" and "*" in temp_policy.allow:
+                persona_tools = ALL_TOOL_DEFINITIONS
+            else:
+                allowed_set = set(temp_policy.allow + temp_policy.ask)
+                persona_tools = [t for t in ALL_TOOL_DEFINITIONS if t.get("function", {}).get("name") in allowed_set]
+            
+            validation_errors = temp_policy.validate_composition(persona_tools)
+            if validation_errors:
+                for err in validation_errors:
+                    logger.critical(f"Persona '{name}' security violation: {err}")
+                logger.error(f"Refusing to load insecure persona '{name}'.")
+                continue
+
             personas[name] = Persona(
                 persona_name=name,
                 model_name=new_persona.get("model_name"),
@@ -183,6 +204,7 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
                 thinking_level=new_persona.get("thinking_level"),
                 long_term_memory=new_persona.get("long_term_memory", True),
                 max_context_tokens=new_persona.get("max_context_tokens"),
+                tool_policy=new_persona.get("tool_policy"),
                 **_resolve_params_kwargs(new_persona),
             )
 
@@ -224,6 +246,23 @@ def load_system_personas_from_file() -> Dict[str, Any]:
             if not name:
                 continue
 
+            # --- Composition Validation ---
+            policy_data = new_persona.get("tool_policy")
+            temp_policy = ToolPolicy.from_dict(policy_data) if policy_data else ToolPolicy.from_legacy_list(new_persona.get("enabled_tools", []))
+            
+            if temp_policy.default == "allow" and "*" in temp_policy.allow:
+                persona_tools = ALL_TOOL_DEFINITIONS
+            else:
+                allowed_set = set(temp_policy.allow + temp_policy.ask)
+                persona_tools = [t for t in ALL_TOOL_DEFINITIONS if t.get("function", {}).get("name") in allowed_set]
+            
+            validation_errors = temp_policy.validate_composition(persona_tools)
+            if validation_errors:
+                for err in validation_errors:
+                    logger.critical(f"System Persona '{name}' security violation: {err}")
+                logger.error(f"Refusing to load insecure system persona '{name}'.")
+                continue
+
             params_kwargs = _resolve_params_kwargs(new_persona)
             # System personas use `response_token_limit` rather than `token_limit`
             # for the legacy flat path. Honor it when params block isn't present.
@@ -243,6 +282,7 @@ def load_system_personas_from_file() -> Dict[str, Any]:
                 thinking_level=new_persona.get("thinking_level"),
                 long_term_memory=new_persona.get("long_term_memory", True),
                 max_context_tokens=new_persona.get("max_context_tokens"),
+                tool_policy=new_persona.get("tool_policy"),
                 **params_kwargs,
             )
 
