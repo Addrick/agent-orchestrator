@@ -72,7 +72,7 @@ def test_persona_legacy_migration():
     )
     
     assert persona.get_tool_policy().allow == ["web_search", "get_ticket_details"]
-    assert persona.get_enabled_tools() == ["web_search", "get_ticket_details"]
+    assert persona.get_enabled_tools() == ["get_ticket_details", "web_search"]
 
 def test_persona_structured_policy():
     policy_dict = {

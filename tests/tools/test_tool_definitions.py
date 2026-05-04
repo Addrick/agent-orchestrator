@@ -36,7 +36,11 @@ def test_validator_rejects_missing_required_flag():
     bad = {
         "type": "function",
         "function": {"name": "x"},
-        "capabilities": {"produces_untrusted": False},
+        "capabilities": {
+            "locality": "local",
+            "sensitivity": "public",
+            "produces_untrusted": False
+        },
     }
     with pytest.raises(ValueError, match="missing required flag 'irreversible'"):
         validate_tool_capabilities(bad)
@@ -46,7 +50,12 @@ def test_validator_rejects_non_bool_flag():
     bad = {
         "type": "function",
         "function": {"name": "x"},
-        "capabilities": {"produces_untrusted": "yes", "irreversible": False},
+        "capabilities": {
+            "locality": "local",
+            "sensitivity": "public",
+            "produces_untrusted": "yes",
+            "irreversible": False
+        },
     }
     with pytest.raises(ValueError, match="must be bool"):
         validate_tool_capabilities(bad)
@@ -57,6 +66,8 @@ def test_validator_rejects_bad_irreversible_if_format():
         "type": "function",
         "function": {"name": "x"},
         "capabilities": {
+            "locality": "local",
+            "sensitivity": "public",
             "produces_untrusted": False,
             "irreversible": False,
             "irreversible_if": "no_colon_path",
@@ -71,6 +82,8 @@ def test_validator_rejects_unresolvable_irreversible_if_module():
         "type": "function",
         "function": {"name": "x"},
         "capabilities": {
+            "locality": "local",
+            "sensitivity": "public",
             "produces_untrusted": False,
             "irreversible": False,
             "irreversible_if": "src.tools.does_not_exist:fn",
@@ -85,6 +98,8 @@ def test_validator_rejects_unresolvable_irreversible_if_function():
         "type": "function",
         "function": {"name": "x"},
         "capabilities": {
+            "locality": "local",
+            "sensitivity": "public",
             "produces_untrusted": False,
             "irreversible": False,
             "irreversible_if": "src.tools.classifiers:no_such_function",

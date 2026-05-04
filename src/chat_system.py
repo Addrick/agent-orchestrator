@@ -28,7 +28,7 @@ from src.generation_events import (
 from src.stream_engine import StreamEngine
 from src.message_handler import BotLogic
 from src.persona import Persona, MemoryMode
-from src.tools.definitions import MODEL_INCOMPATIBLE_TOOLS
+from src.tools.definitions import MODEL_INCOMPATIBLE_TOOLS, get_tool_capabilities
 from src.tools.tool_loop import ToolLoop, _ApiPayloadEvent, _LoopFinishedEvent
 from src.tools.tool_manager import ToolManager, WebSearchHandler
 from src.utils.model_utils import get_model_list, get_model_prefix
@@ -68,12 +68,22 @@ def _relative_time(dt: datetime) -> str:
 
 @dataclass
 class PendingConfirmation:
-    """Stores state for a tool call awaiting user approval in CONFIRM mode."""
+    """Stores state for a tool call awaiting user approval.
+
+    All write-tool calls are parked here for audit before execution,
+    regardless of execution mode. The audit_info dict carries structured
+    metadata (irreversibility flags, taint sources, model reasoning) so
+    the approval surface can present an informed review.
+    """
     write_calls: List[Dict[str, Any]]
     conversation_history: List[Dict[str, Any]]
     persona_name: str
     tools_for_llm: List[Dict[str, Any]]
     image_url: Optional[str]
+    channel: str = ""
+    server_id: Optional[str] = None
+    turn_tainted: bool = False
+    audit_info: Optional[Dict[str, Any]] = None
     created_at: float = field(default_factory=time.time)
 
 
@@ -94,6 +104,8 @@ class RequestContext:
     tools_for_llm: List[Dict[str, Any]] = field(default_factory=list)
     oldest_interaction_id: Optional[int] = None
     local_inference_config: Optional[Dict[str, Any]] = None
+    turn_tainted: bool = False
+    taint_sources: List[str] = field(default_factory=list)
     # Optional: OAI-format messages from the client (e.g. kobold-lite jinja history).
     # Used as a fallback when the DB returns no history for this channel.
     client_messages: Optional[List[Dict[str, Any]]] = None
@@ -118,6 +130,7 @@ class ChatSystem:
         self.models_available: Dict[str, Any] = get_model_list() or {}
         self.background_tasks: Set[Coroutine[Any, Any, Any]] = set()
         self._pending_confirmations: Dict[Tuple[str, str], PendingConfirmation] = {}
+        self._conversation_taints: Dict[Tuple[str, str, str, Optional[str]], bool] = defaultdict(bool)
         self._services: Dict[str, ServiceIntegration] = {}
         self._embedding_service: Optional[EmbeddingService] = embedding_service
 
@@ -271,16 +284,16 @@ class ChatSystem:
             conversation_history: List[Dict[str, Any]],
             current_message: Optional[str] = None,
             oldest_interaction_id: Optional[int] = None,
-    ) -> Optional[str]:
+    ) -> Tuple[Optional[str], bool]:
         """Retrieve and format relevant long-term memory summaries for injection.
 
-        Returns a formatted <memory> block string, or None if no relevant memories
-        or the feature is disabled.
+        Returns (formatted_block, has_untrusted) where has_untrusted is True
+        when any retrieved summary carried the untrusted flag (Phase 5 taint).
         """
         logger.warning(f"### RETRIEVAL_DIAGNOSTIC: Entering _retrieve_memory_block for {persona.get_name()} (Enabled: {MEMORY_RETRIEVAL_ENABLED}, Service: {'YES' if self._embedding_service else 'NO'})")
 
         if not MEMORY_RETRIEVAL_ENABLED or not persona.get_long_term_memory() or self._embedding_service is None:
-            return None
+            return None, False
 
         # Map MemoryMode enum to string for retrieve_relevant_summaries
         mode_map = {
@@ -322,18 +335,18 @@ class ChatSystem:
 
         if not query_texts:
             logger.warning(f"### ChatSystem: Skipping retrieval for {persona.get_name()} (no text content to embed)")
-            return None
+            return None, False
 
         # Embed the query messages (1 batched API call)
         try:
             query_embeddings = await self._embedding_service.encode(query_texts)
         except Exception as e:
             logger.warning(f"Memory retrieval: embedding failed: {e}")
-            return None
+            return None, False
 
         if not query_embeddings:
             logger.warning("Memory retrieval: encode returned empty results")
-            return None
+            return None, False
 
         # Fetch candidate summaries natively in sqlite using sqlite-vec nearest neighbor
         summaries = self.memory_manager.retrieve_relevant_summaries(
@@ -351,7 +364,10 @@ class ChatSystem:
 
         if not summaries:
             logger.warning(f"### ChatSystem: No relevant memories returned from database for {persona.get_name()}")
-            return None
+            return None, False
+
+        # Check if any retrieved summaries carry the untrusted flag (Phase 5 taint)
+        has_untrusted = any(s.get('untrusted', 0) for s in summaries)
 
         # Pack into the expected format matching (score, summary)
         scored_summaries = [(summary.get('dist', 1.0), summary) for summary in summaries]
@@ -359,10 +375,10 @@ class ChatSystem:
         # Format memory block
         memory_block = self._format_memory_block(scored_summaries)
         if memory_block:
-            logger.warning(f"### ChatSystem: Injected memory block for {persona.get_name()} ({len(scored_summaries)} summaries)")
+            logger.warning(f"### ChatSystem: Injected memory block for {persona.get_name()} ({len(scored_summaries)} summaries, untrusted={has_untrusted})")
         else:
             logger.warning(f"### ChatSystem: No relevant memories found for {persona.get_name()}")
-        return memory_block
+        return memory_block, has_untrusted
 
     async def get_session_memory_block(
             self,
@@ -384,7 +400,7 @@ class ChatSystem:
         history, oldest_id = self._build_conversation_history(
             persona, user_identifier, channel, server_id, persona.get_history_messages(),
         )
-        return await self._retrieve_memory_block(
+        block, _has_untrusted = await self._retrieve_memory_block(
             persona=persona,
             user_identifier=user_identifier,
             channel=channel,
@@ -393,6 +409,7 @@ class ChatSystem:
             current_message=query or None,
             oldest_interaction_id=oldest_id,
         )
+        return block
 
     @staticmethod
     def _format_memory_block(scored_summaries: List[Tuple[float, Dict[str, Any]]]) -> Optional[str]:
@@ -409,7 +426,10 @@ class ChatSystem:
             memory_timestamp = summary.get('last_message_at') or summary.get('created_at')
 
             # Build label
+            summary_id = summary.get('summary_id')
             label_parts = [f"#{channel}"]
+            if summary_id:
+                label_parts.append(f"ID:{summary_id}")
             if persona == 'ambient':
                 label_parts.append("ambient")
             if memory_timestamp:
@@ -485,6 +505,10 @@ class ChatSystem:
             ctx.server_id, ctx.history_limit
         )
 
+        # Load sticky taint bit for this conversation
+        taint_key = (ctx.user_identifier, ctx.persona_name, ctx.channel, ctx.server_id)
+        ctx.turn_tainted = self._conversation_taints.get(taint_key, False)
+
         # If the client supplied its own message array (kobold-lite jinja mode),
         # prefer it over the DB result. The portal export already uses global
         # history (all channels), so kobold-lite's in-memory state is the
@@ -528,7 +552,7 @@ class ChatSystem:
             )
 
         # Inject long-term memory block before the sliding window
-        memory_block = await self._retrieve_memory_block(
+        memory_block, has_untrusted = await self._retrieve_memory_block(
             ctx.persona, ctx.user_identifier, ctx.channel,
             ctx.server_id, ctx.conversation_history,
             current_message=ctx.message,
@@ -536,6 +560,10 @@ class ChatSystem:
         )
         if memory_block:
             ctx.conversation_history.insert(0, {"role": "user", "content": memory_block})
+        if has_untrusted:
+            ctx.turn_tainted = True
+            if "memory_recall" not in ctx.taint_sources:
+                ctx.taint_sources.append("memory_recall")
 
         ctx.tools_for_llm = self._filter_tools_for_persona(ctx.persona)
 
@@ -740,6 +768,7 @@ class ChatSystem:
         tool_context_json: Optional[str] = None
         accumulated_parts: List[str] = []
         pending_writes: Optional[List[Dict[str, Any]]] = None
+        audit_info: Optional[Dict[str, Any]] = None
 
         # Construct per-call so tests that swap `chat_system.text_engine`
         # post-init still see the new engine; ToolLoop is stateless.
@@ -752,6 +781,8 @@ class ChatSystem:
                 tools=ctx.tools_for_llm,
                 local_inference_config=ctx.local_inference_config,
                 image_url=ctx.image_url,
+                turn_tainted=ctx.turn_tainted,
+                initial_taint_sources=ctx.taint_sources,
             ):
                 if isinstance(ev, _ApiPayloadEvent):
                     self._store_api_request(
@@ -772,6 +803,11 @@ class ChatSystem:
                     response_type = ev.response_type
                     tool_context_json = ev.tool_context_json
                     pending_writes = ev.pending_writes
+                    audit_info = ev.audit_info
+                    ctx.turn_tainted = ev.turn_tainted
+                    # Persist back to the conversation cache for stickiness
+                    taint_key = (ctx.user_identifier, ctx.persona_name, ctx.channel, ctx.server_id)
+                    self._conversation_taints[taint_key] = ev.turn_tainted
         except asyncio.CancelledError:
             # Client disconnect / abort. Flush whatever assistant text has
             # accumulated so the row reflects what the user actually saw,
@@ -797,6 +833,10 @@ class ChatSystem:
                     persona_name=ctx.persona_name,
                     tools_for_llm=ctx.tools_for_llm,
                     image_url=ctx.image_url,
+                    channel=ctx.channel,
+                    server_id=ctx.server_id,
+                    turn_tainted=ctx.turn_tainted,
+                    audit_info=audit_info,
                 )
             )
 
@@ -929,8 +969,16 @@ class ChatSystem:
         conversation_history = pending.conversation_history
 
         try:
+            taint_key = (user_identifier, persona.get_name(), pending.channel, pending.server_id)
+            turn_tainted = pending.turn_tainted
+
             if approved:
                 await self._execute_write_calls(pending.write_calls, conversation_history)
+                # Update taint from write calls
+                for wc in pending.write_calls:
+                    wc_name = wc.get("name") or "unknown"
+                    if get_tool_capabilities(wc_name).get("produces_untrusted"):
+                        turn_tainted = True
             else:
                 self._append_denied_tool_results(pending.write_calls, conversation_history)
 
@@ -960,6 +1008,9 @@ class ChatSystem:
                     author_role='assistant', author_name=persona_name,
                     content=final_text, timestamp=datetime.now(),
                 )
+
+            # Persist taint bit
+            self._conversation_taints[taint_key] = turn_tainted
 
             return final_text, ResponseType.LLM_GENERATION, assistant_id, None
 

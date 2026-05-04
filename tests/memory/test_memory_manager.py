@@ -638,7 +638,8 @@ def test_schema_creates_memory_tables(mem_manager):
     cursor.execute("PRAGMA table_info(Memory_Summaries)")
     cols = {row['name'] for row in cursor.fetchall()}
     assert cols == {'summary_id', 'segment_id', 'content', 'embedding',
-                    'model_name', 'created_at', 'summary_level', 'parent_summary_id'}
+                    'model_name', 'created_at', 'summary_level', 'parent_summary_id',
+                    'untrusted'}
 
 
 def test_schema_creates_memory_indexes(mem_manager):
@@ -1639,3 +1640,206 @@ def test_swap_dedupe_total_versions_stable_across_churn(mem_manager):
     for _ in range(6):
         result = mem_manager.swap_interaction_version(iid, 0)
         assert result['total_versions'] == 2
+
+
+# --- Phase 5: Memory Taint (untrusted column) Tests ---
+
+def test_store_summary_untrusted_roundtrip(mem_manager):
+    """store_summary(untrusted=True) persists and is retrievable."""
+    ts = datetime.now()
+    seg_id = mem_manager.store_segment("chan", None, "p1", 1, 5, 5, ts)
+    emb = _make_fake_embedding()
+
+    sum_id_trusted = mem_manager.store_summary(seg_id, "trusted content", emb, EMBEDDING_MODEL, ts)
+    sum_id_untrusted = mem_manager.store_summary(seg_id, "tainted content", emb, EMBEDDING_MODEL, ts, untrusted=True)
+
+    conn = mem_manager._get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT untrusted FROM Memory_Summaries WHERE summary_id = ?", (sum_id_trusted,))
+    assert cursor.fetchone()['untrusted'] == 0
+
+    cursor.execute("SELECT untrusted FROM Memory_Summaries WHERE summary_id = ?", (sum_id_untrusted,))
+    assert cursor.fetchone()['untrusted'] == 1
+
+
+def test_store_summary_untrusted_default_false(mem_manager):
+    """store_summary() without untrusted parameter defaults to 0 (trusted)."""
+    ts = datetime.now()
+    seg_id = mem_manager.store_segment("chan", None, "p1", 1, 5, 5, ts)
+    sum_id = mem_manager.store_summary(seg_id, "default content", _make_fake_embedding(), EMBEDDING_MODEL, ts)
+
+    conn = mem_manager._get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT untrusted FROM Memory_Summaries WHERE summary_id = ?", (sum_id,))
+    assert cursor.fetchone()['untrusted'] == 0
+
+
+def test_retrieve_relevant_summaries_includes_untrusted(mem_manager):
+    """retrieve_relevant_summaries returns dicts with the untrusted key."""
+    ts = datetime.now()
+    seg_id = mem_manager.store_segment("chan", None, "p1", 1, 5, 5, ts)
+    emb = _make_fake_embedding()
+    mem_manager.store_summary(seg_id, "trusted fact", emb, EMBEDDING_MODEL, ts)
+    mem_manager.store_summary(seg_id, "untrusted fact", emb, EMBEDDING_MODEL, ts, untrusted=True)
+
+    summaries = mem_manager.retrieve_relevant_summaries(
+        persona_name="p1", channel="chan", memory_mode="channel",
+        model_name=EMBEDDING_MODEL,
+    )
+    assert len(summaries) == 2
+    untrusted_vals = {s['untrusted'] for s in summaries}
+    assert untrusted_vals == {0, 1}
+
+
+@pytest.fixture
+def legacy_mem_manager_with_summaries(tmp_path):
+    """MemoryManager with Memory_Summaries v2 schema but WITHOUT the untrusted column.
+
+    Exercises the ALTER TABLE migration path for existing DBs that already
+    have summary_level but not untrusted.
+    """
+    import sqlite3 as _sqlite3
+    import sqlite_vec as _sqlite_vec
+
+    db_path = str(tmp_path / "legacy_summaries.db")
+    conn = _sqlite3.connect(db_path)
+    conn.enable_load_extension(True)
+    _sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+
+    conn.executescript("""
+        CREATE TABLE User_Interactions (
+            interaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_identifier TEXT NOT NULL,
+            persona_name TEXT NOT NULL,
+            channel TEXT NOT NULL,
+            author_role TEXT NOT NULL CHECK(author_role IN ('user', 'assistant', 'system')),
+            author_name TEXT,
+            content TEXT,
+            timestamp TIMESTAMP NOT NULL,
+            zammad_ticket_id INTEGER,
+            platform_message_id TEXT,
+            server_id TEXT,
+            tool_context TEXT,
+            parent_summary_id INTEGER,
+            reply_to_id INTEGER,
+            reasoning_content TEXT
+        );
+
+        CREATE TABLE Suppressed_Interactions (
+            suppression_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            interaction_id INTEGER NOT NULL UNIQUE,
+            suppressed_at TIMESTAMP NOT NULL,
+            FOREIGN KEY (interaction_id) REFERENCES User_Interactions(interaction_id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE Agent_Actions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            parent_id INTEGER,
+            agent_name TEXT NOT NULL,
+            action_type TEXT NOT NULL,
+            trigger_context TEXT,
+            action_payload TEXT,
+            outcome TEXT,
+            outcome_payload TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE Agent_Action_Contexts (
+            action_id INTEGER NOT NULL,
+            context_type TEXT NOT NULL,
+            context_value TEXT NOT NULL,
+            PRIMARY KEY (action_id, context_type, context_value)
+        );
+
+        CREATE TABLE Memory_Segments (
+            segment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel TEXT NOT NULL,
+            server_id TEXT,
+            persona_name TEXT NOT NULL,
+            start_interaction_id INTEGER NOT NULL,
+            end_interaction_id INTEGER NOT NULL,
+            message_count INTEGER NOT NULL,
+            created_at TIMESTAMP NOT NULL,
+            first_message_at TIMESTAMP,
+            last_message_at TIMESTAMP
+        );
+
+        -- v2 schema WITH summary_level but WITHOUT untrusted
+        CREATE TABLE Memory_Summaries (
+            summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            segment_id INTEGER,
+            content TEXT NOT NULL,
+            embedding BLOB,
+            model_name TEXT NOT NULL,
+            created_at TIMESTAMP NOT NULL,
+            summary_level INTEGER NOT NULL DEFAULT 1,
+            parent_summary_id INTEGER,
+            FOREIGN KEY (segment_id) REFERENCES Memory_Segments(segment_id) ON DELETE CASCADE,
+            FOREIGN KEY (parent_summary_id) REFERENCES Memory_Summaries(summary_id) ON DELETE CASCADE
+        );
+
+        INSERT INTO Memory_Segments (channel, server_id, persona_name, start_interaction_id, end_interaction_id, message_count, created_at)
+        VALUES ('chan', NULL, 'p1', 1, 5, 5, '2026-01-01T00:00:00');
+
+        INSERT INTO Memory_Summaries (segment_id, content, model_name, created_at, summary_level)
+        VALUES (1, 'Pre-migration summary', 'test-model', '2026-01-01T00:00:00', 1);
+    """)
+    conn.close()
+
+    manager = MemoryManager(db_path=db_path)
+    yield manager
+    manager.close()
+
+
+def test_migration_adds_untrusted_column(legacy_mem_manager_with_summaries):
+    """create_schema() on a DB with v2 Memory_Summaries adds the untrusted column."""
+    legacy_mem_manager_with_summaries.create_schema()
+
+    conn = legacy_mem_manager_with_summaries._get_connection()
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(Memory_Summaries)")
+    columns = {row['name'] for row in cursor.fetchall()}
+    assert 'untrusted' in columns
+
+
+def test_migration_untrusted_preserves_existing_data(legacy_mem_manager_with_summaries):
+    """Existing Memory_Summaries rows survive the untrusted migration with default 0."""
+    legacy_mem_manager_with_summaries.create_schema()
+
+    conn = legacy_mem_manager_with_summaries._get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT content, untrusted FROM Memory_Summaries")
+    row = cursor.fetchone()
+    assert row['content'] == 'Pre-migration summary'
+    assert row['untrusted'] == 0
+
+
+def test_migration_untrusted_is_idempotent(legacy_mem_manager_with_summaries):
+    """Running create_schema() twice doesn't error on untrusted column."""
+    legacy_mem_manager_with_summaries.create_schema()
+    legacy_mem_manager_with_summaries.create_schema()  # second call should be a no-op
+
+    conn = legacy_mem_manager_with_summaries._get_connection()
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(Memory_Summaries)")
+    columns = [row['name'] for row in cursor.fetchall()]
+    assert columns.count('untrusted') == 1
+
+
+def test_migration_untrusted_new_features_work(legacy_mem_manager_with_summaries):
+    """After migration, store_summary with untrusted=True works on migrated DB."""
+    legacy_mem_manager_with_summaries.create_schema()
+
+    ts = datetime.now()
+    seg_id = legacy_mem_manager_with_summaries.store_segment("chan", None, "p1", 10, 15, 5, ts)
+    emb = _make_fake_embedding()
+    sum_id = legacy_mem_manager_with_summaries.store_summary(
+        seg_id, "tainted content", emb, EMBEDDING_MODEL, ts, untrusted=True
+    )
+
+    conn = legacy_mem_manager_with_summaries._get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT untrusted FROM Memory_Summaries WHERE summary_id = ?", (sum_id,))
+    assert cursor.fetchone()['untrusted'] == 1

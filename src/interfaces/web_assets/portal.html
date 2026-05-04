@@ -77,6 +77,64 @@ Current version indicated by LITEVER below.
 			background: rgba(139, 92, 246, 0.08);
 			border-color: rgba(139, 92, 246, 0.2);
 		}
+
+		/* Tool Call Process Styles (tool_revamp_v1 Phase 4) */
+		.tool-process {
+			background: rgba(20, 184, 166, 0.05);
+			border: 1px solid rgba(20, 184, 166, 0.15);
+			border-radius: 8px;
+			margin: 8px 0;
+			overflow: hidden;
+		}
+		.tool-process summary {
+			padding: 8px 12px;
+			font-weight: 600;
+			text-transform: uppercase;
+			font-size: 10px;
+			letter-spacing: 0.05em;
+			color: #14b8a6;
+			cursor: pointer;
+			user-select: none;
+			list-style: none;
+			display: flex;
+			align-items: center;
+			gap: 8px;
+		}
+		.tool-process summary::-webkit-details-marker {
+			display: none;
+		}
+		.tool-process summary .tool-status-icon {
+			display: inline-block;
+			animation: pulse 2s infinite;
+		}
+		.tool-process summary .tool-status-icon.done {
+			animation: none;
+		}
+		.tool-content {
+			padding: 0 12px 12px;
+			color: #94a3b8;
+			font-size: 0.95em;
+		}
+		.tool-content .tool-args {
+			font-family: monospace;
+			font-size: 0.85em;
+			color: #64748b;
+			margin-bottom: 4px;
+		}
+		.tool-content .tool-result {
+			font-family: monospace;
+			font-size: 0.85em;
+			color: #10b981;
+		}
+		.tool-content .tool-error {
+			font-family: monospace;
+			font-size: 0.85em;
+			color: #ef4444;
+		}
+		.tool-process[open] {
+			background: rgba(20, 184, 166, 0.08);
+			border-color: rgba(20, 184, 166, 0.25);
+		}
 	</style>
 
 	<style id="bootstrap-normalize.min">
@@ -5186,6 +5244,23 @@ Current version indicated by LITEVER below.
 		let inEditMode = (document.getElementById("allowediting").checked ? true : false);
 		if(!inEditMode)
 		{
+            // Tool Call Think Blocks (tool_revamp_v1 Phase 4)
+            // Pre-pass: detect 🔧-prefixed <think> blocks emitted by the
+            // adapter for tool calls and render them as teal tool-process
+            // details instead of the generic violet reflective-process.
+            // Must run BEFORE the generic <think> handler below.
+            const toolThinkDone = /<think>\n\u{1F527} \*\*(.+?)\*\*\n([\s\S]*?)<\/think>/gu;
+            input = input.replace(toolThinkDone, function(match, toolName, body) {
+                return `<details class="tool-process"><summary><span class="tool-status-icon done">🔧</span> Tool: ${toolName}</summary><div class="tool-content">${body}</div></details>`;
+            });
+            // Streaming: unclosed tool think block (call in progress)
+            const toolThinkOpen = /<think>\n\u{1F527} \*\*(.+?)\*\*\n([\s\S]*)$/u;
+            if (toolThinkOpen.test(input)) {
+                input = input.replace(toolThinkOpen, function(match, toolName, body) {
+                    return `<details class="tool-process" open><summary><span class="tool-status-icon">⚡</span> Tool: ${toolName} (running...)</summary><div class="tool-content">${body}</div></details>`;
+                });
+            }
+
             // Neural Glow: Thinking Block Patch
             const thinkStart = "<think>";
             const thinkEnd = "</think>";

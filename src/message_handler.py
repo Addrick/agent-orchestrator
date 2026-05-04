@@ -38,6 +38,8 @@ class BotLogic:
             'goodbye': self._handle_stop_conversation,
             'dump_last': self._handle_dump_last,
             'dump_history': self._handle_dump_history,
+            'trust': self._handle_trust,
+            'untrust': self._handle_untrust,
         }
         self.what_handlers = {
             'prompt': self._what_prompt,
@@ -59,6 +61,7 @@ class BotLogic:
             'thinking_level': self._what_thinking_level,
             'max_context_tokens': self._what_max_context_tokens,
             'chat_template': self._what_chat_template,
+            'tool_policy': self._what_tool_policy,
         }
         self.set_handlers = {
             'prompt': self._set_prompt,
@@ -79,6 +82,7 @@ class BotLogic:
             'thinking_level': self._set_thinking_level,
             'max_context_tokens': self._set_max_context_tokens,
             'chat_template': self._set_chat_template,
+            'tool_policy': self._set_tool_policy,
         }
 
     async def preprocess_message(
@@ -135,7 +139,9 @@ class BotLogic:
                                                                        "detail, \n"
                                                                        "update_models, \n"
                                                                        "dump_last, \n"
-                                                                       "dump_history")
+                                                                       "dump_history, \n"
+                                                                       "trust <id> <reason>, \n"
+                                                                       "untrust <id> <reason>")
         return help_msg, False
 
     async def _query_llm_with_selection_tool(
@@ -465,6 +471,11 @@ class BotLogic:
         template = persona.get_chat_template()
         display = f"'{template}'" if template else "not set (default)"
         return f"Chat template for '{persona.get_name()}' is {display}.", False
+
+    def _what_tool_policy(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
+        policy = persona.get_tool_policy()
+        return f"Tool policy for '{persona.get_name()}': {json.dumps(policy.to_dict(), indent=2)}", False
+
 
     async def _handle_set(
             self,
@@ -853,6 +864,19 @@ class BotLogic:
         persona.set_thinking_level(value)
         return f"Thinking level for {persona.get_name()} set to '{value}'.", True
 
+    def _set_tool_policy(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
+        if len(args) < 2:
+            return "Usage: set tool_policy <json_string>", False
+        json_str = " ".join(args[1:])
+        try:
+            policy_dict = json.loads(json_str)
+            persona.set_tool_policy(policy_dict)
+            return f"Tool policy for {persona.get_name()} updated.", True
+        except json.JSONDecodeError:
+            return "Error: Invalid JSON string for tool policy.", False
+        except ValueError as e:
+            return f"Error: {e}", False
+
     def _handle_start_conversation(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[
         Optional[str], bool]:
         if args:
@@ -1122,3 +1146,45 @@ class BotLogic:
             return "Usage: update_models", False
         self.chat_system.models_available = get_model_list(update=True) or {}
         return f"Model list updated. Currently available: {json.dumps(self.chat_system.models_available, indent=2)}", False
+
+    def _handle_trust(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[str, bool]:
+        if not args:
+            return "Usage: trust <summary_id> <reason>", False
+        try:
+            summary_id = int(args[0])
+        except ValueError:
+            return f"Error: Invalid summary_id '{args[0]}'. Must be an integer.", False
+        
+        reason = " ".join(args[1:]) if len(args) > 1 else "No reason provided"
+        
+        success = self.chat_system.memory_manager.mark_trusted(
+            summary_id=summary_id,
+            operator_id=user_identifier,
+            reason=reason
+        )
+        
+        if success:
+            return f"Memory {summary_id} marked as TRUSTED. Audit log updated.", True
+        else:
+            return f"Error: Could not find or update memory {summary_id}.", False
+
+    def _handle_untrust(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[str, bool]:
+        if not args:
+            return "Usage: untrust <summary_id> <reason>", False
+        try:
+            summary_id = int(args[0])
+        except ValueError:
+            return f"Error: Invalid summary_id '{args[0]}'. Must be an integer.", False
+        
+        reason = " ".join(args[1:]) if len(args) > 1 else "No reason provided"
+        
+        success = self.chat_system.memory_manager.mark_untrusted(
+            summary_id=summary_id,
+            operator_id=user_identifier,
+            reason=reason
+        )
+        
+        if success:
+            return f"Memory {summary_id} marked as UNTRUSTED. Audit log updated.", True
+        else:
+            return f"Error: Could not find or update memory {summary_id}.", False
