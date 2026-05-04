@@ -41,6 +41,8 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "capabilities": {
             "produces_untrusted": True,
             "irreversible": False,
+            "locality": "network",
+            "sensitivity": "public",
         },
         "function": {
             "name": "google_grounding_search",
@@ -56,6 +58,8 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "capabilities": {
             "produces_untrusted": True,
             "irreversible": False,
+            "locality": "network",
+            "sensitivity": "public",
         },
         "function": {
             "name": "web_search",
@@ -86,6 +90,8 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "capabilities": {
             "produces_untrusted": True,
             "irreversible": False,
+            "locality": "network",
+            "sensitivity": "internal",
         },
         "function": {
             "name": "get_ticket_details",
@@ -109,6 +115,8 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "capabilities": {
             "produces_untrusted": False,
             "irreversible": False,
+            "locality": "network",
+            "sensitivity": "internal",
         },
         "function": {
             "name": "update_ticket",
@@ -152,6 +160,8 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             "produces_untrusted": False,
             "irreversible": False,
             "irreversible_if": "src.tools.classifiers:add_note_irreversible_check",
+            "locality": "network",
+            "sensitivity": "internal",
         },
         "function": {
             "name": "add_note_to_ticket",
@@ -184,6 +194,8 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "capabilities": {
             "produces_untrusted": True,
             "irreversible": False,
+            "locality": "network",
+            "sensitivity": "internal",
         },
         "function": {
             "name": "search_tickets",
@@ -207,6 +219,8 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "capabilities": {
             "produces_untrusted": False,
             "irreversible": True,
+            "locality": "network",
+            "sensitivity": "internal",
         },
         "function": {
             "name": "create_ticket",
@@ -238,6 +252,8 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "capabilities": {
             "produces_untrusted": False,
             "irreversible": False,
+            "locality": "network",
+            "sensitivity": "pii",
         },
         "function": {
             "name": "search_user",
@@ -261,6 +277,8 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "capabilities": {
             "produces_untrusted": False,
             "irreversible": False,
+            "locality": "network",
+            "sensitivity": "pii",
         },
         "function": {
             "name": "create_user",
@@ -284,6 +302,8 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "capabilities": {
             "produces_untrusted": False,
             "irreversible": False,
+            "locality": "network",
+            "sensitivity": "pii",
         },
         "function": {
             "name": "update_user",
@@ -309,6 +329,8 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "capabilities": {
             "produces_untrusted": False,
             "irreversible": True,
+            "locality": "network",
+            "sensitivity": "pii",
         },
         "function": {
             "name": "delete_user",
@@ -329,6 +351,8 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "capabilities": {
             "produces_untrusted": False,
             "irreversible": True,
+            "locality": "network",
+            "sensitivity": "internal",
         },
         "function": {
             "name": "merge_tickets",
@@ -359,6 +383,8 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "capabilities": {
             "produces_untrusted": False,
             "irreversible": False,
+            "locality": "local",
+            "sensitivity": "internal",
         },
         "function": {
             "name": "get_agent_status",
@@ -385,6 +411,8 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "capabilities": {
             "produces_untrusted": False,
             "irreversible": False,
+            "locality": "local",
+            "sensitivity": "internal",
         },
         "function": {
             "name": "get_agent_history",
@@ -425,6 +453,8 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "capabilities": {
             "produces_untrusted": False,
             "irreversible": False,
+            "locality": "local",
+            "sensitivity": "internal",
         },
         "function": {
             "name": "manage_agent",
@@ -459,6 +489,8 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "capabilities": {
             "produces_untrusted": True,
             "irreversible": False,
+            "locality": "local",
+            "sensitivity": "internal",
         },
         "function": {
             "name": "drill_down_memory",
@@ -481,6 +513,8 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "capabilities": {
             "produces_untrusted": False,
             "irreversible": False,
+            "locality": "local",
+            "sensitivity": "internal",
         },
         "function": {
             "name": "update_core_memory",
@@ -511,16 +545,23 @@ def validate_tool_capabilities(tool: Dict[str, Any]) -> None:
     caps = tool.get("capabilities")
     if not isinstance(caps, dict):
         raise ValueError(f"Tool '{name}' missing 'capabilities' block")
-    for required in ("produces_untrusted", "irreversible"):
+    for required in ("produces_untrusted", "irreversible", "locality", "sensitivity"):
         if required not in caps:
             raise ValueError(
                 f"Tool '{name}' capabilities missing required flag '{required}'"
             )
-        if not isinstance(caps[required], bool):
-            raise ValueError(
-                f"Tool '{name}' capability '{required}' must be bool, "
-                f"got {type(caps[required]).__name__}"
-            )
+        if required in ("produces_untrusted", "irreversible"):
+            if not isinstance(caps[required], bool):
+                raise ValueError(
+                    f"Tool '{name}' capability '{required}' must be bool, "
+                    f"got {type(caps[required]).__name__}"
+                )
+        else:
+            if not isinstance(caps[required], str):
+                raise ValueError(
+                    f"Tool '{name}' capability '{required}' must be str, "
+                    f"got {type(caps[required]).__name__}"
+                )
     classifier = caps.get("irreversible_if")
     if classifier is None:
         return

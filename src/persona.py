@@ -2,10 +2,11 @@
 
 import logging
 from enum import Enum, auto
-from typing import Optional, Dict, Any, List, Type, TypeVar
+from typing import Optional, Dict, Any, List, Type, TypeVar, Union
 
 from config import global_config
 from src.generation_params import GenerationParams
+from src.tools.policy import ToolPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,7 @@ class Persona:
             max_context_tokens: Optional[int] = None,
             params: Any = None,
             chat_template: Optional[str] = None,
+            tool_policy: Optional[Union[Dict[str, Any], ToolPolicy]] = None,
             **kwargs: Any,
     ) -> None:
         self._name: str = persona_name
@@ -108,6 +110,13 @@ class Persona:
             self._max_context_tokens: int = int(max_context_tokens) if max_context_tokens is not None else global_config.DEFAULT_MAX_CONTEXT_TOKENS
         except (ValueError, TypeError):
             self._max_context_tokens = global_config.DEFAULT_MAX_CONTEXT_TOKENS
+
+        if isinstance(tool_policy, ToolPolicy):
+            self._tool_policy = tool_policy
+        elif isinstance(tool_policy, dict):
+            self._tool_policy = ToolPolicy.from_dict(tool_policy)
+        else:
+            self._tool_policy = ToolPolicy.from_legacy_list(self._enabled_tools)
 
     # --- Getters ---
 
@@ -173,7 +182,14 @@ class Persona:
 
     def get_enabled_tools(self) -> List[str]:
         """Returns the list of tool names this persona is allowed to use."""
-        return self._enabled_tools
+        if self._tool_policy.default == "allow" and "*" in self._tool_policy.allow:
+            return ["*"]
+        # Combine allowed and ask tools for the engine to consider both
+        return list(set(self._tool_policy.allow + self._tool_policy.ask))
+
+    def get_tool_policy(self) -> ToolPolicy:
+        """Returns the persona's structured tool security policy."""
+        return self._tool_policy
 
     def get_service_bindings(self) -> List[str]:
         """Returns the list of service integrations this persona is bound to."""
@@ -391,9 +407,20 @@ class Persona:
         logger.info(f"Persona '{self._name}' service_bindings set to {self._service_bindings}.")
 
     def set_enabled_tools(self, new_tools: List[str]) -> None:
-        """Sets the list of tools the persona is allowed to use."""
+        """Sets the list of tools the persona is allowed to use, updating the policy."""
         self._enabled_tools = new_tools
+        self._tool_policy = ToolPolicy.from_legacy_list(new_tools)
         logger.info(f"Persona '{self._name}' enabled tools set to: {self._enabled_tools}")
+
+    def set_tool_policy(self, policy: Union[Dict[str, Any], ToolPolicy]) -> None:
+        """Sets the structured tool security policy."""
+        if isinstance(policy, dict):
+            self._tool_policy = ToolPolicy.from_dict(policy)
+        else:
+            self._tool_policy = policy
+        # Update legacy list for compatibility
+        self._enabled_tools = self._tool_policy.allow
+        logger.info(f"Persona '{self._name}' tool policy updated.")
 
     def set_max_context_tokens(self, new_value: Any) -> int:
         """Sets the total context budget. Falls back to default on invalid input."""
