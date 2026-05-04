@@ -567,7 +567,7 @@ async def test_set_tools_exact_names(bot_logic_with_tools, mock_chat_system_with
     persona = mock_chat_system_with_state.personas["derpr"]
     result = await bot_logic_with_tools.preprocess_message("derpr", "user1", "set tools web_search create_ticket")
     assert result["mutated"] is True
-    assert persona.get_enabled_tools() == ["web_search", "create_ticket"]
+    assert persona.get_enabled_tools() == ["create_ticket", "web_search"]
 
 
 @pytest.mark.asyncio
@@ -660,6 +660,7 @@ _SETTER_TO_COMMAND = {
     'set_thinking_level': 'thinking_level',
     'set_max_context_tokens': 'max_context_tokens',
     'set_chat_template': 'chat_template',
+    'set_tool_policy': 'tool_policy',
 }
 
 # Legacy aliases that should not have commands (as they are being deprecated).
@@ -691,6 +692,7 @@ _GETTER_TO_COMMAND = {
     'get_thinking_level': 'thinking_level',
     'get_max_context_tokens': 'max_context_tokens',
     'get_chat_template': 'chat_template',
+    'get_tool_policy': 'tool_policy',
 }
 
 # Getters that intentionally have no what command (internal/derived values).

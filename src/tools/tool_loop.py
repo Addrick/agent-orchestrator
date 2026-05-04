@@ -24,7 +24,10 @@ from src.generation_events import (
     ToolCallResultEvent, ToolCallStartEvent,
 )
 from src.persona import ExecutionMode, Persona
-from src.tools.definitions import WRITE_TOOLS, ALWAYS_CONFIRM_TOOLS
+from src.tools.definitions import (
+    WRITE_TOOLS, ALWAYS_CONFIRM_TOOLS,
+    get_tool_capabilities, is_irreversible
+)
 from src.tools.tool_manager import ToolManager
 
 logger = logging.getLogger(__name__)
@@ -47,6 +50,8 @@ class _LoopFinishedEvent:
     response_type: ResponseType
     tool_context_json: Optional[str] = None
     pending_writes: Optional[List[Dict[str, Any]]] = None
+    turn_tainted: bool = False
+    audit_info: Optional[Dict[str, Any]] = None
 
 
 LoopEvent = Union[
@@ -78,12 +83,16 @@ class ToolLoop:
         tools: List[Dict[str, Any]],
         local_inference_config: Optional[Dict[str, Any]] = None,
         image_url: Optional[str] = None,
+        turn_tainted: bool = False,
+        initial_taint_sources: Optional[List[str]] = None,
     ) -> AsyncIterator[LoopEvent]:
         """Yield generation events for one turn. Mutates
         `conversation_history` in-place so the orchestrator (and any
         CONFIRM-mode resume path) sees the same list."""
         persona_config = persona.get_config_for_engine()
         history_start = len(conversation_history)
+        taint_sources: List[str] = list(initial_taint_sources or [])
+        # turn_tainted is passed in to support conversation-level stickiness
 
         for iter_idx in range(self.max_iterations):
             api_payload: Optional[Dict[str, Any]] = None
@@ -153,6 +162,7 @@ class ToolLoop:
                     final_text=final_text,
                     response_type=ResponseType.LLM_GENERATION,
                     tool_context_json=tool_context_json,
+                    turn_tainted=turn_tainted,
                 )
                 return
 
@@ -165,38 +175,69 @@ class ToolLoop:
             async for tool_ev in self._execute_calls(read_calls, conversation_history):
                 yield tool_ev
 
-            # Determine if we need to halt for confirmation.
-            # We halt if:
-            # 1. The persona is in CONFIRM mode and there are ANY write calls.
-            # 2. There are specific tools in write_calls that are in ALWAYS_CONFIRM_TOOLS.
-            needs_confirmation = (persona.get_execution_mode() == ExecutionMode.CONFIRM and write_calls) or \
-                                any(wc.get("name") in ALWAYS_CONFIRM_TOOLS for wc in write_calls)
+            # Update turn_tainted from read_calls that just finished
+            for rc in read_calls:
+                tool_name = rc.get("name") or "unknown"
+                caps = get_tool_capabilities(tool_name)
+                if caps.get("produces_untrusted"):
+                    turn_tainted = True
+                    taint_sources.append(tool_name)
 
-            if needs_confirmation and write_calls:
-                descriptions = [
-                    f"- **{wc.get('name')}**: {json.dumps(wc.get('arguments', {}))}"
-                    for wc in write_calls
-                ]
-                final_text = (
-                    "I'd like to perform the following actions:\n"
-                    + "\n".join(descriptions)
-                )
+            # --- All write tools require audit ---
+            if write_calls:
+                model_reasoning = "".join(accumulated_parts).strip()
+                audit_actions = []
+                for wc in write_calls:
+                    wc_name = wc.get("name", "")
+                    wc_args = wc.get("arguments", {})
+                    audit_actions.append({
+                        "tool": wc_name,
+                        "arguments": wc_args,
+                        "irreversible": is_irreversible(wc_name, wc_args),
+                        "always_confirm": wc_name in ALWAYS_CONFIRM_TOOLS,
+                    })
+
+                audit_info = {
+                    "actions": audit_actions,
+                    "tainted": turn_tainted,
+                    "taint_sources": taint_sources,
+                    "model_reasoning": model_reasoning or None,
+                    "execution_mode": persona.get_execution_mode().name,
+                }
+
+                # Build human-readable confirmation text
+                lines = ["I'd like to perform the following actions:"]
+                for a in audit_actions:
+                    flags = []
+                    if a["irreversible"]:
+                        flags.append("IRREVERSIBLE")
+                    if a["always_confirm"]:
+                        flags.append("HIGH-IMPACT")
+                    flag_str = f" [{', '.join(flags)}]" if flags else ""
+                    lines.append(f"- **{a['tool']}**{flag_str}: {json.dumps(a['arguments'])}")
+                if turn_tainted:
+                    lines.append(f"\n⚠️ Context contains untrusted content from: {', '.join(taint_sources)}")
+
                 yield _LoopFinishedEvent(
-                    final_text=final_text,
+                    final_text="\n".join(lines),
                     response_type=ResponseType.PENDING_CONFIRMATION,
                     tool_context_json=None,
                     pending_writes=write_calls,
+                    turn_tainted=turn_tainted,
+                    audit_info=audit_info,
                 )
                 return
 
-            async for tool_ev in self._execute_calls(write_calls, conversation_history):
-                yield tool_ev
+            # If we reach here, there were no write_calls this iteration.
+            # (All write_calls are parked above; this branch only runs for
+            # read-only iterations that loop back for more LLM output.)
 
         logger.error(f"Exceeded max tool iterations ({self.max_iterations}).")
         yield _LoopFinishedEvent(
             final_text="I seem to be stuck in a loop. Could you please clarify your request?",
             response_type=ResponseType.DEV_COMMAND,
             tool_context_json=None,
+            turn_tainted=turn_tainted,
         )
 
     async def _execute_calls(

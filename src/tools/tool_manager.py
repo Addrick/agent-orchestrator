@@ -231,7 +231,7 @@ class MemoryToolHandler:
             conn = self.memory_manager._get_connection()
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT content, created_at FROM Memory_Summaries WHERE parent_summary_id = ? ORDER BY created_at ASC",
+                "SELECT content, created_at, untrusted FROM Memory_Summaries WHERE parent_summary_id = ? ORDER BY created_at ASC",
                 (parent_summary_id,)
             )
             return [dict(row) for row in cursor.fetchall()]

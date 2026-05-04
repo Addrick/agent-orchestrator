@@ -207,7 +207,7 @@ async def test_retrieve_memory_block_returns_formatted_block(chat_system_with_me
     ]
     emb_service.encode = AsyncMock(return_value=[_unit_blob(1.0, 0.0)])
 
-    result = await system._retrieve_memory_block(
+    result, is_untrusted = await system._retrieve_memory_block(
         mock_persona, "user1", "chan", None,
         [{"role": "user", "content": "What about the security issue?"}],
     )
@@ -225,11 +225,12 @@ async def test_retrieve_memory_block_disabled(chat_system_with_memory, mock_pers
     """Returns None when feature is disabled."""
     system, _, _ = chat_system_with_memory
 
-    result = await system._retrieve_memory_block(
+    result, is_untrusted = await system._retrieve_memory_block(
         mock_persona, "user1", "chan", None,
         [{"role": "user", "content": "Hello"}],
     )
     assert result is None
+    assert is_untrusted is False
 
 
 @pytest.mark.asyncio
@@ -240,11 +241,12 @@ async def test_retrieve_memory_block_no_embedding_service(mock_persona):
          patch('src.chat_system.get_model_list', return_value={}):
         system = ChatSystem(memory_manager=MagicMock(), text_engine=MagicMock())
 
-    result = await system._retrieve_memory_block(
+    result, is_untrusted = await system._retrieve_memory_block(
         mock_persona, "user1", "chan", None,
         [{"role": "user", "content": "Hello"}],
     )
     assert result is None
+    assert is_untrusted is False
 
 
 @pytest.mark.asyncio
@@ -254,11 +256,12 @@ async def test_retrieve_memory_block_no_summaries(chat_system_with_memory, mock_
     system, mm, _ = chat_system_with_memory
     mm.retrieve_relevant_summaries.return_value = []
 
-    result = await system._retrieve_memory_block(
+    result, is_untrusted = await system._retrieve_memory_block(
         mock_persona, "user1", "chan", None,
         [{"role": "user", "content": "Hello"}],
     )
     assert result is None
+    assert is_untrusted is False
 
 
 @pytest.mark.asyncio
@@ -272,11 +275,12 @@ async def test_retrieve_memory_block_empty_history(chat_system_with_memory, mock
          'segment_id': 1, 'model_name': 'm', 'start_interaction_id': 1, 'end_interaction_id': 3}
     ]
 
-    result = await system._retrieve_memory_block(
+    result, is_untrusted = await system._retrieve_memory_block(
         mock_persona, "user1", "chan", None,
         [],  # empty history
     )
     assert result is None
+    assert is_untrusted is False
 
 
 @pytest.mark.asyncio
@@ -295,7 +299,7 @@ async def test_retrieve_memory_block_top_k_limit(chat_system_with_memory, mock_p
     ]
     emb_service.encode = AsyncMock(return_value=[_unit_blob(1.0, 0.0)])
 
-    result = await system._retrieve_memory_block(
+    result, is_untrusted = await system._retrieve_memory_block(
         mock_persona, "user1", "chan", None,
         [{"role": "user", "content": "Hello"}],
     )
@@ -323,7 +327,7 @@ async def test_retrieve_memory_block_ambient_tag(chat_system_with_memory, mock_p
     ]
     emb_service.encode = AsyncMock(return_value=[_unit_blob(1.0, 0.0)])
 
-    result = await system._retrieve_memory_block(
+    result, is_untrusted = await system._retrieve_memory_block(
         mock_persona, "user1", "chan", None,
         [{"role": "user", "content": "What happened?"}],
     )
@@ -331,6 +335,33 @@ async def test_retrieve_memory_block_ambient_tag(chat_system_with_memory, mock_p
     assert result is not None
     assert "ambient" in result
     assert "#general" in result
+
+
+@pytest.mark.asyncio
+@patch('src.chat_system.MEMORY_RETRIEVAL_ENABLED', True)
+async def test_retrieve_memory_block_untrusted_propagation(chat_system_with_memory, mock_persona):
+    """Untrusted flag is propagated when an untrusted summary is retrieved."""
+    system, mm, emb_service = chat_system_with_memory
+
+    mm.retrieve_relevant_summaries.return_value = [
+        {
+            'summary_id': 1, 'segment_id': 1, 'content': '- Untrusted content',
+            'embedding': _unit_blob(1.0, 0.0), 'model_name': 'test-model',
+            'created_at': datetime.now(), 'channel': 'web', 'persona_name': 'p1',
+            'start_interaction_id': 1, 'end_interaction_id': 3,
+            'untrusted': True,  # TAINTED
+        }
+    ]
+    emb_service.encode = AsyncMock(return_value=[_unit_blob(1.0, 0.0)])
+
+    result, is_untrusted = await system._retrieve_memory_block(
+        mock_persona, "user1", "chan", None,
+        [{"role": "user", "content": "Hello"}],
+    )
+
+    assert result is not None
+    assert is_untrusted is True
+    assert "Untrusted content" in result
 
 
 # --- _relative_time Tests ---

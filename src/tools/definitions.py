@@ -1,7 +1,10 @@
 # src/tools/definitions.py
 
 import importlib
+import logging
 from typing import List, Dict, Any
+
+logger = logging.getLogger(__name__)
 
 """
 This file contains the definitions for all tools available to the LLM.
@@ -604,3 +607,48 @@ WRITE_TOOLS = {t['function']['name'] for t in ALL_TOOL_DEFINITIONS if t.get('is_
 # Tools that ALWAYS require confirmation, even in AUTONOMOUS mode.
 # These are typically high-impact or destructive operations.
 ALWAYS_CONFIRM_TOOLS = {"merge_tickets", "delete_user"}
+
+
+def get_tool_capabilities(tool_name: str) -> Dict[str, Any]:
+    """
+    Retrieves the security capabilities block for a given tool name.
+    Returns a default block (all False) if the tool is not found.
+    """
+    for tool in ALL_TOOL_DEFINITIONS:
+        if tool.get("function", {}).get("name") == tool_name:
+            from typing import cast
+            return cast(Dict[str, Any], tool.get("capabilities", {
+                "produces_untrusted": False,
+                "irreversible": False,
+                "locality": "unknown",
+                "sensitivity": "unknown",
+            }))
+    return {
+        "produces_untrusted": False,
+        "irreversible": False,
+        "locality": "unknown",
+        "sensitivity": "unknown",
+    }
+
+
+def is_irreversible(tool_name: str, args: Dict[str, Any]) -> bool:
+    """
+    Checks if a tool call is irreversible based on its name and arguments.
+    """
+    caps = get_tool_capabilities(tool_name)
+    if caps.get("irreversible"):
+        return True
+
+    classifier = caps.get("irreversible_if")
+    if not classifier:
+        return False
+
+    # Resolve "module:function"
+    try:
+        module_path, func_name = classifier.split(":", 1)
+        module = importlib.import_module(module_path)
+        func = getattr(module, func_name)
+        return bool(func(args))
+    except (ValueError, ImportError, AttributeError, Exception) as e:
+        logger.error(f"Error resolving irreversible_if for {tool_name}: {e}")
+        return False

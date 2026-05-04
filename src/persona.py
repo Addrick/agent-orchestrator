@@ -185,7 +185,7 @@ class Persona:
         if self._tool_policy.default == "allow" and "*" in self._tool_policy.allow:
             return ["*"]
         # Combine allowed and ask tools for the engine to consider both
-        return list(set(self._tool_policy.allow + self._tool_policy.ask))
+        return sorted(list(set(self._tool_policy.allow + self._tool_policy.ask)))
 
     def get_tool_policy(self) -> ToolPolicy:
         """Returns the persona's structured tool security policy."""
