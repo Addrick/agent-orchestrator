@@ -148,21 +148,20 @@ async def test_generate_response_exits_after_max_tool_calls(chat_system_with_moc
 
 @pytest.mark.asyncio
 async def test_tool_use_in_autonomous_mode(chat_system_with_mocks):
-    """Tests that in AUTONOMOUS mode, tool calls are executed immediately."""
+    """In AUTONOMOUS mode, write tool calls still park for audit (universal write-audit model)."""
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_execution_mode(ExecutionMode.AUTONOMOUS)
     persona.set_enabled_tools(['*'])
 
     tool_call = {'type': 'tool_calls',
                  'calls': [{'id': 'call_1', 'name': 'update_ticket', 'arguments': {'state': 'closed'}}]}
-    final_response = {'type': 'text', 'content': 'I have closed the ticket.'}
-    text_engine_mock.generate_response.side_effect = [(tool_call, {}), (final_response, {})]
-    tool_manager_mock.execute_tool.return_value = {"result": {"id": 123, "state": "closed"}}
+    text_engine_mock.generate_response.return_value = (tool_call, {})
 
-    response, _, _ , _ = await system.generate_response('test_persona', 'user', 'channel', 'close ticket')
+    response, response_type, _ , _ = await system.generate_response('test_persona', 'user', 'channel', 'close ticket')
 
-    tool_manager_mock.execute_tool.assert_called_once_with('update_ticket', state='closed')
-    assert response == 'I have closed the ticket.'
+    assert response_type == ResponseType.PENDING_CONFIRMATION
+    assert 'update_ticket' in response
+    tool_manager_mock.execute_tool.assert_not_called()
 
 
 @pytest.mark.parametrize("history, mode, server_id, persona, expected_role, expected_content", [
