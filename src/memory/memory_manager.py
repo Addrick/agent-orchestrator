@@ -43,12 +43,22 @@ DATABASE_FILE: Path = DB_DIR / "user_memory.db"
 
 
 class MemoryManager:
-    def __init__(self, db_path: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        db_path: Optional[str] = None,
+        backend: "Optional[Any]" = None,
+    ) -> None:
         self.db_path: str = db_path if db_path is not None else str(DATABASE_FILE)
         self._conn: Optional[sqlite3.Connection] = None
         self._lock: threading.RLock = threading.RLock()
         if self.db_path != ':memory:':
             DB_DIR.mkdir(parents=True, exist_ok=True)
+        # Lazy import avoids circular: backend modules import MemoryManager for
+        # the static _build_summary_where helper.
+        if backend is None:
+            from src.memory.backend.sqlite import SqliteSemanticBackend
+            backend = SqliteSemanticBackend(self)
+        self.backend = backend
 
     def _get_connection(self) -> sqlite3.Connection:
         if self._conn is None:
@@ -851,22 +861,13 @@ class MemoryManager:
     def log_agent_action(self, agent_name: str, action_type: str, trigger_context: Optional[str] = None,
                          action_payload: Optional[str] = None, outcome: Optional[str] = None,
                          outcome_payload: Optional[str] = None, parent_id: Optional[int] = None) -> int:
-        with self._lock:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute(
-                """INSERT INTO Agent_Actions (parent_id, agent_name, action_type, trigger_context, action_payload, outcome, outcome_payload)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (parent_id, agent_name, action_type, trigger_context, action_payload, outcome, outcome_payload)
-            )
-            return int(cursor.lastrowid) if cursor.lastrowid is not None else 0
+        return self.backend.log_agent_action(
+            agent_name, action_type, trigger_context, action_payload,
+            outcome, outcome_payload, parent_id,
+        )
 
     def update_agent_action_outcome(self, action_id: int, outcome: str, outcome_payload: Optional[str] = None) -> None:
-        with self._lock:
-            conn = self._get_connection()
-            conn.execute("UPDATE Agent_Actions SET outcome = ?, outcome_payload = ? WHERE id = ?",
-                         (outcome, outcome_payload, action_id))
-            conn.commit()
+        self.backend.update_agent_action_outcome(action_id, outcome, outcome_payload)
 
     def get_agent_actions(self, agent_name: str, limit: int = 20, action_type: Optional[str] = None) -> List[
         Dict[str, Any]]:
@@ -884,218 +885,43 @@ class MemoryManager:
             return [dict(row) for row in cursor.fetchall()]
 
     def add_action_contexts(self, action_id: int, contexts: List[Tuple[str, str]]) -> None:
-        with self._lock:
-            conn = self._get_connection()
-            for context_type, context_value in contexts:
-                try:
-                    conn.execute(
-                        "INSERT OR IGNORE INTO Agent_Action_Contexts (action_id, context_type, context_value) VALUES (?, ?, ?)",
-                        (action_id, context_type, context_value))
-                except sqlite3.IntegrityError:
-                    pass
-            conn.commit()
-
-    _FAILURE_OUTCOMES = ('failed', 'error', 'notification_failed')
+        self.backend.add_action_contexts(action_id, contexts)
 
     def get_relevant_agent_actions(self, agent_name: str, match_contexts: Optional[List[Tuple[str, str]]] = None,
                                    match_types: Optional[List[str]] = None, limit: int = 15) -> List[Dict[str, Any]]:
-        with self._lock:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            fetch_limit = limit * 3
-            query = "SELECT * FROM Agent_Actions WHERE agent_name = ? AND parent_id IS NULL"
-            params: List[Any] = [agent_name]
-
-            if match_types:
-                placeholders = ",".join("?" for _ in match_types)
-                query += f" AND action_type IN ({placeholders})"
-                params.extend(match_types)
-
-            query += " ORDER BY timestamp DESC LIMIT ?"
-            params.append(fetch_limit)
-            cursor.execute(query, params)
-            all_actions = [dict(row) for row in cursor.fetchall()]
-
-            matched_ids: set[int] = set()
-            if match_contexts:
-                for ctx_type, ctx_value in match_contexts:
-                    cursor.execute(
-                        "SELECT action_id FROM Agent_Action_Contexts WHERE context_type = ? AND context_value = ?",
-                        (ctx_type, ctx_value))
-                    matched_ids.update(row['action_id'] for row in cursor.fetchall())
-
-            entity_matches = []
-            failures = []
-            other = []
-            for action in all_actions:
-                if action['id'] in matched_ids:
-                    entity_matches.append(action)
-                elif action.get('outcome') in self._FAILURE_OUTCOMES:
-                    failures.append(action)
-                else:
-                    other.append(action)
-
-            return (entity_matches + failures + other)[:limit]
+        return self.backend.get_relevant_agent_actions(agent_name, match_contexts, match_types, limit)
 
     def get_action_steps(self, parent_id: int) -> List[Dict[str, Any]]:
-        with self._lock:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM Agent_Actions WHERE parent_id = ? ORDER BY timestamp ASC", (parent_id,))
-            return [dict(row) for row in cursor.fetchall()]
+        return self.backend.get_action_steps(parent_id)
 
     def store_message_embedding(self, interaction_id: int, embedding: bytes, model_name: str,
                                 created_at: datetime) -> None:
-        with self._lock:
-            conn = self._get_connection()
-            conn.execute(
-                "INSERT OR REPLACE INTO Message_Embeddings (interaction_id, embedding, model_name, created_at) VALUES (?, ?, ?, ?)",
-                (interaction_id, embedding, model_name, created_at))
-            conn.commit()
+        self.backend.store_message_embedding(interaction_id, embedding, model_name, created_at)
 
     def get_unembedded_messages(self, persona_name: str, channel: str, server_id: Optional[str] = None,
                                 limit: int = 50, model_name: Optional[str] = None) -> List[Dict[str, Any]]:
-        with self._lock:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-
-            query = ("SELECT ui.interaction_id, ui.author_role, ui.author_name, ui.content"
-                     " FROM User_Interactions ui LEFT JOIN Message_Embeddings me ON ui.interaction_id = me.interaction_id"
-                     " WHERE ui.persona_name = ? AND ui.channel = ?")
-            params: List[Any] = [persona_name, channel]
-
-            if server_id is not None:
-                query += " AND ui.server_id = ?"
-                params.append(server_id)
-            else:
-                query += " AND ui.server_id IS NULL"
-
-            query += self._suppression_filter("ui")
-            query += " AND ui.content IS NOT NULL AND ui.content != ''"
-
-            # Use the global model if one isn't explicitly provided
-            active_model = model_name if model_name else EMBEDDING_MODEL
-            query += " AND (me.embedding IS NULL OR me.model_name != ?)"
-            params.append(active_model)
-
-            query += " ORDER BY ui.interaction_id ASC LIMIT ?"
-            params.append(limit)
-
-            cursor.execute(query, params)
-            return [dict(row) for row in cursor.fetchall()]
+        return self.backend.get_unembedded_messages(persona_name, channel, server_id, limit, model_name)
 
     def store_segment(self, channel: str, server_id: Optional[str], persona_name: str, start_id: int, end_id: int,
                       message_count: int, created_at: datetime) -> int:
-        with self._lock:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute(
-                """INSERT INTO Memory_Segments (channel, server_id, persona_name, start_interaction_id, end_interaction_id, message_count, created_at, first_message_at, last_message_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (channel, server_id, persona_name, start_id, end_id, message_count, created_at, None, None)
-            )
-            conn.commit()
-            return int(cursor.lastrowid) if cursor.lastrowid is not None else 0
+        return self.backend.store_segment(channel, server_id, persona_name, start_id, end_id, message_count, created_at)
 
     def store_summary(self, segment_id: int, content: str, embedding: bytes, model_name: str,
                       created_at: datetime, summary_level: Optional[int] = None,
                       parent_summary_id: Optional[int] = None,
                       untrusted: bool = False) -> int:
-        with self._lock:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            
-            # If summary_level is None, the DB default will be used (LEVEL_EPISODIC = 1)
-            cols = ["segment_id", "content", "embedding", "model_name", "created_at"]
-            vals: List[Any] = [segment_id, content, embedding, model_name, created_at]
-            
-            if summary_level is not None:
-                cols.append("summary_level")
-                vals.append(summary_level)
-            if parent_summary_id is not None:
-                cols.append("parent_summary_id")
-                vals.append(parent_summary_id)
-            if untrusted:
-                cols.append("untrusted")
-                vals.append(1)
-                
-            placeholders = ", ".join("?" for _ in vals)
-            col_names = ", ".join(cols)
-            
-            cursor.execute(
-                f"INSERT INTO Memory_Summaries ({col_names}) VALUES ({placeholders})",
-                vals
-            )
-            summary_id = cursor.lastrowid
-            cursor.execute(
-                """INSERT INTO vec_Memory_Summaries (summary_id, embedding)
-                   VALUES (?, ?)""",
-                (summary_id, embedding)
-            )
-            conn.commit()
-            return int(summary_id) if summary_id is not None else 0
+        return self.backend.store_summary(segment_id, content, embedding, model_name, created_at,
+                                          summary_level, parent_summary_id, untrusted)
 
     def get_summaries_for_channel(self, channel: str, persona_name: str, server_id: Optional[str] = None,
                                   exclude_after_interaction_id: Optional[int] = None,
                                   model_name: Optional[str] = None) -> List[Dict[str, Any]]:
-        with self._lock:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            query = (
-                "SELECT ms.summary_id, ms.segment_id, ms.content, ms.embedding, ms.model_name, ms.created_at, ms.untrusted, seg.channel, seg.persona_name, seg.start_interaction_id, seg.end_interaction_id"
-                " FROM Memory_Summaries ms JOIN Memory_Segments seg ON ms.segment_id = seg.segment_id"
-                " WHERE seg.channel = ? AND seg.persona_name = ?")
-            params: List[Any] = [channel, persona_name]
-
-            if server_id is not None:
-                query += " AND seg.server_id = ?"
-                params.append(server_id)
-            else:
-                query += " AND seg.server_id IS NULL"
-
-            if exclude_after_interaction_id is not None:
-                query += " AND seg.start_interaction_id < ?"
-                params.append(exclude_after_interaction_id)
-
-            active_model = model_name if model_name else EMBEDDING_MODEL
-            query += " AND ms.model_name = ?"
-            params.append(active_model)
-
-            query += " ORDER BY seg.start_interaction_id ASC"
-            cursor.execute(query, params)
-            return [dict(row) for row in cursor.fetchall()]
+        return self.backend.get_summaries_for_channel(channel, persona_name, server_id,
+                                                     exclude_after_interaction_id, model_name)
 
     def get_unsegmented_embedded_messages(self, persona_name: str, channel: str, server_id: Optional[str] = None,
                                           model_name: Optional[str] = None, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-        with self._lock:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-
-            query = ("SELECT ui.interaction_id, ui.author_role, ui.author_name, ui.content, ui.timestamp, me.embedding, ui.parent_summary_id, ui.reply_to_id"
-                     " FROM User_Interactions ui JOIN Message_Embeddings me ON ui.interaction_id = me.interaction_id"
-                     " WHERE ui.persona_name = ? AND ui.channel = ? AND ui.parent_summary_id IS NULL")
-            params: List[Any] = [persona_name, channel]
-
-            if server_id is not None:
-                query += " AND ui.server_id = ?"
-                params.append(server_id)
-            else:
-                query += " AND ui.server_id IS NULL"
-
-            query += self._suppression_filter("ui")
-            query += " AND ui.content IS NOT NULL AND ui.content != ''"
-
-            active_model = model_name if model_name else EMBEDDING_MODEL
-            query += " AND me.model_name = ?"
-            params.append(active_model)
-
-            query += " ORDER BY ui.interaction_id ASC"
-            if limit is not None:
-                query += " LIMIT ?"
-                params.append(limit)
-
-            cursor.execute(query, params)
-            return [dict(row) for row in cursor.fetchall()]
+        return self.backend.get_unsegmented_embedded_messages(persona_name, channel, server_id, model_name, limit)
 
     def record_segment_failure(
             self,
@@ -1107,39 +933,8 @@ class MemoryManager:
             message_count: int,
             error_reason: Optional[str] = None,
     ) -> None:
-        now = datetime.now(timezone.utc)
-        with self._lock:
-            conn = self._get_connection()
-            # Check for existing failure covering same range
-            if server_id is not None:
-                existing = conn.execute(
-                    "SELECT failure_id, attempts FROM Segment_Failures"
-                    " WHERE channel = ? AND persona_name = ? AND server_id = ?"
-                    " AND start_interaction_id = ? AND end_interaction_id = ?",
-                    (channel, persona_name, server_id, start_id, end_id),
-                ).fetchone()
-            else:
-                existing = conn.execute(
-                    "SELECT failure_id, attempts FROM Segment_Failures"
-                    " WHERE channel = ? AND persona_name = ? AND server_id IS NULL"
-                    " AND start_interaction_id = ? AND end_interaction_id = ?",
-                    (channel, persona_name, start_id, end_id),
-                ).fetchone()
-
-            if existing:
-                conn.execute(
-                    "UPDATE Segment_Failures SET attempts = ?, last_attempt_at = ?, error_reason = ? WHERE failure_id = ?",
-                    (existing['attempts'] + 1, now, error_reason, existing['failure_id']),
-                )
-            else:
-                conn.execute(
-                    "INSERT INTO Segment_Failures"
-                    " (channel, server_id, persona_name, start_interaction_id, end_interaction_id,"
-                    "  message_count, attempts, last_attempt_at, error_reason)"
-                    " VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)",
-                    (channel, server_id, persona_name, start_id, end_id, message_count, now, error_reason),
-                )
-            conn.commit()
+        self.backend.record_segment_failure(channel, server_id, persona_name, start_id, end_id,
+                                            message_count, error_reason)
 
     def get_failed_segment_ranges(
             self,
@@ -1149,26 +944,7 @@ class MemoryManager:
             max_attempts: int = 3,
             cooldown_hours: float = 24.0,
     ) -> List[Dict[str, Any]]:
-        with self._lock:
-            conn = self._get_connection()
-            cutoff = datetime.now(timezone.utc).timestamp() - (cooldown_hours * 3600)
-            query = (
-                "SELECT start_interaction_id, end_interaction_id, attempts, last_attempt_at, error_reason"
-                " FROM Segment_Failures"
-                " WHERE channel = ? AND persona_name = ?"
-            )
-            params: List[Any] = [channel, persona_name]
-            if server_id is not None:
-                query += " AND server_id = ?"
-                params.append(server_id)
-            else:
-                query += " AND server_id IS NULL"
-            # Still blocked: either under max attempts with cooldown, or at/over max attempts
-            query += " AND (attempts >= ? OR last_attempt_at > ?)"
-            params.extend([max_attempts, datetime.fromtimestamp(cutoff, tz=timezone.utc)])
-            cursor = conn.cursor()
-            cursor.execute(query, params)
-            return [dict(row) for row in cursor.fetchall()]
+        return self.backend.get_failed_segment_ranges(channel, persona_name, server_id, max_attempts, cooldown_hours)
 
     def clear_segment_failure(
             self,
@@ -1178,100 +954,14 @@ class MemoryManager:
             start_id: int,
             end_id: int,
     ) -> None:
-        with self._lock:
-            conn = self._get_connection()
-            if server_id is not None:
-                conn.execute(
-                    "DELETE FROM Segment_Failures"
-                    " WHERE channel = ? AND persona_name = ? AND server_id = ?"
-                    " AND start_interaction_id = ? AND end_interaction_id = ?",
-                    (channel, persona_name, server_id, start_id, end_id),
-                )
-            else:
-                conn.execute(
-                    "DELETE FROM Segment_Failures"
-                    " WHERE channel = ? AND persona_name = ? AND server_id IS NULL"
-                    " AND start_interaction_id = ? AND end_interaction_id = ?",
-                    (channel, persona_name, start_id, end_id),
-                )
-            conn.commit()
+        self.backend.clear_segment_failure(channel, persona_name, server_id, start_id, end_id)
 
     def get_active_channels(self, model_name: Optional[str] = None) -> List[Tuple[str, str, Optional[str]]]:
-        with self._lock:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            active_model = model_name if model_name else EMBEDDING_MODEL
-
-            q1 = ("SELECT DISTINCT ui.channel, ui.persona_name, ui.server_id FROM User_Interactions ui"
-                  " LEFT JOIN Message_Embeddings me ON ui.interaction_id = me.interaction_id"
-                  " WHERE ui.content IS NOT NULL AND ui.content != ''" + self._suppression_filter("ui"))
-            params: List[Any] = [active_model]
-            q1 += " AND (me.embedding IS NULL OR me.model_name != ?)"
-
-            q2 = ("SELECT DISTINCT ui.channel, ui.persona_name, ui.server_id FROM User_Interactions ui"
-                  " JOIN Message_Embeddings me ON ui.interaction_id = me.interaction_id"
-                  " WHERE ui.content IS NOT NULL AND ui.content != '' AND ui.interaction_id > COALESCE("
-                  " (SELECT MAX(seg.end_interaction_id) FROM Memory_Segments seg WHERE seg.channel = ui.channel"
-                  " AND seg.persona_name = ui.persona_name AND (seg.server_id = ui.server_id OR (seg.server_id IS NULL AND ui.server_id IS NULL))), 0)"
-                  + self._suppression_filter("ui"))
-
-            # q3: Channels with embedded messages that were never summarized (parent_summary_id IS NULL).
-            # This catches historical messages that sit below existing segments' high-water mark.
-            q3 = ("SELECT DISTINCT ui.channel, ui.persona_name, ui.server_id FROM User_Interactions ui"
-                  " JOIN Message_Embeddings me ON ui.interaction_id = me.interaction_id"
-                  " WHERE ui.content IS NOT NULL AND ui.content != ''"
-                  " AND ui.parent_summary_id IS NULL AND me.model_name = ?"
-                  + self._suppression_filter("ui"))
-            params.append(active_model)
-
-            query = q1 + " UNION " + q2 + " UNION " + q3
-            cursor.execute(query, params)
-            return [(row['channel'], row['persona_name'], row['server_id']) for row in cursor.fetchall()]
+        return self.backend.get_active_channels(model_name)
 
     def get_last_segment_tail_embeddings(self, channel: str, persona_name: str, server_id: Optional[str] = None,
                                          n: int = 3, model_name: Optional[str] = None) -> Optional[List[bytes]]:
-        with self._lock:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            seg_query = "SELECT segment_id, start_interaction_id, end_interaction_id FROM Memory_Segments WHERE channel = ? AND persona_name = ?"
-            seg_params: List[Any] = [channel, persona_name]
-
-            if server_id is not None:
-                seg_query += " AND server_id = ?"
-                seg_params.append(server_id)
-            else:
-                seg_query += " AND server_id IS NULL"
-
-            seg_query += " ORDER BY end_interaction_id DESC LIMIT 1"
-            cursor.execute(seg_query, seg_params)
-            seg_row = cursor.fetchone()
-            if seg_row is None:
-                return None
-
-            emb_query = (
-                "SELECT me.embedding FROM Message_Embeddings me JOIN User_Interactions ui ON me.interaction_id = ui.interaction_id"
-                " WHERE ui.channel = ? AND ui.persona_name = ? AND ui.interaction_id BETWEEN ? AND ?")
-            emb_params: List[Any] = [channel, persona_name, seg_row['start_interaction_id'],
-                                     seg_row['end_interaction_id']]
-
-            if server_id is not None:
-                emb_query += " AND ui.server_id = ?"
-                emb_params.append(server_id)
-            else:
-                emb_query += " AND ui.server_id IS NULL"
-
-            active_model = model_name if model_name else EMBEDDING_MODEL
-            emb_query += " AND me.model_name = ?"
-            emb_params.append(active_model)
-
-            emb_query += " ORDER BY me.interaction_id DESC LIMIT ?"
-            emb_params.append(n)
-
-            cursor.execute(emb_query, emb_params)
-            rows = cursor.fetchall()
-            if not rows:
-                return None
-            return [row['embedding'] for row in reversed(rows)]
+        return self.backend.get_last_segment_tail_embeddings(channel, persona_name, server_id, n, model_name)
 
     @staticmethod
     def _build_summary_where(
@@ -1341,70 +1031,11 @@ class MemoryManager:
         query_embeddings: Optional[List[bytes]] = None,
         limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """Retrieve summaries scoped by MemoryMode for retrieval-time fan-out."""
-        if memory_mode == "ticket":
-            return []
-
-        with self._lock:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-
-            dist_select = ""
-            dist_params: List[Any] = []
-            if query_embeddings:
-                d_exprs = ["vec_distance_cosine(v.embedding, ?)"] * len(query_embeddings)
-                if len(d_exprs) > 1:
-                    dist_select = f", min({', '.join(d_exprs)}) as dist"
-                else:
-                    dist_select = f", {d_exprs[0]} as dist"
-                dist_params.extend(query_embeddings)
-
-            base_select = (
-                f"SELECT ms.summary_id, ms.segment_id, ms.content, ms.embedding,"
-                f" ms.model_name, ms.created_at, ms.untrusted, seg.channel, seg.persona_name,"
-                f" seg.start_interaction_id, seg.end_interaction_id, seg.last_message_at{dist_select}"
-                f" FROM Memory_Summaries ms"
-                f" JOIN Memory_Segments seg ON ms.segment_id = seg.segment_id"
-            )
-            if query_embeddings:
-                base_select += " JOIN vec_Memory_Summaries v ON ms.summary_id = v.summary_id"
-
-            build_args = (memory_mode, channel, server_id, user_identifier,
-                          exclude_after_interaction_id, model_name)
-
-            # Build primary query
-            where_clause, params = self._build_summary_where(persona_name, *build_args)
-            query = f"{base_select} WHERE {where_clause}"
-            final_params = dist_params + params
-
-            # Ambient union
-            if include_ambient and persona_name != "ambient":
-                amb_where, amb_params = self._build_summary_where("ambient", *build_args)
-                query += f" UNION {base_select} WHERE {amb_where}"
-                final_params.extend(dist_params + amb_params)
-
-            if query_embeddings:
-                query += " ORDER BY dist ASC"
-            
-            # Log search parameters for diagnostics (exclude raw embeddings for brevity)
-            if limit:
-                query += " LIMIT ?"
-                final_params.append(limit)
-
-            safe_params = [f"<blob:{len(p)}b>" if isinstance(p, bytes) else p for p in final_params]
-            logger.info(f"MemoryManager.retrieve: Executing query for {persona_name} (mode: {memory_mode}). Params: {safe_params}")
-
-            cursor.execute(query, final_params)
-            rows = [dict(row) for row in cursor.fetchall()]
-
-            if query_embeddings:
-                if not rows:
-                    logger.info(f"MemoryManager.retrieve: 0 summaries found for {persona_name} in {channel} (mode={memory_mode})")
-                else:
-                    best_dist = rows[0].get('dist', 1.0)
-                    logger.info(f"MemoryManager.retrieve: {len(rows)} summaries found (best similarity dist: {best_dist:.4f})")
-
-            return rows
+        return self.backend.retrieve_relevant_summaries(
+            persona_name, channel, server_id, user_identifier, memory_mode,
+            include_ambient, exclude_after_interaction_id, model_name,
+            query_embeddings, limit,
+        )
 
     def log_audit_event(self, event_type: str, target_id: Optional[int] = None, 
                         operator_id: Optional[str] = None, prior_state: Optional[str] = None, 
