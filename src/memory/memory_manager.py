@@ -1406,6 +1406,30 @@ class MemoryManager:
 
             return rows
 
+    def log_audit_event(self, event_type: str, target_id: Optional[int] = None, 
+                        operator_id: Optional[str] = None, prior_state: Optional[str] = None, 
+                        new_state: Optional[str] = None, reason: Optional[str] = None, 
+                        metadata: Optional[Dict[str, Any]] = None) -> None:
+        """Public method to log security-relevant events to Audit_Log."""
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            try:
+                self._log_audit_event(
+                    cursor=cursor,
+                    event_type=event_type,
+                    target_id=target_id,
+                    operator_id=operator_id,
+                    prior_state=prior_state,
+                    new_state=new_state,
+                    reason=reason,
+                    metadata=metadata
+                )
+                conn.commit()
+            except sqlite3.Error as e:
+                logger.error(f"Failed to log audit event {event_type}: {e}")
+                conn.rollback()
+
     def mark_trusted(self, summary_id: int, operator_id: str, reason: str) -> bool:
         """Mark a memory summary as trusted (untrusted=0)."""
         return self._update_summary_trust(summary_id, 0, operator_id, reason)

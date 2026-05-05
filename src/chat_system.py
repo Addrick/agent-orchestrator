@@ -839,6 +839,14 @@ class ChatSystem:
                     audit_info=audit_info,
                 )
             )
+            # Phase 7: Log audit parking
+            self.memory_manager.log_audit_event(
+                event_type="audit_parked",
+                operator_id=ctx.user_identifier,
+                new_state="pending",
+                reason="Universal write-audit gate triggered",
+                metadata=audit_info
+            )
 
         # 4. Log/update assistant turn. Original text (including links) is preserved.
         assistant_id = self._commit_or_update_assistant(
@@ -979,8 +987,27 @@ class ChatSystem:
                     wc_name = wc.get("name") or "unknown"
                     if get_tool_capabilities(wc_name).get("produces_untrusted"):
                         turn_tainted = True
+                
+                decision_state = "approved"
+                decision_reason = "Human approved tool execution"
             else:
                 self._append_denied_tool_results(pending.write_calls, conversation_history)
+                decision_state = "denied"
+                decision_reason = "Human denied tool execution"
+
+            # Phase 7: Log audit decision
+            self.memory_manager.log_audit_event(
+                event_type="audit_decision",
+                operator_id=user_identifier,
+                prior_state="pending",
+                new_state=decision_state,
+                reason=decision_reason,
+                metadata={
+                    "write_calls": pending.write_calls,
+                    "audit_info": pending.audit_info,
+                    "turn_tainted": turn_tainted
+                }
+            )
 
             # Continue the LLM conversation with the tool results
             history_object = {
