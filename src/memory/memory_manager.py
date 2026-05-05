@@ -1,6 +1,7 @@
 # src/memory/memory_manager.py
 
 import sqlite3
+import json
 import logging
 import threading
 from contextlib import contextmanager
@@ -192,6 +193,20 @@ class MemoryManager:
                 PRIMARY KEY (action_id, context_type, context_value)
             );
             CREATE INDEX IF NOT EXISTS idx_action_context_lookup ON Agent_Action_Contexts (context_type, context_value);
+
+            CREATE TABLE IF NOT EXISTS Audit_Log (
+                audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                target_id INTEGER,
+                operator_id TEXT,
+                timestamp TIMESTAMP NOT NULL,
+                prior_state TEXT,
+                new_state TEXT,
+                reason TEXT,
+                metadata TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_audit_event ON Audit_Log (event_type, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_audit_target ON Audit_Log (target_id);
             """
             conn.executescript(schema_sql)
             conn.commit()
@@ -246,6 +261,7 @@ class MemoryManager:
                         created_at TIMESTAMP NOT NULL,
                         summary_level INTEGER NOT NULL DEFAULT 1,
                         parent_summary_id INTEGER,
+                        untrusted INTEGER NOT NULL DEFAULT 0,
                         FOREIGN KEY (segment_id) REFERENCES Memory_Segments(segment_id) ON DELETE CASCADE,
                         FOREIGN KEY (parent_summary_id) REFERENCES Memory_Summaries(summary_id) ON DELETE CASCADE
                     )
@@ -270,12 +286,20 @@ class MemoryManager:
                         created_at TIMESTAMP NOT NULL,
                         summary_level INTEGER NOT NULL DEFAULT 1,
                         parent_summary_id INTEGER,
+                        untrusted INTEGER NOT NULL DEFAULT 0,
                         FOREIGN KEY (segment_id) REFERENCES Memory_Segments(segment_id) ON DELETE CASCADE,
                         FOREIGN KEY (parent_summary_id) REFERENCES Memory_Summaries(summary_id) ON DELETE CASCADE
                     )
                 """)
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_summary_segment ON Memory_Summaries (segment_id)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_summary_parent ON Memory_Summaries (parent_summary_id)")
+
+            # Memory_Summaries: add untrusted column if missing (Phase 5 tool security)
+            # Re-read columns after potential v1→v2 rebuild above (which includes untrusted)
+            cursor.execute("PRAGMA table_info(Memory_Summaries)")
+            mem_sum_cols = {row['name'] for row in cursor.fetchall()}
+            if mem_sum_cols and 'untrusted' not in mem_sum_cols:
+                conn.execute("ALTER TABLE Memory_Summaries ADD COLUMN untrusted INTEGER NOT NULL DEFAULT 0")
 
             # Verify sqlite-vec virtual table dimensions match current config
             for table_name in ["vec_Message_Embeddings", "vec_Memory_Summaries"]:
@@ -975,14 +999,15 @@ class MemoryManager:
 
     def store_summary(self, segment_id: int, content: str, embedding: bytes, model_name: str,
                       created_at: datetime, summary_level: Optional[int] = None,
-                      parent_summary_id: Optional[int] = None) -> int:
+                      parent_summary_id: Optional[int] = None,
+                      untrusted: bool = False) -> int:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
             
             # If summary_level is None, the DB default will be used (LEVEL_EPISODIC = 1)
             cols = ["segment_id", "content", "embedding", "model_name", "created_at"]
-            vals = [segment_id, content, embedding, model_name, created_at]
+            vals: List[Any] = [segment_id, content, embedding, model_name, created_at]
             
             if summary_level is not None:
                 cols.append("summary_level")
@@ -990,6 +1015,9 @@ class MemoryManager:
             if parent_summary_id is not None:
                 cols.append("parent_summary_id")
                 vals.append(parent_summary_id)
+            if untrusted:
+                cols.append("untrusted")
+                vals.append(1)
                 
             placeholders = ", ".join("?" for _ in vals)
             col_names = ", ".join(cols)
@@ -1014,7 +1042,7 @@ class MemoryManager:
             conn = self._get_connection()
             cursor = conn.cursor()
             query = (
-                "SELECT ms.summary_id, ms.segment_id, ms.content, ms.embedding, ms.model_name, ms.created_at, seg.channel, seg.persona_name, seg.start_interaction_id, seg.end_interaction_id"
+                "SELECT ms.summary_id, ms.segment_id, ms.content, ms.embedding, ms.model_name, ms.created_at, ms.untrusted, seg.channel, seg.persona_name, seg.start_interaction_id, seg.end_interaction_id"
                 " FROM Memory_Summaries ms JOIN Memory_Segments seg ON ms.segment_id = seg.segment_id"
                 " WHERE seg.channel = ? AND seg.persona_name = ?")
             params: List[Any] = [channel, persona_name]
@@ -1333,7 +1361,7 @@ class MemoryManager:
 
             base_select = (
                 f"SELECT ms.summary_id, ms.segment_id, ms.content, ms.embedding,"
-                f" ms.model_name, ms.created_at, seg.channel, seg.persona_name,"
+                f" ms.model_name, ms.created_at, ms.untrusted, seg.channel, seg.persona_name,"
                 f" seg.start_interaction_id, seg.end_interaction_id, seg.last_message_at{dist_select}"
                 f" FROM Memory_Summaries ms"
                 f" JOIN Memory_Segments seg ON ms.segment_id = seg.segment_id"
@@ -1377,3 +1405,94 @@ class MemoryManager:
                     logger.info(f"MemoryManager.retrieve: {len(rows)} summaries found (best similarity dist: {best_dist:.4f})")
 
             return rows
+
+    def log_audit_event(self, event_type: str, target_id: Optional[int] = None, 
+                        operator_id: Optional[str] = None, prior_state: Optional[str] = None, 
+                        new_state: Optional[str] = None, reason: Optional[str] = None, 
+                        metadata: Optional[Dict[str, Any]] = None) -> None:
+        """Public method to log security-relevant events to Audit_Log."""
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            try:
+                self._log_audit_event(
+                    cursor=cursor,
+                    event_type=event_type,
+                    target_id=target_id,
+                    operator_id=operator_id,
+                    prior_state=prior_state,
+                    new_state=new_state,
+                    reason=reason,
+                    metadata=metadata
+                )
+                conn.commit()
+            except sqlite3.Error as e:
+                logger.error(f"Failed to log audit event {event_type}: {e}")
+                conn.rollback()
+
+    def mark_trusted(self, summary_id: int, operator_id: str, reason: str) -> bool:
+        """Mark a memory summary as trusted (untrusted=0)."""
+        return self._update_summary_trust(summary_id, 0, operator_id, reason)
+
+    def mark_untrusted(self, summary_id: int, operator_id: str, reason: str) -> bool:
+        """Mark a memory summary as untrusted (untrusted=1)."""
+        return self._update_summary_trust(summary_id, 1, operator_id, reason)
+
+    def _update_summary_trust(self, summary_id: int, untrusted_value: int, operator_id: str, reason: str) -> bool:
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            
+            # 1. Fetch current state for audit log
+            cursor.execute("SELECT untrusted FROM Memory_Summaries WHERE summary_id = ?", (summary_id,))
+            row = cursor.fetchone()
+            if not row:
+                return False
+            
+            prior_val = row['untrusted']
+            if prior_val == untrusted_value:
+                # No change needed, but we might still log it? 
+                # Let's just return True to signify success.
+                return True
+
+            try:
+                # 2. Update bit
+                cursor.execute("UPDATE Memory_Summaries SET untrusted = ? WHERE summary_id = ?", 
+                               (untrusted_value, summary_id))
+                
+                # 3. Log audit event
+                prior_state = "untrusted" if prior_val else "trusted"
+                new_state = "untrusted" if untrusted_value else "trusted"
+                
+                self._log_audit_event(
+                    cursor=cursor,
+                    event_type="operator_override",
+                    target_id=summary_id,
+                    operator_id=operator_id,
+                    prior_state=prior_state,
+                    new_state=new_state,
+                    reason=reason
+                )
+                
+                conn.commit()
+                logger.info(f"Summary {summary_id} marked as {new_state} by {operator_id}. Reason: {reason}")
+                return True
+            except sqlite3.Error as e:
+                logger.error(f"Failed to update trust for summary {summary_id}: {e}")
+                conn.rollback()
+                return False
+
+    def _log_audit_event(self, cursor: sqlite3.Cursor, event_type: str, target_id: Optional[int] = None, 
+                        operator_id: Optional[str] = None, prior_state: Optional[str] = None, 
+                        new_state: Optional[str] = None, reason: Optional[str] = None, 
+                        metadata: Optional[Dict[str, Any]] = None) -> None:
+        """Internal helper to log security-relevant events to Audit_Log."""
+        now = datetime.now()
+        meta_json = json.dumps(metadata) if metadata else None
+        
+        cursor.execute(
+            """INSERT INTO Audit_Log 
+               (event_type, target_id, operator_id, timestamp, prior_state, new_state, reason, metadata)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (event_type, target_id, operator_id, now, prior_state, new_state, reason, meta_json)
+        )
