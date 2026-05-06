@@ -1,0 +1,29 @@
+services:
+  hindsight:
+    # Verified SHA for v0.5.0 (linux/amd64)
+    image: ghcr.io/vectorize-io/hindsight@sha256:a4352c52225c7b3abc0d60ee0e92027c333f5a15f5d8888117f8702c8dcd93f4
+    container_name: hindsight-memory
+    restart: unless-stopped
+    networks:
+      - hindsight-internal
+    environment:
+      - HINDSIGHT_LLM_URL=http://host.docker.internal:5001/v1
+      - HINDSIGHT_LLM_MODEL=qwen2.5-32b
+      # Internal DB creds (only used inside the container)
+      - HINDSIGHT_DATABASE_URL=postgresql://hindsight:hindsight@localhost:5432/hindsight
+    ports:
+      - "127.0.0.1:8888:8888" # API restricted to localhost
+    volumes:
+      - hindsight-data:/var/lib/postgresql/data
+    # Hardening: Drop all capabilities, prevent privilege escalation
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  hindsight-data:
+
+networks:
+  hindsight-internal:
+    internal: true # No internet egress
