@@ -10,7 +10,8 @@ from typing import Any, Coroutine, Dict, List, Callable, Optional, cast, Tuple, 
 from pathlib import Path
 
 # --- NEW: Import the global embedding model variable ---
-from config.global_config import EMBEDDING_MODEL, EMBEDDING_DIMENSION
+from config.global_config import EMBEDDING_MODEL, EMBEDDING_DIMENSION, SEMANTIC_BACKEND, HINDSIGHT_URL
+from src.memory.backend.base import MemoryHit, Experience, MentalModel, ReflectResult
 import sqlite_vec
 
 logger = logging.getLogger(__name__)
@@ -56,8 +57,12 @@ class MemoryManager:
         # Lazy import avoids circular: backend modules import MemoryManager for
         # the static _build_summary_where helper.
         if backend is None:
-            from src.memory.backend.sqlite import SqliteSemanticBackend
-            backend = SqliteSemanticBackend(self)
+            if SEMANTIC_BACKEND == "hindsight":
+                from src.memory.backend.hindsight import HindsightBackend
+                backend = HindsightBackend(url=HINDSIGHT_URL)
+            else:
+                from src.memory.backend.sqlite import SqliteSemanticBackend
+                backend = SqliteSemanticBackend(self)
         self.backend = backend
 
     def _get_connection(self) -> sqlite3.Connection:
@@ -1127,3 +1132,97 @@ class MemoryManager:
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (event_type, target_id, operator_id, now, prior_state, new_state, reason, meta_json)
         )
+
+    # ---------- New Hindsight-shape Delegation ----------
+
+    async def retain_turn(
+        self,
+        bank_id: str,
+        role: str,
+        content: str,
+        *,
+        timestamp: datetime,
+        scope_tags: List[str],
+        source_persona: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        return await self.backend.retain_turn(
+            bank_id, role, content,
+            timestamp=timestamp, scope_tags=scope_tags,
+            source_persona=source_persona, metadata=metadata
+        )
+
+    async def retain_experience(
+        self,
+        bank_id: str,
+        action_type: str,
+        context: Dict[str, Any],
+        outcome: Optional[str],
+        *,
+        scope_tags: List[str],
+        source_persona: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        return await self.backend.retain_experience(
+            bank_id, action_type, context, outcome,
+            scope_tags=scope_tags, source_persona=source_persona, metadata=metadata
+        )
+
+    async def recall(
+        self,
+        bank_id: str,
+        query: str,
+        *,
+        k: int = 10,
+        types: Optional[List[str]] = None,
+        tag_filter: Optional[List[str]] = None,
+        max_tokens: Optional[int] = None,
+        budget: Optional[float] = None,
+    ) -> List[MemoryHit]:
+        return await self.backend.recall(
+            bank_id, query, k=k, types=types,
+            tag_filter=tag_filter, max_tokens=max_tokens, budget=budget
+        )
+
+    async def recall_experiences(
+        self,
+        bank_id: str,
+        query: str,
+        *,
+        match_contexts: Optional[List[Tuple[str, str]]] = None,
+        k: int = 10,
+    ) -> List[Experience]:
+        return await self.backend.recall_experiences(
+            bank_id, query, match_contexts=match_contexts, k=k
+        )
+
+    async def reflect(
+        self,
+        bank_id: str,
+        query: str,
+        *,
+        tag_filter: Optional[List[str]] = None,
+    ) -> ReflectResult:
+        return await self.backend.reflect(bank_id, query, tag_filter=tag_filter)
+
+    async def list_mental_models(
+        self,
+        bank_id: str,
+        *,
+        tags: Optional[List[str]] = None,
+    ) -> List[MentalModel]:
+        return await self.backend.list_mental_models(bank_id, tags=tags)
+
+    async def ensure_bank(
+        self,
+        bank_id: str,
+        *,
+        mission: Optional[str] = None,
+        reflect_mission: Optional[str] = None,
+    ) -> None:
+        await self.backend.ensure_bank(
+            bank_id, mission=mission, reflect_mission=reflect_mission
+        )
+
+    async def delete_bank(self, bank_id: str) -> None:
+        await self.backend.delete_bank(bank_id)
