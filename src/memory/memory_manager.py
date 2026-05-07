@@ -1225,11 +1225,17 @@ class MemoryManager:
         self,
         bank_id: str,
         *,
-        mission: Optional[str] = None,
+        retain_mission: Optional[str] = None,
         reflect_mission: Optional[str] = None,
+        enable_observations: Optional[bool] = None,
+        observations_mission: Optional[str] = None,
     ) -> None:
         await self.backend.ensure_bank(
-            bank_id, mission=mission, reflect_mission=reflect_mission
+            bank_id,
+            retain_mission=retain_mission,
+            reflect_mission=reflect_mission,
+            enable_observations=enable_observations,
+            observations_mission=observations_mission,
         )
 
     async def delete_bank(self, bank_id: str) -> None:

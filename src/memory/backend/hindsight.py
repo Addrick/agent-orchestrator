@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 UNTRUSTED_TAG = "untrusted:true"
 TRUSTED_TAG = "untrusted:false"
 
+# Session cut heuristic: gap between retains in the same scope that starts a
+# new document. >24h idle → new conversation document. Plan §1.4.
+SESSION_GAP_SECONDS = 24 * 3600
+
 
 class HindsightAPIError(Exception):
     """Raised for non-2xx responses from the Hindsight API."""
@@ -56,12 +60,17 @@ class HindsightRESTClient:
             raise HindsightAPIError(response.status_code, response.text)
         return cast(Dict[str, Any], response.json())
 
-    async def aretain(self, bank_id: str, content: str, tags: List[str]) -> Dict[str, Any]:
-        payload = {
-            "content": content,
-            "tags": tags,
-            "retain_async": True,  # async consolidation per plan §1.3
-        }
+    async def aretain(
+        self,
+        bank_id: str,
+        items: List[Dict[str, Any]],
+        *,
+        async_: bool = True,
+    ) -> Dict[str, Any]:
+        # Upstream RetainRequest: {items: [MemoryItem...], async: bool}.
+        # MemoryItem fields used here: content, tags, document_id, timestamp,
+        # metadata, update_mode. Server chunks per bank `retain_chunk_size`.
+        payload: Dict[str, Any] = {"items": items, "async": async_}
         return await self._request("POST", f"/banks/{bank_id}/retain", json=payload)
 
     async def arecall(
@@ -80,14 +89,25 @@ class HindsightRESTClient:
     async def acreate_bank(
         self,
         bank_id: str,
-        mission: Optional[str] = None,
+        retain_mission: Optional[str] = None,
         reflect_mission: Optional[str] = None,
+        *,
+        enable_observations: Optional[bool] = None,
+        observations_mission: Optional[str] = None,
     ) -> None:
-        payload = {
-            "bank_id": bank_id,
-            "mission": mission,
-            "reflect_mission": reflect_mission,
-        }
+        # Upstream CreateBankRequest active fields. `mission` / `background`
+        # are deprecated aliases for `reflect_mission` and intentionally not
+        # sent; sending them would silently overwrite reflect_mission and
+        # leave retain_mission unset.
+        payload: Dict[str, Any] = {"bank_id": bank_id}
+        if retain_mission is not None:
+            payload["retain_mission"] = retain_mission
+        if reflect_mission is not None:
+            payload["reflect_mission"] = reflect_mission
+        if enable_observations is not None:
+            payload["enable_observations"] = enable_observations
+        if observations_mission is not None:
+            payload["observations_mission"] = observations_mission
         try:
             await self._request("POST", "/banks", json=payload)
         except HindsightAPIError as e:
@@ -223,6 +243,91 @@ class _TrustOverrideStore:
                 self._conn = None
 
 
+class _DocScopeStore:
+    """Per-scope rolling document_id state for retain bundling (DP-112).
+
+    Upstream Hindsight grows conversation memory by retaining items with a
+    stable `document_id` and `update_mode="append"`. We need to know two
+    things on every retain:
+      1. Which document_id does this scope currently own?
+      2. Is this turn append-ing to it, or starting a new one?
+
+    Heuristic: if more than SESSION_GAP_SECONDS have passed since the last
+    retain in this scope (or no row exists), open a new document with
+    update_mode="replace"; otherwise append to the existing document.
+
+    Sync sqlite3 in async land is fine at this volume — one indexed upsert
+    per retain, called from the same worker that owns the queue.
+    """
+
+    SCHEMA = """
+    CREATE TABLE IF NOT EXISTS Doc_Scope (
+        scope_key   TEXT PRIMARY KEY,
+        document_id TEXT NOT NULL,
+        last_ts     TEXT NOT NULL
+    );
+    """
+
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        self._lock = threading.RLock()
+        self._conn: Optional[sqlite3.Connection] = None
+
+    def _get(self) -> sqlite3.Connection:
+        if self._conn is None:
+            if self.db_path != ":memory:":
+                Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+            self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            self._conn.executescript(self.SCHEMA)
+            self._conn.commit()
+        return self._conn
+
+    def resolve(self, scope_key: str, now: datetime) -> Tuple[str, str]:
+        """Return (document_id, update_mode) for a retain in this scope.
+
+        Side effect: updates last_ts (and document_id on session cut) so the
+        next retain in the same scope sees the right state.
+        """
+        with self._lock:
+            conn = self._get()
+            row = conn.execute(
+                "SELECT document_id, last_ts FROM Doc_Scope WHERE scope_key=?",
+                (scope_key,),
+            ).fetchone()
+            now_iso = now.isoformat()
+            if row is not None:
+                try:
+                    last = datetime.fromisoformat(row["last_ts"])
+                except ValueError:
+                    last = now
+                if (now - last).total_seconds() <= SESSION_GAP_SECONDS:
+                    conn.execute(
+                        "UPDATE Doc_Scope SET last_ts=? WHERE scope_key=?",
+                        (now_iso, scope_key),
+                    )
+                    conn.commit()
+                    return str(row["document_id"]), "append"
+            # New session: scope_key + session-start timestamp keeps the doc_id
+            # human-readable and unique without a counter.
+            document_id = f"{scope_key}:{now_iso}"
+            conn.execute(
+                "INSERT INTO Doc_Scope (scope_key, document_id, last_ts) "
+                "VALUES (?, ?, ?) "
+                "ON CONFLICT(scope_key) DO UPDATE SET "
+                "document_id=excluded.document_id, last_ts=excluded.last_ts",
+                (scope_key, document_id, now_iso),
+            )
+            conn.commit()
+            return document_id, "replace"
+
+    def close(self) -> None:
+        with self._lock:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
+
+
 class HindsightBackend(MemoryBackend):
     """MemoryBackend implementation using the native HindsightRESTClient.
 
@@ -232,7 +337,12 @@ class HindsightBackend(MemoryBackend):
     block on the retain LLM round-trip. Recall stays synchronous (caller awaits).
     """
 
-    def __init__(self, url: str, override_db_path: Optional[str] = None):
+    def __init__(
+        self,
+        url: str,
+        override_db_path: Optional[str] = None,
+        doc_scope_db_path: Optional[str] = None,
+    ):
         self.url = url
         self._client: Optional[HindsightRESTClient] = None
         self._queues: Dict[str, "asyncio.Queue[Any]"] = {}
@@ -241,7 +351,10 @@ class HindsightBackend(MemoryBackend):
         self._closed = False
         if override_db_path is None:
             override_db_path = str(Path(__file__).resolve().parent.parent / "hindsight_overrides.db")
+        if doc_scope_db_path is None:
+            doc_scope_db_path = str(Path(__file__).resolve().parent.parent / "hindsight_doc_scope.db")
         self._overrides = _TrustOverrideStore(override_db_path)
+        self._doc_scope = _DocScopeStore(doc_scope_db_path)
 
     def _get_client(self) -> HindsightRESTClient:
         if self._client is None:
@@ -267,26 +380,59 @@ class HindsightBackend(MemoryBackend):
                 )
         return q
 
+    @staticmethod
+    def _drain_batch(
+        q: "asyncio.Queue[Any]", first: Any
+    ) -> Tuple[List[Dict[str, Any]], int, bool]:
+        """Pull `first` plus any items currently queued into one batch.
+
+        Returns (batch, done_count, stop_seen). STOP mid-batch flushes the
+        batch first, then the caller honors stop after the POST.
+        """
+        batch: List[Dict[str, Any]] = [first]
+        done_count = 1
+        stop_seen = False
+        while True:
+            try:
+                nxt = q.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            done_count += 1
+            if nxt is _STOP:
+                stop_seen = True
+                break
+            batch.append(nxt)
+        return batch, done_count, stop_seen
+
     async def _worker_loop(self, bank_id: str, q: "asyncio.Queue[Any]") -> None:
-        """Drain retain payloads in FIFO. Drop on transport errors, never crash."""
+        """Drain-on-tick FIFO worker.
+
+        Each iteration awaits one item to wake up, then drains everything
+        currently queued into a single bundled POST. Bursts coalesce; sparse
+        traffic still POSTs the lone item immediately. Transport errors drop
+        the whole batch (no retry storm — alpha system).
+        """
         client = self._get_client()
         while True:
-            item = await q.get()
-            if item is _STOP:
+            first = await q.get()
+            if first is _STOP:
                 q.task_done()
                 return
-            content, tags = item
+            batch, done_count, stop_seen = self._drain_batch(q, first)
             try:
-                await client.aretain(bank_id=bank_id, content=content, tags=tags)
+                await client.aretain(bank_id=bank_id, items=batch)
             except httpx.ConnectError as e:
                 # Kobold offline / proxy down — expected operational state, log+drop.
-                logger.info("Hindsight retain dropped (kobold offline): %s", e)
+                logger.info("Hindsight retain batch dropped (kobold offline): %s", e)
             except (httpx.RequestError, HindsightAPIError) as e:
-                logger.warning("Hindsight retain dropped: %s", e)
+                logger.warning("Hindsight retain batch dropped: %s", e)
             except Exception:  # noqa: BLE001 — worker must never die
-                logger.exception("Hindsight retain worker: unexpected error, dropping payload")
+                logger.exception("Hindsight retain worker: unexpected error, dropping batch")
             finally:
-                q.task_done()
+                for _ in range(done_count):
+                    q.task_done()
+            if stop_seen:
+                return
 
     async def aclose(self) -> None:
         """Drain queues, stop workers, close httpx client. Idempotent."""
@@ -304,6 +450,7 @@ class HindsightBackend(MemoryBackend):
             await self._client.client.aclose()
             self._client = None
         self._overrides.close()
+        self._doc_scope.close()
 
     # ---------- Legacy SQLite-shape: fail loud when flag is flipped early ----------
     # Plan §5 (Cleanup): legacy callers must migrate to new-shape methods before
@@ -335,6 +482,38 @@ class HindsightBackend(MemoryBackend):
 
     # ---------- New Hindsight-shape Methods ----------
 
+    def _scope_key(self, bank_id: str, scope_tags: List[str]) -> str:
+        # Document scope = persona-bank + channel. Channel sourced from the
+        # caller's scope_tags (`channel:<id>`). No channel tag → scope is the
+        # bank itself (e.g., experiences not tied to a chat channel).
+        for tag in scope_tags:
+            if tag.startswith("channel:"):
+                return f"{bank_id}:{tag[len('channel:'):]}"
+        return bank_id
+
+    def _build_item(
+        self,
+        *,
+        bank_id: str,
+        content: str,
+        tags: List[str],
+        scope_tags: List[str],
+        timestamp: datetime,
+        metadata: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        scope_key = self._scope_key(bank_id, scope_tags)
+        document_id, update_mode = self._doc_scope.resolve(scope_key, timestamp)
+        item: Dict[str, Any] = {
+            "content": content,
+            "tags": tags,
+            "document_id": document_id,
+            "update_mode": update_mode,
+            "timestamp": timestamp.isoformat(),
+        }
+        if metadata:
+            item["metadata"] = metadata
+        return item
+
     async def retain_turn(
         self,
         bank_id: str,
@@ -354,8 +533,12 @@ class HindsightBackend(MemoryBackend):
             f"role:{role}",
             _untrusted_tag(untrusted),
         ]
+        item = self._build_item(
+            bank_id=bank_id, content=content, tags=tags,
+            scope_tags=scope_tags, timestamp=timestamp, metadata=metadata,
+        )
         q = await self._ensure_worker(bank_id)
-        await q.put((content, tags))
+        await q.put(item)
         return ""
 
     async def retain_experience(
@@ -377,8 +560,14 @@ class HindsightBackend(MemoryBackend):
             f"action:{action_type}",
             _untrusted_tag(untrusted),
         ]
+        item = self._build_item(
+            bank_id=bank_id, content=content, tags=tags,
+            scope_tags=scope_tags,
+            timestamp=datetime.now(timezone.utc),
+            metadata=metadata,
+        )
         q = await self._ensure_worker(bank_id)
-        await q.put((content, tags))
+        await q.put(item)
         return ""
 
     async def recall(
@@ -448,12 +637,18 @@ class HindsightBackend(MemoryBackend):
         self,
         bank_id: str,
         *,
-        mission: Optional[str] = None,
+        retain_mission: Optional[str] = None,
         reflect_mission: Optional[str] = None,
+        enable_observations: Optional[bool] = None,
+        observations_mission: Optional[str] = None,
     ) -> None:
         client = self._get_client()
         await client.acreate_bank(
-            bank_id=bank_id, mission=mission, reflect_mission=reflect_mission
+            bank_id=bank_id,
+            retain_mission=retain_mission,
+            reflect_mission=reflect_mission,
+            enable_observations=enable_observations,
+            observations_mission=observations_mission,
         )
 
     async def delete_bank(self, bank_id: str) -> None:

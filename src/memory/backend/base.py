@@ -377,13 +377,17 @@ class MemoryBackend(ABC):
         self,
         bank_id: str,
         *,
-        mission: Optional[str] = None,
+        retain_mission: Optional[str] = None,
         reflect_mission: Optional[str] = None,
+        enable_observations: Optional[bool] = None,
+        observations_mission: Optional[str] = None,
     ) -> None:
         """Ensure a bank exists (new-shape).
 
-        SQLite noop — banks are implicit in persona/channel scoping. Hindsight
-        creates the bank with the given missions.
+        `retain_mission` steers extraction; `reflect_mission` steers reflect
+        output. Upstream's deprecated `mission` alias is intentionally not
+        accepted — it silently overwrites reflect_mission server-side.
+        SQLite noop — banks are implicit in persona/channel scoping.
         """
         return None
 

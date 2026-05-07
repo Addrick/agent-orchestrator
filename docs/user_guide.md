@@ -363,8 +363,11 @@ Each persona uses its own bank. Before retaining or recalling for a persona, cal
 ```python
 await backend.ensure_bank(
     bank_id="alice",
-    mission="conversational memory for persona alice",
-    reflect_mission="extract durable facts and preferences",
+    retain_mission="extract decisions, preferences, and durable facts; ignore chitchat",
+    reflect_mission="ground answers in stored decisions and rationale; be precise",
+    # Optional:
+    # enable_observations=True,
+    # observations_mission="stable facts about people and projects",
 )
 ```
 
