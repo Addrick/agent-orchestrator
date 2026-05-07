@@ -56,6 +56,7 @@ class Persona:
             params: Any = None,
             chat_template: Optional[str] = None,
             tool_policy: Optional[Union[Dict[str, Any], ToolPolicy]] = None,
+            meta_visible: bool = False,
             **kwargs: Any,
     ) -> None:
         self._name: str = persona_name
@@ -105,6 +106,7 @@ class Persona:
         self._thinking_level: Optional[str] = thinking_level
         self._long_term_memory: bool = long_term_memory
         self._chat_template: Optional[str] = chat_template if chat_template else None
+        self._meta_visible: bool = bool(meta_visible)
 
         try:
             self._max_context_tokens: int = int(max_context_tokens) if max_context_tokens is not None else global_config.DEFAULT_MAX_CONTEXT_TOKENS
@@ -218,6 +220,16 @@ class Persona:
     def get_memory_mode(self) -> MemoryMode:
         """Returns the persona's current memory retrieval strategy."""
         return self._memory_mode
+
+    def get_meta_visible(self) -> bool:
+        """Whether this persona's bank is included in cross-persona fan-out
+        recall (`MemoryRouter.list_visible_personas`). Default False — opt-in
+        groundwork for the future Meta-Agent. See plans/memory_backend_abc.md."""
+        return self._meta_visible
+
+    def set_meta_visible(self, value: bool) -> None:
+        self._meta_visible = bool(value)
+        logger.info(f"Persona '{self._name}' meta_visible set to {self._meta_visible}.")
 
     def get_max_context_tokens(self) -> int:
         """Total ctx budget (prompt + reserved response). Matches kobold-lite's
