@@ -257,13 +257,45 @@ class MemoryBackend(ABC):
         timestamp: datetime,
         scope_tags: List[str],
         source_persona: str,
+        untrusted: bool = False,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Retain a conversation turn in the semantic store (new-shape).
 
+        `untrusted` is part of the security framework contract — backends MUST
+        persist it and surface it on subsequent recall hits. See
+        plans/tool_security_framework.md +
+        decisions/2026-05-03-minimum-viable-tool-security.md.
+
         Sprint 1 stub — Hindsight backend (Sprint 2) implements; SQLite raises.
         """
         raise NotImplementedError("retain_turn lands in Sprint 2 (HindsightBackend)")
+
+    async def mark_trusted(
+        self,
+        bank_id: str,
+        hit_id: str,
+        *,
+        operator_id: str,
+        reason: str,
+    ) -> None:
+        """Flip the untrusted bit OFF on a stored unit.
+
+        Operator override path — see security plan. Default raises so backends
+        must opt in.
+        """
+        raise NotImplementedError("mark_trusted not implemented on this backend")
+
+    async def mark_untrusted(
+        self,
+        bank_id: str,
+        hit_id: str,
+        *,
+        operator_id: str,
+        reason: str,
+    ) -> None:
+        """Flip the untrusted bit ON on a stored unit."""
+        raise NotImplementedError("mark_untrusted not implemented on this backend")
 
     async def retain_experience(
         self,
@@ -274,6 +306,7 @@ class MemoryBackend(ABC):
         *,
         scope_tags: List[str],
         source_persona: str,
+        untrusted: bool = False,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Retain an episodic action+outcome record (new-shape).

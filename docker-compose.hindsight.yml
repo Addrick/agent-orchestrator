@@ -1,21 +1,53 @@
 services:
+  # Egress proxy: ONLY container with non-internal network access.
+  # Forwards :5001 from the internal net to host kobold at host.docker.internal:5001.
+  # Keeps the paranoid-mode posture (hindsight cannot reach internet) while
+  # allowing the one whitelisted destination through. See
+  # memory/project/decisions/2026-05-05-hindsight-paranoid-mode.md
+  kobold-proxy:
+    # TODO: pin alpine/socat by SHA before trusting in any non-dev context
+    image: alpine/socat:1.8.0.0
+    container_name: hindsight-kobold-proxy
+    restart: unless-stopped
+    command: -d TCP-LISTEN:5001,fork,reuseaddr TCP:host.docker.internal:5001
+    networks:
+      hindsight-internal:
+        aliases:
+          - kobold-proxy
+      egress:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
   hindsight:
     # Verified SHA for v0.5.0 (linux/amd64)
     image: ghcr.io/vectorize-io/hindsight@sha256:a4352c52225c7b3abc0d60ee0e92027c333f5a15f5d8888117f8702c8dcd93f4
     container_name: hindsight-memory
     restart: unless-stopped
+    depends_on:
+      - kobold-proxy
     networks:
       - hindsight-internal
     environment:
-      - HINDSIGHT_LLM_URL=http://host.docker.internal:5001/v1
-      - HINDSIGHT_LLM_MODEL=qwen2.5-32b
-      # Internal DB creds (only used inside the container)
-      - HINDSIGHT_DATABASE_URL=postgresql://hindsight:hindsight@localhost:5432/hindsight
+      # Talk to host kobold via the proxy sidecar (the only egress path).
+      - HINDSIGHT_API_LLM_PROVIDER=openai
+      - HINDSIGHT_API_LLM_BASE_URL=http://kobold-proxy:5001/v1
+      - HINDSIGHT_API_LLM_MODEL=qwen2.5-32b
+      - HINDSIGHT_API_LLM_API_KEY=kobold
     ports:
       - "127.0.0.1:8888:8888" # API restricted to localhost
     volumes:
-      - hindsight-data:/var/lib/postgresql/data
-    # Hardening: Drop all capabilities, prevent privilege escalation
+      # Embedded pg0 stores at /home/hindsight/.pg0 per upstream Dockerfile.
+      - hindsight-data:/home/hindsight/.pg0
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8888/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     cap_drop:
       - ALL
     security_opt:
@@ -26,4 +58,6 @@ volumes:
 
 networks:
   hindsight-internal:
-    internal: true # No internet egress
+    internal: true # No internet egress for hindsight container itself
+  egress:
+    # Default bridge — used ONLY by kobold-proxy to reach the host LLM.
