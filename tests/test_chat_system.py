@@ -29,6 +29,9 @@ def chat_system_with_mocks():
     on `text_engine.generate_response.*` keep working unchanged.
     """
     mock_memory_manager = MagicMock(spec=MemoryManager)
+    # DP-113: ChatSystem reads memory_manager.backend at construction. spec=
+    # restricts to class attributes, so attach a stub backend explicitly.
+    mock_memory_manager.backend = MagicMock()
     text_engine = TextEngine()
     text_engine.generate_response = AsyncMock(  # type: ignore[method-assign]
         return_value=({'type': 'text', 'content': 'LLM Reply'}, {}),

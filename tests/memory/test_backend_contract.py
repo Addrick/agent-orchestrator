@@ -161,20 +161,24 @@ def test_new_shape_ensure_bank_noop_on_sqlite(backend: MemoryBackend) -> None:
     asyncio.run(backend.ensure_bank("bank", retain_mission="m", reflect_mission="rm"))
 
 
-def test_new_shape_retain_turn_not_implemented_on_sqlite(backend: MemoryBackend) -> None:
+def test_new_shape_retain_turn_is_noop_on_sqlite(backend: MemoryBackend) -> None:
+    # DP-113: legacy MemoryAgent batch loop continues to drive consolidation
+    # under sqlite_legacy. retain_turn is a deliberate noop returning "".
     from datetime import datetime, timezone
-    with pytest.raises(NotImplementedError):
-        asyncio.run(backend.retain_turn(
-            "bank", "user", "hi",
-            timestamp=datetime.now(timezone.utc),
-            scope_tags=["scope:c"],
-            source_persona="alice",
-        ))
+    result = asyncio.run(backend.retain_turn(
+        "bank", "user", "hi",
+        timestamp=datetime.now(timezone.utc),
+        scope_tags=["channel:c"],
+        source_persona="alice",
+    ))
+    assert result == ""
 
 
-def test_new_shape_recall_not_implemented_on_sqlite(backend: MemoryBackend) -> None:
-    with pytest.raises(NotImplementedError):
-        asyncio.run(backend.recall("bank", "query"))
+def test_new_shape_recall_returns_empty_without_embedding_service(backend: MemoryBackend) -> None:
+    # DP-113: recall translates query → embedding via injected EmbeddingService.
+    # When none is set (e.g. raw MemoryManager construction), fail soft.
+    hits = asyncio.run(backend.recall("bank", "query"))
+    assert hits == []
 
 
 # ---------- delegation sanity ----------

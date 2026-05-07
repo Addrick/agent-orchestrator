@@ -490,6 +490,45 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "function",
         "is_write": False,
         "capabilities": {
+            # DP-113 / tool_security_framework.md: recall surfaces previously-
+            # ingested external content (chat history, tool output) — origin
+            # is untrusted even though the read is local.
+            "produces_untrusted": True,
+            "irreversible": False,
+            "locality": "local",
+            "sensitivity": "internal",
+        },
+        "function": {
+            "name": "recall_memory",
+            "description": (
+                "Search the persona's long-term memory bank for facts relevant to a "
+                "natural-language query. Returns up to `limit` hits — each is a short "
+                "summary of a past conversation or observation. Use when the user "
+                "references something you don't see in the recent message window. "
+                "Scope (persona, channel, user, server) is inherited from the active "
+                "turn — you cannot query another persona's bank."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Natural-language question or topic to recall.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of memory hits to return (default 10).",
+                        "default": 10,
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "is_write": False,
+        "capabilities": {
             "produces_untrusted": True,
             "irreversible": False,
             "locality": "local",

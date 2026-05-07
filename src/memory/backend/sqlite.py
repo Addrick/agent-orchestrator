@@ -12,15 +12,19 @@ NotImplementedError stubs / noops; Sprint 2 lands them on HindsightBackend.
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from config.global_config import EMBEDDING_MODEL
-from src.memory.backend.base import MemoryBackend
+from src.memory.backend.base import MemoryBackend, MemoryHit
 
 if TYPE_CHECKING:
+    from src.embedding_service import EmbeddingService
     from src.memory.memory_manager import MemoryManager
+
+logger = logging.getLogger(__name__)
 
 
 class SqliteSemanticBackend(MemoryBackend):
@@ -33,12 +37,25 @@ class SqliteSemanticBackend(MemoryBackend):
     # Failure outcome literals copied from MemoryManager (kept private to backend).
     _FAILURE_OUTCOMES = ("failed", "error", "notification_failed")
 
-    def __init__(self, memory_manager: "MemoryManager") -> None:
+    def __init__(
+        self,
+        memory_manager: "MemoryManager",
+        embedding_service: "Optional[EmbeddingService]" = None,
+    ) -> None:
         # The backend shares the MemoryManager's connection, lock, and
         # suppression filter. This avoids two parallel SQLite connections to
         # the same DB file (transactions would deadlock) and keeps the
         # transcript layer + semantic layer transactionally consistent.
         self._mm = memory_manager
+        # New-shape recall translates a query string → embedding → existing
+        # retrieve_relevant_summaries. ChatSystem injects the service after
+        # construction via set_embedding_service(); recall returns [] when
+        # absent rather than raising — matches HindsightBackend's "fail soft
+        # on retrieval" policy.
+        self._embedding_service = embedding_service
+
+    def set_embedding_service(self, service: "Optional[EmbeddingService]") -> None:
+        self._embedding_service = service
 
     # ---------- Episodic ----------
 
@@ -600,3 +617,125 @@ class SqliteSemanticBackend(MemoryBackend):
             if not rows:
                 return None
             return [row["embedding"] for row in reversed(rows)]
+
+    # ===== New Hindsight-shape (DP-113) =====
+    #
+    # `retain_turn` is intentionally a noop on SQLite: the legacy
+    # MemoryAgent batch loop continues to drive embedding/segmentation/
+    # summarization off `User_Interactions` rows under the `sqlite_legacy`
+    # selector. Per-turn inline writes would either duplicate that work or
+    # double the embedding-API cost for no behaviour change. See
+    # tasks/DP-113.md §"Consolidation trigger location".
+    #
+    # `recall` translates the new-shape API to the existing
+    # `retrieve_relevant_summaries` path so ChatSystem can be rewired to the
+    # backend boundary while still riding the legacy summary index.
+
+    @staticmethod
+    def _parse_scope_tags(tag_filter: Optional[List[str]]) -> Dict[str, Optional[str]]:
+        # `exclude_after` carries the sliding-window cutoff so the legacy
+        # summary index doesn't surface memories that are still in the
+        # visible history window (see ChatSystem._retrieve_memory_block).
+        scope: Dict[str, Optional[str]] = {
+            "channel": None, "server": None, "user": None,
+            "interface": None, "exclude_after": None,
+        }
+        if not tag_filter:
+            return scope
+        for tag in tag_filter:
+            if ":" not in tag:
+                continue
+            key, value = tag.split(":", 1)
+            if key in scope:
+                scope[key] = value
+        return scope
+
+    async def retain_turn(
+        self,
+        bank_id: str,
+        role: str,
+        content: str,
+        *,
+        timestamp: datetime,
+        scope_tags: List[str],
+        source_persona: str,
+        untrusted: bool = False,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        # Noop under sqlite_legacy — see class-level note above.
+        return ""
+
+    async def recall(
+        self,
+        bank_id: str,
+        query: str,
+        *,
+        k: int = 10,
+        types: Optional[List[str]] = None,
+        tag_filter: Optional[List[str]] = None,
+        max_tokens: Optional[int] = None,
+        budget: Optional[float] = None,
+    ) -> List[MemoryHit]:
+        if self._embedding_service is None:
+            logger.info("SqliteSemanticBackend.recall: no embedding service set; returning empty.")
+            return []
+
+        scope = self._parse_scope_tags(tag_filter)
+        channel = scope["channel"]
+        server_id = scope["server"]
+        user_identifier = scope["user"]
+        memory_mode = "channel" if channel else "global"
+        try:
+            exclude_after = int(scope["exclude_after"]) if scope["exclude_after"] else None
+        except (TypeError, ValueError):
+            exclude_after = None
+
+        try:
+            query_embeddings = await self._embedding_service.encode([query])
+        except Exception as e:  # noqa: BLE001
+            logger.warning("SqliteSemanticBackend.recall: embedding failed: %s", e)
+            return []
+        if not query_embeddings:
+            return []
+
+        rows = self.retrieve_relevant_summaries(
+            persona_name=bank_id,
+            channel=channel or "",
+            server_id=server_id,
+            user_identifier=user_identifier,
+            memory_mode=memory_mode,
+            include_ambient=True,
+            exclude_after_interaction_id=exclude_after,
+            model_name=self._embedding_service.model_name,
+            query_embeddings=query_embeddings,
+            limit=k,
+        )
+
+        hits: List[MemoryHit] = []
+        for row in rows:
+            # `retrieve_relevant_summaries` returns cosine *distance* (smaller
+            # is closer). Map to similarity score in [0, 1] so MemoryHit.score
+            # follows "higher is better" like Hindsight's recall results.
+            dist = row.get("dist")
+            score = max(0.0, 1.0 - float(dist)) if dist is not None else 0.0
+            ts = row.get("last_message_at") or row.get("created_at")
+            tags = []
+            if row.get("channel"):
+                tags.append(f"channel:{row['channel']}")
+            if row.get("persona_name"):
+                tags.append(f"persona:{row['persona_name']}")
+            hits.append(MemoryHit(
+                id=str(row["summary_id"]),
+                content=row.get("content", ""),
+                score=score,
+                untrusted=bool(row.get("untrusted", 0)),
+                tags=tags,
+                timestamp=ts if isinstance(ts, datetime) else None,
+                metadata={
+                    "segment_id": row.get("segment_id"),
+                    "start_interaction_id": row.get("start_interaction_id"),
+                    "end_interaction_id": row.get("end_interaction_id"),
+                    "model_name": row.get("model_name"),
+                },
+            ))
+        return hits
