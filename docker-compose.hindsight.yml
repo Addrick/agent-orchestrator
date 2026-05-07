@@ -5,8 +5,9 @@ services:
   # allowing the one whitelisted destination through. See
   # memory/project/decisions/2026-05-05-hindsight-paranoid-mode.md
   kobold-proxy:
-    # TODO: pin alpine/socat by SHA before trusting in any non-dev context
-    image: alpine/socat:1.8.0.0
+    # Verified multi-arch index digest for alpine/socat:1.8.0.0.
+    # TODO: re-pin on the next intentional bump (re-run `docker buildx imagetools inspect`).
+    image: alpine/socat@sha256:a6be4c0262b339c53ddad723cdd178a1a13271e1137c65e27f90a08c16de02b8
     container_name: hindsight-kobold-proxy
     restart: unless-stopped
     command: -d TCP-LISTEN:5001,fork,reuseaddr TCP:host.docker.internal:5001

@@ -46,8 +46,11 @@ def test_read_untrusted_absent_defaults_true() -> None:
 
 
 @pytest.fixture
-def backend() -> HindsightBackend:
-    return HindsightBackend(url="http://stub:8888")
+def backend(tmp_path) -> HindsightBackend:
+    return HindsightBackend(
+        url="http://stub:8888",
+        override_db_path=str(tmp_path / "overrides.db"),
+    )
 
 
 @pytest.mark.asyncio
@@ -68,7 +71,10 @@ async def test_retain_turn_threads_untrusted_tag(backend: HindsightBackend) -> N
             source_persona="alice",
             untrusted=True,
         )
-    assert hit_id == "unit-123"
+        # Fire-and-forget: ID isn't known to the caller, drain to verify worker did POST.
+        await backend.aclose()
+    assert hit_id == ""
+    assert captured["bank_id"] == "alice"
     assert UNTRUSTED_TAG in captured["tags"]
     assert "persona:alice" in captured["tags"]
     assert "role:user" in captured["tags"]
@@ -91,6 +97,7 @@ async def test_retain_turn_trusted_default(backend: HindsightBackend) -> None:
             scope_tags=[],
             source_persona="alice",
         )
+        await backend.aclose()
     assert TRUSTED_TAG in captured["tags"]
     assert UNTRUSTED_TAG not in captured["tags"]
 
@@ -130,6 +137,8 @@ async def test_retain_turn_fails_soft_on_network_error(backend: HindsightBackend
             scope_tags=[],
             source_persona="alice",
         )
+        # Drain — worker must swallow ConnectError and stay alive.
+        await backend.aclose()
     assert hit_id == ""
 
 
@@ -166,9 +175,93 @@ async def test_legacy_methods_raise_not_implemented(backend: HindsightBackend) -
 
 
 @pytest.mark.asyncio
-async def test_mark_trusted_pending_upstream(backend: HindsightBackend) -> None:
-    with pytest.raises(NotImplementedError, match="DP-110"):
-        await backend.mark_trusted("a", "1", operator_id="adam", reason="t")
+async def test_queue_preserves_intra_bank_order(backend: HindsightBackend) -> None:
+    """Plan §1.3 — intra-bank FIFO. Cross-bank ordering not guaranteed (parallel)."""
+    seen: Dict[str, List[str]] = {"alice": [], "bob": []}
+
+    async def fake_aretain(bank_id: str, content: str, tags: List[str]) -> Dict[str, Any]:
+        seen[bank_id].append(content)
+        return {"id": content}
+
+    client = backend._get_client()
+    with patch.object(client, "aretain", side_effect=fake_aretain):
+        for i in range(5):
+            await backend.retain_turn(
+                "alice", "user", f"a{i}",
+                timestamp=datetime.now(timezone.utc),
+                scope_tags=[], source_persona="alice",
+            )
+            await backend.retain_turn(
+                "bob", "user", f"b{i}",
+                timestamp=datetime.now(timezone.utc),
+                scope_tags=[], source_persona="bob",
+            )
+        await backend.aclose()
+
+    assert seen["alice"] == [f"a{i}" for i in range(5)]
+    assert seen["bob"] == [f"b{i}" for i in range(5)]
+
+
+@pytest.mark.asyncio
+async def test_worker_survives_connect_error(backend: HindsightBackend) -> None:
+    """ConnectError on item N must not kill the worker; item N+1 still drains."""
+    calls: List[str] = []
+
+    async def flaky(bank_id: str, content: str, tags: List[str]) -> Dict[str, Any]:
+        calls.append(content)
+        if content == "boom":
+            raise httpx.ConnectError("kobold offline")
+        return {"id": content}
+
+    client = backend._get_client()
+    with patch.object(client, "aretain", side_effect=flaky):
+        for c in ("ok1", "boom", "ok2"):
+            await backend.retain_turn(
+                "alice", "user", c,
+                timestamp=datetime.now(timezone.utc),
+                scope_tags=[], source_persona="alice",
+            )
+        await backend.aclose()
+
+    assert calls == ["ok1", "boom", "ok2"]
+
+
+@pytest.mark.asyncio
+async def test_mark_trusted_audit_and_recall_override(backend: HindsightBackend) -> None:
+    """Flip → recall → assert MemoryHit.untrusted reflects new value. Flip back → re-verify."""
+    fake_results = [
+        {"id": "u1", "content": "x", "score": 0.9, "tags": [UNTRUSTED_TAG]},
+    ]
+
+    async def fake_arecall(bank_id: str, query: str, k: int = 10, tags=None):
+        return fake_results
+
+    client = backend._get_client()
+    with patch.object(client, "arecall", side_effect=fake_arecall):
+        # Storage tag is untrusted → hit reads untrusted.
+        hits = await backend.recall("alice", "q")
+        assert hits[0].untrusted is True
+
+        # Operator marks trusted.
+        await backend.mark_trusted("alice", "u1", operator_id="adam", reason="vetted")
+        hits = await backend.recall("alice", "q")
+        assert hits[0].untrusted is False
+
+        # Flip back.
+        await backend.mark_untrusted("alice", "u1", operator_id="adam", reason="recanted")
+        hits = await backend.recall("alice", "q")
+        assert hits[0].untrusted is True
+
+    # Audit log captured both flips with prior + new.
+    rows = backend._overrides._get().execute(
+        "SELECT prior, new, operator_id, reason FROM Unit_Trust_Audit "
+        "WHERE bank_id=? AND hit_id=? ORDER BY audit_id", ("alice", "u1"),
+    ).fetchall()
+    assert len(rows) == 2
+    assert rows[0]["prior"] is None and rows[0]["new"] == 0  # first flip: no prior override
+    assert rows[1]["prior"] == 0 and rows[1]["new"] == 1     # second flip: prior trusted → untrusted
+    assert all(r["operator_id"] == "adam" for r in rows)
+    await backend.aclose()
 
 
 # ---------- Live container smoke ----------
