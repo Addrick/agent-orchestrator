@@ -158,7 +158,7 @@ def test_new_shape_list_mental_models_empty_on_sqlite(backend: MemoryBackend) ->
 
 def test_new_shape_ensure_bank_noop_on_sqlite(backend: MemoryBackend) -> None:
     # Should not raise; SQLite has implicit banks.
-    asyncio.run(backend.ensure_bank("bank", mission="m", reflect_mission="rm"))
+    asyncio.run(backend.ensure_bank("bank", retain_mission="m", reflect_mission="rm"))
 
 
 def test_new_shape_retain_turn_not_implemented_on_sqlite(backend: MemoryBackend) -> None:

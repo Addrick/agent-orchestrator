@@ -8,8 +8,9 @@ Two layers:
 """
 from __future__ import annotations
 
+import asyncio
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, patch
 
@@ -20,6 +21,7 @@ from src.memory.backend.hindsight import (
     HindsightAPIError,
     HindsightBackend,
     HindsightRESTClient,
+    SESSION_GAP_SECONDS,
     TRUSTED_TAG,
     UNTRUSTED_TAG,
     _read_untrusted,
@@ -50,6 +52,7 @@ def backend(tmp_path) -> HindsightBackend:
     return HindsightBackend(
         url="http://stub:8888",
         override_db_path=str(tmp_path / "overrides.db"),
+        doc_scope_db_path=str(tmp_path / "doc_scope.db"),
     )
 
 
@@ -57,9 +60,9 @@ def backend(tmp_path) -> HindsightBackend:
 async def test_retain_turn_threads_untrusted_tag(backend: HindsightBackend) -> None:
     captured: Dict[str, Any] = {}
 
-    async def fake_aretain(bank_id: str, content: str, tags: List[str]) -> Dict[str, Any]:
+    async def fake_aretain(bank_id: str, items, async_=True) -> Dict[str, Any]:
         captured["bank_id"] = bank_id
-        captured["tags"] = tags
+        captured["items"] = items
         return {"id": "unit-123"}
 
     client = backend._get_client()
@@ -75,18 +78,22 @@ async def test_retain_turn_threads_untrusted_tag(backend: HindsightBackend) -> N
         await backend.aclose()
     assert hit_id == ""
     assert captured["bank_id"] == "alice"
-    assert UNTRUSTED_TAG in captured["tags"]
-    assert "persona:alice" in captured["tags"]
-    assert "role:user" in captured["tags"]
-    assert "channel:c1" in captured["tags"]
+    assert len(captured["items"]) == 1
+    item = captured["items"][0]
+    assert UNTRUSTED_TAG in item["tags"]
+    assert "persona:alice" in item["tags"]
+    assert "role:user" in item["tags"]
+    assert "channel:c1" in item["tags"]
+    assert item["document_id"].startswith("alice:c1:")
+    assert item["update_mode"] == "replace"  # first turn in scope
 
 
 @pytest.mark.asyncio
 async def test_retain_turn_trusted_default(backend: HindsightBackend) -> None:
     captured: Dict[str, Any] = {}
 
-    async def fake_aretain(bank_id: str, content: str, tags: List[str]) -> Dict[str, Any]:
-        captured["tags"] = tags
+    async def fake_aretain(bank_id: str, items, async_=True) -> Dict[str, Any]:
+        captured["items"] = items
         return {"id": "x"}
 
     client = backend._get_client()
@@ -98,8 +105,9 @@ async def test_retain_turn_trusted_default(backend: HindsightBackend) -> None:
             source_persona="alice",
         )
         await backend.aclose()
-    assert TRUSTED_TAG in captured["tags"]
-    assert UNTRUSTED_TAG not in captured["tags"]
+    tags = captured["items"][0]["tags"]
+    assert TRUSTED_TAG in tags
+    assert UNTRUSTED_TAG not in tags
 
 
 @pytest.mark.asyncio
@@ -179,9 +187,10 @@ async def test_queue_preserves_intra_bank_order(backend: HindsightBackend) -> No
     """Plan §1.3 — intra-bank FIFO. Cross-bank ordering not guaranteed (parallel)."""
     seen: Dict[str, List[str]] = {"alice": [], "bob": []}
 
-    async def fake_aretain(bank_id: str, content: str, tags: List[str]) -> Dict[str, Any]:
-        seen[bank_id].append(content)
-        return {"id": content}
+    async def fake_aretain(bank_id: str, items, async_=True) -> Dict[str, Any]:
+        for it in items:
+            seen[bank_id].append(it["content"])
+        return {"id": "ok"}
 
     client = backend._get_client()
     with patch.object(client, "aretain", side_effect=fake_aretain):
@@ -207,20 +216,35 @@ async def test_worker_survives_connect_error(backend: HindsightBackend) -> None:
     """ConnectError on item N must not kill the worker; item N+1 still drains."""
     calls: List[str] = []
 
-    async def flaky(bank_id: str, content: str, tags: List[str]) -> Dict[str, Any]:
-        calls.append(content)
-        if content == "boom":
+    async def flaky(bank_id: str, items, async_=True) -> Dict[str, Any]:
+        contents = [it["content"] for it in items]
+        calls.extend(contents)
+        if "boom" in contents:
             raise httpx.ConnectError("kobold offline")
-        return {"id": content}
+        return {"id": "ok"}
 
     client = backend._get_client()
     with patch.object(client, "aretain", side_effect=flaky):
-        for c in ("ok1", "boom", "ok2"):
-            await backend.retain_turn(
-                "alice", "user", c,
-                timestamp=datetime.now(timezone.utc),
-                scope_tags=[], source_persona="alice",
-            )
+        # Three sequential retains; awaiting between each lets the worker
+        # drain item-by-item so the ConnectError batch is just "boom" alone
+        # and the next item still drains.
+        await backend.retain_turn(
+            "alice", "user", "ok1",
+            timestamp=datetime.now(timezone.utc),
+            scope_tags=[], source_persona="alice",
+        )
+        await backend._queues["alice"].join()
+        await backend.retain_turn(
+            "alice", "user", "boom",
+            timestamp=datetime.now(timezone.utc),
+            scope_tags=[], source_persona="alice",
+        )
+        await backend._queues["alice"].join()
+        await backend.retain_turn(
+            "alice", "user", "ok2",
+            timestamp=datetime.now(timezone.utc),
+            scope_tags=[], source_persona="alice",
+        )
         await backend.aclose()
 
     assert calls == ["ok1", "boom", "ok2"]
@@ -264,6 +288,180 @@ async def test_mark_trusted_audit_and_recall_override(backend: HindsightBackend)
     await backend.aclose()
 
 
+# ---------- Bundle shape (DP-112) ----------
+
+
+@pytest.mark.asyncio
+async def test_bundle_coalesces_when_worker_is_busy(backend: HindsightBackend) -> None:
+    """N items enqueued while the worker's first POST is in flight collapse
+    into one bundled POST on the next drain tick."""
+    batches: List[List[Dict[str, Any]]] = []
+    gate = asyncio.Event()
+
+    async def fake_aretain(bank_id: str, items, async_=True) -> Dict[str, Any]:
+        batches.append(list(items))
+        # Hold the first POST until everything is queued, so the second drain
+        # tick observes all remaining items at once.
+        if len(batches) == 1:
+            await gate.wait()
+        return {"id": "ok"}
+
+    client = backend._get_client()
+    with patch.object(client, "aretain", side_effect=fake_aretain):
+        # First retain wakes the worker; aretain blocks on `gate`.
+        await backend.retain_turn(
+            "alice", "user", "first",
+            timestamp=datetime.now(timezone.utc),
+            scope_tags=["channel:c1"], source_persona="alice",
+        )
+        # Wait for the worker to actually start processing the first item so
+        # the rest land on a busy worker.
+        for _ in range(50):
+            if batches:
+                break
+            await asyncio.sleep(0.01)
+        for i in range(4):
+            await backend.retain_turn(
+                "alice", "user", f"q{i}",
+                timestamp=datetime.now(timezone.utc),
+                scope_tags=["channel:c1"], source_persona="alice",
+            )
+        gate.set()
+        await backend.aclose()
+
+    # First batch: just "first". Second batch: the four queued items in one POST.
+    assert [it["content"] for it in batches[0]] == ["first"]
+    assert [it["content"] for it in batches[1]] == ["q0", "q1", "q2", "q3"]
+
+
+@pytest.mark.asyncio
+async def test_document_id_stable_within_scope(backend: HindsightBackend) -> None:
+    seen: List[Dict[str, Any]] = []
+
+    async def fake_aretain(bank_id: str, items, async_=True) -> Dict[str, Any]:
+        seen.extend(items)
+        return {"id": "ok"}
+
+    client = backend._get_client()
+    with patch.object(client, "aretain", side_effect=fake_aretain):
+        for content in ("a", "b", "c"):
+            await backend.retain_turn(
+                "alice", "user", content,
+                timestamp=datetime.now(timezone.utc),
+                scope_tags=["channel:c1"], source_persona="alice",
+            )
+        await backend.aclose()
+
+    doc_ids = {it["document_id"] for it in seen}
+    assert len(doc_ids) == 1, f"all retains in same scope must share doc_id, got {doc_ids}"
+    modes = [it["update_mode"] for it in seen]
+    assert modes[0] == "replace"
+    assert all(m == "append" for m in modes[1:])
+
+
+@pytest.mark.asyncio
+async def test_document_id_differs_across_scopes(backend: HindsightBackend) -> None:
+    seen: List[Dict[str, Any]] = []
+
+    async def fake_aretain(bank_id: str, items, async_=True) -> Dict[str, Any]:
+        seen.extend(items)
+        return {"id": "ok"}
+
+    client = backend._get_client()
+    with patch.object(client, "aretain", side_effect=fake_aretain):
+        await backend.retain_turn(
+            "alice", "user", "x",
+            timestamp=datetime.now(timezone.utc),
+            scope_tags=["channel:c1"], source_persona="alice",
+        )
+        await backend.retain_turn(
+            "alice", "user", "y",
+            timestamp=datetime.now(timezone.utc),
+            scope_tags=["channel:c2"], source_persona="alice",
+        )
+        await backend.aclose()
+
+    assert seen[0]["document_id"] != seen[1]["document_id"]
+
+
+@pytest.mark.asyncio
+async def test_session_gap_starts_new_document(backend: HindsightBackend) -> None:
+    """>SESSION_GAP_SECONDS gap → new document_id + update_mode='replace'."""
+    seen: List[Dict[str, Any]] = []
+
+    async def fake_aretain(bank_id: str, items, async_=True) -> Dict[str, Any]:
+        seen.extend(items)
+        return {"id": "ok"}
+
+    t0 = datetime.now(timezone.utc) - timedelta(seconds=SESSION_GAP_SECONDS + 60)
+    t1 = datetime.now(timezone.utc)
+
+    client = backend._get_client()
+    with patch.object(client, "aretain", side_effect=fake_aretain):
+        await backend.retain_turn(
+            "alice", "user", "old",
+            timestamp=t0,
+            scope_tags=["channel:c1"], source_persona="alice",
+        )
+        await backend._queues["alice"].join()
+        await backend.retain_turn(
+            "alice", "user", "new",
+            timestamp=t1,
+            scope_tags=["channel:c1"], source_persona="alice",
+        )
+        await backend.aclose()
+
+    assert seen[0]["document_id"] != seen[1]["document_id"]
+    assert seen[0]["update_mode"] == "replace"
+    assert seen[1]["update_mode"] == "replace"
+
+
+@pytest.mark.asyncio
+async def test_ensure_bank_sends_retain_mission_not_mission(backend: HindsightBackend) -> None:
+    """Wire-level: retain_mission goes to the server; deprecated `mission` does not."""
+    captured: Dict[str, Any] = {}
+
+    async def fake_request(method: str, path: str, **kwargs: Any) -> Dict[str, Any]:
+        captured["json"] = kwargs.get("json")
+        return {}
+
+    client = backend._get_client()
+    with patch.object(client, "_request", side_effect=fake_request):
+        await backend.ensure_bank(
+            "alice",
+            retain_mission="extract decisions",
+            reflect_mission="summarize",
+            enable_observations=True,
+            observations_mission="stable facts",
+        )
+    payload = captured["json"]
+    assert payload["retain_mission"] == "extract decisions"
+    assert payload["reflect_mission"] == "summarize"
+    assert payload["enable_observations"] is True
+    assert payload["observations_mission"] == "stable facts"
+    assert "mission" not in payload
+    assert "background" not in payload
+
+
+@pytest.mark.asyncio
+async def test_aretain_uses_async_field_not_retain_async() -> None:
+    """Wire-level: payload key is `async` (upstream RetainRequest), not `retain_async`."""
+    client = HindsightRESTClient(base_url="http://stub")
+    captured: Dict[str, Any] = {}
+
+    async def fake_request(method: str, path: str, **kwargs: Any) -> Dict[str, Any]:
+        captured["path"] = path
+        captured["json"] = kwargs.get("json")
+        return {}
+
+    with patch.object(client, "_request", side_effect=fake_request):
+        await client.aretain("bank-x", [{"content": "hi", "tags": []}])
+    assert captured["path"] == "/banks/bank-x/retain"
+    assert captured["json"]["async"] is True
+    assert "retain_async" not in captured["json"]
+    assert captured["json"]["items"] == [{"content": "hi", "tags": []}]
+
+
 # ---------- Live container smoke ----------
 
 
@@ -274,7 +472,7 @@ async def test_live_retain_recall_round_trip() -> None:
     url = os.environ["HINDSIGHT_LIVE_URL"]
     backend = HindsightBackend(url=url)
     bank = "test-conformance"
-    await backend.ensure_bank(bank, mission="conformance test bank")
+    await backend.ensure_bank(bank, retain_mission="conformance test bank")
     try:
         await backend.retain_turn(
             bank, "user", "the quick brown fox jumps over the lazy dog",
