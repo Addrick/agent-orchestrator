@@ -1144,12 +1144,13 @@ class MemoryManager:
         timestamp: datetime,
         scope_tags: List[str],
         source_persona: str,
+        untrusted: bool = False,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         return await self.backend.retain_turn(
             bank_id, role, content,
             timestamp=timestamp, scope_tags=scope_tags,
-            source_persona=source_persona, metadata=metadata
+            source_persona=source_persona, untrusted=untrusted, metadata=metadata
         )
 
     async def retain_experience(
@@ -1161,12 +1162,19 @@ class MemoryManager:
         *,
         scope_tags: List[str],
         source_persona: str,
+        untrusted: bool = False,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         return await self.backend.retain_experience(
             bank_id, action_type, context, outcome,
-            scope_tags=scope_tags, source_persona=source_persona, metadata=metadata
+            scope_tags=scope_tags, source_persona=source_persona,
+            untrusted=untrusted, metadata=metadata,
         )
+
+    # Note: mark_trusted/mark_untrusted on MemoryManager already exist for the
+    # legacy summary-level API (int summary_id). The new-shape per-hit equivalents
+    # are reached via `mm.backend.mark_trusted(bank_id, hit_id, ...)` to avoid
+    # name collision. Resolve when the legacy API is retired in Phase 5.
 
     async def recall(
         self,

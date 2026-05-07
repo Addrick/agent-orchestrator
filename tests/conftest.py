@@ -27,10 +27,12 @@ def pytest_collection_modifyitems(config, items):
         or os.environ.get("ANTHROPIC_API_KEY")
     )
     has_discord = bool(os.environ.get("DISCORD_API_KEY") or os.environ.get("DISCORD_BOT_TOKEN"))
+    has_hindsight = bool(os.environ.get("HINDSIGHT_LIVE_URL"))
 
     skip_zammad = pytest.mark.skip(reason="ZAMMAD_URL/ZAMMAD_API_KEY not set")
     skip_llm = pytest.mark.skip(reason="No LLM API keys set (OPENAI_API_KEY, GOOGLE_API_KEY, ANTHROPIC_API_KEY)")
     skip_discord = pytest.mark.skip(reason="DISCORD_API_KEY not set")
+    skip_hindsight = pytest.mark.skip(reason="HINDSIGHT_LIVE_URL not set")
 
     for item in items:
         if "zammad_live" in item.keywords and not has_zammad:
@@ -39,3 +41,5 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_llm)
         if "discord_live" in item.keywords and not has_discord:
             item.add_marker(skip_discord)
+        if "hindsight_live" in item.keywords and not has_hindsight:
+            item.add_marker(skip_hindsight)
