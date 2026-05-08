@@ -1,5 +1,6 @@
 stuff/
 .huggingface/
+memory/
 .venv/
 .idea/
 __pycache__/
