@@ -1,4 +1,5 @@
 # scripts/backfill_hindsight.py
+import argparse
 import asyncio
 import logging
 import sys
@@ -10,8 +11,8 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from src.memory.memory_manager import MemoryManager
 from src.memory.backend.hindsight import HindsightBackend
-from src.utils.save_utils import load_personas_from_file, load_system_personas_from_file
-from config.global_config import HINDSIGHT_URL
+from src.utils.save_utils import load_system_personas_from_file
+from config.global_config import HINDSIGHT_URL, MEMORY_DATABASE_FILE
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,22 +20,26 @@ logging.basicConfig(
 )
 logger = logging.getLogger("backfill")
 
-async def backfill():
+async def backfill(persona_filter: list[str] | None = None):
     # 1. Initialize
-    mm = MemoryManager()
+    mm = MemoryManager(db_path=MEMORY_DATABASE_FILE)
     hindsight = HindsightBackend(url=HINDSIGHT_URL)
-    
-    # 2. Get all personas to ensure banks exist — but skip system personas
-    # (triage_*, *_selector, etc.). They have no conversational LTM and a bank
-    # for them stays empty forever. Matches ChatSystem.startup() gate.
-    loaded = {**(load_personas_from_file() or {}), **(load_system_personas_from_file() or {})}
-    ltm_personas = {n for n, p in loaded.items() if p.get_long_term_memory()}
+
+    # 2. Pick personas. Explicit --personas list wins; otherwise auto-include
+    # everything in User_Interactions minus system pipeline workers.
+    system_persona_names = set((load_system_personas_from_file() or {}).keys())
     with mm.transaction() as conn:
         all_personas = [row["persona_name"] for row in conn.execute("SELECT DISTINCT persona_name FROM User_Interactions")]
-    personas = [p for p in all_personas if p in ltm_personas]
-    skipped = sorted(set(all_personas) - set(personas))
-    if skipped:
-        logger.info(f"Skipping non-LTM personas (no bank): {skipped}")
+    if persona_filter:
+        missing = [p for p in persona_filter if p not in all_personas]
+        if missing:
+            logger.warning(f"Persona(s) not present in User_Interactions: {missing}")
+        personas = [p for p in persona_filter if p in all_personas]
+    else:
+        personas = [p for p in all_personas if p not in system_persona_names]
+        skipped = sorted(set(all_personas) - set(personas))
+        if skipped:
+            logger.info(f"Skipping system personas (no bank): {skipped}")
 
     logger.info(f"Ensuring banks exist for personas: {personas}")
     for persona in personas:
@@ -120,4 +125,10 @@ async def backfill():
     logger.info("Backfill script finished enqueuing.")
 
 if __name__ == "__main__":
-    asyncio.run(backfill())
+    parser = argparse.ArgumentParser(description="Backfill User_Interactions into Hindsight banks.")
+    parser.add_argument(
+        "--personas", nargs="+", default=None,
+        help="Persona names to backfill (default: all non-system personas in User_Interactions).",
+    )
+    args = parser.parse_args()
+    asyncio.run(backfill(persona_filter=args.personas))

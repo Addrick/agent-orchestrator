@@ -119,7 +119,7 @@ async def test_recall_recovers_untrusted_bit(backend: HindsightBackend) -> None:
         {"id": "3", "content": "untagged msg", "score": 0.7, "tags": []},
     ]
 
-    async def fake_arecall(bank_id: str, query: str, k: int = 10, tags=None):
+    async def fake_arecall(bank_id: str, query: str, **kw):
         return fake_results
 
     client = backend._get_client()
@@ -257,7 +257,7 @@ async def test_mark_trusted_audit_and_recall_override(backend: HindsightBackend)
         {"id": "u1", "content": "x", "score": 0.9, "tags": [UNTRUSTED_TAG]},
     ]
 
-    async def fake_arecall(bank_id: str, query: str, k: int = 10, tags=None):
+    async def fake_arecall(bank_id: str, query: str, **kw):
         return fake_results
 
     client = backend._get_client()
@@ -456,7 +456,7 @@ async def test_aretain_uses_async_field_not_retain_async() -> None:
 
     with patch.object(client, "_request", side_effect=fake_request):
         await client.aretain("bank-x", [{"content": "hi", "tags": []}])
-    assert captured["path"] == "/banks/bank-x/retain"
+    assert captured["path"] == "/v1/default/banks/bank-x/memories"
     assert captured["json"]["async"] is True
     assert "retain_async" not in captured["json"]
     assert captured["json"]["items"] == [{"content": "hi", "tags": []}]

@@ -19,6 +19,9 @@ logger = logging.getLogger(__name__)
 UNTRUSTED_TAG = "untrusted:true"
 TRUSTED_TAG = "untrusted:false"
 
+# Hindsight 0.6.1 hardcodes a single tenant prefix in every bank route.
+HINDSIGHT_API_PREFIX = "/v1/default"
+
 # Session cut heuristic: gap between retains in the same scope that starts a
 # new document. >24h idle → new conversation document. Plan §1.4.
 SESSION_GAP_SECONDS = 24 * 3600
@@ -71,20 +74,41 @@ class HindsightRESTClient:
         # MemoryItem fields used here: content, tags, document_id, timestamp,
         # metadata, update_mode. Server chunks per bank `retain_chunk_size`.
         payload: Dict[str, Any] = {"items": items, "async": async_}
-        return await self._request("POST", f"/banks/{bank_id}/retain", json=payload)
+        return await self._request(
+            "POST", f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}/memories", json=payload
+        )
 
     async def arecall(
-        self, bank_id: str, query: str, k: int = 10, tags: Optional[List[str]] = None
+        self,
+        bank_id: str,
+        query: str,
+        *,
+        max_tokens: Optional[int] = None,
+        budget: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        types: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
-        payload = {"query": query, "k": k, "tags": tags or []}
-        result = await self._request("POST", f"/banks/{bank_id}/recall", json=payload)
+        # 0.6.1 RecallRequest: budget-driven (low/mid/high) + max_tokens cap.
+        # No `k` parameter anymore; callers slice result list to taste.
+        payload: Dict[str, Any] = {"query": query, "tags": tags or []}
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        if budget is not None:
+            payload["budget"] = budget
+        if types is not None:
+            payload["types"] = types
+        result = await self._request(
+            "POST", f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}/memories/recall", json=payload
+        )
         return cast(List[Dict[str, Any]], result.get("results", []))
 
     async def areflect(
         self, bank_id: str, query: str, tags: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         payload = {"query": query, "tags": tags or []}
-        return await self._request("POST", f"/banks/{bank_id}/reflect", json=payload)
+        return await self._request(
+            "POST", f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}/reflect", json=payload
+        )
 
     async def acreate_bank(
         self,
@@ -95,11 +119,10 @@ class HindsightRESTClient:
         enable_observations: Optional[bool] = None,
         observations_mission: Optional[str] = None,
     ) -> None:
-        # Upstream CreateBankRequest active fields. `mission` / `background`
-        # are deprecated aliases for `reflect_mission` and intentionally not
-        # sent; sending them would silently overwrite reflect_mission and
-        # leave retain_mission unset.
-        payload: Dict[str, Any] = {"bank_id": bank_id}
+        # 0.6.1 CreateBankRequest. bank_id lives in the URL path; body carries
+        # `name` (display) + mission fields. `mission`/`background` are
+        # deprecated aliases for `reflect_mission` and intentionally not sent.
+        payload: Dict[str, Any] = {"name": bank_id}
         if retain_mission is not None:
             payload["retain_mission"] = retain_mission
         if reflect_mission is not None:
@@ -109,14 +132,14 @@ class HindsightRESTClient:
         if observations_mission is not None:
             payload["observations_mission"] = observations_mission
         try:
-            await self._request("POST", "/banks", json=payload)
+            await self._request("PUT", f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}", json=payload)
         except HindsightAPIError as e:
             if e.status_code == 409:  # already exists
                 return
             raise
 
     async def adelete_bank(self, bank_id: str) -> None:
-        await self._request("DELETE", f"/banks/{bank_id}")
+        await self._request("DELETE", f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}")
 
 
 def _untrusted_tag(untrusted: bool) -> str:
@@ -579,29 +602,48 @@ class HindsightBackend(MemoryBackend):
         types: Optional[List[str]] = None,
         tag_filter: Optional[List[str]] = None,
         max_tokens: Optional[int] = None,
-        budget: Optional[float] = None,
+        budget: Optional[str] = None,
     ) -> List[MemoryHit]:
+        # 0.6.1 recall is budget-driven (no `k`). Translate the caller's `k`
+        # into a soft token cap; slice the result list to honor `k` post-hoc.
+        # Cheap heuristic: ~500 tokens/hit max. Caller can override via max_tokens.
+        if max_tokens is None:
+            max_tokens = k * 500
         client = self._get_client()
         try:
-            results = await client.arecall(bank_id=bank_id, query=query, k=k, tags=tag_filter)
+            results = await client.arecall(
+                bank_id=bank_id, query=query,
+                max_tokens=max_tokens, budget=budget,
+                tags=tag_filter, types=types,
+            )
         except (httpx.RequestError, HindsightAPIError) as e:
             logger.warning("Hindsight recall failed: %s", e)
             return []
 
         hits: List[MemoryHit] = []
-        for r in results:
+        for r in results[:k]:
             tags = r.get("tags", []) or []
+            # 0.6.1 RecallResult fields: text, id, tags, metadata, mentioned_at,
+            # occurred_start. No `score` — server returns results pre-ranked, so
+            # we synthesize descending position-based scores to preserve order
+            # through MemoryRouter's score-based merge.
+            content = r.get("text", r.get("content", ""))  # tolerate old-shape mocks
+            ts_str = r.get("mentioned_at") or r.get("occurred_start") or r.get("timestamp")
+            ts: Optional[datetime] = None
+            if ts_str:
+                try:
+                    ts = datetime.fromisoformat(ts_str)
+                except ValueError:
+                    pass
             hits.append(
                 MemoryHit(
                     id=str(r.get("id", "")),
-                    content=r.get("content", ""),
-                    score=float(r.get("score", 0.0)),
+                    content=content,
+                    score=float(r.get("score", 1.0 - (len(hits) / max(k, 1)))),
                     untrusted=_read_untrusted(tags),
                     metadata=r.get("metadata", {}) or {},
                     tags=tags,
-                    timestamp=(
-                        datetime.fromisoformat(r["timestamp"]) if "timestamp" in r else None
-                    ),
+                    timestamp=ts,
                 )
             )
         # Apply operator overrides on top of the storage-side bit (DP-110 option c).

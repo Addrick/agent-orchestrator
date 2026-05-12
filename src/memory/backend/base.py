@@ -324,7 +324,7 @@ class MemoryBackend(ABC):
         types: Optional[List[str]] = None,
         tag_filter: Optional[List[str]] = None,
         max_tokens: Optional[int] = None,
-        budget: Optional[float] = None,
+        budget: Optional[str] = None,
     ) -> List[MemoryHit]:
         """Semantic recall (new-shape).
 

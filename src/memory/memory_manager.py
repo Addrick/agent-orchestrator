@@ -1185,7 +1185,7 @@ class MemoryManager:
         types: Optional[List[str]] = None,
         tag_filter: Optional[List[str]] = None,
         max_tokens: Optional[int] = None,
-        budget: Optional[float] = None,
+        budget: Optional[str] = None,
     ) -> List[MemoryHit]:
         return await self.backend.recall(
             bank_id, query, k=k, types=types,
