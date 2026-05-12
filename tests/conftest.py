@@ -17,6 +17,32 @@ if _env_test_path:
     load_dotenv(dotenv_path=_env_test_path, override=True)
 
 
+@pytest.fixture(autouse=True)
+def _force_sqlite_backend_in_tests(monkeypatch):
+    """DP-114 followup: keep MemoryManager()-constructing tests on the
+    SQLite backend even though production defaults to Hindsight.
+
+    The 67 legacy tests in tests/memory, tests/test_memory_retrieval, etc.
+    exercise SqliteSemanticBackend's contract via MemoryManager's selector.
+    Flipping the production default to "hindsight" (DP-114) routes those
+    constructions to HindsightBackend, whose legacy methods raise
+    NotImplementedError by design ("migrate the caller before flipping").
+
+    Tests that intend to exercise HindsightBackend instantiate it directly,
+    so this autouse patch only affects MemoryManager-via-selector paths.
+    """
+    # `pythonpath = src .` in pytest.ini causes `memory.memory_manager` and
+    # `src.memory.memory_manager` to load as two distinct module objects.
+    # Patch both so MemoryManager picks SQLite regardless of which import
+    # path the test used.
+    import sys
+    for mod_name in ("memory.memory_manager", "src.memory.memory_manager"):
+        if mod_name in sys.modules:
+            monkeypatch.setattr(
+                f"{mod_name}.SEMANTIC_BACKEND", "sqlite", raising=False,
+            )
+
+
 def pytest_collection_modifyitems(config, items):
     """Auto-skip live tests when required env vars are missing."""
     has_zammad = bool(os.environ.get("ZAMMAD_URL") and os.environ.get("ZAMMAD_API_KEY"))
