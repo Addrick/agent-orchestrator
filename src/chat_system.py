@@ -118,6 +118,12 @@ class ChatSystem:
                  embedding_service: Optional[EmbeddingService] = None,
                  stream_engine: Optional[StreamEngine] = None) -> None:
         self.personas: Dict[str, Persona] = load_personas_from_file() or {}
+        # Ensure system personas are also loaded so they are callable by the engine
+        from src.utils.save_utils import load_system_personas_from_file
+        system_personas = load_system_personas_from_file()
+        if system_personas:
+            self.personas.update(system_personas)
+
         self.memory_manager: MemoryManager = memory_manager
         # DP-113: backend boundary for new-shape recall/retain_turn. The
         # MemoryManager owns construction (selector lives in global_config);
@@ -1110,3 +1116,14 @@ class ChatSystem:
             logger.error(f"Error resuming pending confirmation for {user_identifier}: {e}", exc_info=True)
             return ("An error occurred while processing the confirmed action.",
                     ResponseType.DEV_COMMAND, None, None)
+
+    async def startup(self) -> None:
+        """Post-init async startup tasks (e.g. Hindsight memory bank provisioning)."""
+        from src.memory.backend import HindsightBackend
+        if isinstance(self.memory_backend, HindsightBackend):
+            logger.info("Initializing Hindsight memory banks...")
+            for name in self.personas:
+                try:
+                    await self.memory_backend.ensure_bank(bank_id=name)
+                except Exception as e:
+                    logger.warning(f"Could not ensure Hindsight bank for {name}: {e}")

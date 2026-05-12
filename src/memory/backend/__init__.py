@@ -16,6 +16,7 @@ from src.memory.backend.base import (
     ReflectResult,
 )
 from src.memory.backend.sqlite import SqliteSemanticBackend
+from src.memory.backend.hindsight import HindsightBackend
 
 __all__ = [
     "Experience",
@@ -24,4 +25,5 @@ __all__ = [
     "MentalModel",
     "ReflectResult",
     "SqliteSemanticBackend",
+    "HindsightBackend",
 ]
