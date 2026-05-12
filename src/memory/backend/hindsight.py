@@ -434,13 +434,34 @@ class HindsightBackend(MemoryBackend):
             batch.append(nxt)
         return batch, done_count, stop_seen
 
+    @staticmethod
+    def _split_by_document_id(batch: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+        """Hindsight 0.6.1 rejects batches whose items share a document_id
+        ("race conditions" guard). Conversational retains intentionally share
+        a doc_id to append turns — so split each drained batch into per-POST
+        groups where each POST has at most one item per document_id. Order
+        within a doc_id is preserved across the resulting POSTs."""
+        buckets: List[Dict[str, Dict[str, Any]]] = []
+        for item in batch:
+            doc_id = item.get("document_id", "")
+            placed = False
+            for b in buckets:
+                if doc_id not in b:
+                    b[doc_id] = item
+                    placed = True
+                    break
+            if not placed:
+                buckets.append({doc_id: item})
+        return [list(b.values()) for b in buckets]
+
     async def _worker_loop(self, bank_id: str, q: "asyncio.Queue[Any]") -> None:
         """Drain-on-tick FIFO worker.
 
         Each iteration awaits one item to wake up, then drains everything
-        currently queued into a single bundled POST. Bursts coalesce; sparse
-        traffic still POSTs the lone item immediately. Transport errors drop
-        the whole batch (no retry storm — alpha system).
+        currently queued. The bundle is split into per-document_id groups
+        (0.6.1 server rejects duplicates within one batch); each group POSTs
+        separately. Bursts still coalesce. Transport errors drop the whole
+        batch (no retry storm — alpha system).
         """
         client = self._get_client()
         while True:
@@ -450,7 +471,8 @@ class HindsightBackend(MemoryBackend):
                 return
             batch, done_count, stop_seen = self._drain_batch(q, first)
             try:
-                await client.aretain(bank_id=bank_id, items=batch)
+                for sub in self._split_by_document_id(batch):
+                    await client.aretain(bank_id=bank_id, items=sub)
             except httpx.ConnectError as e:
                 # Kobold offline / proxy down — expected operational state, log+drop.
                 logger.info("Hindsight retain batch dropped (kobold offline): %s", e)
