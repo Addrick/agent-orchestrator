@@ -312,6 +312,11 @@ class _DocScopeStore:
         Side effect: updates last_ts (and document_id on session cut) so the
         next retain in the same scope sees the right state.
         """
+        # Normalize to UTC-aware: backfill rows mix naive + aware timestamps
+        # (legacy SQLite adapter just .isoformat()'d whatever was passed in).
+        # Naive values are treated as UTC.
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
         with self._lock:
             conn = self._get()
             row = conn.execute(
@@ -322,6 +327,8 @@ class _DocScopeStore:
             if row is not None:
                 try:
                     last = datetime.fromisoformat(row["last_ts"])
+                    if last.tzinfo is None:
+                        last = last.replace(tzinfo=timezone.utc)
                 except ValueError:
                     last = now
                 if (now - last).total_seconds() <= SESSION_GAP_SECONDS:
