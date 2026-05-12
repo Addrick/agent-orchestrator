@@ -674,7 +674,7 @@ class SqliteSemanticBackend(MemoryBackend):
         types: Optional[List[str]] = None,
         tag_filter: Optional[List[str]] = None,
         max_tokens: Optional[int] = None,
-        budget: Optional[float] = None,
+        budget: Optional[str] = None,
     ) -> List[MemoryHit]:
         if self._embedding_service is None:
             logger.info("SqliteSemanticBackend.recall: no embedding service set; returning empty.")
