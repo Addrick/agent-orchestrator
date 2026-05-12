@@ -486,3 +486,126 @@ async def test_live_retain_recall_round_trip() -> None:
             "untrusted bit must round-trip through Hindsight tags"
     finally:
         await backend.delete_bank(bank)
+
+@pytest.mark.asyncio
+async def test_retain_experience_threads_tags_and_content(backend: HindsightBackend) -> None:
+    captured: Dict[str, Any] = {}
+
+    async def fake_aretain(bank_id: str, items, async_=True) -> Dict[str, Any]:
+        captured["items"] = items
+        return {"id": "exp-123"}
+
+    client = backend._get_client()
+    with patch.object(client, "aretain", side_effect=fake_aretain):
+        hit_id = await backend.retain_experience(
+            "alice", "search", {"query": "foo"}, "found bar",
+            scope_tags=["channel:c1"],
+            source_persona="alice",
+            untrusted=True,
+            metadata={"meta": "data"},
+        )
+        await backend.aclose()
+    
+    assert hit_id == ""
+    item = captured["items"][0]
+    assert "type:experience" in item["tags"]
+    assert "action:search" in item["tags"]
+    assert UNTRUSTED_TAG in item["tags"]
+    assert "Action: search" in item["content"]
+    assert "found bar" in item["content"]
+    assert item["metadata"] == {"meta": "data"}
+
+
+@pytest.mark.asyncio
+async def test_reflect_success_and_failure(backend: HindsightBackend) -> None:
+    client = backend._get_client()
+    
+    # Success
+    with patch.object(client, "areflect", return_value={"answer": "yes", "mental_models": [{"id": "m1", "content": "model1", "tags": []}]}):
+        res = await backend.reflect("alice", "q")
+        assert res.answer == "yes"
+        assert res.mental_models[0].id == "m1"
+        assert res.mental_models[0].content == "model1"
+
+    # Failure
+    with patch.object(client, "areflect", side_effect=HindsightAPIError(500, "boom")):
+        res = await backend.reflect("alice", "q")
+        assert res.answer == ""
+        assert res.mental_models == []
+
+
+@pytest.mark.asyncio
+async def test_ensure_bank_ignores_409(backend: HindsightBackend) -> None:
+    client = backend._get_client()
+    
+    with patch.object(client, "_request", side_effect=HindsightAPIError(409, "already exists")):
+        await backend.ensure_bank("alice") # Should not raise
+        
+    with patch.object(client, "_request", side_effect=HindsightAPIError(500, "boom")):
+        with pytest.raises(HindsightAPIError):
+            await backend.ensure_bank("alice")
+
+
+@pytest.mark.asyncio
+async def test_delete_bank(backend: HindsightBackend) -> None:
+    client = backend._get_client()
+    
+    with patch.object(client, "adelete_bank") as mock_adelete:
+        await backend.delete_bank("alice")
+        mock_adelete.assert_called_once_with(bank_id="alice")
+
+
+@pytest.mark.asyncio
+async def test_request_raises_api_error_on_non_2xx() -> None:
+    client = HindsightRESTClient(base_url="http://stub")
+    
+    class FakeResponse:
+        status_code = 404
+        text = "not found"
+        def json(self): return {}
+        
+    async def fake_request(*args, **kwargs):
+        return FakeResponse()
+        
+    with patch.object(client.client, "request", side_effect=fake_request):
+        with pytest.raises(HindsightAPIError) as exc_info:
+            await client._request("GET", "/foo")
+        assert exc_info.value.status_code == 404
+        assert "not found" in exc_info.value.message
+
+
+@pytest.mark.asyncio
+async def test_worker_survives_api_error_and_exception(backend: HindsightBackend) -> None:
+    calls: List[str] = []
+
+    async def flaky(bank_id: str, items, async_=True) -> Dict[str, Any]:
+        contents = [it["content"] for it in items]
+        calls.extend(contents)
+        if "api-error" in contents:
+            raise HindsightAPIError(500, "server on fire")
+        if "value-error" in contents:
+            raise ValueError("bad data")
+        return {"id": "ok"}
+
+    client = backend._get_client()
+    with patch.object(client, "aretain", side_effect=flaky):
+        await backend.retain_turn("alice", "user", "api-error", timestamp=datetime.now(timezone.utc), scope_tags=[], source_persona="alice")
+        await backend._queues["alice"].join()
+        
+        await backend.retain_turn("alice", "user", "value-error", timestamp=datetime.now(timezone.utc), scope_tags=[], source_persona="alice")
+        await backend._queues["alice"].join()
+
+        await backend.retain_turn("alice", "user", "ok", timestamp=datetime.now(timezone.utc), scope_tags=[], source_persona="alice")
+        await backend._queues["alice"].join()
+        
+        await backend.aclose()
+
+    assert calls == ["api-error", "value-error", "ok"]
+
+
+@pytest.mark.asyncio
+async def test_worker_first_is_stop(backend: HindsightBackend) -> None:
+    # Wake up the worker with just _STOP
+    q = await backend._ensure_worker("bob")
+    await backend.aclose()
+    # It shouldn't crash
