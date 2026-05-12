@@ -799,7 +799,7 @@ class ChatSystem:
         )
 
         # DP-113: retain user turn through the backend boundary. Sqlite_legacy
-        # is a noop (batch MemoryAgent still drives consolidation); Hindsight
+        # is a noop (batch SqliteConsolidator still drives consolidation); Hindsight
         # enqueues fire-and-forget. Either way, retain_turn returns quickly
         # and does not block the LLM call below.
         if user_interaction_id is not None and message and message.strip():
@@ -1120,10 +1120,21 @@ class ChatSystem:
     async def startup(self) -> None:
         """Post-init async startup tasks (e.g. Hindsight memory bank provisioning)."""
         from src.memory.backend import HindsightBackend
-        if isinstance(self.memory_backend, HindsightBackend):
-            logger.info("Initializing Hindsight memory banks...")
-            for name in self.personas:
-                try:
-                    await self.memory_backend.ensure_bank(bank_id=name)
-                except Exception as e:
-                    logger.warning(f"Could not ensure Hindsight bank for {name}: {e}")
+        if not isinstance(self.memory_backend, HindsightBackend):
+            return
+        # Only personas that converse with users get a bank; system personas
+        # (model_selector, triage_*, etc.) are single-shot pipeline workers
+        # with no accumulating chat history — provisioning would just create
+        # empty banks. Gate on `long_term_memory`.
+        targets = [n for n, p in self.personas.items() if p.get_long_term_memory()]
+        if not targets:
+            return
+        logger.info(f"Initializing Hindsight memory banks for {len(targets)} persona(s)...")
+
+        async def _ensure(name: str) -> None:
+            try:
+                await self.memory_backend.ensure_bank(bank_id=name)
+            except Exception as e:
+                logger.warning(f"Could not ensure Hindsight bank for {name}: {e}")
+
+        await asyncio.gather(*(_ensure(n) for n in targets))

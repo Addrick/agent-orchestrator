@@ -1,7 +1,7 @@
 import unittest
 import numpy as np
 from unittest.mock import MagicMock
-from src.agents.memory_agent import MemoryAgent
+from src.agents.sqlite_consolidator import SqliteConsolidator
 
 class MockChat:
     def __init__(self):
@@ -18,7 +18,7 @@ class TestMemoryGlue(unittest.TestCase):
         # Mock the segment tail lookup to return None (no previous segment)
         self.chat.memory_manager.get_last_segment_tail_embeddings.return_value = None
         
-        self.agent = MemoryAgent(
+        self.agent = SqliteConsolidator(
             self.chat, 
             agent_config={'similarity_threshold': 0.80, 'min_segment_size': 2}
         )

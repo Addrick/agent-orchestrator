@@ -13,7 +13,8 @@
       "execution_mode": "AUTONOMOUS",
       "enabled_tools": [],
       "memory_mode": "global",
-      "meta_visible": false
+      "meta_visible": false,
+      "long_term_memory": false
     },
     {
       "name": "tool_selector",
@@ -28,7 +29,8 @@
       "execution_mode": "AUTONOMOUS",
       "enabled_tools": [],
       "memory_mode": "global",
-      "meta_visible": false
+      "meta_visible": false,
+      "long_term_memory": false
     },
     {
       "name": "triage_analyst",
@@ -43,7 +45,8 @@
       "execution_mode": "AUTONOMOUS",
       "enabled_tools": [],
       "memory_mode": "ticket_isolated",
-      "meta_visible": false
+      "meta_visible": false,
+      "long_term_memory": false
     },
     {
       "name": "triage_scout",
@@ -58,9 +61,10 @@
       "execution_mode": "AUTONOMOUS",
       "enabled_tools": [],
       "memory_mode": "global",
-      "meta_visible": false
+      "meta_visible": false,
+      "long_term_memory": false
     },
-        {
+    {
       "name": "triage_filter",
       "model_name": "gemma-4-31b-it",
       "prompt": "You are a technical support relevance classifier. Your job is to determine if a 'Historical Ticket' is relevant to a 'New Ticket'.\nIf the historical ticket describes the same root cause, error message, or system as the new ticket, respond with RELEVANT.\nIf they are unrelated (different systems, different errors), respond with IRRELEVANT.\nRespond with ONLY the single word.",
@@ -73,7 +77,8 @@
       "execution_mode": "AUTONOMOUS",
       "enabled_tools": [],
       "memory_mode": "global",
-      "meta_visible": false
+      "meta_visible": false,
+      "long_term_memory": false
     },
     {
       "name": "triage_summarizer",
@@ -88,7 +93,8 @@
       "execution_mode": "AUTONOMOUS",
       "enabled_tools": [],
       "memory_mode": "global",
-      "meta_visible": false
+      "meta_visible": false,
+      "long_term_memory": false
     },
     {
       "name": "dispatch_analyst",
@@ -103,7 +109,8 @@
       "execution_mode": "AUTONOMOUS",
       "enabled_tools": [],
       "memory_mode": "global",
-      "meta_visible": false
+      "meta_visible": false,
+      "long_term_memory": false
     },
     {
       "name": "memory_summarizer",
@@ -119,7 +126,8 @@
       "execution_mode": "AUTONOMOUS",
       "enabled_tools": [],
       "memory_mode": "global",
-      "meta_visible": false
+      "meta_visible": false,
+      "long_term_memory": false
     }
   ]
 }

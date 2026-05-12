@@ -18,7 +18,7 @@ from src.app_manager import AppManager
 from src.agents.agent_manager import AgentManager
 from src.agents.agent_service import AgentServiceIntegration
 from src.agents.dispatch_agent import DispatchAgent
-from src.agents.memory_agent import MemoryAgent
+from src.agents.sqlite_consolidator import SqliteConsolidator
 from src.agents.zammad_bot import ZammadBot
 from src.agents.reminder_agent import ReminderAgent
 from src.clients.notification import (
@@ -39,6 +39,7 @@ from config.global_config import (
     WEB_INTERFACE,
     KOBOLD_PORT,
     MEMORY_DATABASE_FILE,
+    SEMANTIC_BACKEND,
     UPDATE_MODELS_ON_STARTUP,
 )
 from dotenv import load_dotenv
@@ -139,8 +140,13 @@ def _register_agents(
     zammad_client: Optional[ZammadClient],
 ) -> None:
     """Register agent classes with AgentManager. Agents start via auto_start config."""
-    # Memory agent — no external service dependency
-    agent_manager.register("memory", MemoryAgent)
+    # SqliteConsolidator drives the legacy SQLite segment/summary pipeline.
+    # Hindsight backend obsoletes it — registering it under the new backend
+    # would crash deploy() on first cycle (NotImplementedError on legacy ops).
+    if SEMANTIC_BACKEND == "sqlite":
+        agent_manager.register("sqlite_consolidator", SqliteConsolidator)
+    else:
+        logger.info("SqliteConsolidator skipped (SEMANTIC_BACKEND=%s).", SEMANTIC_BACKEND)
 
     if zammad_client is not None:
         agent_manager.register("zammad_bot", ZammadBot)
@@ -211,9 +217,10 @@ async def main() -> None:
     # 8.1 Perform post-init startup tasks (e.g. Hindsight bank provisioning)
     await bot.startup()
 
-    # 9. Register background daemons
-    consolidator = MemoryConsolidator(memory_manager, text_engine, embedding_service)
-    app.register_task("memory_consolidator", consolidator.start_daemon(check_interval_seconds=3600))
+    # 9. Register background daemons — legacy SQLite L1→L2 consolidation only
+    if SEMANTIC_BACKEND == "sqlite":
+        consolidator = MemoryConsolidator(memory_manager, text_engine, embedding_service)
+        app.register_task("memory_consolidator", consolidator.start_daemon(check_interval_seconds=3600))
 
     # 10. Optionally update the model list on startup
     if UPDATE_MODELS_ON_STARTUP:

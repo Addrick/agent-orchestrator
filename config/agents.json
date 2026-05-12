@@ -1,6 +1,6 @@
 {
     "agents": {
-        "memory": {
+        "sqlite_consolidator": {
             "persona": "memory_summarizer",
             "schedule": {"interval": 900},
             "action_history_limit": 5,
