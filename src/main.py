@@ -208,6 +208,9 @@ async def main() -> None:
     # 8. Register interfaces
     _register_interfaces(app, bot, notification_router)
 
+    # 8.1 Perform post-init startup tasks (e.g. Hindsight bank provisioning)
+    await bot.startup()
+
     # 9. Register background daemons
     consolidator = MemoryConsolidator(memory_manager, text_engine, embedding_service)
     app.register_task("memory_consolidator", consolidator.start_daemon(check_interval_seconds=3600))
