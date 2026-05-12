@@ -77,6 +77,54 @@ async def test_recall_memory_handler_invokes_backend_with_turn_scope() -> None:
 
 
 @pytest.mark.asyncio
+async def test_recall_memory_handler_omits_server_tag_when_absent() -> None:
+    """DP-115: turn context with no server_id (DM, ticket interface) must
+    not synthesize an empty `server:` tag — that would mis-scope recall."""
+    backend = MagicMock()
+    backend.recall = AsyncMock(return_value=[])
+    manager = ToolManager()
+    MemoryRecallHandler(backend).register(manager)
+
+    token = set_turn_context(TurnContext(
+        persona_name="alice", user_identifier="u1",
+        channel="dm:u1", server_id=None,
+    ))
+    try:
+        await manager.execute_tool("recall_memory", query="x")
+    finally:
+        reset_turn_context(token)
+
+    tag_filter = backend.recall.await_args.kwargs["tag_filter"]
+    assert "channel:dm:u1" in tag_filter
+    assert "user:u1" in tag_filter
+    assert not any(t.startswith("server:") for t in tag_filter)
+
+
+@pytest.mark.asyncio
+async def test_recall_memory_handler_bank_id_follows_active_persona() -> None:
+    """DP-115: bank_id is not cached on the handler — every invocation
+    reads the active TurnContext, so per-persona scope isolation holds
+    across consecutive turns from different personas."""
+    backend = MagicMock()
+    backend.recall = AsyncMock(return_value=[])
+    manager = ToolManager()
+    MemoryRecallHandler(backend).register(manager)
+
+    for persona in ("alice", "bob", "charlie"):
+        token = set_turn_context(TurnContext(
+            persona_name=persona, user_identifier="u1",
+            channel="c1", server_id=None,
+        ))
+        try:
+            await manager.execute_tool("recall_memory", query="q")
+        finally:
+            reset_turn_context(token)
+
+    banks = [c.kwargs["bank_id"] for c in backend.recall.await_args_list]
+    assert banks == ["alice", "bob", "charlie"]
+
+
+@pytest.mark.asyncio
 async def test_recall_memory_handler_no_turn_context_returns_empty() -> None:
     backend = MagicMock()
     backend.recall = AsyncMock(return_value=[])
