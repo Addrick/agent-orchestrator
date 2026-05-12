@@ -36,13 +36,17 @@ services:
       # Talk to host kobold via the proxy sidecar (the only egress path).
       - HINDSIGHT_API_LLM_PROVIDER=openai
       - HINDSIGHT_API_LLM_BASE_URL=http://kobold-proxy:5001/v1
-      - HINDSIGHT_API_LLM_MODEL=qwen2.5-32b
+      - HINDSIGHT_API_LLM_MODEL=qwen3.6-35b-a3b
       - HINDSIGHT_API_LLM_API_KEY=kobold
+      - HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS=8192
+      - HINDSIGHT_API_MAX_CONTEXT_TOKENS=16384
     ports:
       - "127.0.0.1:8888:8888" # API restricted to localhost
+      - "127.0.0.1:9999:9999" # Control Plane UI
     volumes:
       # Embedded pg0 stores at /home/hindsight/.pg0 per upstream Dockerfile.
       - hindsight-data:/home/hindsight/.pg0
+      - hindsight-cache:/home/hindsight/.cache
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8888/health"]
       interval: 30s
@@ -56,6 +60,7 @@ services:
 
 volumes:
   hindsight-data:
+  hindsight-cache:
 
 networks:
   hindsight-internal:
