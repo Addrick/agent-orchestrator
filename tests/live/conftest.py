@@ -267,5 +267,5 @@ def managed_zammad_user(live_chat_system):
 # ---------------------------------------------------------------------------
 
 LLM_LIVE_MAX_TOKENS = 100
-LLM_LIVE_MODEL = "gemma-3-27b-it"  # multimodal, generous free-tier rate limits
+LLM_LIVE_MODEL = "gemma-4-31b-it"  # multimodal, generous free-tier rate limits
 LLM_LIVE_MAX_TESTS = 10
