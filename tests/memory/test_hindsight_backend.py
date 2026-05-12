@@ -329,9 +329,12 @@ async def test_bundle_coalesces_when_worker_is_busy(backend: HindsightBackend) -
         gate.set()
         await backend.aclose()
 
-    # First batch: just "first". Second batch: the four queued items in one POST.
+    # First POST: just "first". The four queued items share a document_id
+    # within the same session — server-side dedupe forces one POST per item,
+    # but they all dispatch in the same drain tick after `gate` releases.
     assert [it["content"] for it in batches[0]] == ["first"]
-    assert [it["content"] for it in batches[1]] == ["q0", "q1", "q2", "q3"]
+    drained = [it["content"] for batch in batches[1:] for it in batch]
+    assert drained == ["q0", "q1", "q2", "q3"]
 
 
 @pytest.mark.asyncio
