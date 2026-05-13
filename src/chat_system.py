@@ -390,7 +390,7 @@ class ChatSystem:
                 ),
                 source_persona=persona_name,
                 untrusted=untrusted,
-                metadata={"interaction_id": interaction_id},
+                metadata={"interaction_id": str(interaction_id)},
             )
         except Exception as e:  # noqa: BLE001
             logger.warning(f"retain_turn dropped ({role} turn): {e}")
