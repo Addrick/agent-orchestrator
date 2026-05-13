@@ -50,6 +50,7 @@ def _make_tool_manager(results: Dict[str, Any] | None = None):
             return results[name]
         return {"result": "ok"}
     manager.execute_tool = AsyncMock(side_effect=execute)
+    manager.enrich_audit_action = AsyncMock(return_value=None)
     return manager
 
 
