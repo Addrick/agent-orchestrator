@@ -187,12 +187,33 @@ Defined in `config/system_personas.json`. Not directly user-accessible — used 
 
 ## Execution Modes
 
-Controls how the bot handles LLM-requested tool calls.
+Determines the autonomy level for a persona's tool-use capabilities.
 
 | Mode | Behavior |
 |------|----------|
-| **AUTONOMOUS** | Tools execute immediately. The user sees only the final response. |
-| **CONFIRM** | Write tools (create, update, delete) are presented to the user for approval before execution. Read tools execute immediately. On Discord, approval uses reaction buttons with a 5-minute timeout. |
+| **AUTONOMOUS** | **Read-only** tools execute immediately. **Write tools still require audit** (see [Tool Security](#tool-security) below). The user sees the final response after all automated steps. |
+| **CONFIRM** | Standard mode. All write tools are presented for approval. Provides a consistent point of review for all state-changing actions. On Discord, approval uses reaction buttons with a 5-minute timeout. |
+
+## Tool Security
+
+The bot implements a comprehensive security framework to prevent prompt injection and unauthorized actions.
+
+### Universal Write-Audit
+Regardless of execution mode, **all write tools** (tools that modify state, like creating tickets or deleting users) are parked for human audit before execution. This ensures that no state-changing action is taken without explicit user consent.
+
+### Taint Tracking
+The system tracks the "trustworthiness" of the conversation context. If a persona uses a tool that retrieves potentially untrusted content (like `web_search` or `recall_memory` containing past external input), the current turn is marked as **tainted**. 
+- Taint is "sticky" for the duration of the conversation.
+- When a turn is tainted, any subsequent write-tool approval request will carry a warning: `⚠️ Context contains untrusted content from: [source]`.
+
+### Insecure Composition Blocking
+To prevent sophisticated injection attacks, the system refuses to load any persona whose tool configuration creates an inherently insecure path. Common blocked compositions include:
+- **`network:read` + `local:write`**: Prevents tools that read from the internet from being used by a persona that can write to local storage/files.
+- **`untrusted:read` + `network:write`**: Prevents untrusted data from being exfiltrated to a network endpoint.
+- **`pii:read` + `network:*`**: Prevents sensitive Personal Identifiable Information (PII) from being sent over the network.
+
+### Irreversibility Flags
+Some tools are marked as **IRREVERSIBLE** (e.g., `delete_user`). Others may be dynamically flagged based on their arguments—for example, `add_note_to_ticket` is flagged as irreversible if the note is visible to a customer (`internal: false`). These flags are surfaced in the approval dialogue to highlight high-stakes actions.
 
 ## Memory Modes
 
@@ -228,7 +249,7 @@ Tools are capabilities the LLM can invoke during a conversation. Available tools
 | `search_tickets` | Search using Zammad query syntax |
 | `search_user` | Find user by email or name |
 
-**Write (gated by CONFIRM mode):**
+**Write:**
 | Tool | Description |
 |------|-------------|
 | `create_ticket` | Create a new support ticket |

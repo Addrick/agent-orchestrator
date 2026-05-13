@@ -6,9 +6,10 @@
 # Uses LLM_LIVE_MODEL (gemini-2.5-flash) and LLM_LIVE_MAX_TOKENS from conftest
 # to keep costs minimal while exercising the full engine path.
 
+import asyncio
 import pytest
 
-from src.engine import TextEngine
+from src.engine import TextEngine, LLMCommunicationError
 from tests.live.conftest import LLM_LIVE_MODEL, LLM_LIVE_MAX_TOKENS
 
 pytestmark = pytest.mark.llm_live
@@ -84,7 +85,7 @@ class TestLiveMultimodalResponse:
 
 
 class TestLiveToolCalls:
-    TOOL_MODEL = "gemini-3.1-flash-lite-preview"  # gemma doesn't support function calling
+    TOOL_MODEL = "gemini-3.1-flash-lite"  # drop -preview for stability and speed
 
     @pytest.mark.asyncio
     async def test_tool_call_happy_path(self, engine):
@@ -115,7 +116,17 @@ class TestLiveToolCalls:
         ]
 
         tool_config = {"model_name": self.TOOL_MODEL, "max_output_tokens": LLM_LIVE_MAX_TOKENS}
-        result, api_payload = await engine.generate_response(tool_config, context, tools=tools)
+        try:
+            result, api_payload = await asyncio.wait_for(
+                engine.generate_response(tool_config, context, tools=tools),
+                timeout=5.0
+            )
+        except asyncio.TimeoutError:
+            pytest.skip(f"Live API call timed out after 5s ({self.TOOL_MODEL})")
+        except LLMCommunicationError as e:
+            if "503" in str(e) or "UNAVAILABLE" in str(e):
+                pytest.skip(f"Live API currently unavailable (503): {e}")
+            raise
 
         # The model should either call the tool or respond with text —
         # both are valid, but with a clear tool prompt it should call.

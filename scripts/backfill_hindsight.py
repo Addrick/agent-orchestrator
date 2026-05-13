@@ -75,7 +75,7 @@ async def backfill(persona_filter: list[str] | None = None, wipe: bool = False):
         placeholders = ",".join("?" * len(personas)) if personas else "''"
         rows = conn.execute(f"""
             SELECT interaction_id, user_identifier, persona_name, channel, author_role,
-                   content, timestamp, reasoning_content, tool_context
+                   author_name, content, timestamp, reasoning_content, tool_context
             FROM User_Interactions
             WHERE persona_name IN ({placeholders})
             ORDER BY timestamp ASC, interaction_id ASC
@@ -84,59 +84,82 @@ async def backfill(persona_filter: list[str] | None = None, wipe: bool = False):
     total = len(rows)
     logger.info(f"Starting backfill of {total} interactions...")
 
-    # 4. Process in batches to avoid overwhelming the async queue too fast
-    # Though HindsightBackend has its own queue, we want to monitor progress
-    batch_size = 50
-    for i in range(0, total, batch_size):
-        batch = rows[i:i+batch_size]
+    # 4. Group interactions by (persona, channel) to maximize context window
+    # and minimize instruction overhead.
+    logger.info("Grouping interactions into context blocks...")
+    
+    # Structure: {(persona, channel): [list of message dictionaries]}
+    groups = {}
+    for row in rows:
+        key = (row["persona_name"], row["channel"])
+        if key not in groups:
+            groups[key] = []
+        groups[key].append(row)
+
+    MAX_BLOCK_SIZE = 40000  # Characters (approx 10k tokens)
+    MAX_BLOCK_MESSAGES = 100
+    
+    processed_count = 0
+    for (persona_name, channel), items in groups.items():
+        logger.info(f"Backfilling {len(items)} messages for {persona_name} in #{channel}...")
         
-        for row in batch:
-            # Retain turn
+        current_block = []
+        current_size = 0
+        
+        for idx, row in enumerate(items):
+            # Prepare the individual message content
             ts = row["timestamp"]
             if isinstance(ts, str):
                 try:
                     ts = datetime.fromisoformat(ts)
                 except ValueError:
-                    # Fallback for older sqlite formats if needed
                     ts = datetime.now(timezone.utc)
-            
-            # Normalize to UTC if naive
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=timezone.utc)
 
-            # Prepare content: include reasoning if present
-            content = row["content"] or ""
+            msg_content = row["content"] or ""
             if row["reasoning_content"]:
-                content = f"<thought>\n{row['reasoning_content']}\n</thought>\n\n{content}"
+                msg_content = f"<thought>\n{row['reasoning_content']}\n</thought>\n\n{msg_content}"
             
-            # Force Hindsight's extraction LLM to see the original date
             date_header = ts.strftime("%Y-%m-%d %H:%M:%S")
-            content = f"Date: {date_header}\n---\n{content}"
+            speaker = row["author_name"] or row["user_identifier"] or "Unknown"
+            formatted_msg = f"Date: {date_header}\nSpeaker: {speaker}\n---\n{msg_content}"
             
-            # Metadata for traceability
-            # Hindsight metadata values must be strings (HTTP 422 otherwise).
-            metadata = {
-                "legacy_id": str(row["interaction_id"]),
-                "user": str(row["user_identifier"]),
-            }
-            if row["tool_context"]:
-                metadata["tool_context"] = str(row["tool_context"])
+            current_block.append((formatted_msg, ts, row["interaction_id"], row["user_identifier"]))
+            current_size += len(formatted_msg)
+            
+            # Ship block if it's full or it's the last message for this group
+            if current_size >= MAX_BLOCK_SIZE or len(current_block) >= MAX_BLOCK_MESSAGES or idx == len(items) - 1:
+                # Concatenate the messages in the block
+                block_content = "\n\n".join([m[0] for m in current_block])
+                
+                # Use the timestamp of the last message as the anchor
+                anchor_ts = current_block[-1][1]
+                
+                # Metadata from the last message (or collective)
+                metadata = {
+                    "legacy_ids": ",".join([str(m[2]) for m in current_block]),
+                    "users": ",".join(list(set([str(m[3]) for m in current_block]))),
+                }
 
-            await hindsight.retain_turn(
-                bank_id=row["persona_name"],
-                role=row["author_role"],
-                content=content,
-                timestamp=ts,
-                scope_tags=[f"channel:{row['channel']}"],
-                source_persona=row["persona_name"],
-                metadata=metadata
-            )
-        
-        logger.info(f"Enqueued batch {i//batch_size + 1}/{(total // batch_size) + 1} ({min(i+batch_size, total)}/{total})")
-        
-        # Give the backend workers a tiny bit of time to breathe, 
-        # though they process in the background.
-        await asyncio.sleep(0.1)
+                await hindsight.retain_turn(
+                    bank_id=persona_name,
+                    role="user", # Grouped chat transcript is treated as input
+                    content=block_content,
+                    timestamp=anchor_ts,
+                    scope_tags=[f"channel:{channel}"],
+                    source_persona=persona_name,
+                    metadata=metadata
+                )
+                
+                processed_count += len(current_block)
+                logger.info(f"Enqueued block of {len(current_block)} messages ({processed_count}/{total})")
+                
+                current_block = []
+                current_size = 0
+                
+                # Tiny breather for the loop
+                await asyncio.sleep(0.05)
 
     logger.info("All turns enqueued. Waiting for Hindsight workers to finish processing...")
     logger.info("Note: This depends on your LLM speed (Kobold/Gemma). Watch Hindsight container logs for progress.")

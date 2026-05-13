@@ -565,6 +565,7 @@ class HindsightBackend(MemoryBackend):
             "document_id": document_id,
             "update_mode": update_mode,
             "timestamp": timestamp.isoformat(),
+            "mentioned_at": timestamp.isoformat(),
         }
         if metadata:
             item["metadata"] = metadata
@@ -662,7 +663,7 @@ class HindsightBackend(MemoryBackend):
             # we synthesize descending position-based scores to preserve order
             # through MemoryRouter's score-based merge.
             content = r.get("text", r.get("content", ""))  # tolerate old-shape mocks
-            ts_str = r.get("mentioned_at") or r.get("occurred_start") or r.get("timestamp")
+            ts_str = r.get("occurred_start") or r.get("timestamp") or r.get("mentioned_at")
             ts: Optional[datetime] = None
             if ts_str:
                 try:
