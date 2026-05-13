@@ -14,6 +14,7 @@ from config.global_config import MAX_CACHED_API_REQUESTS, \
 from src.memory.context_budget import truncate_messages_to_budget
 from src.embedding_service import EmbeddingService
 from src.clients.service_integration import ServiceIntegration
+from src.memory.backend.base import MemoryBackend, MemoryHit
 from src.memory.memory_manager import MemoryManager
 from src.engine import TextEngine
 from src.generation_events import (
@@ -30,7 +31,8 @@ from src.message_handler import BotLogic
 from src.persona import Persona, MemoryMode
 from src.tools.definitions import MODEL_INCOMPATIBLE_TOOLS, get_tool_capabilities
 from src.tools.tool_loop import ToolLoop, _ApiPayloadEvent, _LoopFinishedEvent
-from src.tools.tool_manager import ToolManager, WebSearchHandler
+from src.tools.tool_manager import ToolManager, WebSearchHandler, MemoryRecallHandler
+from src.tools.turn_context import TurnContext, set_turn_context, reset_turn_context
 from src.utils.model_utils import get_model_list, get_model_prefix
 from src.utils.save_utils import load_personas_from_file, save_personas_to_file
 from src.utils.message_utils import strip_vertex_links
@@ -116,14 +118,28 @@ class ChatSystem:
                  embedding_service: Optional[EmbeddingService] = None,
                  stream_engine: Optional[StreamEngine] = None) -> None:
         self.personas: Dict[str, Persona] = load_personas_from_file() or {}
+        # Ensure system personas are also loaded so they are callable by the engine
+        from src.utils.save_utils import load_system_personas_from_file
+        system_personas = load_system_personas_from_file()
+        if system_personas:
+            self.personas.update(system_personas)
+
         self.memory_manager: MemoryManager = memory_manager
+        # DP-113: backend boundary for new-shape recall/retain_turn. The
+        # MemoryManager owns construction (selector lives in global_config);
+        # ChatSystem just borrows the reference + pushes the embedding service
+        # into it so SqliteSemanticBackend.recall can translate query → embed.
+        self.memory_backend: MemoryBackend = memory_manager.backend
+        if embedding_service is not None and hasattr(self.memory_backend, "set_embedding_service"):
+            self.memory_backend.set_embedding_service(embedding_service)
         self.text_engine: TextEngine = text_engine
         self.stream_engine: Optional[StreamEngine] = stream_engine
         self.tool_manager: ToolManager = ToolManager()
         WebSearchHandler().register(self.tool_manager)
-        
+
         from src.tools.tool_manager import MemoryToolHandler
         MemoryToolHandler(self.memory_manager).register(self.tool_manager)
+        MemoryRecallHandler(self.memory_backend).register(self.tool_manager)
 
         self.bot_logic: BotLogic = BotLogic(self)
         self.last_api_requests: Dict[str, Dict[str, Optional[Dict[str, Any]]]] = defaultdict(dict)
@@ -292,93 +308,112 @@ class ChatSystem:
         """
         logger.warning(f"### RETRIEVAL_DIAGNOSTIC: Entering _retrieve_memory_block for {persona.get_name()} (Enabled: {MEMORY_RETRIEVAL_ENABLED}, Service: {'YES' if self._embedding_service else 'NO'})")
 
-        if not MEMORY_RETRIEVAL_ENABLED or not persona.get_long_term_memory() or self._embedding_service is None:
+        if not MEMORY_RETRIEVAL_ENABLED or not persona.get_long_term_memory():
             return None, False
 
-        # Map MemoryMode enum to string for retrieve_relevant_summaries
-        mode_map = {
-            MemoryMode.CHANNEL_ISOLATED: "channel",
-            MemoryMode.SERVER_WIDE: "server",
-            MemoryMode.PERSONAL: "personal",
-            MemoryMode.GLOBAL: "global",
-            MemoryMode.TICKET_ISOLATED: "ticket",
-        }
-        memory_mode = mode_map.get(persona.get_memory_mode(), "channel")
-
-        # THE FIX: Only include the current message in the search query
-        # to avoid broad query averaging/multi-matching that dilutes relevance.
-        query_texts = []
+        # Build the recall query string: prefer the current user message;
+        # fall back to the most recent user turn in the formatted history.
+        query_text: Optional[str] = None
         if current_message and current_message.strip():
-            # Noise reduction for embedding search
-            query_texts.append(strip_vertex_links(current_message))
-
-        # Fallback: if current_message is empty, use the most recent USER message from history
-        if not query_texts and conversation_history:
+            query_text = strip_vertex_links(current_message)
+        if not query_text and conversation_history:
             for msg in reversed(conversation_history):
-                # We specifically look for 'user' role to honor the intent of 
-                # searching for the user's latest query/intent.
                 if msg.get('role') == 'user':
                     content = msg.get('content', '')
                     if isinstance(content, str) and content.strip():
-                        # conversation_history messages are already cleaned in _format_raw_history_for_llm
-                        # but we strip again just in case (e.g. from client_messages)
-                        query_texts.append(strip_vertex_links(content))
+                        query_text = strip_vertex_links(content)
                         break
-
-        # Enhanced Diagnostic Logging
-        logger.debug(
-            f"### RETRIEVAL_TRACE: persona={persona.get_name()}, "
-            f"current_msg_len={len(current_message) if current_message else 0}, "
-            f"history_len={len(conversation_history)}, "
-            f"query_texts={query_texts}"
-        )
-
-        if not query_texts:
+        if not query_text:
             logger.warning(f"### ChatSystem: Skipping retrieval for {persona.get_name()} (no text content to embed)")
             return None, False
 
-        # Embed the query messages (1 batched API call)
-        try:
-            query_embeddings = await self._embedding_service.encode(query_texts)
-        except Exception as e:
-            logger.warning(f"Memory retrieval: embedding failed: {e}")
-            return None, False
-
-        if not query_embeddings:
-            logger.warning("Memory retrieval: encode returned empty results")
-            return None, False
-
-        # Fetch candidate summaries natively in sqlite using sqlite-vec nearest neighbor
-        summaries = self.memory_manager.retrieve_relevant_summaries(
-            persona_name=persona.get_name(),
-            channel=channel,
-            server_id=server_id,
-            user_identifier=user_identifier,
-            memory_mode=memory_mode,
-            include_ambient=persona.get_include_ambient_memory(),
-            exclude_after_interaction_id=oldest_interaction_id,
-            model_name=self._embedding_service.model_name,
-            query_embeddings=query_embeddings,
-            limit=MEMORY_MAX_SUMMARIES_IN_CONTEXT,
+        tag_filter = self._build_scope_tags(
+            channel=channel, server_id=server_id, user_identifier=user_identifier,
         )
+        # Carry the sliding-window cutoff through the backend boundary as a
+        # tag predicate. SqliteSemanticBackend.recall translates this back into
+        # `exclude_after_interaction_id` so the legacy summary index doesn't
+        # surface memories that are still in the visible window. Hindsight
+        # ignores unknown tag prefixes — no-op there.
+        if oldest_interaction_id is not None:
+            tag_filter.append(f"exclude_after:{oldest_interaction_id}")
 
-        if not summaries:
-            logger.warning(f"### ChatSystem: No relevant memories returned from database for {persona.get_name()}")
+        try:
+            hits = await self.memory_backend.recall(
+                bank_id=persona.get_name(),
+                query=query_text,
+                k=MEMORY_MAX_SUMMARIES_IN_CONTEXT,
+                tag_filter=tag_filter,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Memory recall failed: {e}")
             return None, False
 
-        # Check if any retrieved summaries carry the untrusted flag (Phase 5 taint)
-        has_untrusted = any(s.get('untrusted', 0) for s in summaries)
+        if not hits:
+            logger.warning(f"### ChatSystem: No relevant memories returned from backend for {persona.get_name()}")
+            return None, False
 
-        # Pack into the expected format matching (score, summary)
-        scored_summaries = [(summary.get('dist', 1.0), summary) for summary in summaries]
-
-        # Format memory block
-        memory_block = self._format_memory_block(scored_summaries)
+        has_untrusted = any(h.untrusted for h in hits)
+        memory_block = self._format_memory_block(hits)
         if memory_block:
-            logger.warning(f"### ChatSystem: Injected memory block for {persona.get_name()} ({len(scored_summaries)} summaries, untrusted={has_untrusted})")
-        else:
-            logger.warning(f"### ChatSystem: No relevant memories found for {persona.get_name()}")
+            logger.warning(f"### ChatSystem: Injected memory block for {persona.get_name()} ({len(hits)} hits, untrusted={has_untrusted})")
         return memory_block, has_untrusted
+
+    async def _retain_turn_safe(
+        self,
+        *,
+        persona_name: str,
+        role: str,
+        content: str,
+        user_identifier: str,
+        channel: str,
+        server_id: Optional[str],
+        timestamp: datetime,
+        interaction_id: int,
+        untrusted: bool,
+    ) -> None:
+        """Fire-and-forget wrapper around backend.retain_turn.
+
+        The Hindsight backend's retain_turn enqueues into a per-bank
+        asyncio.Queue and returns immediately; sqlite_legacy is a noop. We
+        still wrap in try/except so a backend hiccup never derails the user
+        turn — alpha system, retain failures are logged + dropped.
+        """
+        try:
+            await self.memory_backend.retain_turn(
+                bank_id=persona_name,
+                role=role,
+                content=content,
+                timestamp=timestamp,
+                scope_tags=self._build_scope_tags(
+                    channel=channel, server_id=server_id, user_identifier=user_identifier,
+                ),
+                source_persona=persona_name,
+                untrusted=untrusted,
+                metadata={"interaction_id": interaction_id},
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"retain_turn dropped ({role} turn): {e}")
+
+    @staticmethod
+    def _build_scope_tags(
+        *,
+        channel: Optional[str],
+        server_id: Optional[str],
+        user_identifier: Optional[str],
+        interface: Optional[str] = None,
+    ) -> List[str]:
+        """Plan §1.4 scope tags. Used for retain + recall tag predicates."""
+        tags: List[str] = []
+        if channel:
+            tags.append(f"channel:{channel}")
+        if user_identifier:
+            tags.append(f"user:{user_identifier}")
+        if server_id:
+            tags.append(f"server:{server_id}")
+        if interface:
+            tags.append(f"interface:{interface}")
+        return tags
 
     async def get_session_memory_block(
             self,
@@ -412,34 +447,32 @@ class ChatSystem:
         return block
 
     @staticmethod
-    def _format_memory_block(scored_summaries: List[Tuple[float, Dict[str, Any]]]) -> Optional[str]:
-        """Format scored summaries into a <memory> block for injection."""
-        if not scored_summaries:
+    def _format_memory_block(hits: List[MemoryHit]) -> Optional[str]:
+        """Format MemoryHit list into a <memory> block for injection."""
+        if not hits:
             return None
 
         lines = ["<memory>", "The following are relevant facts from previous conversations:", ""]
 
-        for _score, summary in scored_summaries:
-            channel = summary.get('channel', 'unknown')
-            persona = summary.get('persona_name', '')
-            # Prefer the actual time the memory occurred over when it was summarized
-            memory_timestamp = summary.get('last_message_at') or summary.get('created_at')
+        for hit in hits:
+            tag_map: Dict[str, str] = {}
+            for tag in hit.tags or []:
+                if ":" in tag:
+                    k, v = tag.split(":", 1)
+                    tag_map[k] = v
+            channel = tag_map.get("channel", "unknown")
+            persona = tag_map.get("persona", "")
 
-            # Build label
-            summary_id = summary.get('summary_id')
             label_parts = [f"#{channel}"]
-            if summary_id:
-                label_parts.append(f"ID:{summary_id}")
-            if persona == 'ambient':
+            if hit.id:
+                label_parts.append(f"ID:{hit.id}")
+            if persona == "ambient":
                 label_parts.append("ambient")
-            if memory_timestamp:
-                label_parts.append(_relative_time(memory_timestamp))
+            if hit.timestamp:
+                label_parts.append(_relative_time(hit.timestamp))
 
-            label = ", ".join(label_parts)
-            lines.append(f"[{label}]")
-
-            content = summary.get('content', '')
-            for fact_line in content.strip().split('\n'):
+            lines.append(f"[{', '.join(label_parts)}]")
+            for fact_line in hit.content.strip().split('\n'):
                 if fact_line.strip():
                     lines.append(fact_line)
             lines.append("")
@@ -732,6 +765,16 @@ class ChatSystem:
             client_messages=client_messages,
         )
 
+        # DP-113: pin the active turn's scope so engine-side tools (e.g.
+        # `recall_memory`) inherit persona/channel/user/server without those
+        # showing up as model-callable args.
+        _turn_token = set_turn_context(TurnContext(
+            persona_name=persona_name,
+            user_identifier=user_identifier,
+            channel=channel,
+            server_id=server_id,
+        ))
+
         try:
             await self._prepare_request(ctx, is_retry=is_retry)
         except Exception as e:
@@ -739,6 +782,7 @@ class ChatSystem:
                 f"_prepare_request failed for {user_identifier}: {e}", exc_info=True,
             )
             yield ErrorEvent(message="An internal error occurred while processing your request.")
+            reset_turn_context(_turn_token)
             return
 
         # 2. Log user turn (or archive for retry). Done after history is built
@@ -753,6 +797,18 @@ class ChatSystem:
             server_id=server_id, platform_message_id=platform_message_id,
             timestamp=user_ts,
         )
+
+        # DP-113: retain user turn through the backend boundary. Sqlite_legacy
+        # is a noop (batch SqliteConsolidator still drives consolidation); Hindsight
+        # enqueues fire-and-forget. Either way, retain_turn returns quickly
+        # and does not block the LLM call below.
+        if user_interaction_id is not None and message and message.strip():
+            await self._retain_turn_safe(
+                persona_name=persona_name, role="user", content=message,
+                user_identifier=user_identifier, channel=channel,
+                server_id=server_id, timestamp=user_ts,
+                interaction_id=user_interaction_id, untrusted=False,
+            )
 
         # 3. Tool loop. ToolLoop owns iteration + tool dispatch; this
         #    forwards Token / ToolCallStart / ToolCallResult events,
@@ -797,6 +853,7 @@ class ChatSystem:
                     yield ev
                 elif isinstance(ev, ErrorEvent):
                     yield ev
+                    reset_turn_context(_turn_token)
                     return
                 elif isinstance(ev, _LoopFinishedEvent):
                     final_text = ev.final_text
@@ -823,6 +880,7 @@ class ChatSystem:
                     retry_assistant_id=retry_assistant_id,
                     tool_context_json=None,
                 )
+            reset_turn_context(_turn_token)
             raise
 
         if pending_writes is not None:
@@ -858,12 +916,25 @@ class ChatSystem:
             tool_context_json=tool_context_json,
         )
 
+        # DP-113: retain assistant turn through the backend boundary.
+        # Inherit ctx.turn_tainted so the untrusted bit reaches the
+        # store when the LLM consumed attacker-influenced tool output.
+        if assistant_id is not None and final_text and final_text.strip() \
+                and response_type == ResponseType.LLM_GENERATION:
+            await self._retain_turn_safe(
+                persona_name=persona_name, role="assistant", content=final_text,
+                user_identifier=user_identifier, channel=channel,
+                server_id=server_id, timestamp=datetime.now(),
+                interaction_id=assistant_id, untrusted=ctx.turn_tainted,
+            )
+
         yield DoneEvent(
             text=final_text if final_text else "",
             response_type=response_type,
             assistant_id=assistant_id,
             user_interaction_id=user_interaction_id,
         )
+        reset_turn_context(_turn_token)
 
     async def stream_response(
             self,
@@ -1045,3 +1116,25 @@ class ChatSystem:
             logger.error(f"Error resuming pending confirmation for {user_identifier}: {e}", exc_info=True)
             return ("An error occurred while processing the confirmed action.",
                     ResponseType.DEV_COMMAND, None, None)
+
+    async def startup(self) -> None:
+        """Post-init async startup tasks (e.g. Hindsight memory bank provisioning)."""
+        from src.memory.backend import HindsightBackend
+        if not isinstance(self.memory_backend, HindsightBackend):
+            return
+        # Only personas that converse with users get a bank; system personas
+        # (model_selector, triage_*, etc.) are single-shot pipeline workers
+        # with no accumulating chat history — provisioning would just create
+        # empty banks. Gate on `long_term_memory`.
+        targets = [n for n, p in self.personas.items() if p.get_long_term_memory()]
+        if not targets:
+            return
+        logger.info(f"Initializing Hindsight memory banks for {len(targets)} persona(s)...")
+
+        async def _ensure(name: str) -> None:
+            try:
+                await self.memory_backend.ensure_bank(bank_id=name)
+            except Exception as e:
+                logger.warning(f"Could not ensure Hindsight bank for {name}: {e}")
+
+        await asyncio.gather(*(_ensure(n) for n in targets))

@@ -1,0 +1,126 @@
+%%{init: {
+  "theme": "base",
+  "themeVariables": {
+    "fontFamily": "Helvetica, Arial, sans-serif",
+    "fontSize": "14px",
+    "primaryColor": "#FFF3E0",
+    "primaryBorderColor": "#455A64",
+    "primaryTextColor": "#1A1A1A",
+    "lineColor": "#37474F",
+    "clusterBkg": "#FAFAFA",
+    "clusterBorder": "#90A4AE"
+  },
+  "flowchart": { "curve": "basis", "nodeSpacing": 40, "rankSpacing": 60 }
+}}%%
+flowchart TB
+    %% ---------- Interfaces ----------
+    subgraph IF["Interfaces"]
+        direction LR
+        DISCORD["Discord Bot"]
+        GMAIL["Gmail Bot<br/><i>(PoC)</i>"]
+        PORTAL["KoboldAdapter<br/>/portal · FastAPI"]
+        ZIFACE["Zammad Agents"]
+    end
+
+    %% ---------- Core orchestration ----------
+    subgraph CORE["Core Orchestration"]
+        direction TB
+        CHAT["ChatSystem<br/><i>DI hub · stream kernel</i>"]
+        BL["BotLogic<br/><i>dev commands</i>"]
+        PER["Persona<br/><i>modes · sampling · tools</i>"]
+        LOOP["ToolLoop<br/><i>max 5 iterations</i>"]
+        ENG["TextEngine<br/><i>provider dispatch</i>"]
+    end
+
+    %% ---------- Tools ----------
+    subgraph TOOLS["Tools &amp; Services"]
+        direction LR
+        TM["ToolManager"]
+        SVC["ServiceIntegrations<br/>Zammad · Agents · Memory · Web"]
+    end
+
+    %% ---------- Memory ----------
+    subgraph MEM["Memory"]
+        direction TB
+        MM["MemoryManager<br/><i>transcript · audit · versions</i>"]
+        BABC{{"MemoryBackend ABC"}}
+        BSQL["SqliteSemanticBackend<br/><i>sqlite-vec · default</i>"]
+        BHIND["HindsightBackend<br/><i>REST · alpha</i>"]
+        EMB["EmbeddingService<br/><i>gemini-embedding-001</i>"]
+    end
+
+    %% ---------- Agents ----------
+    subgraph AG["Background Agents"]
+        direction TB
+        APP["AppManager<br/><i>lifecycle</i>"]
+        AGM["AgentManager"]
+        MA["MemoryAgent<br/><i>15 min · embed + segment</i>"]
+        MC["MemoryConsolidator<br/><i>hourly · L1 → L2</i>"]
+        ZA["ZammadBot<br/><i>triage pipeline</i>"]
+        DA["DispatchAgent<br/><i>priority + notify</i>"]
+        NR["NotificationRouter<br/>Discord · Zammad · Log"]
+    end
+
+    %% ---------- External ----------
+    subgraph EXT["External"]
+        direction LR
+        LLM[("LLM APIs<br/>OpenAI · Anthropic · Google<br/>local OAI-compatible")]
+        ZAPI[("Zammad REST")]
+        SQLITE[("SQLite<br/>User_Interactions · vec_*")]
+        HDB[("Hindsight<br/>Postgres + pgvector")]
+    end
+
+    %% ---------- Edges ----------
+    DISCORD --> CHAT
+    GMAIL   --> CHAT
+    PORTAL  --> CHAT
+    ZIFACE  -.-> AGM
+
+    CHAT --> BL
+    CHAT --> PER
+    CHAT --> LOOP
+    LOOP --> ENG
+    LOOP --> TM
+    ENG  -.-> LLM
+
+    TM  --> SVC
+    SVC -.-> ZAPI
+    SVC -. "recall_memory" .-> MM
+
+    CHAT --> MM
+    MM   --> BABC
+    BABC ==> BSQL
+    BABC ==> BHIND
+    BSQL  -.-> SQLITE
+    BHIND -.-> HDB
+    MM    -.-> SQLITE
+    CHAT  -.-> EMB
+    BSQL  -.-> EMB
+
+    APP --> AGM
+    APP -.-> CHAT
+    AGM --> MA
+    AGM --> MC
+    AGM --> ZA
+    AGM --> DA
+    MA -.-> MM
+    MC -.-> MM
+    ZA -.-> ZAPI
+    DA --> NR
+    DA -.-> ZAPI
+    NR -.-> DISCORD
+
+    %% ---------- Styling ----------
+    classDef iface     fill:#E3F2FD,stroke:#455A64,color:#1A1A1A;
+    classDef core      fill:#FFF3E0,stroke:#455A64,color:#1A1A1A;
+    classDef tools     fill:#F3E5F5,stroke:#455A64,color:#1A1A1A;
+    classDef memory    fill:#E8F5E9,stroke:#455A64,color:#1A1A1A;
+    classDef agents    fill:#FCE4EC,stroke:#455A64,color:#1A1A1A;
+    classDef external  fill:#ECEFF1,stroke:#455A64,color:#1A1A1A;
+
+    class DISCORD,GMAIL,PORTAL,ZIFACE iface;
+    class CHAT,BL,PER,LOOP,ENG core;
+    class TM,SVC tools;
+    class MM,BABC,BSQL,BHIND,EMB memory;
+    class APP,AGM,MA,MC,ZA,DA,NR agents;
+    class LLM,ZAPI,SQLITE,HDB external;

@@ -1,7 +1,7 @@
 """
 Wipes all Memory_Summaries, Memory_Segments, and vec tables,
 then resets User_Interactions.parent_summary_id to NULL so the
-MemoryAgent will re-process everything from scratch on next deploy().
+SqliteConsolidator will re-process everything from scratch on next deploy().
 
 Usage:
     python -m scripts.reset_memory_summaries [--db PATH]
@@ -83,7 +83,7 @@ def reset(db_path: Path, *, skip_backup: bool = False) -> None:
         c.execute("SELECT COUNT(*) FROM User_Interactions WHERE parent_summary_id IS NOT NULL")
         assert c.fetchone()[0] == 0
 
-    print("Done. MemoryAgent will re-segment and re-summarize on next deploy().")
+    print("Done. SqliteConsolidator will re-segment and re-summarize on next deploy().")
     conn.close()
 
 

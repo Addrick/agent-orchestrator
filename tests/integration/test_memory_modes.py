@@ -299,6 +299,9 @@ async def test_e2e_memory_injection_in_prepare_request(memory_e2e_system):
     mock_emb_service.model_name = "test-model"
     mock_emb_service.encode = AsyncMock(return_value=[_unit_blob(1.0, 0.0)])
     system._embedding_service = mock_emb_service
+    # DP-113: backend.recall translates query → embedding via the backend's
+    # injected EmbeddingService, not ChatSystem._embedding_service directly.
+    system.memory_backend.set_embedding_service(mock_emb_service)
 
     # 4. Trigger generate_response which calls _prepare_request internally
     persona = system.personas['test_persona']
@@ -358,6 +361,9 @@ async def test_e2e_recency_filter_no_information_gap(memory_e2e_system):
     mock_emb_service.model_name = "test-model"
     mock_emb_service.encode = AsyncMock(return_value=[_unit_blob(1.0, 0.0)])
     system._embedding_service = mock_emb_service
+    # DP-113: backend.recall translates query → embedding via the backend's
+    # injected EmbeddingService, not ChatSystem._embedding_service directly.
+    system.memory_backend.set_embedding_service(mock_emb_service)
 
     persona = system.personas['test_persona']
     persona.set_memory_mode(MemoryMode.CHANNEL_ISOLATED)

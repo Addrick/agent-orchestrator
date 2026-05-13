@@ -170,7 +170,7 @@ def _print_embedding_similarity(conn, channel: str) -> None:
     if len(rows) < 2:
         return
 
-    # Compute running centroid similarities (same algo as MemoryAgent)
+    # Compute running centroid similarities (same algo as SqliteConsolidator)
     centroid = blob_to_vector(rows[0]['embedding']).copy()
     n = 1
     similarities: List[float] = []
@@ -415,7 +415,7 @@ def cmd_resegment(mm: MemoryManager, channel: str, threshold: float,
     print(f"\n=== Re-segmentation: threshold={threshold}, "
           f"min_size={min_size}, {len(rows)} messages ===\n")
 
-    # Run segmentation algorithm (mirrors MemoryAgent._segment_by_similarity)
+    # Run segmentation algorithm (mirrors SqliteConsolidator._segment_by_similarity)
     centroid = None
     n = 0
     segments: List[Dict[str, Any]] = []

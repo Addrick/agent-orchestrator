@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 import pytest
 
-from src.agents.memory_agent import MemoryAgent
+from src.agents.sqlite_consolidator import SqliteConsolidator
 from config.global_config import GEMINI_EMBEDDING_001_TPM
 
 
@@ -44,7 +44,7 @@ def mock_chat_system() -> Any:
 @pytest.fixture
 @patch('src.agents.base.load_system_personas_from_file', return_value={})
 def memory_agent(mock_load: Any,mock_chat_system: Any) -> Any:
-    agent = MemoryAgent(mock_chat_system, agent_config={
+    agent = SqliteConsolidator(mock_chat_system, agent_config={
         "similarity_threshold": 0.3,
         "min_segment_size": 3,
         "batch_size": 200,
@@ -55,10 +55,10 @@ def memory_agent(mock_load: Any,mock_chat_system: Any) -> Any:
 
 # --- Init Tests ---
 
-class TestMemoryAgentInit:
+class TestSqliteConsolidatorInit:
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
     def test_init_stores_config(self,mock_load: Any,mock_chat_system: Any) -> None:
-        agent = MemoryAgent(mock_chat_system, agent_config={
+        agent = SqliteConsolidator(mock_chat_system, agent_config={
             "similarity_threshold": 0.5,
             "min_segment_size": 5,
             "batch_size": 100,
@@ -69,14 +69,14 @@ class TestMemoryAgentInit:
 
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
     def test_init_defaults(self,mock_load: Any,mock_chat_system: Any) -> None:
-        agent = MemoryAgent(mock_chat_system)
+        agent = SqliteConsolidator(mock_chat_system)
         assert agent._similarity_threshold == 0.8
         assert agent._min_segment_size == 1
         assert agent._batch_size == 100
 
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
     def test_lazy_embedding_service(self,mock_load: Any,mock_chat_system: Any) -> None:
-        agent = MemoryAgent(mock_chat_system)
+        agent = SqliteConsolidator(mock_chat_system)
         assert agent._embedding_service is None
 
 
@@ -297,7 +297,7 @@ class TestSummarization:
 
 class TestDeploy:
     @pytest.mark.asyncio
-    @patch('src.agents.memory_agent.GeminiEmbeddingProvider')
+    @patch('src.agents.sqlite_consolidator.GeminiEmbeddingProvider')
     async def test_deploy_processes_channels(self, mock_provider_cls: Any, memory_agent: Any) -> None:
         """Deploy processes each active channel."""
         mock_provider = MagicMock()
@@ -316,7 +316,7 @@ class TestDeploy:
         memory_agent._process_channel.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch('src.agents.memory_agent.GeminiEmbeddingProvider')
+    @patch('src.agents.sqlite_consolidator.GeminiEmbeddingProvider')
     async def test_deploy_no_channels(self, mock_provider_cls: Any, memory_agent: Any) -> None:
         """Deploy does nothing when no channels need processing."""
         mock_provider = MagicMock()
@@ -332,7 +332,7 @@ class TestDeploy:
         memory_agent._process_channel.assert_not_called()
 
     @pytest.mark.asyncio
-    @patch('src.agents.memory_agent.GeminiEmbeddingProvider')
+    @patch('src.agents.sqlite_consolidator.GeminiEmbeddingProvider')
     async def test_deploy_skips_below_min_segment_size(self, mock_provider_cls: Any, memory_agent: Any) -> None:
         """Channels with fewer messages than min_segment_size are skipped."""
         mock_provider = MagicMock()
@@ -357,7 +357,7 @@ class TestDeploy:
         memory_agent.memory_manager.transaction.assert_not_called()
 
     @pytest.mark.asyncio
-    @patch('src.agents.memory_agent.GeminiEmbeddingProvider')
+    @patch('src.agents.sqlite_consolidator.GeminiEmbeddingProvider')
     async def test_deploy_respects_shutdown(self, mock_provider_cls: Any, memory_agent: Any) -> None:
         """Deploy stops processing channels when shutdown is signalled."""
         mock_provider = MagicMock()
@@ -377,7 +377,7 @@ class TestDeploy:
         memory_agent._process_channel.assert_not_called()
 
     @pytest.mark.asyncio
-    @patch('src.agents.memory_agent.GeminiEmbeddingProvider')
+    @patch('src.agents.sqlite_consolidator.GeminiEmbeddingProvider')
     async def test_deploy_continues_on_channel_error(self, mock_provider_cls: Any, memory_agent: Any) -> None:
         """Deploy continues to next channel if one fails."""
         mock_provider = MagicMock()
@@ -490,32 +490,32 @@ class TestTransactionModel:
 class TestConfigInjection:
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
     def test_batch_size_from_config(self,mock_load: Any,mock_chat_system: Any) -> None:
-        agent = MemoryAgent(mock_chat_system, agent_config={"batch_size": 50})
+        agent = SqliteConsolidator(mock_chat_system, agent_config={"batch_size": 50})
         assert agent._batch_size == 50
 
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
     def test_max_tokens_per_chunk_default(self,mock_load: Any,mock_chat_system: Any) -> None:
-        agent = MemoryAgent(mock_chat_system)
+        agent = SqliteConsolidator(mock_chat_system)
         assert agent._max_tokens_per_chunk == GEMINI_EMBEDDING_001_TPM
 
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
     def test_max_tokens_per_chunk_from_config(self,mock_load: Any,mock_chat_system: Any) -> None:
-        agent = MemoryAgent(mock_chat_system, agent_config={"max_tokens_per_chunk": 5000})
+        agent = SqliteConsolidator(mock_chat_system, agent_config={"max_tokens_per_chunk": 5000})
         assert agent._max_tokens_per_chunk == 5000
 
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
     def test_agent_name(self,mock_load: Any,mock_chat_system: Any) -> None:
-        agent = MemoryAgent(mock_chat_system)
+        agent = SqliteConsolidator(mock_chat_system)
         assert agent.agent_name == "memory"
 
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
     def test_allowed_channels_default_none(self,mock_load: Any,mock_chat_system: Any) -> None:
-        agent = MemoryAgent(mock_chat_system)
+        agent = SqliteConsolidator(mock_chat_system)
         assert agent._allowed_channels is None
 
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
     def test_allowed_channels_from_config(self,mock_load: Any,mock_chat_system: Any) -> None:
-        agent = MemoryAgent(mock_chat_system, agent_config={
+        agent = SqliteConsolidator(mock_chat_system, agent_config={
             "allowed_channels": [
                 {"channel": "chan-a", "server_id": "s1"},
                 {"channel": "chan-b", "server_id": "s2"},
@@ -532,19 +532,19 @@ class TestChunkMessages:
 
     def test_single_chunk_under_limits(self) -> None:
         msgs = [{'content': 'short'} for _ in range(5)]
-        chunks = MemoryAgent._chunk_messages(msgs, max_items=100, max_tokens=10000)
+        chunks = SqliteConsolidator._chunk_messages(msgs, max_items=100, max_tokens=10000)
         assert len(chunks) == 1
         assert len(chunks[0]) == 5
 
     def test_splits_on_item_count(self) -> None:
         msgs = [{'content': 'x'} for _ in range(250)]
-        chunks = MemoryAgent._chunk_messages(msgs, max_items=100, max_tokens=10**9)
+        chunks = SqliteConsolidator._chunk_messages(msgs, max_items=100, max_tokens=10**9)
         assert [len(c) for c in chunks] == [100, 100, 50]
 
     def test_splits_on_token_budget(self) -> None:
         # 4 chars/token estimate; 4000 chars = 1000 tokens per message
         msgs = [{'content': 'a' * 4000} for _ in range(10)]
-        chunks = MemoryAgent._chunk_messages(msgs, max_items=100, max_tokens=2500)
+        chunks = SqliteConsolidator._chunk_messages(msgs, max_items=100, max_tokens=2500)
         # Each chunk fits at most 2 messages (2000 tokens) before the 3rd would exceed 2500
         assert all(len(c) <= 2 for c in chunks)
         assert sum(len(c) for c in chunks) == 10
@@ -556,18 +556,18 @@ class TestChunkMessages:
             {'content': 'a' * 200000},  # ~50k tokens, way over budget
             {'content': 'short'},
         ]
-        chunks = MemoryAgent._chunk_messages(msgs, max_items=100, max_tokens=25000)
+        chunks = SqliteConsolidator._chunk_messages(msgs, max_items=100, max_tokens=25000)
         assert len(chunks) == 2
         assert chunks[0] == [msgs[0]]
         assert chunks[1] == [msgs[1]]
 
     def test_empty_input(self) -> None:
-        assert MemoryAgent._chunk_messages([], max_items=100, max_tokens=25000) == []
+        assert SqliteConsolidator._chunk_messages([], max_items=100, max_tokens=25000) == []
 
 
 class TestAllowedChannels:
     @pytest.mark.asyncio
-    @patch('src.agents.memory_agent.GeminiEmbeddingProvider')
+    @patch('src.agents.sqlite_consolidator.GeminiEmbeddingProvider')
     async def test_deploy_filters_to_allowed_channels(self, mock_provider_cls: Any, memory_agent: Any) -> None:
         """Deploy only processes channels in allowed_channels when configured."""
         mock_provider = MagicMock()
@@ -592,7 +592,7 @@ class TestAllowedChannels:
         assert call_args[0][2] == "s1"
 
     @pytest.mark.asyncio
-    @patch('src.agents.memory_agent.GeminiEmbeddingProvider')
+    @patch('src.agents.sqlite_consolidator.GeminiEmbeddingProvider')
     async def test_deploy_no_filter_when_allowed_channels_none(self, mock_provider_cls: Any, memory_agent: Any) -> None:
         """Deploy processes all channels when allowed_channels is not set."""
         mock_provider = MagicMock()
