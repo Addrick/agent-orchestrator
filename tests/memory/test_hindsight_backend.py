@@ -178,20 +178,12 @@ async def test_legacy_methods_raise_not_implemented(backend: HindsightBackend) -
         backend.store_segment()
     with pytest.raises(NotImplementedError):
         backend.retrieve_relevant_summaries()
-
-
-@pytest.mark.asyncio
-async def test_agent_action_telemetry_is_silent_noop(backend: HindsightBackend) -> None:
-    """Agent-action methods are sqlite-only telemetry; under hindsight they
-    must no-op silently so agents keep running. Writes return sentinel 0; reads
-    return empty lists.
-    """
-    aid = backend.log_agent_action("dispatch", "x", outcome="pending")
-    assert aid == 0
-    backend.update_agent_action_outcome(aid, "success")  # must not raise
-    backend.add_action_contexts(aid, [("ticket", "1")])  # must not raise
-    assert backend.get_relevant_agent_actions("dispatch") == []
-    assert backend.get_action_steps(0) == []
+    # Agent-action telemetry on the backend itself must also fail loud;
+    # MemoryManager routes those calls through its sqlite action-log delegate.
+    with pytest.raises(NotImplementedError):
+        backend.log_agent_action()
+    with pytest.raises(NotImplementedError):
+        backend.get_relevant_agent_actions("dispatch")
 
 
 @pytest.mark.asyncio

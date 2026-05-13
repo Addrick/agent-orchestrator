@@ -514,29 +514,15 @@ class HindsightBackend(MemoryBackend):
             "Migrate the caller to retain_turn/recall before flipping SEMANTIC_BACKEND."
         )
 
-    # Agent-action telemetry: operational audit trail, not semantic memory.
-    # Hindsight has no equivalent store. Silently no-op (writes return sentinel 0,
-    # reads return []) so agents keep running; consequence is loss of action-history
-    # context. Acceptable because this data was never user-visible.
-    _agent_action_warned: bool = False
-    def _warn_action_log_once(self) -> None:
-        if not HindsightBackend._agent_action_warned:
-            HindsightBackend._agent_action_warned = True
-            logger.warning(
-                "HindsightBackend: agent-action telemetry is a no-op under hindsight "
-                "(sqlite-only feature). Action history will be empty."
-            )
-    def log_agent_action(self, *args: Any, **kwargs: Any) -> int:
-        self._warn_action_log_once()
-        return 0
-    def update_agent_action_outcome(self, *args: Any, **kwargs: Any) -> None:
-        self._warn_action_log_once()
-    def add_action_contexts(self, *args: Any, **kwargs: Any) -> None:
-        self._warn_action_log_once()
-    def get_relevant_agent_actions(self, *args: Any, **kwargs: Any) -> List[Dict[str, Any]]:
-        return []
-    def get_action_steps(self, *args: Any, **kwargs: Any) -> List[Dict[str, Any]]:
-        return []
+    # Agent-action telemetry: operational state, owned by MemoryManager's
+    # sqlite action-log delegate regardless of semantic backend. Direct calls
+    # against HindsightBackend must fail loud — callers should route through
+    # MemoryManager so the sqlite delegate handles them.
+    def log_agent_action(self, *args: Any, **kwargs: Any) -> int: self._no_legacy("log_agent_action")
+    def update_agent_action_outcome(self, *args: Any, **kwargs: Any) -> None: self._no_legacy("update_agent_action_outcome")
+    def add_action_contexts(self, *args: Any, **kwargs: Any) -> None: self._no_legacy("add_action_contexts")
+    def get_relevant_agent_actions(self, *args: Any, **kwargs: Any) -> List[Dict[str, Any]]: self._no_legacy("get_relevant_agent_actions")
+    def get_action_steps(self, *args: Any, **kwargs: Any) -> List[Dict[str, Any]]: self._no_legacy("get_action_steps")
     def store_message_embedding(self, *args: Any, **kwargs: Any) -> None: self._no_legacy("store_message_embedding")
     def get_unembedded_messages(self, *args: Any, **kwargs: Any) -> List[Dict[str, Any]]: self._no_legacy("get_unembedded_messages")
     def store_segment(self, *args: Any, **kwargs: Any) -> int: self._no_legacy("store_segment")

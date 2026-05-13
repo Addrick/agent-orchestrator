@@ -56,13 +56,19 @@ class MemoryManager:
             DB_DIR.mkdir(parents=True, exist_ok=True)
         # Lazy import avoids circular: backend modules import MemoryManager for
         # the static _build_summary_where helper.
+        # Agent-action telemetry (Agent_Actions table) is operational state, not
+        # semantic memory — it always lives in sqlite even when the semantic
+        # backend is Hindsight. Pin a dedicated SqliteSemanticBackend just for
+        # the action-log surface; it shares this MM's connection and lock.
+        from src.memory.backend.sqlite import SqliteSemanticBackend
+        self._action_log = SqliteSemanticBackend(self)
+
         if backend is None:
             if SEMANTIC_BACKEND == "hindsight":
                 from src.memory.backend.hindsight import HindsightBackend
                 backend = HindsightBackend(url=HINDSIGHT_URL)
             else:
-                from src.memory.backend.sqlite import SqliteSemanticBackend
-                backend = SqliteSemanticBackend(self)
+                backend = self._action_log
         self.backend = backend
 
     def _get_connection(self) -> sqlite3.Connection:
@@ -866,13 +872,13 @@ class MemoryManager:
     def log_agent_action(self, agent_name: str, action_type: str, trigger_context: Optional[str] = None,
                          action_payload: Optional[str] = None, outcome: Optional[str] = None,
                          outcome_payload: Optional[str] = None, parent_id: Optional[int] = None) -> int:
-        return self.backend.log_agent_action(
+        return self._action_log.log_agent_action(
             agent_name, action_type, trigger_context, action_payload,
             outcome, outcome_payload, parent_id,
         )
 
     def update_agent_action_outcome(self, action_id: int, outcome: str, outcome_payload: Optional[str] = None) -> None:
-        self.backend.update_agent_action_outcome(action_id, outcome, outcome_payload)
+        self._action_log.update_agent_action_outcome(action_id, outcome, outcome_payload)
 
     def get_agent_actions(self, agent_name: str, limit: int = 20, action_type: Optional[str] = None) -> List[
         Dict[str, Any]]:
@@ -890,14 +896,14 @@ class MemoryManager:
             return [dict(row) for row in cursor.fetchall()]
 
     def add_action_contexts(self, action_id: int, contexts: List[Tuple[str, str]]) -> None:
-        self.backend.add_action_contexts(action_id, contexts)
+        self._action_log.add_action_contexts(action_id, contexts)
 
     def get_relevant_agent_actions(self, agent_name: str, match_contexts: Optional[List[Tuple[str, str]]] = None,
                                    match_types: Optional[List[str]] = None, limit: int = 15) -> List[Dict[str, Any]]:
-        return self.backend.get_relevant_agent_actions(agent_name, match_contexts, match_types, limit)
+        return self._action_log.get_relevant_agent_actions(agent_name, match_contexts, match_types, limit)
 
     def get_action_steps(self, parent_id: int) -> List[Dict[str, Any]]:
-        return self.backend.get_action_steps(parent_id)
+        return self._action_log.get_action_steps(parent_id)
 
     def store_message_embedding(self, interaction_id: int, embedding: bytes, model_name: str,
                                 created_at: datetime) -> None:
