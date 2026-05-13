@@ -272,3 +272,52 @@ def test_provider_extra_clear_keeps_other_keys(persona):
     persona.clear_provider_extra("kobold", "a")
     assert persona.get_provider_extra("kobold", "b") == 2
     assert persona.get_generation_params().provider_extras == {"kobold": {"b": 2}}
+
+
+# --- meta_visible (DP-111 / Sprint 4 fan-out) ---
+
+def test_meta_visible_default_false(persona):
+    assert persona.get_meta_visible() is False
+
+
+def test_meta_visible_explicit_true(base_persona_args):
+    p = Persona(**base_persona_args, meta_visible=True)
+    assert p.get_meta_visible() is True
+
+
+def test_meta_visible_setter(persona):
+    persona.set_meta_visible(True)
+    assert persona.get_meta_visible() is True
+    persona.set_meta_visible(False)
+    assert persona.get_meta_visible() is False
+
+
+def test_meta_visible_round_trip_save_load(base_persona_args, tmp_path):
+    """Round-trip meta_visible through save_personas_to_file → load_personas_from_file."""
+    from src.utils.save_utils import save_personas_to_file, load_personas_from_file
+
+    p_visible = Persona(**{**base_persona_args, "persona_name": "visible"}, meta_visible=True)
+    p_hidden = Persona(**{**base_persona_args, "persona_name": "hidden"}, meta_visible=False)
+    save_file = str(tmp_path / "personas.json")
+    save_personas_to_file({"visible": p_visible, "hidden": p_hidden}, file_path_override=save_file)
+
+    loaded = load_personas_from_file(file_path_override=save_file)
+    assert loaded["visible"].get_meta_visible() is True
+    assert loaded["hidden"].get_meta_visible() is False
+
+
+def test_meta_visible_absent_in_legacy_config_defaults_false(base_persona_args, tmp_path):
+    """A persona JSON without meta_visible (old config file) loads as False."""
+    import json
+    from src.utils.save_utils import load_personas_from_file
+
+    save_file = tmp_path / "personas.json"
+    save_file.write_text(json.dumps({
+        "personas": [{
+            "name": "legacy",
+            "model_name": "m",
+            "prompt": "p",
+        }],
+    }))
+    loaded = load_personas_from_file(file_path_override=str(save_file))
+    assert loaded["legacy"].get_meta_visible() is False

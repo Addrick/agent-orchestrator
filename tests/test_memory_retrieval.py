@@ -10,6 +10,7 @@ import pytest
 from memory.memory_manager import MemoryManager
 from src.chat_system import ChatSystem, _relative_time
 from src.embedding_service import EmbeddingService
+from src.memory.backend.base import MemoryHit
 from src.persona import MemoryMode
 
 
@@ -176,14 +177,19 @@ def mock_persona():
 
 @pytest.fixture
 def chat_system_with_memory():
-    """ChatSystem with mocked dependencies for memory retrieval tests."""
+    """ChatSystem with mocked dependencies for memory retrieval tests.
+
+    DP-113: ChatSystem now calls `memory_backend.recall(...)` rather than
+    `memory_manager.retrieve_relevant_summaries(...)`. Tests stub the
+    backend's recall directly via `system.memory_backend.recall = AsyncMock(...)`.
+    """
     mm = MagicMock()
+    mm.backend = MagicMock()  # spec= would block this; use plain MagicMock
     te = MagicMock()
     with patch('src.chat_system.load_personas_from_file', return_value={}), \
          patch('src.chat_system.get_model_list', return_value={}):
         system = ChatSystem(memory_manager=mm, text_engine=te)
 
-    # Set up embedding service
     emb_service = MagicMock(spec=EmbeddingService)
     emb_service.model_name = "test-model"
     system._embedding_service = emb_service
@@ -196,16 +202,14 @@ async def test_retrieve_memory_block_returns_formatted_block(chat_system_with_me
     """Memory block is returned with proper formatting."""
     system, mm, emb_service = chat_system_with_memory
 
-    mm.retrieve_relevant_summaries.return_value = [
-        {
-            'summary_id': 1, 'segment_id': 1, 'content': '- Security alert found',
-            'embedding': _unit_blob(1.0, 0.0), 'model_name': 'test-model',
-            'created_at': datetime.now() - timedelta(days=2),
-            'channel': 'security', 'persona_name': 'sage',
-            'start_interaction_id': 1, 'end_interaction_id': 5,
-        }
-    ]
-    emb_service.encode = AsyncMock(return_value=[_unit_blob(1.0, 0.0)])
+    system.memory_backend.recall = AsyncMock(return_value=[
+        MemoryHit(
+            id="1", content="- Security alert found", score=0.9, untrusted=False,
+            tags=["channel:security", "persona:sage"],
+            timestamp=datetime.now() - timedelta(days=2),
+            metadata={"segment_id": 1},
+        ),
+    ])
 
     result, is_untrusted = await system._retrieve_memory_block(
         mock_persona, "user1", "chan", None,
@@ -254,7 +258,7 @@ async def test_retrieve_memory_block_no_embedding_service(mock_persona):
 async def test_retrieve_memory_block_no_summaries(chat_system_with_memory, mock_persona):
     """Returns None when no summaries are found."""
     system, mm, _ = chat_system_with_memory
-    mm.retrieve_relevant_summaries.return_value = []
+    system.memory_backend.recall = AsyncMock(return_value=[])
 
     result, is_untrusted = await system._retrieve_memory_block(
         mock_persona, "user1", "chan", None,
@@ -269,11 +273,9 @@ async def test_retrieve_memory_block_no_summaries(chat_system_with_memory, mock_
 async def test_retrieve_memory_block_empty_history(chat_system_with_memory, mock_persona):
     """Returns None when conversation history has no text content."""
     system, mm, _ = chat_system_with_memory
-    mm.retrieve_relevant_summaries.return_value = [
-        {'summary_id': 1, 'content': 'facts', 'embedding': _unit_blob(1.0, 0.0),
-         'channel': 'chan', 'persona_name': 'p1', 'created_at': datetime.now(),
-         'segment_id': 1, 'model_name': 'm', 'start_interaction_id': 1, 'end_interaction_id': 3}
-    ]
+    system.memory_backend.recall = AsyncMock(return_value=[
+        MemoryHit(id="1", content="facts", score=0.5, tags=["channel:chan", "persona:p1"]),
+    ])
 
     result, is_untrusted = await system._retrieve_memory_block(
         mock_persona, "user1", "chan", None,
@@ -290,14 +292,11 @@ async def test_retrieve_memory_block_top_k_limit(chat_system_with_memory, mock_p
     """Only top-K summaries are fetched from the database."""
     system, mm, emb_service = chat_system_with_memory
 
-    mm.retrieve_relevant_summaries.return_value = [
-        {'summary_id': i, 'segment_id': i, 'content': f'Fact {i}',
-         'embedding': _unit_blob(1.0, 0.0), 'model_name': 'test-model',
-         'created_at': datetime.now(), 'channel': 'chan', 'persona_name': 'p1',
-         'start_interaction_id': i, 'end_interaction_id': i + 2}
+    system.memory_backend.recall = AsyncMock(return_value=[
+        MemoryHit(id=str(i), content=f"Fact {i}", score=0.5,
+                  tags=["channel:chan", "persona:p1"])
         for i in range(2)
-    ]
-    emb_service.encode = AsyncMock(return_value=[_unit_blob(1.0, 0.0)])
+    ])
 
     result, is_untrusted = await system._retrieve_memory_block(
         mock_persona, "user1", "chan", None,
@@ -305,9 +304,8 @@ async def test_retrieve_memory_block_top_k_limit(chat_system_with_memory, mock_p
     )
 
     assert result is not None
-    # Verify the database limit argument was correctly passed
-    mm.retrieve_relevant_summaries.assert_called_once()
-    assert mm.retrieve_relevant_summaries.call_args.kwargs['limit'] == 2
+    system.memory_backend.recall.assert_called_once()
+    assert system.memory_backend.recall.call_args.kwargs['k'] == 2
 
 
 @pytest.mark.asyncio
@@ -316,16 +314,11 @@ async def test_retrieve_memory_block_ambient_tag(chat_system_with_memory, mock_p
     """Ambient summaries are tagged in the formatted block."""
     system, mm, emb_service = chat_system_with_memory
 
-    mm.retrieve_relevant_summaries.return_value = [
-        {
-            'summary_id': 1, 'segment_id': 1, 'content': '- Ambient observation',
-            'embedding': _unit_blob(1.0, 0.0), 'model_name': 'test-model',
-            'created_at': datetime.now(), 'channel': 'general',
-            'persona_name': 'ambient',
-            'start_interaction_id': 1, 'end_interaction_id': 3,
-        }
-    ]
-    emb_service.encode = AsyncMock(return_value=[_unit_blob(1.0, 0.0)])
+    system.memory_backend.recall = AsyncMock(return_value=[
+        MemoryHit(id="1", content="- Ambient observation", score=0.7,
+                  tags=["channel:general", "persona:ambient"],
+                  timestamp=datetime.now()),
+    ])
 
     result, is_untrusted = await system._retrieve_memory_block(
         mock_persona, "user1", "chan", None,
@@ -343,16 +336,10 @@ async def test_retrieve_memory_block_untrusted_propagation(chat_system_with_memo
     """Untrusted flag is propagated when an untrusted summary is retrieved."""
     system, mm, emb_service = chat_system_with_memory
 
-    mm.retrieve_relevant_summaries.return_value = [
-        {
-            'summary_id': 1, 'segment_id': 1, 'content': '- Untrusted content',
-            'embedding': _unit_blob(1.0, 0.0), 'model_name': 'test-model',
-            'created_at': datetime.now(), 'channel': 'web', 'persona_name': 'p1',
-            'start_interaction_id': 1, 'end_interaction_id': 3,
-            'untrusted': True,  # TAINTED
-        }
-    ]
-    emb_service.encode = AsyncMock(return_value=[_unit_blob(1.0, 0.0)])
+    system.memory_backend.recall = AsyncMock(return_value=[
+        MemoryHit(id="1", content="- Untrusted content", score=0.6,
+                  untrusted=True, tags=["channel:web", "persona:p1"]),
+    ])
 
     result, is_untrusted = await system._retrieve_memory_block(
         mock_persona, "user1", "chan", None,
@@ -381,14 +368,14 @@ def test_relative_time_hours():
 # --- Memory Block Formatting ---
 
 def test_format_memory_block_score_ordered():
-    """Entries are in the order passed (already score-sorted by caller)."""
-    summaries = [
-        (0.9, {'channel': 'chan-a', 'persona_name': 'p1',
-                'created_at': datetime.now(), 'content': '- High relevance'}),
-        (0.3, {'channel': 'chan-b', 'persona_name': 'p1',
-                'created_at': datetime.now(), 'content': '- Low relevance'}),
+    """Entries appear in the order passed (caller is responsible for sorting)."""
+    hits = [
+        MemoryHit(id="1", content="- High relevance", score=0.9,
+                  tags=["channel:chan-a", "persona:p1"], timestamp=datetime.now()),
+        MemoryHit(id="2", content="- Low relevance", score=0.3,
+                  tags=["channel:chan-b", "persona:p1"], timestamp=datetime.now()),
     ]
-    result = ChatSystem._format_memory_block(summaries)
+    result = ChatSystem._format_memory_block(hits)
     assert result is not None
     high_idx = result.index("High relevance")
     low_idx = result.index("Low relevance")

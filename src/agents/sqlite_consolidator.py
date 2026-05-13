@@ -1,4 +1,4 @@
-# src/agents/memory_agent.py
+# src/agents/sqlite_consolidator.py
 
 import logging
 import asyncio
@@ -24,7 +24,7 @@ from src.utils.message_utils import strip_vertex_links
 logger = logging.getLogger(__name__)
 
 
-class MemoryAgent(Agent):
+class SqliteConsolidator(Agent):
     """
     Batch agent that segments conversations by topic, extracts facts via LLM,
     and stores embedded summaries for retrieval-augmented conversation context.
@@ -91,7 +91,7 @@ class MemoryAgent(Agent):
             # First, check if the ChatSystem already has a service initialized (e.g. from main.py)
             if self.chat_system._embedding_service is not None:
                 self._embedding_service = self.chat_system._embedding_service
-                logger.info("MemoryAgent: using existing EmbeddingService from ChatSystem.")
+                logger.info("SqliteConsolidator: using existing EmbeddingService from ChatSystem.")
             else:
                 # Initialize new service
                 from src.embedding_service import GeminiEmbeddingProvider
@@ -111,7 +111,7 @@ class MemoryAgent(Agent):
                 # Shared service with the bot
                 self.chat_system._embedding_service = self._embedding_service
                 logger.info(
-                    f"MemoryAgent: initialized new EmbeddingService ({provider_name}) (model: {EMBEDDING_MODEL})"
+                    f"SqliteConsolidator: initialized new EmbeddingService ({provider_name}) (model: {EMBEDDING_MODEL})"
                 )
 
         return self._embedding_service
@@ -133,7 +133,7 @@ class MemoryAgent(Agent):
             ]
             if len(channels) != len(all_channels):
                 logger.debug(
-                    f"MemoryAgent: {len(all_channels)} active channels, "
+                    f"SqliteConsolidator: {len(all_channels)} active channels, "
                     f"{len(channels)} after allowed_channels filter. "
                     f"Active: {[(ch, pn, sid) for ch, pn, sid in all_channels]}"
                 )
@@ -141,10 +141,10 @@ class MemoryAgent(Agent):
             channels = all_channels
 
         if not channels:
-            logger.info("MemoryAgent: no channels with unprocessed messages.")
+            logger.info("SqliteConsolidator: no channels with unprocessed messages.")
             return
 
-        logger.info(f"MemoryAgent: found {len(channels)} channel(s) to process.")
+        logger.info(f"SqliteConsolidator: found {len(channels)} channel(s) to process.")
 
         for channel, persona_name, server_id in channels:
             if self._shutdown_event.is_set():
@@ -156,7 +156,7 @@ class MemoryAgent(Agent):
                 )
             except Exception as e:
                 # Keep error logging quiet without vomiting stack traces
-                logger.error(f"MemoryAgent: error processing {channel}/{persona_name}: {str(e)}")
+                logger.error(f"SqliteConsolidator: error processing {channel}/{persona_name}: {str(e)}")
 
     async def _process_channel(
             self,
@@ -175,9 +175,9 @@ class MemoryAgent(Agent):
                 if count == 0:
                     break
                 batch_num += 1
-                logger.info(f"MemoryAgent: {channel}/{persona_name} — embedding batch {batch_num} done ({count} stored).")
+                logger.info(f"SqliteConsolidator: {channel}/{persona_name} — embedding batch {batch_num} done ({count} stored).")
             except Exception as e:
-                logger.warning(f"MemoryAgent: {channel}/{persona_name} embedding phase aborted: {str(e)}")
+                logger.warning(f"SqliteConsolidator: {channel}/{persona_name} embedding phase aborted: {str(e)}")
                 break
 
         # --- Phase 2: Segment and summarize all available (loop until clear) ---
@@ -192,9 +192,9 @@ class MemoryAgent(Agent):
                 if committed_count == 0:
                     break
                 batch_num += 1
-                logger.info(f"MemoryAgent: {channel}/{persona_name} — summary batch {batch_num} done ({committed_count} stored).")
+                logger.info(f"SqliteConsolidator: {channel}/{persona_name} — summary batch {batch_num} done ({committed_count} stored).")
             except Exception as e:
-                logger.warning(f"MemoryAgent: {channel}/{persona_name} summary phase aborted: {str(e)}")
+                logger.warning(f"SqliteConsolidator: {channel}/{persona_name} summary phase aborted: {str(e)}")
                 break
 
     async def _embed_unembedded(
@@ -215,10 +215,10 @@ class MemoryAgent(Agent):
         )
 
         if not messages:
-            logger.debug(f"MemoryAgent: {channel}/{persona_name} — no unembedded messages found.")
+            logger.debug(f"SqliteConsolidator: {channel}/{persona_name} — no unembedded messages found.")
             return 0
 
-        logger.info(f"MemoryAgent: {channel}/{persona_name} — {len(messages)} unembedded messages to process.")
+        logger.info(f"SqliteConsolidator: {channel}/{persona_name} — {len(messages)} unembedded messages to process.")
 
         chunk_size = self._batch_size
         total_stored = 0
@@ -230,7 +230,7 @@ class MemoryAgent(Agent):
             est_tokens = sum(len(t) for t in chunk_texts) // 4
 
             logger.debug(
-                f"MemoryAgent: {channel}/{persona_name} — "
+                f"SqliteConsolidator: {channel}/{persona_name} — "
                 f"embedding chunk {chunk_idx + 1}/{len(chunks)} "
                 f"({len(chunk_texts)} messages, ~{est_tokens} tokens)"
             )
@@ -268,7 +268,7 @@ class MemoryAgent(Agent):
                 await asyncio.sleep(60)
                 break
 
-        logger.info(f"MemoryAgent: {channel}/{persona_name} — stored {total_stored} embeddings.")
+        logger.info(f"SqliteConsolidator: {channel}/{persona_name} — stored {total_stored} embeddings.")
         return total_stored
 
     @staticmethod
@@ -310,7 +310,7 @@ class MemoryAgent(Agent):
             model_name=model_name,
         )
 
-        logger.info(f"MemoryAgent: {channel}/{persona_name} — {len(rows)} unsegmented embedded messages found.")
+        logger.info(f"SqliteConsolidator: {channel}/{persona_name} — {len(rows)} unsegmented embedded messages found.")
 
         if len(rows) < self._min_segment_size:
             return 0
@@ -345,7 +345,7 @@ class MemoryAgent(Agent):
             skipped = original_count - len(segments)
             if skipped:
                 logger.info(
-                    f"MemoryAgent: {channel}/{persona_name} — skipped {skipped} segments matching prior failures "
+                    f"SqliteConsolidator: {channel}/{persona_name} — skipped {skipped} segments matching prior failures "
                     f"(cooldown/max-retries). {len(segments)} remaining.")
             if not segments:
                 return 0
@@ -353,14 +353,14 @@ class MemoryAgent(Agent):
         total_committed = 0
         for i, segment in enumerate(segments):
             if self._shutdown_event.is_set():
-                logger.info(f"MemoryAgent: {channel}/{persona_name} — shutdown signalled, stopping at segment {i + 1}/{len(segments)}.")
+                logger.info(f"SqliteConsolidator: {channel}/{persona_name} — shutdown signalled, stopping at segment {i + 1}/{len(segments)}.")
                 break
 
-            logger.info(f"MemoryAgent: {channel}/{persona_name} — Processing segment {i + 1}/{len(segments)}...")
+            logger.info(f"SqliteConsolidator: {channel}/{persona_name} — Processing segment {i + 1}/{len(segments)}...")
             summary_result = await self._summarize_segment(segment, embedding_service)
             if summary_result is None:
                 logger.warning(
-                    f"MemoryAgent: {channel}/{persona_name} — Segment {i + 1}/{len(segments)} failed summarization, recording failure.")
+                    f"SqliteConsolidator: {channel}/{persona_name} — Segment {i + 1}/{len(segments)} failed summarization, recording failure.")
                 self.memory_manager.record_segment_failure(
                     channel=channel, server_id=server_id, persona_name=persona_name,
                     start_id=segment['start_id'], end_id=segment['end_id'],
@@ -429,7 +429,7 @@ class MemoryAgent(Agent):
                     )
 
                 if outlier_ids:
-                    logger.info(f"MemoryAgent: Excluded {len(outlier_ids)} outliers from summary {summary_id}. They remain NULL for re-queueing.")
+                    logger.info(f"SqliteConsolidator: Excluded {len(outlier_ids)} outliers from summary {summary_id}. They remain NULL for re-queueing.")
 
             # Clear any prior failure record now that this range succeeded
             self.memory_manager.clear_segment_failure(
@@ -437,13 +437,13 @@ class MemoryAgent(Agent):
                 start_id=segment['start_id'], end_id=segment['end_id'],
             )
             total_committed += 1
-            logger.info(f"MemoryAgent: {channel}/{persona_name} — Segment {i + 1}/{len(segments)} committed.")
+            logger.info(f"SqliteConsolidator: {channel}/{persona_name} — Segment {i + 1}/{len(segments)} committed.")
 
         if total_committed == 0 and segments:
             logger.warning(
-                f"MemoryAgent: all {len(segments)} segments failed summarization for {channel}/{persona_name}.")
+                f"SqliteConsolidator: all {len(segments)} segments failed summarization for {channel}/{persona_name}.")
 
-        logger.info(f"MemoryAgent: {channel}/{persona_name} — {total_committed}/{len(segments)} segments+summaries stored.")
+        logger.info(f"SqliteConsolidator: {channel}/{persona_name} — {total_committed}/{len(segments)} segments+summaries stored.")
         return total_committed
 
     def _segment_by_similarity(
@@ -618,7 +618,7 @@ class MemoryAgent(Agent):
                 token_count = len(prompt) // 4
             
             if token_count > RATE_LIMIT_GEMMA_4_TPR * 0.95:
-                logger.warning(f"MemoryAgent: Segment token count ({token_count}) exceeds safety limit. Splitting segment.")
+                logger.warning(f"SqliteConsolidator: Segment token count ({token_count}) exceeds safety limit. Splitting segment.")
                 # We return None to signal failure; the iterative loop will try again with a smaller fetch?
                 # No, if we don't have a LIMIT, it will just fetch the same thing.
                 # IMPLEMENTATION NOTE: Since the user rejected manual split logic but wants a safeguard,
@@ -626,7 +626,7 @@ class MemoryAgent(Agent):
                 return None
 
         except Exception as e:
-            logger.debug(f"MemoryAgent: Token counting failed/skipped: {e}")
+            logger.debug(f"SqliteConsolidator: Token counting failed/skipped: {e}")
 
         try:
             # Agent-internal schema — passed directly to the LLM, never routed through ToolManager
@@ -692,7 +692,7 @@ class MemoryAgent(Agent):
                     observations = [line.strip("- ").strip() for line in text.split("\n") if line.strip()]
 
             if not observations:
-                logger.info(f"MemoryAgent: No observations extracted for segment starting at {segment['start_id']}.")
+                logger.info(f"SqliteConsolidator: No observations extracted for segment starting at {segment['start_id']}.")
                 return None
 
             # Build structured text for storage
@@ -710,8 +710,8 @@ class MemoryAgent(Agent):
             return (facts_text, summary_embedding, outlier_ids)
 
         except RuntimeError as e:
-            logger.warning(f"MemoryAgent: Summarization embedding paused due to Daily Quota: {str(e)}")
+            logger.warning(f"SqliteConsolidator: Summarization embedding paused due to Daily Quota: {str(e)}")
             return None
         except Exception as e:
-            logger.error(f"MemoryAgent: summarization failed: {str(e)}")
+            logger.error(f"SqliteConsolidator: summarization failed: {str(e)}")
             return None

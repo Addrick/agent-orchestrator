@@ -159,7 +159,7 @@ class TextEngine:
         if "gemma-4" in model_name:
             return self._generate_google_response, [self._gemma_4_rpm_limiter]
         if "gemma" in model_name:
-            return self._generate_google_response, [self._gemma_3_rpm_limiter]
+            return self._generate_google_response, [self._gemma_4_rpm_limiter]
         if "gemini-3.1" in model_name:
             return self._generate_google_response, [self._gemini_3_rpm_limiter]
         if "gemini" in model_name:

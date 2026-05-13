@@ -29,6 +29,9 @@ def chat_system_with_mocks():
     on `text_engine.generate_response.*` keep working unchanged.
     """
     mock_memory_manager = MagicMock(spec=MemoryManager)
+    # DP-113: ChatSystem reads memory_manager.backend at construction. spec=
+    # restricts to class attributes, so attach a stub backend explicitly.
+    mock_memory_manager.backend = MagicMock()
     text_engine = TextEngine()
     text_engine.generate_response = AsyncMock(  # type: ignore[method-assign]
         return_value=({'type': 'text', 'content': 'LLM Reply'}, {}),
@@ -306,7 +309,7 @@ async def test_resume_pending_confirmation_denied(chat_system_with_mocks):
     ("gpt-3.5-turbo", "gpt"),
     ("claude-3-opus-20240229", "claude"),
     ("claude-3.5-sonnet", "claude"),
-    ("gemma-3-27b-it", "gemma"),
+    ("gemma-4-31b-it", "gemma"),
     ("gemini-2.5-flash", "gemini"),
     ("gemini-2.5-pro", "gemini"),
     ("gemini-3.1-flash", "gemini-3.1"),
@@ -373,7 +376,7 @@ async def test_grounding_kept_for_gemini_25_models(chat_system_with_mocks):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [
-    "gpt-4o", "claude-3-opus-20240229", "gemma-3-27b-it", "gemini-3.1-flash", "local",
+    "gpt-4o", "claude-3-opus-20240229", "gemma-4-31b-it", "gemini-3.1-flash", "local",
 ])
 async def test_grounding_filtered_for_incompatible_models(chat_system_with_mocks, model_name):
     """Grounding should be filtered for all incompatible model prefixes."""

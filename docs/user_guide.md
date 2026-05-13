@@ -252,6 +252,7 @@ Available to any persona with `enabled_tools: ["*"]` (e.g., `joy`, `it-help`). T
 
 | Tool | Type | Description |
 |------|------|-------------|
+| `recall_memory` | Read | Search the persona's long-term memory bank for facts relevant to a natural-language query. Returns up to `limit` (default 10) hits — short summaries of past conversations or observations. Scope is inherited from the active turn (persona, channel, user, server); the LLM cannot redirect recall to another persona. Marked `produces_untrusted=True` so retrieved hits taint the turn under the tool-security framework. |
 | `drill_down_memory` | Read | Fetch raw episodic memories under a specific Core Profile. Use to recover specific details (dates, links, verbatim quotes) that were abstracted away during consolidation. Requires `parent_summary_id`. |
 | `update_core_memory` | Write | Modify an existing Core Profile when new information contradicts or extends it. Requires `summary_id` and the revised content. |
 
@@ -320,6 +321,91 @@ Long-term memory retrieval is filtered by channel, persona, and embedding model.
 - Personas may reference past conversations that occurred outside the current context window
 - The `drill_down_memory` tool lets a persona with `*` tools fetch raw episodic details behind a core profile
 - The `update_core_memory` tool lets a persona correct or extend a core profile when new information supersedes it
+
+## Hindsight Backend (alpha)
+
+The semantic memory tier can be backed by [vectorize-io/hindsight](https://github.com/vectorize-io/hindsight) instead of the default SQLite store. Hindsight runs in Docker with an embedded Postgres + pgvector and handles retain/recall/reflect via a REST API. This is alpha — the SQLite backend remains the default.
+
+### Bring up the stack
+
+```bash
+docker compose -f docker-compose.hindsight.yml up -d
+```
+
+The compose file starts two containers:
+
+- `hindsight-memory` — the API server, bound to `127.0.0.1:8888` only.
+- `hindsight-kobold-proxy` — `socat` sidecar that forwards `:5001` from the internal Docker network to the host's kobold endpoint. The hindsight container itself has **no** internet egress (paranoid mode, see `memory/project/decisions/2026-05-05-hindsight-paranoid-mode.md`).
+
+Both images are pinned by SHA digest. Rotate digests intentionally; do not drift to floating tags.
+
+### Required host services
+
+- **kobold.cpp** running at `localhost:5001` with an OpenAI-compatible `/v1` endpoint and a model loaded (default: `qwen2.5-32b`). The proxy reaches it via `host.docker.internal:5001`.
+- Docker Desktop / Docker Engine with the `host-gateway` extra-host alias supported.
+
+If kobold is offline, retain operations are silently dropped (see failure modes below) and recall returns the existing corpus.
+
+### Enable in the bot
+
+Set in `.env` (or `config/global_config.py`):
+
+```
+SEMANTIC_BACKEND=hindsight
+HINDSIGHT_URL=http://localhost:8888
+```
+
+Restart the bot. `MemoryManager.__init__` will instantiate `HindsightBackend` instead of `SqliteSemanticBackend`. Legacy SQLite-shape methods (`store_segment`, `retrieve_relevant_summaries`, …) will raise `NotImplementedError` if called — every caller must migrate to `retain_turn` / `recall` first.
+
+### First-time bank bootstrap
+
+Each persona uses its own bank. Before retaining or recalling for a persona, call:
+
+```python
+await backend.ensure_bank(
+    bank_id="alice",
+    retain_mission="extract decisions, preferences, and durable facts; ignore chitchat",
+    reflect_mission="ground answers in stored decisions and rationale; be precise",
+    # Optional:
+    # enable_observations=True,
+    # observations_mission="stable facts about people and projects",
+)
+```
+
+`ensure_bank` is idempotent — a 409 from upstream is treated as success.
+
+### Backup and restore
+
+Hindsight stores its embedded Postgres at `/home/hindsight/.pg0` inside the container, mapped to the named volume `hindsight-data`.
+
+**Backup** (host shell):
+
+```bash
+docker exec hindsight-memory pg_dump -U hindsight hindsight > hindsight.sql
+```
+
+**Restore** (into a fresh stack):
+
+```bash
+docker compose -f docker-compose.hindsight.yml up -d
+docker exec -i hindsight-memory psql -U hindsight hindsight < hindsight.sql
+```
+
+Restore-test at least once before relying on backups — bank IDs and tag schemas must round-trip cleanly.
+
+### Failure modes
+
+| Symptom | Cause | Effect |
+|---------|-------|--------|
+| Retain calls drop, log `Hindsight retain dropped (kobold offline)` | kobold not running on host | New turns aren't consolidated; existing recall still works |
+| Container restart | `docker compose restart hindsight` or crash | Recall + retain both unavailable until container is up; queued retains in-flight at shutdown are lost |
+| 409 on `ensure_bank` | Bank already exists | Treated as success — safe to call on every startup |
+
+The retain path is fire-and-forget through a per-bank async queue: user turns enqueue and return immediately; one worker per bank drains in FIFO order. There is no DLQ — alpha tolerates dropped retains rather than risk back-pressure on user turns.
+
+### Operator trust overrides
+
+`mark_trusted` / `mark_untrusted` flip the `untrusted` bit on a specific recall hit (per the [tool security framework](../memory/project/plans/tool_security_framework.md)). Overrides live in a parallel SQLite file (`src/memory/hindsight_overrides.db`) — recall post-filters and rewrites the bit. Every flip is audit-logged with operator_id, reason, prior, and new values.
 
 ## System Defaults
 

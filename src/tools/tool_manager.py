@@ -216,6 +216,58 @@ class WebSearchHandler:
         return [{"title": r["title"], "url": r["href"], "summary": r["body"]} for r in raw]
 
 
+class MemoryRecallHandler:
+    """Wraps `MemoryBackend.recall` as the model-callable `recall_memory` tool.
+
+    The tool's tag scope is inherited from the active turn via `turn_context`
+    — the LLM can't redirect recall to another persona / channel. Returns
+    structured hits the engine LLM integrates into its response. The
+    `produces_untrusted` capability flag means hits taint the turn per the
+    tool-security framework.
+    """
+
+    def __init__(self, memory_backend: Any) -> None:
+        self.memory_backend = memory_backend
+
+    def register(self, manager: ToolManager) -> None:
+        manager.register("recall_memory", self._recall_memory)
+
+    async def _recall_memory(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
+        from src.tools.turn_context import get_turn_context
+        ctx = get_turn_context()
+        if ctx is None:
+            logger.warning("recall_memory invoked without an active turn context.")
+            return []
+        tag_filter: List[str] = [
+            f"channel:{ctx.channel}",
+            f"user:{ctx.user_identifier}",
+        ]
+        if ctx.server_id:
+            tag_filter.append(f"server:{ctx.server_id}")
+
+        logger.info(
+            f"Executing tool: recall_memory query='{query}' limit={limit} "
+            f"persona={ctx.persona_name}"
+        )
+        hits = await self.memory_backend.recall(
+            bank_id=ctx.persona_name,
+            query=query,
+            k=limit,
+            tag_filter=tag_filter,
+        )
+        return [
+            {
+                "id": h.id,
+                "content": h.content,
+                "score": h.score,
+                "untrusted": h.untrusted,
+                "tags": h.tags,
+                "timestamp": h.timestamp.isoformat() if h.timestamp else None,
+            }
+            for h in hits
+        ]
+
+
 class MemoryToolHandler:
     def __init__(self, memory_manager: Any, embedding_service: Any = None) -> None:
         self.memory_manager = memory_manager

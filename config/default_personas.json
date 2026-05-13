@@ -12,7 +12,8 @@
             "display_name_in_chat": false,
             "execution_mode": "AUTONOMOUS",
             "enabled_tools": ["google_grounding_search"],
-            "memory_mode": "CHANNEL_ISOLATED"
+            "memory_mode": "CHANNEL_ISOLATED",
+            "meta_visible": false
         },
         {
             "name": "testr",
@@ -26,7 +27,8 @@
             "display_name_in_chat": true,
             "execution_mode": "AUTONOMOUS",
             "enabled_tools": [],
-            "memory_mode": "CHANNEL_ISOLATED"
+            "memory_mode": "CHANNEL_ISOLATED",
+            "meta_visible": false
         },
         {
             "name": "gemini",
@@ -40,7 +42,8 @@
             "display_name_in_chat": false,
             "execution_mode": "AUTONOMOUS",
             "enabled_tools": ["google_grounding_search"],
-            "memory_mode": "CHANNEL_ISOLATED"
+            "memory_mode": "CHANNEL_ISOLATED",
+            "meta_visible": false
         },
         {
             "name": "chatgpt",
@@ -54,7 +57,8 @@
             "display_name_in_chat": false,
             "execution_mode": "AUTONOMOUS",
             "enabled_tools": [],
-            "memory_mode": "CHANNEL_ISOLATED"
+            "memory_mode": "CHANNEL_ISOLATED",
+            "meta_visible": false
         },
         {
             "name": "claude",
@@ -68,7 +72,8 @@
             "display_name_in_chat": false,
             "execution_mode": "AUTONOMOUS",
             "enabled_tools": [],
-            "memory_mode": "CHANNEL_ISOLATED"
+            "memory_mode": "CHANNEL_ISOLATED",
+            "meta_visible": false
         },
         {
             "name": "it-help",
@@ -84,7 +89,8 @@
             "enabled_tools": [
                 "*"
             ],
-            "memory_mode": "CHANNEL_ISOLATED"
+            "memory_mode": "CHANNEL_ISOLATED",
+            "meta_visible": false
         },
         {
             "name": "joy",
@@ -101,7 +107,8 @@
                 "*"
             ],
             "memory_mode": "CHANNEL_ISOLATED",
-            "service_bindings": ["zammad", "agents"]
+            "service_bindings": ["zammad", "agents"],
+            "meta_visible": false
         }
     ],
     "models": {
@@ -232,12 +239,11 @@
             "gemini-2.5-flash-preview-tts",
             "gemini-2.5-pro-preview-tts",
             "learnlm-2.0-flash-experimental",
-            "gemma-3-1b-it",
-            "gemma-3-4b-it",
-            "gemma-3-12b-it",
-            "gemma-3-27b-it",
-            "gemma-3n-e4b-it",
-            "gemma-3n-e2b-it",
+            "gemma-4-1b-it",
+            "gemma-4-4b-it",
+            "gemma-4-12b-it",
+            "gemma-4-31b-it",
+            "gemma-4-26b-a4b-it",
             "gemini-2.5-flash-lite",
             "gemini-2.5-flash-image-preview",
             "gemini-2.5-flash-image",
