@@ -670,6 +670,17 @@ def get_tool_capabilities(tool_name: str) -> Dict[str, Any]:
     }
 
 
+def get_tool_definition(tool_name: str) -> Optional[Dict[str, Any]]:
+    """
+    Retrieves the full JSON definition for a given tool name.
+    Returns None if the tool is not found.
+    """
+    for tool in ALL_TOOL_DEFINITIONS:
+        if tool.get("function", {}).get("name") == tool_name:
+            return tool
+    return None
+
+
 def is_irreversible(tool_name: str, args: Dict[str, Any]) -> bool:
     """
     Checks if a tool call is irreversible based on its name and arguments.

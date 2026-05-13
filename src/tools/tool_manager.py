@@ -21,10 +21,23 @@ class ToolManager:
 
     def __init__(self) -> None:
         self._handlers: Dict[str, Callable[..., Coroutine[Any, Any, Any]]] = {}
+        self._enrichers: Dict[str, Callable[..., Coroutine[Any, Any, Any]]] = {}
 
-    def register(self, name: str, handler: Callable[..., Coroutine[Any, Any, Any]]) -> None:
-        """Register an async handler for a named tool."""
+    def register(self, name: str, handler: Callable[..., Coroutine[Any, Any, Any]], 
+                 enricher: Optional[Callable[..., Coroutine[Any, Any, Any]]] = None) -> None:
+        """Register an async handler for a named tool, and optionally an enrichment handler."""
         self._handlers[name] = handler
+        if enricher:
+            self._enrichers[name] = enricher
+
+    async def enrich_audit_action(self, tool_name: str, arguments: Dict[str, Any]) -> Optional[str]:
+        """Returns a human-readable enrichment string for a tool call if an enricher is registered."""
+        if tool_name in self._enrichers:
+            try:
+                return await self._enrichers[tool_name](**arguments)
+            except Exception as e:
+                logger.warning(f"Enrichment failed for {tool_name}: {e}")
+        return None
 
     def get_tool_definitions(self) -> List[Dict[str, Any]]:
         """Returns definitions for registered tools plus non-callable tool flags."""
@@ -60,15 +73,39 @@ class ZammadToolHandler:
 
     def register(self, manager: ToolManager) -> None:
         manager.register("get_ticket_details", self._get_ticket_details)
-        manager.register("update_ticket", self._update_ticket)
-        manager.register("add_note_to_ticket", self._add_note_to_ticket)
+        manager.register("update_ticket", self._update_ticket, self._enrich_ticket_action)
+        manager.register("add_note_to_ticket", self._add_note_to_ticket, self._enrich_ticket_action)
         manager.register("search_tickets", self._search_tickets)
         manager.register("create_ticket", self._create_ticket)
         manager.register("search_user", self._search_user)
         manager.register("create_user", self._create_user)
         manager.register("update_user", self._update_user)
         manager.register("delete_user", self._delete_user)
-        manager.register("merge_tickets", self._merge_tickets)
+        manager.register("merge_tickets", self._merge_tickets, self._enrich_merge_action)
+
+    async def _enrich_ticket_action(self, **kwargs: Any) -> Optional[str]:
+        """Fetches ticket number and title for enrichment."""
+        ticket_id = kwargs.get("ticket_id")
+        if not ticket_id:
+            return None
+        try:
+            ticket = await asyncio.to_thread(self.zammad_client.get_ticket, ticket_id=ticket_id)
+            return f"#{ticket.get('number')} ({ticket.get('title')})"
+        except Exception:
+            return None
+
+    async def _enrich_merge_action(self, **kwargs: Any) -> Optional[str]:
+        """Fetches ticket info for merge action enrichment."""
+        source_id = kwargs.get("source_ticket_id")
+        target_id = kwargs.get("target_ticket_id")
+        if not source_id or not target_id:
+            return None
+        try:
+            source = await asyncio.to_thread(self.zammad_client.get_ticket, ticket_id=source_id)
+            target = await asyncio.to_thread(self.zammad_client.get_ticket, ticket_id=target_id)
+            return f"Merge #{source.get('number')} into #{target.get('number')} ('{target.get('title')}')"
+        except Exception:
+            return None
 
     async def _get_ticket_details(self, ticket_number: int) -> Dict[str, Any]:
         """Translates user-facing ticket number to internal ID, then fetches complete details (articles + customer)."""
