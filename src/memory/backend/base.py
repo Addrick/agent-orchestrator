@@ -307,6 +307,7 @@ class MemoryBackend(ABC):
         scope_tags: List[str],
         source_persona: str,
         untrusted: bool = False,
+        timestamp: Optional[datetime] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Retain an episodic action+outcome record (new-shape).

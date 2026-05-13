@@ -603,6 +603,7 @@ class HindsightBackend(MemoryBackend):
         scope_tags: List[str],
         source_persona: str,
         untrusted: bool = False,
+        timestamp: Optional[datetime] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         content = f"Action: {action_type}\nContext: {json.dumps(context)}\nOutcome: {outcome}"
@@ -615,7 +616,7 @@ class HindsightBackend(MemoryBackend):
         item = self._build_item(
             bank_id=bank_id, content=content, tags=tags,
             scope_tags=scope_tags,
-            timestamp=datetime.now(timezone.utc),
+            timestamp=timestamp or datetime.now(timezone.utc),
             metadata=metadata,
         )
         q = await self._ensure_worker(bank_id)

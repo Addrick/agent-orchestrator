@@ -1163,12 +1163,13 @@ class MemoryManager:
         scope_tags: List[str],
         source_persona: str,
         untrusted: bool = False,
+        timestamp: Optional[datetime] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         return await self.backend.retain_experience(
             bank_id, action_type, context, outcome,
             scope_tags=scope_tags, source_persona=source_persona,
-            untrusted=untrusted, metadata=metadata,
+            untrusted=untrusted, timestamp=timestamp, metadata=metadata,
         )
 
     # Note: mark_trusted/mark_untrusted on MemoryManager already exist for the
