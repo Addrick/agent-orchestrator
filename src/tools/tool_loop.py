@@ -26,7 +26,7 @@ from src.generation_events import (
 from src.persona import ExecutionMode, Persona
 from src.tools.definitions import (
     WRITE_TOOLS, ALWAYS_CONFIRM_TOOLS,
-    get_tool_capabilities, is_irreversible
+    get_tool_capabilities, is_irreversible, get_tool_definition
 )
 from src.tools.tool_manager import ToolManager
 
@@ -190,11 +190,24 @@ class ToolLoop:
                 for wc in write_calls:
                     wc_name = wc.get("name", "")
                     wc_args = wc.get("arguments", {})
+                    
+                    # Extract binding and sensitivity from definition
+                    defn = get_tool_definition(wc_name) or {}
+                    binding = defn.get("service_binding")
+                    caps = defn.get("capabilities") or {}
+                    sensitivity = caps.get("sensitivity")
+                    
+                    # Fetch enrichment info (e.g. ticket number/title)
+                    enrichment = await self.tool_manager.enrich_audit_action(wc_name, wc_args)
+                    
                     audit_actions.append({
                         "tool": wc_name,
                         "arguments": wc_args,
                         "irreversible": is_irreversible(wc_name, wc_args),
                         "always_confirm": wc_name in ALWAYS_CONFIRM_TOOLS,
+                        "service_binding": binding,
+                        "sensitivity": sensitivity,
+                        "enrichment": enrichment,
                     })
 
                 audit_info = {
@@ -209,12 +222,19 @@ class ToolLoop:
                 lines = ["I'd like to perform the following actions:"]
                 for a in audit_actions:
                     flags = []
+                    if a["service_binding"]:
+                        flags.append(a["service_binding"].upper())
+                    if a["sensitivity"]:
+                        flags.append(a["sensitivity"].upper())
                     if a["irreversible"]:
                         flags.append("IRREVERSIBLE")
                     if a["always_confirm"]:
                         flags.append("HIGH-IMPACT")
+                    
                     flag_str = f" [{', '.join(flags)}]" if flags else ""
-                    lines.append(f"- **{a['tool']}**{flag_str}: {json.dumps(a['arguments'])}")
+                    enrich_str = f": **{a['enrichment']}**" if a["enrichment"] else ":"
+                    lines.append(f"- **{a['tool']}**{flag_str}{enrich_str} {json.dumps(a['arguments'])}")
+                
                 if turn_tainted:
                     lines.append(f"\n⚠️ Context contains untrusted content from: {', '.join(taint_sources)}")
 
