@@ -141,6 +141,17 @@ class ZammadClient:
         }
         return self._make_request('post', 'tags/add', json=payload)
 
+    def remove_tag(self, ticket_id: int, tag: str) -> Dict[str, Any]:
+        """
+        Removes a tag from a ticket using the Tags API.
+        """
+        payload = {
+            "object": "Ticket",
+            "o_id": ticket_id,
+            "item": tag
+        }
+        return self._make_request('delete', 'tags/remove', json=payload)
+
     def get_tags(self, ticket_id: int) -> List[str]:
         """
         Retrieves tags for a specific ticket using the Tags API.

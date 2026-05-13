@@ -118,15 +118,32 @@ class ZammadToolHandler:
     async def _update_ticket(self, ticket_id: int, **kwargs: Any) -> Dict[str, Any]:
         logger.info(f"Executing tool: update_ticket on ticket_id={ticket_id} with args={kwargs}")
         payload: Dict[str, Any] = {}
-        valid_args = ["state", "priority", "owner_id", "tags"]
+        valid_args = ["state", "priority", "owner_id"]
+        
+        # 1. Handle Tags via Tags API (Delta Update)
+        if "tags" in kwargs:
+            requested_tags = set(kwargs["tags"]) if isinstance(kwargs["tags"], list) else set()
+            current_tags = set(await asyncio.to_thread(self.zammad_client.get_tags, ticket_id=ticket_id))
+            
+            tags_to_add = requested_tags - current_tags
+            tags_to_remove = current_tags - requested_tags
+            
+            for tag in tags_to_add:
+                await asyncio.to_thread(self.zammad_client.add_tag, ticket_id=ticket_id, tag=tag)
+            for tag in tags_to_remove:
+                await asyncio.to_thread(self.zammad_client.remove_tag, ticket_id=ticket_id, tag=tag)
+
+        # 2. Handle other fields via Ticket API
         for key, value in kwargs.items():
             if key in valid_args:
-                if key == "tags" and isinstance(value, list):
-                    payload[key] = ",".join(value)
-                else:
-                    payload[key] = value
+                payload[key] = value
+
         if not payload:
+            if "tags" in kwargs:
+                # Only tags were updated, return the current ticket state
+                return await asyncio.to_thread(self.zammad_client.get_ticket, ticket_id=ticket_id)
             raise ValueError("No valid update parameters provided for update_ticket.")
+
         return await asyncio.to_thread(
             self.zammad_client.update_ticket, ticket_id=ticket_id, payload=payload
         )
