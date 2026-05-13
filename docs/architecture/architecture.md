@@ -22,7 +22,7 @@ Interface (Discord/Gmail/Zammad)
       -> ToolManager.execute_tool()     -- tool execution
       -- yields TokenEvent / ToolCallStartEvent / ToolCallResultEvent / ErrorEvent
       -- + internal _ApiPayloadEvent (orchestrator caches) and _LoopFinishedEvent
-         (orchestrator persists assistant turn / parks CONFIRM-mode write calls)
+         (orchestrator persists assistant turn / parks write calls for audit)
     -> MemoryManager.log_message()    -- persist user + assistant messages (reply_to_id links A->Q)
     -> Response back to interface
 
@@ -56,10 +56,10 @@ Background (MemoryConsolidator, hourly daemon via app.register_task):
 - `_build_conversation_history()` -> fetches from DB via MemoryManager, formats for LLM; returns `(history, oldest_interaction_id)`
 - `_retrieve_memory_block()` -> resolves a query string from current message / latest user turn, then calls `self.memory_backend.recall(bank_id=persona, query, k=MEMORY_MAX_SUMMARIES_IN_CONTEXT, tag_filter=[channel:_, user:_, server:_, exclude_after:_])`. Formats the returned `MemoryHit` list into a `<memory>` XML block injected at history[0]. The `exclude_after:N` tag carries the sliding-window cutoff through the backend boundary; SqliteSemanticBackend translates it back into `exclude_after_interaction_id`, Hindsight ignores it. Controlled by `MEMORY_RETRIEVAL_ENABLED` and `MEMORY_MAX_SUMMARIES_IN_CONTEXT`.
 - `_prepare_request()` -> builds history, injects memory block, appends user message, then calls `memory.context_budget.truncate_messages_to_budget(messages, max_context_tokens - response_token_limit)` to enforce the persona's total ctx cap. System messages and the latest user message are always preserved.
-- `_orchestrate()` -> shared streaming kernel — preprocess → set TurnContext (`src/tools/turn_context.py`) → user-log → user `retain_turn` → ToolLoop → assistant-commit → assistant `retain_turn` (taint-aware) → DoneEvent → reset TurnContext. `stream_response()` (portal) and `generate_response()` (Discord/Gmail/agents) both delegate here. Token + tool events forwarded as-is; internal `_ApiPayloadEvent` siphons into `_store_api_request`, `_LoopFinishedEvent` drives CONFIRM-mode parking + assistant persistence. Both retain calls are fire-and-forget (sqlite_legacy noop; Hindsight enqueues + returns).
+- `_orchestrate()` -> shared streaming kernel — preprocess → set TurnContext (`src/tools/turn_context.py`) → user-log → user `retain_turn` → ToolLoop → assistant-commit → assistant `retain_turn` (taint-aware) → DoneEvent → reset TurnContext. `stream_response()` (portal) and `generate_response()` (Discord/Gmail/agents) both delegate here. Token + tool events forwarded as-is; internal `_ApiPayloadEvent` siphons into `_store_api_request`, `_LoopFinishedEvent` drives universal write-audit parking + assistant persistence. Both retain calls are fire-and-forget (sqlite_legacy noop; Hindsight enqueues + returns).
 - `_retain_turn_safe()` -> wraps `memory_backend.retain_turn(...)` with try/except so a backend hiccup never derails the user turn. Builds scope tags + threads `untrusted` (False for user turns; `ctx.turn_tainted` for assistant turns).
 - `_filter_tools_for_persona()` -> filters by enabled tools, service bindings, model compatibility
-- `resume_pending_confirmation()` -> handles CONFIRM mode write-tool approval flow (still uses `_execute_write_calls` / `_append_denied_tool_results` retained for this path)
+- `resume_pending_confirmation()` -> handles write-tool approval flow (still uses `_execute_write_calls` / `_append_denied_tool_results` retained for this path)
 - `PendingConfirmation` dataclass stores paused state for write-tool confirmation
 - `RequestContext` dataclass bundles all pipeline state
 
@@ -76,8 +76,8 @@ Background (MemoryConsolidator, hourly daemon via app.register_task):
 ### `src/tools/tool_loop.py` -- ToolLoop
 - Stream-shaped tool loop extracted from `_orchestrate` (tool revamp v1, supersedes the old `plans/toolloop_extraction.md`).
 - `ToolLoop(text_engine, tool_manager, max_iterations=MAX_TOOL_CALLS)` — constructed per-call by `_orchestrate` so tests that swap `chat_system.text_engine` post-init still take effect.
-- `run(persona, conversation_history, params, tools, ...)` — async generator. Drives `text_engine.stream_messages` per iteration, forwards `TokenEvent`s, surfaces tool calls as `ToolCallStartEvent` / `ToolCallResultEvent`, mutates `conversation_history` in place (orchestrator + CONFIRM-mode resume read it back).
-- Trusts the tool list it's handed — capability filtering / policy live in `ChatSystem._filter_tools_for_persona`. Sibling `plans/tool_security_framework.md` will replace that mapping with a richer policy without touching this loop.
+- `run(persona, conversation_history, params, tools, ...)` — async generator. Drives `text_engine.stream_messages` per iteration, forwards `TokenEvent`s, surfaces tool calls as `ToolCallStartEvent` / `ToolCallResultEvent`, mutates `conversation_history` in place (orchestrator + resume path read it back).
+- Implements universal write-audit: if any call in a batch has `is_write=True`, the loop yields `_LoopFinishedEvent(response_type=PENDING_CONFIRMATION)` and exits. Taint tracking and irreversibility flags are computed here for the audit surface.
 - Tool errors (returned as `{"error": ...}` by `tool_manager.execute_tool`) surface via `ToolCallResultEvent.error`; the loop continues so the model can adapt instead of hard-stopping.
 - Internal events `_ApiPayloadEvent` / `_LoopFinishedEvent` are loop-private — they let the orchestrator handle api-payload caching, CONFIRM-mode `pending_writes` parking, and assistant-row persistence without leaking into the public event surface.
 
@@ -113,7 +113,7 @@ Background (MemoryConsolidator, hourly daemon via app.register_task):
 ### `src/tools/` -- Tool System
 - `definitions.py` -- JSON schemas for all tools, `WRITE_TOOLS` set, `MODEL_INCOMPATIBLE_TOOLS` dict
 - `tool_manager.py` -- ToolManager registry, `execute_tool()`, handler registration pattern
-- Tool categories: read-only (search, get) vs write (create, update, close) -- write tools go through confirmation in CONFIRM mode
+- Tool categories: read-only (search, get) vs write (create, update, close) -- all write tools go through human confirmation
 - `WebSearchHandler` registered at ChatSystem init
 - Service-specific tools registered via `ServiceIntegration.register_tools()`
 - Memory tools: `submit_memory_summary` (observations[] + outlier_ids[], used by MemoryAgent), `drill_down_memory` (retrieves source messages for a summary), `update_core_memory` (edits core profile summaries)

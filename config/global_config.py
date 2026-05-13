@@ -62,7 +62,7 @@ TEST_PERSONA_SAVE_FILE = TEST_DATABASE_DIR / "test_personas.json"
 # Toggles for enabling/disabling specific application interfaces
 DISCORD_BOT = True
 GMAIL_BOT = False
-WEB_INTERFACE = False
+WEB_INTERFACE = 1
 KOBOLD_PORT = 5002
 # Persona served when kobold-lite connects without picking one explicitly.
 # Overridable with KOBOLD_DEFAULT_PERSONA env var.

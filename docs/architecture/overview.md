@@ -12,13 +12,13 @@ Async, provider-agnostic LLM orchestration engine for chatbot automation (IT sup
 
 **Providers:** OpenAI, Anthropic, Google (Gemini 2.5/3.1, Gemma), local OpenAI-compatible. Rate limiters split by model family.
 
-**Persona system:** Stateful LLM config objects with ExecutionMode (AUTONOMOUS, CONFIRM) and MemoryMode (CHANNEL_ISOLATED, SERVER_WIDE, PERSONAL, GLOBAL, TICKET_ISOLATED — note: TICKET_ISOLATED is dormant since lifecycle hook removal). Runtime-mutable via `set` commands. System personas are read-only configs used by agents for analysis.
+**Persona system:** Stateful LLM config objects with ExecutionMode (AUTONOMOUS, CONFIRM) and MemoryMode (CHANNEL_ISOLATED, SERVER_WIDE, PERSONAL, GLOBAL, TICKET_ISOLATED). Note: Execution mode still affects UI presentation, but **all write tools park for audit** regardless of mode per the security framework. Runtime-mutable via `set` commands. System personas are read-only configs used by agents for analysis.
 
 **Agent framework:** Agent ABC (src/agents/base.py) → AgentManager lifecycle → AppManager top-level coordinator. Currently: ZammadBot (multi-stage triage via 4 system personas), DispatchAgent (priority assessment + config-driven notification). Autonomous background workers on interval schedules. Config-driven via agents.json. Agents invoke system personas for read-only LLM analysis; do not spawn other agents. Agent tools (status/history/manage) gated behind service_bindings.
 
 **Notification system:** NotificationRouter → Notifier ABC (DiscordNotifier, ZammadNotifier, LogNotifier). Decoupled from agents — channel/recipient config-driven.
 
-**Tool system:** JSON schemas in definitions.py, read-only vs write (confirmation gating in CONFIRM mode), service-binding filtered. ServiceIntegration ABC is a tool-registration-only interface (lifecycle hooks removed 2026-03-28). Agent tools registered via AgentServiceIntegration.
+**Tool system:** JSON schemas in definitions.py, read-only vs write (all write tools go through human confirmation), service-binding filtered. ServiceIntegration ABC is a tool-registration-only interface (lifecycle hooks removed 2026-03-28). Agent tools registered via AgentServiceIntegration.
 
 **Storage:** SQLite — User_Interactions (conversations), Suppressed_Interactions, Agent_Actions + Agent_Action_Contexts. All async via to_thread().
 
