@@ -20,7 +20,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("backfill")
 
-async def backfill(persona_filter: list[str] | None = None):
+async def backfill(persona_filter: list[str] | None = None, wipe: bool = False):
     # 1. Initialize
     mm = MemoryManager(db_path=MEMORY_DATABASE_FILE)
     hindsight = HindsightBackend(url=HINDSIGHT_URL)
@@ -43,11 +43,29 @@ async def backfill(persona_filter: list[str] | None = None):
 
     logger.info(f"Ensuring banks exist for personas: {personas}")
     for persona in personas:
+        if wipe:
+            logger.info(f"Wiping bank for persona: {persona}")
+            await hindsight.delete_bank(persona)
+        
+        if persona == "ambient":
+            retain_mission = (
+                "You are an observer listening to an ambient channel. The messages are from "
+                "various users and are not necessarily directed at you. Extract facts about "
+                "the users, their interests, and mentioned entities. Attribute actions to "
+                "the correct speakers identified in the text (e.g. 'Name: message'). "
+                "IMPORTANT: Do NOT attribute these actions to a persona named 'ambient'. "
+                "The 'ambient' name refers to the bank itself, not a participant."
+            )
+            reflect_mission = "Reason over the ambient conversation logs to identify user interests, recurring themes, and entity relationships."
+        else:
+            retain_mission = f"Extract facts and experiences for the persona '{persona}'."
+            reflect_mission = f"Reason over the memories of '{persona}' to provide thoughtful insights."
+
         await hindsight.ensure_bank(
             bank_id=persona,
             enable_observations=True,
-            retain_mission=f"Extract facts and experiences for the persona '{persona}'.",
-            reflect_mission=f"Reason over the memories of '{persona}' to provide thoughtful insights."
+            retain_mission=retain_mission,
+            reflect_mission=reflect_mission
         )
 
     # 3. Fetch all interactions
@@ -73,10 +91,27 @@ async def backfill(persona_filter: list[str] | None = None):
         batch = rows[i:i+batch_size]
         
         for row in batch:
+            # Retain turn
+            ts = row["timestamp"]
+            if isinstance(ts, str):
+                try:
+                    ts = datetime.fromisoformat(ts)
+                except ValueError:
+                    # Fallback for older sqlite formats if needed
+                    ts = datetime.now(timezone.utc)
+            
+            # Normalize to UTC if naive
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+
             # Prepare content: include reasoning if present
             content = row["content"] or ""
             if row["reasoning_content"]:
                 content = f"<thought>\n{row['reasoning_content']}\n</thought>\n\n{content}"
+            
+            # Force Hindsight's extraction LLM to see the original date
+            date_header = ts.strftime("%Y-%m-%d %H:%M:%S")
+            content = f"Date: {date_header}\n---\n{content}"
             
             # Metadata for traceability
             # Hindsight metadata values must be strings (HTTP 422 otherwise).
@@ -86,15 +121,6 @@ async def backfill(persona_filter: list[str] | None = None):
             }
             if row["tool_context"]:
                 metadata["tool_context"] = str(row["tool_context"])
-
-            # Retain turn
-            ts = row["timestamp"]
-            if isinstance(ts, str):
-                try:
-                    ts = datetime.fromisoformat(ts)
-                except ValueError:
-                    # Fallback for older sqlite formats if needed
-                    ts = datetime.now(timezone.utc)
 
             await hindsight.retain_turn(
                 bank_id=row["persona_name"],
@@ -130,5 +156,9 @@ if __name__ == "__main__":
         "--personas", nargs="+", default=None,
         help="Persona names to backfill (default: all non-system personas in User_Interactions).",
     )
+    parser.add_argument(
+        "--wipe", action="store_true",
+        help="Delete existing banks for selected personas before backfilling (clears duplicates).",
+    )
     args = parser.parse_args()
-    asyncio.run(backfill(persona_filter=args.personas))
+    asyncio.run(backfill(persona_filter=args.personas, wipe=args.wipe))
