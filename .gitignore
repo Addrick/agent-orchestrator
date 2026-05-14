@@ -39,3 +39,7 @@ tests/test_data/
 
 # Eval harness run logs (keep result JSONs for archaeology)
 eval_harnesses/results/*.log
+
+# Eval harness slice cache + transient seeder state
+.eval_cache/
+eval_harnesses/suites/memory_recall/fixtures/.test_persona_seeded.json

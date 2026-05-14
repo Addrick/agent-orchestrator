@@ -1,38 +1,169 @@
 [
   {
     "id": "bass_blister",
-    "description": "Bass guitar blister advice should surface SEG 743",
-    "user_request": "bass guitar blister",
-    "persona_name": "default",
+    "description": "Bass guitar blister query should surface SEG 1215.",
+    "user_request": "bass guitar blister fingertips",
+    "persona_name": "arbitr",
     "channel": "arbitr",
+    "slice_sql": "eval_harnesses/suites/memory_recall/fixtures/slice.sql",
     "expectations": {
-      "expected_segments": [743],
-      "anti_segments": []
+      "expected_segments": [
+        1215
+      ],
+      "anti_segments": [
+        1131,
+        1175
+      ]
     },
-    "graders": ["retrieval_hits"]
+    "graders": [
+      "retrieval_hits"
+    ],
+    "server_id": "347812763093172225"
   },
   {
-    "id": "koboldcpp_context",
-    "description": "koboldcpp context-truncation question should surface SEGs 663, 620",
-    "user_request": "koboldcpp context truncation long context",
-    "persona_name": "default",
+    "id": "koboldcpp_cuda_gemma",
+    "description": "KoboldCPP CUDA error on Gemma load should surface SEG 1247, with 1248/1251 as related-but-different.",
+    "user_request": "koboldcpp CUDA error launching gemma gguf",
+    "persona_name": "arbitr",
     "channel": "arbitr",
+    "slice_sql": "eval_harnesses/suites/memory_recall/fixtures/slice.sql",
     "expectations": {
-      "expected_segments": [663, 620],
-      "anti_segments": []
+      "expected_segments": [
+        1247
+      ],
+      "anti_segments": [
+        1268
+      ]
     },
-    "graders": ["retrieval_hits"]
+    "graders": [
+      "retrieval_hits"
+    ],
+    "server_id": "347812763093172225"
   },
   {
-    "id": "surface_smc",
-    "description": "Surface laptop SMC reset / boot failure should surface SEGs 573, 574",
-    "user_request": "Surface laptop SMC reset power",
-    "persona_name": "default",
+    "id": "zammad_db_error",
+    "description": "Zammad Rails DB config error — cluster, both SEGs 1121, 1122 should surface.",
+    "user_request": "Zammad cannot load database configuration RuntimeError",
+    "persona_name": "arbitr",
     "channel": "arbitr",
+    "slice_sql": "eval_harnesses/suites/memory_recall/fixtures/slice.sql",
     "expectations": {
-      "expected_segments": [573, 574],
-      "anti_segments": []
+      "expected_segments": [
+        1121,
+        1122
+      ],
+      "anti_segments": [
+        1124,
+        1241
+      ]
     },
-    "graders": ["retrieval_hits"]
+    "graders": [
+      "retrieval_hits"
+    ],
+    "server_id": "347812763093172225"
+  },
+  {
+    "id": "docker_anon_token",
+    "description": "Docker anonymous token error cluster — SEGs 1255, 1256.",
+    "user_request": "docker failed to fetch anonymous token EOF",
+    "persona_name": "arbitr",
+    "channel": "arbitr",
+    "slice_sql": "eval_harnesses/suites/memory_recall/fixtures/slice.sql",
+    "expectations": {
+      "expected_segments": [
+        1255,
+        1256
+      ],
+      "anti_segments": [
+        1125,
+        1218
+      ]
+    },
+    "graders": [
+      "retrieval_hits"
+    ],
+    "server_id": "347812763093172225"
+  },
+  {
+    "id": "surface_bitlocker",
+    "description": "Surface device BitLocker decryption — SEG 1196. 1131 (lens wipes for displays) and 1194 (Cinema Display scratch) are display-vocab noise.",
+    "user_request": "Surface laptop BitLocker recovery Intune",
+    "persona_name": "arbitr",
+    "channel": "arbitr",
+    "slice_sql": "eval_harnesses/suites/memory_recall/fixtures/slice.sql",
+    "expectations": {
+      "expected_segments": [
+        1196
+      ],
+      "anti_segments": [
+        1131,
+        1194
+      ]
+    },
+    "graders": [
+      "retrieval_hits"
+    ],
+    "server_id": "347812763093172225"
+  },
+  {
+    "id": "gemini_embedding_2",
+    "description": "Gemini Embedding 2 release date — SEG 1254. embeddinggemma (1257) is related noise.",
+    "user_request": "Gemini Embedding 2 release date multimodal",
+    "persona_name": "arbitr",
+    "channel": "arbitr",
+    "slice_sql": "eval_harnesses/suites/memory_recall/fixtures/slice.sql",
+    "expectations": {
+      "expected_segments": [
+        1254
+      ],
+      "anti_segments": [
+        1257,
+        1153
+      ]
+    },
+    "graders": [
+      "retrieval_hits"
+    ],
+    "server_id": "347812763093172225"
+  },
+  {
+    "id": "powershell_ssh_scroll",
+    "description": "PowerShell SSH mouse scroll issue — SEG 1231.",
+    "user_request": "PowerShell SSH mouse scroll wheel not working",
+    "persona_name": "arbitr",
+    "channel": "arbitr",
+    "slice_sql": "eval_harnesses/suites/memory_recall/fixtures/slice.sql",
+    "expectations": {
+      "expected_segments": [
+        1231
+      ],
+      "anti_segments": [
+        1139
+      ]
+    },
+    "graders": [
+      "retrieval_hits"
+    ],
+    "server_id": "347812763093172225"
+  },
+  {
+    "id": "openviking_memory",
+    "description": "OpenViking memory schema research — SEG 1244. 1268 (memory_mode) is generic memory noise.",
+    "user_request": "OpenViking memory schema association graphs",
+    "persona_name": "arbitr",
+    "channel": "arbitr",
+    "slice_sql": "eval_harnesses/suites/memory_recall/fixtures/slice.sql",
+    "expectations": {
+      "expected_segments": [
+        1244
+      ],
+      "anti_segments": [
+        1268
+      ]
+    },
+    "graders": [
+      "retrieval_hits"
+    ],
+    "server_id": "347812763093172225"
   }
 ]

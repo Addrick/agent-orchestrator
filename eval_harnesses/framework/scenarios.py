@@ -42,7 +42,7 @@ class Scenario:
 
 _SCENARIO_FIELDS = {
     "id", "description", "user_request", "context", "persona_name",
-    "channel", "user_identifier", "seed_memory", "expectations",
+    "channel", "user_identifier", "server_id", "seed_memory", "expectations",
     "graders", "meta",
 }
 
