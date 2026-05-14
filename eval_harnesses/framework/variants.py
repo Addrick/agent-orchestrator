@@ -26,6 +26,9 @@ class MemoryVariant:
     hindsight: bool = False
     retrieval_params: Dict[str, Any] = field(default_factory=dict)
     hindsight_params: Dict[str, Any] = field(default_factory=dict)
+    # When set, build_fixture uses this DB path directly (read-only intent;
+    # not unlinked on teardown). None => fresh temp DB per cell-run.
+    db_path: Optional[str] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
