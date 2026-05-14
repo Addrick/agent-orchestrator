@@ -1,0 +1,98 @@
+{
+  "suite": "backfill_dates",
+  "started_at": "2026-05-14T05:27:03.512052",
+  "finished_at": "2026-05-14T05:28:07.136948",
+  "live": false,
+  "summary": {
+    "total": 1,
+    "passed": 1,
+    "per_grader": {
+      "date_attribution": {
+        "pass": 1,
+        "fail": 0
+      }
+    }
+  },
+  "cells": [
+    {
+      "scenario_id": "single_dated_quote",
+      "memory_variant_id": "explicit_default_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "EK 360 AIO cooler is leaking after 14 months; RMA request sent | When: 2026-03-12 | Involving: Adam",
+        "response_type": null,
+        "duration_s": 63.452283,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": null,
+        "raw": {
+          "retain_response": {
+            "success": true,
+            "bank_id": "eval_backfill_single_dated_quote_explicit_default_mission_b09c6",
+            "items_count": 1,
+            "async": false,
+            "operation_id": null,
+            "operation_ids": null,
+            "usage": {
+              "input_tokens": 1838,
+              "output_tokens": 197,
+              "total_tokens": 2035
+            }
+          },
+          "bank_id": "eval_backfill_single_dated_quote_explicit_default_mission_b09c6",
+          "strategy": "explicit",
+          "recalled_items": [
+            {
+              "id": "9aa53d7e-7341-4e49-abee-5de6063236d7",
+              "text": "EK 360 AIO cooler is leaking after 14 months; RMA request sent | When: 2026-03-12 | Involving: Adam",
+              "type": "world",
+              "entities": [
+                "Adam",
+                "EK 360 AIO cooler"
+              ],
+              "context": "",
+              "occurred_start": "2026-03-12T00:00:00+00:00",
+              "occurred_end": "2026-03-12T00:00:00+00:00",
+              "mentioned_at": "2026-03-12T10:00:00+00:00",
+              "document_id": "doc_aio_cooler",
+              "metadata": {},
+              "chunk_id": "eval_backfill_single_dated_quote_explicit_default_mission_b09c6_doc_aio_cooler_0",
+              "tags": [],
+              "source_fact_ids": null
+            }
+          ],
+          "mentioned_at": [
+            "2026-03-12T10:00:00+00:00"
+          ],
+          "occurred_start": [
+            "2026-03-12T00:00:00+00:00"
+          ]
+        }
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": true,
+          "score": 1.0,
+          "notes": "hits=1/1 misses=none forbidden_hits=none",
+          "detail": {
+            "expected": [
+              "2026-03-12"
+            ],
+            "recalled": [
+              "2026-03-12"
+            ],
+            "misses": [],
+            "forbidden_hits": [],
+            "raw_mentioned_at": [
+              "2026-03-12T10:00:00+00:00"
+            ]
+          }
+        }
+      ],
+      "passed": true
+    }
+  ]
+}

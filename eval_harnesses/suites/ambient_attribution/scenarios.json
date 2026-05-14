@@ -1,0 +1,61 @@
+[
+  {
+    "id": "two_speaker_simple",
+    "description": "Two speakers, distinct topics. Each statement must be attributed to its speaker.",
+    "user_request": "Summarize what each participant said.",
+    "expectations": {
+      "speakers": ["Tom", "Alice"],
+      "turns": [
+        {"speaker": "Tom", "ts": "2026-04-01T10:00:00Z", "text": "I picked up a wagyu A5 ribeye on discount at H Mart yesterday."},
+        {"speaker": "Alice", "ts": "2026-04-01T10:01:00Z", "text": "My GPU is throttling at 84C under load. Need to repaste."},
+        {"speaker": "Tom", "ts": "2026-04-01T10:02:00Z", "text": "I rendered it sous vide at 54C for two hours then seared in tallow."}
+      ],
+      "facts": [
+        {"speaker": "Tom", "must_contain": ["wagyu", "discount"]},
+        {"speaker": "Alice", "must_contain": ["gpu", "throttl"]},
+        {"speaker": "Tom", "must_contain": ["sous vide", "54"]}
+      ]
+    },
+    "graders": ["attribution_correctness"]
+  },
+  {
+    "id": "three_speaker_overlap",
+    "description": "Three speakers discussing related topics; risk of cross-attribution.",
+    "user_request": "What did each person say about the LAN party?",
+    "expectations": {
+      "speakers": ["Adam", "Mike", "Sara"],
+      "turns": [
+        {"speaker": "Adam", "ts": "2026-04-10T19:00:00Z", "text": "Hosting LAN party Saturday. Bring your own ethernet cable."},
+        {"speaker": "Mike", "ts": "2026-04-10T19:02:00Z", "text": "I can bring the unmanaged 8-port switch and two cat6 runs."},
+        {"speaker": "Sara", "ts": "2026-04-10T19:03:00Z", "text": "I'll handle pizza. Two pepperoni and one veggie from Pequods."},
+        {"speaker": "Adam", "ts": "2026-04-10T19:05:00Z", "text": "Cool. Tournament bracket starts at 8pm sharp, double elim."},
+        {"speaker": "Mike", "ts": "2026-04-10T19:06:00Z", "text": "Are we doing CS2 or Quake Champions? My ping is awful in CS2."}
+      ],
+      "facts": [
+        {"speaker": "Adam", "must_contain": ["lan party", "saturday"]},
+        {"speaker": "Mike", "must_contain": ["switch", "cat6"]},
+        {"speaker": "Sara", "must_contain": ["pizza", "pequods"]},
+        {"speaker": "Adam", "must_contain": ["bracket", "double elim"]},
+        {"speaker": "Mike", "must_contain": ["cs2", "ping"]}
+      ]
+    },
+    "graders": ["attribution_correctness"]
+  },
+  {
+    "id": "single_speaker_no_label",
+    "description": "Single speaker with no name in some lines; should still NOT be attributed to ambient/narrator.",
+    "user_request": "What did Adam say?",
+    "expectations": {
+      "speakers": ["Adam"],
+      "turns": [
+        {"speaker": "Adam", "ts": "2026-04-20T12:00:00Z", "text": "Got Hindsight 0.6.1 deployed in docker today. Recall actually returns hits now."},
+        {"speaker": "Adam", "ts": "2026-04-20T12:05:00Z", "text": "Mental model refresh still empty if tags_match is restrictive though."}
+      ],
+      "facts": [
+        {"speaker": "Adam", "must_contain": ["hindsight", "0.6.1"]},
+        {"speaker": "Adam", "must_contain": ["mental model", "tags_match"]}
+      ]
+    },
+    "graders": ["attribution_correctness"]
+  }
+]

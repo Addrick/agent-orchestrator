@@ -1,0 +1,486 @@
+{
+  "suite": "backfill_dates",
+  "started_at": "2026-05-14T05:23:25.513483",
+  "finished_at": "2026-05-14T05:32:42.396513",
+  "live": false,
+  "summary": {
+    "total": 18,
+    "passed": 0,
+    "per_grader": {
+      "date_attribution": {
+        "pass": 0,
+        "fail": 18
+      }
+    }
+  },
+  "cells": [
+    {
+      "scenario_id": "single_dated_quote",
+      "memory_variant_id": "unset_default_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "",
+        "response_type": null,
+        "duration_s": 31.421124,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": "ReadTimeout: ",
+        "raw": {}
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": false,
+          "score": 0.0,
+          "notes": "driver error: ReadTimeout: ",
+          "detail": {}
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "single_dated_quote",
+      "memory_variant_id": "explicit_default_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "",
+        "response_type": null,
+        "duration_s": 30.730703,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": "ReadTimeout: ",
+        "raw": {}
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": false,
+          "score": 0.0,
+          "notes": "driver error: ReadTimeout: ",
+          "detail": {}
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "single_dated_quote",
+      "memory_variant_id": "header_inline_default_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "",
+        "response_type": null,
+        "duration_s": 30.754155,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": "ReadTimeout: ",
+        "raw": {}
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": false,
+          "score": 0.0,
+          "notes": "driver error: ReadTimeout: ",
+          "detail": {}
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "single_dated_quote",
+      "memory_variant_id": "block_anchor_default_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "",
+        "response_type": null,
+        "duration_s": 30.851858,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": "ReadTimeout: ",
+        "raw": {}
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": false,
+          "score": 0.0,
+          "notes": "driver error: ReadTimeout: ",
+          "detail": {}
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "single_dated_quote",
+      "memory_variant_id": "unset_backfill_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "",
+        "response_type": null,
+        "duration_s": 30.742073,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": "ReadTimeout: ",
+        "raw": {}
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": false,
+          "score": 0.0,
+          "notes": "driver error: ReadTimeout: ",
+          "detail": {}
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "single_dated_quote",
+      "memory_variant_id": "header_inline_backfill_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "",
+        "response_type": null,
+        "duration_s": 30.755649,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": "ReadTimeout: ",
+        "raw": {}
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": false,
+          "score": 0.0,
+          "notes": "driver error: ReadTimeout: ",
+          "detail": {}
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "two_docs_distinct_dates",
+      "memory_variant_id": "unset_default_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "",
+        "response_type": null,
+        "duration_s": 30.734634,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": "ReadTimeout: ",
+        "raw": {}
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": false,
+          "score": 0.0,
+          "notes": "driver error: ReadTimeout: ",
+          "detail": {}
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "two_docs_distinct_dates",
+      "memory_variant_id": "explicit_default_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "",
+        "response_type": null,
+        "duration_s": 30.807022,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": "ReadTimeout: ",
+        "raw": {}
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": false,
+          "score": 0.0,
+          "notes": "driver error: ReadTimeout: ",
+          "detail": {}
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "two_docs_distinct_dates",
+      "memory_variant_id": "header_inline_default_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "",
+        "response_type": null,
+        "duration_s": 31.208973,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": "ReadTimeout: ",
+        "raw": {}
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": false,
+          "score": 0.0,
+          "notes": "driver error: ReadTimeout: ",
+          "detail": {}
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "two_docs_distinct_dates",
+      "memory_variant_id": "block_anchor_default_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "",
+        "response_type": null,
+        "duration_s": 30.918537,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": "ReadTimeout: ",
+        "raw": {}
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": false,
+          "score": 0.0,
+          "notes": "driver error: ReadTimeout: ",
+          "detail": {}
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "two_docs_distinct_dates",
+      "memory_variant_id": "unset_backfill_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "",
+        "response_type": null,
+        "duration_s": 31.106621,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": "ReadTimeout: ",
+        "raw": {}
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": false,
+          "score": 0.0,
+          "notes": "driver error: ReadTimeout: ",
+          "detail": {}
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "two_docs_distinct_dates",
+      "memory_variant_id": "header_inline_backfill_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "",
+        "response_type": null,
+        "duration_s": 30.753022,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": "ReadTimeout: ",
+        "raw": {}
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": false,
+          "score": 0.0,
+          "notes": "driver error: ReadTimeout: ",
+          "detail": {}
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "inline_date_in_body",
+      "memory_variant_id": "unset_default_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "",
+        "response_type": null,
+        "duration_s": 30.835473,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": "ReadTimeout: ",
+        "raw": {}
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": false,
+          "score": 0.0,
+          "notes": "driver error: ReadTimeout: ",
+          "detail": {}
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "inline_date_in_body",
+      "memory_variant_id": "explicit_default_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "",
+        "response_type": null,
+        "duration_s": 30.7718,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": "ReadTimeout: ",
+        "raw": {}
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": false,
+          "score": 0.0,
+          "notes": "driver error: ReadTimeout: ",
+          "detail": {}
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "inline_date_in_body",
+      "memory_variant_id": "header_inline_default_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "",
+        "response_type": null,
+        "duration_s": 31.192014,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": "ReadTimeout: ",
+        "raw": {}
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": false,
+          "score": 0.0,
+          "notes": "driver error: ReadTimeout: ",
+          "detail": {}
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "inline_date_in_body",
+      "memory_variant_id": "block_anchor_default_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "",
+        "response_type": null,
+        "duration_s": 30.85716,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": "ReadTimeout: ",
+        "raw": {}
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": false,
+          "score": 0.0,
+          "notes": "driver error: ReadTimeout: ",
+          "detail": {}
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "inline_date_in_body",
+      "memory_variant_id": "unset_backfill_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "",
+        "response_type": null,
+        "duration_s": 30.837854,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": "ReadTimeout: ",
+        "raw": {}
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": false,
+          "score": 0.0,
+          "notes": "driver error: ReadTimeout: ",
+          "detail": {}
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "inline_date_in_body",
+      "memory_variant_id": "header_inline_backfill_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "",
+        "response_type": null,
+        "duration_s": 30.956174,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": "ReadTimeout: ",
+        "raw": {}
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": false,
+          "score": 0.0,
+          "notes": "driver error: ReadTimeout: ",
+          "detail": {}
+        }
+      ],
+      "passed": false
+    }
+  ]
+}

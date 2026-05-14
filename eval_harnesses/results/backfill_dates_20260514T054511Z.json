@@ -1,0 +1,1940 @@
+{
+  "suite": "backfill_dates",
+  "started_at": "2026-05-14T05:29:16.931043",
+  "finished_at": "2026-05-14T05:45:11.924828",
+  "live": false,
+  "summary": {
+    "total": 18,
+    "passed": 6,
+    "per_grader": {
+      "date_attribution": {
+        "pass": 6,
+        "fail": 12
+      }
+    }
+  },
+  "cells": [
+    {
+      "scenario_id": "single_dated_quote",
+      "memory_variant_id": "unset_default_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "EK 360 AIO cooler is leaking after 14 months; RMA request sent | Involving: Adam",
+        "response_type": null,
+        "duration_s": 56.579483,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": null,
+        "raw": {
+          "retain_response": {
+            "success": true,
+            "bank_id": "eval_backfill_single_dated_quote_unset_default_mission_b69c6ff4",
+            "items_count": 1,
+            "async": false,
+            "operation_id": null,
+            "operation_ids": null,
+            "usage": {
+              "input_tokens": 1801,
+              "output_tokens": 173,
+              "total_tokens": 1974
+            }
+          },
+          "bank_id": "eval_backfill_single_dated_quote_unset_default_mission_b69c6ff4",
+          "strategy": "unset",
+          "recalled_items": [
+            {
+              "id": "0fbf46a7-5c98-4ecd-98e8-847243eab230",
+              "text": "EK 360 AIO cooler is leaking after 14 months; RMA request sent | Involving: Adam",
+              "type": "world",
+              "entities": [
+                "Adam",
+                "EK 360 AIO cooler"
+              ],
+              "context": "",
+              "occurred_start": null,
+              "occurred_end": null,
+              "mentioned_at": null,
+              "document_id": "doc_aio_cooler",
+              "metadata": {},
+              "chunk_id": "eval_backfill_single_dated_quote_unset_default_mission_b69c6ff4_doc_aio_cooler_0",
+              "tags": [],
+              "source_fact_ids": null
+            }
+          ],
+          "mentioned_at": [
+            null
+          ],
+          "occurred_start": [
+            null
+          ]
+        }
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": false,
+          "score": 0.0,
+          "notes": "no mentioned_at values in recalled items",
+          "detail": {
+            "recalled": [
+              {
+                "id": "0fbf46a7-5c98-4ecd-98e8-847243eab230",
+                "text": "EK 360 AIO cooler is leaking after 14 months; RMA request sent | Involving: Adam",
+                "type": "world",
+                "entities": [
+                  "Adam",
+                  "EK 360 AIO cooler"
+                ],
+                "context": "",
+                "occurred_start": null,
+                "occurred_end": null,
+                "mentioned_at": null,
+                "document_id": "doc_aio_cooler",
+                "metadata": {},
+                "chunk_id": "eval_backfill_single_dated_quote_unset_default_mission_b69c6ff4_doc_aio_cooler_0",
+                "tags": [],
+                "source_fact_ids": null
+              }
+            ]
+          }
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "single_dated_quote",
+      "memory_variant_id": "explicit_default_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "EK 360 AIO cooler is leaking after 14 months; RMA request sent | When: 2026-03-12 | Involving: Adam",
+        "response_type": null,
+        "duration_s": 72.851368,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": null,
+        "raw": {
+          "retain_response": {
+            "success": true,
+            "bank_id": "eval_backfill_single_dated_quote_explicit_default_mission_16406",
+            "items_count": 1,
+            "async": false,
+            "operation_id": null,
+            "operation_ids": null,
+            "usage": {
+              "input_tokens": 1839,
+              "output_tokens": 174,
+              "total_tokens": 2013
+            }
+          },
+          "bank_id": "eval_backfill_single_dated_quote_explicit_default_mission_16406",
+          "strategy": "explicit",
+          "recalled_items": [
+            {
+              "id": "68d57a55-b62d-476f-99a6-524ade9ac9e0",
+              "text": "EK 360 AIO cooler is leaking after 14 months; RMA request sent | When: 2026-03-12 | Involving: Adam",
+              "type": "experience",
+              "entities": [
+                "EK 360 AIO cooler",
+                "RMA",
+                "Adam"
+              ],
+              "context": "",
+              "occurred_start": null,
+              "occurred_end": null,
+              "mentioned_at": "2026-03-12T10:00:00+00:00",
+              "document_id": "doc_aio_cooler",
+              "metadata": {},
+              "chunk_id": "eval_backfill_single_dated_quote_explicit_default_mission_16406_doc_aio_cooler_0",
+              "tags": [],
+              "source_fact_ids": null
+            }
+          ],
+          "mentioned_at": [
+            "2026-03-12T10:00:00+00:00"
+          ],
+          "occurred_start": [
+            null
+          ]
+        }
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": true,
+          "score": 1.0,
+          "notes": "hits=1/1 misses=none forbidden_hits=none",
+          "detail": {
+            "expected": [
+              "2026-03-12"
+            ],
+            "recalled": [
+              "2026-03-12"
+            ],
+            "misses": [],
+            "forbidden_hits": [],
+            "raw_mentioned_at": [
+              "2026-03-12T10:00:00+00:00"
+            ]
+          }
+        }
+      ],
+      "passed": true
+    },
+    {
+      "scenario_id": "single_dated_quote",
+      "memory_variant_id": "header_inline_default_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "EK 360 AIO cooler is leaking after 14 months; RMA request sent | When: 2026-03-12 | Involving: Adam",
+        "response_type": null,
+        "duration_s": 1.68367,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": null,
+        "raw": {
+          "retain_response": {
+            "success": true,
+            "bank_id": "eval_backfill_single_dated_quote_header_inline_default_mission_",
+            "items_count": 1,
+            "async": false,
+            "operation_id": null,
+            "operation_ids": null,
+            "usage": {
+              "input_tokens": 0,
+              "output_tokens": 0,
+              "total_tokens": 0
+            }
+          },
+          "bank_id": "eval_backfill_single_dated_quote_header_inline_default_mission_",
+          "strategy": "header_inline",
+          "recalled_items": [
+            {
+              "id": "3a504a8f-7a10-4ce6-a336-dc12e5a5eb97",
+              "text": "EK 360 AIO cooler is leaking after 14 months; RMA request sent | When: 2026-03-12 | Involving: Adam",
+              "type": "experience",
+              "entities": [
+                "EK 360 AIO cooler",
+                "Adam"
+              ],
+              "context": "",
+              "occurred_start": "2026-03-12T00:00:00+00:00",
+              "occurred_end": "2026-03-12T00:00:00+00:00",
+              "mentioned_at": null,
+              "document_id": "doc_aio_cooler",
+              "metadata": {},
+              "chunk_id": "eval_backfill_single_dated_quote_header_inline_default_mission__doc_aio_cooler_0",
+              "tags": [],
+              "source_fact_ids": null
+            }
+          ],
+          "mentioned_at": [
+            null
+          ],
+          "occurred_start": [
+            "2026-03-12T00:00:00+00:00"
+          ]
+        }
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": false,
+          "score": 0.0,
+          "notes": "no mentioned_at values in recalled items",
+          "detail": {
+            "recalled": [
+              {
+                "id": "3a504a8f-7a10-4ce6-a336-dc12e5a5eb97",
+                "text": "EK 360 AIO cooler is leaking after 14 months; RMA request sent | When: 2026-03-12 | Involving: Adam",
+                "type": "experience",
+                "entities": [
+                  "EK 360 AIO cooler",
+                  "Adam"
+                ],
+                "context": "",
+                "occurred_start": "2026-03-12T00:00:00+00:00",
+                "occurred_end": "2026-03-12T00:00:00+00:00",
+                "mentioned_at": null,
+                "document_id": "doc_aio_cooler",
+                "metadata": {},
+                "chunk_id": "eval_backfill_single_dated_quote_header_inline_default_mission__doc_aio_cooler_0",
+                "tags": [],
+                "source_fact_ids": null
+              }
+            ]
+          }
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "single_dated_quote",
+      "memory_variant_id": "block_anchor_default_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "EK 360 AIO cooler is leaking after 14 months, RMA request sent | When: 2026-03-12 | Involving: Adam",
+        "response_type": null,
+        "duration_s": 91.325353,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": null,
+        "raw": {
+          "retain_response": {
+            "success": true,
+            "bank_id": "eval_backfill_single_dated_quote_block_anchor_default_mission_b",
+            "items_count": 1,
+            "async": false,
+            "operation_id": null,
+            "operation_ids": null,
+            "usage": {
+              "input_tokens": 1832,
+              "output_tokens": 97,
+              "total_tokens": 1929
+            }
+          },
+          "bank_id": "eval_backfill_single_dated_quote_block_anchor_default_mission_b",
+          "strategy": "block_anchor",
+          "recalled_items": [
+            {
+              "id": "f1927f56-f087-4476-a9c8-8de9cce12fdb",
+              "text": "EK 360 AIO cooler is leaking after 14 months, RMA request sent | When: 2026-03-12 | Involving: Adam",
+              "type": "experience",
+              "entities": [
+                "RMA request",
+                "Adam",
+                "EK 360 AIO cooler"
+              ],
+              "context": "",
+              "occurred_start": null,
+              "occurred_end": null,
+              "mentioned_at": "2026-03-12T10:00:00+00:00",
+              "document_id": "doc_aio_cooler",
+              "metadata": {},
+              "chunk_id": "eval_backfill_single_dated_quote_block_anchor_default_mission_b_doc_aio_cooler_0",
+              "tags": [],
+              "source_fact_ids": null
+            }
+          ],
+          "mentioned_at": [
+            "2026-03-12T10:00:00+00:00"
+          ],
+          "occurred_start": [
+            null
+          ]
+        }
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": true,
+          "score": 1.0,
+          "notes": "hits=1/1 misses=none forbidden_hits=none",
+          "detail": {
+            "expected": [
+              "2026-03-12"
+            ],
+            "recalled": [
+              "2026-03-12"
+            ],
+            "misses": [],
+            "forbidden_hits": [],
+            "raw_mentioned_at": [
+              "2026-03-12T10:00:00+00:00"
+            ]
+          }
+        }
+      ],
+      "passed": true
+    },
+    {
+      "scenario_id": "single_dated_quote",
+      "memory_variant_id": "unset_backfill_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "EK 360 AIO cooler is leaking after 14 months, RMA request sent | Involving: Adam",
+        "response_type": null,
+        "duration_s": 68.512103,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": null,
+        "raw": {
+          "retain_response": {
+            "success": true,
+            "bank_id": "eval_backfill_single_dated_quote_unset_backfill_mission_9370ece",
+            "items_count": 1,
+            "async": false,
+            "operation_id": null,
+            "operation_ids": null,
+            "usage": {
+              "input_tokens": 1915,
+              "output_tokens": 84,
+              "total_tokens": 1999
+            }
+          },
+          "bank_id": "eval_backfill_single_dated_quote_unset_backfill_mission_9370ece",
+          "strategy": "unset",
+          "recalled_items": [
+            {
+              "id": "84ae0ac4-6b6b-49ce-993f-33f2b8e3a1fd",
+              "text": "EK 360 AIO cooler is leaking after 14 months, RMA request sent | Involving: Adam",
+              "type": "experience",
+              "entities": [
+                "EK 360 AIO cooler",
+                "RMA"
+              ],
+              "context": "",
+              "occurred_start": null,
+              "occurred_end": null,
+              "mentioned_at": null,
+              "document_id": "doc_aio_cooler",
+              "metadata": {},
+              "chunk_id": "eval_backfill_single_dated_quote_unset_backfill_mission_9370ece_doc_aio_cooler_0",
+              "tags": [],
+              "source_fact_ids": null
+            }
+          ],
+          "mentioned_at": [
+            null
+          ],
+          "occurred_start": [
+            null
+          ]
+        }
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": false,
+          "score": 0.0,
+          "notes": "no mentioned_at values in recalled items",
+          "detail": {
+            "recalled": [
+              {
+                "id": "84ae0ac4-6b6b-49ce-993f-33f2b8e3a1fd",
+                "text": "EK 360 AIO cooler is leaking after 14 months, RMA request sent | Involving: Adam",
+                "type": "experience",
+                "entities": [
+                  "EK 360 AIO cooler",
+                  "RMA"
+                ],
+                "context": "",
+                "occurred_start": null,
+                "occurred_end": null,
+                "mentioned_at": null,
+                "document_id": "doc_aio_cooler",
+                "metadata": {},
+                "chunk_id": "eval_backfill_single_dated_quote_unset_backfill_mission_9370ece_doc_aio_cooler_0",
+                "tags": [],
+                "source_fact_ids": null
+              }
+            ]
+          }
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "single_dated_quote",
+      "memory_variant_id": "header_inline_backfill_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "EK 360 AIO cooler is leaking after 14 months | When: 2026-03-12 | Involving: Adam\nRMA request sent for EK 360 AIO cooler | When: 2026-03-12 | Involving: Adam",
+        "response_type": null,
+        "duration_s": 2.098607,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": null,
+        "raw": {
+          "retain_response": {
+            "success": true,
+            "bank_id": "eval_backfill_single_dated_quote_header_inline_backfill_mission",
+            "items_count": 1,
+            "async": false,
+            "operation_id": null,
+            "operation_ids": null,
+            "usage": {
+              "input_tokens": 0,
+              "output_tokens": 0,
+              "total_tokens": 0
+            }
+          },
+          "bank_id": "eval_backfill_single_dated_quote_header_inline_backfill_mission",
+          "strategy": "header_inline",
+          "recalled_items": [
+            {
+              "id": "7c0ef7c4-3953-4358-964f-a3252943a64d",
+              "text": "EK 360 AIO cooler is leaking after 14 months | When: 2026-03-12 | Involving: Adam",
+              "type": "experience",
+              "entities": [
+                "EK 360 AIO cooler"
+              ],
+              "context": "",
+              "occurred_start": null,
+              "occurred_end": null,
+              "mentioned_at": null,
+              "document_id": "doc_aio_cooler",
+              "metadata": {},
+              "chunk_id": "eval_backfill_single_dated_quote_header_inline_backfill_mission_doc_aio_cooler_0",
+              "tags": [],
+              "source_fact_ids": null
+            },
+            {
+              "id": "c4189a89-222b-4136-8855-9c91d640577b",
+              "text": "RMA request sent for EK 360 AIO cooler | When: 2026-03-12 | Involving: Adam",
+              "type": "experience",
+              "entities": [
+                "EK 360 AIO cooler"
+              ],
+              "context": "",
+              "occurred_start": null,
+              "occurred_end": null,
+              "mentioned_at": null,
+              "document_id": "doc_aio_cooler",
+              "metadata": {},
+              "chunk_id": "eval_backfill_single_dated_quote_header_inline_backfill_mission_doc_aio_cooler_0",
+              "tags": [],
+              "source_fact_ids": null
+            }
+          ],
+          "mentioned_at": [
+            null,
+            null
+          ],
+          "occurred_start": [
+            null,
+            null
+          ]
+        }
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": false,
+          "score": 0.0,
+          "notes": "no mentioned_at values in recalled items",
+          "detail": {
+            "recalled": [
+              {
+                "id": "7c0ef7c4-3953-4358-964f-a3252943a64d",
+                "text": "EK 360 AIO cooler is leaking after 14 months | When: 2026-03-12 | Involving: Adam",
+                "type": "experience",
+                "entities": [
+                  "EK 360 AIO cooler"
+                ],
+                "context": "",
+                "occurred_start": null,
+                "occurred_end": null,
+                "mentioned_at": null,
+                "document_id": "doc_aio_cooler",
+                "metadata": {},
+                "chunk_id": "eval_backfill_single_dated_quote_header_inline_backfill_mission_doc_aio_cooler_0",
+                "tags": [],
+                "source_fact_ids": null
+              },
+              {
+                "id": "c4189a89-222b-4136-8855-9c91d640577b",
+                "text": "RMA request sent for EK 360 AIO cooler | When: 2026-03-12 | Involving: Adam",
+                "type": "experience",
+                "entities": [
+                  "EK 360 AIO cooler"
+                ],
+                "context": "",
+                "occurred_start": null,
+                "occurred_end": null,
+                "mentioned_at": null,
+                "document_id": "doc_aio_cooler",
+                "metadata": {},
+                "chunk_id": "eval_backfill_single_dated_quote_header_inline_backfill_mission_doc_aio_cooler_0",
+                "tags": [],
+                "source_fact_ids": null
+              }
+            ]
+          }
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "two_docs_distinct_dates",
+      "memory_variant_id": "unset_default_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "Adam's Surface laptop won't boot after firmware update; SMC reset did not help | Involving: Adam\nkoboldcpp is silently truncating context above 32k tokens on the 24GB card | Involving: Adam",
+        "response_type": null,
+        "duration_s": 273.697321,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": null,
+        "raw": {
+          "retain_response": {
+            "success": true,
+            "bank_id": "eval_backfill_two_docs_distinct_dates_unset_default_mission_dab",
+            "items_count": 2,
+            "async": false,
+            "operation_id": null,
+            "operation_ids": null,
+            "usage": {
+              "input_tokens": 3587,
+              "output_tokens": 257,
+              "total_tokens": 3844
+            }
+          },
+          "bank_id": "eval_backfill_two_docs_distinct_dates_unset_default_mission_dab",
+          "strategy": "unset",
+          "recalled_items": [
+            {
+              "id": "00362438-0ea9-473c-b761-117b59f3737e",
+              "text": "Adam's Surface laptop won't boot after firmware update; SMC reset did not help | Involving: Adam",
+              "type": "experience",
+              "entities": [
+                "firmware update",
+                "Adam",
+                "SMC reset",
+                "Surface laptop"
+              ],
+              "context": "",
+              "occurred_start": null,
+              "occurred_end": null,
+              "mentioned_at": null,
+              "document_id": "doc_surface",
+              "metadata": {},
+              "chunk_id": "eval_backfill_two_docs_distinct_dates_unset_default_mission_dab_doc_surface_0",
+              "tags": [],
+              "source_fact_ids": null
+            },
+            {
+              "id": "4a685d64-8c81-4e80-8d58-e913c6cf2512",
+              "text": "koboldcpp is silently truncating context above 32k tokens on the 24GB card | Involving: Adam",
+              "type": "world",
+              "entities": [
+                "koboldcpp",
+                "Adam"
+              ],
+              "context": "",
+              "occurred_start": null,
+              "occurred_end": null,
+              "mentioned_at": null,
+              "document_id": "doc_kobold",
+              "metadata": {},
+              "chunk_id": "eval_backfill_two_docs_distinct_dates_unset_default_mission_dab_doc_kobold_0",
+              "tags": [],
+              "source_fact_ids": null
+            }
+          ],
+          "mentioned_at": [
+            null,
+            null
+          ],
+          "occurred_start": [
+            null,
+            null
+          ]
+        }
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": false,
+          "score": 0.0,
+          "notes": "no mentioned_at values in recalled items",
+          "detail": {
+            "recalled": [
+              {
+                "id": "00362438-0ea9-473c-b761-117b59f3737e",
+                "text": "Adam's Surface laptop won't boot after firmware update; SMC reset did not help | Involving: Adam",
+                "type": "experience",
+                "entities": [
+                  "firmware update",
+                  "Adam",
+                  "SMC reset",
+                  "Surface laptop"
+                ],
+                "context": "",
+                "occurred_start": null,
+                "occurred_end": null,
+                "mentioned_at": null,
+                "document_id": "doc_surface",
+                "metadata": {},
+                "chunk_id": "eval_backfill_two_docs_distinct_dates_unset_default_mission_dab_doc_surface_0",
+                "tags": [],
+                "source_fact_ids": null
+              },
+              {
+                "id": "4a685d64-8c81-4e80-8d58-e913c6cf2512",
+                "text": "koboldcpp is silently truncating context above 32k tokens on the 24GB card | Involving: Adam",
+                "type": "world",
+                "entities": [
+                  "koboldcpp",
+                  "Adam"
+                ],
+                "context": "",
+                "occurred_start": null,
+                "occurred_end": null,
+                "mentioned_at": null,
+                "document_id": "doc_kobold",
+                "metadata": {},
+                "chunk_id": "eval_backfill_two_docs_distinct_dates_unset_default_mission_dab_doc_kobold_0",
+                "tags": [],
+                "source_fact_ids": null
+              }
+            ]
+          }
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "two_docs_distinct_dates",
+      "memory_variant_id": "explicit_default_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "Adam's Surface laptop won't boot after firmware update; SMC reset did not help (2026-04-15).\nAdam's Surface laptop won't boot after firmware update; SMC reset did not help | When: 2026-04-15 | Involving: Adam\nkoboldcpp is silently truncating context above 32k tokens on the 24GB card | Involving: Adam\nKoboldcpp is silently truncating context above 32k tokens on the 24GB card.",
+        "response_type": null,
+        "duration_s": 3.955502,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": null,
+        "raw": {
+          "retain_response": {
+            "success": true,
+            "bank_id": "eval_backfill_two_docs_distinct_dates_explicit_default_mission_",
+            "items_count": 2,
+            "async": false,
+            "operation_id": null,
+            "operation_ids": null,
+            "usage": {
+              "input_tokens": 0,
+              "output_tokens": 0,
+              "total_tokens": 0
+            }
+          },
+          "bank_id": "eval_backfill_two_docs_distinct_dates_explicit_default_mission_",
+          "strategy": "explicit",
+          "recalled_items": [
+            {
+              "id": "72e94baa-5476-4be8-b465-e603b05dfaa4",
+              "text": "Adam's Surface laptop won't boot after firmware update; SMC reset did not help (2026-04-15).",
+              "type": "observation",
+              "entities": [
+                "firmware update",
+                "Adam",
+                "Surface laptop"
+              ],
+              "context": null,
+              "occurred_start": "2026-04-15T00:00:00+00:00",
+              "occurred_end": "2026-04-15T00:00:00+00:00",
+              "mentioned_at": "2026-04-15T09:00:00+00:00",
+              "document_id": null,
+              "metadata": {},
+              "chunk_id": null,
+              "tags": [],
+              "source_fact_ids": null
+            },
+            {
+              "id": "2183a70b-db96-4802-b827-b9e476fe02c2",
+              "text": "Adam's Surface laptop won't boot after firmware update; SMC reset did not help | When: 2026-04-15 | Involving: Adam",
+              "type": "experience",
+              "entities": [
+                "firmware update",
+                "Adam",
+                "Surface laptop"
+              ],
+              "context": "",
+              "occurred_start": "2026-04-15T00:00:00+00:00",
+              "occurred_end": "2026-04-15T00:00:00+00:00",
+              "mentioned_at": "2026-04-15T09:00:00+00:00",
+              "document_id": "doc_surface",
+              "metadata": {},
+              "chunk_id": "eval_backfill_two_docs_distinct_dates_explicit_default_mission__doc_surface_0",
+              "tags": [],
+              "source_fact_ids": null
+            },
+            {
+              "id": "51b20e11-f0fa-4214-ab0a-530cf14733c6",
+              "text": "koboldcpp is silently truncating context above 32k tokens on the 24GB card | Involving: Adam",
+              "type": "world",
+              "entities": [
+                "Adam",
+                "koboldcpp"
+              ],
+              "context": "",
+              "occurred_start": null,
+              "occurred_end": null,
+              "mentioned_at": "2026-04-01T14:30:00+00:00",
+              "document_id": "doc_kobold",
+              "metadata": {},
+              "chunk_id": "eval_backfill_two_docs_distinct_dates_explicit_default_mission__doc_kobold_0",
+              "tags": [],
+              "source_fact_ids": null
+            },
+            {
+              "id": "29f6b181-23b3-4870-9de7-c5dd27939a45",
+              "text": "Koboldcpp is silently truncating context above 32k tokens on the 24GB card.",
+              "type": "observation",
+              "entities": [
+                "Adam",
+                "koboldcpp"
+              ],
+              "context": null,
+              "occurred_start": null,
+              "occurred_end": null,
+              "mentioned_at": "2026-04-01T14:30:00+00:00",
+              "document_id": null,
+              "metadata": {},
+              "chunk_id": null,
+              "tags": [],
+              "source_fact_ids": null
+            }
+          ],
+          "mentioned_at": [
+            "2026-04-15T09:00:00+00:00",
+            "2026-04-15T09:00:00+00:00",
+            "2026-04-01T14:30:00+00:00",
+            "2026-04-01T14:30:00+00:00"
+          ],
+          "occurred_start": [
+            "2026-04-15T00:00:00+00:00",
+            "2026-04-15T00:00:00+00:00",
+            null,
+            null
+          ]
+        }
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": true,
+          "score": 1.0,
+          "notes": "hits=2/2 misses=none forbidden_hits=none",
+          "detail": {
+            "expected": [
+              "2026-04-01",
+              "2026-04-15"
+            ],
+            "recalled": [
+              "2026-04-01",
+              "2026-04-15"
+            ],
+            "misses": [],
+            "forbidden_hits": [],
+            "raw_mentioned_at": [
+              "2026-04-15T09:00:00+00:00",
+              "2026-04-15T09:00:00+00:00",
+              "2026-04-01T14:30:00+00:00",
+              "2026-04-01T14:30:00+00:00"
+            ]
+          }
+        }
+      ],
+      "passed": true
+    },
+    {
+      "scenario_id": "two_docs_distinct_dates",
+      "memory_variant_id": "header_inline_default_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "Adam reports that koboldcpp is silently truncating context above 32k tokens on the 24GB card.\nAdam reports that koboldcpp is silently truncating context above 32k tokens on the 24GB card | Involving: Adam\nAdam's Surface laptop won't boot after firmware update; SMC reset did not help (as of 2026-04-15).\nAdam's Surface laptop won't boot after firmware update; SMC reset did not help | When: 2026-04-15 | Involving: Adam",
+        "response_type": null,
+        "duration_s": 9.348378,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": null,
+        "raw": {
+          "retain_response": {
+            "success": true,
+            "bank_id": "eval_backfill_two_docs_distinct_dates_header_inline_default_mis",
+            "items_count": 2,
+            "async": false,
+            "operation_id": null,
+            "operation_ids": null,
+            "usage": {
+              "input_tokens": 0,
+              "output_tokens": 0,
+              "total_tokens": 0
+            }
+          },
+          "bank_id": "eval_backfill_two_docs_distinct_dates_header_inline_default_mis",
+          "strategy": "header_inline",
+          "recalled_items": [
+            {
+              "id": "f21eed67-67ee-4b7f-aeca-4a09df9eb305",
+              "text": "Adam reports that koboldcpp is silently truncating context above 32k tokens on the 24GB card.",
+              "type": "observation",
+              "entities": [
+                "Adam",
+                "koboldcpp"
+              ],
+              "context": null,
+              "occurred_start": null,
+              "occurred_end": null,
+              "mentioned_at": "2026-05-14T05:30:54.531194+00:00",
+              "document_id": null,
+              "metadata": {},
+              "chunk_id": null,
+              "tags": [],
+              "source_fact_ids": null
+            },
+            {
+              "id": "1aa8a08f-a536-47eb-b1f9-494f5a7b47c0",
+              "text": "Adam reports that koboldcpp is silently truncating context above 32k tokens on the 24GB card | Involving: Adam",
+              "type": "world",
+              "entities": [
+                "Adam",
+                "koboldcpp"
+              ],
+              "context": "",
+              "occurred_start": null,
+              "occurred_end": null,
+              "mentioned_at": null,
+              "document_id": "doc_kobold",
+              "metadata": {},
+              "chunk_id": "eval_backfill_two_docs_distinct_dates_header_inline_default_mis_doc_kobold_0",
+              "tags": [],
+              "source_fact_ids": null
+            },
+            {
+              "id": "d467f65c-15c2-43b8-b921-3deab4346ff6",
+              "text": "Adam's Surface laptop won't boot after firmware update; SMC reset did not help (as of 2026-04-15).",
+              "type": "observation",
+              "entities": [
+                "SMC reset",
+                "Adam",
+                "Surface laptop",
+                "firmware update"
+              ],
+              "context": null,
+              "occurred_start": "2026-04-15T00:00:00+00:00",
+              "occurred_end": "2026-04-15T00:00:00+00:00",
+              "mentioned_at": "2026-05-14T05:30:54.628195+00:00",
+              "document_id": null,
+              "metadata": {},
+              "chunk_id": null,
+              "tags": [],
+              "source_fact_ids": null
+            },
+            {
+              "id": "76737d01-2642-4359-8a5d-5fdcac2cbf70",
+              "text": "Adam's Surface laptop won't boot after firmware update; SMC reset did not help | When: 2026-04-15 | Involving: Adam",
+              "type": "experience",
+              "entities": [
+                "SMC reset",
+                "Adam",
+                "Surface laptop",
+                "firmware update"
+              ],
+              "context": "",
+              "occurred_start": "2026-04-15T00:00:00+00:00",
+              "occurred_end": "2026-04-15T00:00:00+00:00",
+              "mentioned_at": null,
+              "document_id": "doc_surface",
+              "metadata": {},
+              "chunk_id": "eval_backfill_two_docs_distinct_dates_header_inline_default_mis_doc_surface_0",
+              "tags": [],
+              "source_fact_ids": null
+            }
+          ],
+          "mentioned_at": [
+            "2026-05-14T05:30:54.531194+00:00",
+            null,
+            "2026-05-14T05:30:54.628195+00:00",
+            null
+          ],
+          "occurred_start": [
+            null,
+            null,
+            "2026-04-15T00:00:00+00:00",
+            "2026-04-15T00:00:00+00:00"
+          ]
+        }
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": false,
+          "score": 0.0,
+          "notes": "hits=0/2 misses=['2026-04-01', '2026-04-15'] forbidden_hits=none",
+          "detail": {
+            "expected": [
+              "2026-04-01",
+              "2026-04-15"
+            ],
+            "recalled": [
+              "2026-05-14"
+            ],
+            "misses": [
+              "2026-04-01",
+              "2026-04-15"
+            ],
+            "forbidden_hits": [],
+            "raw_mentioned_at": [
+              "2026-05-14T05:30:54.531194+00:00",
+              null,
+              "2026-05-14T05:30:54.628195+00:00",
+              null
+            ]
+          }
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "two_docs_distinct_dates",
+      "memory_variant_id": "block_anchor_default_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "Adam's Surface laptop won't boot after a firmware update, and an SMC reset did not help.\nAdam's Surface laptop won't boot after a firmware update; SMC reset did not help | Involving: Adam\nkoboldcpp is silently truncating context above 32k tokens on the 24GB card | Involving: Adam\nKoboldcpp is silently truncating context above 32k tokens on the 24GB card.",
+        "response_type": null,
+        "duration_s": 2.943628,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": null,
+        "raw": {
+          "retain_response": {
+            "success": true,
+            "bank_id": "eval_backfill_two_docs_distinct_dates_block_anchor_default_miss",
+            "items_count": 2,
+            "async": false,
+            "operation_id": null,
+            "operation_ids": null,
+            "usage": {
+              "input_tokens": 0,
+              "output_tokens": 0,
+              "total_tokens": 0
+            }
+          },
+          "bank_id": "eval_backfill_two_docs_distinct_dates_block_anchor_default_miss",
+          "strategy": "block_anchor",
+          "recalled_items": [
+            {
+              "id": "463f8423-3432-4cfe-9a15-73735d4f12c5",
+              "text": "Adam's Surface laptop won't boot after a firmware update, and an SMC reset did not help.",
+              "type": "observation",
+              "entities": [
+                "SMC reset",
+                "Adam",
+                "Surface laptop",
+                "firmware update"
+              ],
+              "context": null,
+              "occurred_start": "2026-04-15T00:00:00+00:00",
+              "occurred_end": "2026-04-15T00:00:00+00:00",
+              "mentioned_at": "2026-04-15T09:00:00+00:00",
+              "document_id": null,
+              "metadata": {},
+              "chunk_id": null,
+              "tags": [],
+              "source_fact_ids": null
+            },
+            {
+              "id": "f2837893-a4bb-40c2-bc96-d24c72115b93",
+              "text": "Adam's Surface laptop won't boot after a firmware update; SMC reset did not help | Involving: Adam",
+              "type": "experience",
+              "entities": [
+                "SMC reset",
+                "Adam",
+                "Surface laptop",
+                "firmware update"
+              ],
+              "context": "",
+              "occurred_start": "2026-04-15T00:00:00+00:00",
+              "occurred_end": "2026-04-15T00:00:00+00:00",
+              "mentioned_at": "2026-04-15T09:00:00+00:00",
+              "document_id": "doc_surface",
+              "metadata": {},
+              "chunk_id": "eval_backfill_two_docs_distinct_dates_block_anchor_default_miss_doc_surface_0",
+              "tags": [],
+              "source_fact_ids": null
+            },
+            {
+              "id": "272a8831-9691-488d-b72b-9f668cbde9e4",
+              "text": "koboldcpp is silently truncating context above 32k tokens on the 24GB card | Involving: Adam",
+              "type": "world",
+              "entities": [
+                "Adam",
+                "koboldcpp"
+              ],
+              "context": "",
+              "occurred_start": null,
+              "occurred_end": null,
+              "mentioned_at": "2026-04-01T14:30:00+00:00",
+              "document_id": "doc_kobold",
+              "metadata": {},
+              "chunk_id": "eval_backfill_two_docs_distinct_dates_block_anchor_default_miss_doc_kobold_0",
+              "tags": [],
+              "source_fact_ids": null
+            },
+            {
+              "id": "f2988b58-12aa-40a6-8f3e-fac1a60c4ee1",
+              "text": "Koboldcpp is silently truncating context above 32k tokens on the 24GB card.",
+              "type": "observation",
+              "entities": [
+                "Adam",
+                "koboldcpp"
+              ],
+              "context": null,
+              "occurred_start": null,
+              "occurred_end": null,
+              "mentioned_at": "2026-04-01T14:30:00+00:00",
+              "document_id": null,
+              "metadata": {},
+              "chunk_id": null,
+              "tags": [],
+              "source_fact_ids": null
+            }
+          ],
+          "mentioned_at": [
+            "2026-04-15T09:00:00+00:00",
+            "2026-04-15T09:00:00+00:00",
+            "2026-04-01T14:30:00+00:00",
+            "2026-04-01T14:30:00+00:00"
+          ],
+          "occurred_start": [
+            "2026-04-15T00:00:00+00:00",
+            "2026-04-15T00:00:00+00:00",
+            null,
+            null
+          ]
+        }
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": true,
+          "score": 1.0,
+          "notes": "hits=2/2 misses=none forbidden_hits=none",
+          "detail": {
+            "expected": [
+              "2026-04-01",
+              "2026-04-15"
+            ],
+            "recalled": [
+              "2026-04-01",
+              "2026-04-15"
+            ],
+            "misses": [],
+            "forbidden_hits": [],
+            "raw_mentioned_at": [
+              "2026-04-15T09:00:00+00:00",
+              "2026-04-15T09:00:00+00:00",
+              "2026-04-01T14:30:00+00:00",
+              "2026-04-01T14:30:00+00:00"
+            ]
+          }
+        }
+      ],
+      "passed": true
+    },
+    {
+      "scenario_id": "two_docs_distinct_dates",
+      "memory_variant_id": "unset_backfill_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "Adam's Surface laptop won't boot after a firmware update; SMC reset did not help | Involving: Adam\nkoboldcpp silently truncates context above 32k tokens on 24GB cards | Involving: Adam",
+        "response_type": null,
+        "duration_s": 150.159606,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": null,
+        "raw": {
+          "retain_response": {
+            "success": true,
+            "bank_id": "eval_backfill_two_docs_distinct_dates_unset_backfill_mission_06",
+            "items_count": 2,
+            "async": false,
+            "operation_id": null,
+            "operation_ids": null,
+            "usage": {
+              "input_tokens": 3825,
+              "output_tokens": 304,
+              "total_tokens": 4129
+            }
+          },
+          "bank_id": "eval_backfill_two_docs_distinct_dates_unset_backfill_mission_06",
+          "strategy": "unset",
+          "recalled_items": [
+            {
+              "id": "e6eb310f-467f-437a-8689-089f3c155171",
+              "text": "Adam's Surface laptop won't boot after a firmware update; SMC reset did not help | Involving: Adam",
+              "type": "world",
+              "entities": [
+                "Surface laptop",
+                "Adam",
+                "firmware update"
+              ],
+              "context": "",
+              "occurred_start": null,
+              "occurred_end": null,
+              "mentioned_at": null,
+              "document_id": "doc_surface",
+              "metadata": {},
+              "chunk_id": "eval_backfill_two_docs_distinct_dates_unset_backfill_mission_06_doc_surface_0",
+              "tags": [],
+              "source_fact_ids": null
+            },
+            {
+              "id": "06875180-a6da-4bc0-b228-1248fd4b80dc",
+              "text": "koboldcpp silently truncates context above 32k tokens on 24GB cards | Involving: Adam",
+              "type": "world",
+              "entities": [
+                "koboldcpp",
+                "Adam"
+              ],
+              "context": "",
+              "occurred_start": null,
+              "occurred_end": null,
+              "mentioned_at": null,
+              "document_id": "doc_kobold",
+              "metadata": {},
+              "chunk_id": "eval_backfill_two_docs_distinct_dates_unset_backfill_mission_06_doc_kobold_0",
+              "tags": [],
+              "source_fact_ids": null
+            }
+          ],
+          "mentioned_at": [
+            null,
+            null
+          ],
+          "occurred_start": [
+            null,
+            null
+          ]
+        }
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": false,
+          "score": 0.0,
+          "notes": "no mentioned_at values in recalled items",
+          "detail": {
+            "recalled": [
+              {
+                "id": "e6eb310f-467f-437a-8689-089f3c155171",
+                "text": "Adam's Surface laptop won't boot after a firmware update; SMC reset did not help | Involving: Adam",
+                "type": "world",
+                "entities": [
+                  "Surface laptop",
+                  "Adam",
+                  "firmware update"
+                ],
+                "context": "",
+                "occurred_start": null,
+                "occurred_end": null,
+                "mentioned_at": null,
+                "document_id": "doc_surface",
+                "metadata": {},
+                "chunk_id": "eval_backfill_two_docs_distinct_dates_unset_backfill_mission_06_doc_surface_0",
+                "tags": [],
+                "source_fact_ids": null
+              },
+              {
+                "id": "06875180-a6da-4bc0-b228-1248fd4b80dc",
+                "text": "koboldcpp silently truncates context above 32k tokens on 24GB cards | Involving: Adam",
+                "type": "world",
+                "entities": [
+                  "koboldcpp",
+                  "Adam"
+                ],
+                "context": "",
+                "occurred_start": null,
+                "occurred_end": null,
+                "mentioned_at": null,
+                "document_id": "doc_kobold",
+                "metadata": {},
+                "chunk_id": "eval_backfill_two_docs_distinct_dates_unset_backfill_mission_06_doc_kobold_0",
+                "tags": [],
+                "source_fact_ids": null
+              }
+            ]
+          }
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "two_docs_distinct_dates",
+      "memory_variant_id": "header_inline_backfill_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "Adam's Surface laptop failed to boot after a firmware update; SMC reset did not resolve the issue.\nAdam's Surface laptop failed to boot after a firmware update; SMC reset did not resolve the issue | When: 2026-04-15 | Involving: Adam\nkoboldcpp silently truncates context above 32k tokens on the 24GB card.\nkoboldcpp silently truncates context above 32k tokens on the 24GB card",
+        "response_type": null,
+        "duration_s": 2.135299,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": null,
+        "raw": {
+          "retain_response": {
+            "success": true,
+            "bank_id": "eval_backfill_two_docs_distinct_dates_header_inline_backfill_mi",
+            "items_count": 2,
+            "async": false,
+            "operation_id": null,
+            "operation_ids": null,
+            "usage": {
+              "input_tokens": 0,
+              "output_tokens": 0,
+              "total_tokens": 0
+            }
+          },
+          "bank_id": "eval_backfill_two_docs_distinct_dates_header_inline_backfill_mi",
+          "strategy": "header_inline",
+          "recalled_items": [
+            {
+              "id": "bb58c692-0f6f-48dd-b15d-55a0aed74727",
+              "text": "Adam's Surface laptop failed to boot after a firmware update; SMC reset did not resolve the issue.",
+              "type": "observation",
+              "entities": [
+                "firmware update",
+                "Surface laptop",
+                "Adam"
+              ],
+              "context": null,
+              "occurred_start": null,
+              "occurred_end": null,
+              "mentioned_at": "2026-05-14T05:32:40.012011+00:00",
+              "document_id": null,
+              "metadata": {},
+              "chunk_id": null,
+              "tags": [],
+              "source_fact_ids": null
+            },
+            {
+              "id": "22aa7f50-043a-448d-a5df-284a2fbb4dd1",
+              "text": "Adam's Surface laptop failed to boot after a firmware update; SMC reset did not resolve the issue | When: 2026-04-15 | Involving: Adam",
+              "type": "experience",
+              "entities": [
+                "firmware update",
+                "Surface laptop",
+                "Adam"
+              ],
+              "context": "",
+              "occurred_start": null,
+              "occurred_end": null,
+              "mentioned_at": null,
+              "document_id": "doc_surface",
+              "metadata": {},
+              "chunk_id": "eval_backfill_two_docs_distinct_dates_header_inline_backfill_mi_doc_surface_0",
+              "tags": [],
+              "source_fact_ids": null
+            },
+            {
+              "id": "2c5076b6-3f04-4d65-97cc-90e8a59765de",
+              "text": "koboldcpp silently truncates context above 32k tokens on the 24GB card.",
+              "type": "observation",
+              "entities": [
+                "koboldcpp",
+                "24GB card"
+              ],
+              "context": null,
+              "occurred_start": null,
+              "occurred_end": null,
+              "mentioned_at": "2026-05-14T05:32:39.883402+00:00",
+              "document_id": null,
+              "metadata": {},
+              "chunk_id": null,
+              "tags": [],
+              "source_fact_ids": null
+            },
+            {
+              "id": "2eba7fd8-10d0-49a4-a187-3d178604c316",
+              "text": "koboldcpp silently truncates context above 32k tokens on the 24GB card",
+              "type": "world",
+              "entities": [
+                "koboldcpp",
+                "24GB card"
+              ],
+              "context": "",
+              "occurred_start": null,
+              "occurred_end": null,
+              "mentioned_at": null,
+              "document_id": "doc_kobold",
+              "metadata": {},
+              "chunk_id": "eval_backfill_two_docs_distinct_dates_header_inline_backfill_mi_doc_kobold_0",
+              "tags": [],
+              "source_fact_ids": null
+            }
+          ],
+          "mentioned_at": [
+            "2026-05-14T05:32:40.012011+00:00",
+            null,
+            "2026-05-14T05:32:39.883402+00:00",
+            null
+          ],
+          "occurred_start": [
+            null,
+            null,
+            null,
+            null
+          ]
+        }
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": false,
+          "score": 0.0,
+          "notes": "hits=0/2 misses=['2026-04-01', '2026-04-15'] forbidden_hits=none",
+          "detail": {
+            "expected": [
+              "2026-04-01",
+              "2026-04-15"
+            ],
+            "recalled": [
+              "2026-05-14"
+            ],
+            "misses": [
+              "2026-04-01",
+              "2026-04-15"
+            ],
+            "forbidden_hits": [],
+            "raw_mentioned_at": [
+              "2026-05-14T05:32:40.012011+00:00",
+              null,
+              "2026-05-14T05:32:39.883402+00:00",
+              null
+            ]
+          }
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "inline_date_in_body",
+      "memory_variant_id": "unset_default_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "The dispatcher hit the Discord rate limit twice in a row at 18:04 UTC | When: 2026-02-20 | Involving: dispatcher",
+        "response_type": null,
+        "duration_s": 88.158141,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": null,
+        "raw": {
+          "retain_response": {
+            "success": true,
+            "bank_id": "eval_backfill_inline_date_in_body_unset_default_mission_646586e",
+            "items_count": 1,
+            "async": false,
+            "operation_id": null,
+            "operation_ids": null,
+            "usage": {
+              "input_tokens": 1810,
+              "output_tokens": 190,
+              "total_tokens": 2000
+            }
+          },
+          "bank_id": "eval_backfill_inline_date_in_body_unset_default_mission_646586e",
+          "strategy": "unset",
+          "recalled_items": [
+            {
+              "id": "520b5853-e9cd-4c88-b4d6-37b0edf61027",
+              "text": "The dispatcher hit the Discord rate limit twice in a row at 18:04 UTC | When: 2026-02-20 | Involving: dispatcher",
+              "type": "experience",
+              "entities": [
+                "dispatcher",
+                "Discord"
+              ],
+              "context": "",
+              "occurred_start": "2026-02-20T00:00:00+00:00",
+              "occurred_end": "2026-02-20T00:00:00+00:00",
+              "mentioned_at": null,
+              "document_id": "doc_discord",
+              "metadata": {},
+              "chunk_id": "eval_backfill_inline_date_in_body_unset_default_mission_646586e_doc_discord_0",
+              "tags": [],
+              "source_fact_ids": null
+            }
+          ],
+          "mentioned_at": [
+            null
+          ],
+          "occurred_start": [
+            "2026-02-20T00:00:00+00:00"
+          ]
+        }
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": false,
+          "score": 0.0,
+          "notes": "no mentioned_at values in recalled items",
+          "detail": {
+            "recalled": [
+              {
+                "id": "520b5853-e9cd-4c88-b4d6-37b0edf61027",
+                "text": "The dispatcher hit the Discord rate limit twice in a row at 18:04 UTC | When: 2026-02-20 | Involving: dispatcher",
+                "type": "experience",
+                "entities": [
+                  "dispatcher",
+                  "Discord"
+                ],
+                "context": "",
+                "occurred_start": "2026-02-20T00:00:00+00:00",
+                "occurred_end": "2026-02-20T00:00:00+00:00",
+                "mentioned_at": null,
+                "document_id": "doc_discord",
+                "metadata": {},
+                "chunk_id": "eval_backfill_inline_date_in_body_unset_default_mission_646586e_doc_discord_0",
+                "tags": [],
+                "source_fact_ids": null
+              }
+            ]
+          }
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "inline_date_in_body",
+      "memory_variant_id": "explicit_default_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "The dispatcher hit the Discord rate limit twice in a row at 18:04 UTC | When: 2026-02-20 | Involving: dispatcher",
+        "response_type": null,
+        "duration_s": 66.847921,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": null,
+        "raw": {
+          "retain_response": {
+            "success": true,
+            "bank_id": "eval_backfill_inline_date_in_body_explicit_default_mission_67da",
+            "items_count": 1,
+            "async": false,
+            "operation_id": null,
+            "operation_ids": null,
+            "usage": {
+              "input_tokens": 1843,
+              "output_tokens": 191,
+              "total_tokens": 2034
+            }
+          },
+          "bank_id": "eval_backfill_inline_date_in_body_explicit_default_mission_67da",
+          "strategy": "explicit",
+          "recalled_items": [
+            {
+              "id": "03719703-9e08-4a2d-ba74-fe40a04a08d7",
+              "text": "The dispatcher hit the Discord rate limit twice in a row at 18:04 UTC | When: 2026-02-20 | Involving: dispatcher",
+              "type": "experience",
+              "entities": [
+                "dispatcher",
+                "Discord"
+              ],
+              "context": "",
+              "occurred_start": "2026-02-20T00:00:00+00:00",
+              "occurred_end": "2026-02-20T00:00:00+00:00",
+              "mentioned_at": "2026-02-20T18:00:00+00:00",
+              "document_id": "doc_discord",
+              "metadata": {},
+              "chunk_id": "eval_backfill_inline_date_in_body_explicit_default_mission_67da_doc_discord_0",
+              "tags": [],
+              "source_fact_ids": null
+            }
+          ],
+          "mentioned_at": [
+            "2026-02-20T18:00:00+00:00"
+          ],
+          "occurred_start": [
+            "2026-02-20T00:00:00+00:00"
+          ]
+        }
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": true,
+          "score": 1.0,
+          "notes": "hits=1/1 misses=none forbidden_hits=none",
+          "detail": {
+            "expected": [
+              "2026-02-20"
+            ],
+            "recalled": [
+              "2026-02-20"
+            ],
+            "misses": [],
+            "forbidden_hits": [],
+            "raw_mentioned_at": [
+              "2026-02-20T18:00:00+00:00"
+            ]
+          }
+        }
+      ],
+      "passed": true
+    },
+    {
+      "scenario_id": "inline_date_in_body",
+      "memory_variant_id": "header_inline_default_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "The dispatcher hit the Discord rate limit twice in a row at 18:04 UTC | When: 2026-02-20 | Involving: dispatcher",
+        "response_type": null,
+        "duration_s": 2.388825,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": null,
+        "raw": {
+          "retain_response": {
+            "success": true,
+            "bank_id": "eval_backfill_inline_date_in_body_header_inline_default_mission",
+            "items_count": 1,
+            "async": false,
+            "operation_id": null,
+            "operation_ids": null,
+            "usage": {
+              "input_tokens": 0,
+              "output_tokens": 0,
+              "total_tokens": 0
+            }
+          },
+          "bank_id": "eval_backfill_inline_date_in_body_header_inline_default_mission",
+          "strategy": "header_inline",
+          "recalled_items": [
+            {
+              "id": "64dc0850-82c3-4588-992c-9d568eb7f532",
+              "text": "The dispatcher hit the Discord rate limit twice in a row at 18:04 UTC | When: 2026-02-20 | Involving: dispatcher",
+              "type": "experience",
+              "entities": [
+                "dispatcher",
+                "Discord"
+              ],
+              "context": "",
+              "occurred_start": "2026-02-20T00:00:00+00:00",
+              "occurred_end": "2026-02-20T00:00:00+00:00",
+              "mentioned_at": null,
+              "document_id": "doc_discord",
+              "metadata": {},
+              "chunk_id": "eval_backfill_inline_date_in_body_header_inline_default_mission_doc_discord_0",
+              "tags": [],
+              "source_fact_ids": null
+            }
+          ],
+          "mentioned_at": [
+            null
+          ],
+          "occurred_start": [
+            "2026-02-20T00:00:00+00:00"
+          ]
+        }
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": false,
+          "score": 0.0,
+          "notes": "no mentioned_at values in recalled items",
+          "detail": {
+            "recalled": [
+              {
+                "id": "64dc0850-82c3-4588-992c-9d568eb7f532",
+                "text": "The dispatcher hit the Discord rate limit twice in a row at 18:04 UTC | When: 2026-02-20 | Involving: dispatcher",
+                "type": "experience",
+                "entities": [
+                  "dispatcher",
+                  "Discord"
+                ],
+                "context": "",
+                "occurred_start": "2026-02-20T00:00:00+00:00",
+                "occurred_end": "2026-02-20T00:00:00+00:00",
+                "mentioned_at": null,
+                "document_id": "doc_discord",
+                "metadata": {},
+                "chunk_id": "eval_backfill_inline_date_in_body_header_inline_default_mission_doc_discord_0",
+                "tags": [],
+                "source_fact_ids": null
+              }
+            ]
+          }
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "inline_date_in_body",
+      "memory_variant_id": "block_anchor_default_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "The dispatcher hit the Discord rate limit twice in a row at 18:04 UTC | When: 2026-02-20 | Involving: dispatcher",
+        "response_type": null,
+        "duration_s": 1.887144,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": null,
+        "raw": {
+          "retain_response": {
+            "success": true,
+            "bank_id": "eval_backfill_inline_date_in_body_block_anchor_default_mission_",
+            "items_count": 1,
+            "async": false,
+            "operation_id": null,
+            "operation_ids": null,
+            "usage": {
+              "input_tokens": 0,
+              "output_tokens": 0,
+              "total_tokens": 0
+            }
+          },
+          "bank_id": "eval_backfill_inline_date_in_body_block_anchor_default_mission_",
+          "strategy": "block_anchor",
+          "recalled_items": [
+            {
+              "id": "0fa08df9-f19e-4ad9-9666-2fbf191d3c93",
+              "text": "The dispatcher hit the Discord rate limit twice in a row at 18:04 UTC | When: 2026-02-20 | Involving: dispatcher",
+              "type": "experience",
+              "entities": [
+                "dispatcher",
+                "Discord"
+              ],
+              "context": "",
+              "occurred_start": "2026-02-20T00:00:00+00:00",
+              "occurred_end": "2026-02-20T00:00:00+00:00",
+              "mentioned_at": "2026-02-20T00:00:00+00:00",
+              "document_id": "doc_discord",
+              "metadata": {},
+              "chunk_id": "eval_backfill_inline_date_in_body_block_anchor_default_mission__doc_discord_0",
+              "tags": [],
+              "source_fact_ids": null
+            }
+          ],
+          "mentioned_at": [
+            "2026-02-20T00:00:00+00:00"
+          ],
+          "occurred_start": [
+            "2026-02-20T00:00:00+00:00"
+          ]
+        }
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": true,
+          "score": 1.0,
+          "notes": "hits=1/1 misses=none forbidden_hits=none",
+          "detail": {
+            "expected": [
+              "2026-02-20"
+            ],
+            "recalled": [
+              "2026-02-20"
+            ],
+            "misses": [],
+            "forbidden_hits": [],
+            "raw_mentioned_at": [
+              "2026-02-20T00:00:00+00:00"
+            ]
+          }
+        }
+      ],
+      "passed": true
+    },
+    {
+      "scenario_id": "inline_date_in_body",
+      "memory_variant_id": "unset_backfill_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "Dispatcher hit Discord rate limit twice in a row at 18:04 UTC | When: 2026-02-20 | Involving: dispatcher",
+        "response_type": null,
+        "duration_s": 58.34039,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": null,
+        "raw": {
+          "retain_response": {
+            "success": true,
+            "bank_id": "eval_backfill_inline_date_in_body_unset_backfill_mission_ad9d08",
+            "items_count": 1,
+            "async": false,
+            "operation_id": null,
+            "operation_ids": null,
+            "usage": {
+              "input_tokens": 1922,
+              "output_tokens": 109,
+              "total_tokens": 2031
+            }
+          },
+          "bank_id": "eval_backfill_inline_date_in_body_unset_backfill_mission_ad9d08",
+          "strategy": "unset",
+          "recalled_items": [
+            {
+              "id": "ed0860ea-01d1-4da5-a040-a83e77dbfc12",
+              "text": "Dispatcher hit Discord rate limit twice in a row at 18:04 UTC | When: 2026-02-20 | Involving: dispatcher",
+              "type": "experience",
+              "entities": [
+                "dispatcher"
+              ],
+              "context": "",
+              "occurred_start": "2026-02-20T00:00:00+00:00",
+              "occurred_end": "2026-02-20T00:00:00+00:00",
+              "mentioned_at": null,
+              "document_id": "doc_discord",
+              "metadata": {},
+              "chunk_id": "eval_backfill_inline_date_in_body_unset_backfill_mission_ad9d08_doc_discord_0",
+              "tags": [],
+              "source_fact_ids": null
+            }
+          ],
+          "mentioned_at": [
+            null
+          ],
+          "occurred_start": [
+            "2026-02-20T00:00:00+00:00"
+          ]
+        }
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": false,
+          "score": 0.0,
+          "notes": "no mentioned_at values in recalled items",
+          "detail": {
+            "recalled": [
+              {
+                "id": "ed0860ea-01d1-4da5-a040-a83e77dbfc12",
+                "text": "Dispatcher hit Discord rate limit twice in a row at 18:04 UTC | When: 2026-02-20 | Involving: dispatcher",
+                "type": "experience",
+                "entities": [
+                  "dispatcher"
+                ],
+                "context": "",
+                "occurred_start": "2026-02-20T00:00:00+00:00",
+                "occurred_end": "2026-02-20T00:00:00+00:00",
+                "mentioned_at": null,
+                "document_id": "doc_discord",
+                "metadata": {},
+                "chunk_id": "eval_backfill_inline_date_in_body_unset_backfill_mission_ad9d08_doc_discord_0",
+                "tags": [],
+                "source_fact_ids": null
+              }
+            ]
+          }
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "inline_date_in_body",
+      "memory_variant_id": "header_inline_backfill_mission",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "The dispatcher hit the Discord rate limit twice in a row at 18:04 UTC | When: 2026-02-20 | Involving: dispatcher",
+        "response_type": null,
+        "duration_s": 1.900175,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": null,
+        "raw": {
+          "retain_response": {
+            "success": true,
+            "bank_id": "eval_backfill_inline_date_in_body_header_inline_backfill_missio",
+            "items_count": 1,
+            "async": false,
+            "operation_id": null,
+            "operation_ids": null,
+            "usage": {
+              "input_tokens": 0,
+              "output_tokens": 0,
+              "total_tokens": 0
+            }
+          },
+          "bank_id": "eval_backfill_inline_date_in_body_header_inline_backfill_missio",
+          "strategy": "header_inline",
+          "recalled_items": [
+            {
+              "id": "713b975b-03d9-4047-9a03-76af79f337b3",
+              "text": "The dispatcher hit the Discord rate limit twice in a row at 18:04 UTC | When: 2026-02-20 | Involving: dispatcher",
+              "type": "world",
+              "entities": [
+                "Discord",
+                "dispatcher"
+              ],
+              "context": "",
+              "occurred_start": "2026-02-20T00:00:00+00:00",
+              "occurred_end": "2026-02-20T00:00:00+00:00",
+              "mentioned_at": null,
+              "document_id": "doc_discord",
+              "metadata": {},
+              "chunk_id": "eval_backfill_inline_date_in_body_header_inline_backfill_missio_doc_discord_0",
+              "tags": [],
+              "source_fact_ids": null
+            }
+          ],
+          "mentioned_at": [
+            null
+          ],
+          "occurred_start": [
+            "2026-02-20T00:00:00+00:00"
+          ]
+        }
+      },
+      "grades": [
+        {
+          "grader": "date_attribution",
+          "passed": false,
+          "score": 0.0,
+          "notes": "no mentioned_at values in recalled items",
+          "detail": {
+            "recalled": [
+              {
+                "id": "713b975b-03d9-4047-9a03-76af79f337b3",
+                "text": "The dispatcher hit the Discord rate limit twice in a row at 18:04 UTC | When: 2026-02-20 | Involving: dispatcher",
+                "type": "world",
+                "entities": [
+                  "Discord",
+                  "dispatcher"
+                ],
+                "context": "",
+                "occurred_start": "2026-02-20T00:00:00+00:00",
+                "occurred_end": "2026-02-20T00:00:00+00:00",
+                "mentioned_at": null,
+                "document_id": "doc_discord",
+                "metadata": {},
+                "chunk_id": "eval_backfill_inline_date_in_body_header_inline_backfill_missio_doc_discord_0",
+                "tags": [],
+                "source_fact_ids": null
+              }
+            ]
+          }
+        }
+      ],
+      "passed": false
+    }
+  ]
+}

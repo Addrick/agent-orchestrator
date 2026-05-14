@@ -1,0 +1,55 @@
+{
+  "memory": [
+    {
+      "id": "prod_mission_date_speaker",
+      "description": "Production retain_mission from backfill_hindsight.py + Date+Speaker header format (current behavior)",
+      "extra": {
+        "content_format": "date_speaker_header",
+        "retain_mission": "You are an observer listening to an ambient channel. The messages are from various users and are not necessarily directed at you. Extract facts about the users, their interests, and mentioned entities. Attribute actions to the correct speakers identified in the text (e.g. 'Name: message'). IMPORTANT: Do NOT attribute these actions to a persona named 'ambient'. The 'ambient' name refers to the bank itself, not a participant.",
+        "wait_seconds": 1.0
+      }
+    },
+    {
+      "id": "prod_mission_inline",
+      "description": "Production mission + bare `Name: text` per line (no Date header)",
+      "extra": {
+        "content_format": "inline",
+        "retain_mission": "You are an observer listening to an ambient channel. The messages are from various users and are not necessarily directed at you. Extract facts about the users, their interests, and mentioned entities. Attribute actions to the correct speakers identified in the text (e.g. 'Name: message'). IMPORTANT: Do NOT attribute these actions to a persona named 'ambient'. The 'ambient' name refers to the bank itself, not a participant.",
+        "wait_seconds": 1.0
+      }
+    },
+    {
+      "id": "emphatic_mission_date_speaker",
+      "description": "Mission rewritten with stronger anti-narrator framing + speaker-extraction examples",
+      "extra": {
+        "content_format": "date_speaker_header",
+        "retain_mission": "You are recording observations from a multi-participant chat log. EVERY memory you extract MUST be attributed to a specific named participant. Each turn is labeled `Speaker: <name>` — that name is the subject of every action in the turn that follows. Never use 'ambient', 'narrator', 'observer', 'the user', or 'the channel' as the subject of an extracted memory; those are not participants. If you cannot identify a specific named speaker for a statement, omit the memory entirely.",
+        "wait_seconds": 1.0
+      }
+    },
+    {
+      "id": "emphatic_mission_bracketed",
+      "description": "Emphatic mission + `[Speaker] text` format",
+      "extra": {
+        "content_format": "bracketed",
+        "retain_mission": "You are recording observations from a multi-participant chat log. EVERY memory you extract MUST be attributed to a specific named participant. Each line begins with `[<name>]` followed by what they said — that name is the subject of every action that follows. Never use 'ambient', 'narrator', 'observer', 'the user', or 'the channel' as the subject of an extracted memory; those are not participants. If you cannot identify a specific named speaker for a statement, omit the memory entirely.",
+        "wait_seconds": 1.0
+      }
+    },
+    {
+      "id": "emphatic_mission_json",
+      "description": "Emphatic mission + JSON-formatted turns (most explicit speaker structure)",
+      "extra": {
+        "content_format": "json_block",
+        "retain_mission": "You are recording observations from a multi-participant chat log presented as a JSON array. Each entry is `{\"speaker\": <name>, \"text\": <words>}`. EVERY memory you extract MUST cite the named speaker as the subject. Never use 'ambient', 'narrator', 'observer', 'the user', or 'the channel' as the subject; those are not participants.",
+        "wait_seconds": 1.0
+      }
+    }
+  ],
+  "prompt": [
+    {
+      "id": "default",
+      "description": "Suite uses bank retain_mission, not persona prompt"
+    }
+  ]
+}

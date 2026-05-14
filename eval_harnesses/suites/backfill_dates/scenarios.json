@@ -1,0 +1,58 @@
+[
+  {
+    "id": "single_dated_quote",
+    "description": "One short doc with one explicit date and one fact",
+    "user_request": "What did Adam say about the EK AIO cooler?",
+    "expectations": {
+      "documents": [
+        {
+          "id": "doc_aio_cooler",
+          "doc_date": "2026-03-12T10:00:00Z",
+          "text": "Adam: The EK 360 AIO cooler is leaking after 14 months. RMA request sent."
+        }
+      ],
+      "expected_dates": ["2026-03-12"],
+      "forbidden_dates": []
+    },
+    "graders": ["date_attribution"]
+  },
+  {
+    "id": "two_docs_distinct_dates",
+    "description": "Two docs from different days; both dates must surface",
+    "user_request": "What problems did Adam report?",
+    "expectations": {
+      "documents": [
+        {
+          "id": "doc_kobold",
+          "doc_date": "2026-04-01T14:30:00Z",
+          "text": "Adam: koboldcpp is silently truncating context above 32k tokens on the 24GB card."
+        },
+        {
+          "id": "doc_surface",
+          "doc_date": "2026-04-15T09:00:00Z",
+          "text": "Adam: Surface laptop won't boot after the firmware update; SMC reset did not help."
+        }
+      ],
+      "expected_dates": ["2026-04-01", "2026-04-15"],
+      "forbidden_dates": []
+    },
+    "graders": ["date_attribution"]
+  },
+  {
+    "id": "inline_date_in_body",
+    "description": "Date appears only in the prose of the document, not as metadata",
+    "user_request": "What happened with the Discord rate limit?",
+    "expectations": {
+      "documents": [
+        {
+          "id": "doc_discord",
+          "doc_date": "2026-02-20T18:00:00Z",
+          "text": "On 2026-02-20 the dispatcher hit the Discord rate limit twice in a row at 18:04 UTC."
+        }
+      ],
+      "expected_dates": ["2026-02-20"],
+      "forbidden_dates": []
+    },
+    "graders": ["date_attribution"]
+  }
+]

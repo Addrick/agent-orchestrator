@@ -1,0 +1,1341 @@
+{
+  "suite": "ambient_attribution",
+  "started_at": "2026-05-14T05:45:12.312096",
+  "finished_at": "2026-05-14T06:35:36.617502",
+  "live": false,
+  "summary": {
+    "total": 15,
+    "passed": 8,
+    "per_grader": {
+      "attribution_correctness": {
+        "pass": 8,
+        "fail": 7
+      }
+    },
+    "per_variant": {
+      "prod_mission_date_speaker|default": {
+        "total": 3,
+        "passed": 2,
+        "avg_score": 0.6666666666666666
+      },
+      "prod_mission_inline|default": {
+        "total": 3,
+        "passed": 2,
+        "avg_score": 0.6666666666666666
+      },
+      "emphatic_mission_date_speaker|default": {
+        "total": 3,
+        "passed": 1,
+        "avg_score": 0.3333333333333333
+      },
+      "emphatic_mission_bracketed|default": {
+        "total": 3,
+        "passed": 1,
+        "avg_score": 0.3333333333333333
+      },
+      "emphatic_mission_json|default": {
+        "total": 3,
+        "passed": 2,
+        "avg_score": 0.6666666666666666
+      }
+    }
+  },
+  "cells": [
+    {
+      "scenario_id": "two_speaker_simple",
+      "memory_variant_id": "prod_mission_date_speaker",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "Tom cooked the wagyu A5 ribeye sous vide at 54C for two hours and seared it in tallow | Involving: Tom\n---\nTom bought a wagyu A5 ribeye on discount at H Mart | When: 2026-03-31 | Involving: Tom\n---\nAlice's GPU throttles at 84C under load and needs repasting | Involving: Alice",
+        "response_type": null,
+        "duration_s": 85.571477,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": null,
+        "raw": {
+          "retain_response": {
+            "success": true,
+            "bank_id": "eval_ambient_two_speaker_simple_prod_mission_date_speaker_9adb3",
+            "items_count": 1,
+            "async": false,
+            "operation_id": null,
+            "operation_ids": null,
+            "usage": {
+              "input_tokens": 2097,
+              "output_tokens": 560,
+              "total_tokens": 2657
+            }
+          },
+          "bank_id": "eval_ambient_two_speaker_simple_prod_mission_date_speaker_9adb3",
+          "content_format": "date_speaker_header",
+          "recalled_items": [
+            {
+              "id": "5b123223-3734-4032-8219-fe7a2694393b",
+              "text": "Tom cooked the wagyu A5 ribeye sous vide at 54C for two hours and seared it in tallow | Involving: Tom",
+              "type": "experience",
+              "entities": [
+                "Tom",
+                "wagyu A5 ribeye"
+              ],
+              "context": "",
+              "occurred_start": "2026-04-01T00:00:00.020000+00:00",
+              "occurred_end": "2026-04-01T00:00:00.020000+00:00",
+              "mentioned_at": "2026-04-01T10:02:00.020000+00:00",
+              "document_id": "transcript_9adb3298",
+              "metadata": {},
+              "chunk_id": "eval_ambient_two_speaker_simple_prod_mission_date_speaker_9adb3_transcript_9adb3298_0",
+              "tags": [
+                "channel:eval_ambient"
+              ],
+              "source_fact_ids": null
+            },
+            {
+              "id": "3e6fdf1d-32ef-4830-8f56-2e30ba7b2293",
+              "text": "Tom bought a wagyu A5 ribeye on discount at H Mart | When: 2026-03-31 | Involving: Tom",
+              "type": "experience",
+              "entities": [
+                "H Mart",
+                "Tom",
+                "wagyu A5 ribeye"
+              ],
+              "context": "",
+              "occurred_start": "2026-03-31T00:00:00+00:00",
+              "occurred_end": "2026-03-31T00:00:00+00:00",
+              "mentioned_at": "2026-04-01T10:02:00+00:00",
+              "document_id": "transcript_9adb3298",
+              "metadata": {},
+              "chunk_id": "eval_ambient_two_speaker_simple_prod_mission_date_speaker_9adb3_transcript_9adb3298_0",
+              "tags": [
+                "channel:eval_ambient"
+              ],
+              "source_fact_ids": null
+            },
+            {
+              "id": "56764a85-90c1-42ac-9d12-099ac2f108ba",
+              "text": "Alice's GPU throttles at 84C under load and needs repasting | Involving: Alice",
+              "type": "experience",
+              "entities": [
+                "GPU",
+                "Alice"
+              ],
+              "context": "",
+              "occurred_start": null,
+              "occurred_end": null,
+              "mentioned_at": "2026-04-01T10:02:00.010000+00:00",
+              "document_id": "transcript_9adb3298",
+              "metadata": {},
+              "chunk_id": "eval_ambient_two_speaker_simple_prod_mission_date_speaker_9adb3_transcript_9adb3298_0",
+              "tags": [
+                "channel:eval_ambient"
+              ],
+              "source_fact_ids": null
+            }
+          ],
+          "recalled_text": [
+            "Tom cooked the wagyu A5 ribeye sous vide at 54C for two hours and seared it in tallow | Involving: Tom",
+            "Tom bought a wagyu A5 ribeye on discount at H Mart | When: 2026-03-31 | Involving: Tom",
+            "Alice's GPU throttles at 84C under load and needs repasting | Involving: Alice"
+          ]
+        }
+      },
+      "grades": [
+        {
+          "grader": "attribution_correctness",
+          "passed": true,
+          "score": 1.0,
+          "notes": "facts 3/3 bad_attribution=0",
+          "detail": {
+            "fact_results": [
+              {
+                "speaker": "Tom",
+                "must_contain": [
+                  "wagyu",
+                  "discount"
+                ],
+                "passed": true,
+                "matched_item_idx": 1
+              },
+              {
+                "speaker": "Alice",
+                "must_contain": [
+                  "gpu",
+                  "throttl"
+                ],
+                "passed": true,
+                "matched_item_idx": 2
+              },
+              {
+                "speaker": "Tom",
+                "must_contain": [
+                  "sous vide",
+                  "54"
+                ],
+                "passed": true,
+                "matched_item_idx": 0
+              }
+            ],
+            "bad_attribution_hits": [],
+            "speakers_known": [
+              "alice",
+              "tom"
+            ],
+            "item_count": 3
+          }
+        }
+      ],
+      "passed": true
+    },
+    {
+      "scenario_id": "two_speaker_simple",
+      "memory_variant_id": "prod_mission_inline",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "Tom cooked the wagyu sous vide at 54C for two hours and seared it in tallow | Involving: Tom\n---\nTom bought a wagyu A5 ribeye on discount at H Mart | When: 2026-03-31 | Involving: Tom\n---\nAlice's GPU is throttling at 84C under load and needs repasting | Involving: Alice",
+        "response_type": null,
+        "duration_s": 84.282039,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": null,
+        "raw": {
+          "retain_response": {
+            "success": true,
+            "bank_id": "eval_ambient_two_speaker_simple_prod_mission_inline_c653a966",
+            "items_count": 1,
+            "async": false,
+            "operation_id": null,
+            "operation_ids": null,
+            "usage": {
+              "input_tokens": 2013,
+              "output_tokens": 483,
+              "total_tokens": 2496
+            }
+          },
+          "bank_id": "eval_ambient_two_speaker_simple_prod_mission_inline_c653a966",
+          "content_format": "inline",
+          "recalled_items": [
+            {
+              "id": "b2b8263b-8992-4784-bba1-104ef410a919",
+              "text": "Tom cooked the wagyu sous vide at 54C for two hours and seared it in tallow | Involving: Tom",
+              "type": "world",
+              "entities": [
+                "Tom",
+                "tallow",
+                "wagyu"
+              ],
+              "context": "",
+              "occurred_start": null,
+              "occurred_end": null,
+              "mentioned_at": "2026-04-01T10:02:00.020000+00:00",
+              "document_id": "transcript_c653a966",
+              "metadata": {},
+              "chunk_id": "eval_ambient_two_speaker_simple_prod_mission_inline_c653a966_transcript_c653a966_0",
+              "tags": [
+                "channel:eval_ambient"
+              ],
+              "source_fact_ids": null
+            },
+            {
+              "id": "5f9cbed6-7e04-42b4-a64c-12b3442af199",
+              "text": "Tom bought a wagyu A5 ribeye on discount at H Mart | When: 2026-03-31 | Involving: Tom",
+              "type": "world",
+              "entities": [
+                "Tom",
+                "wagyu A5 ribeye",
+                "H Mart"
+              ],
+              "context": "",
+              "occurred_start": null,
+              "occurred_end": null,
+              "mentioned_at": "2026-04-01T10:02:00+00:00",
+              "document_id": "transcript_c653a966",
+              "metadata": {},
+              "chunk_id": "eval_ambient_two_speaker_simple_prod_mission_inline_c653a966_transcript_c653a966_0",
+              "tags": [
+                "channel:eval_ambient"
+              ],
+              "source_fact_ids": null
+            },
+            {
+              "id": "bdfef1f6-20d1-428d-a979-2ece2e3d730f",
+              "text": "Alice's GPU is throttling at 84C under load and needs repasting | Involving: Alice",
+              "type": "world",
+              "entities": [
+                "GPU",
+                "Alice"
+              ],
+              "context": "",
+              "occurred_start": null,
+              "occurred_end": null,
+              "mentioned_at": "2026-04-01T10:02:00.010000+00:00",
+              "document_id": "transcript_c653a966",
+              "metadata": {},
+              "chunk_id": "eval_ambient_two_speaker_simple_prod_mission_inline_c653a966_transcript_c653a966_0",
+              "tags": [
+                "channel:eval_ambient"
+              ],
+              "source_fact_ids": null
+            }
+          ],
+          "recalled_text": [
+            "Tom cooked the wagyu sous vide at 54C for two hours and seared it in tallow | Involving: Tom",
+            "Tom bought a wagyu A5 ribeye on discount at H Mart | When: 2026-03-31 | Involving: Tom",
+            "Alice's GPU is throttling at 84C under load and needs repasting | Involving: Alice"
+          ]
+        }
+      },
+      "grades": [
+        {
+          "grader": "attribution_correctness",
+          "passed": true,
+          "score": 1.0,
+          "notes": "facts 3/3 bad_attribution=0",
+          "detail": {
+            "fact_results": [
+              {
+                "speaker": "Tom",
+                "must_contain": [
+                  "wagyu",
+                  "discount"
+                ],
+                "passed": true,
+                "matched_item_idx": 1
+              },
+              {
+                "speaker": "Alice",
+                "must_contain": [
+                  "gpu",
+                  "throttl"
+                ],
+                "passed": true,
+                "matched_item_idx": 2
+              },
+              {
+                "speaker": "Tom",
+                "must_contain": [
+                  "sous vide",
+                  "54"
+                ],
+                "passed": true,
+                "matched_item_idx": 0
+              }
+            ],
+            "bad_attribution_hits": [],
+            "speakers_known": [
+              "alice",
+              "tom"
+            ],
+            "item_count": 3
+          }
+        }
+      ],
+      "passed": true
+    },
+    {
+      "scenario_id": "two_speaker_simple",
+      "memory_variant_id": "emphatic_mission_date_speaker",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "Tom cooked the wagyu A5 ribeye sous vide at 54C for two hours and seared it in tallow | When: 2026-04-01 | Involving: Tom\n---\nTom bought a discounted wagyu A5 ribeye at H Mart | When: 2026-03-31 | Involving: Tom\n---\nAlice's GPU is throttling at 84C under load and needs repasting | When: 2026-04-01 | Involving: Alice",
+        "response_type": null,
+        "duration_s": 85.050426,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": null,
+        "raw": {
+          "retain_response": {
+            "success": true,
+            "bank_id": "eval_ambient_two_speaker_simple_emphatic_mission_date_speaker_e",
+            "items_count": 1,
+            "async": false,
+            "operation_id": null,
+            "operation_ids": null,
+            "usage": {
+              "input_tokens": 2111,
+              "output_tokens": 630,
+              "total_tokens": 2741
+            }
+          },
+          "bank_id": "eval_ambient_two_speaker_simple_emphatic_mission_date_speaker_e",
+          "content_format": "date_speaker_header",
+          "recalled_items": [
+            {
+              "id": "5b887d6c-98dd-4188-b98c-5f6058737ae4",
+              "text": "Tom cooked the wagyu A5 ribeye sous vide at 54C for two hours and seared it in tallow | When: 2026-04-01 | Involving: Tom",
+              "type": "world",
+              "entities": [
+                "wagyu A5 ribeye",
+                "tallow",
+                "Tom"
+              ],
+              "context": "",
+              "occurred_start": "2026-04-01T00:00:00.020000+00:00",
+              "occurred_end": "2026-04-01T00:00:00.020000+00:00",
+              "mentioned_at": "2026-04-01T10:02:00.020000+00:00",
+              "document_id": "transcript_e093ea36",
+              "metadata": {},
+              "chunk_id": "eval_ambient_two_speaker_simple_emphatic_mission_date_speaker_e_transcript_e093ea36_0",
+              "tags": [
+                "channel:eval_ambient"
+              ],
+              "source_fact_ids": null
+            },
+            {
+              "id": "0cad3c9c-4dbf-4173-a5c7-e396823ac81d",
+              "text": "Tom bought a discounted wagyu A5 ribeye at H Mart | When: 2026-03-31 | Involving: Tom",
+              "type": "world",
+              "entities": [
+                "wagyu A5 ribeye",
+                "H Mart",
+                "Tom"
+              ],
+              "context": "",
+              "occurred_start": "2026-03-31T00:00:00+00:00",
+              "occurred_end": "2026-03-31T00:00:00+00:00",
+              "mentioned_at": "2026-04-01T10:02:00+00:00",
+              "document_id": "transcript_e093ea36",
+              "metadata": {},
+              "chunk_id": "eval_ambient_two_speaker_simple_emphatic_mission_date_speaker_e_transcript_e093ea36_0",
+              "tags": [
+                "channel:eval_ambient"
+              ],
+              "source_fact_ids": null
+            },
+            {
+              "id": "bdbeebc8-851b-4aed-bc41-64ac9ac10f23",
+              "text": "Alice's GPU is throttling at 84C under load and needs repasting | When: 2026-04-01 | Involving: Alice",
+              "type": "world",
+              "entities": [
+                "GPU",
+                "Alice"
+              ],
+              "context": "",
+              "occurred_start": "2026-04-01T00:00:00.010000+00:00",
+              "occurred_end": "2026-04-01T00:00:00.010000+00:00",
+              "mentioned_at": "2026-04-01T10:02:00.010000+00:00",
+              "document_id": "transcript_e093ea36",
+              "metadata": {},
+              "chunk_id": "eval_ambient_two_speaker_simple_emphatic_mission_date_speaker_e_transcript_e093ea36_0",
+              "tags": [
+                "channel:eval_ambient"
+              ],
+              "source_fact_ids": null
+            }
+          ],
+          "recalled_text": [
+            "Tom cooked the wagyu A5 ribeye sous vide at 54C for two hours and seared it in tallow | When: 2026-04-01 | Involving: Tom",
+            "Tom bought a discounted wagyu A5 ribeye at H Mart | When: 2026-03-31 | Involving: Tom",
+            "Alice's GPU is throttling at 84C under load and needs repasting | When: 2026-04-01 | Involving: Alice"
+          ]
+        }
+      },
+      "grades": [
+        {
+          "grader": "attribution_correctness",
+          "passed": true,
+          "score": 1.0,
+          "notes": "facts 3/3 bad_attribution=0",
+          "detail": {
+            "fact_results": [
+              {
+                "speaker": "Tom",
+                "must_contain": [
+                  "wagyu",
+                  "discount"
+                ],
+                "passed": true,
+                "matched_item_idx": 1
+              },
+              {
+                "speaker": "Alice",
+                "must_contain": [
+                  "gpu",
+                  "throttl"
+                ],
+                "passed": true,
+                "matched_item_idx": 2
+              },
+              {
+                "speaker": "Tom",
+                "must_contain": [
+                  "sous vide",
+                  "54"
+                ],
+                "passed": true,
+                "matched_item_idx": 0
+              }
+            ],
+            "bad_attribution_hits": [],
+            "speakers_known": [
+              "alice",
+              "tom"
+            ],
+            "item_count": 3
+          }
+        }
+      ],
+      "passed": true
+    },
+    {
+      "scenario_id": "two_speaker_simple",
+      "memory_variant_id": "emphatic_mission_bracketed",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "",
+        "response_type": null,
+        "duration_s": 301.101632,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": "ReadTimeout: ",
+        "raw": {}
+      },
+      "grades": [
+        {
+          "grader": "attribution_correctness",
+          "passed": false,
+          "score": 0.0,
+          "notes": "driver error: ReadTimeout: ",
+          "detail": {}
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "two_speaker_simple",
+      "memory_variant_id": "emphatic_mission_json",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "",
+        "response_type": null,
+        "duration_s": 301.001242,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": "ReadTimeout: ",
+        "raw": {}
+      },
+      "grades": [
+        {
+          "grader": "attribution_correctness",
+          "passed": false,
+          "score": 0.0,
+          "notes": "driver error: ReadTimeout: ",
+          "detail": {}
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "three_speaker_overlap",
+      "memory_variant_id": "prod_mission_date_speaker",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "",
+        "response_type": null,
+        "duration_s": 300.860012,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": "ReadTimeout: ",
+        "raw": {}
+      },
+      "grades": [
+        {
+          "grader": "attribution_correctness",
+          "passed": false,
+          "score": 0.0,
+          "notes": "driver error: ReadTimeout: ",
+          "detail": {}
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "three_speaker_overlap",
+      "memory_variant_id": "prod_mission_inline",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "",
+        "response_type": null,
+        "duration_s": 300.962003,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": "ReadTimeout: ",
+        "raw": {}
+      },
+      "grades": [
+        {
+          "grader": "attribution_correctness",
+          "passed": false,
+          "score": 0.0,
+          "notes": "driver error: ReadTimeout: ",
+          "detail": {}
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "three_speaker_overlap",
+      "memory_variant_id": "emphatic_mission_date_speaker",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "",
+        "response_type": null,
+        "duration_s": 300.872025,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": "ReadTimeout: ",
+        "raw": {}
+      },
+      "grades": [
+        {
+          "grader": "attribution_correctness",
+          "passed": false,
+          "score": 0.0,
+          "notes": "driver error: ReadTimeout: ",
+          "detail": {}
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "three_speaker_overlap",
+      "memory_variant_id": "emphatic_mission_bracketed",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "",
+        "response_type": null,
+        "duration_s": 300.744325,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": "ReadTimeout: ",
+        "raw": {}
+      },
+      "grades": [
+        {
+          "grader": "attribution_correctness",
+          "passed": false,
+          "score": 0.0,
+          "notes": "driver error: ReadTimeout: ",
+          "detail": {}
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "three_speaker_overlap",
+      "memory_variant_id": "emphatic_mission_json",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "Adam hosting LAN party Saturday, participants bring own ethernet cable | When: 2026-04-11 | Involving: Adam\n---\nMike asking about CS2 or Quake Champions, ping awful in CS2 | When: 2026-04-11 | Involving: Mike\n---\nMike bringing unmanaged 8-port switch and two cat6 runs | When: 2026-04-11 | Involving: Mike\n---\nSara handling pizza, two pepperoni and one veggie from Pequods | When: 2026-04-11 | Involving: Sara\n---\nTournament bracket starts at 8pm sharp, double elim | When: 2026-04-11 | Involving: Adam",
+        "response_type": null,
+        "duration_s": 237.9388,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": null,
+        "raw": {
+          "retain_response": {
+            "success": true,
+            "bank_id": "eval_ambient_three_speaker_overlap_emphatic_mission_json_6dbdd3",
+            "items_count": 1,
+            "async": false,
+            "operation_id": null,
+            "operation_ids": null,
+            "usage": {
+              "input_tokens": 2122,
+              "output_tokens": 471,
+              "total_tokens": 2593
+            }
+          },
+          "bank_id": "eval_ambient_three_speaker_overlap_emphatic_mission_json_6dbdd3",
+          "content_format": "json_block",
+          "recalled_items": [
+            {
+              "id": "41f568b3-f5df-4746-a9af-fa9ebdc24c48",
+              "text": "Adam hosting LAN party Saturday, participants bring own ethernet cable | When: 2026-04-11 | Involving: Adam",
+              "type": "experience",
+              "entities": null,
+              "context": "",
+              "occurred_start": "2026-04-11T00:00:00+00:00",
+              "occurred_end": "2026-04-11T00:00:00+00:00",
+              "mentioned_at": "2026-04-10T19:06:00+00:00",
+              "document_id": "transcript_6dbdd342",
+              "metadata": {},
+              "chunk_id": "eval_ambient_three_speaker_overlap_emphatic_mission_json_6dbdd3_transcript_6dbdd342_0",
+              "tags": [
+                "channel:eval_ambient"
+              ],
+              "source_fact_ids": null
+            },
+            {
+              "id": "0ce0b813-275b-4a8f-8b22-f26fc26acaec",
+              "text": "Mike asking about CS2 or Quake Champions, ping awful in CS2 | When: 2026-04-11 | Involving: Mike",
+              "type": "experience",
+              "entities": null,
+              "context": "",
+              "occurred_start": "2026-04-11T00:00:00.040000+00:00",
+              "occurred_end": "2026-04-11T00:00:00.040000+00:00",
+              "mentioned_at": "2026-04-10T19:06:00.040000+00:00",
+              "document_id": "transcript_6dbdd342",
+              "metadata": {},
+              "chunk_id": "eval_ambient_three_speaker_overlap_emphatic_mission_json_6dbdd3_transcript_6dbdd342_0",
+              "tags": [
+                "channel:eval_ambient"
+              ],
+              "source_fact_ids": null
+            },
+            {
+              "id": "6c42765f-56df-4a6d-ba47-3bbdeb4b6a39",
+              "text": "Mike bringing unmanaged 8-port switch and two cat6 runs | When: 2026-04-11 | Involving: Mike",
+              "type": "experience",
+              "entities": null,
+              "context": "",
+              "occurred_start": "2026-04-11T00:00:00.010000+00:00",
+              "occurred_end": "2026-04-11T00:00:00.010000+00:00",
+              "mentioned_at": "2026-04-10T19:06:00.010000+00:00",
+              "document_id": "transcript_6dbdd342",
+              "metadata": {},
+              "chunk_id": "eval_ambient_three_speaker_overlap_emphatic_mission_json_6dbdd3_transcript_6dbdd342_0",
+              "tags": [
+                "channel:eval_ambient"
+              ],
+              "source_fact_ids": null
+            },
+            {
+              "id": "3b3593ab-bacd-4a0e-b8b5-5810b95d7064",
+              "text": "Sara handling pizza, two pepperoni and one veggie from Pequods | When: 2026-04-11 | Involving: Sara",
+              "type": "experience",
+              "entities": null,
+              "context": "",
+              "occurred_start": "2026-04-11T00:00:00.020000+00:00",
+              "occurred_end": "2026-04-11T00:00:00.020000+00:00",
+              "mentioned_at": "2026-04-10T19:06:00.020000+00:00",
+              "document_id": "transcript_6dbdd342",
+              "metadata": {},
+              "chunk_id": "eval_ambient_three_speaker_overlap_emphatic_mission_json_6dbdd3_transcript_6dbdd342_0",
+              "tags": [
+                "channel:eval_ambient"
+              ],
+              "source_fact_ids": null
+            },
+            {
+              "id": "a416c2b0-18f8-464f-bd12-e5909ab7f98a",
+              "text": "Tournament bracket starts at 8pm sharp, double elim | When: 2026-04-11 | Involving: Adam",
+              "type": "experience",
+              "entities": null,
+              "context": "",
+              "occurred_start": "2026-04-11T00:00:00.030000+00:00",
+              "occurred_end": "2026-04-11T00:00:00.030000+00:00",
+              "mentioned_at": "2026-04-10T19:06:00.030000+00:00",
+              "document_id": "transcript_6dbdd342",
+              "metadata": {},
+              "chunk_id": "eval_ambient_three_speaker_overlap_emphatic_mission_json_6dbdd3_transcript_6dbdd342_0",
+              "tags": [
+                "channel:eval_ambient"
+              ],
+              "source_fact_ids": null
+            }
+          ],
+          "recalled_text": [
+            "Adam hosting LAN party Saturday, participants bring own ethernet cable | When: 2026-04-11 | Involving: Adam",
+            "Mike asking about CS2 or Quake Champions, ping awful in CS2 | When: 2026-04-11 | Involving: Mike",
+            "Mike bringing unmanaged 8-port switch and two cat6 runs | When: 2026-04-11 | Involving: Mike",
+            "Sara handling pizza, two pepperoni and one veggie from Pequods | When: 2026-04-11 | Involving: Sara",
+            "Tournament bracket starts at 8pm sharp, double elim | When: 2026-04-11 | Involving: Adam"
+          ]
+        }
+      },
+      "grades": [
+        {
+          "grader": "attribution_correctness",
+          "passed": true,
+          "score": 1.0,
+          "notes": "facts 5/5 bad_attribution=0",
+          "detail": {
+            "fact_results": [
+              {
+                "speaker": "Adam",
+                "must_contain": [
+                  "lan party",
+                  "saturday"
+                ],
+                "passed": true,
+                "matched_item_idx": 0
+              },
+              {
+                "speaker": "Mike",
+                "must_contain": [
+                  "switch",
+                  "cat6"
+                ],
+                "passed": true,
+                "matched_item_idx": 2
+              },
+              {
+                "speaker": "Sara",
+                "must_contain": [
+                  "pizza",
+                  "pequods"
+                ],
+                "passed": true,
+                "matched_item_idx": 3
+              },
+              {
+                "speaker": "Adam",
+                "must_contain": [
+                  "bracket",
+                  "double elim"
+                ],
+                "passed": true,
+                "matched_item_idx": 4
+              },
+              {
+                "speaker": "Mike",
+                "must_contain": [
+                  "cs2",
+                  "ping"
+                ],
+                "passed": true,
+                "matched_item_idx": 1
+              }
+            ],
+            "bad_attribution_hits": [],
+            "speakers_known": [
+              "adam",
+              "mike",
+              "sara"
+            ],
+            "item_count": 5
+          }
+        }
+      ],
+      "passed": true
+    },
+    {
+      "scenario_id": "single_speaker_no_label",
+      "memory_variant_id": "prod_mission_date_speaker",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "Adam deployed Hindsight 0.6.1 in docker, Recall now returns hits | When: 2026-04-20 | Involving: Adam\n---\nMental model refresh still empty if tags_match is restrictive | When: 2026-04-20 | Involving: Adam",
+        "response_type": null,
+        "duration_s": 122.81712,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": null,
+        "raw": {
+          "retain_response": {
+            "success": true,
+            "bank_id": "eval_ambient_single_speaker_no_label_prod_mission_date_speaker_",
+            "items_count": 1,
+            "async": false,
+            "operation_id": null,
+            "operation_ids": null,
+            "usage": {
+              "input_tokens": 2040,
+              "output_tokens": 176,
+              "total_tokens": 2216
+            }
+          },
+          "bank_id": "eval_ambient_single_speaker_no_label_prod_mission_date_speaker_",
+          "content_format": "date_speaker_header",
+          "recalled_items": [
+            {
+              "id": "8f519af0-93bc-426d-b5f1-ab3822f0da9d",
+              "text": "Adam deployed Hindsight 0.6.1 in docker, Recall now returns hits | When: 2026-04-20 | Involving: Adam",
+              "type": "experience",
+              "entities": [
+                "Recall",
+                "docker",
+                "Hindsight 0.6.1"
+              ],
+              "context": "",
+              "occurred_start": null,
+              "occurred_end": null,
+              "mentioned_at": "2026-04-20T12:05:00+00:00",
+              "document_id": "transcript_008cb93a",
+              "metadata": {},
+              "chunk_id": "eval_ambient_single_speaker_no_label_prod_mission_date_speaker__transcript_008cb93a_0",
+              "tags": [
+                "channel:eval_ambient"
+              ],
+              "source_fact_ids": null
+            },
+            {
+              "id": "17d08b3a-622d-4d9b-b5a8-f0829293fef6",
+              "text": "Mental model refresh still empty if tags_match is restrictive | When: 2026-04-20 | Involving: Adam",
+              "type": "experience",
+              "entities": [
+                "Mental model refresh",
+                "tags_match"
+              ],
+              "context": "",
+              "occurred_start": null,
+              "occurred_end": null,
+              "mentioned_at": "2026-04-20T12:05:00.010000+00:00",
+              "document_id": "transcript_008cb93a",
+              "metadata": {},
+              "chunk_id": "eval_ambient_single_speaker_no_label_prod_mission_date_speaker__transcript_008cb93a_0",
+              "tags": [
+                "channel:eval_ambient"
+              ],
+              "source_fact_ids": null
+            }
+          ],
+          "recalled_text": [
+            "Adam deployed Hindsight 0.6.1 in docker, Recall now returns hits | When: 2026-04-20 | Involving: Adam",
+            "Mental model refresh still empty if tags_match is restrictive | When: 2026-04-20 | Involving: Adam"
+          ]
+        }
+      },
+      "grades": [
+        {
+          "grader": "attribution_correctness",
+          "passed": true,
+          "score": 1.0,
+          "notes": "facts 2/2 bad_attribution=0",
+          "detail": {
+            "fact_results": [
+              {
+                "speaker": "Adam",
+                "must_contain": [
+                  "hindsight",
+                  "0.6.1"
+                ],
+                "passed": true,
+                "matched_item_idx": 0
+              },
+              {
+                "speaker": "Adam",
+                "must_contain": [
+                  "mental model",
+                  "tags_match"
+                ],
+                "passed": true,
+                "matched_item_idx": 1
+              }
+            ],
+            "bad_attribution_hits": [],
+            "speakers_known": [
+              "adam"
+            ],
+            "item_count": 2
+          }
+        }
+      ],
+      "passed": true
+    },
+    {
+      "scenario_id": "single_speaker_no_label",
+      "memory_variant_id": "prod_mission_inline",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "Adam deployed Hindsight 0.6.1 in docker, recall returns hits now | When: 2026-04-20 | Involving: Adam\n---\nMental model refresh empty if tags_match is restrictive | When: 2026-04-20 | Involving: Adam",
+        "response_type": null,
+        "duration_s": 118.631441,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": null,
+        "raw": {
+          "retain_response": {
+            "success": true,
+            "bank_id": "eval_ambient_single_speaker_no_label_prod_mission_inline_37a548",
+            "items_count": 1,
+            "async": false,
+            "operation_id": null,
+            "operation_ids": null,
+            "usage": {
+              "input_tokens": 1987,
+              "output_tokens": 178,
+              "total_tokens": 2165
+            }
+          },
+          "bank_id": "eval_ambient_single_speaker_no_label_prod_mission_inline_37a548",
+          "content_format": "inline",
+          "recalled_items": [
+            {
+              "id": "0883b70f-d481-4a54-a305-25b97e5886c4",
+              "text": "Adam deployed Hindsight 0.6.1 in docker, recall returns hits now | When: 2026-04-20 | Involving: Adam",
+              "type": "experience",
+              "entities": [
+                "Hindsight 0.6.1",
+                "Adam",
+                "docker"
+              ],
+              "context": "",
+              "occurred_start": null,
+              "occurred_end": null,
+              "mentioned_at": "2026-04-20T12:05:00+00:00",
+              "document_id": "transcript_37a5483f",
+              "metadata": {},
+              "chunk_id": "eval_ambient_single_speaker_no_label_prod_mission_inline_37a548_transcript_37a5483f_0",
+              "tags": [
+                "channel:eval_ambient"
+              ],
+              "source_fact_ids": null
+            },
+            {
+              "id": "e77133fc-7dd2-4938-b775-97eaefee665c",
+              "text": "Mental model refresh empty if tags_match is restrictive | When: 2026-04-20 | Involving: Adam",
+              "type": "experience",
+              "entities": [
+                "Adam",
+                "tags_match",
+                "Mental model refresh"
+              ],
+              "context": "",
+              "occurred_start": null,
+              "occurred_end": null,
+              "mentioned_at": "2026-04-20T12:05:00.010000+00:00",
+              "document_id": "transcript_37a5483f",
+              "metadata": {},
+              "chunk_id": "eval_ambient_single_speaker_no_label_prod_mission_inline_37a548_transcript_37a5483f_0",
+              "tags": [
+                "channel:eval_ambient"
+              ],
+              "source_fact_ids": null
+            }
+          ],
+          "recalled_text": [
+            "Adam deployed Hindsight 0.6.1 in docker, recall returns hits now | When: 2026-04-20 | Involving: Adam",
+            "Mental model refresh empty if tags_match is restrictive | When: 2026-04-20 | Involving: Adam"
+          ]
+        }
+      },
+      "grades": [
+        {
+          "grader": "attribution_correctness",
+          "passed": true,
+          "score": 1.0,
+          "notes": "facts 2/2 bad_attribution=0",
+          "detail": {
+            "fact_results": [
+              {
+                "speaker": "Adam",
+                "must_contain": [
+                  "hindsight",
+                  "0.6.1"
+                ],
+                "passed": true,
+                "matched_item_idx": 0
+              },
+              {
+                "speaker": "Adam",
+                "must_contain": [
+                  "mental model",
+                  "tags_match"
+                ],
+                "passed": true,
+                "matched_item_idx": 1
+              }
+            ],
+            "bad_attribution_hits": [],
+            "speakers_known": [
+              "adam"
+            ],
+            "item_count": 2
+          }
+        }
+      ],
+      "passed": true
+    },
+    {
+      "scenario_id": "single_speaker_no_label",
+      "memory_variant_id": "emphatic_mission_date_speaker",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "",
+        "response_type": null,
+        "duration_s": 300.790509,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": "ReadTimeout: ",
+        "raw": {}
+      },
+      "grades": [
+        {
+          "grader": "attribution_correctness",
+          "passed": false,
+          "score": 0.0,
+          "notes": "driver error: ReadTimeout: ",
+          "detail": {}
+        }
+      ],
+      "passed": false
+    },
+    {
+      "scenario_id": "single_speaker_no_label",
+      "memory_variant_id": "emphatic_mission_bracketed",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "Adam deployed Hindsight 0.6.1 in Docker, and Recall now returns hits. | When: 2026-04-20 | Involving: Adam\n---\nMental model refresh is empty when tags_match is restrictive. | When: 2026-04-20 | Involving: Adam",
+        "response_type": null,
+        "duration_s": 97.178297,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": null,
+        "raw": {
+          "retain_response": {
+            "success": true,
+            "bank_id": "eval_ambient_single_speaker_no_label_emphatic_mission_bracketed",
+            "items_count": 1,
+            "async": false,
+            "operation_id": null,
+            "operation_ids": null,
+            "usage": {
+              "input_tokens": 2004,
+              "output_tokens": 376,
+              "total_tokens": 2380
+            }
+          },
+          "bank_id": "eval_ambient_single_speaker_no_label_emphatic_mission_bracketed",
+          "content_format": "bracketed",
+          "recalled_items": [
+            {
+              "id": "4618e02a-0f36-4160-98d0-0394f714debc",
+              "text": "Adam deployed Hindsight 0.6.1 in Docker, and Recall now returns hits. | When: 2026-04-20 | Involving: Adam",
+              "type": "experience",
+              "entities": [
+                "Recall",
+                "Docker",
+                "Hindsight 0.6.1"
+              ],
+              "context": "",
+              "occurred_start": "2026-04-20T00:00:00+00:00",
+              "occurred_end": "2026-04-20T00:00:00+00:00",
+              "mentioned_at": "2026-04-20T12:05:00+00:00",
+              "document_id": "transcript_a98e6842",
+              "metadata": {},
+              "chunk_id": "eval_ambient_single_speaker_no_label_emphatic_mission_bracketed_transcript_a98e6842_0",
+              "tags": [
+                "channel:eval_ambient"
+              ],
+              "source_fact_ids": null
+            },
+            {
+              "id": "075a5a9f-fc9b-4bc2-bf3e-0bf83a124549",
+              "text": "Mental model refresh is empty when tags_match is restrictive. | When: 2026-04-20 | Involving: Adam",
+              "type": "experience",
+              "entities": [
+                "tags_match",
+                "Mental model refresh"
+              ],
+              "context": "",
+              "occurred_start": "2026-04-20T00:00:00.010000+00:00",
+              "occurred_end": "2026-04-20T00:00:00.010000+00:00",
+              "mentioned_at": "2026-04-20T12:05:00.010000+00:00",
+              "document_id": "transcript_a98e6842",
+              "metadata": {},
+              "chunk_id": "eval_ambient_single_speaker_no_label_emphatic_mission_bracketed_transcript_a98e6842_0",
+              "tags": [
+                "channel:eval_ambient"
+              ],
+              "source_fact_ids": null
+            }
+          ],
+          "recalled_text": [
+            "Adam deployed Hindsight 0.6.1 in Docker, and Recall now returns hits. | When: 2026-04-20 | Involving: Adam",
+            "Mental model refresh is empty when tags_match is restrictive. | When: 2026-04-20 | Involving: Adam"
+          ]
+        }
+      },
+      "grades": [
+        {
+          "grader": "attribution_correctness",
+          "passed": true,
+          "score": 1.0,
+          "notes": "facts 2/2 bad_attribution=0",
+          "detail": {
+            "fact_results": [
+              {
+                "speaker": "Adam",
+                "must_contain": [
+                  "hindsight",
+                  "0.6.1"
+                ],
+                "passed": true,
+                "matched_item_idx": 0
+              },
+              {
+                "speaker": "Adam",
+                "must_contain": [
+                  "mental model",
+                  "tags_match"
+                ],
+                "passed": true,
+                "matched_item_idx": 1
+              }
+            ],
+            "bad_attribution_hits": [],
+            "speakers_known": [
+              "adam"
+            ],
+            "item_count": 2
+          }
+        }
+      ],
+      "passed": true
+    },
+    {
+      "scenario_id": "single_speaker_no_label",
+      "memory_variant_id": "emphatic_mission_json",
+      "prompt_variant_id": "default",
+      "output": {
+        "response_text": "Adam deployed Hindsight 0.6.1 in docker today | When: 2026-04-20 | Involving: Adam\n---\nRecall returns hits now | When: 2026-04-20 | Involving: Adam\n---\nMental model refresh is empty if tags_match is restrictive | When: 2026-04-20 | Involving: Adam",
+        "response_type": null,
+        "duration_s": 86.35517,
+        "tool_calls": [],
+        "retrieved_summary_ids": [],
+        "retrieved_summaries": [],
+        "hindsight_hits": [],
+        "error": null,
+        "raw": {
+          "retain_response": {
+            "success": true,
+            "bank_id": "eval_ambient_single_speaker_no_label_emphatic_mission_json_be4f",
+            "items_count": 1,
+            "async": false,
+            "operation_id": null,
+            "operation_ids": null,
+            "usage": {
+              "input_tokens": 2018,
+              "output_tokens": 314,
+              "total_tokens": 2332
+            }
+          },
+          "bank_id": "eval_ambient_single_speaker_no_label_emphatic_mission_json_be4f",
+          "content_format": "json_block",
+          "recalled_items": [
+            {
+              "id": "23f42ba2-18d4-44ee-9b44-7a0b9f14be3f",
+              "text": "Adam deployed Hindsight 0.6.1 in docker today | When: 2026-04-20 | Involving: Adam",
+              "type": "experience",
+              "entities": [
+                "Adam",
+                "Hindsight 0.6.1",
+                "docker"
+              ],
+              "context": "",
+              "occurred_start": "2026-04-20T00:00:00+00:00",
+              "occurred_end": "2026-04-20T00:00:00+00:00",
+              "mentioned_at": "2026-04-20T12:05:00+00:00",
+              "document_id": "transcript_be4ffb03",
+              "metadata": {},
+              "chunk_id": "eval_ambient_single_speaker_no_label_emphatic_mission_json_be4f_transcript_be4ffb03_0",
+              "tags": [
+                "channel:eval_ambient"
+              ],
+              "source_fact_ids": null
+            },
+            {
+              "id": "b2019c1f-6c3c-4d2d-894d-1e714239693a",
+              "text": "Recall returns hits now | When: 2026-04-20 | Involving: Adam",
+              "type": "experience",
+              "entities": [
+                "Adam",
+                "Recall"
+              ],
+              "context": "",
+              "occurred_start": null,
+              "occurred_end": null,
+              "mentioned_at": "2026-04-20T12:05:00.010000+00:00",
+              "document_id": "transcript_be4ffb03",
+              "metadata": {},
+              "chunk_id": "eval_ambient_single_speaker_no_label_emphatic_mission_json_be4f_transcript_be4ffb03_0",
+              "tags": [
+                "channel:eval_ambient"
+              ],
+              "source_fact_ids": null
+            },
+            {
+              "id": "a6047f9f-bd42-4ec0-8a30-185329deab42",
+              "text": "Mental model refresh is empty if tags_match is restrictive | When: 2026-04-20 | Involving: Adam",
+              "type": "experience",
+              "entities": [
+                "Adam",
+                "Mental model refresh",
+                "tags_match"
+              ],
+              "context": "",
+              "occurred_start": null,
+              "occurred_end": null,
+              "mentioned_at": "2026-04-20T12:05:00.020000+00:00",
+              "document_id": "transcript_be4ffb03",
+              "metadata": {},
+              "chunk_id": "eval_ambient_single_speaker_no_label_emphatic_mission_json_be4f_transcript_be4ffb03_0",
+              "tags": [
+                "channel:eval_ambient"
+              ],
+              "source_fact_ids": null
+            }
+          ],
+          "recalled_text": [
+            "Adam deployed Hindsight 0.6.1 in docker today | When: 2026-04-20 | Involving: Adam",
+            "Recall returns hits now | When: 2026-04-20 | Involving: Adam",
+            "Mental model refresh is empty if tags_match is restrictive | When: 2026-04-20 | Involving: Adam"
+          ]
+        }
+      },
+      "grades": [
+        {
+          "grader": "attribution_correctness",
+          "passed": true,
+          "score": 1.0,
+          "notes": "facts 2/2 bad_attribution=0",
+          "detail": {
+            "fact_results": [
+              {
+                "speaker": "Adam",
+                "must_contain": [
+                  "hindsight",
+                  "0.6.1"
+                ],
+                "passed": true,
+                "matched_item_idx": 0
+              },
+              {
+                "speaker": "Adam",
+                "must_contain": [
+                  "mental model",
+                  "tags_match"
+                ],
+                "passed": true,
+                "matched_item_idx": 2
+              }
+            ],
+            "bad_attribution_hits": [],
+            "speakers_known": [
+              "adam"
+            ],
+            "item_count": 3
+          }
+        }
+      ],
+      "passed": true
+    }
+  ]
+}
