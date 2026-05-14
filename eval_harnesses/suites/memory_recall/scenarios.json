@@ -1,0 +1,38 @@
+[
+  {
+    "id": "bass_blister",
+    "description": "Bass guitar blister advice should surface SEG 743",
+    "user_request": "bass guitar blister",
+    "persona_name": "default",
+    "channel": "arbitr",
+    "expectations": {
+      "expected_segments": [743],
+      "anti_segments": []
+    },
+    "graders": ["retrieval_hits"]
+  },
+  {
+    "id": "koboldcpp_context",
+    "description": "koboldcpp context-truncation question should surface SEGs 663, 620",
+    "user_request": "koboldcpp context truncation long context",
+    "persona_name": "default",
+    "channel": "arbitr",
+    "expectations": {
+      "expected_segments": [663, 620],
+      "anti_segments": []
+    },
+    "graders": ["retrieval_hits"]
+  },
+  {
+    "id": "surface_smc",
+    "description": "Surface laptop SMC reset / boot failure should surface SEGs 573, 574",
+    "user_request": "Surface laptop SMC reset power",
+    "persona_name": "default",
+    "channel": "arbitr",
+    "expectations": {
+      "expected_segments": [573, 574],
+      "anti_segments": []
+    },
+    "graders": ["retrieval_hits"]
+  }
+]

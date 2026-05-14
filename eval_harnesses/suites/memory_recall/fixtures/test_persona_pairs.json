@@ -1,0 +1,207 @@
+[
+  {
+    "id": "birthday_single_fact",
+    "description": "Direct birthday query — single-fact recall.",
+    "bank": "test_persona",
+    "persona_name": "default",
+    "channel": "arbitr",
+    "k_sweep": [
+      1,
+      3,
+      5,
+      10
+    ],
+    "expectations": {
+      "expected_facts": [
+        {
+          "key": "birthday_date",
+          "source": "seed",
+          "seed_key": "adam_birthday_date"
+        }
+      ],
+      "noise_facts": [
+        {
+          "key": "city",
+          "source": "seed",
+          "seed_key": "adam_city"
+        },
+        {
+          "key": "job",
+          "source": "seed",
+          "seed_key": "adam_job"
+        }
+      ]
+    },
+    "thresholds": {
+      "k_pass": 5,
+      "recall": 1.0,
+      "noise_rate": 0.25
+    },
+    "graders": [
+      "semantic_recall"
+    ],
+    "user_request": "when is Adam's birthday"
+  },
+  {
+    "id": "birthday_multi_fact",
+    "description": "Birthday query — should pull both date and year facts.",
+    "bank": "test_persona",
+    "persona_name": "default",
+    "channel": "arbitr",
+    "k_sweep": [
+      1,
+      3,
+      5,
+      10
+    ],
+    "expectations": {
+      "expected_facts": [
+        {
+          "key": "birthday_date",
+          "source": "seed",
+          "seed_key": "adam_birthday_date"
+        },
+        {
+          "key": "birthday_year",
+          "source": "seed",
+          "seed_key": "adam_dob_year"
+        }
+      ],
+      "noise_facts": [
+        {
+          "key": "fav_color",
+          "source": "seed",
+          "seed_key": "adam_fav_color"
+        }
+      ]
+    },
+    "thresholds": {
+      "k_pass": 5,
+      "recall": 0.5,
+      "noise_rate": 0.25
+    },
+    "graders": [
+      "semantic_recall"
+    ],
+    "user_request": "tell me about Adam's birthday and when he was born"
+  },
+  {
+    "id": "hobby_instrument",
+    "description": "Hobby/music query should surface bass guitar fact, not pet or job.",
+    "bank": "test_persona",
+    "persona_name": "default",
+    "channel": "arbitr",
+    "k_sweep": [
+      1,
+      3,
+      5,
+      10
+    ],
+    "expectations": {
+      "expected_facts": [
+        {
+          "key": "instrument",
+          "source": "seed",
+          "seed_key": "adam_instrument"
+        }
+      ],
+      "noise_facts": [
+        {
+          "key": "pet",
+          "source": "seed",
+          "seed_key": "adam_pet"
+        },
+        {
+          "key": "job",
+          "source": "seed",
+          "seed_key": "adam_job"
+        }
+      ]
+    },
+    "thresholds": {
+      "k_pass": 3,
+      "recall": 1.0,
+      "noise_rate": 0.34
+    },
+    "graders": [
+      "semantic_recall"
+    ],
+    "user_request": "what music does Adam play"
+  },
+  {
+    "id": "food_preference",
+    "description": "Food preference query — cilantro dislike. Pet/color are plausible noise.",
+    "bank": "test_persona",
+    "persona_name": "default",
+    "channel": "arbitr",
+    "k_sweep": [
+      1,
+      3,
+      5,
+      10
+    ],
+    "expectations": {
+      "expected_facts": [
+        {
+          "key": "cilantro",
+          "source": "seed",
+          "seed_key": "adam_dislikes_cilantro"
+        }
+      ],
+      "noise_facts": [
+        {
+          "key": "fav_color",
+          "source": "seed",
+          "seed_key": "adam_fav_color"
+        }
+      ]
+    },
+    "thresholds": {
+      "k_pass": 5,
+      "recall": 1.0,
+      "noise_rate": 0.25
+    },
+    "graders": [
+      "semantic_recall"
+    ],
+    "user_request": "what foods does Adam avoid"
+  },
+  {
+    "id": "location_query",
+    "description": "Location query — single fact.",
+    "bank": "test_persona",
+    "persona_name": "default",
+    "channel": "arbitr",
+    "k_sweep": [
+      1,
+      3,
+      5,
+      10
+    ],
+    "expectations": {
+      "expected_facts": [
+        {
+          "key": "city",
+          "source": "seed",
+          "seed_key": "adam_city"
+        }
+      ],
+      "noise_facts": [
+        {
+          "key": "job",
+          "source": "seed",
+          "seed_key": "adam_job"
+        }
+      ]
+    },
+    "thresholds": {
+      "k_pass": 3,
+      "recall": 1.0,
+      "noise_rate": 0.34
+    },
+    "graders": [
+      "semantic_recall"
+    ],
+    "user_request": "where does Adam live"
+  }
+]

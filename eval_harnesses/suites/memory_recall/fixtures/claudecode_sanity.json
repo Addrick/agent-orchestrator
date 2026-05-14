@@ -1,0 +1,70 @@
+[
+  {
+    "id": "ssh_publickey_error",
+    "description": "Sanity: known fact about SSH publickey error in claudecode bank.",
+    "user_request": "ssh connection problems",
+    "bank": "claudecode",
+    "persona_name": "default",
+    "channel": "arbitr",
+    "k_sweep": [
+      1,
+      3,
+      5,
+      10
+    ],
+    "expectations": {
+      "expected_facts": [
+        {
+          "key": "ssh_publickey",
+          "source": "history",
+          "locators": [
+            "Permission denied (publickey)"
+          ]
+        }
+      ],
+      "noise_facts": []
+    },
+    "thresholds": {
+      "k_pass": 5,
+      "recall": 1.0,
+      "noise_rate": 1.0
+    },
+    "graders": [
+      "semantic_recall"
+    ]
+  },
+  {
+    "id": "memory_retrieval_fix",
+    "description": "Sanity: memory retrieval bug fix fact.",
+    "user_request": "memory retrieval bug",
+    "bank": "claudecode",
+    "persona_name": "default",
+    "channel": "arbitr",
+    "k_sweep": [
+      1,
+      3,
+      5,
+      10
+    ],
+    "expectations": {
+      "expected_facts": [
+        {
+          "key": "mem_lookup_fix",
+          "source": "history",
+          "locators": [
+            "memory retrieval issue where it was incorrectly receiving messages for lookup"
+          ]
+        }
+      ],
+      "noise_facts": []
+    },
+    "thresholds": {
+      "k_pass": 5,
+      "recall": 1.0,
+      "noise_rate": 1.0
+    },
+    "graders": [
+      "semantic_recall"
+    ]
+  }
+]
