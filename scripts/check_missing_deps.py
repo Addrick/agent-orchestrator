@@ -35,7 +35,7 @@ def get_all_imports(directory):
                                 for alias in node.names:
                                     imports.add(alias.name.split('.')[0])
                             elif isinstance(node, ast.ImportFrom):
-                                if node.module:
+                                if node.module and node.level == 0:
                                     imports.add(node.module.split('.')[0])
                 except Exception as e:
                     print(f"Error parsing {path}: {e}")

@@ -62,7 +62,7 @@ TEST_PERSONA_SAVE_FILE = TEST_DATABASE_DIR / "test_personas.json"
 # Toggles for enabling/disabling specific application interfaces
 DISCORD_BOT = True
 GMAIL_BOT = False
-WEB_INTERFACE = 1
+WEB_INTERFACE = 0
 KOBOLD_PORT = 5002
 # Persona served when kobold-lite connects without picking one explicitly.
 # Overridable with KOBOLD_DEFAULT_PERSONA env var.
@@ -175,7 +175,7 @@ REMINDER_SENT_TAG = "ai_reminder_sent"
 MEMORY_RETRIEVAL_ENABLED = True
 MEMORY_MAX_SUMMARIES_IN_CONTEXT = 5
 
-SEMANTIC_BACKEND = "hindsight" # Literal["sqlite", "hindsight"]
+SEMANTIC_BACKEND = "sqlite" # Literal["sqlite", "hindsight"]
 HINDSIGHT_URL = "http://localhost:8888"
 HINDSIGHT_LLM_MODEL = "qwen2.5-32b"
 

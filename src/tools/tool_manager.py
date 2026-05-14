@@ -34,7 +34,7 @@ class ToolManager:
         """Returns a human-readable enrichment string for a tool call if an enricher is registered."""
         if tool_name in self._enrichers:
             try:
-                return await self._enrichers[tool_name](**arguments)
+                return cast(Optional[str], await self._enrichers[tool_name](**arguments))
             except Exception as e:
                 logger.warning(f"Enrichment failed for {tool_name}: {e}")
         return None
