@@ -1,0 +1,34 @@
+{
+  "adam_dob_year": {
+    "text": "Adam was born in 1990.",
+    "tags": ["persona", "biography"]
+  },
+  "adam_birthday_date": {
+    "text": "Adam's birthday is March 14.",
+    "tags": ["persona", "biography"]
+  },
+  "adam_city": {
+    "text": "Adam lives in Portland, Oregon.",
+    "tags": ["persona", "location"]
+  },
+  "adam_job": {
+    "text": "Adam works as a software engineer at a small fintech startup.",
+    "tags": ["persona", "work"]
+  },
+  "adam_fav_color": {
+    "text": "Adam's favorite color is dark green.",
+    "tags": ["persona", "preference"]
+  },
+  "adam_instrument": {
+    "text": "Adam plays bass guitar in a local cover band on weekends.",
+    "tags": ["persona", "hobby"]
+  },
+  "adam_pet": {
+    "text": "Adam has a tortoiseshell cat named Mira.",
+    "tags": ["persona", "pet"]
+  },
+  "adam_dislikes_cilantro": {
+    "text": "Adam strongly dislikes cilantro and avoids it in food.",
+    "tags": ["persona", "preference"]
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "memory": [
+    {
+      "id": "sqlite_only_default",
+      "description": "Local KNN summary retrieval, default params",
+      "sqlite_summaries": true,
+      "hindsight": false,
+      "retrieval_params": {"limit": 5}
+    },
+    {
+      "id": "sqlite_k20",
+      "description": "Local KNN, wider net (limit=20)",
+      "sqlite_summaries": true,
+      "hindsight": false,
+      "retrieval_params": {"limit": 20}
+    },
+    {
+      "id": "hindsight_only",
+      "description": "Hindsight backend recall (requires live server)",
+      "sqlite_summaries": false,
+      "hindsight": true,
+      "hindsight_params": {"limit": 5}
+    }
+  ],
+  "prompt": [
+    {
+      "id": "default",
+      "description": "No prompt change; recall driver does not invoke an LLM"
+    }
+  ]
+}
