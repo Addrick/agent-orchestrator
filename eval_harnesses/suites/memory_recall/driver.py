@@ -19,6 +19,26 @@ _SEED_FILE = _SUITE_DIR / "fixtures" / "test_persona_seed.json"
 _RESOLVED_CACHE: Dict[Tuple[str, str], Dict[str, Any]] = {}
 _SEED_CACHE: Dict[str, Dict[str, Any]] = {}
 
+# Cache the embedding service + per-(model, query) cache. Encoding the
+# same user_request across variant cells is wasted Gemini calls.
+_EMBED_SERVICE: Dict[str, Any] = {}
+_QUERY_EMBED_CACHE: Dict[Tuple[str, str], bytes] = {}
+
+
+def _embed_service():
+    if "svc" not in _EMBED_SERVICE:
+        from src.embedding_service import EmbeddingService
+        _EMBED_SERVICE["svc"] = EmbeddingService()
+    return _EMBED_SERVICE["svc"]
+
+
+async def _embed_query(text: str, model_name: str) -> bytes:
+    key = (model_name, text)
+    if key not in _QUERY_EMBED_CACHE:
+        svc = _embed_service()
+        _QUERY_EMBED_CACHE[key] = await svc.encode_single(text)
+    return _QUERY_EMBED_CACHE[key]
+
 
 def _seed() -> Dict[str, Any]:
     if "data" not in _SEED_CACHE:
@@ -90,18 +110,33 @@ async def recall_driver(
     try:
         if mem_var.sqlite_summaries:
             params = dict(mem_var.retrieval_params)
-            hits = mm.retrieve_relevant_summaries(
-                persona_name=scenario.persona_name,
-                channel=scenario.channel,
-                user_identifier=scenario.user_identifier,
-                **params,
-            )
-            out.retrieved_summaries = hits or []
-            out.retrieved_summary_ids = [
-                h.get("segment_id")
-                for h in (hits or [])
-                if h.get("segment_id") is not None
-            ]
+            # Encode user_request to bytes for KNN. Use the variant's
+            # model_name if pinned, else the embedding service default
+            # (which should match what's in the DB's vec_Memory_Summaries).
+            try:
+                svc = _embed_service()
+                model_name = params.get("model_name") or svc.model_name
+                query_blob = await _embed_query(scenario.user_request, model_name)
+                params.setdefault("query_embeddings", [query_blob])
+                params.setdefault("model_name", model_name)
+            except Exception as e:
+                out.error = f"embedding failed: {type(e).__name__}: {e}"
+                query_blob = None
+
+            if query_blob is not None:
+                hits = mm.retrieve_relevant_summaries(
+                    persona_name=scenario.persona_name,
+                    channel=scenario.channel,
+                    user_identifier=scenario.user_identifier,
+                    server_id=getattr(scenario, "server_id", None),
+                    **params,
+                )
+                out.retrieved_summaries = hits or []
+                out.retrieved_summary_ids = [
+                    h.get("segment_id")
+                    for h in (hits or [])
+                    if h.get("segment_id") is not None
+                ]
 
         if mem_var.hindsight:
             bank = (

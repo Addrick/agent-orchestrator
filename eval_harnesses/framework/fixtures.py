@@ -92,12 +92,18 @@ def build_fixture(
     from src.chat_system import ChatSystem
     from src.utils.save_utils import load_personas_from_file
 
-    tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-    tmp.close()
-    db_path = tmp.name
-
-    mm = MemoryManager(db_path=db_path)
-    mm.create_schema()
+    # Real-DB mode: variant points at an existing user DB. Don't reschema,
+    # don't unlink on teardown — treat as read-only.
+    using_real_db = bool(getattr(memory_variant, "db_path", None))
+    if using_real_db:
+        db_path = memory_variant.db_path
+        mm = MemoryManager(db_path=db_path)
+    else:
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        db_path = tmp.name
+        mm = MemoryManager(db_path=db_path)
+        mm.create_schema()
 
     # Memory-variant toggles. Hindsight-off swaps in the local sqlite backend.
     if not memory_variant.hindsight:
@@ -125,10 +131,11 @@ def build_fixture(
         try:
             mm.close()
         finally:
-            try:
-                os.unlink(db_path)
-            except OSError:
-                pass
+            if not using_real_db:
+                try:
+                    os.unlink(db_path)
+                except OSError:
+                    pass
 
     bundle = FixtureBundle(
         chat_system=chat_system,
