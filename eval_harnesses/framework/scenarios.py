@@ -28,6 +28,7 @@ class Scenario:
     persona_name: str = "default"
     channel: str = "eval"
     user_identifier: str = "eval_user"
+    server_id: Optional[str] = None
     # Seed memory state before the run. Each entry may be a raw turn or a
     # pre-built summary (skips summarizer for determinism).
     seed_memory: List[SeededInteraction] = field(default_factory=list)

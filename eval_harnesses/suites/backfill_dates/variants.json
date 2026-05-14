@@ -1,0 +1,64 @@
+{
+  "memory": [
+    {
+      "id": "unset_default_mission",
+      "description": "Reproduces hindsight_import.py: timestamp=unset, default mission",
+      "extra": {
+        "timestamp_strategy": "unset",
+        "retain_mission": null,
+        "wait_seconds": 1.0
+      }
+    },
+    {
+      "id": "explicit_default_mission",
+      "description": "Per-item explicit timestamp = doc_date (correct path)",
+      "extra": {
+        "timestamp_strategy": "explicit",
+        "retain_mission": null,
+        "wait_seconds": 1.0
+      }
+    },
+    {
+      "id": "header_inline_default_mission",
+      "description": "No timestamp, but content prefixed with `Date: <iso>` header",
+      "extra": {
+        "timestamp_strategy": "header_inline",
+        "retain_mission": null,
+        "wait_seconds": 1.0
+      }
+    },
+    {
+      "id": "block_anchor_default_mission",
+      "description": "timestamp = last ISO date found in content (anchor)",
+      "extra": {
+        "timestamp_strategy": "block_anchor",
+        "retain_mission": null,
+        "wait_seconds": 1.0
+      }
+    },
+    {
+      "id": "unset_backfill_mission",
+      "description": "timestamp=unset BUT retain_mission instructs the LLM to extract dates from prose into mentioned_at",
+      "extra": {
+        "timestamp_strategy": "unset",
+        "retain_mission": "BACKFILL TASK: This bank is being populated from historical text. Each document body contains the original date(s). When extracting memories, set the mentioned_at / occurred_at fields from the date present in the source text, NOT the current ingest time. If multiple dates appear, prefer the date attached to the speaker's statement.",
+        "wait_seconds": 1.0
+      }
+    },
+    {
+      "id": "header_inline_backfill_mission",
+      "description": "header_inline strategy + backfill-aware retain mission",
+      "extra": {
+        "timestamp_strategy": "header_inline",
+        "retain_mission": "BACKFILL TASK: Each document begins with a `Date: <iso>` header. Use that date for mentioned_at / occurred_at on every memory extracted from that document, not the current ingest time.",
+        "wait_seconds": 1.0
+      }
+    }
+  ],
+  "prompt": [
+    {
+      "id": "default",
+      "description": "Suite ignores prompt variants; LLM behavior driven by bank's retain_mission"
+    }
+  ]
+}

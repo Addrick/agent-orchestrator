@@ -34,3 +34,7 @@ tests/test_data/
 /test_memory.db
 /src/memory/user_memory.db
 /portal_test.db
+/portal.db
+
+# Eval harness run logs (keep result JSONs for archaeology)
+eval_harnesses/results/*.log
