@@ -20,6 +20,67 @@ logging.basicConfig(
 )
 logger = logging.getLogger("backfill")
 
+# Density-tuning bank config — see
+# memory/project/plans/hindsight_graph_density_tuning.md. ASCII only.
+BANK_CONFIG = {
+    "retain_chunk_size": 6000,
+    "retain_extraction_mode": "concise",
+    "enable_observations": True,
+}
+
+OBSERVATIONS_MISSION_TEMPLATE = (
+    "Consolidate the user's preferences, recurring topics, and decisions "
+    "into stable beliefs. Merge duplicates across sessions. Mark superseded "
+    "preferences as historical rather than overwriting."
+)
+
+
+def _missions_for(persona: str) -> tuple[str, str, str]:
+    """(retain, reflect, observations) missions tailored to a persona."""
+    if persona == "ambient":
+        retain = (
+            "You are an observer listening to an ambient channel. The messages "
+            "are from various users and are not necessarily directed at you. "
+            "Extract durable signal: users' stable interests, recurring topics, "
+            "and entity relationships. Attribute actions to the speakers "
+            "identified in the text (e.g. 'Name: message'). "
+            "IGNORE: one-shot questions, slash commands, conversational filler. "
+            "IMPORTANT: Do NOT attribute actions to a persona named 'ambient'. "
+            "The 'ambient' name refers to the bank itself, not a participant."
+        )
+        reflect = (
+            "Reason over the ambient conversation logs to identify user "
+            "interests, recurring themes, and entity relationships."
+        )
+    else:
+        retain = (
+            f"Extract ONLY durable signal for the persona '{persona}': the "
+            "user's stable preferences, recurring topics of conversation, "
+            "long-lived goals, and decisions made together. "
+            "IGNORE: one-shot questions, slash commands, single-session "
+            "debugging, conversational filler."
+        )
+        reflect = (
+            f"Reason over '{persona}'s memories to identify durable "
+            "preferences, recurring patterns, and long-lived context."
+        )
+    return retain, reflect, OBSERVATIONS_MISSION_TEMPLATE
+
+
+def is_junk_prompt(text: str) -> bool:
+    """Drops harness wrappers + bare slash-commands. Keeps short replies."""
+    t = text.strip()
+    if not t:
+        return True
+    if t.startswith("/") and "\n" not in t and len(t.split()) <= 2:
+        return True
+    if "<command-message>" in t or "<command-name>" in t:
+        return True
+    if t.startswith("<<") and t.endswith(">>"):
+        return True
+    return False
+
+
 async def backfill(persona_filter: list[str] | None = None, wipe: bool = False):
     # 1. Initialize
     mm = MemoryManager(db_path=MEMORY_DATABASE_FILE)
@@ -47,26 +108,16 @@ async def backfill(persona_filter: list[str] | None = None, wipe: bool = False):
             logger.info(f"Wiping bank for persona: {persona}")
             await hindsight.delete_bank(persona)
         
-        if persona == "ambient":
-            retain_mission = (
-                "You are an observer listening to an ambient channel. The messages are from "
-                "various users and are not necessarily directed at you. Extract facts about "
-                "the users, their interests, and mentioned entities. Attribute actions to "
-                "the correct speakers identified in the text (e.g. 'Name: message'). "
-                "IMPORTANT: Do NOT attribute these actions to a persona named 'ambient'. "
-                "The 'ambient' name refers to the bank itself, not a participant."
-            )
-            reflect_mission = "Reason over the ambient conversation logs to identify user interests, recurring themes, and entity relationships."
-        else:
-            retain_mission = f"Extract facts and experiences for the persona '{persona}'."
-            reflect_mission = f"Reason over the memories of '{persona}' to provide thoughtful insights."
-
+        retain_mission, reflect_mission, observations_mission = _missions_for(persona)
         await hindsight.ensure_bank(
             bank_id=persona,
             enable_observations=True,
             retain_mission=retain_mission,
-            reflect_mission=reflect_mission
+            reflect_mission=reflect_mission,
+            observations_mission=observations_mission,
         )
+        logger.info(f"Patching {persona} bank config: {BANK_CONFIG}")
+        await hindsight._get_client().apatch_bank_config(persona, BANK_CONFIG)
 
     # 3. Fetch all interactions
     # We order by interaction_id to ensure we process in the order they were recorded
@@ -118,12 +169,15 @@ async def backfill(persona_filter: list[str] | None = None, wipe: bool = False):
                 ts = ts.replace(tzinfo=timezone.utc)
 
             msg_content = row["content"] or ""
+            # Junk filter on user-authored turns only — assistant prose stays.
+            if (row["author_role"] or "").lower() == "user" and is_junk_prompt(msg_content):
+                continue
             if row["reasoning_content"]:
                 msg_content = f"<thought>\n{row['reasoning_content']}\n</thought>\n\n{msg_content}"
-            
+
             date_header = ts.strftime("%Y-%m-%d %H:%M:%S")
             speaker = row["author_name"] or row["user_identifier"] or "Unknown"
-            formatted_msg = f"Date: {date_header}\nSpeaker: {speaker}\n---\n{msg_content}"
+            formatted_msg = f"[{date_header}] {speaker}: {msg_content}"
             
             current_block.append((formatted_msg, ts, row["interaction_id"], row["user_identifier"]))
             current_size += len(formatted_msg)
@@ -157,9 +211,26 @@ async def backfill(persona_filter: list[str] | None = None, wipe: bool = False):
                 
                 current_block = []
                 current_size = 0
-                
-                # Tiny breather for the loop
-                await asyncio.sleep(0.05)
+
+        # Junk-filter `continue` can skip the last row; ship tail block here.
+        if current_block:
+            block_content = "\n\n".join([m[0] for m in current_block])
+            anchor_ts = current_block[-1][1]
+            metadata = {
+                "legacy_ids": ",".join([str(m[2]) for m in current_block]),
+                "users": ",".join(list(set([str(m[3]) for m in current_block]))),
+            }
+            await hindsight.retain_turn(
+                bank_id=persona_name,
+                role="user",
+                content=block_content,
+                timestamp=anchor_ts,
+                scope_tags=[f"channel:{channel}"],
+                source_persona=persona_name,
+                metadata=metadata,
+            )
+            processed_count += len(current_block)
+            logger.info(f"Enqueued tail block of {len(current_block)} messages ({processed_count}/{total})")
 
     logger.info("All turns enqueued. Waiting for Hindsight workers to finish processing...")
     logger.info("Note: This depends on your LLM speed (Kobold/Gemma). Watch Hindsight container logs for progress.")

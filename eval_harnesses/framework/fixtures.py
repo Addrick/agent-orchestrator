@@ -4,6 +4,7 @@ import os
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 from unittest.mock import patch
 
@@ -94,10 +95,21 @@ def build_fixture(
 
     # Real-DB mode: variant points at an existing user DB. Don't reschema,
     # don't unlink on teardown — treat as read-only.
+    # Frozen-slice mode: scenario.meta["slice_sql"] points at a .sql dump.
+    # Materialize (cached by checksum) and treat the result like real-DB mode
+    # so the test data is reproducible without committing a binary DB.
     using_real_db = bool(getattr(memory_variant, "db_path", None))
+    slice_sql = scenario.meta.get("slice_sql") if not using_real_db else None
     if using_real_db:
         db_path = memory_variant.db_path
         mm = MemoryManager(db_path=db_path)
+    elif slice_sql:
+        from eval_harnesses.suites.memory_recall.load_slice import materialize_slice
+        slice_path = Path(slice_sql)
+        cache_dir = Path(scenario.meta.get("slice_cache_dir", ".eval_cache/slices"))
+        db_path = str(materialize_slice(slice_path, cache_dir=cache_dir))
+        mm = MemoryManager(db_path=db_path)
+        using_real_db = True  # don't unlink the cached slice DB
     else:
         tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         tmp.close()
