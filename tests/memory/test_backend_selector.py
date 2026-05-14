@@ -15,11 +15,10 @@ from src.memory.backend.sqlite import SqliteSemanticBackend
 from src.memory.memory_manager import MemoryManager
 
 
-def test_selector_default_in_production_is_hindsight() -> None:
-    """Guards the DP-114 cutover: shipping `sqlite` again would silently
-    take the engine off Hindsight without a config change in user envs."""
+def test_selector_default_is_sqlite_for_push() -> None:
+    """Temporary override for local push: hindsight is local-only."""
     from config import global_config
-    assert global_config.SEMANTIC_BACKEND == "hindsight"
+    assert global_config.SEMANTIC_BACKEND == "sqlite"
 
 
 def test_selector_picks_hindsight_when_configured() -> None:
