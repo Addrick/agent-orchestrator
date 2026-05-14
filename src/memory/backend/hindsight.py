@@ -141,6 +141,19 @@ class HindsightRESTClient:
     async def adelete_bank(self, bank_id: str) -> None:
         await self._request("DELETE", f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}")
 
+    async def apatch_bank_config(
+        self, bank_id: str, config: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        # 0.6.1 PATCH /banks/{id}/config — only `retain_chunk_size`,
+        # `retain_chunk_batch_size`, `retain_extraction_mode`,
+        # `observations_mission`, `enable_observations`, and disposition_*
+        # fields are accepted. Caller is responsible for ASCII-only values
+        # (server misreads utf-8 → latin-1 on this endpoint).
+        return await self._request(
+            "PATCH", f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}/config",
+            json={"updates": config},
+        )
+
 
 def _untrusted_tag(untrusted: bool) -> str:
     return UNTRUSTED_TAG if untrusted else TRUSTED_TAG
@@ -566,6 +579,7 @@ class HindsightBackend(MemoryBackend):
             "update_mode": update_mode,
             "timestamp": timestamp.isoformat(),
             "mentioned_at": timestamp.isoformat(),
+            "event_date": timestamp.isoformat(), # Anchors facts in Hindsight 0.6.1
         }
         if metadata:
             item["metadata"] = metadata

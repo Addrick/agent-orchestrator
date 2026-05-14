@@ -1,6 +1,6 @@
 stuff/
 .huggingface/
-memory/
+/memory/
 .venv/
 .idea/
 __pycache__/
@@ -21,6 +21,7 @@ aggregated_tests.txt
 
 # Runtime databases
 src/database/*.db
+src/memory/*.db
 
 # Local config/credentials
 config/creds/
