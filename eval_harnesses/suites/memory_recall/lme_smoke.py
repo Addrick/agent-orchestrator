@@ -109,15 +109,102 @@ async def _wait_drain(client: HindsightRESTClient, bank: str, timeout_s: float =
         await asyncio.sleep(30)
 
 
+async def _ingest_and_recall(
+    client: HindsightRESTClient, bank: str, q: Dict[str, Any], drain_timeout_s: float,
+) -> Dict[str, Any]:
+    """Single-Q ingest + recall. Returns a result dict for the summary."""
+    qid = q["question_id"]
+    print(f"\n=== reset bank '{bank}' (qid={qid}) ===")
+    try:
+        await client.adelete_bank(bank)
+    except HindsightAPIError as e:
+        if e.status_code != 404:
+            raise
+    await client.acreate_bank(
+        bank,
+        retain_mission="Store user-assistant turns verbatim for recall eval.",
+        reflect_mission="Surface turns relevant to the user's question.",
+    )
+
+    items: List[Dict[str, Any]] = []
+    total_chars = 0
+    for sid, turns, ts in zip(
+        q["haystack_session_ids"], q["haystack_sessions"],
+        q.get("haystack_dates", [None] * len(q["haystack_sessions"])),
+    ):
+        content = _session_to_text(turns)
+        total_chars += len(content)
+        items.append({
+            "content": content, "tags": [qid, "lme_smoke"],
+            "timestamp": _to_iso(ts), "document_id": sid,
+            "metadata": {"question_id": qid, "session_id": sid},
+        })
+    print(f"  retain {len(items)} sessions ({total_chars} chars, ~{total_chars//4} toks)")
+
+    t0 = time.monotonic()
+    await client.aretain(bank, items, async_=True)
+    drain = await _wait_drain(client, bank, timeout_s=drain_timeout_s)
+    total_ingest = time.monotonic() - t0
+    print(f"  drained after {drain:.1f}s, total {total_ingest:.1f}s")
+
+    stats = await client._request("GET", f"{HINDSIGHT_API_PREFIX}/banks/{bank}/stats")
+    node_counts = stats.get("node_counts", {}) or {}
+    if not node_counts:
+        await asyncio.sleep(5)
+        stats = await client._request("GET", f"{HINDSIGHT_API_PREFIX}/banks/{bank}/stats")
+        node_counts = stats.get("node_counts", {}) or {}
+    fact_count = sum(node_counts.values())
+    print(f"  facts: {fact_count} ({node_counts})")
+
+    ans = set(q["answer_session_ids"])
+    res = await client.arecall(bank, q["question"], tags=[qid], max_tokens=4096)
+    retrieved_sess = []
+    for h in res or []:
+        sid = (h.get("source") or {}).get("document_id") or (h.get("metadata") or {}).get("session_id")
+        if sid:
+            retrieved_sess.append(sid)
+    unique = list(dict.fromkeys(retrieved_sess))
+    hit_set = set(unique) & ans
+    recall = len(hit_set) / max(len(ans), 1)
+    flag = "OK " if hit_set else "MISS"
+    print(f"  {flag} ans={sorted(ans)} retrieved_top3={unique[:3]} "
+          f"recall={recall:.2f} ({len(res or [])} facts)")
+    return {
+        "qid": qid, "qtype": q["question_type"], "bank": bank,
+        "ingest_s": total_ingest, "fact_count": fact_count,
+        "recall": recall, "hit_any": bool(hit_set),
+        "expected": sorted(ans), "retrieved_top": unique[:5],
+    }
+
+
 async def main(
     n: int, seed: int, keep: bool, tier: str, bank: str, qid: Optional[str],
-    drain_timeout_s: float,
+    drain_timeout_s: float, qids: Optional[List[str]] = None,
+    bank_prefix: Optional[str] = None,
 ) -> int:
     src = TIER_FILES[tier]
     if not src.exists():
         raise SystemExit(f"missing {tier} JSON at {src}; run hf download first")
     print(f"Loading {tier} from {src}...")
     data = json.loads(src.read_text(encoding="utf-8"))
+    # qids list mode: one bank per qid
+    if qids:
+        by_id = {d["question_id"]: d for d in data}
+        missing = [q for q in qids if q not in by_id]
+        if missing:
+            raise SystemExit(f"qids not found in {tier}: {missing}")
+        picked = [by_id[q] for q in qids]
+        client = HindsightRESTClient(HINDSIGHT_URL, timeout=300.0)
+        results = []
+        for q in picked:
+            b = f"{bank_prefix or 'lme_' + tier}_{q['question_id']}"
+            results.append(await _ingest_and_recall(client, b, q, drain_timeout_s))
+        print("\n=== MULTI-Q SUMMARY ===")
+        for r in results:
+            print(f"  {r['qid']} [{r['qtype']}] ingest={r['ingest_s']/60:.1f}m "
+                  f"facts={r['fact_count']} recall={r['recall']:.2f} hit={r['hit_any']}")
+        return 0
+    # Original single-bank / random-pick mode
     picked = _pick_questions(data, n, seed, qid)
     print(f"Picked {len(picked)} questions:")
     for q in picked:
@@ -168,8 +255,14 @@ async def main(
     total_ingest = time.monotonic() - t0
     print(f"Queue drained after {drain:.1f}s. Total ingest wall: {total_ingest:.1f}s")
 
+    # Stats endpoint lags briefly after drain — node_counts may still be empty
+    # if the final consolidation hasn't materialized counts yet. Retry once.
     stats = await client._request("GET", f"{HINDSIGHT_API_PREFIX}/banks/{bank}/stats")
     node_counts = stats.get("node_counts", {}) or {}
+    if not node_counts:
+        await asyncio.sleep(5)
+        stats = await client._request("GET", f"{HINDSIGHT_API_PREFIX}/banks/{bank}/stats")
+        node_counts = stats.get("node_counts", {}) or {}
     fact_count = sum(node_counts.values()) if node_counts else 0
     print(f"Bank node_counts: {node_counts} (total={fact_count})")
     print(f"  total_documents: {stats.get('total_documents')}")
@@ -212,7 +305,8 @@ async def main(
     print(f"Questions: {len(picked)}")
     print(f"Ingest wall: {total_ingest:.1f}s ({total_ingest/len(picked):.1f}s/Q)")
     print(f"Hit-any rate: {hit_rate:.0%}")
-    print(f"Projected full Oracle (500 Qs): {total_ingest * 500 / len(picked) / 60:.1f} min")
+    print(f"Projected full {tier} ingest (500 Qs, serial): "
+          f"{total_ingest * 500 / len(picked) / 3600:.1f} hrs")
 
     if not keep:
         print(f"\nDeleting bank '{bank}'...")
@@ -230,9 +324,15 @@ if __name__ == "__main__":
     ap.add_argument("--tier", choices=list(TIER_FILES.keys()), default="oracle")
     ap.add_argument("--bank", default=SMOKE_BANK_DEFAULT)
     ap.add_argument("--qid", default=None, help="pick a specific question_id (overrides --n)")
+    ap.add_argument("--qids", default=None,
+                    help="comma-separated question_ids; one bank per qid (overrides --qid/--n)")
+    ap.add_argument("--bank-prefix", default=None,
+                    help="bank name prefix in --qids mode (default: lme_<tier>)")
     ap.add_argument("--drain-timeout-s", type=float, default=1800.0)
     ap.add_argument("--keep", action="store_true", help="don't delete the smoke bank on exit")
     args = ap.parse_args()
+    qids_list = [q.strip() for q in args.qids.split(",")] if args.qids else None
     raise SystemExit(asyncio.run(main(
         args.n, args.seed, args.keep, args.tier, args.bank, args.qid, args.drain_timeout_s,
+        qids=qids_list, bank_prefix=args.bank_prefix,
     )))
