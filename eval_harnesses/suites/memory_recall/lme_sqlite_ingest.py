@@ -119,41 +119,64 @@ def _bank_stats(mm: Any) -> Dict[str, int]:
     return stats
 
 
+def _clear_segment_failures(mm: Any) -> int:
+    """Wipe Segment_Failures so the consolidator retries previously-failed
+    ranges. Returns rows deleted."""
+    with mm.transaction() as conn:
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM Segment_Failures")
+        n = c.fetchone()[0]
+        c.execute("DELETE FROM Segment_Failures")
+        return n
+
+
 async def main(
     tier: str, qid: Optional[str], n: int, seed: int, db: Path,
-    skip_l1: bool,
+    skip_l1: bool, resume: bool, clear_failures: bool,
 ) -> int:
-    src = TIER_FILES[tier]
-    if not src.exists():
-        raise SystemExit(f"missing {tier} JSON at {src}")
-    print(f"Loading {tier}...")
-    data = json.loads(src.read_text(encoding="utf-8"))
-    picked = _pick_questions(data, n, seed, qid)
-    print(f"Picked {len(picked)} questions:")
-    for q in picked:
-        print(f"  {q['question_id']} [{q['question_type']}] "
-              f"sessions={len(q['haystack_sessions'])}")
-
-    db.parent.mkdir(parents=True, exist_ok=True)
-    if db.exists():
-        print(f"Removing existing {db}")
-        db.unlink()
-
     from src.memory.memory_manager import MemoryManager
-    mm = MemoryManager(db_path=str(db))
-    mm.create_schema()
 
-    print(f"\n=== Stage 1: log_message ===")
-    t0 = time.monotonic()
-    total = 0
-    for q in picked:
-        total += _log_haystack(mm, q)
-    t_log = time.monotonic() - t0
-    print(f"Logged {total} turns in {t_log:.1f}s")
+    if resume:
+        if not db.exists():
+            raise SystemExit(f"--resume requires existing DB at {db}")
+        print(f"Resuming against {db}")
+        mm = MemoryManager(db_path=str(db))
+        mm.create_schema()  # idempotent; re-verifies vec sync
+        if clear_failures:
+            n_cleared = _clear_segment_failures(mm)
+            print(f"Cleared {n_cleared} Segment_Failures rows")
+        print(f"Initial stats: {_bank_stats(mm)}")
+    else:
+        src = TIER_FILES[tier]
+        if not src.exists():
+            raise SystemExit(f"missing {tier} JSON at {src}")
+        print(f"Loading {tier}...")
+        data = json.loads(src.read_text(encoding="utf-8"))
+        picked = _pick_questions(data, n, seed, qid)
+        print(f"Picked {len(picked)} questions:")
+        for q in picked:
+            print(f"  {q['question_id']} [{q['question_type']}] "
+                  f"sessions={len(q['haystack_sessions'])}")
+
+        db.parent.mkdir(parents=True, exist_ok=True)
+        if db.exists():
+            print(f"Removing existing {db}")
+            db.unlink()
+
+        mm = MemoryManager(db_path=str(db))
+        mm.create_schema()
+
+        print(f"\n=== Stage 1: log_message ===")
+        t0 = time.monotonic()
+        total = 0
+        for q in picked:
+            total += _log_haystack(mm, q)
+        t_log = time.monotonic() - t0
+        print(f"Logged {total} turns in {t_log:.1f}s")
 
     chat_system = _build_chat_system(mm)
 
-    print(f"\n=== Stage 2: SqliteConsolidator (embed + segment + L0 summarize) ===")
+    print(f"\n=== Stage 2: SqliteConsolidator (embed + segment + L0 summarize) ===")  # noqa: E501
     t0 = time.monotonic()
     await _run_l0(chat_system)
     t_l0 = time.monotonic() - t0
@@ -182,7 +205,12 @@ if __name__ == "__main__":
     ap.add_argument("--db", type=Path, required=True)
     ap.add_argument("--skip-l1", action="store_true",
                     help="skip MemoryConsolidator (L0->L1) stage")
+    ap.add_argument("--resume", action="store_true",
+                    help="reuse existing DB; skip log_message stage")
+    ap.add_argument("--clear-failures", action="store_true",
+                    help="(resume mode) wipe Segment_Failures so failed ranges retry")
     args = ap.parse_args()
     raise SystemExit(asyncio.run(main(
         args.tier, args.qid, args.n, args.seed, args.db, args.skip_l1,
+        args.resume, args.clear_failures,
     )))
