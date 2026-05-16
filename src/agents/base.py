@@ -133,21 +133,98 @@ class Agent(ABC):
 
     # --- Step Logging ---
 
-    def _log_step(
-        self, parent_id: int, action_type: str,
-        action_payload: Optional[str] = None,
-        outcome: str = "success",
-        outcome_payload: Optional[str] = None,
+    MAX_PAYLOAD_CHARS: int = 4000
+    _TRUNC_MARKER: str = "...[truncated]"
+
+    @classmethod
+    def _truncate_ascii(cls, text: Optional[str], max_len: Optional[int] = None) -> Optional[str]:
+        """ASCII-safe + length-cap. Downstream Hindsight has utf-8 mangling on
+        some endpoints, so action payloads are stored ASCII-only by default."""
+        if text is None:
+            return None
+        text = text.encode("ascii", "replace").decode("ascii")
+        cap = cls.MAX_PAYLOAD_CHARS if max_len is None else max_len
+        if len(text) > cap:
+            return text[: cap - len(cls._TRUNC_MARKER)] + cls._TRUNC_MARKER
+        return text
+
+    @classmethod
+    def _serialize_payload(cls, data: Any) -> Optional[str]:
+        """Serialize an arbitrary payload to an ASCII-safe, capped string.
+        dict/list → JSON; str → passed through; None → None."""
+        if data is None:
+            return None
+        if isinstance(data, str):
+            return cls._truncate_ascii(data)
+        try:
+            return cls._truncate_ascii(json.dumps(data, default=str, ensure_ascii=True))
+        except (TypeError, ValueError):
+            return cls._truncate_ascii(str(data))
+
+    def _log_task_root(
+        self, action_type: str,
+        trigger_context: Optional[str] = None,
+        action_payload: Any = None,
+        contexts: Optional[List[Tuple[str, Any]]] = None,
+        outcome: str = "pending",
     ) -> int:
-        """Log a child step under a parent task action."""
-        return int(self.memory_manager.log_agent_action(
+        """Log the root of an agent task and attach context tags atomically.
+
+        Use _log_step under the returned id for child trajectory steps, and
+        _finalize_action to set the outcome/outcome_payload when done.
+        """
+        action_id = int(self.memory_manager.log_agent_action(
             agent_name=self.agent_name,
             action_type=action_type,
-            action_payload=action_payload,
+            trigger_context=self._truncate_ascii(trigger_context),
+            action_payload=self._serialize_payload(action_payload),
             outcome=outcome,
-            outcome_payload=outcome_payload,
+        ))
+        if contexts:
+            self._add_contexts(action_id, contexts)
+        return action_id
+
+    def _add_contexts(self, action_id: int, contexts: List[Tuple[str, Any]]) -> None:
+        cleaned = [
+            (str(t), str(v))
+            for t, v in contexts
+            if t is not None and v is not None and str(v) != ""
+        ]
+        if cleaned:
+            self.memory_manager.add_action_contexts(action_id, cleaned)
+
+    def _finalize_action(
+        self, action_id: int, outcome: str,
+        outcome_payload: Any = None,
+    ) -> None:
+        """Set the terminal outcome + outcome_payload on a root action."""
+        self.memory_manager.update_agent_action_outcome(
+            action_id, outcome, self._serialize_payload(outcome_payload),
+        )
+
+    def _log_step(
+        self, parent_id: int, action_type: str,
+        action_payload: Any = None,
+        outcome: str = "success",
+        outcome_payload: Any = None,
+        contexts: Optional[List[Tuple[str, Any]]] = None,
+    ) -> int:
+        """Log a child step under a parent task action.
+
+        action_payload / outcome_payload accept dicts (JSON-serialised) or strings.
+        Both are ASCII-safe and capped at MAX_PAYLOAD_CHARS.
+        """
+        action_id = int(self.memory_manager.log_agent_action(
+            agent_name=self.agent_name,
+            action_type=action_type,
+            action_payload=self._serialize_payload(action_payload),
+            outcome=outcome,
+            outcome_payload=self._serialize_payload(outcome_payload),
             parent_id=parent_id,
         ))
+        if contexts:
+            self._add_contexts(action_id, contexts)
+        return action_id
 
     # --- LLM Context Building ---
 
