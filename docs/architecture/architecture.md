@@ -241,7 +241,17 @@ Abstract base for autonomous background workers. Not user-interactive — poll e
 - Lifecycle: `start()` → `_on_start()` → `[loop: deploy() every interval]` → `stop()`
 - `deploy()`: Abstract — subclass implements one work cycle
 - `_build_llm_context()`: Minimal context (user prompt + optional action history injection)
-- `_log_step()`: Logs actions/child steps to Agent_Actions table
+- Action-log helpers (DP-116a enriched contract):
+  - `_log_task_root(action_type, trigger_context, action_payload, contexts, outcome="pending")`: opens a root row, JSON-serialises and ASCII-safe-truncates `action_payload`, attaches `Agent_Action_Contexts` rows
+  - `_log_step(parent_id, action_type, action_payload, outcome, outcome_payload, contexts)`: child row under a root; accepts dict payloads, same serialisation rules
+  - `_add_contexts(action_id, [(type, value), ...])`: idempotent context tag insert
+  - `_finalize_action(action_id, outcome, outcome_payload)`: terminal update on a root; serialises `outcome_payload`
+  - `_serialize_payload(data)` / `_truncate_ascii(text)`: dict→JSON, ASCII-only (`encode("ascii","replace")`), capped at `MAX_PAYLOAD_CHARS` (4000) with `...[truncated]` marker. ASCII-only is defensive against Hindsight's utf-8→latin-1 mangling on some endpoints.
+- Hindsight bridging (DP-116b):
+  - `_format_action_series_prose(parent, steps, contexts)`: flattens a root + children + context tags into dense k:v prose (no JSON braces, no nulls). Caps at 8000 chars.
+  - `_retain_action_series(action_id)`: called by subclasses after `_finalize_action` on a root. Re-reads the series from `Agent_Actions` (idempotent across restarts), formats prose, enqueues a `retain_experience` POST with `document_id=f"agent_action:{action_id}"` and `content_override=<prose>`. Fire-and-forget through `HindsightBackend._ensure_worker`. SQLite-shape backends raise `NotImplementedError`, which is swallowed — bridging is Hindsight-only and opportunistic.
+  - Class attrs `experience_bank` / `experience_persona` select the destination bank. DispatchAgent points both at `DISPATCH_PERSONA_NAME` so dispatch series mingle into the dispatch_analyst persona bank alongside chat-prose extractions. ReminderAgent defaults to `agent_name` ("reminder").
+  - Idempotency: stable `document_id` + Hindsight `update_mode="replace"` (set via `HindsightBackend._build_item` when `document_id` is passed explicitly, bypassing the rolling `_doc_scope` heuristic) — re-retain on the same id replaces the prior content.
 - `_get_action_history_message()`: Injects recent actions into LLM context if `action_history_limit > 0`
 - Auto-loads system personas from file on init (agents invoke system personas for read-only analysis)
 - Config: `schedule` (dict, e.g. `{"interval": 30}`), `action_history_limit` (int), `agent_name` (str)
@@ -262,6 +272,8 @@ Routes triaged tickets to notifications. Pipeline per ticket:
 3. Route notification via `NotificationRouter` (channel/recipient from agents.json config, not LLM-chosen)
 4. Tag ticket as dispatched in Zammad
 5. Log action outcome
+
+Trajectory logging (DP-116a): each `_dispatch_ticket()` call writes one `dispatch` root row plus child rows for `tool:zammad.get_ticket`, `tool:zammad.get_ticket_articles`, `llm_step` (dispatch_analyst), `tool:notification.send`, `tool:zammad.add_tag`. Root `action_payload` carries `{ticket_id}`, `outcome_payload` carries `{ticket_id, number, title, priority, channel, recipient, sent, decision}`. Contexts attached to the root: `ticket_id`, `persona`, `priority`, `channel`, `recipient`.
 
 **`zammad_bot.py` -- ZammadBot**
 Multi-stage AI triage pipeline for new, untagged tickets. Uses 4 system personas:
@@ -310,9 +322,10 @@ Plugs agent tools into ChatSystem's service binding system. Personas with `servi
 - Agents do NOT spawn other agents; no delegation chains currently
 
 ### `src/tools/agent_tool_handler.py` -- AgentToolHandler
-Three tools gated behind `service_bindings: ["agents"]`:
+Four tools gated behind `service_bindings: ["agents"]`:
 - `get_agent_status` (read): Running state, deploy counts, errors for one or all agents
 - `get_agent_history` (read): Recent action log with optional ticket_id/customer filters
+- `lookup_agent_history` (read, DP-116b): Dereference a single action series by `action_id` — returns parent row + child steps + context tags. Used to recover the full trajectory after a Hindsight recall hit surfaces `action_id:<n>` from the bridged experience.
 - `manage_agent` (write): Start/stop/restart — goes through confirmation if persona is in CONFIRM mode
 
 ### `src/clients/notification.py` -- Notification System

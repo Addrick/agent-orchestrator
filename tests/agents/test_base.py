@@ -129,3 +129,138 @@ class TestBuildLlmContext:
         result = agent._build_llm_context(persona, "test prompt")
         assert len(result["history"]) == 1
         mock_chat_system.memory_manager.get_relevant_agent_actions.assert_not_called()
+
+
+class TestRetainActionSeries:
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    def test_format_action_series_prose_dense_kv(self, mock_load, mock_chat_system):
+        agent = ConcreteAgent(mock_chat_system)
+        parent = {
+            "id": 7,
+            "agent_name": "test_agent",
+            "action_type": "dispatch",
+            "trigger_context": "ticket:1234",
+            "outcome": "success",
+            "action_payload": '{"ticket_id": 1234, "empty": "", "none": null}',
+            "outcome_payload": '{"priority": "high", "sent": true}',
+        }
+        steps = [
+            {"action_type": "tool:zammad.get_ticket",
+             "outcome": "success",
+             "action_payload": '{"ticket_id": 1234}',
+             "outcome_payload": '{"number": "10042", "title": "Billing 500"}'},
+            {"action_type": "llm_step", "outcome": "success",
+             "action_payload": '{"persona": "dispatch_analyst"}',
+             "outcome_payload": '{"priority": "high"}'},
+        ]
+        contexts = [("ticket_id", "1234"), ("priority", "high")]
+
+        prose = agent._format_action_series_prose(parent, steps, contexts)
+
+        assert "action_id=7" in prose
+        assert "type=dispatch" in prose
+        assert "outcome=success" in prose
+        assert "trigger: ticket:1234" in prose
+        assert "ticket_id=1234" in prose
+        assert "priority=high" in prose
+        # Empty + null collapsed
+        assert "empty:" not in prose
+        assert "none:" not in prose
+        # No JSON braces from inner payloads
+        assert '{"ticket_id"' not in prose
+        # Steps numbered
+        assert "1. tool:zammad.get_ticket" in prose
+        assert "2. llm_step" in prose
+
+    @pytest.mark.asyncio
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    async def test_retain_action_series_calls_memory_manager(
+        self, mock_load, mock_chat_system,
+    ):
+        from unittest.mock import AsyncMock
+        agent = ConcreteAgent(mock_chat_system)
+        agent.experience_bank = "test_bank"
+        agent.experience_persona = "test_persona"
+
+        mm = mock_chat_system.memory_manager
+        mm.get_agent_action.return_value = {
+            "id": 9, "action_type": "dispatch", "outcome": "success",
+            "trigger_context": "ticket:1", "action_payload": None,
+            "outcome_payload": None, "timestamp": "2026-05-16T00:00:00+00:00",
+        }
+        mm.get_action_steps.return_value = []
+        mm.get_action_contexts.return_value = [("ticket_id", "1")]
+        mm.retain_experience = AsyncMock(return_value="")
+
+        await agent._retain_action_series(9)
+
+        mm.retain_experience.assert_awaited_once()
+        kwargs = mm.retain_experience.call_args.kwargs
+        assert kwargs["bank_id"] == "test_bank"
+        assert kwargs["source_persona"] == "test_persona"
+        assert kwargs["document_id"] == "agent_action:9"
+        assert "agent=test_agent" in kwargs["content_override"]
+        assert kwargs["action_type"] == "dispatch"
+
+    @pytest.mark.asyncio
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    async def test_retain_action_series_swallows_not_implemented(
+        self, mock_load, mock_chat_system,
+    ):
+        """SQLite backend raises NotImplementedError on retain_experience —
+        bridging is opportunistic, must not break the agent loop."""
+        from unittest.mock import AsyncMock
+        agent = ConcreteAgent(mock_chat_system)
+        mm = mock_chat_system.memory_manager
+        mm.get_agent_action.return_value = {
+            "id": 1, "action_type": "x", "outcome": "success",
+            "trigger_context": None, "action_payload": None,
+            "outcome_payload": None, "timestamp": None,
+        }
+        mm.get_action_steps.return_value = []
+        mm.get_action_contexts.return_value = []
+        mm.retain_experience = AsyncMock(side_effect=NotImplementedError())
+
+        # Should not raise
+        await agent._retain_action_series(1)
+
+    @pytest.mark.asyncio
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    async def test_retain_action_series_swallows_generic_exception(
+        self, mock_load, mock_chat_system,
+    ):
+        """Generic backend failure (Hindsight down, network error, etc.) must
+        not break the agent loop — agent fire-and-forgets the bridge."""
+        from unittest.mock import AsyncMock
+        agent = ConcreteAgent(mock_chat_system)
+        mm = mock_chat_system.memory_manager
+        mm.get_agent_action.return_value = {
+            "id": 2, "action_type": "x", "outcome": "success",
+            "trigger_context": None, "action_payload": None,
+            "outcome_payload": None, "timestamp": None,
+        }
+        mm.get_action_steps.return_value = []
+        mm.get_action_contexts.return_value = []
+        mm.retain_experience = AsyncMock(side_effect=RuntimeError("hindsight down"))
+
+        with patch('src.agents.base.logger') as mock_logger:
+            # Should not raise
+            await agent._retain_action_series(2)
+            # Warning logged, not error
+            mock_logger.warning.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    async def test_retain_action_series_handles_missing_action(
+        self, mock_load, mock_chat_system,
+    ):
+        """If the parent action row is gone (race / deletion), warn and skip
+        without calling retain_experience."""
+        from unittest.mock import AsyncMock
+        agent = ConcreteAgent(mock_chat_system)
+        mm = mock_chat_system.memory_manager
+        mm.get_agent_action.return_value = None
+        mm.retain_experience = AsyncMock()
+
+        await agent._retain_action_series(404)
+        mm.retain_experience.assert_not_awaited()

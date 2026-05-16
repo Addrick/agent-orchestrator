@@ -13,8 +13,16 @@ def mock_chat_system():
     cs = MagicMock()
     cs.text_engine = MagicMock()
     cs.memory_manager = MagicMock()
-    cs.memory_manager.log_agent_action = MagicMock(return_value=1)
+    # Each call returns a fresh id so root vs. child rows can be told apart.
+    cs._next_action_id = 0
+
+    def _next_id(*_args, **_kwargs):
+        cs._next_action_id += 1
+        return cs._next_action_id
+
+    cs.memory_manager.log_agent_action = MagicMock(side_effect=_next_id)
     cs.memory_manager.update_agent_action_outcome = MagicMock()
+    cs.memory_manager.add_action_contexts = MagicMock()
     cs.personas = {}
     return cs
 
@@ -191,13 +199,34 @@ class TestDispatchTicket:
 
         await agent._dispatch_ticket(42)
 
-        # Verify action logged
-        mock_chat_system.memory_manager.log_agent_action.assert_called_once()
-        # Verify ticket tagged
+        # Root + at least one child action logged
+        log_calls = mock_chat_system.memory_manager.log_agent_action.call_args_list
+        assert len(log_calls) >= 2
+        root_kwargs = log_calls[0].kwargs
+        assert root_kwargs["action_type"] == "dispatch"
+        assert root_kwargs.get("parent_id") is None
+        # Child rows carry parent_id linking back to the root
+        child_calls = [c for c in log_calls[1:] if c.kwargs.get("parent_id") == 1]
+        assert child_calls, "expected child step rows under the root action"
+        child_types = {c.kwargs["action_type"] for c in child_calls}
+        assert "llm_step" in child_types
+        assert any(t.startswith("tool:") for t in child_types)
+        # Ticket tagged
         mock_zammad_client.add_tag.assert_called_once()
-        # Verify outcome updated to success
-        update_call = mock_chat_system.memory_manager.update_agent_action_outcome.call_args
-        assert update_call[0][1] == "success"
+        # Outcome on the root row is success with structured payload
+        final_call = mock_chat_system.memory_manager.update_agent_action_outcome.call_args
+        assert final_call[0][0] == 1  # root action_id
+        assert final_call[0][1] == "success"
+        payload = json.loads(final_call[0][2])
+        assert payload["priority"] == "medium"
+        assert payload["sent"] is True
+        # Contexts attached to the root row
+        ctx_calls = mock_chat_system.memory_manager.add_action_contexts.call_args_list
+        root_ctx_calls = [c for c in ctx_calls if c[0][0] == 1]
+        assert root_ctx_calls
+        flat_contexts = {(t, v) for call in root_ctx_calls for (t, v) in call[0][1]}
+        ctx_types = {t for t, _ in flat_contexts}
+        assert {"ticket_id", "priority", "channel", "recipient"} <= ctx_types
 
     @patch('src.agents.base.load_system_personas_from_file', return_value={})
     @pytest.mark.asyncio
