@@ -89,11 +89,15 @@ class DispatchAgent(Agent):
             )
             triage_note = self._extract_triage_note(articles)
             triage_excerpt = triage_note[:600]
+            # Raw articles live in Zammad (fully auditable there). Log a ref
+            # + short excerpt instead of the bodies so the series stays small
+            # and memory extraction sees signal, not bulk article text.
             self._log_step(
                 action_id, "tool:zammad.get_ticket_articles",
                 action_payload={"ticket_id": ticket_id},
                 outcome_payload={
                     "article_count": len(articles),
+                    "ref": f"zammad.ticket({ticket_id}).articles",
                     "triage_excerpt": triage_excerpt,
                 },
             )

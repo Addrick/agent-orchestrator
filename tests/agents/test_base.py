@@ -223,3 +223,44 @@ class TestRetainActionSeries:
 
         # Should not raise
         await agent._retain_action_series(1)
+
+    @pytest.mark.asyncio
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    async def test_retain_action_series_swallows_generic_exception(
+        self, mock_load, mock_chat_system,
+    ):
+        """Generic backend failure (Hindsight down, network error, etc.) must
+        not break the agent loop — agent fire-and-forgets the bridge."""
+        from unittest.mock import AsyncMock
+        agent = ConcreteAgent(mock_chat_system)
+        mm = mock_chat_system.memory_manager
+        mm.get_agent_action.return_value = {
+            "id": 2, "action_type": "x", "outcome": "success",
+            "trigger_context": None, "action_payload": None,
+            "outcome_payload": None, "timestamp": None,
+        }
+        mm.get_action_steps.return_value = []
+        mm.get_action_contexts.return_value = []
+        mm.retain_experience = AsyncMock(side_effect=RuntimeError("hindsight down"))
+
+        with patch('src.agents.base.logger') as mock_logger:
+            # Should not raise
+            await agent._retain_action_series(2)
+            # Warning logged, not error
+            mock_logger.warning.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch('src.agents.base.load_system_personas_from_file', return_value={})
+    async def test_retain_action_series_handles_missing_action(
+        self, mock_load, mock_chat_system,
+    ):
+        """If the parent action row is gone (race / deletion), warn and skip
+        without calling retain_experience."""
+        from unittest.mock import AsyncMock
+        agent = ConcreteAgent(mock_chat_system)
+        mm = mock_chat_system.memory_manager
+        mm.get_agent_action.return_value = None
+        mm.retain_experience = AsyncMock()
+
+        await agent._retain_action_series(404)
+        mm.retain_experience.assert_not_awaited()
