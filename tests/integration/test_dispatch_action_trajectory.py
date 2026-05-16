@@ -44,6 +44,12 @@ async def test_dispatch_end_to_end_trajectory(mocked_chat_system):
                 "reasoning": "Billing portal 500s; payment blocked."}
     agent._get_dispatch_decision = AsyncMock(return_value=decision)
 
+    # DP-116b: track Hindsight bridging. Sqlite-shape backend raises
+    # NotImplementedError on retain_experience; substitute an AsyncMock so we
+    # can assert the wire-up fires once with the expected doc_id + prose.
+    retain_mock = AsyncMock(return_value="")
+    memory_manager.retain_experience = retain_mock
+
     await agent._dispatch_ticket(1234)
 
     actions = memory_manager.get_agent_actions("dispatch", limit=50)
@@ -83,3 +89,19 @@ async def test_dispatch_end_to_end_trajectory(mocked_chat_system):
     assert "ticket_id" in ctx_types
     assert "priority" in ctx_types
     assert "channel" in ctx_types
+
+    # DP-116b: bridge fired exactly once at series completion.
+    retain_mock.assert_awaited_once()
+    kwargs = retain_mock.await_args.kwargs
+    assert kwargs["document_id"] == f"agent_action:{root_id}"
+    assert kwargs["bank_id"] == "dispatch_analyst"
+    assert kwargs["source_persona"] == "dispatch_analyst"
+    assert kwargs["action_type"] == "dispatch"
+    prose = kwargs["content_override"]
+    assert f"action_id={root_id}" in prose
+    assert "outcome=success" in prose
+    assert "ticket_id=1234" in prose
+    # Step rows included as dense prose, not raw JSON
+    assert "tool:zammad.get_ticket" in prose
+    assert "llm_step" in prose
+    assert '{"ticket_id"' not in prose

@@ -192,3 +192,42 @@ class TestManageAgent:
     async def test_unknown_action_raises(self, handler):
         with pytest.raises(ValueError, match="Unknown action"):
             await handler._manage_agent(agent_name="dispatch", action="explode")
+
+
+class TestLookupAgentHistory:
+    @pytest.mark.asyncio
+    async def test_returns_parent_steps_and_contexts(
+        self, handler, mock_memory_manager,
+    ):
+        mock_memory_manager.get_agent_action.return_value = {
+            "id": 42, "parent_id": None, "agent_name": "dispatch",
+            "action_type": "dispatch", "trigger_context": "ticket:1",
+            "outcome": "success", "timestamp": "2026-05-16T00:00:00",
+            "action_payload": '{"ticket_id": 1}',
+            "outcome_payload": '{"sent": true}',
+        }
+        mock_memory_manager.get_action_steps.return_value = [
+            {"id": 43, "parent_id": 42, "agent_name": "dispatch",
+             "action_type": "tool:notification.send", "outcome": "success",
+             "trigger_context": None, "timestamp": "2026-05-16T00:00:01",
+             "action_payload": None, "outcome_payload": '{"sent": true}'},
+        ]
+        mock_memory_manager.get_action_contexts.return_value = [
+            ("ticket_id", "1"), ("priority", "high"),
+        ]
+
+        result = await handler._lookup_agent_history(action_id=42)
+        assert result["found"] is True
+        assert result["parent"]["id"] == 42
+        assert result["parent"]["action_payload"] == {"ticket_id": 1}
+        assert result["parent"]["outcome_payload"] == {"sent": True}
+        assert len(result["steps"]) == 1
+        assert result["steps"][0]["outcome_payload"] == {"sent": True}
+        assert {"type": "ticket_id", "value": "1"} in result["contexts"]
+        assert {"type": "priority", "value": "high"} in result["contexts"]
+
+    @pytest.mark.asyncio
+    async def test_missing_action(self, handler, mock_memory_manager):
+        mock_memory_manager.get_agent_action.return_value = None
+        result = await handler._lookup_agent_history(action_id=999)
+        assert result == {"action_id": 999, "found": False}

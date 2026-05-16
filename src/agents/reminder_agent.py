@@ -137,9 +137,11 @@ class ReminderAgent(Agent):
                 "success" if sent else "failed",
                 {"sent": sent, "channel": channel, "recipient": recipient},
             )
+            await self._retain_action_series(action_id)
             return sent
         except Exception as e:
             self._finalize_action(action_id, "error", {"error": str(e)})
+            await self._retain_action_series(action_id)
             return False
 
     def _resolve_recipient(self, channel: str, recipient_key: str, ticket_id: int) -> str:

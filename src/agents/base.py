@@ -5,7 +5,7 @@ import json
 import logging
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 from src.chat_system import ChatSystem
 from src.persona import Persona
@@ -36,6 +36,12 @@ class Agent(ABC):
     agent_name: str = ""
     action_history_limit: int = 0  # 0 = disabled
     schedule: Dict[str, Any] = {}  # e.g. {"interval": 30}
+
+    # Hindsight bridging (DP-116b). Both default to agent_name when unset.
+    # Subclasses override `experience_bank` to mingle agent series into a
+    # human-facing persona bank (e.g. dispatch -> "dispatch_analyst").
+    experience_bank: Optional[str] = None
+    experience_persona: Optional[str] = None
 
     def __init__(self, chat_system: ChatSystem, inject_personas: bool = True) -> None:
         self.chat_system = chat_system
@@ -201,6 +207,127 @@ class Agent(ABC):
         self.memory_manager.update_agent_action_outcome(
             action_id, outcome, self._serialize_payload(outcome_payload),
         )
+
+    # --- Hindsight bridging (DP-116b) ---
+
+    AGENT_HISTORY_DOC_PREFIX: str = "agent_action"
+
+    @classmethod
+    def _action_document_id(cls, action_id: int) -> str:
+        return f"{cls.AGENT_HISTORY_DOC_PREFIX}:{action_id}"
+
+    def _format_action_series_prose(
+        self,
+        parent: Dict[str, Any],
+        steps: List[Dict[str, Any]],
+        contexts: List[Tuple[str, str]],
+    ) -> str:
+        """Dense ASCII prose for a parent + children + context-tag series.
+
+        Hindsight's extractor performs best on chat-like prose. Plain k:v
+        lines, no JSON braces / nulls, repeated keys collapsed.
+        """
+        def _kv_lines(payload: Optional[str], indent: str = "  ") -> List[str]:
+            if not payload:
+                return []
+            try:
+                data = json.loads(payload)
+            except (TypeError, ValueError):
+                return [f"{indent}{payload}"]
+            if not isinstance(data, dict):
+                return [f"{indent}{data}"]
+            lines = []
+            for k, v in data.items():
+                if v is None or v == "" or v == [] or v == {}:
+                    continue
+                if isinstance(v, (dict, list)):
+                    v = json.dumps(v, ensure_ascii=True, default=str)
+                lines.append(f"{indent}{k}: {v}")
+            return lines
+
+        action_id = parent.get("id")
+        out: List[str] = []
+        out.append(
+            f"agent={self.agent_name} action_id={action_id} "
+            f"type={parent.get('action_type')} outcome={parent.get('outcome')}"
+        )
+        trigger = parent.get("trigger_context")
+        if trigger:
+            out.append(f"trigger: {trigger}")
+        if contexts:
+            ctx_str = ", ".join(f"{t}={v}" for t, v in contexts)
+            out.append(f"contexts: {ctx_str}")
+        ap_lines = _kv_lines(parent.get("action_payload"))
+        if ap_lines:
+            out.append("inputs:")
+            out.extend(ap_lines)
+        if steps:
+            out.append("steps:")
+            for i, step in enumerate(steps, 1):
+                out.append(
+                    f"  {i}. {step.get('action_type')} -> {step.get('outcome')}"
+                )
+                for line in _kv_lines(step.get("action_payload"), indent="     in: "):
+                    out.append(line)
+                for line in _kv_lines(step.get("outcome_payload"), indent="     out: "):
+                    out.append(line)
+        op_lines = _kv_lines(parent.get("outcome_payload"))
+        if op_lines:
+            out.append("result:")
+            out.extend(op_lines)
+        prose = "\n".join(out)
+        return cast("str", self._truncate_ascii(prose, max_len=8000)) or ""
+
+    async def _retain_action_series(self, action_id: int) -> None:
+        """Bridge a finalized agent-action series into Hindsight.
+
+        Fire-and-forget through the backend's per-bank queue. Stable
+        document_id = `agent_action:<id>` makes the retain idempotent
+        (re-running on the same id replaces; no double-extract).
+        """
+        if not self.agent_name:
+            return
+        parent = self.memory_manager.get_agent_action(action_id)
+        if parent is None:
+            logger.warning("retain_action_series: action %s not found", action_id)
+            return
+        steps = self.memory_manager.get_action_steps(action_id)
+        contexts = self.memory_manager.get_action_contexts(action_id)
+        prose = self._format_action_series_prose(parent, steps, contexts)
+        bank = self.experience_bank or self.agent_name
+        persona = self.experience_persona or self.experience_bank or self.agent_name
+        scope_tags = [f"agent:{self.agent_name}", f"action_id:{action_id}"]
+        ts = parent.get("timestamp")
+        if isinstance(ts, str):
+            try:
+                ts = datetime.fromisoformat(ts)
+            except ValueError:
+                ts = None
+        if ts is None:
+            ts = datetime.now(timezone.utc)
+        try:
+            await self.memory_manager.retain_experience(
+                bank_id=bank,
+                action_type=str(parent.get("action_type") or "agent_action"),
+                context={"action_id": action_id},
+                outcome=str(parent.get("outcome") or ""),
+                scope_tags=scope_tags,
+                source_persona=persona,
+                timestamp=ts,
+                metadata={"action_id": str(action_id),
+                          "agent": self.agent_name},
+                document_id=self._action_document_id(action_id),
+                content_override=prose,
+            )
+        except NotImplementedError:
+            # SQLite-shape backend (semantic backend = sqlite). Bridging is a
+            # Hindsight-only feature; silently skip when the backend isn't wired.
+            pass
+        except Exception as e:  # noqa: BLE001 — never break the agent loop
+            logger.warning(
+                "retain_action_series enqueue failed for action %s: %s",
+                action_id, e,
+            )
 
     def _log_step(
         self, parent_id: int, action_type: str,

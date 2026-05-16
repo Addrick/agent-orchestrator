@@ -34,6 +34,7 @@ class AgentToolHandler:
         """Register all agent tools with the tool manager."""
         manager.register("get_agent_status", self._get_agent_status)
         manager.register("get_agent_history", self._get_agent_history)
+        manager.register("lookup_agent_history", self._lookup_agent_history)
         manager.register("manage_agent", self._manage_agent)
 
     async def _get_agent_status(
@@ -108,6 +109,45 @@ class AgentToolHandler:
             "agent_name": agent_name,
             "action_count": len(formatted),
             "actions": formatted,
+        }
+
+    async def _lookup_agent_history(
+        self, action_id: int,
+    ) -> Dict[str, Any]:
+        """Dereference an action series by id: parent row + steps + contexts."""
+        logger.info(f"Executing tool: lookup_agent_history action_id={action_id}")
+        parent = self._memory_manager.get_agent_action(action_id)
+        if parent is None:
+            return {"action_id": action_id, "found": False}
+
+        def _coerce(row: Dict[str, Any]) -> Dict[str, Any]:
+            out: Dict[str, Any] = {
+                "id": row.get("id"),
+                "parent_id": row.get("parent_id"),
+                "agent_name": row.get("agent_name"),
+                "action_type": row.get("action_type"),
+                "trigger_context": row.get("trigger_context"),
+                "outcome": row.get("outcome"),
+                "timestamp": str(row.get("timestamp", "")),
+            }
+            for key in ("action_payload", "outcome_payload"):
+                val = row.get(key)
+                if not val:
+                    continue
+                try:
+                    out[key] = json.loads(val)
+                except (json.JSONDecodeError, TypeError):
+                    out[key] = val
+            return out
+
+        steps = self._memory_manager.get_action_steps(action_id)
+        contexts = self._memory_manager.get_action_contexts(action_id)
+        return {
+            "action_id": action_id,
+            "found": True,
+            "parent": _coerce(parent),
+            "steps": [_coerce(s) for s in steps],
+            "contexts": [{"type": t, "value": v} for t, v in contexts],
         }
 
     async def _manage_agent(

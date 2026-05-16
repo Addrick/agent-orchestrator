@@ -28,7 +28,7 @@ class TestAgentServiceName:
 
 
 class TestAgentServiceRegisterTools:
-    def test_registers_all_three_tools(self):
+    def test_registers_all_tools(self):
         mock_agent_manager = MagicMock()
         mock_memory_manager = MagicMock()
         service = AgentServiceIntegration(mock_agent_manager, mock_memory_manager)
@@ -36,11 +36,13 @@ class TestAgentServiceRegisterTools:
         mock_tool_manager = MagicMock()
         service.register_tools(mock_tool_manager)
 
-        # AgentToolHandler.register calls manager.register 3 times
-        assert mock_tool_manager.register.call_count == 3
+        assert mock_tool_manager.register.call_count == 4
 
         registered_names = {call.args[0] for call in mock_tool_manager.register.call_args_list}
-        assert registered_names == {"get_agent_status", "get_agent_history", "manage_agent"}
+        assert registered_names == {
+            "get_agent_status", "get_agent_history",
+            "lookup_agent_history", "manage_agent",
+        }
 
     def test_passes_correct_dependencies_to_handler(self):
         mock_agent_manager = MagicMock()
@@ -74,14 +76,14 @@ class TestAgentToolRegistrationChain:
         assert {'get_agent_status', 'get_agent_history', 'manage_agent'} <= tool_names
 
     def test_agent_tools_have_correct_service_binding(self):
-        """All 3 agent tools declare service_binding='agents'."""
+        """All agent tools declare service_binding='agents'."""
         manager = ToolManager()
         service = AgentServiceIntegration(MagicMock(), MagicMock())
         service.register_tools(manager)
 
         agent_tools = [t for t in manager.get_tool_definitions()
                        if t.get('service_binding') == 'agents']
-        assert len(agent_tools) == 3
+        assert len(agent_tools) == 4
 
     def test_unregistered_tools_excluded_from_definitions(self):
         """ToolManager with no registered handlers returns no callable tools."""
