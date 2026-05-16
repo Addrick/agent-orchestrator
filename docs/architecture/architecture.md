@@ -241,7 +241,12 @@ Abstract base for autonomous background workers. Not user-interactive — poll e
 - Lifecycle: `start()` → `_on_start()` → `[loop: deploy() every interval]` → `stop()`
 - `deploy()`: Abstract — subclass implements one work cycle
 - `_build_llm_context()`: Minimal context (user prompt + optional action history injection)
-- `_log_step()`: Logs actions/child steps to Agent_Actions table
+- Action-log helpers (DP-116a enriched contract):
+  - `_log_task_root(action_type, trigger_context, action_payload, contexts, outcome="pending")`: opens a root row, JSON-serialises and ASCII-safe-truncates `action_payload`, attaches `Agent_Action_Contexts` rows
+  - `_log_step(parent_id, action_type, action_payload, outcome, outcome_payload, contexts)`: child row under a root; accepts dict payloads, same serialisation rules
+  - `_add_contexts(action_id, [(type, value), ...])`: idempotent context tag insert
+  - `_finalize_action(action_id, outcome, outcome_payload)`: terminal update on a root; serialises `outcome_payload`
+  - `_serialize_payload(data)` / `_truncate_ascii(text)`: dict→JSON, ASCII-only (`encode("ascii","replace")`), capped at `MAX_PAYLOAD_CHARS` (4000) with `...[truncated]` marker. ASCII-only is defensive against Hindsight's utf-8→latin-1 mangling on some endpoints.
 - `_get_action_history_message()`: Injects recent actions into LLM context if `action_history_limit > 0`
 - Auto-loads system personas from file on init (agents invoke system personas for read-only analysis)
 - Config: `schedule` (dict, e.g. `{"interval": 30}`), `action_history_limit` (int), `agent_name` (str)
@@ -262,6 +267,8 @@ Routes triaged tickets to notifications. Pipeline per ticket:
 3. Route notification via `NotificationRouter` (channel/recipient from agents.json config, not LLM-chosen)
 4. Tag ticket as dispatched in Zammad
 5. Log action outcome
+
+Trajectory logging (DP-116a): each `_dispatch_ticket()` call writes one `dispatch` root row plus child rows for `tool:zammad.get_ticket`, `tool:zammad.get_ticket_articles`, `llm_step` (dispatch_analyst), `tool:notification.send`, `tool:zammad.add_tag`. Root `action_payload` carries `{ticket_id}`, `outcome_payload` carries `{ticket_id, number, title, priority, channel, recipient, sent, decision}`. Contexts attached to the root: `ticket_id`, `persona`, `priority`, `channel`, `recipient`.
 
 **`zammad_bot.py` -- ZammadBot**
 Multi-stage AI triage pipeline for new, untagged tickets. Uses 4 system personas:
