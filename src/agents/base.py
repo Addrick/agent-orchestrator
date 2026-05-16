@@ -276,7 +276,10 @@ class Agent(ABC):
             out.append("result:")
             out.extend(op_lines)
         prose = "\n".join(out)
-        return cast("str", self._truncate_ascii(prose, max_len=8000)) or ""
+        # 16k safety cap. Hindsight chunks at 10k internally, so this is a
+        # belt on pathological loops — not a semantic boundary. Series are
+        # kept small at log time via ref-substitution for blob payloads.
+        return cast("str", self._truncate_ascii(prose, max_len=16000)) or ""
 
     async def _retain_action_series(self, action_id: int) -> None:
         """Bridge a finalized agent-action series into Hindsight.

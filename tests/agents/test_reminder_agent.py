@@ -163,6 +163,47 @@ class TestReminderAgentActionLogging:
             assert fcall[0][1] == "success"
             assert json.loads(fcall[0][2])["sent"] is True
 
+    @pytest.mark.asyncio
+    async def test_hindsight_bridge_fires_per_target(
+        self, reminder_agent, mock_zammad_client, mock_chat_system,
+    ):
+        """DP-116b: at series completion, reminder enqueues one
+        retain_experience call per target. bank/persona default to agent_name
+        ('reminder') because ReminderAgent does not override experience_bank."""
+        reminder_agent.deploy_count = 1
+        now_iso = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+        mock_zammad_client.search_tickets = MagicMock(return_value=[
+            {"id": 101, "number": "10101", "title": "T1", "customer_id": 1, "updated_at": now_iso},
+        ])
+        mock_zammad_client.get_user = MagicMock(return_value={"firstname": "A", "lastname": "B"})
+        reminder_agent.notification_router.send = AsyncMock(return_value=True)
+
+        mm = mock_chat_system.memory_manager
+        # _retain_action_series re-reads the row it just finalized.
+        mm.get_agent_action.side_effect = lambda aid: {
+            "id": aid, "agent_name": "reminder", "action_type": "daily_summary",
+            "trigger_context": "target:discord_dm:adrich",
+            "action_payload": '{"channel": "discord_dm"}',
+            "outcome": "success",
+            "outcome_payload": '{"sent": true}',
+            "timestamp": "2026-05-16T00:00:00+00:00",
+        }
+        mm.get_action_steps.return_value = []
+        mm.get_action_contexts.return_value = [("channel", "discord_dm")]
+        mm.retain_experience = AsyncMock(return_value="")
+
+        await reminder_agent.deploy()
+
+        # One bridge call per configured target (2)
+        assert mm.retain_experience.await_count == 2
+        for call in mm.retain_experience.await_args_list:
+            kw = call.kwargs
+            assert kw["bank_id"] == "reminder"
+            assert kw["source_persona"] == "reminder"
+            assert kw["action_type"] == "daily_summary"
+            assert kw["document_id"].startswith("agent_action:")
+            assert "agent=reminder" in kw["content_override"]
+
 
 class TestReminderAgentRecipientResolution:
     def test_resolves_mapped_recipient(self, reminder_agent):
