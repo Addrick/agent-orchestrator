@@ -31,6 +31,10 @@ class DispatchAgent(Agent):
     """
 
     agent_name: str = "dispatch"
+    # Mingle agent series into the dispatch_analyst persona bank so reflect
+    # surfaces past series alongside chat-prose extractions.
+    experience_bank: Optional[str] = DISPATCH_PERSONA_NAME
+    experience_persona: Optional[str] = DISPATCH_PERSONA_NAME
 
     def __init__(
         self,
@@ -62,29 +66,66 @@ class DispatchAgent(Agent):
 
     async def _dispatch_ticket(self, ticket_id: int) -> None:
         """Run the full dispatch pipeline for a single ticket."""
-        action_id = self.memory_manager.log_agent_action(
-            agent_name="dispatch",
+        action_id = self._log_task_root(
             action_type="dispatch",
             trigger_context=f"ticket:{ticket_id}",
-            outcome="pending",
+            action_payload={"ticket_id": ticket_id},
+            contexts=[("ticket_id", ticket_id), ("persona", DISPATCH_PERSONA_NAME)],
         )
 
         try:
             # 1. Fetch ticket and triage note
             ticket = await asyncio.to_thread(self.zammad_client.get_ticket, ticket_id=ticket_id)
             title = ticket.get('title', 'No Title')
+            number = ticket.get('number', ticket_id)
+            self._log_step(
+                action_id, "tool:zammad.get_ticket",
+                action_payload={"ticket_id": ticket_id},
+                outcome_payload={"number": number, "title": title},
+            )
+
             articles = await asyncio.to_thread(
                 self.zammad_client.get_ticket_articles, ticket_id=ticket_id
             )
             triage_note = self._extract_triage_note(articles)
+            triage_excerpt = triage_note[:600]
+            # Raw articles live in Zammad (fully auditable there). Log a ref
+            # + short excerpt instead of the bodies so the series stays small
+            # and memory extraction sees signal, not bulk article text.
+            self._log_step(
+                action_id, "tool:zammad.get_ticket_articles",
+                action_payload={"ticket_id": ticket_id},
+                outcome_payload={
+                    "article_count": len(articles),
+                    "ref": f"zammad.ticket({ticket_id}).articles",
+                    "triage_excerpt": triage_excerpt,
+                },
+            )
 
             # 2. LLM dispatch decision (priority + summary only)
+            llm_step_id = self._log_step(
+                action_id, "llm_step",
+                action_payload={
+                    "persona": DISPATCH_PERSONA_NAME,
+                    "title": title,
+                    "triage_excerpt": triage_excerpt,
+                },
+                outcome="pending",
+            )
             decision = await self._get_dispatch_decision(title, triage_note)
             if decision is None:
-                self.memory_manager.update_agent_action_outcome(
-                    action_id, "failed", "LLM returned no dispatch decision"
+                self._finalize_action(
+                    llm_step_id, "failed",
+                    {"reason": "LLM returned no dispatch decision"},
                 )
+                self._finalize_action(
+                    action_id, "failed",
+                    {"reason": "LLM returned no dispatch decision",
+                     "title": title, "ticket_id": ticket_id},
+                )
+                await self._retain_action_series(action_id)
                 return
+            self._finalize_action(llm_step_id, "success", decision)
 
             # 3. Send notification via config-defined channel/recipient
             defaults = self.agent_config.get("notification_defaults", {})
@@ -94,7 +135,7 @@ class DispatchAgent(Agent):
 
             notification_body = (
                 f"Priority: {priority.upper()}\n"
-                f"Ticket: #{ticket.get('number', ticket_id)}\n"
+                f"Ticket: #{number}\n"
                 f"Issue: {summary}\n"
                 f"Reasoning: {decision.get('reasoning', 'N/A')}"
             )
@@ -104,12 +145,43 @@ class DispatchAgent(Agent):
             else:
                 recipient = self._resolve_recipient(notify_channel, ticket_id)
 
-            sent = await self.notification_router.send(
-                channel=notify_channel,
-                recipient=recipient,
-                subject=f"[{priority.upper()}] {title}",
-                body=notification_body,
-            )
+            self._add_contexts(action_id, [
+                ("priority", priority),
+                ("channel", notify_channel),
+                ("recipient", recipient),
+            ])
+
+            subject = f"[{priority.upper()}] {title}"
+            try:
+                sent = await self.notification_router.send(
+                    channel=notify_channel,
+                    recipient=recipient,
+                    subject=subject,
+                    body=notification_body,
+                )
+                self._log_step(
+                    action_id, "tool:notification.send",
+                    action_payload={
+                        "channel": notify_channel,
+                        "recipient": recipient,
+                        "subject": subject,
+                        "body_excerpt": notification_body[:400],
+                    },
+                    outcome="success" if sent else "failed",
+                    outcome_payload={"sent": sent},
+                )
+            except Exception as send_exc:
+                sent = False
+                self._log_step(
+                    action_id, "tool:notification.send",
+                    action_payload={
+                        "channel": notify_channel,
+                        "recipient": recipient,
+                        "subject": subject,
+                    },
+                    outcome="error",
+                    outcome_payload={"error": str(send_exc)},
+                )
 
             # 4. Tag ticket as dispatched
             await asyncio.to_thread(
@@ -117,24 +189,34 @@ class DispatchAgent(Agent):
                 ticket_id=ticket_id,
                 tag=DISPATCH_DISPATCHED_TAG,
             )
+            self._log_step(
+                action_id, "tool:zammad.add_tag",
+                action_payload={"ticket_id": ticket_id, "tag": DISPATCH_DISPATCHED_TAG},
+                outcome_payload={"tagged": True},
+            )
 
             # 5. Log outcome
-            outcome_payload = json.dumps({
-                "priority": priority,
-                "channel": notify_channel,
-                "sent": sent,
-                "decision": decision,
-            })
-            self.memory_manager.update_agent_action_outcome(
-                action_id, "success" if sent else "notification_failed", outcome_payload
+            self._finalize_action(
+                action_id,
+                "success" if sent else "notification_failed",
+                {
+                    "ticket_id": ticket_id,
+                    "number": number,
+                    "title": title,
+                    "priority": priority,
+                    "channel": notify_channel,
+                    "recipient": recipient,
+                    "sent": sent,
+                    "decision": decision,
+                },
             )
             logger.info(f"Ticket {ticket_id} dispatched: priority={priority}, channel={notify_channel}")
+            await self._retain_action_series(action_id)
 
         except Exception as e:
             logger.error(f"Error dispatching ticket {ticket_id}: {e}", exc_info=True)
-            self.memory_manager.update_agent_action_outcome(
-                action_id, "error", str(e)
-            )
+            self._finalize_action(action_id, "error", {"error": str(e)})
+            await self._retain_action_series(action_id)
 
     def _resolve_recipient(self, channel: str, ticket_id: int) -> str:
         """Resolve the notification recipient from agent_config or fall back to zammad."""

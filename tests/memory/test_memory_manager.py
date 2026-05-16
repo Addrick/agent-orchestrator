@@ -333,6 +333,58 @@ def test_migration_is_idempotent(legacy_mem_manager):
     assert len(actions) == 2  # no duplicates
 
 
+# --- DP-116b: get_agent_action / get_action_contexts round-trip (real sqlite) ---
+
+def test_get_agent_action_round_trip(mem_manager):
+    """SqliteSemanticBackend.get_agent_action returns the row inserted by
+    log_agent_action with all fields intact."""
+    action_id = mem_manager.log_agent_action(
+        agent_name="dispatch", action_type="dispatch",
+        trigger_context="ticket:42",
+        action_payload='{"ticket_id": 42}',
+        outcome="pending",
+    )
+    row = mem_manager.get_agent_action(action_id)
+    assert row is not None
+    assert row["id"] == action_id
+    assert row["agent_name"] == "dispatch"
+    assert row["action_type"] == "dispatch"
+    assert row["trigger_context"] == "ticket:42"
+    assert row["action_payload"] == '{"ticket_id": 42}'
+    assert row["outcome"] == "pending"
+    assert row["parent_id"] is None
+
+
+def test_get_agent_action_missing_returns_none(mem_manager):
+    assert mem_manager.get_agent_action(999999) is None
+
+
+def test_get_action_contexts_round_trip(mem_manager):
+    """add_action_contexts rows come back via get_action_contexts as (type, value)
+    tuples ordered deterministically."""
+    action_id = mem_manager.log_agent_action(
+        agent_name="dispatch", action_type="dispatch", outcome="pending",
+    )
+    mem_manager.add_action_contexts(action_id, [
+        ("ticket_id", "42"),
+        ("priority", "high"),
+        ("channel", "zammad"),
+    ])
+    ctxs = mem_manager.get_action_contexts(action_id)
+    assert set(ctxs) == {
+        ("ticket_id", "42"), ("priority", "high"), ("channel", "zammad"),
+    }
+    # Ordering: SQL is ORDER BY context_type, context_value
+    assert ctxs == sorted(ctxs)
+
+
+def test_get_action_contexts_empty(mem_manager):
+    action_id = mem_manager.log_agent_action(
+        agent_name="dispatch", action_type="dispatch", outcome="pending",
+    )
+    assert mem_manager.get_action_contexts(action_id) == []
+
+
 # --- Thread Safety Tests ---
 
 @pytest.fixture

@@ -103,16 +103,28 @@ class ReminderAgent(Agent):
         """Helper to send notification to a specific target (channel + recipient)."""
         channel = target.get("channel", "discord_dm")
         recipient_key = target.get("recipient", "adrich")
-        
+
         recipient = self._resolve_recipient(channel, recipient_key, ticket_id)
 
-        action_id = self.memory_manager.log_agent_action(
-            agent_name=self.agent_name,
+        ticket_count = body.count("\n• ") + (1 if body.lstrip().startswith("• ") else 0)
+        action_id = self._log_task_root(
             action_type="daily_summary",
             trigger_context=f"target:{channel}:{recipient}",
-            outcome="pending",
+            action_payload={
+                "channel": channel,
+                "recipient": recipient,
+                "recipient_key": recipient_key,
+                "subject": subject,
+                "body_excerpt": body[:1200],
+                "ticket_count": ticket_count,
+            },
+            contexts=[
+                ("channel", channel),
+                ("recipient", recipient),
+                ("recipient_key", recipient_key),
+            ],
         )
-        
+
         try:
             sent = await self.notification_router.send(
                 channel=channel,
@@ -120,10 +132,16 @@ class ReminderAgent(Agent):
                 subject=subject,
                 body=body,
             )
-            self.memory_manager.update_agent_action_outcome(action_id, "success" if sent else "failed")
+            self._finalize_action(
+                action_id,
+                "success" if sent else "failed",
+                {"sent": sent, "channel": channel, "recipient": recipient},
+            )
+            await self._retain_action_series(action_id)
             return sent
         except Exception as e:
-            self.memory_manager.update_agent_action_outcome(action_id, "error", str(e))
+            self._finalize_action(action_id, "error", {"error": str(e)})
+            await self._retain_action_series(action_id)
             return False
 
     def _resolve_recipient(self, channel: str, recipient_key: str, ticket_id: int) -> str:
