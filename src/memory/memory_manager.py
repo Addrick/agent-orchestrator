@@ -905,6 +905,12 @@ class MemoryManager:
     def get_action_steps(self, parent_id: int) -> List[Dict[str, Any]]:
         return self._action_log.get_action_steps(parent_id)
 
+    def get_agent_action(self, action_id: int) -> Optional[Dict[str, Any]]:
+        return self._action_log.get_agent_action(action_id)
+
+    def get_action_contexts(self, action_id: int) -> List[Tuple[str, str]]:
+        return self._action_log.get_action_contexts(action_id)
+
     def store_message_embedding(self, interaction_id: int, embedding: bytes, model_name: str,
                                 created_at: datetime) -> None:
         self.backend.store_message_embedding(interaction_id, embedding, model_name, created_at)
@@ -1171,11 +1177,14 @@ class MemoryManager:
         untrusted: bool = False,
         timestamp: Optional[datetime] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        document_id: Optional[str] = None,
+        content_override: Optional[str] = None,
     ) -> str:
         return await self.backend.retain_experience(
             bank_id, action_type, context, outcome,
             scope_tags=scope_tags, source_persona=source_persona,
             untrusted=untrusted, timestamp=timestamp, metadata=metadata,
+            document_id=document_id, content_override=content_override,
         )
 
     # Note: mark_trusted/mark_untrusted on MemoryManager already exist for the

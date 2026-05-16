@@ -483,6 +483,36 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "is_write": False,
+        "service_binding": "agents",
+        "capabilities": {
+            "produces_untrusted": False,
+            "irreversible": False,
+            "locality": "local",
+            "sensitivity": "internal",
+        },
+        "function": {
+            "name": "lookup_agent_history",
+            "description": (
+                "Dereference an agent-action series by its action_id. Returns the "
+                "parent row, all child step rows, and context tags. Use this after "
+                "a recall hit references `action_id:<id>` to fetch the full "
+                "trajectory the summary was extracted from."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action_id": {
+                        "type": "integer",
+                        "description": "The id of the parent (root) Agent_Actions row.",
+                    },
+                },
+                "required": ["action_id"],
+            },
+        },
+    },
     # =========================================================================
     # Memory Management Tools
     # =========================================================================

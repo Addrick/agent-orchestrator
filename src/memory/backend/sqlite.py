@@ -166,6 +166,24 @@ class SqliteSemanticBackend(MemoryBackend):
             )
             return [dict(row) for row in cursor.fetchall()]
 
+    def get_agent_action(self, action_id: int) -> Optional[Dict[str, Any]]:
+        with self._mm._lock:
+            conn = self._mm._get_connection()
+            row = conn.execute(
+                "SELECT * FROM Agent_Actions WHERE id = ?", (action_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_action_contexts(self, action_id: int) -> List[Tuple[str, str]]:
+        with self._mm._lock:
+            conn = self._mm._get_connection()
+            rows = conn.execute(
+                "SELECT context_type, context_value FROM Agent_Action_Contexts "
+                "WHERE action_id = ? ORDER BY context_type, context_value",
+                (action_id,),
+            ).fetchall()
+            return [(r["context_type"], r["context_value"]) for r in rows]
+
     # ---------- Semantic ----------
 
     def store_message_embedding(

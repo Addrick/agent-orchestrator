@@ -555,6 +555,46 @@ async def test_retain_experience_threads_tags_and_content(backend: HindsightBack
 
 
 @pytest.mark.asyncio
+async def test_retain_experience_explicit_document_id_bypasses_doc_scope(
+    backend: HindsightBackend,
+) -> None:
+    """DP-116b: explicit document_id pins the doc + uses replace, skipping
+    the rolling _doc_scope heuristic. Re-retain on the same id is idempotent."""
+    captured: List[Dict[str, Any]] = []
+
+    async def fake_aretain(bank_id: str, items, async_=True) -> Dict[str, Any]:
+        captured.append(items[0])
+        return {}
+
+    client = backend._get_client()
+    with patch.object(client, "aretain", side_effect=fake_aretain), \
+         patch.object(backend._doc_scope, "resolve", side_effect=AssertionError("should not be called")):
+        await backend.retain_experience(
+            "alice", "dispatch", {"action_id": 42}, "success",
+            scope_tags=["agent:dispatch", "action_id:42"],
+            source_persona="dispatch_analyst",
+            document_id="agent_action:42",
+            content_override="agent=dispatch action_id=42 type=dispatch outcome=success",
+        )
+        await backend.retain_experience(
+            "alice", "dispatch", {"action_id": 42}, "success",
+            scope_tags=["agent:dispatch", "action_id:42"],
+            source_persona="dispatch_analyst",
+            document_id="agent_action:42",
+            content_override="agent=dispatch action_id=42 type=dispatch outcome=success",
+        )
+        await backend.aclose()
+
+    assert len(captured) == 2
+    for item in captured:
+        assert item["document_id"] == "agent_action:42"
+        assert item["update_mode"] == "replace"
+        assert item["content"].startswith("agent=dispatch action_id=42")
+        assert "type:experience" in item["tags"]
+        assert "action:dispatch" in item["tags"]
+
+
+@pytest.mark.asyncio
 async def test_reflect_success_and_failure(backend: HindsightBackend) -> None:
     client = backend._get_client()
     

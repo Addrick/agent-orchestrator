@@ -569,9 +569,15 @@ class HindsightBackend(MemoryBackend):
         scope_tags: List[str],
         timestamp: datetime,
         metadata: Optional[Dict[str, Any]],
+        document_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        scope_key = self._scope_key(bank_id, scope_tags)
-        document_id, update_mode = self._doc_scope.resolve(scope_key, timestamp)
+        if document_id is not None:
+            # Explicit doc_id (e.g. agent-action series) — bypass rolling scope.
+            # update_mode='replace' makes the retain idempotent on the same key.
+            update_mode = "replace"
+        else:
+            scope_key = self._scope_key(bank_id, scope_tags)
+            document_id, update_mode = self._doc_scope.resolve(scope_key, timestamp)
         item: Dict[str, Any] = {
             "content": content,
             "tags": tags,
@@ -624,8 +630,13 @@ class HindsightBackend(MemoryBackend):
         untrusted: bool = False,
         timestamp: Optional[datetime] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        document_id: Optional[str] = None,
+        content_override: Optional[str] = None,
     ) -> str:
-        content = f"Action: {action_type}\nContext: {json.dumps(context)}\nOutcome: {outcome}"
+        if content_override is not None:
+            content = content_override
+        else:
+            content = f"Action: {action_type}\nContext: {json.dumps(context)}\nOutcome: {outcome}"
         tags = list(scope_tags) + [
             f"persona:{source_persona}",
             "type:experience",
@@ -637,6 +648,7 @@ class HindsightBackend(MemoryBackend):
             scope_tags=scope_tags,
             timestamp=timestamp or datetime.now(timezone.utc),
             metadata=metadata,
+            document_id=document_id,
         )
         q = await self._ensure_worker(bank_id)
         await q.put(item)

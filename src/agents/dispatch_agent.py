@@ -31,6 +31,10 @@ class DispatchAgent(Agent):
     """
 
     agent_name: str = "dispatch"
+    # Mingle agent series into the dispatch_analyst persona bank so reflect
+    # surfaces past series alongside chat-prose extractions.
+    experience_bank: Optional[str] = DISPATCH_PERSONA_NAME
+    experience_persona: Optional[str] = DISPATCH_PERSONA_NAME
 
     def __init__(
         self,
@@ -115,6 +119,7 @@ class DispatchAgent(Agent):
                     {"reason": "LLM returned no dispatch decision",
                      "title": title, "ticket_id": ticket_id},
                 )
+                await self._retain_action_series(action_id)
                 return
             self._finalize_action(llm_step_id, "success", decision)
 
@@ -202,10 +207,12 @@ class DispatchAgent(Agent):
                 },
             )
             logger.info(f"Ticket {ticket_id} dispatched: priority={priority}, channel={notify_channel}")
+            await self._retain_action_series(action_id)
 
         except Exception as e:
             logger.error(f"Error dispatching ticket {ticket_id}: {e}", exc_info=True)
             self._finalize_action(action_id, "error", {"error": str(e)})
+            await self._retain_action_series(action_id)
 
     def _resolve_recipient(self, channel: str, ticket_id: int) -> str:
         """Resolve the notification recipient from agent_config or fall back to zammad."""

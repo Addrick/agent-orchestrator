@@ -309,8 +309,18 @@ class MemoryBackend(ABC):
         untrusted: bool = False,
         timestamp: Optional[datetime] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        document_id: Optional[str] = None,
+        content_override: Optional[str] = None,
     ) -> str:
         """Retain an episodic action+outcome record (new-shape).
+
+        If `document_id` is provided, the backend uses it verbatim with
+        update_mode='replace' (idempotent re-retain on the same key). Without
+        it, the backend falls back to its rolling session-document heuristic.
+
+        If `content_override` is provided, it is sent as the item content
+        instead of the default `f"Action ... Context ... Outcome ..."` format —
+        callers pre-format dense prose for agent-trajectory bridging.
 
         Sprint 1 stub — Hindsight backend (Sprint 2) implements; SQLite raises.
         """
