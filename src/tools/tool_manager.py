@@ -260,7 +260,7 @@ class WebSearchHandler:
 
     async def _web_search(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
         logger.info(f"Executing tool: web_search with query='{query}', max_results={max_results}")
-        from duckduckgo_search import DDGS
+        from ddgs import DDGS
 
         def _sync_search() -> List[Dict[str, Any]]:
             with DDGS() as ddgs:

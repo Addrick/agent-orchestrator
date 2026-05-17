@@ -42,7 +42,7 @@ charset-normalizer==3.4.6
     # via requests
 click==8.3.1
     # via
-    #   duckduckgo-search
+    #   ddgs
     #   uvicorn
 colorama==0.4.6
     # via
@@ -50,6 +50,8 @@ colorama==0.4.6
     #   tqdm
 cryptography==46.0.5
     # via google-auth
+ddgs==9.11.4
+    # via -r requirements.in
 discord-py==2.7.1
     # via -r requirements.in
 distro==1.9.0
@@ -59,8 +61,6 @@ distro==1.9.0
     #   openai
 docstring-parser==0.17.0
     # via anthropic
-duckduckgo-search==8.1.1
-    # via -r requirements.in
 fastapi==0.136.1
     # via -r requirements.in
 frozenlist==1.8.0
@@ -136,7 +136,7 @@ jiter==0.13.0
     #   anthropic
     #   openai
 lxml==6.0.2
-    # via duckduckgo-search
+    # via ddgs
 multidict==6.7.1
     # via
     #   aiohttp
@@ -157,7 +157,7 @@ opentelemetry-sdk==1.40.0
 opentelemetry-semantic-conventions==0.61b0
     # via opentelemetry-sdk
 primp==1.1.3
-    # via duckduckgo-search
+    # via ddgs
 propcache==0.4.1
     # via
     #   aiohttp

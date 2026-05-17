@@ -27,5 +27,5 @@ numpy
 # Utilities
 python-dotenv
 requests
-duckduckgo_search
+ddgs
 sqlite-vec
