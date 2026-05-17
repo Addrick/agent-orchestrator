@@ -338,17 +338,17 @@ class MemoryManager:
             conn.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_Memory_Summaries USING vec0(summary_id INTEGER PRIMARY KEY, embedding float[{EMBEDDING_DIMENSION}])")
 
             # Robustly sync embeddings from main tables to virtual vector tables
-            cursor.execute("SELECT COUNT(*) FROM Message_Embeddings me WHERE me.embedding IS NOT NULL AND NOT EXISTS (SELECT 1 FROM vec_Message_Embeddings v WHERE v.interaction_id = me.interaction_id)")
+            cursor.execute("SELECT COUNT(*) FROM Message_Embeddings WHERE embedding IS NOT NULL AND interaction_id NOT IN (SELECT interaction_id FROM vec_Message_Embeddings)")
             missing_msgs = cursor.fetchone()[0]
             if missing_msgs > 0:
                 logger.info(f"Syncing {missing_msgs} missing message embeddings to sqlite-vec...")
-                conn.execute(f"INSERT INTO vec_Message_Embeddings(interaction_id, embedding) SELECT interaction_id, embedding FROM Message_Embeddings me WHERE embedding IS NOT NULL AND length(embedding) = {EMBEDDING_DIMENSION * 4} AND NOT EXISTS (SELECT 1 FROM vec_Message_Embeddings v WHERE v.interaction_id = me.interaction_id)")
+                conn.execute(f"INSERT INTO vec_Message_Embeddings(interaction_id, embedding) SELECT interaction_id, embedding FROM Message_Embeddings WHERE embedding IS NOT NULL AND length(embedding) = {EMBEDDING_DIMENSION * 4} AND interaction_id NOT IN (SELECT interaction_id FROM vec_Message_Embeddings)")
 
-            cursor.execute("SELECT COUNT(*) FROM Memory_Summaries ms WHERE ms.embedding IS NOT NULL AND NOT EXISTS (SELECT 1 FROM vec_Memory_Summaries v WHERE v.summary_id = ms.summary_id)")
+            cursor.execute("SELECT COUNT(*) FROM Memory_Summaries WHERE embedding IS NOT NULL AND summary_id NOT IN (SELECT summary_id FROM vec_Memory_Summaries)")
             missing_sums = cursor.fetchone()[0]
             if missing_sums > 0:
                 logger.info(f"Syncing {missing_sums} missing memory summaries to sqlite-vec...")
-                conn.execute(f"INSERT INTO vec_Memory_Summaries(summary_id, embedding) SELECT summary_id, embedding FROM Memory_Summaries ms WHERE embedding IS NOT NULL AND length(embedding) = {EMBEDDING_DIMENSION * 4} AND NOT EXISTS (SELECT 1 FROM vec_Memory_Summaries v WHERE v.summary_id = ms.summary_id)")
+                conn.execute(f"INSERT INTO vec_Memory_Summaries(summary_id, embedding) SELECT summary_id, embedding FROM Memory_Summaries WHERE embedding IS NOT NULL AND length(embedding) = {EMBEDDING_DIMENSION * 4} AND summary_id NOT IN (SELECT summary_id FROM vec_Memory_Summaries)")
 
             conn.commit()
             logger.info("User memory database schema created or verified successfully.")
