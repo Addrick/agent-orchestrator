@@ -39,10 +39,12 @@ import argparse
 import asyncio
 import json
 import os
+import queue
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -144,57 +146,113 @@ def _looks_like_agent_leak(out: str) -> bool:
     return any(m in low for m in _AGENT_LEAK_MARKERS)
 
 
-def _gemini_call_once(prompt: str, model: str, timeout: float) -> str:
-    """Run the gemini CLI with the prompt fed via stdin.
+class GeminiACPClient:
+    """Persistent connection to gemini --acp for low-latency multi-prompting."""
 
-    The Windows `.CMD` shim re-parses argv values that start with `-`, so
-    prompts beginning with a bulleted fact list crashed with "Not enough
-    arguments following: p". Per `gemini --help`: "[-p] Appended to input
-    on stdin (if any)" — so we pass a short directive via -p and the long
-    body via stdin.
-    """
-    env = os.environ.copy()
-    env["GEMINI_SYSTEM_MD"] = str(Path(_gemini_cwd()) / "system.md")
-    proc = subprocess.run(
-        [_gemini_bin(), "-m", model, "--skip-trust",
-         "-p", "Respond to the request on stdin."],
-        input=prompt, capture_output=True, text=True, timeout=timeout,
-        check=False, cwd=_gemini_cwd(), env=env,
-    )
-    out = (proc.stdout or "").strip()
-    if not out and proc.returncode != 0:
-        raise RuntimeError(
-            f"gemini CLI exit={proc.returncode}: {(proc.stderr or '')[:200]}"
+    def __init__(self, model: str, cwd: str):
+        self.model = model
+        self.cwd = cwd
+        self.responses: queue.Queue[dict] = queue.Queue()
+        self.id_counter = 0
+        self.current_response_text: list[str] = []
+        self.session_id: Optional[str] = None
+
+        env = os.environ.copy()
+        env["GEMINI_SYSTEM_MD"] = str(Path(cwd) / "system.md")
+
+        self.proc = subprocess.Popen(
+            [_gemini_bin(), "--acp", "-m", model, "--skip-trust"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            cwd=cwd,
+            env=env,
         )
-    return out
+
+        # Start background reader
+        threading.Thread(target=self._reader, daemon=True).start()
+
+        # Protocol Handshake
+        self._call("initialize", {"protocolVersion": 1, "capabilities": {}})
+        # Start session
+        resp = self._call("session/new", {"cwd": cwd, "mcpServers": []})
+        self.session_id = resp["result"]["sessionId"]
+
+    def _reader(self):
+        for line in self.proc.stdout:
+            if not line.strip():
+                continue
+            try:
+                data = json.loads(line)
+                if data.get("method") == "session/update":
+                    upd = data["params"].get("update", {})
+                    if upd.get("sessionUpdate") == "agent_message_chunk":
+                        text = upd.get("content", {}).get("text", "")
+                        self.current_response_text.append(text)
+                self.responses.put(data)
+            except json.JSONDecodeError:
+                pass
+
+    def _call(self, method: str, params: dict, timeout: float = 300.0) -> dict:
+        self.id_counter += 1
+        msg = {"jsonrpc": "2.0", "id": self.id_counter, "method": method, "params": params}
+        self.proc.stdin.write(json.dumps(msg) + "\n")
+        self.proc.stdin.flush()
+
+        start = time.monotonic()
+        while time.monotonic() - start < timeout:
+            try:
+                resp = self.responses.get(timeout=1.0)
+                if resp.get("id") == self.id_counter:
+                    if "error" in resp:
+                        raise RuntimeError(f"ACP Error: {resp['error']}")
+                    return resp
+            except queue.Empty:
+                continue
+        raise TimeoutError(f"ACP call '{method}' timed out after {timeout}s")
+
+    def ask(self, prompt: str) -> str:
+        self.current_response_text = []
+        self._call("session/prompt", {
+            "sessionId": self.session_id,
+            "prompt": [{"type": "text", "text": prompt}]
+        })
+        return "".join(self.current_response_text).strip()
+
+    def close(self):
+        try:
+            self.proc.terminate()
+            self.proc.wait(timeout=5)
+        except:
+            self.proc.kill()
+
+
+_CLIENT_CACHE: dict[str, GeminiACPClient] = {}
 
 
 def _gemini_call(
     prompt: str, model: str, timeout: float = 300.0, max_retries: int = 3,
 ) -> str:
-    """One-shot text generation via local `gemini` CLI (paid OAuth tier).
+    """One-shot text generation via persistent ACP client.
 
-    Run from an empty cwd + `--skip-trust` to suppress workspace context
-    auto-loading (which otherwise makes the CLI treat the embedded prompt
-    as session metadata and respond with workspace introspection).
-    Plan mode is NOT used — it refuses non-coding prompts. Resolves the
-    `.CMD` shim on Windows because `subprocess.run` doesn't search PATHEXT.
-
-    Retries up to `max_retries` times if the response shows agent-persona
-    leak markers (e.g. "Gemini CLI", "I am ready") — empirically the CLI
-    occasionally falls into agent mode and a fresh subprocess clears it.
+    Maintains a pool of clients (one per model) to avoid process startup
+    overhead. Retries on 'agent leak' markers as a fallback.
     """
+    if model not in _CLIENT_CACHE:
+        _CLIENT_CACHE[model] = GeminiACPClient(model, _gemini_cwd())
+    
+    client = _CLIENT_CACHE[model]
     last = ""
     for attempt in range(max_retries):
-        out = _gemini_call_once(prompt, model, timeout)
+        out = client.ask(prompt)
         if not _looks_like_agent_leak(out):
             return out
         last = out
-        print(
-            f"  [gemini retry {attempt+1}/{max_retries}] agent-leak: "
-            f"{out[:80]!r}",
-            file=sys.stderr,
-        )
+        print(f"  [gemini retry {attempt+1}/{max_retries}] agent-leak in ACP: {out[:80]!r}", file=sys.stderr)
+        # On leak, we might want to reset the session or restart the client,
+        # but for now we just try again (ACP often self-corrects on next turn).
     return last
 
 
