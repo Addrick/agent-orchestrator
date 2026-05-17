@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from dotenv import load_dotenv
 
 # =============================================================================
 # PATH CONFIGURATION
@@ -8,6 +9,10 @@ from pathlib import Path
 # This ensures file paths remain correct regardless of the execution context (local vs Docker).
 CONFIG_DIR = Path(__file__).parent.resolve()
 PROJECT_ROOT = CONFIG_DIR.parent
+
+# Load environment variables from .env file at the project root
+load_dotenv(PROJECT_ROOT / ".env")
+
 
 # Core directories
 DATA_DIR = PROJECT_ROOT / "data"
