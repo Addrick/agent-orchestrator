@@ -122,6 +122,8 @@ This project uses a tiered memory system inspired by [OpenViking](https://github
 
 ### Structure
 
+> **⚠️ Two-repo layout.** The `memory/` directory is gitignored in this repo and is its own separate git repo (`derpr-private-notes`, sibling directory). Commits to memory content go in that repo, not this one. When the user says "commit the plan/memory/task," operate in `memory/` (use `git -C memory ...` or `cd memory && git ...`). The codebase repo and the memory repo have independent histories and branches.
+
 Memory lives in the project-scoped memory directory with three tiers:
 
 - **L0** — `MEMORY.md` (auto-loaded every session). **Strictly an index** — one-line directory summaries only (~20 lines). No memory content belongs here; only pointers to help decide which L1 files are relevant. When the system prompt instructs you to "add a pointer to MEMORY.md," add a single summary line under the appropriate directory heading, not memory content.
