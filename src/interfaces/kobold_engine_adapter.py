@@ -188,6 +188,26 @@ class KoboldEngineAdapter:
             p.start_new_conversation()
             return {"result": f"History for {name} reset successfully"}
 
+        @self.app.post("/api/v1/persona/{name}/dev_command")
+        async def dev_command(name: str, request: Request) -> Any:
+            if name not in self.chat_system.personas:
+                return JSONResponse(status_code=404,
+                                    content={"error": f"Persona '{name}' not found"})
+            body = await request.json()
+            command = body.get("command", "")
+            try:
+                result = await self.chat_system.bot_logic.preprocess_message(name, "portal", command)
+            except Exception as e:
+                return {"response": str(e), "mutated": False}
+            if result is None:
+                return JSONResponse(
+                    status_code=400,
+                    content={"response": "Not a dev command", "mutated": False},
+                )
+            if result.get("mutated"):
+                save_personas_to_file(self.chat_system.personas)
+            return {"response": result.get("response", ""), "mutated": bool(result.get("mutated"))}
+
         @self.app.get("/api/v1/session/{persona}/kobold_export")
         async def kobold_export(persona: str, max_turns: Optional[int] = None) -> Any:
             """Build a kobold-lite savefile from DERPR's global history for `persona`.
