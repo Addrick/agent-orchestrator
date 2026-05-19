@@ -1,12 +1,16 @@
-"""Phase 1 tests for tools/gemini_acp_dispatch.py.
+"""Tests for scripts/gemini_acp_dispatch.py.
 
-Covers result-block parsing, summary building (with 1KB cap), and argparse.
-JSON-RPC client + process lifecycle live in later phases.
+Phase 1: parser, summary builder, argparse, write_outputs.
+Phase 2: ACP JSON-RPC roundtrip against fake-gemini fixture.
+Phase 3: wall-clock timeout, SIGTERM cancel, drain cap.
 """
 
 from __future__ import annotations
 
 import json
+import signal
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -17,6 +21,7 @@ from scripts.gemini_acp_dispatch import (
     main,
     parse_args,
     parse_result_block,
+    run_dispatch,
     write_outputs,
 )
 
@@ -269,26 +274,256 @@ def test_parse_args_defaults_wall_clock_to_10(tmp_path: Path) -> None:
     assert args.wall_clock == 10
 
 
-# ---------- main entry (Phase 1 just argparses, no ACP yet) ----------
+# ---------- main entry ----------
 
 
-def test_main_phase1_writes_skeleton_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Phase 1 main() should be invokable end-to-end but is a stub that writes
-    a 'not-implemented' summary so the integration path is exercisable.
-    Phase 2 replaces the stub with the actual ACP roundtrip."""
+def test_main_swaps_in_spawn_via_monkeypatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_gemini_spawner,
+) -> None:
+    """main() drives the full dispatcher; in tests we monkeypatch the
+    module-level spawn function to swap real gemini for the fake."""
     packet = tmp_path / "packet.md"
-    packet.write_text("# SP-1: stub\n\nDoes nothing yet.\n")
+    packet.write_text("# SP-1\n\nDo nothing\n")
     out_dir = tmp_path / "out"
+
+    monkeypatch.setattr(
+        "scripts.gemini_acp_dispatch.spawn_gemini",
+        fake_gemini_spawner(),
+    )
     rc = main(
         [
             "--packet", str(packet),
             "--worktree", str(tmp_path),
             "--out-dir", str(out_dir),
             "--session-id", "sp-1-attempt-1",
-            "--wall-clock", "1",
+            # 0.5 minutes = 30s; default fake has no delay so completes instantly
+            "--wall-clock", "0.5",
         ]
     )
     assert rc == 0
     summary = json.loads((out_dir / "summary.json").read_text())
     assert summary["session_id"] == "sp-1-attempt-1"
-    assert summary["stop_reason"] == "not-implemented"
+    assert summary["stop_reason"] == "ok"
+    assert summary["files_modified"] == ["src/foo.py"]
+
+
+# ---------- Phase 2: ACP roundtrip against fake-gemini ----------
+
+
+def _run(
+    *,
+    out_dir: Path,
+    spawn_fn,
+    wall_clock_seconds: float = 30.0,
+    packet_text: str = "# SP-1\nDo work\n",
+    session_id: str = "sp-1-attempt-1",
+) -> int:
+    return run_dispatch(
+        packet_text=packet_text,
+        worktree=out_dir.parent,
+        out_dir=out_dir,
+        session_id=session_id,
+        wall_clock_seconds=wall_clock_seconds,
+        spawn_fn=spawn_fn,
+    )
+
+
+def test_acp_handshake_and_summary(tmp_path: Path, fake_gemini_spawner) -> None:
+    out_dir = tmp_path / "out"
+    rc = _run(out_dir=out_dir, spawn_fn=fake_gemini_spawner())
+    assert rc == 0
+    summary = json.loads((out_dir / "summary.json").read_text())
+    assert summary["stop_reason"] == "ok"
+    assert summary["parse_failed"] is False
+    assert summary["files_modified"] == ["src/foo.py"]
+    assert summary["key_changes"] == ["implemented foo"]
+    # events.jsonl populated with at least handshake responses + stream
+    events = [
+        json.loads(line)
+        for line in (out_dir / "events.jsonl").read_text().splitlines()
+        if line
+    ]
+    methods = [e.get("method") for e in events]
+    # Initialize and session/new responses don't carry "method"; updates do
+    assert "session/update" in methods
+    # At least one response (no method, has id) present
+    assert any("method" not in e and "id" in e for e in events)
+
+
+def test_streamed_chunks_concatenate_into_result_block(
+    tmp_path: Path, fake_gemini_spawner
+) -> None:
+    """The dispatcher must accumulate all agent_message_chunk text and parse
+    the result block out of the concatenated whole, not individual chunks."""
+    out_dir = tmp_path / "out"
+    custom = (
+        "preface line\n\n"
+        "## Result\n"
+        "stop_reason: failed\n"
+        "files_modified: none\n"
+        "key_changes: tried, gave up\n"
+        "acceptance_self_check: skipped -- could not run\n"
+        "blockers: missing fixture\n"
+    )
+    rc = _run(out_dir=out_dir, spawn_fn=fake_gemini_spawner(final_message=custom))
+    # outer_stop is "failed" → not in _EXIT_CODES → exit 0 (Claude reads summary)
+    assert rc == 0
+    summary = json.loads((out_dir / "summary.json").read_text())
+    assert summary["stop_reason"] == "failed"
+    assert summary["parse_failed"] is False
+    assert summary["blockers"] == ["missing fixture"]
+
+
+def test_missing_result_block_marks_parse_failed(
+    tmp_path: Path, fake_gemini_spawner
+) -> None:
+    out_dir = tmp_path / "out"
+    rc = _run(
+        out_dir=out_dir,
+        spawn_fn=fake_gemini_spawner(final_message="just chatter, no result block"),
+    )
+    assert rc == 0
+    summary = json.loads((out_dir / "summary.json").read_text())
+    assert summary["stop_reason"] == "parse-failed"
+    assert summary["parse_failed"] is True
+    assert summary["raw_final_message"] is not None
+    assert "just chatter" in summary["raw_final_message"]
+
+
+def test_malformed_result_block_marks_parse_failed(
+    tmp_path: Path, fake_gemini_spawner
+) -> None:
+    out_dir = tmp_path / "out"
+    bad = "## Result\nstop_reason: vibes\nfiles_modified: none\nkey_changes: x\nacceptance_self_check: y\nblockers: none\n"
+    rc = _run(out_dir=out_dir, spawn_fn=fake_gemini_spawner(final_message=bad))
+    assert rc == 0
+    summary = json.loads((out_dir / "summary.json").read_text())
+    assert summary["stop_reason"] == "parse-failed"
+    assert summary["parse_failed"] is True
+    assert "vibes" in (summary["raw_final_message"] or "")
+
+
+def test_auto_approves_permission_requests(
+    tmp_path: Path, fake_gemini_spawner
+) -> None:
+    """request_permission events from the server must be auto-responded with
+    'allow_always' so the prompt can complete. The fake fires N requests
+    before the prompt response; the dispatcher must not hang and must
+    record both the inbound requests and its outbound responses."""
+    out_dir = tmp_path / "out"
+    rc = _run(out_dir=out_dir, spawn_fn=fake_gemini_spawner(permission_requests=3))
+    assert rc == 0
+    summary = json.loads((out_dir / "summary.json").read_text())
+    assert summary["stop_reason"] == "ok"
+    events = [
+        json.loads(line)
+        for line in (out_dir / "events.jsonl").read_text().splitlines()
+        if line
+    ]
+    perm_requests = [e for e in events if e.get("method") == "session/request_permission"]
+    assert len(perm_requests) == 3
+
+
+def test_handshake_failure_yields_error_summary(
+    tmp_path: Path, fake_gemini_spawner
+) -> None:
+    out_dir = tmp_path / "out"
+    rc = _run(out_dir=out_dir, spawn_fn=fake_gemini_spawner(fail_init=True))
+    assert rc == 1
+    summary = json.loads((out_dir / "summary.json").read_text())
+    assert summary["stop_reason"] == "error"
+    assert summary["parse_failed"] is True
+    assert "handshake failed" in (summary["raw_final_message"] or "")
+
+
+def test_spawn_failure_yields_error_summary(tmp_path: Path) -> None:
+    out_dir = tmp_path / "out"
+
+    def boom(_worktree: Path):
+        raise RuntimeError("no gemini for you")
+
+    rc = run_dispatch(
+        packet_text="x",
+        worktree=tmp_path,
+        out_dir=out_dir,
+        session_id="sp-1-attempt-1",
+        wall_clock_seconds=5.0,
+        spawn_fn=boom,
+    )
+    assert rc == 1
+    summary = json.loads((out_dir / "summary.json").read_text())
+    assert summary["stop_reason"] == "error"
+    assert "no gemini for you" in (summary["raw_final_message"] or "")
+
+
+# ---------- Phase 3: lifecycle (timeout, cancel) ----------
+
+
+def test_wall_clock_timeout_writes_timeout_summary_and_exits_124(
+    tmp_path: Path, fake_gemini_spawner
+) -> None:
+    """Fake sleeps 5s before responding; dispatcher caps at 0.5s and should
+    cancel, write a timeout summary, and exit 124."""
+    out_dir = tmp_path / "out"
+    rc = _run(
+        out_dir=out_dir,
+        spawn_fn=fake_gemini_spawner(prompt_delay=5.0),
+        wall_clock_seconds=0.5,
+    )
+    assert rc == 124
+    summary = json.loads((out_dir / "summary.json").read_text())
+    assert summary["stop_reason"] == "timeout"
+    assert summary["parse_failed"] is True
+    # Wall-clock recorded should be roughly the cap, not the fake's 5s sleep
+    assert summary["wall_clock_seconds"] < 4.0
+
+
+def test_cancel_via_flag_writes_cancelled_summary_and_exits_130(
+    tmp_path: Path, fake_gemini_spawner
+) -> None:
+    """We can't reliably send SIGTERM to ourselves on Windows. Instead we
+    drive cancellation by firing SIGINT from a background thread once
+    run_dispatch is well into the prompt — same code path the SIGTERM
+    handler would take on Unix."""
+    out_dir = tmp_path / "out"
+
+    def _interrupter() -> None:
+        time.sleep(0.4)
+        # signal.raise_signal targets the current process; SIGINT is supported
+        # on both POSIX and Windows.
+        try:
+            signal.raise_signal(signal.SIGINT)
+        except Exception:
+            pass
+
+    t = threading.Thread(target=_interrupter, daemon=True)
+    t.start()
+    rc = _run(
+        out_dir=out_dir,
+        spawn_fn=fake_gemini_spawner(prompt_delay=5.0),
+        wall_clock_seconds=30.0,
+    )
+    t.join(timeout=2.0)
+    assert rc == 130
+    summary = json.loads((out_dir / "summary.json").read_text())
+    assert summary["stop_reason"] == "cancelled"
+
+
+def test_drain_does_not_hang_beyond_5s_after_cancel(
+    tmp_path: Path, fake_gemini_spawner
+) -> None:
+    """If gemini ignores our cancel, the dispatcher must still bound its
+    total wait by the drain cap (5s) plus a little wiggle room."""
+    out_dir = tmp_path / "out"
+    start = time.monotonic()
+    rc = _run(
+        out_dir=out_dir,
+        spawn_fn=fake_gemini_spawner(prompt_delay=20.0),
+        wall_clock_seconds=0.3,
+    )
+    elapsed = time.monotonic() - start
+    assert rc == 124
+    # Cap (0.3s) + drain (5s) + close (≤2s for stdin-close wait + 2s terminate) → < 12s
+    assert elapsed < 12.0
