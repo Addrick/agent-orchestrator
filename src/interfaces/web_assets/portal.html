@@ -114,22 +114,41 @@ Current version indicated by LITEVER below.
 			padding: 0 12px 12px;
 			color: #94a3b8;
 			font-size: 0.95em;
+			overflow-wrap: anywhere;
+			word-break: break-word;
 		}
 		.tool-content .tool-args {
 			font-family: monospace;
 			font-size: 0.85em;
 			color: #64748b;
 			margin-bottom: 4px;
+			white-space: pre-wrap;
+			overflow-wrap: anywhere;
+			word-break: break-word;
+		}
+		.tool-content .tool-args code {
+			white-space: pre-wrap;
+			overflow-wrap: anywhere;
+			word-break: break-word;
 		}
 		.tool-content .tool-result {
 			font-family: monospace;
 			font-size: 0.85em;
 			color: #10b981;
+			white-space: pre-wrap;
+			overflow-wrap: anywhere;
+			word-break: break-word;
+			max-height: 400px;
+			overflow-y: auto;
+			margin: 0;
 		}
 		.tool-content .tool-error {
 			font-family: monospace;
 			font-size: 0.85em;
 			color: #ef4444;
+			white-space: pre-wrap;
+			overflow-wrap: anywhere;
+			word-break: break-word;
 		}
 		.tool-process[open] {
 			background: rgba(20, 184, 166, 0.08);
@@ -5239,27 +5258,40 @@ Current version indicated by LITEVER below.
 		}
 		return isValid;
 	}
+	function derpr_replace_tool_markers(input)
+	{
+		// Shared between the live streaming renderer (`format_streaming_text`)
+		// and the committed-turn renderer (`repack_postprocess_turn`). The
+		// adapter no longer emits inline `<think>🔧 ...</think>` content;
+		// instead `handle_tool_*` inserts `[[DERPR_TOOL:<call_id>]]` markers
+		// into the synchro stream and stores metadata under
+		// `window._derpr_pending_tool_calls`. Render each marker against the
+		// current map entry. Markers without metadata (e.g. after a page
+		// reload before history rehydration ships) are dropped silently.
+		if (!input || input.indexOf("[[DERPR_TOOL:") < 0) return input;
+		return input.replace(/\[\[DERPR_TOOL:([^\]]+)\]\]/g, function(match, callId) {
+			const m = (window._derpr_pending_tool_calls instanceof Map)
+				? window._derpr_pending_tool_calls.get(callId) : null;
+			if (!m) return "";
+			const argsJson = escape_html(JSON.stringify(m.arguments || {}));
+			const argsBody = `<div class="tool-args"><code>${argsJson}</code></div>`;
+			if (m.status === "running") {
+				return `<details class="tool-process" open data-call-id="${escape_html(callId)}"><summary><span class="tool-status-icon">⚡</span> Tool: ${escape_html(m.tool_name)} (running...)</summary><div class="tool-content">${argsBody}</div></details>`;
+			}
+			const icon = m.error ? "⚠️" : "🔧";
+			const bodyText = escape_html(m.error || m.result || "");
+			return `<details class="tool-process" data-call-id="${escape_html(callId)}"><summary><span class="tool-status-icon done">${icon}</span> Tool: ${escape_html(m.tool_name)}</summary><div class="tool-content">${argsBody}<pre class="tool-result">${bodyText}</pre></div></details>`;
+		});
+	}
 	function format_streaming_text(input)
 	{
 		let inEditMode = (document.getElementById("allowediting").checked ? true : false);
 		if(!inEditMode)
 		{
-            // Tool Call Think Blocks (tool_revamp_v1 Phase 4)
-            // Pre-pass: detect 🔧-prefixed <think> blocks emitted by the
-            // adapter for tool calls and render them as teal tool-process
-            // details instead of the generic violet reflective-process.
-            // Must run BEFORE the generic <think> handler below.
-            const toolThinkDone = /<think>\n\u{1F527} \*\*(.+?)\*\*\n([\s\S]*?)<\/think>/gu;
-            input = input.replace(toolThinkDone, function(match, toolName, body) {
-                return `<details class="tool-process"><summary><span class="tool-status-icon done">🔧</span> Tool: ${toolName}</summary><div class="tool-content">${body}</div></details>`;
-            });
-            // Streaming: unclosed tool think block (call in progress)
-            const toolThinkOpen = /<think>\n\u{1F527} \*\*(.+?)\*\*\n([\s\S]*)$/u;
-            if (toolThinkOpen.test(input)) {
-                input = input.replace(toolThinkOpen, function(match, toolName, body) {
-                    return `<details class="tool-process" open><summary><span class="tool-status-icon">⚡</span> Tool: ${toolName} (running...)</summary><div class="tool-content">${body}</div></details>`;
-                });
-            }
+            // Tool-call markers (portal_tool_trace_ui plan, Phase D).
+            // Substitution is shared with the committed-turn renderer; see
+            // `derpr_replace_tool_markers` above.
+            input = derpr_replace_tool_markers(input);
 
             // Neural Glow: Thinking Block Patch
             const thinkStart = "<think>";
@@ -7372,13 +7404,28 @@ Current version indicated by LITEVER below.
 					{
 						last_response_streamlog += chunk;
 					}
+					// Proper SSE frame parser: frames separated by "\n\n".
+					// Each frame may carry one "event:" line + ≥1 "data:" lines.
+					// Previous regex matched only "data:" lines and left
+					// orphan "event:" lines in the buffer, silently dropping
+					// content for any turn that produced a derpr-tool-* frame.
 					let evs = [];
-					let m;
-					while ((m = /^data: ?(.*)(\r?\n){2}/m.exec(ctrl.buf)) !== null) {
-						try{evs.push({data: JSON.parse(m[1])});} catch (e) {
-							console.log("Cannot parse a chunk: " + chunk);
+					while (true) {
+						const sepMatch = ctrl.buf.match(/\r?\n\r?\n/);
+						if (!sepMatch) break;
+						const frame = ctrl.buf.slice(0, sepMatch.index);
+						ctrl.buf = ctrl.buf.slice(sepMatch.index + sepMatch[0].length);
+						let etype = "message";
+						let dataLines = [];
+						for (const line of frame.split(/\r?\n/)) {
+							if (line.startsWith("event:")) etype = line.slice(6).trim();
+							else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
 						}
-						ctrl.buf = ctrl.buf.substring(m.index + m[0].length);
+						if (!dataLines.length) continue;
+						const data = dataLines.join("\n");
+						if (data === "[DONE]") { evs.push({event: etype, data: "[DONE]"}); continue; }
+						try { evs.push({event: etype, data: JSON.parse(data)}); }
+						catch (e) { console.log("Cannot parse a chunk: " + data); }
 					}
 					if (evs.length) {
 						ctrl.enqueue(evs);
@@ -7392,6 +7439,45 @@ Current version indicated by LITEVER below.
 					if(pending_response_id && pending_response_id != "-1" && pending_response_id != "")
 					{
 						for (let event of chunk) {
+							// derpr event-typed frames (portal_tool_trace_ui Phase D).
+							// Tool lifecycle: inject/refresh a [[DERPR_TOOL:<id>]]
+							// marker in the synchro stream that the renderer
+							// turns into a <details class="tool-process"> block.
+							// The `derpr` assistant_id frame is also consumed by
+							// the tee-based sniffer further down; we no-op here
+							// to avoid double-handling.
+							if (event.event === "derpr-tool-start" && event.data && event.data.call_id) {
+								if (!(window._derpr_pending_tool_calls instanceof Map)) {
+									window._derpr_pending_tool_calls = new Map();
+								}
+								window._derpr_pending_tool_calls.set(event.data.call_id, {
+									tool_name: event.data.tool_name,
+									arguments: event.data.arguments || {},
+									group_id: event.data.group_id || null,
+									status: "running",
+								});
+								synchro_pending_stream += `[[DERPR_TOOL:${event.data.call_id}]]`;
+								continue;
+							}
+							if (event.event === "derpr-tool-result" && event.data && event.data.call_id) {
+								if (!(window._derpr_pending_tool_calls instanceof Map)) {
+									window._derpr_pending_tool_calls = new Map();
+								}
+								const prev = window._derpr_pending_tool_calls.get(event.data.call_id) || {
+									tool_name: event.data.tool_name,
+									arguments: {},
+									group_id: event.data.group_id || null,
+								};
+								prev.result = event.data.result;
+								prev.error = event.data.error || null;
+								prev.status = prev.error ? "error" : "done";
+								window._derpr_pending_tool_calls.set(event.data.call_id, prev);
+								continue;
+							}
+							if (event.event === "derpr") {
+								// Assistant_id hydration handled by tee sniffer.
+								continue;
+							}
 							//for gemini
 							if (event.data && event.data.candidates && event.data.candidates.length>0) {
 								if(event.data.candidates[0].content && event.data.candidates[0].content.parts && event.data.candidates[0].content.parts.length>0)
@@ -25789,6 +25875,15 @@ Current version indicated by LITEVER below.
 
 			//convert the msg into images
 			processed_msg = render_all_media_html(processed_msg,false,centerimages);
+
+			// Replace [[DERPR_TOOL:<call_id>]] markers in committed turns
+			// (portal_tool_trace_ui Phase D). The live renderer
+			// `format_streaming_text` handles in-flight markers; this branch
+			// handles the same markers after the turn lands in gametext_arr.
+			// Both paths share `derpr_replace_tool_markers`, so a marker
+			// surviving the stream-end transition (e.g. a re-render after
+			// commit) still resolves against `window._derpr_pending_tool_calls`.
+			processed_msg = derpr_replace_tool_markers(processed_msg);
 		}
 
 		let namepart = (currchatunit.myturn ? "User" : cosmetic_corpo_ai_nick);
