@@ -6,9 +6,40 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
-from src.stream_engine import StreamEngine, _render_prompt
+from src.stream_engine import StreamEngine, _render_prompt, _ToolCallStreamParser
 from src.engine import LLMCommunicationError
 from src.generation_params import GenerationParams
+
+
+def test_tool_call_parser_strips_harmony_channel_markers():
+    """portal_tool_trace_ui Phase E: Qwen3 / harmony channel markers
+    (`<|tool|>`, `<|channel|>`, `<|im_start|>` …) must be stripped from
+    `visible_text`. Leaking them poisons future contexts because the
+    extracted text is fed back to the model on the next turn."""
+    parser = _ToolCallStreamParser()
+    parser.feed("<|tool|>\n<tool_call>")
+    parser.feed('{"name": "ping", "arguments": {}}')
+    parser.feed("</tool_call><|im_end|>")
+    parser.flush()
+    assert parser.visible_text == "\n"  # only the literal newline between markers
+    assert len(parser.calls) == 1
+    assert parser.calls[0]["name"] == "ping"
+
+
+def test_tool_call_parser_harmony_split_across_chunks():
+    """Partial `<|...` arriving across feed boundaries must be buffered,
+    not leaked. Tests the residual re-buffering path."""
+    parser = _ToolCallStreamParser()
+    out_a = parser.feed("hello world goodbye <|")
+    # Partial `<|` plus the `<tool_call>` lookahead must both be buffered;
+    # nothing containing "<|" leaks.
+    assert "<|" not in out_a
+    out_b = parser.feed("channel|>analysis")
+    final = out_a + out_b + parser.flush()
+    assert "<|" not in final
+    assert "hello world" in final
+    assert final.endswith("analysis")
+    assert "<|" not in parser.visible_text
 
 
 def test_render_prompt_default_chatml():
@@ -21,7 +52,12 @@ def test_render_prompt_default_chatml():
     assert "<|im_start|>system\nSysPrompt<|im_end|>" in prompt
     assert "<|im_start|>user\nUserMsg<|im_end|>" in prompt
     assert prompt.endswith("<|im_start|>assistant\n")
-    assert "<|im_end|>" in stop
+    # Bare "<|im_end|>" is intentionally NOT a stop sequence
+    # (harmony_channel_stop_seq.md): Qwen3/harmony emits it between
+    # channels inside a single turn. Role boundaries are the stops now.
+    assert "<|im_end|>" not in stop
+    assert "<|im_start|>user" in stop
+    assert "<|im_start|>system" in stop
 
 
 def test_render_prompt_template_selection():
@@ -68,7 +104,9 @@ def test_render_prompt_stop_sequence_merging():
     _, stop = _render_prompt(messages, "chatml", inference_config)
 
     assert "OVERRIDE_STOP" in stop
-    assert "<|im_start|>" in stop  # Should also contain base stops from ChatML
+    # Base chatml stops dropped bare `<|im_end|>` / `<|im_start|>` after
+    # harmony_channel_stop_seq.md — role-qualified variants remain.
+    assert "<|im_start|>user" in stop
     assert stop[0] == "OVERRIDE_STOP"  # Priority
 
 
@@ -394,7 +432,9 @@ async def test_stream_messages_typed_renders_via_persona_template():
     assert payload["max_length"] == 64
     assert payload["prompt"].startswith("<") and "chars" in payload["prompt"]
     # Stop sequences come from the chatml template since none were provided.
-    assert "<|im_end|>" in payload["stop_sequence"]
+    # harmony_channel_stop_seq.md retired bare `<|im_end|>`; role boundaries remain.
+    assert "<|im_start|>user" in payload["stop_sequence"]
+    assert "<|im_end|>" not in payload["stop_sequence"]
 
 
 @pytest.mark.asyncio
