@@ -162,6 +162,49 @@ async def test_multiple_sequential_tool_calls():
 
 
 @pytest.mark.asyncio
+async def test_group_id_shared_per_iter_unique_across_iters():
+    """portal_tool_trace_ui Phase A: every ToolCall*Event minted in the
+    same iteration shares one group_id; a new iter mints a fresh one.
+    Carries the forward-compat plumbing for parallel-call rendering."""
+    engine = _make_engine([
+        [
+            {"type": "tool_calls", "calls": [
+                {"id": "c1", "name": "tool_a", "arguments": {}},
+                {"id": "c2", "name": "tool_b", "arguments": {}},
+            ]},
+            {"type": "done", "full_text": ""},
+        ],
+        [
+            {"type": "tool_calls", "calls": [
+                {"id": "c3", "name": "tool_a", "arguments": {}}
+            ]},
+            {"type": "done", "full_text": ""},
+        ],
+        [
+            {"type": "text_delta", "text": "ok"},
+            {"type": "done", "full_text": "ok"},
+        ],
+    ])
+    tools = _make_tool_manager({"tool_a": {"r": 1}, "tool_b": {"r": 2}})
+    loop = ToolLoop(engine, tools, max_iterations=5)
+
+    events = await _drain(loop.run(
+        persona=_make_persona(), conversation_history=[],
+        params=MagicMock(), tools=[],
+    ))
+
+    tool_evs = [e for e in events
+                if isinstance(e, (ToolCallStartEvent, ToolCallResultEvent))]
+    # iter0 produced 2 calls → 4 events (2 start + 2 result), all same group
+    iter0 = tool_evs[:4]
+    iter1 = tool_evs[4:6]
+    assert all(e.group_id for e in tool_evs), "group_id must be populated"
+    assert len({e.group_id for e in iter0}) == 1
+    assert len({e.group_id for e in iter1}) == 1
+    assert iter0[0].group_id != iter1[0].group_id
+
+
+@pytest.mark.asyncio
 async def test_tool_error_surfaces_in_result_event():
     """A tool whose result dict contains 'error' is surfaced via the
     event's `error` field; the loop continues so the LLM can adapt."""
