@@ -36,6 +36,7 @@
         "reminder": {
             "schedule": {"daily_at": "17:00"},
             "auto_start": true,
+            "send_startup_dm": false,
             "notification_targets": [
                 {"channel": "discord_channel", "recipient": "client-tix"}
             ],
