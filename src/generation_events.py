@@ -45,10 +45,13 @@ class ErrorEvent:
 class ToolCallStartEvent:
     """Tool invocation surfaced mid-stream. `call_id` pairs with the
     matching ToolCallResultEvent so consumers can fold open/close blocks
-    even if a future provider streams parallel calls."""
+    even if a future provider streams parallel calls. `group_id` tags
+    every call minted by the same model iteration so a future parallel
+    executor can render concurrent calls under one header."""
     tool_name: str
     arguments: Dict[str, Any]
     call_id: str
+    group_id: Optional[str] = None
 
 
 @dataclass
@@ -60,6 +63,7 @@ class ToolCallResultEvent:
     tool_name: str
     result: str
     error: Optional[str] = None
+    group_id: Optional[str] = None
 
 
 GenerationEvent = Union[
