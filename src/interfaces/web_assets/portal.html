@@ -29314,6 +29314,29 @@ Current version indicated by LITEVER below.
 		</div>
 	</div>
 
+	<div class="popupcontainer flex hidden" id="derpr-tools-modal">
+		<div class="popupbg flex" onclick="document.getElementById('derpr-tools-modal').classList.add('hidden')"></div>
+		<div class="nspopup flexsize higher" style="max-width: 640px; width: 90%;">
+			<div class="popuptitlebar">
+				<div class="popuptitletext">Persona Tools</div>
+			</div>
+			<div class="menutext custom-scrollbar" style="overflow-y: auto; max-height: 80vh;">
+				<div class="settingitem wide">
+					<div class="settinglabel">Persona</div>
+					<select id="derpr-tools-persona-select" class="form-control" onchange="onDerprToolsPersonaChange()"></select>
+				</div>
+				<div id="derpr-tools-summary" style="margin-top: 8px; font-size: 11px; color: #aaa; font-family: monospace; word-break: break-all;"></div>
+				<div id="derpr-tools-validation" class="hidden" style="margin-top: 8px; padding: 6px 8px; background: #4a3a1a; border: 1px solid #aa8833; border-radius: 3px; color: #ffd; font-size: 11px;"></div>
+				<div id="derpr-tools-list" style="margin-top: 10px;"></div>
+				<div id="derpr-tools-status" style="margin-top: 8px; font-size: 11px; color: #6c6;"></div>
+			</div>
+			<div class="popupfooter" style="display: flex; gap: 8px;">
+				<button id="derpr-tools-save" type="button" class="btn btn-primary" style="flex: 1;" onclick="saveDerprToolsConfig()">Save</button>
+				<button id="derpr-tools-cancel" type="button" class="btn btn-primary" style="flex: 0.5;" onclick="document.getElementById('derpr-tools-modal').classList.add('hidden')">Cancel</button>
+			</div>
+		</div>
+	</div>
+
 	<div id="maincontainer" class="adaptivecontainer maincontainer">
 		<div id="outerbodybg"></div>
 		<div id="topmenu" class="topmenu">
@@ -29369,6 +29392,9 @@ Current version indicated by LITEVER below.
 							</select>
 							<button title="Persona Settings" type="button" class="btn btn-primary" style="padding: 2px 6px; height: 30px;" onclick="openPersonaSettings()">
 								<img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23ccc' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.1a2 2 0 0 1-1-1.72v-.51a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z'/%3E%3Ccircle cx='12' cy='12' r='3'/%3E%3C/svg%3E" style="vertical-align: middle;">
+							</button>
+							<button id="derpr-tools-btn" title="Persona tools" type="button" class="btn btn-primary" style="padding: 2px 6px; height: 30px; display: flex; align-items: center; justify-content: center;" onclick="openDerprToolsModal()">
+								<span style="font-size: 14px; line-height: 1;">🛠️</span>
 							</button>
 						</li>
 
@@ -32599,6 +32625,96 @@ Current version indicated by LITEVER below.
                 updateLtmAnoteUI();
             }
 		} catch (e) { console.error("Failed to load persona details", e); }
+	}
+
+	// ----- DP-120: Persona Tools modal -----
+
+	window._derpr_tools_catalog = null;
+	window._derpr_tools_persona = null;
+
+	async function openDerprToolsModal() {
+		const modal = document.getElementById('derpr-tools-modal');
+		const select = document.getElementById('derpr-tools-persona-select');
+		const status = document.getElementById('derpr-tools-status');
+		status.textContent = '';
+		try {
+			const [modelsRes, catRes] = await Promise.all([
+				fetch('/v1/models'),
+				fetch('/api/v1/tools/catalog'),
+			]);
+			const models = await modelsRes.json();
+			window._derpr_tools_catalog = await catRes.json();
+			const personas = (models.data || []).map(m => m.id);
+			const active = document.getElementById('personaSelectTopNav');
+			const preferred = (active && active.value) || personas[0] || '';
+			select.innerHTML = '';
+			personas.forEach(name => {
+				const opt = document.createElement('option');
+				opt.value = name;
+				opt.textContent = name;
+				if (name === preferred) opt.selected = true;
+				select.appendChild(opt);
+			});
+			await onDerprToolsPersonaChange();
+		} catch (e) {
+			console.error("Failed to open tools modal", e);
+			status.style.color = '#c66';
+			status.textContent = 'Failed to load: ' + e;
+		}
+		modal.classList.remove('hidden');
+	}
+
+	async function onDerprToolsPersonaChange() {
+		const select = document.getElementById('derpr-tools-persona-select');
+		const name = select && select.value;
+		if (!name) return;
+		try {
+			const res = await fetch(`/api/v1/persona/${encodeURIComponent(name)}`);
+			if (!res.ok) {
+				document.getElementById('derpr-tools-summary').textContent = `(persona ${name} not loadable)`;
+				window._derpr_tools_persona = null;
+				return;
+			}
+			const p = await res.json();
+			window._derpr_tools_persona = p;
+			renderDerprToolsSummary(p);
+			renderDerprToolsList(p);
+			validateDerprToolsSelection();
+		} catch (e) {
+			console.error("Failed to load persona for tools modal", e);
+		}
+	}
+
+	function renderDerprToolsSummary(p) {
+		const summary = document.getElementById('derpr-tools-summary');
+		const tp = p.tool_policy || {};
+		const enabled = p.enabled_tools || [];
+		const fmtList = (arr) => {
+			if (!arr || !arr.length) return '[]';
+			if (arr.length > 10) return '[' + arr.slice(0, 10).join(', ') + ', ... (+' + (arr.length - 10) + ')]';
+			return '[' + arr.join(', ') + ']';
+		};
+		const defaultPolicy = tp.default || 'deny';
+		const ask = tp.ask || [];
+		const overrides = tp.explicit_overrides ? Object.keys(tp.explicit_overrides) : [];
+		summary.textContent = `policy.default=${defaultPolicy} | allow=${fmtList(enabled)} | ask=${fmtList(ask)} | overrides=${fmtList(overrides)}`;
+	}
+
+	// Phase 4: populated when SP-4 lands; stub keeps Phase 3 read-only.
+	function renderDerprToolsList(_p) {
+		// SP-4 fills in: grouped checkboxes by capability.
+	}
+
+	// Phase 5: populated when SP-5 lands.
+	function validateDerprToolsSelection() {
+		// SP-5 mirrors ToolPolicy.validate_composition.
+	}
+
+	function saveDerprToolsConfig() {
+		// SP-5 builds the minimal `set tools` command and POSTs to dev_command.
+		const status = document.getElementById('derpr-tools-status');
+		status.style.color = '#aaa';
+		status.textContent = '(save not implemented yet)';
 	}
 
 	// Phase 2.1: switch the active session between kobold-lite's native
