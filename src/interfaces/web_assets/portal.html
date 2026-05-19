@@ -32790,16 +32790,112 @@ Current version indicated by LITEVER below.
 		validateDerprToolsSelection();
 	}
 
-	// Phase 5: populated when SP-5 lands.
-	function validateDerprToolsSelection() {
-		// SP-5 mirrors ToolPolicy.validate_composition.
+	function _derprToolsCurrentSelection() {
+		const allowAll = document.getElementById('derpr-tools-allow-all');
+		if (allowAll && allowAll.checked) return { allowAll: true, names: [] };
+		const checked = [];
+		document.querySelectorAll('.derpr-tools-row').forEach(cb => {
+			if (cb.checked) checked.push(cb.dataset.toolName);
+		});
+		return { allowAll: false, names: checked };
 	}
 
-	function saveDerprToolsConfig() {
-		// SP-5 builds the minimal `set tools` command and POSTs to dev_command.
+	function validateDerprToolsSelection() {
+		const banner = document.getElementById('derpr-tools-validation');
+		const catalog = (window._derpr_tools_catalog && window._derpr_tools_catalog.tools) || [];
+		const persona = window._derpr_tools_persona || {};
+		const overrides = (persona.tool_policy && persona.tool_policy.explicit_overrides) || {};
+		const sel = _derprToolsCurrentSelection();
+		const active = sel.allowAll
+			? catalog
+			: catalog.filter(t => sel.names.includes(t.name));
+
+		let hasNetworkRead = false, hasNetworkWrite = false, hasLocalWrite = false;
+		let hasUntrustedRead = false, hasPiiRead = false;
+		active.forEach(t => {
+			const caps = t.capabilities || {};
+			const isWrite = !!t.is_write;
+			if (caps.locality === 'network' && !isWrite) hasNetworkRead = true;
+			if (caps.locality === 'network' && isWrite) hasNetworkWrite = true;
+			if (caps.locality === 'local' && isWrite) hasLocalWrite = true;
+			if (caps.produces_untrusted && !isWrite) hasUntrustedRead = true;
+			if (caps.sensitivity === 'pii' && !isWrite) hasPiiRead = true;
+		});
+		const hasNetworkAny = hasNetworkRead || hasNetworkWrite;
+
+		const warnings = [];
+		if (hasNetworkRead && hasLocalWrite && !overrides.network_read_local_write) {
+			warnings.push('network:read + local:write (potential disk rewrite via injection)');
+		}
+		if (hasUntrustedRead && hasNetworkWrite && !overrides.untrusted_read_network_write) {
+			warnings.push('untrusted:read + network:write (potential exfiltration via injection)');
+		}
+		if (hasPiiRead && hasNetworkAny && !overrides.pii_read_network_any) {
+			warnings.push('pii:read + network:* (potential PII exfiltration)');
+		}
+
+		if (!warnings.length) {
+			banner.classList.add('hidden');
+			banner.innerHTML = '';
+			return;
+		}
+		banner.classList.remove('hidden');
+		banner.innerHTML = '<strong>Insecure composition:</strong><ul style="margin: 4px 0 0 16px; padding: 0;">'
+			+ warnings.map(w => '<li>' + w.replace(/</g, '&lt;') + '</li>').join('')
+			+ '</ul>';
+	}
+
+	function _derprToolsBuildCommand() {
+		const catalog = (window._derpr_tools_catalog && window._derpr_tools_catalog.tools) || [];
+		const allNames = catalog.map(t => t.name);
+		const sel = _derprToolsCurrentSelection();
+		if (sel.allowAll) return 'set tools all';
+		if (sel.names.length === 0) return 'set tools none';
+		if (sel.names.length === allNames.length) return 'set tools all';
+		// allow-all-minus-N when most tools are checked
+		if (sel.names.length > allNames.length / 2) {
+			const excluded = allNames.filter(n => !sel.names.includes(n));
+			return 'set tools all ' + excluded.map(n => '-' + n).join(' ');
+		}
+		return 'set tools ' + sel.names.join(' ');
+	}
+
+	async function saveDerprToolsConfig() {
 		const status = document.getElementById('derpr-tools-status');
+		const select = document.getElementById('derpr-tools-persona-select');
+		const name = select && select.value;
+		if (!name) return;
+		const command = _derprToolsBuildCommand();
 		status.style.color = '#aaa';
-		status.textContent = '(save not implemented yet)';
+		status.textContent = 'Saving…';
+		try {
+			const res = await fetch(`/api/v1/persona/${encodeURIComponent(name)}/dev_command`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ command }),
+			});
+			const data = await res.json().catch(() => ({}));
+			if (res.ok && data.mutated) {
+				const refresh = await fetch(`/api/v1/persona/${encodeURIComponent(name)}`);
+				if (refresh.ok) {
+					const p = await refresh.json();
+					window._derpr_tools_persona = p;
+					renderDerprToolsSummary(p);
+				}
+				status.style.color = '#6c6';
+				status.textContent = 'Saved';
+				setTimeout(() => {
+					document.getElementById('derpr-tools-modal').classList.add('hidden');
+					status.textContent = '';
+				}, 2000);
+			} else {
+				status.style.color = '#c66';
+				status.textContent = (data && data.response) || `Save failed (${res.status})`;
+			}
+		} catch (e) {
+			status.style.color = '#c66';
+			status.textContent = 'Save failed: ' + e;
+		}
 	}
 
 	// Phase 2.1: switch the active session between kobold-lite's native
