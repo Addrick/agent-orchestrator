@@ -654,6 +654,30 @@ class HindsightBackend(MemoryBackend):
         await q.put(item)
         return ""
 
+    async def retain_document(
+        self,
+        bank_id: str,
+        document_id: str,
+        content: str,
+        *,
+        tags: List[str],
+        metadata: Dict[str, str],
+        timestamp: datetime,
+    ) -> None:
+        # Standalone document retain — explicit document_id forces
+        # update_mode='replace' inside _build_item, making re-ingest idempotent.
+        item = self._build_item(
+            bank_id=bank_id,
+            content=content,
+            tags=list(tags),
+            scope_tags=[],
+            timestamp=timestamp,
+            metadata=dict(metadata) if metadata else None,
+            document_id=document_id,
+        )
+        q = await self._ensure_worker(bank_id)
+        await q.put(item)
+
     async def recall(
         self,
         bank_id: str,

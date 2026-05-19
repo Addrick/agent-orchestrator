@@ -204,3 +204,21 @@ def test_memory_manager_accepts_injected_backend() -> None:
     finally:
         mm.close()
         mm2.close()
+
+
+# ---------- DP-118: retain_document on sqlite is noop+warn ----------
+
+
+@pytest.mark.asyncio
+async def test_sqlite_retain_document_is_noop(backend: MemoryBackend, caplog) -> None:
+    from datetime import datetime, timezone
+    import logging
+    caplog.set_level(logging.WARNING)
+    result = await backend.retain_document(
+        "alice", "notes/x.md", "content",
+        tags=["ingest"],
+        metadata={"source_path": "notes/x.md"},
+        timestamp=datetime.now(timezone.utc),
+    )
+    assert result is None
+    assert any("sqlite backend active" in rec.message for rec in caplog.records)

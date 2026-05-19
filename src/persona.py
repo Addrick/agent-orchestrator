@@ -57,6 +57,7 @@ class Persona:
             chat_template: Optional[str] = None,
             tool_policy: Optional[Union[Dict[str, Any], ToolPolicy]] = None,
             meta_visible: bool = False,
+            ingest_bank: Optional[str] = None,
             **kwargs: Any,
     ) -> None:
         self._name: str = persona_name
@@ -107,6 +108,7 @@ class Persona:
         self._long_term_memory: bool = long_term_memory
         self._chat_template: Optional[str] = chat_template if chat_template else None
         self._meta_visible: bool = bool(meta_visible)
+        self._ingest_bank: Optional[str] = ingest_bank if ingest_bank else None
 
         try:
             self._max_context_tokens: int = int(max_context_tokens) if max_context_tokens is not None else global_config.DEFAULT_MAX_CONTEXT_TOKENS
@@ -204,6 +206,10 @@ class Persona:
     def get_long_term_memory(self) -> bool:
         """Whether long-term memory retrieval is enabled for this persona."""
         return self._long_term_memory
+
+    def get_ingest_bank(self) -> Optional[str]:
+        """Optional override bank for the `ingest_path` tool. None = use persona name."""
+        return self._ingest_bank
 
     def get_thinking_level(self) -> Optional[str]:
         """Returns the thinking level override for extended thinking models (e.g. 'minimal')."""

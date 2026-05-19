@@ -692,6 +692,7 @@ _GETTER_TO_COMMAND = {
     'get_service_bindings': 'service_bindings',
     'get_long_term_memory': 'long_term_memory',
     'get_include_ambient_memory': 'include_ambient_memory',
+    'get_ingest_bank': 'ingest_bank',
     'get_thinking_level': 'thinking_level',
     'get_max_context_tokens': 'max_context_tokens',
     'get_chat_template': 'chat_template',

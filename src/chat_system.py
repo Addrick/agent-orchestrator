@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, AsyncIterator, Coroutine, Dict, List, Optional, Set, Tuple
 
+from config import global_config
 from config.global_config import MAX_CACHED_API_REQUESTS, \
     PENDING_CONFIRMATION_TIMEOUT, MEMORY_RETRIEVAL_ENABLED, MEMORY_MAX_SUMMARIES_IN_CONTEXT
 from src.memory.context_budget import truncate_messages_to_budget
@@ -140,6 +141,13 @@ class ChatSystem:
         from src.tools.tool_manager import MemoryToolHandler
         MemoryToolHandler(self.memory_manager).register(self.tool_manager)
         MemoryRecallHandler(self.memory_backend).register(self.tool_manager)
+
+        from src.tools.ingest_path import IngestPathHandler
+        IngestPathHandler(
+            self.memory_backend,
+            cache_dir=global_config.INGEST_CACHE_DIR,
+            persona_lookup=self.personas.get,
+        ).register(self.tool_manager)
 
         self.bot_logic: BotLogic = BotLogic(self)
         self.last_api_requests: Dict[str, Dict[str, Optional[Dict[str, Any]]]] = defaultdict(dict)
@@ -650,6 +658,14 @@ class ChatSystem:
                 logger.error(f"handle_portal_retry failed: {e}", exc_info=True)
                 retry_assistant_id = None
             return None, retry_assistant_id
+
+        # Symmetric with the assistant-side guard in _commit_or_update_assistant:
+        # an empty / whitespace-only user message must never land a phantom row.
+        # kobold-lite continue/prefetch calls without a user message would
+        # otherwise leave zero-length user_interaction rows between turns,
+        # polluting context and confusing the model.
+        if not message or not message.strip():
+            return None, None
 
         try:
             user_interaction_id = self.memory_manager.log_message(

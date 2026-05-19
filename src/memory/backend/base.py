@@ -402,6 +402,28 @@ class MemoryBackend(ABC):
         """
         return None
 
+    async def retain_document(
+        self,
+        bank_id: str,
+        document_id: str,
+        content: str,
+        *,
+        tags: List[str],
+        metadata: Dict[str, str],
+        timestamp: datetime,
+    ) -> None:
+        """Retain a standalone document (file content) into a bank.
+
+        `document_id` is the stable key (typically a relative path). Repeated
+        calls with the same `document_id` REPLACE the prior content on the
+        Hindsight side (update_mode='replace'). Metadata values must be strings
+        (Hindsight rejects non-string values with HTTP 422).
+
+        Used by the `ingest_path` tool to materialize file content into a
+        persona's bank. Hindsight implements; SQLite warns + noops.
+        """
+        raise NotImplementedError("retain_document not implemented on this backend")
+
     async def delete_bank(self, bank_id: str) -> None:
         """Delete a bank (new-shape).
 

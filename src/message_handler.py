@@ -58,6 +58,7 @@ class BotLogic:
             'display_name': self._what_display_name,
             'long_term_memory': self._what_long_term_memory,
             'include_ambient_memory': self._what_include_ambient_memory,
+            'ingest_bank': self._what_ingest_bank,
             'thinking_level': self._what_thinking_level,
             'max_context_tokens': self._what_max_context_tokens,
             'chat_template': self._what_chat_template,
@@ -458,6 +459,11 @@ class BotLogic:
     def _what_include_ambient_memory(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
         status = "enabled" if persona.get_include_ambient_memory() else "disabled"
         return f"Ambient memory inclusion for '{persona.get_name()}' is {status}.", False
+
+    def _what_ingest_bank(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
+        bank = persona.get_ingest_bank()
+        display = f"'{bank}'" if bank else f"default ('{persona.get_name()}')"
+        return f"Ingest target bank for '{persona.get_name()}' is {display}.", False
 
     def _what_thinking_level(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
         level = persona.get_thinking_level()
