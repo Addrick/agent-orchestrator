@@ -1,0 +1,22 @@
+[run]
+branch = True
+source = src
+omit =
+    src/interfaces/zammad_bot.py
+    src/database/*
+    src/__main__.py
+    src/main.py
+
+[report]
+exclude_lines =
+    pragma: no cover
+    raise NotImplementedError
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:
+    \.\.\.
+show_missing = True
+skip_covered = False
+precision = 1
+
+[html]
+directory = htmlcov
