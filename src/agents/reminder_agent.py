@@ -35,11 +35,14 @@ class ReminderAgent(Agent):
 
     async def deploy(self) -> None:
         """Send the daily ticket summary. This is called once per day based on the agent schedule."""
-        # Special case: On the very first run (startup), send a DM to adrich as a "bot online" signal.
+        # Special case: On the very first run (startup), optionally send a DM to adrich as a "bot online" signal.
         if self.deploy_count == 0:
-            logger.info("Agent 'reminder' startup run: Sending summary DM to adrich.")
-            startup_target = {"channel": "discord_dm", "recipient": "adrich"}
-            await self._send_batch_summary(target_override=startup_target)
+            if self.agent_config.get("send_startup_dm", False):
+                logger.info("Agent 'reminder' startup run: Sending summary DM to adrich.")
+                startup_target = {"channel": "discord_dm", "recipient": "adrich"}
+                await self._send_batch_summary(target_override=startup_target)
+            else:
+                logger.info("Agent 'reminder' startup run: Startup DM to adrich is disabled.")
             return
 
         logger.info("Starting daily ticket summary...")
