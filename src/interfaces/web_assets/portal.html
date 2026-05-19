@@ -32700,9 +32700,94 @@ Current version indicated by LITEVER below.
 		summary.textContent = `policy.default=${defaultPolicy} | allow=${fmtList(enabled)} | ask=${fmtList(ask)} | overrides=${fmtList(overrides)}`;
 	}
 
-	// Phase 4: populated when SP-4 lands; stub keeps Phase 3 read-only.
-	function renderDerprToolsList(_p) {
-		// SP-4 fills in: grouped checkboxes by capability.
+	const _DERPR_TOOLS_GROUP_ORDER = [
+		'network:read', 'network:write', 'local:write',
+		'untrusted:read', 'pii:read', 'other',
+	];
+
+	function _derprToolsGroupOf(tool) {
+		const caps = tool.capabilities || {};
+		if (caps.sensitivity === 'pii') return 'pii:read';
+		if (caps.sensitivity === 'untrusted') return 'untrusted:read';
+		if (caps.locality === 'network' && tool.is_write) return 'network:write';
+		if (caps.locality === 'network') return 'network:read';
+		if (caps.locality === 'local' && tool.is_write) return 'local:write';
+		return 'other';
+	}
+
+	function renderDerprToolsList(p) {
+		const container = document.getElementById('derpr-tools-list');
+		container.innerHTML = '';
+		const catalog = (window._derpr_tools_catalog && window._derpr_tools_catalog.tools) || [];
+		const enabled = new Set(p.enabled_tools || []);
+		const allowAll = enabled.has('*');
+
+		const allowAllRow = document.createElement('div');
+		allowAllRow.style.cssText = 'padding: 4px 6px; margin-bottom: 6px; background: #2a2a2a; border-radius: 3px;';
+		const allowAllLabel = document.createElement('label');
+		allowAllLabel.style.cssText = 'display: flex; align-items: center; gap: 6px; cursor: pointer; font-weight: bold;';
+		const allowAllInput = document.createElement('input');
+		allowAllInput.type = 'checkbox';
+		allowAllInput.id = 'derpr-tools-allow-all';
+		allowAllInput.checked = allowAll;
+		allowAllInput.addEventListener('change', onDerprToolsAllowAllChange);
+		allowAllLabel.appendChild(allowAllInput);
+		allowAllLabel.appendChild(document.createTextNode('Allow all (*)'));
+		allowAllRow.appendChild(allowAllLabel);
+		container.appendChild(allowAllRow);
+
+		const grouped = {};
+		_DERPR_TOOLS_GROUP_ORDER.forEach(g => { grouped[g] = []; });
+		catalog.forEach(t => {
+			const g = _derprToolsGroupOf(t);
+			(grouped[g] || grouped['other']).push(t);
+		});
+
+		_DERPR_TOOLS_GROUP_ORDER.forEach(group => {
+			const tools = grouped[group];
+			if (!tools.length) return;
+			tools.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+
+			const header = document.createElement('div');
+			header.style.cssText = 'margin-top: 8px; padding: 3px 6px; font-size: 11px; color: #88c; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #333;';
+			header.textContent = group;
+			container.appendChild(header);
+
+			tools.forEach(t => {
+				const row = document.createElement('label');
+				row.style.cssText = 'display: flex; align-items: flex-start; gap: 6px; padding: 3px 6px; cursor: pointer; font-size: 12px;';
+				const cb = document.createElement('input');
+				cb.type = 'checkbox';
+				cb.className = 'derpr-tools-row';
+				cb.dataset.toolName = t.name;
+				cb.checked = allowAll ? false : enabled.has(t.name);
+				cb.disabled = allowAll;
+				cb.addEventListener('change', validateDerprToolsSelection);
+				row.appendChild(cb);
+				const text = document.createElement('span');
+				const nameSpan = document.createElement('span');
+				nameSpan.style.fontWeight = 'bold';
+				nameSpan.textContent = t.name;
+				text.appendChild(nameSpan);
+				if (t.description) {
+					const descSpan = document.createElement('span');
+					descSpan.style.cssText = 'color: #888; margin-left: 6px;';
+					descSpan.textContent = '— ' + t.description;
+					text.appendChild(descSpan);
+				}
+				row.appendChild(text);
+				container.appendChild(row);
+			});
+		});
+	}
+
+	function onDerprToolsAllowAllChange() {
+		const allowAll = document.getElementById('derpr-tools-allow-all').checked;
+		document.querySelectorAll('.derpr-tools-row').forEach(cb => {
+			cb.disabled = allowAll;
+			if (allowAll) cb.checked = false;
+		});
+		validateDerprToolsSelection();
 	}
 
 	// Phase 5: populated when SP-5 lands.
