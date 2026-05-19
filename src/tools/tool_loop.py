@@ -166,13 +166,16 @@ class ToolLoop:
                 )
                 return
 
+            group_id = f"iter{iter_idx}_{uuid.uuid4().hex[:8]}"
+            for call_item in tool_calls_collected:
+                call_item["group_id"] = group_id
             conversation_history.append(
                 {"role": "assistant", "tool_calls": tool_calls_collected}
             )
             read_calls = [c for c in tool_calls_collected if c.get("name") not in WRITE_TOOLS]
             write_calls = [c for c in tool_calls_collected if c.get("name") in WRITE_TOOLS]
 
-            async for tool_ev in self._execute_calls(read_calls, conversation_history):
+            async for tool_ev in self._execute_calls(read_calls, conversation_history, group_id=group_id):
                 yield tool_ev
 
             # Update turn_tainted from read_calls that just finished
@@ -264,6 +267,7 @@ class ToolLoop:
         self,
         calls: List[Dict[str, Any]],
         conversation_history: List[Dict[str, Any]],
+        group_id: Optional[str] = None,
     ) -> AsyncIterator[LoopEvent]:
         """Execute a batch of tool calls, yielding start/result events
         and appending results to the shared conversation history. Tool
@@ -279,6 +283,7 @@ class ToolLoop:
                 tool_name=tool_name,
                 arguments=tool_args,
                 call_id=call_id,
+                group_id=group_id,
             )
 
             try:
@@ -308,4 +313,5 @@ class ToolLoop:
                 tool_name=tool_name,
                 result=result_str,
                 error=err_str,
+                group_id=group_id,
             )
