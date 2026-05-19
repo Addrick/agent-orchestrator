@@ -852,7 +852,8 @@ def test_delete_interaction_idempotent():
 
 def test_patch_interaction_clears_l0_embedding():
     """PATCH triggers L0 invalidation: Message_Embeddings + vec_* gone."""
-    import struct, math
+    import struct
+    import math
     from config.global_config import EMBEDDING_DIMENSION, EMBEDDING_MODEL
     adapter, mm, _ = _make_adapter_with_seeded_db()
     iid = mm.log_message("user_a", "test_persona", "web_ui", "assistant", "test_persona",
@@ -1035,7 +1036,7 @@ def test_kobold_export_excludes_suppressed_row():
     """A row deleted via the DELETE endpoint disappears from kobold_export."""
     adapter, mm, persona = _make_adapter_with_seeded_db(context_length=20)
     base = datetime(2026, 4, 1, 12, 0, 0)
-    keep_id = mm.log_message("user_a", "test_persona", "chan", "user", "Alice",
+    mm.log_message("user_a", "test_persona", "chan", "user", "Alice",
                              "keep me", base)
     drop_id = mm.log_message("user_a", "test_persona", "chan", "user", "Alice",
                              "delete me", base + timedelta(seconds=1))
@@ -1388,3 +1389,83 @@ def test_persona_extended_unknown_persona_returns_404():
     assert "error" in r.json()
     mm.close()
 
+
+# -------- SP-2a: dev_command endpoint tests --------
+
+def test_dev_command_happy_path_mutates_and_saves():
+    adapter, mm, persona, chat_system = _make_real_adapter()
+    chat_system.bot_logic.preprocess_message = AsyncMock(return_value={
+        "response": "Tools set to none.",
+        "mutated": True
+    })
+
+    with patch("src.interfaces.kobold_adapter.save_personas_to_file") as mock_save:
+        with TestClient(adapter.app) as client:
+            r = client.post("/api/v1/persona/test_persona/dev_command", json={"command": "set tools none"})
+
+    assert r.status_code == 200
+    assert r.json() == {"response": "Tools set to none.", "mutated": True}
+    chat_system.bot_logic.preprocess_message.assert_awaited_once_with("test_persona", "portal", "set tools none")
+    mock_save.assert_called_once_with(chat_system.personas)
+    mm.close()
+
+
+def test_dev_command_non_mutating_does_not_save():
+    adapter, mm, persona, chat_system = _make_real_adapter()
+    chat_system.bot_logic.preprocess_message = AsyncMock(return_value={
+        "response": "Tools: none.",
+        "mutated": False
+    })
+
+    with patch("src.interfaces.kobold_adapter.save_personas_to_file") as mock_save:
+        with TestClient(adapter.app) as client:
+            r = client.post("/api/v1/persona/test_persona/dev_command", json={"command": "what tools"})
+
+    assert r.status_code == 200
+    assert r.json() == {"response": "Tools: none.", "mutated": False}
+    mock_save.assert_not_called()
+    mm.close()
+
+
+def test_dev_command_unknown_persona_returns_404():
+    adapter, mm, persona, chat_system = _make_real_adapter()
+    chat_system.bot_logic.preprocess_message = AsyncMock()
+
+    with patch("src.interfaces.kobold_adapter.save_personas_to_file") as mock_save:
+        with TestClient(adapter.app) as client:
+            r = client.post("/api/v1/persona/ghost/dev_command", json={"command": "set tools none"})
+
+    assert r.status_code == 404
+    chat_system.bot_logic.preprocess_message.assert_not_called()
+    mock_save.assert_not_called()
+    mm.close()
+
+
+def test_dev_command_non_command_returns_400():
+    adapter, mm, persona, chat_system = _make_real_adapter()
+    # preprocess_message returns None if it's not a dev command
+    chat_system.bot_logic.preprocess_message = AsyncMock(return_value=None)
+
+    with patch("src.interfaces.kobold_adapter.save_personas_to_file") as mock_save:
+        with TestClient(adapter.app) as client:
+            r = client.post("/api/v1/persona/test_persona/dev_command", json={"command": "not a command"})
+
+    assert r.status_code == 400
+    assert r.json() == {"response": "Not a dev command", "mutated": False}
+    mock_save.assert_not_called()
+    mm.close()
+
+
+def test_dev_command_preprocess_error_surfaces_in_response():
+    adapter, mm, persona, chat_system = _make_real_adapter()
+    chat_system.bot_logic.preprocess_message = AsyncMock(side_effect=Exception("boom"))
+
+    with patch("src.interfaces.kobold_adapter.save_personas_to_file") as mock_save:
+        with TestClient(adapter.app) as client:
+            r = client.post("/api/v1/persona/test_persona/dev_command", json={"command": "error command"})
+
+    assert r.status_code == 200
+    assert r.json()["mutated"] is False
+    assert "boom" in r.json()["response"]
+    mock_save.assert_not_called()
+    mm.close()
