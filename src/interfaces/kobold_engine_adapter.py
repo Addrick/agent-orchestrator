@@ -602,6 +602,54 @@ class KoboldEngineAdapter:
                     "derpr_assistant_id": assistant_id,
                 })
 
+            # Optional wire-level dump: set DERPR_DEBUG_SSE_DUMP=1 (or a dir path)
+            # to capture the incoming request JSON + every outgoing SSE chunk to
+            # a per-request file under <dir>/derpr_sse_<ts>_<persona>.log. Use
+            # when the portal swallows a turn so we can replay exactly what hit
+            # the wire. Default dir: ./logs/sse_dumps. Zero overhead when unset.
+            dump_setting = os.environ.get("DERPR_DEBUG_SSE_DUMP", "").strip()
+            dump_fh = None
+            if dump_setting:
+                dump_dir = dump_setting if dump_setting not in ("1", "true", "TRUE") else "logs/sse_dumps"
+                try:
+                    os.makedirs(dump_dir, exist_ok=True)
+                    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%f")
+                    dump_path = os.path.join(
+                        dump_dir, f"derpr_sse_{ts}_{persona_name or 'nopersona'}.log"
+                    )
+                    dump_fh = open(dump_path, "w", encoding="utf-8")
+                    dump_fh.write("=== REQUEST ===\n")
+                    dump_fh.write(json.dumps({
+                        "ts": ts,
+                        "persona": persona_name,
+                        "is_retry": is_retry,
+                        "is_stream": is_stream,
+                        "user_text": user_text,
+                        "derpr_user_text_sidecar": sidecar_user,
+                        "msg_count": len(msgs_in),
+                        "roles": [m.get("role") for m in msgs_in],
+                        "local_inference_config": local_inference_config,
+                        "raw_body": data,
+                    }, ensure_ascii=False, indent=2, default=str))
+                    dump_fh.write("\n\n=== SSE STREAM ===\n")
+                    dump_fh.flush()
+                    logger.warning("SSE dump enabled — writing to %s", dump_path)
+                except Exception as e:
+                    logger.error("SSE dump init failed: %s", e)
+                    dump_fh = None
+
+            def _dump_write(label: str, payload: bytes) -> None:
+                if dump_fh is None:
+                    return
+                try:
+                    dump_fh.write(f"--- {label} ---\n")
+                    dump_fh.write(payload.decode("utf-8", errors="replace"))
+                    if not payload.endswith(b"\n"):
+                        dump_fh.write("\n")
+                    dump_fh.flush()
+                except Exception:
+                    pass
+
             async def relay() -> AsyncIterator[bytes]:
                 try:
                     # Pass through the request to the central ChatSystem.
@@ -629,68 +677,74 @@ class KoboldEngineAdapter:
                                     "delta": {"content": ev.delta},
                                 }],
                             })
-                            yield f"data: {chunk}\n\n".encode("utf-8")
+                            out = f"data: {chunk}\n\n".encode("utf-8")
+                            _dump_write("TokenEvent", out)
+                            yield out
                         elif isinstance(ev, ToolCallStartEvent):
-                            payload = json.dumps({
+                            payload_obj: Dict[str, Any] = {
                                 "tool_name": ev.tool_name,
                                 "arguments": ev.arguments,
                                 "call_id": ev.call_id,
-                            })
-                            yield f"event: derpr-tool-start\ndata: {payload}\n\n".encode("utf-8")
-                            # Inline visual block for kobold-lite: open a
-                            # `<think>` block (rendered by the portal as a
-                            # `<details>` collapsible). Closes on the
-                            # matching ToolCallResultEvent. Sequential
-                            # call assumption — parallel calls would need
-                            # call_id-tagged blocks (sibling plan work).
-                            inline_open = (
-                                f"\n\n<think>\n🔧 **{ev.tool_name}**\n"
-                                f"Arguments: `{json.dumps(ev.arguments)}`\n"
-                            )
-                            chunk = json.dumps({
-                                "object": "chat.completion.chunk",
-                                "choices": [{
-                                    "index": 0,
-                                    "delta": {"content": inline_open},
-                                }],
-                            })
-                            yield f"data: {chunk}\n\n".encode("utf-8")
+                            }
+                            if ev.group_id is not None:
+                                payload_obj["group_id"] = ev.group_id
+                            payload = json.dumps(payload_obj)
+                            out = f"event: derpr-tool-start\ndata: {payload}\n\n".encode("utf-8")
+                            _dump_write("ToolCallStartEvent", out)
+                            yield out
                         elif isinstance(ev, ToolCallResultEvent):
-                            payload = json.dumps({
+                            payload_obj = {
                                 "call_id": ev.call_id,
                                 "tool_name": ev.tool_name,
                                 "result": ev.result,
                                 "error": ev.error,
-                            })
-                            yield f"event: derpr-tool-result\ndata: {payload}\n\n".encode("utf-8")
-                            result_label = "Error" if ev.error else "Result"
-                            result_body = ev.error if ev.error else ev.result
-                            inline_close = (
-                                f"\n{result_label}: `{result_body}`\n</think>\n\n"
-                            )
-                            chunk = json.dumps({
-                                "object": "chat.completion.chunk",
-                                "choices": [{
-                                    "index": 0,
-                                    "delta": {"content": inline_close},
-                                }],
-                            })
-                            yield f"data: {chunk}\n\n".encode("utf-8")
+                            }
+                            if ev.group_id is not None:
+                                payload_obj["group_id"] = ev.group_id
+                            payload = json.dumps(payload_obj)
+                            out = f"event: derpr-tool-result\ndata: {payload}\n\n".encode("utf-8")
+                            _dump_write("ToolCallResultEvent", out)
+                            yield out
                         elif isinstance(ev, DoneEvent):
+                            if dump_fh is not None:
+                                _dump_write(
+                                    "DoneEvent",
+                                    json.dumps({
+                                        "assistant_id": ev.assistant_id,
+                                        "user_interaction_id": ev.user_interaction_id,
+                                        "response_type": getattr(ev.response_type, "name", str(ev.response_type)),
+                                        "final_text_len": len(ev.text or ""),
+                                        "final_text_preview": (ev.text or "")[:500],
+                                    }, ensure_ascii=False).encode("utf-8"),
+                                )
                             if ev.assistant_id is not None:
                                 frame = (
                                     f"event: derpr\n"
                                     f"data: {json.dumps({'assistant_id': ev.assistant_id, 'user_id': ev.user_interaction_id})}\n\n"
                                 )
-                                yield frame.encode("utf-8")
-                            yield b"data: [DONE]\n\n"
+                                out = frame.encode("utf-8")
+                                _dump_write("derpr-id-frame", out)
+                                yield out
+                            out = b"data: [DONE]\n\n"
+                            _dump_write("DONE", out)
+                            yield out
                         elif isinstance(ev, ErrorEvent):
                             err = json.dumps({"error": {"message": ev.message}})
-                            yield f"data: {err}\n\n".encode("utf-8")
+                            out = f"data: {err}\n\n".encode("utf-8")
+                            _dump_write("ErrorEvent", out)
+                            yield out
                             yield b"data: [DONE]\n\n"
                 except asyncio.CancelledError:
                     # Engine kernel flushes the partial assistant row on cancel.
+                    _dump_write("CANCELLED", b"client disconnected / asyncio.CancelledError")
                     raise
+                finally:
+                    if dump_fh is not None:
+                        try:
+                            dump_fh.write("\n=== END ===\n")
+                            dump_fh.close()
+                        except Exception:
+                            pass
 
             return StreamingResponse(
                 relay(),
