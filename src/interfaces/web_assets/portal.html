@@ -14,7 +14,12 @@ Current version indicated by LITEVER below.
 	<script id="init-config">
 	const LITEVER = 328;
 	const urlParams = new URLSearchParams(window.location.search);
-	var localflag = urlParams.get('local'); //this will be replaced automatically in embedded kcpp
+	if (window.location.port === "5003") {
+		window.DERPR_PORTAL_TYPE = "engine";
+	} else if (window.location.port === "5002") {
+		window.DERPR_PORTAL_TYPE = "passthrough";
+	}
+	var localflag = urlParams.get('local') || (window.DERPR_PORTAL_TYPE ? "1" : null); //this will be replaced automatically in embedded kcpp
 	const STORAGE_PREFIX = (localflag?"e_":"")+"kaihordewebui_";
 	</script>
 
@@ -5616,7 +5621,7 @@ Current version indicated by LITEVER below.
 
 		//remove all unwanted options from the endpoint dropdown in case it is used
 		for (var i = cepoptions.length - 1; i >= 0; i--) {
-			if (cepoptions[i].value !== "1" && cepoptions[i].value !== "2") {
+			if (cepoptions[i].value !== "1") {
 				cep.remove(i);
 			}
 		}
@@ -5694,12 +5699,22 @@ Current version indicated by LITEVER below.
 	]).then(([loadedsettingsjson, loadedstorycompressed, loadedbackgroundimg, currcss, currmod, modpropsstr, loadedsamplerpresetsjson]) => {
 	try
 	{
+		if (window.DERPR_PORTAL_TYPE) {
+			localsettings.prev_custom_endpoint_type = 1;
+			localsettings.saved_kai_addr = window.location.origin;
+			localsettings.prev_custom_endpoint_ischatcmpl = (window.DERPR_PORTAL_TYPE === "engine");
+		}
 		if (loadedsettingsjson != null && loadedsettingsjson != "" && loadedstorycompressed != null && loadedstorycompressed != "") {
 			let loadedsettings = JSON.parse(loadedsettingsjson);
 			//see if persist is enabled
 			if (loadedsettings && loadedsettings.persist_session) {
 				import_compressed_story(loadedstorycompressed,true,false); //use the same compressed format as shared stories and import it
 				import_props_into_object(localsettings,loadedsettings);
+				if (window.DERPR_PORTAL_TYPE) {
+					localsettings.prev_custom_endpoint_type = 1;
+					localsettings.saved_kai_addr = window.location.origin;
+					localsettings.prev_custom_endpoint_ischatcmpl = (window.DERPR_PORTAL_TYPE === "engine");
+				}
 				console.log("Loaded local settings and story");
 
 				//offer to reconnect
@@ -5882,6 +5897,27 @@ Current version indicated by LITEVER below.
 
 	//setup customization aesthetic UI functionality
 	initializeInstructUIFunctionality();
+
+	// DERPR Portal Badge and Title Initialization
+	if (window.DERPR_PORTAL_TYPE) {
+		const badge = document.getElementById("derpr-portal-badge");
+		if (badge) {
+			badge.style.display = "inline-block";
+			if (window.DERPR_PORTAL_TYPE === "engine") {
+				badge.textContent = "DERPR Engine Portal";
+				badge.style.backgroundColor = "#1e3a8a";
+				badge.style.color = "#93c5fd";
+				badge.style.borderColor = "#2563eb";
+				document.title = "derpr engine";
+			} else {
+				badge.textContent = "KoboldCPP Passthrough Portal";
+				badge.style.backgroundColor = "#374151";
+				badge.style.color = "#d1d5db";
+				badge.style.borderColor = "#4b5563";
+				document.title = "derpr passthrough";
+			}
+		}
+	}
 
 	});
 
@@ -8191,6 +8227,9 @@ Current version indicated by LITEVER below.
 				document.getElementById("customkoboldkey").value = localmodekey;
 			}
 			document.getElementById("customkoboldendpoint").value = localprotocol + localmodehost + ":" + localmodeport + sublocalpathname;
+			if (window.DERPR_PORTAL_TYPE) {
+				document.getElementById("useoaichatcompl").checked = (window.DERPR_PORTAL_TYPE === "engine");
+			}
 			connect_custom_endpoint();
 			document.getElementById("lastreq3").innerHTML = document.getElementById("lastreq2").innerHTML = document.getElementById("lastreq1").innerHTML =
 			`<a href="#" class="color_footer" onclick="msgbox('Source code is available at https://github.com/LostRuins/lite.koboldai.net \\nPlease report any bugs you find there.','Information')">KoboldAI Lite</a> v${LITEVER} Embedded`;
@@ -29284,6 +29323,7 @@ Current version indicated by LITEVER below.
 					<span class="navbar-button-bar"></span>
 					<span class="navbar-button-bar"></span>
 				</button>
+				<span id="derpr-portal-badge" style="display:none; margin-left: 10px; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; vertical-align: middle; line-height: 18px; margin-top: 4px; border: 1px solid transparent;"></span>
 				<div class="navbar-collapse collapse" id="navbarNavDropdown">
 					<ul class="nav navbar-nav">
 						<li class="nav-item hidden" id="topbtn_admin">
