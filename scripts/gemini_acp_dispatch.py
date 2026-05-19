@@ -475,7 +475,7 @@ class AcpClient:
 # --------------------------------------------------------------------------
 
 
-def spawn_gemini(worktree: Path) -> subprocess.Popen[str]:
+def spawn_gemini(worktree: Path, model: str | None = None) -> subprocess.Popen[str]:
     """Spawn ``gemini --acp`` in the worktree.
 
     Windows: ``shutil.which`` resolves the ``.CMD`` shim correctly. See
@@ -485,8 +485,11 @@ def spawn_gemini(worktree: Path) -> subprocess.Popen[str]:
     if not binary:
         raise RuntimeError("gemini CLI not found on PATH")
     env = os.environ.copy()
+    argv = [binary, "--acp", "--skip-trust", "--yolo"]
+    if model:
+        argv.extend(["-m", model])
     return subprocess.Popen(
-        [binary, "--acp", "--skip-trust", "--yolo"],
+        argv,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -609,6 +612,7 @@ def run_dispatch(
     session_id: str,
     wall_clock_seconds: float,
     spawn_fn: Callable[[Path], subprocess.Popen[str]] | None = None,
+    model: str | None = None,
 ) -> int:
     """Execute one sprint attempt. Returns the process exit code.
 
@@ -618,7 +622,11 @@ def run_dispatch(
     if spawn_fn is None:
         # Look up at call time (not def time) so monkeypatch on the module
         # attribute reaches us. Default arg binding would freeze the original.
-        spawn_fn = spawn_gemini
+        if model:
+            def spawn_fn(wt: Path) -> subprocess.Popen[str]:
+                return spawn_gemini(wt, model=model)
+        else:
+            spawn_fn = spawn_gemini
 
     out_dir.mkdir(parents=True, exist_ok=True)
     event_log = StreamingEventLog(out_dir / "events.jsonl")
@@ -732,6 +740,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--session-id", type=str, required=True)
     # Accept float so tests can use sub-minute caps without a hidden flag.
     parser.add_argument("--wall-clock", type=float, default=10)
+    parser.add_argument("--model", type=str, default=None,
+                        help="Gemini model id (e.g. gemini-3-flash-preview). "
+                             "Omit to use the CLI's default model.")
     return parser.parse_args(argv)
 
 
@@ -748,6 +759,7 @@ def main(argv: list[str]) -> int:
         out_dir=args.out_dir,
         session_id=args.session_id,
         wall_clock_seconds=float(args.wall_clock) * 60.0,
+        model=args.model,
     )
 
 
