@@ -805,7 +805,7 @@ class TestExtractSystemPrompt:
 
 class TestWebSearch:
     @pytest.mark.asyncio
-    @patch('duckduckgo_search.DDGS')
+    @patch('ddgs.DDGS')
     async def test_web_search_returns_formatted_results(self, mock_ddgs_class):
         from src.tools.tool_manager import ToolManager, WebSearchHandler
         mock_ddgs_instance = MagicMock()
@@ -826,7 +826,7 @@ class TestWebSearch:
         mock_ddgs_instance.text.assert_called_once_with("test query", max_results=5)
 
     @pytest.mark.asyncio
-    @patch('duckduckgo_search.DDGS')
+    @patch('ddgs.DDGS')
     async def test_web_search_respects_max_results(self, mock_ddgs_class):
         from src.tools.tool_manager import ToolManager, WebSearchHandler
         mock_ddgs_instance = MagicMock()
