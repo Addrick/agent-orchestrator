@@ -101,10 +101,29 @@ class KoboldAdapter:
             ]
             return {"object": "list", "data": models}
 
+        @self.app.get("/api/v1/tools/catalog")
+        async def get_tools_catalog() -> Any:
+            defs = self.chat_system.tool_manager.get_tool_definitions()
+            tools = []
+            for t in defs:
+                func = t.get("function", {})
+                caps = t.get("capabilities", {})
+                tools.append({
+                    "name": func.get("name"),
+                    "description": func.get("description"),
+                    "is_write": bool(t.get("is_write", False)),
+                    "capabilities": {
+                        "locality": caps.get("locality"),
+                        "sensitivity": caps.get("sensitivity"),
+                        "produces_untrusted": bool(caps.get("produces_untrusted", False)),
+                    }
+                })
+            return {"tools": tools}
+
         @self.app.get("/api/v1/persona/{name}")
         async def get_persona(name: str) -> Any:
             if name not in self.chat_system.personas:
-                return {"error": f"Persona '{name}' not found"}
+                return JSONResponse(status_code=404, content={"error": f"Persona '{name}' not found"})
             p = self.chat_system.personas[name]
             return {
                 "name": p.get_name(),
@@ -121,6 +140,8 @@ class KoboldAdapter:
                 "max_context_tokens": p.get_max_context_tokens(),
                 "instruct_tags": p.get_provider_extra("kobold", "instruct_tags"),
                 "kobold_extras": get_kobold_extras_for_get(p),
+                "enabled_tools": p.get_enabled_tools(),
+                "tool_policy": p.get_tool_policy().to_dict(),
             }
 
         @self.app.get("/api/v1/session/{persona}/ltm_block")
@@ -206,12 +227,12 @@ class KoboldAdapter:
                     status_code=404,
                     content={"error": f"interaction {interaction_id} not found"},
                 )
-            
+
             for v in versions:
                 reasoning = v.get("reasoning_content")
                 if reasoning:
                     v["content"] = f"<think>\n{reasoning}\n</think>\n{v['content']}"
-            
+
             return {"interaction_id": interaction_id, "versions": versions}
 
         @self.app.post("/api/v1/interaction/{interaction_id}/select_version/{k}")
@@ -244,10 +265,10 @@ class KoboldAdapter:
                 reasoning = v.get("reasoning_content")
                 if reasoning:
                     v["content"] = f"<think>\n{reasoning}\n</think>\n{v['content']}"
-                    
+
             if result.get("reasoning_content"):
                 result["current_content"] = f"<think>\n{result['reasoning_content']}\n</think>\n{result['current_content']}"
-                
+
             return {**result, "versions": versions}
 
         @self.app.patch("/api/v1/interaction/{interaction_id}")
@@ -598,10 +619,10 @@ class KoboldAdapter:
                                     if line and line != "[DONE]":
                                         cdata = json.loads(line)
                                         delta = cdata.get("choices", [{}])[0].get("delta", {})
-                                        
+
                                         content = delta.get("content")
                                         reasoning = delta.get("reasoning_content") or delta.get("reasoning")
-                                        
+
                                         if reasoning:
                                             full_reasoning.append(reasoning)
                                         if content:
