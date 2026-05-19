@@ -28,7 +28,14 @@ CHAT_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "user": "<|im_start|>user\n{content}<|im_end|>\n",
         "assistant": "<|im_start|>assistant\n{content}<|im_end|>\n",
         "assistant_start": "<|im_start|>assistant\n",
-        "stop": ["<|im_end|>", "<|im_start|>"],
+        # Bare `<|im_end|>` was removed (harmony_channel_stop_seq.md):
+        # Qwen3/harmony models emit `<|im_end|>` between channels
+        # (thinking → tool_call → message) inside a single turn, so
+        # halting on it truncated tool_calls mid-turn. Rely on the
+        # model's EOS token for normal stop; `<|im_start|>user` /
+        # `<|im_start|>system` still guard against the model rolling
+        # into a new role.
+        "stop": ["<|im_start|>user", "<|im_start|>system"],
     },
     "gemma": {
         "system": "",  # gemma has no system role — merge into first user turn
@@ -369,6 +376,22 @@ class StreamEngine:
                             # Log empty tokens that aren't terminal
                             logger.debug("Received empty token in message event: %r", data)
                         if data.get("finish_reason") == "stop":
+                            # Diagnostic: log kcpp's stop verdict + tail of
+                            # accumulated text so we can tell EOS vs stop-word
+                            # vs limit. kcpp's terminal chunk carries
+                            # `stopped_eos` / `stopped_word` / `stopped_limit`
+                            # and `stopping_word` when matched on a string.
+                            # Without this we can't tell why generation ended.
+                            stop_info = {
+                                "stopped_eos": data.get("stopped_eos"),
+                                "stopped_word": data.get("stopped_word"),
+                                "stopped_limit": data.get("stopped_limit"),
+                                "stopping_word": data.get("stopping_word"),
+                                "finish_reason": data.get("finish_reason"),
+                                "tail": accumulated_text[-120:],
+                                "total_chars": len(accumulated_text),
+                            }
+                            logger.warning("KCPP_STOP %s", stop_info)
                             done = True
                     if done:
                         break
@@ -506,6 +529,8 @@ def _parse_sse_event(raw: str) -> Optional[Tuple[str, Dict[str, Any]]]:
 
 _TOOL_OPEN = "<tool_call>"
 _TOOL_CLOSE = "</tool_call>"
+_HARMONY_OPEN = "<|"
+_HARMONY_CLOSE = "|>"
 
 
 class _ToolCallStreamParser:
@@ -548,8 +573,34 @@ class _ToolCallStreamParser:
                 self._buffer = self._buffer[open_at + len(_TOOL_OPEN):]
                 self._inside = True
         chunk = "".join(out_parts)
+        chunk, partial = self._strip_harmony(chunk)
+        if partial:
+            # Re-buffer the dangling "<|..." so the next feed() can complete it.
+            self._buffer = partial + self._buffer
         self.visible_text += chunk
         return chunk
+
+    @staticmethod
+    def _strip_harmony(text: str) -> Tuple[str, str]:
+        """Remove complete `<|...|>` channel markers (Qwen3/harmony tags
+        like `<|tool|>`, `<|tool_call|>`, `<|channel|>`, `<|im_start|>`).
+        Returns (cleaned_text, partial_tail). The partial tail is any
+        incomplete `<|...` at the end of `text` that should be re-buffered
+        until its closing `|>` arrives — without this, leaked markers
+        contaminate visible_text and self-poison future model contexts."""
+        out: List[str] = []
+        i = 0
+        while i < len(text):
+            j = text.find(_HARMONY_OPEN, i)
+            if j == -1:
+                out.append(text[i:])
+                return "".join(out), ""
+            out.append(text[i:j])
+            k = text.find(_HARMONY_CLOSE, j + len(_HARMONY_OPEN))
+            if k == -1:
+                return "".join(out), text[j:]
+            i = k + len(_HARMONY_CLOSE)
+        return "".join(out), ""
 
     def flush(self) -> str:
         """Emit remaining buffered text once the stream has ended."""
@@ -563,6 +614,9 @@ class _ToolCallStreamParser:
             return leftover
         chunk = self._buffer
         self._buffer = ""
+        chunk, _partial = self._strip_harmony(chunk)
+        # Drop any unclosed `<|...` at stream end — leaking a half-marker
+        # is worse than swallowing it.
         self.visible_text += chunk
         return chunk
 
