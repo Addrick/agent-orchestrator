@@ -56,6 +56,56 @@ from src.memory.backend.hindsight import HindsightRESTClient
 from .lme_smoke import TIER_FILES
 
 
+def _stream_load_qids(path: Path, qids: set[str]) -> Dict[str, Dict[str, Any]]:
+    """Stream a LongMemEval JSON array and return only items whose
+    question_id is in `qids`. Avoids the 2.6GB-into-RAM spike that
+    `json.loads(read_text())` causes on the m-tier file.
+    """
+    decoder = json.JSONDecoder()
+    out: Dict[str, Dict[str, Any]] = {}
+    buf = ""
+    pos = 0  # index into buf
+    with open(path, "r", encoding="utf-8") as f:
+        # Skip leading whitespace + opening '['
+        while True:
+            ch = f.read(1)
+            if not ch:
+                raise ValueError(f"empty file: {path}")
+            if ch == "[":
+                break
+            if not ch.isspace():
+                raise ValueError(f"expected '[', got {ch!r}")
+        while len(out) < len(qids):
+            # Skip whitespace and commas in buf at pos
+            while pos < len(buf) and buf[pos] in " \t\n\r,":
+                pos += 1
+            # Trim consumed prefix to bound memory
+            if pos > 65536:
+                buf = buf[pos:]
+                pos = 0
+            # Need more data?
+            if pos >= len(buf) or buf[pos] != "{":
+                chunk = f.read(1 << 20)  # 1MB
+                if not chunk:
+                    break  # EOF
+                buf += chunk
+                continue
+            try:
+                obj, end = decoder.raw_decode(buf, pos)
+            except json.JSONDecodeError:
+                # incomplete object — pull more
+                chunk = f.read(1 << 20)
+                if not chunk:
+                    raise
+                buf += chunk
+                continue
+            pos = end
+            qid = obj.get("question_id")
+            if qid in qids:
+                out[qid] = obj
+    return out
+
+
 # Modeled on LongMemEval autoeval. Plain accuracy judge — does the predicted
 # answer convey the gold answer's content? Numeric / list answers count as
 # correct only if every gold element is present (per paper's strict scoring).
@@ -401,14 +451,13 @@ def _print_summary(results: List[Dict[str, Any]]) -> None:
 async def main(
     tier: str, qids: List[str], bank_prefix: str,
     model_answer: str, model_judge: str, top_k: int, max_tokens: int,
-    out: Path,
+    out: Path, bank_suffix: str = "",
 ) -> int:
     src = TIER_FILES[tier]
     if not src.exists():
         raise SystemExit(f"missing {tier} JSON at {src}")
-    print(f"Loading {tier}...", file=sys.stderr)
-    data = json.loads(src.read_text(encoding="utf-8"))
-    by_id = {d["question_id"]: d for d in data}
+    print(f"Streaming {tier} for {len(qids)} qids...", file=sys.stderr)
+    by_id = _stream_load_qids(src, set(qids))
     missing = [q for q in qids if q not in by_id]
     if missing:
         raise SystemExit(f"qids not in {tier}: {missing}")
@@ -417,7 +466,7 @@ async def main(
     results: List[Dict[str, Any]] = []
     for qid in qids:
         q = by_id[qid]
-        bank = f"{bank_prefix}_{qid}"
+        bank = f"{bank_prefix}_{qid}{bank_suffix}"
         print(f"\n--- {qid} [{q['question_type']}] bank={bank} ---", file=sys.stderr)
         r = await _score_one(
             client, q, bank, top_k, max_tokens, model_answer, model_judge,
@@ -456,10 +505,12 @@ if __name__ == "__main__":
     ap.add_argument("--top-k", type=int, default=10,
                     help="cap facts shown to answerer + counted in retrieval slot metrics")
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--bank-suffix", default="",
+                    help="appended to bank name (e.g. '_v2a' for variant)")
     args = ap.parse_args()
     qids_list = [q.strip() for q in args.qids.split(",") if q.strip()]
     raise SystemExit(asyncio.run(main(
         args.tier, qids_list, args.bank_prefix,
         args.model_answer, args.model_judge, args.top_k, args.max_tokens,
-        args.out,
+        args.out, bank_suffix=args.bank_suffix,
     )))
