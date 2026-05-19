@@ -77,7 +77,8 @@ class TestReminderAgentDeploy:
 
     @pytest.mark.asyncio
     async def test_startup_sends_to_adrich_only(self, reminder_agent, mock_zammad_client):
-        # deploy_count is 0 by default
+        # deploy_count is 0 by default, explicitly enable send_startup_dm
+        reminder_agent.agent_config["send_startup_dm"] = True
         now_iso = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
         mock_zammad_client.search_tickets = MagicMock(return_value=[
             {"id": 101, "number": "10101", "title": "New Ticket", "customer_id": 1, "updated_at": now_iso},
@@ -92,6 +93,21 @@ class TestReminderAgentDeploy:
         call_args = reminder_agent.notification_router.send.call_args
         assert call_args[1]["channel"] == "discord_dm"
         assert call_args[1]["recipient"] == "12345" # Resolved adrich ID
+
+    @pytest.mark.asyncio
+    async def test_startup_dm_disabled_by_default(self, reminder_agent, mock_zammad_client):
+        # deploy_count is 0 by default, send_startup_dm is False by default
+        reminder_agent.agent_config["send_startup_dm"] = False
+        now_iso = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+        mock_zammad_client.search_tickets = MagicMock(return_value=[
+            {"id": 101, "number": "10101", "title": "New Ticket", "customer_id": 1, "updated_at": now_iso},
+        ])
+        reminder_agent.notification_router.send = AsyncMock()
+        
+        await reminder_agent.deploy()
+        
+        # Should NOT send any notifications since startup DM is disabled
+        reminder_agent.notification_router.send.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_sends_daily_summary_to_multiple_targets(self, reminder_agent, mock_zammad_client, mock_chat_system):
