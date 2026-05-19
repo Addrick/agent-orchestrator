@@ -683,6 +683,27 @@ class SqliteSemanticBackend(MemoryBackend):
         # Noop under sqlite_legacy — see class-level note above.
         return ""
 
+    async def retain_document(
+        self,
+        bank_id: str,
+        document_id: str,
+        content: str,
+        *,
+        tags: List[str],
+        metadata: Dict[str, str],
+        timestamp: datetime,
+    ) -> None:
+        # SQLite backend is turn-history-shaped; long-form documents have no
+        # home here. The `ingest_path` tool calls this, sees the warning, and
+        # surfaces "memory backend is sqlite; ingest was a noop" upstream.
+        logger.warning(
+            "retain_document: sqlite backend active; ingest is noop "
+            "(bank=%s, document_id=%s). Switch MEMORY_BACKEND to hindsight "
+            "to use ingest_path.",
+            bank_id, document_id,
+        )
+        return None
+
     async def recall(
         self,
         bank_id: str,

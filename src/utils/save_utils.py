@@ -207,6 +207,7 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
                 max_context_tokens=new_persona.get("max_context_tokens"),
                 tool_policy=new_persona.get("tool_policy"),
                 meta_visible=new_persona.get("meta_visible", False),
+                ingest_bank=new_persona.get("ingest_bank"),
                 **_resolve_params_kwargs(new_persona),
             )
 
@@ -286,6 +287,7 @@ def load_system_personas_from_file() -> Dict[str, Any]:
                 max_context_tokens=new_persona.get("max_context_tokens"),
                 tool_policy=new_persona.get("tool_policy"),
                 meta_visible=new_persona.get("meta_visible", False),
+                ingest_bank=new_persona.get("ingest_bank"),
                 **params_kwargs,
             )
 

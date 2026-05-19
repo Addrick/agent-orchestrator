@@ -209,6 +209,23 @@ def test_include_ambient_memory_absent_in_config(base_persona_args):
     assert p.get_include_ambient_memory() is True
 
 
+# --- DP-118: ingest_bank ---
+
+def test_ingest_bank_default_is_none(base_persona_args):
+    p = Persona(**base_persona_args)
+    assert p.get_ingest_bank() is None
+
+
+def test_ingest_bank_explicit(base_persona_args):
+    p = Persona(**base_persona_args, ingest_bank="custom_bank")
+    assert p.get_ingest_bank() == "custom_bank"
+
+
+def test_ingest_bank_empty_string_normalized_to_none(base_persona_args):
+    p = Persona(**base_persona_args, ingest_bank="")
+    assert p.get_ingest_bank() is None
+
+
 # --- Phase 3: max_context_tokens ---
 
 def test_max_context_tokens_default(base_persona_args, monkeypatch):

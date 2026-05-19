@@ -600,6 +600,52 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
                 "required": ["summary_id", "new_content"]
             }
         }
+    },
+    {
+        "type": "function",
+        "is_write": True,
+        "capabilities": {
+            "produces_untrusted": True,
+            "irreversible": False,
+            "locality": "local",
+            "sensitivity": "user",
+        },
+        "function": {
+            "name": "ingest_path",
+            "description": (
+                "Ingest a markdown file or directory of notes into the persona's "
+                "long-term memory bank. Idempotent: unchanged files are skipped via "
+                "a local hash cache. Requires the Hindsight memory backend; on the "
+                "SQLite backend the call is a noop with a warning."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File or directory path to ingest.",
+                    },
+                    "glob": {
+                        "type": "string",
+                        "description": "Glob filter applied when path is a directory.",
+                        "default": "**/*.md",
+                    },
+                    "bank": {
+                        "type": "string",
+                        "description": (
+                            "Override target bank id. Defaults to persona.ingest_bank "
+                            "if set, otherwise the persona's own name."
+                        ),
+                    },
+                    "force": {
+                        "type": "boolean",
+                        "description": "Bypass the local hash cache and re-ingest all matches.",
+                        "default": False,
+                    },
+                },
+                "required": ["path"],
+            },
+        },
     }
 ]
 

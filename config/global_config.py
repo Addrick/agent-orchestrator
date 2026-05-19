@@ -86,6 +86,12 @@ MAX_TOOL_CALLS = 5
 MAX_CACHED_API_REQUESTS = 128
 # Seconds before a pending tool confirmation expires (CONFIRM execution mode)
 PENDING_CONFIRMATION_TIMEOUT = 300
+
+# DP-118: `ingest_path` agent tool — global kill switch + hash-cache location.
+# Set INGEST_PATH_ENABLED=0 to disable the tool everywhere. Per-persona gating
+# still happens via `enabled_tools`; this is the emergency off-switch.
+INGEST_PATH_ENABLED: bool = os.environ.get("INGEST_PATH_ENABLED", "1").lower() in ("1", "true", "yes", "on")
+INGEST_CACHE_DIR: Path = Path(os.environ.get("INGEST_CACHE_DIR", str(DATA_DIR / "ingest_cache")))
 # Channel ID for specific debug outputs (loaded from env for security)
 DISCORD_DEBUG_CHANNEL = int(os.environ.get("DISCORD_DEBUG_CHANNEL", "0"))
 

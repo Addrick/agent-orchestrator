@@ -687,3 +687,37 @@ async def test_worker_first_is_stop(backend: HindsightBackend) -> None:
     q = await backend._ensure_worker("bob")
     await backend.aclose()
     # It shouldn't crash
+
+
+# ---------- DP-118: retain_document (ingest_path tool path) ----------
+
+
+@pytest.mark.asyncio
+async def test_retain_document_posts_one_item_with_replace(backend: HindsightBackend) -> None:
+    captured: Dict[str, Any] = {}
+
+    async def fake_aretain(bank_id: str, items, async_=True) -> Dict[str, Any]:
+        captured["bank_id"] = bank_id
+        captured["items"] = items
+        return {"id": "doc-1"}
+
+    client = backend._get_client()
+    ts = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
+    with patch.object(client, "aretain", side_effect=fake_aretain):
+        await backend.retain_document(
+            "alice", "notes/foo.md", "body text",
+            tags=["ingest", "notes"],
+            metadata={"source_path": "notes/foo.md", "sha256": "abc"},
+            timestamp=ts,
+        )
+        await backend.aclose()
+
+    assert captured["bank_id"] == "alice"
+    assert len(captured["items"]) == 1
+    item = captured["items"][0]
+    assert item["document_id"] == "notes/foo.md"
+    assert item["update_mode"] == "replace"
+    assert item["content"] == "body text"
+    assert item["timestamp"] == ts.isoformat()
+    assert "ingest" in item["tags"] and "notes" in item["tags"]
+    assert item["metadata"] == {"source_path": "notes/foo.md", "sha256": "abc"}
