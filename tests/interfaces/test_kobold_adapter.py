@@ -93,6 +93,114 @@ def _make_stream_messages(call_event_lists):
     return stream_messages
 
 
+class MockAsyncClient:
+    def __init__(self, chat_system, stream_messages):
+        self.chat_system = chat_system
+        self.stream_messages = stream_messages
+
+    async def get(self, url, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.content = b'{}'
+        resp.json = lambda: {}
+        return resp
+
+    async def post(self, url, **kwargs):
+        if "/api/extra/abort" in url or "/abort" in url:
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.content = b'{"result": "aborted"}'
+            resp.json = lambda: {"result": "aborted"}
+            return resp
+
+        if "/chat/completions" not in url:
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.content = b'{}'
+            resp.json = lambda: {}
+            return resp
+
+        full_text = ""
+        async for event in self.stream_messages():
+            if event.get("type") == "text_delta":
+                full_text += event.get("text", "")
+            elif event.get("type") == "done":
+                if event.get("full_text") is not None:
+                    full_text = event["full_text"]
+
+        resp_json = {
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": full_text
+                }
+            }]
+        }
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.content = json.dumps(resp_json).encode("utf-8")
+        resp.json = lambda: resp_json
+        return resp
+
+    def stream(self, method, url, **kwargs):
+        outer_self = self
+        class StreamContext:
+            async def __aenter__(self):
+                upstream = MagicMock()
+                
+                async def aiter_raw():
+                    async for event in outer_self.stream_messages():
+                        if event.get("type") == "text_delta":
+                            chunk = {
+                                "choices": [{
+                                    "delta": {
+                                        "content": event["text"]
+                                    }
+                                }]
+                            }
+                            yield f"data: {json.dumps(chunk)}\n\n".encode("utf-8")
+                        elif event.get("type") == "tool_calls":
+                            for call in event.get("calls", []):
+                                payload = {
+                                    "tool_name": call["name"],
+                                    "arguments": call["arguments"],
+                                    "call_id": call["id"]
+                                }
+                                yield f"event: derpr-tool-start\ndata: {json.dumps(payload)}\n\n".encode("utf-8")
+                                
+                                try:
+                                    res = await outer_self.chat_system.tool_manager.execute_tool(
+                                        call["name"], **call["arguments"]
+                                    )
+                                    res_payload = {
+                                        "call_id": call["id"],
+                                        "tool_name": call["name"],
+                                        "result": json.dumps(res),
+                                        "error": None
+                                    }
+                                except Exception as e:
+                                    res_payload = {
+                                        "call_id": call["id"],
+                                        "tool_name": call["name"],
+                                        "result": None,
+                                        "error": str(e)
+                                    }
+                                yield f"event: derpr-tool-result\ndata: {json.dumps(res_payload)}\n\n".encode("utf-8")
+                        elif event.get("type") == "done":
+                            yield b"data: [DONE]\n\n"
+
+                upstream.aiter_raw = aiter_raw
+                return upstream
+
+            async def __aexit__(self, *a):
+                return False
+
+        return StreamContext()
+
+    async def aclose(self):
+        pass
+
+
 def _make_real_adapter(persona_name: str = "test_persona",
                        stream_messages=None,
                        deltas=("ack",),
@@ -130,6 +238,7 @@ def _make_real_adapter(persona_name: str = "test_persona",
     chat_system.bot_logic.preprocess_message = AsyncMock(return_value=None)
 
     adapter = KoboldAdapter(chat_system=chat_system)
+    adapter._http = MockAsyncClient(chat_system, stream_messages)
     return adapter, mm, persona, chat_system
 
 

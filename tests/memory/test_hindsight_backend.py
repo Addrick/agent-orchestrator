@@ -477,6 +477,10 @@ def hindsight_live_url() -> str:
     url = os.environ.get("HINDSIGHT_LIVE_URL")
     if not url:
         pytest.skip("HINDSIGHT_LIVE_URL not set")
+    try:
+        httpx.get(url, timeout=1.0)
+    except Exception:
+        pytest.skip(f"Hindsight service at {url} is offline/unreachable")
     return url
 
 
