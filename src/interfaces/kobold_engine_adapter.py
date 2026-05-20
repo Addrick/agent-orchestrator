@@ -104,10 +104,29 @@ class KoboldEngineAdapter:
             ]
             return {"object": "list", "data": models}
 
+        @self.app.get("/api/v1/tools/catalog")
+        async def get_tools_catalog() -> Any:
+            defs = self.chat_system.tool_manager.get_tool_definitions()
+            tools = []
+            for t in defs:
+                func = t.get("function", {})
+                caps = t.get("capabilities", {})
+                tools.append({
+                    "name": func.get("name"),
+                    "description": func.get("description"),
+                    "is_write": bool(t.get("is_write", False)),
+                    "capabilities": {
+                        "locality": caps.get("locality"),
+                        "sensitivity": caps.get("sensitivity"),
+                        "produces_untrusted": bool(caps.get("produces_untrusted", False)),
+                    }
+                })
+            return {"tools": tools}
+
         @self.app.get("/api/v1/persona/{name}")
         async def get_persona(name: str) -> Any:
             if name not in self.chat_system.personas:
-                return {"error": f"Persona '{name}' not found"}
+                return JSONResponse(status_code=404, content={"error": f"Persona '{name}' not found"})
             p = self.chat_system.personas[name]
             return {
                 "name": p.get_name(),
@@ -125,6 +144,8 @@ class KoboldEngineAdapter:
                 "chat_template": p.get_chat_template(),
                 "instruct_tags": p.get_provider_extra("kobold", "instruct_tags"),
                 "kobold_extras": get_kobold_extras_for_get(p),
+                "enabled_tools": p.get_enabled_tools(),
+                "tool_policy": p.get_tool_policy().to_dict(),
             }
 
         @self.app.get("/api/v1/session/{persona}/ltm_block")
@@ -166,6 +187,26 @@ class KoboldEngineAdapter:
             p = self.chat_system.personas[name]
             p.start_new_conversation()
             return {"result": f"History for {name} reset successfully"}
+
+        @self.app.post("/api/v1/persona/{name}/dev_command")
+        async def dev_command(name: str, request: Request) -> Any:
+            if name not in self.chat_system.personas:
+                return JSONResponse(status_code=404,
+                                    content={"error": f"Persona '{name}' not found"})
+            body = await request.json()
+            command = body.get("command", "")
+            try:
+                result = await self.chat_system.bot_logic.preprocess_message(name, "portal", command)
+            except Exception as e:
+                return {"response": str(e), "mutated": False}
+            if result is None:
+                return JSONResponse(
+                    status_code=400,
+                    content={"response": "Not a dev command", "mutated": False},
+                )
+            if result.get("mutated"):
+                save_personas_to_file(self.chat_system.personas)
+            return {"response": result.get("response", ""), "mutated": bool(result.get("mutated"))}
 
         @self.app.get("/api/v1/session/{persona}/kobold_export")
         async def kobold_export(persona: str, max_turns: Optional[int] = None) -> Any:
@@ -211,12 +252,12 @@ class KoboldEngineAdapter:
                     status_code=404,
                     content={"error": f"interaction {interaction_id} not found"},
                 )
-            
+
             for v in versions:
                 reasoning = v.get("reasoning_content")
                 if reasoning:
                     v["content"] = f"<think>\n{reasoning}\n</think>\n{v['content']}"
-            
+
             return {"interaction_id": interaction_id, "versions": versions}
 
         @self.app.post("/api/v1/interaction/{interaction_id}/select_version/{k}")
@@ -249,10 +290,10 @@ class KoboldEngineAdapter:
                 reasoning = v.get("reasoning_content")
                 if reasoning:
                     v["content"] = f"<think>\n{reasoning}\n</think>\n{v['content']}"
-                    
+
             if result.get("reasoning_content"):
                 result["current_content"] = f"<think>\n{result['reasoning_content']}\n</think>\n{result['current_content']}"
-                
+
             return {**result, "versions": versions}
 
         @self.app.patch("/api/v1/interaction/{interaction_id}")
@@ -664,7 +705,7 @@ class KoboldEngineAdapter:
                         message=user_text,
                         is_retry=is_retry,
                         local_inference_config=local_inference_config,
-                        client_messages=None, # Explicitly None to force DB history rebuild
+                        client_messages=None,  # Explicitly None to force DB history rebuild
                     ):
 
                         if await request.is_disconnected():

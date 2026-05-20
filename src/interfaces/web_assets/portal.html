@@ -29222,11 +29222,11 @@ Current version indicated by LITEVER below.
 
 	<div class="popupcontainer flex hidden" id="persona_config_popup">
 		<div class="popupbg flex" onclick="document.getElementById('persona_config_popup').classList.add('hidden')"></div>
-		<div class="nspopup flexsize higher" style="max-width: 600px; width: 90%;">
+		<div class="nspopup flexsize higher" style="max-width: 900px; width: 90%;">
 			<div class="popuptitlebar">
 				<div class="popuptitletext">Inference Matrix: Persona Definition</div>
 			</div>
-			<div class="menutext custom-scrollbar" style="overflow-y: auto; max-height: 80vh;">
+			<div class="menutext custom-scrollbar" style="overflow-y: auto; max-height: 65vh;">
 				<div class="settingitem wide">
 					<div class="settinglabel">Role Name (Inactive)</div>
 					<input type="text" id="personaRole" class="form-control" placeholder="e.g. Assistant">
@@ -29314,6 +29314,29 @@ Current version indicated by LITEVER below.
 		</div>
 	</div>
 
+	<div class="popupcontainer flex hidden" id="derpr-tools-modal">
+		<div class="popupbg flex" onclick="document.getElementById('derpr-tools-modal').classList.add('hidden')"></div>
+		<div class="nspopup flexsize higher" style="max-width: 900px; width: 90%;">
+			<div class="popuptitlebar">
+				<div class="popuptitletext">Persona Tools</div>
+			</div>
+			<div class="menutext custom-scrollbar" style="overflow-y: auto; max-height: 65vh;">
+				<div class="settingitem wide">
+					<div class="settinglabel">Persona</div>
+					<select id="derpr-tools-persona-select" class="form-control" onchange="onDerprToolsPersonaChange()"></select>
+				</div>
+				<div id="derpr-tools-summary" style="margin-top: 8px; font-size: 11px; color: #aaa; font-family: monospace; word-break: break-all;"></div>
+				<div id="derpr-tools-validation" class="hidden" style="margin-top: 8px; padding: 6px 8px; background: #4a3a1a; border: 1px solid #aa8833; border-radius: 3px; color: #ffd; font-size: 11px;"></div>
+				<div id="derpr-tools-list" style="margin-top: 10px;"></div>
+				<div id="derpr-tools-status" style="margin-top: 8px; font-size: 11px; color: #6c6;"></div>
+			</div>
+			<div class="popupfooter" style="display: flex; gap: 8px;">
+				<button id="derpr-tools-save" type="button" class="btn btn-primary" style="flex: 1;" onclick="saveDerprToolsConfig()">Save</button>
+				<button id="derpr-tools-cancel" type="button" class="btn btn-primary" style="flex: 0.5;" onclick="document.getElementById('derpr-tools-modal').classList.add('hidden')">Cancel</button>
+			</div>
+		</div>
+	</div>
+
 	<div id="maincontainer" class="adaptivecontainer maincontainer">
 		<div id="outerbodybg"></div>
 		<div id="topmenu" class="topmenu">
@@ -29369,6 +29392,9 @@ Current version indicated by LITEVER below.
 							</select>
 							<button title="Persona Settings" type="button" class="btn btn-primary" style="padding: 2px 6px; height: 30px;" onclick="openPersonaSettings()">
 								<img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23ccc' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.1a2 2 0 0 1-1-1.72v-.51a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z'/%3E%3Ccircle cx='12' cy='12' r='3'/%3E%3C/svg%3E" style="vertical-align: middle;">
+							</button>
+							<button id="derpr-tools-btn" title="Persona tools" type="button" class="btn btn-primary" style="padding: 2px 6px; height: 30px; display: flex; align-items: center; justify-content: center;" onclick="openDerprToolsModal()">
+								<span style="font-size: 14px; line-height: 1;">🛠️</span>
 							</button>
 						</li>
 
@@ -32599,6 +32625,277 @@ Current version indicated by LITEVER below.
                 updateLtmAnoteUI();
             }
 		} catch (e) { console.error("Failed to load persona details", e); }
+	}
+
+	// ----- DP-120: Persona Tools modal -----
+
+	window._derpr_tools_catalog = null;
+	window._derpr_tools_persona = null;
+
+	async function openDerprToolsModal() {
+		const modal = document.getElementById('derpr-tools-modal');
+		const select = document.getElementById('derpr-tools-persona-select');
+		const status = document.getElementById('derpr-tools-status');
+		status.textContent = '';
+		try {
+			const [modelsRes, catRes] = await Promise.all([
+				fetch('/v1/models'),
+				fetch('/api/v1/tools/catalog'),
+			]);
+			const models = await modelsRes.json();
+			window._derpr_tools_catalog = await catRes.json();
+			const personas = (models.data || []).map(m => m.id);
+			const active = document.getElementById('personaSelectTopNav');
+			const preferred = (active && active.value) || personas[0] || '';
+			select.innerHTML = '';
+			personas.forEach(name => {
+				const opt = document.createElement('option');
+				opt.value = name;
+				opt.textContent = name;
+				if (name === preferred) opt.selected = true;
+				select.appendChild(opt);
+			});
+			await onDerprToolsPersonaChange();
+		} catch (e) {
+			console.error("Failed to open tools modal", e);
+			status.style.color = '#c66';
+			status.textContent = 'Failed to load: ' + e;
+		}
+		modal.classList.remove('hidden');
+	}
+
+	async function onDerprToolsPersonaChange() {
+		const select = document.getElementById('derpr-tools-persona-select');
+		const name = select && select.value;
+		if (!name) return;
+		try {
+			const res = await fetch(`/api/v1/persona/${encodeURIComponent(name)}`);
+			if (!res.ok) {
+				document.getElementById('derpr-tools-summary').textContent = `(persona ${name} not loadable)`;
+				window._derpr_tools_persona = null;
+				return;
+			}
+			const p = await res.json();
+			window._derpr_tools_persona = p;
+			renderDerprToolsSummary(p);
+			renderDerprToolsList(p);
+			validateDerprToolsSelection();
+		} catch (e) {
+			console.error("Failed to load persona for tools modal", e);
+		}
+	}
+
+	function renderDerprToolsSummary(p) {
+		const summary = document.getElementById('derpr-tools-summary');
+		const tp = p.tool_policy || {};
+		const enabled = p.enabled_tools || [];
+		const fmtList = (arr) => {
+			if (!arr || !arr.length) return '[]';
+			if (arr.length > 10) return '[' + arr.slice(0, 10).join(', ') + ', ... (+' + (arr.length - 10) + ')]';
+			return '[' + arr.join(', ') + ']';
+		};
+		const defaultPolicy = tp.default || 'deny';
+		const ask = tp.ask || [];
+		const overrides = tp.explicit_overrides ? Object.keys(tp.explicit_overrides) : [];
+		summary.textContent = `policy.default=${defaultPolicy} | allow=${fmtList(enabled)} | ask=${fmtList(ask)} | overrides=${fmtList(overrides)}`;
+	}
+
+	const _DERPR_TOOLS_GROUP_ORDER = [
+		'network:read', 'network:write', 'local:write',
+		'untrusted:read', 'pii:read', 'other',
+	];
+
+	function _derprToolsGroupOf(tool) {
+		const caps = tool.capabilities || {};
+		if (caps.sensitivity === 'pii') return 'pii:read';
+		if (caps.sensitivity === 'untrusted') return 'untrusted:read';
+		if (caps.locality === 'network' && tool.is_write) return 'network:write';
+		if (caps.locality === 'network') return 'network:read';
+		if (caps.locality === 'local' && tool.is_write) return 'local:write';
+		return 'other';
+	}
+
+	function renderDerprToolsList(p) {
+		const container = document.getElementById('derpr-tools-list');
+		container.innerHTML = '';
+		const catalog = (window._derpr_tools_catalog && window._derpr_tools_catalog.tools) || [];
+		const enabled = new Set(p.enabled_tools || []);
+		const allowAll = enabled.has('*');
+
+		const allowAllRow = document.createElement('div');
+		allowAllRow.style.cssText = 'padding: 4px 6px; margin-bottom: 6px; background: #2a2a2a; border-radius: 3px;';
+		const allowAllLabel = document.createElement('label');
+		allowAllLabel.style.cssText = 'display: flex; align-items: center; gap: 6px; cursor: pointer; font-weight: bold;';
+		const allowAllInput = document.createElement('input');
+		allowAllInput.type = 'checkbox';
+		allowAllInput.id = 'derpr-tools-allow-all';
+		allowAllInput.checked = allowAll;
+		allowAllInput.addEventListener('change', onDerprToolsAllowAllChange);
+		allowAllLabel.appendChild(allowAllInput);
+		allowAllLabel.appendChild(document.createTextNode('Allow all (*)'));
+		allowAllRow.appendChild(allowAllLabel);
+		container.appendChild(allowAllRow);
+
+		const grouped = {};
+		_DERPR_TOOLS_GROUP_ORDER.forEach(g => { grouped[g] = []; });
+		catalog.forEach(t => {
+			const g = _derprToolsGroupOf(t);
+			(grouped[g] || grouped['other']).push(t);
+		});
+
+		_DERPR_TOOLS_GROUP_ORDER.forEach(group => {
+			const tools = grouped[group];
+			if (!tools.length) return;
+			tools.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+
+			const header = document.createElement('div');
+			header.style.cssText = 'margin-top: 8px; padding: 3px 6px; font-size: 11px; color: #88c; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #333;';
+			header.textContent = group;
+			container.appendChild(header);
+
+			tools.forEach(t => {
+				const row = document.createElement('label');
+				row.style.cssText = 'display: flex; align-items: flex-start; gap: 6px; padding: 3px 6px; cursor: pointer; font-size: 12px;';
+				const cb = document.createElement('input');
+				cb.type = 'checkbox';
+				cb.className = 'derpr-tools-row';
+				cb.dataset.toolName = t.name;
+				cb.checked = allowAll ? false : enabled.has(t.name);
+				cb.disabled = allowAll;
+				cb.addEventListener('change', validateDerprToolsSelection);
+				row.appendChild(cb);
+				const text = document.createElement('span');
+				const nameSpan = document.createElement('span');
+				nameSpan.style.fontWeight = 'bold';
+				nameSpan.textContent = t.name;
+				text.appendChild(nameSpan);
+				if (t.description) {
+					const descSpan = document.createElement('span');
+					descSpan.style.cssText = 'color: #888; margin-left: 6px;';
+					descSpan.textContent = '— ' + t.description;
+					text.appendChild(descSpan);
+				}
+				row.appendChild(text);
+				container.appendChild(row);
+			});
+		});
+	}
+
+	function onDerprToolsAllowAllChange() {
+		const allowAll = document.getElementById('derpr-tools-allow-all').checked;
+		document.querySelectorAll('.derpr-tools-row').forEach(cb => {
+			cb.disabled = allowAll;
+			if (allowAll) cb.checked = false;
+		});
+		validateDerprToolsSelection();
+	}
+
+	function _derprToolsCurrentSelection() {
+		const allowAll = document.getElementById('derpr-tools-allow-all');
+		if (allowAll && allowAll.checked) return { allowAll: true, names: [] };
+		const checked = [];
+		document.querySelectorAll('.derpr-tools-row').forEach(cb => {
+			if (cb.checked) checked.push(cb.dataset.toolName);
+		});
+		return { allowAll: false, names: checked };
+	}
+
+	function validateDerprToolsSelection() {
+		const banner = document.getElementById('derpr-tools-validation');
+		const catalog = (window._derpr_tools_catalog && window._derpr_tools_catalog.tools) || [];
+		const persona = window._derpr_tools_persona || {};
+		const overrides = (persona.tool_policy && persona.tool_policy.explicit_overrides) || {};
+		const sel = _derprToolsCurrentSelection();
+		const active = sel.allowAll
+			? catalog
+			: catalog.filter(t => sel.names.includes(t.name));
+
+		let hasNetworkRead = false, hasNetworkWrite = false, hasLocalWrite = false;
+		let hasUntrustedRead = false, hasPiiRead = false;
+		active.forEach(t => {
+			const caps = t.capabilities || {};
+			const isWrite = !!t.is_write;
+			if (caps.locality === 'network' && !isWrite) hasNetworkRead = true;
+			if (caps.locality === 'network' && isWrite) hasNetworkWrite = true;
+			if (caps.locality === 'local' && isWrite) hasLocalWrite = true;
+			if (caps.produces_untrusted && !isWrite) hasUntrustedRead = true;
+			if (caps.sensitivity === 'pii' && !isWrite) hasPiiRead = true;
+		});
+		const hasNetworkAny = hasNetworkRead || hasNetworkWrite;
+
+		const warnings = [];
+		if (hasNetworkRead && hasLocalWrite && !overrides.network_read_local_write) {
+			warnings.push('network:read + local:write (potential disk rewrite via injection)');
+		}
+		if (hasUntrustedRead && hasNetworkWrite && !overrides.untrusted_read_network_write) {
+			warnings.push('untrusted:read + network:write (potential exfiltration via injection)');
+		}
+		if (hasPiiRead && hasNetworkAny && !overrides.pii_read_network_any) {
+			warnings.push('pii:read + network:* (potential PII exfiltration)');
+		}
+
+		if (!warnings.length) {
+			banner.classList.add('hidden');
+			banner.innerHTML = '';
+			return;
+		}
+		banner.classList.remove('hidden');
+		banner.innerHTML = '<strong>Insecure composition:</strong><ul style="margin: 4px 0 0 16px; padding: 0;">'
+			+ warnings.map(w => '<li>' + w.replace(/</g, '&lt;') + '</li>').join('')
+			+ '</ul>';
+	}
+
+	function _derprToolsBuildCommand() {
+		const catalog = (window._derpr_tools_catalog && window._derpr_tools_catalog.tools) || [];
+		const allNames = catalog.map(t => t.name);
+		const sel = _derprToolsCurrentSelection();
+		if (sel.allowAll) return 'set tools all';
+		if (sel.names.length === 0) return 'set tools none';
+		if (sel.names.length === allNames.length) return 'set tools all';
+		// allow-all-minus-N when most tools are checked
+		if (sel.names.length > allNames.length / 2) {
+			const excluded = allNames.filter(n => !sel.names.includes(n));
+			return 'set tools all ' + excluded.map(n => '-' + n).join(' ');
+		}
+		return 'set tools ' + sel.names.join(' ');
+	}
+
+	async function saveDerprToolsConfig() {
+		const status = document.getElementById('derpr-tools-status');
+		const select = document.getElementById('derpr-tools-persona-select');
+		const name = select && select.value;
+		if (!name) return;
+		const command = _derprToolsBuildCommand();
+		status.style.color = '#aaa';
+		status.textContent = 'Saving…';
+		try {
+			const res = await fetch(`/api/v1/persona/${encodeURIComponent(name)}/dev_command`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ command }),
+			});
+			const data = await res.json().catch(() => ({}));
+			if (res.ok && data.mutated) {
+				const refresh = await fetch(`/api/v1/persona/${encodeURIComponent(name)}`);
+				if (refresh.ok) {
+					const p = await refresh.json();
+					window._derpr_tools_persona = p;
+					renderDerprToolsSummary(p);
+				}
+				status.style.color = '#6c6';
+				status.textContent = 'Saved';
+				setTimeout(() => {
+					document.getElementById('derpr-tools-modal').classList.add('hidden');
+					status.textContent = '';
+				}, 2000);
+			} else {
+				status.style.color = '#c66';
+				status.textContent = (data && data.response) || `Save failed (${res.status})`;
+			}
+		} catch (e) {
+			status.style.color = '#c66';
+			status.textContent = 'Save failed: ' + e;
+		}
 	}
 
 	// Phase 2.1: switch the active session between kobold-lite's native
