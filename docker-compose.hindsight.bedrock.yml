@@ -1,0 +1,43 @@
+# Override that swaps the kobold-proxy path for a Bedrock proxy.
+# Usage:
+#   docker compose -f docker-compose.hindsight.yml \
+#                  -f docker-compose.hindsight.bedrock.yml up -d
+#
+# Set the active extraction model via the BEDROCK_MODEL_ID env var (or .env):
+#   BEDROCK_MODEL_ID=google.gemma-3-4b-it docker compose ... up -d
+#
+# AWS creds: mount ~/.aws read-only into bedrock-proxy. Hindsight container
+# stays paranoid-mode (no internet); proxy is the only path out.
+services:
+  bedrock-proxy:
+    build:
+      context: ./bedrock_proxy
+    container_name: hindsight-bedrock-proxy
+    restart: unless-stopped
+    networks:
+      hindsight-internal:
+        aliases:
+          - bedrock-proxy
+      egress:
+    environment:
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_PROFILE=${AWS_PROFILE:-default}
+      - LOG_LEVEL=INFO
+    volumes:
+      - ${USERPROFILE:-${HOME}}/.aws:/root/.aws:ro
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  hindsight:
+    depends_on:
+      - bedrock-proxy
+    environment:
+      - HINDSIGHT_API_LLM_PROVIDER=openai
+      - HINDSIGHT_API_LLM_BASE_URL=http://bedrock-proxy:4000/v1
+      - HINDSIGHT_API_LLM_MODEL=${BEDROCK_MODEL_ID:-google.gemma-3-4b-it}
+      - HINDSIGHT_API_LLM_API_KEY=unused
+      - HINDSIGHT_API_LLM_MAX_CONCURRENT=4
+      - HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS=4096
+      - HINDSIGHT_API_MAX_CONTEXT_TOKENS=16384
