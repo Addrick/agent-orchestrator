@@ -328,8 +328,10 @@ class MemoryToolHandler:
         self.embedding_service = embedding_service
 
     def register(self, manager: ToolManager) -> None:
-        manager.register("drill_down_memory", self._drill_down_memory)
-        manager.register("update_core_memory", self._update_core_memory)
+        backend = getattr(self.memory_manager, "backend", None)
+        if backend and backend.__class__.__name__ == "SqliteSemanticBackend":
+            manager.register("drill_down_memory", self._drill_down_memory)
+            manager.register("update_core_memory", self._update_core_memory)
 
     async def _drill_down_memory(self, parent_summary_id: int) -> List[Dict[str, Any]]:
         logger.info(f"Executing drill_down_memory for parent {parent_summary_id}")
