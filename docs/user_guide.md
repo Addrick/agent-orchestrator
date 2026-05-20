@@ -349,20 +349,23 @@ The semantic memory tier can be backed by [vectorize-io/hindsight](https://githu
 
 ### Bring up the stack
 
+**Production deployment (since 2026-05-19):** Hindsight runs on `aux-desktop` (`10.0.0.70`), bound to `0.0.0.0:8888`. The derpr default `HINDSIGHT_URL` points there. The `docker-compose.hindsight.yml` in this repo is the **legacy local stack**, kept for offline development and as a known-good config reference; the live deployment uses a near-identical compose on the remote host with the bind changed to `0.0.0.0` and the kobold-proxy upstream pointed at LAN IPs instead of `host.docker.internal`.
+
 ```bash
+# Legacy / local-only bring-up:
 docker compose -f docker-compose.hindsight.yml up -d
 ```
 
 The compose file starts two containers:
 
-- `hindsight-memory` — the API server, bound to `127.0.0.1:8888` only.
-- `hindsight-kobold-proxy` — `socat` sidecar that forwards `:5001` from the internal Docker network to the host's kobold endpoint. The hindsight container itself has **no** internet egress (paranoid mode, see `memory/project/decisions/2026-05-05-hindsight-paranoid-mode.md`).
+- `hindsight-memory` — the API server. Local compose binds to `127.0.0.1:8888`; production binds to `0.0.0.0:8888` on `10.0.0.70`.
+- `hindsight-kobold-proxy` — nginx LB sidecar that load-balances `:5001` across one or more host-side koboldcpp instances. The hindsight container itself has **no** internet egress (paranoid mode, see `memory/project/decisions/2026-05-05-hindsight-paranoid-mode.md`).
 
 Both images are pinned by SHA digest. Rotate digests intentionally; do not drift to floating tags.
 
 ### Required host services
 
-- **kobold.cpp** running at `localhost:5001` with an OpenAI-compatible `/v1` endpoint and a model loaded (default: `qwen2.5-32b`). The proxy reaches it via `host.docker.internal:5001`.
+- **kobold.cpp** running with an OpenAI-compatible `/v1` endpoint and a model loaded (default: `qwen2.5-32b`). The local compose reaches kobold via `host.docker.internal:5001`; the production compose on `10.0.0.70` reaches the two LAN kobold instances at `10.0.0.67:5001` and `10.0.0.69:5001` (configured in `kobold-lb.conf`).
 - Docker Desktop / Docker Engine with the `host-gateway` extra-host alias supported.
 
 If kobold is offline, retain operations are silently dropped (see failure modes below) and recall returns the existing corpus.
@@ -373,7 +376,7 @@ Set in `.env` (or `config/global_config.py`):
 
 ```
 SEMANTIC_BACKEND=hindsight
-HINDSIGHT_URL=http://localhost:8888
+HINDSIGHT_URL=http://10.0.0.70:8888
 ```
 
 Restart the bot. `MemoryManager.__init__` will instantiate `HindsightBackend` instead of `SqliteSemanticBackend`. Legacy SQLite-shape methods (`store_segment`, `retrieve_relevant_summaries`, …) will raise `NotImplementedError` if called — every caller must migrate to `retain_turn` / `recall` first.

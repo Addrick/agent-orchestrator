@@ -115,7 +115,7 @@ docker compose up -d --build                              # main app
 docker compose -f docker-compose.hindsight.yml up -d      # optional Hindsight stack
 ```
 
-The Hindsight compose file pins images by SHA digest and runs the API server with no internet egress (a `socat` sidecar bridges localhost kobold.cpp into the container). See `docs/user_guide.md` (Hindsight section) for bring-up, bank bootstrap, backup/restore, and failure modes.
+The Hindsight compose file pins images by SHA digest and runs the API server with no internet egress (an nginx LB sidecar routes LLM traffic to one or more host-side kobold.cpp instances). The committed compose is the legacy local stack; the live deployment runs on `aux-desktop` (`10.0.0.70`) with bind changed to `0.0.0.0:8888` and the LB upstream pointed at LAN IPs. See `docs/user_guide.md` (Hindsight section) for bring-up, bank bootstrap, backup/restore, and failure modes.
 
 ## Environment
 
@@ -127,7 +127,7 @@ All variables are read directly via `os.environ` — set them in `.env` or your 
 | `OPENAI_API_KEY` | OpenAI provider |
 | `ANTHROPIC_API_KEY` | Anthropic provider |
 | `GOOGLE_GENERATIVEAI_API_KEY` | Gemini/Gemma + embeddings |
-| `LOCAL_LLM_URL` | Override for OpenAI-compatible local endpoint (default `http://localhost:5001`) |
+| `LOCAL_LLM_URL` | Override for OpenAI-compatible local endpoint (default `http://omen:5001/v1`) |
 | `ZAMMAD_URL`, `ZAMMAD_API_KEY` | Enables ZammadClient + Zammad agents |
 | `GMAIL_CREDENTIALS_FILE`, `GMAIL_TOKEN_FILE`, `GMAIL_PROJECT_ID`, `GMAIL_PUBSUB_TOPIC`, `GMAIL_PUBSUB_SUBSCRIPTION_ID` | Gmail PoC interface |
 | `MEMORY_DATABASE_FILE` | SQLite path (default `data/user_memory.db`) |

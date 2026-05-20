@@ -116,7 +116,7 @@ PERSONAL and TICKET_ISOLATED memories never flow to metabank regardless of `meta
 ## Config
 
 - `global_config.SEMANTIC_BACKEND: Literal["sqlite", "hindsight"]` (default `sqlite`)
-- `global_config.HINDSIGHT_URL: str` (default `http://localhost:8888`)
+- `global_config.HINDSIGHT_URL: str` (default `http://10.0.0.70:8888` — aux-desktop, since 2026-05-19)
 - `global_config.METABANK_ENABLED: bool` (default `False`)
 - Per-persona override on backend choice (deferred — single global until proven needed)
 - Per-persona `meta_visible: bool` on Persona schema (default `False`, ignored unless `METABANK_ENABLED`)
