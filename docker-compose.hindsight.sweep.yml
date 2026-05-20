@@ -1,0 +1,91 @@
+# Standalone Hindsight stack dedicated to the LongMemEval Bedrock sweep.
+#
+# Runs in parallel with the prod stack (docker-compose.hindsight.yml) — uses
+# different container names, a separate data volume, separate host ports,
+# and its own network. Prod bank consolidation continues to hit local
+# kobold on the original instance; this instance only sees sweep banks.
+#
+# Up:
+#   BEDROCK_MODEL_ID=google.gemma-3-4b-it \
+#     docker compose -f docker-compose.hindsight.sweep.yml up -d
+#
+# Swap model mid-sweep:
+#   BEDROCK_MODEL_ID=openai.gpt-oss-20b-1:0 \
+#     docker compose -f docker-compose.hindsight.sweep.yml up -d \
+#                    --no-deps --force-recreate hindsight-sweep
+#
+# Host ports:
+#   8889 — API (point HINDSIGHT_URL at http://127.0.0.1:8889 for sweep work)
+#   10000 — Control Plane UI
+#
+# Tear down (preserves data volume):
+#   docker compose -f docker-compose.hindsight.sweep.yml down
+#
+# Tear down + wipe sweep data (post-2026-05-22 cleanup):
+#   docker compose -f docker-compose.hindsight.sweep.yml down -v
+services:
+  bedrock-proxy-sweep:
+    build:
+      context: ./bedrock_proxy
+    container_name: hindsight-sweep-bedrock-proxy
+    restart: unless-stopped
+    networks:
+      hindsight-sweep-internal:
+        aliases:
+          - bedrock-proxy
+      hindsight-sweep-egress:
+    environment:
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_PROFILE=${AWS_PROFILE:-default}
+      - LOG_LEVEL=INFO
+    volumes:
+      - ${USERPROFILE:-${HOME}}/.aws:/root/.aws:ro
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  hindsight-sweep:
+    # Same pinned digest as prod stack — keep them in lockstep so sweep
+    # results aren't confounded by a Hindsight version delta.
+    image: ghcr.io/vectorize-io/hindsight@sha256:a4352c52225c7b3abc0d60ee0e92027c333f5a15f5d8888117f8702c8dcd93f4
+    container_name: hindsight-sweep-memory
+    restart: unless-stopped
+    depends_on:
+      - bedrock-proxy-sweep
+    networks:
+      - hindsight-sweep-internal
+    environment:
+      - HINDSIGHT_API_LLM_PROVIDER=openai
+      - HINDSIGHT_API_LLM_BASE_URL=http://bedrock-proxy:4000/v1
+      - HINDSIGHT_API_LLM_MODEL=${BEDROCK_MODEL_ID:-google.gemma-3-4b-it}
+      - HINDSIGHT_API_LLM_API_KEY=unused
+      - HINDSIGHT_API_LLM_MAX_CONCURRENT=4
+      - HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS=4096
+      - HINDSIGHT_API_MAX_CONTEXT_TOKENS=16384
+    ports:
+      - "127.0.0.1:8889:8888"
+      - "127.0.0.1:10000:9999"
+    volumes:
+      - hindsight-sweep-data:/home/hindsight/.pg0
+      - hindsight-sweep-cache:/home/hindsight/.cache
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8888/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  hindsight-sweep-data:
+  hindsight-sweep-cache:
+
+networks:
+  hindsight-sweep-internal:
+    internal: true  # hindsight container itself has no internet
+  hindsight-sweep-egress:
+    # Default bridge — only bedrock-proxy-sweep uses this to reach AWS.
