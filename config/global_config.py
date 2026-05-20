@@ -187,7 +187,7 @@ MEMORY_RETRIEVAL_ENABLED = True
 MEMORY_MAX_SUMMARIES_IN_CONTEXT = 5
 
 SEMANTIC_BACKEND = os.environ.get("SEMANTIC_BACKEND", "sqlite") # Literal["sqlite", "hindsight"]
-HINDSIGHT_URL = os.environ.get("HINDSIGHT_URL", "http://localhost:8888")
+HINDSIGHT_URL = os.environ.get("HINDSIGHT_URL", "http://10.0.0.70:8888")
 HINDSIGHT_LLM_MODEL = os.environ.get("HINDSIGHT_LLM_MODEL", "qwen2.5-32b")
 
 LOCAL_LLM_URL = "http://omen:5001/v1"
