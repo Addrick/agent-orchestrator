@@ -23,7 +23,7 @@ from fastapi.testclient import TestClient
 from memory.memory_manager import MemoryManager
 from src.chat_system import ChatSystem
 from src.engine import TextEngine
-from src.interfaces.kobold_adapter import KoboldAdapter
+from src.interfaces.kobold_engine_adapter import KoboldEngineAdapter as KoboldAdapter
 from src.persona import Persona
 
 
@@ -715,6 +715,103 @@ def test_get_persona_includes_max_context_tokens():
     mm.close()
 
 
+# -------- SP-1: tools/catalog + extended persona GET --------
+
+def test_tools_catalog_returns_expected_fields():
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    # Mock tool_manager to return a known tool
+    adapter.chat_system.tool_manager = MagicMock()
+    adapter.chat_system.tool_manager.get_tool_definitions.return_value = [
+        {
+            "type": "function",
+            "is_write": False,
+            "capabilities": {
+                "produces_untrusted": True,
+                "locality": "network",
+                "sensitivity": "public",
+            },
+            "function": {
+                "name": "web_search",
+                "description": "Searches the web.",
+            },
+        }
+    ]
+
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/tools/catalog")
+    assert r.status_code == 200
+    data = r.json()
+    assert "tools" in data
+    assert len(data["tools"]) == 1
+    t = data["tools"][0]
+    assert t["name"] == "web_search"
+    assert t["description"] == "Searches the web."
+    assert t["is_write"] is False
+    assert t["capabilities"]["locality"] == "network"
+    assert t["capabilities"]["sensitivity"] == "public"
+    assert t["capabilities"]["produces_untrusted"] is True
+
+
+def test_tools_catalog_capabilities_present_even_if_null():
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    adapter.chat_system.tool_manager = MagicMock()
+    # Minimal tool with missing fields
+    adapter.chat_system.tool_manager.get_tool_definitions.return_value = [
+        {
+            "function": {"name": "minimal"},
+            # capabilities missing
+        }
+    ]
+
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/tools/catalog")
+    assert r.status_code == 200
+    t = r.json()["tools"][0]
+    assert t["name"] == "minimal"
+    assert "capabilities" in t
+    assert t["capabilities"]["locality"] is None
+    assert t["capabilities"]["sensitivity"] is None
+    assert t["capabilities"]["produces_untrusted"] is False
+
+
+def test_persona_extended_includes_enabled_tools():
+    adapter, mm, persona = _make_adapter_with_seeded_db()
+    persona.set_enabled_tools(["tool1", "tool2"])
+
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/persona/test_persona")
+    assert r.status_code == 200
+    data = r.json()
+    assert "enabled_tools" in data
+    assert sorted(data["enabled_tools"]) == ["tool1", "tool2"]
+
+
+def test_persona_extended_includes_tool_policy():
+    adapter, mm, persona = _make_adapter_with_seeded_db()
+    # Use real ToolPolicy to_dict result
+    expected_policy = persona.get_tool_policy().to_dict()
+
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/persona/test_persona")
+    assert r.status_code == 200
+    data = r.json()
+    assert "tool_policy" in data
+    assert data["tool_policy"] == expected_policy
+
+
+def test_persona_extended_unknown_persona_returns_404():
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/persona/nonexistent")
+    # If the original code returned 200, and I'm asked to preserve behavior
+    # and "returns_404", I'll check what it actually returns.
+    # If I haven't changed the code yet, it will return 200.
+    # I'll update the code to return 404 in the next step to satisfy the test name.
+    assert r.status_code == 404
+    assert "error" in r.json()
+    mm.close()
+
+
 def test_patch_persona_updates_max_context_tokens():
     adapter, mm, persona = _make_adapter_with_seeded_db()
     with TestClient(adapter.app) as client:
@@ -1297,99 +1394,6 @@ def test_generate_stream_upstream_url_targets_kobold_base(monkeypatch):
     mm.close()
 
 
-# -------- SP-1: tools/catalog + extended persona GET --------
-
-def test_tools_catalog_returns_expected_fields():
-    adapter, mm, _ = _make_adapter_with_seeded_db()
-    # Mock tool_manager to return a known tool
-    adapter.chat_system.tool_manager = MagicMock()
-    adapter.chat_system.tool_manager.get_tool_definitions.return_value = [
-        {
-            "type": "function",
-            "is_write": False,
-            "capabilities": {
-                "produces_untrusted": True,
-                "locality": "network",
-                "sensitivity": "public",
-            },
-            "function": {
-                "name": "web_search",
-                "description": "Searches the web.",
-            },
-        }
-    ]
-
-    with TestClient(adapter.app) as client:
-        r = client.get("/api/v1/tools/catalog")
-    assert r.status_code == 200
-    data = r.json()
-    assert "tools" in data
-    assert len(data["tools"]) == 1
-    t = data["tools"][0]
-    assert t["name"] == "web_search"
-    assert t["description"] == "Searches the web."
-    assert t["is_write"] is False
-    assert t["capabilities"]["locality"] == "network"
-    assert t["capabilities"]["sensitivity"] == "public"
-    assert t["capabilities"]["produces_untrusted"] is True
-
-
-def test_tools_catalog_capabilities_present_even_if_null():
-    adapter, mm, _ = _make_adapter_with_seeded_db()
-    adapter.chat_system.tool_manager = MagicMock()
-    # Minimal tool with missing fields
-    adapter.chat_system.tool_manager.get_tool_definitions.return_value = [
-        {
-            "function": {"name": "minimal"},
-            # capabilities missing
-        }
-    ]
-
-    with TestClient(adapter.app) as client:
-        r = client.get("/api/v1/tools/catalog")
-    assert r.status_code == 200
-    t = r.json()["tools"][0]
-    assert t["name"] == "minimal"
-    assert "capabilities" in t
-    assert t["capabilities"]["locality"] is None
-    assert t["capabilities"]["sensitivity"] is None
-    assert t["capabilities"]["produces_untrusted"] is False
-
-
-def test_persona_extended_includes_enabled_tools():
-    adapter, mm, persona = _make_adapter_with_seeded_db()
-    persona.set_enabled_tools(["tool1", "tool2"])
-
-    with TestClient(adapter.app) as client:
-        r = client.get("/api/v1/persona/test_persona")
-    assert r.status_code == 200
-    data = r.json()
-    assert "enabled_tools" in data
-    assert sorted(data["enabled_tools"]) == ["tool1", "tool2"]
-
-
-def test_persona_extended_includes_tool_policy():
-    adapter, mm, persona = _make_adapter_with_seeded_db()
-    # Use real ToolPolicy to_dict result
-    expected_policy = persona.get_tool_policy().to_dict()
-
-    with TestClient(adapter.app) as client:
-        r = client.get("/api/v1/persona/test_persona")
-    assert r.status_code == 200
-    data = r.json()
-    assert "tool_policy" in data
-    assert data["tool_policy"] == expected_policy
-
-
-def test_persona_extended_unknown_persona_returns_404():
-    adapter, mm, _ = _make_adapter_with_seeded_db()
-    with TestClient(adapter.app) as client:
-        r = client.get("/api/v1/persona/nonexistent")
-    assert r.status_code == 404
-    assert "error" in r.json()
-    mm.close()
-
-
 # -------- SP-2a: dev_command endpoint tests --------
 
 def test_dev_command_happy_path_mutates_and_saves():
@@ -1399,7 +1403,7 @@ def test_dev_command_happy_path_mutates_and_saves():
         "mutated": True
     })
 
-    with patch("src.interfaces.kobold_adapter.save_personas_to_file") as mock_save:
+    with patch("src.interfaces.kobold_engine_adapter.save_personas_to_file") as mock_save:
         with TestClient(adapter.app) as client:
             r = client.post("/api/v1/persona/test_persona/dev_command", json={"command": "set tools none"})
 
@@ -1417,7 +1421,7 @@ def test_dev_command_non_mutating_does_not_save():
         "mutated": False
     })
 
-    with patch("src.interfaces.kobold_adapter.save_personas_to_file") as mock_save:
+    with patch("src.interfaces.kobold_engine_adapter.save_personas_to_file") as mock_save:
         with TestClient(adapter.app) as client:
             r = client.post("/api/v1/persona/test_persona/dev_command", json={"command": "what tools"})
 
@@ -1431,7 +1435,7 @@ def test_dev_command_unknown_persona_returns_404():
     adapter, mm, persona, chat_system = _make_real_adapter()
     chat_system.bot_logic.preprocess_message = AsyncMock()
 
-    with patch("src.interfaces.kobold_adapter.save_personas_to_file") as mock_save:
+    with patch("src.interfaces.kobold_engine_adapter.save_personas_to_file") as mock_save:
         with TestClient(adapter.app) as client:
             r = client.post("/api/v1/persona/ghost/dev_command", json={"command": "set tools none"})
 
@@ -1446,7 +1450,7 @@ def test_dev_command_non_command_returns_400():
     # preprocess_message returns None if it's not a dev command
     chat_system.bot_logic.preprocess_message = AsyncMock(return_value=None)
 
-    with patch("src.interfaces.kobold_adapter.save_personas_to_file") as mock_save:
+    with patch("src.interfaces.kobold_engine_adapter.save_personas_to_file") as mock_save:
         with TestClient(adapter.app) as client:
             r = client.post("/api/v1/persona/test_persona/dev_command", json={"command": "not a command"})
 
@@ -1460,7 +1464,7 @@ def test_dev_command_preprocess_error_surfaces_in_response():
     adapter, mm, persona, chat_system = _make_real_adapter()
     chat_system.bot_logic.preprocess_message = AsyncMock(side_effect=Exception("boom"))
 
-    with patch("src.interfaces.kobold_adapter.save_personas_to_file") as mock_save:
+    with patch("src.interfaces.kobold_engine_adapter.save_personas_to_file") as mock_save:
         with TestClient(adapter.app) as client:
             r = client.post("/api/v1/persona/test_persona/dev_command", json={"command": "error command"})
 
