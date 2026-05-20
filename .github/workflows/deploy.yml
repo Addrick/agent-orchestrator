@@ -89,7 +89,7 @@ jobs:
 
     steps:
       - name: Log in to GHCR
-        shell: pwsh
+        shell: powershell
         run: |
           # Write GHCR auth into our pinned docker config dir, bypassing wincred
           # (wincred fails for non-interactive sessions; see C:\Server\derpr\.docker\config.json)
@@ -102,18 +102,18 @@ jobs:
           [System.IO.File]::WriteAllText("$env:DOCKER_CONFIG\config.json", $cfg)
 
       - name: Pull new image
-        shell: pwsh
+        shell: powershell
         run: docker pull ${{ env.IMAGE_NAME }}:latest
 
       - name: Stop and remove old container
-        shell: pwsh
+        shell: powershell
         run: |
           docker stop $env:CONTAINER_NAME 2>$null
           docker rm   $env:CONTAINER_NAME 2>$null
           exit 0   # ignore failures if container absent
 
       - name: Run new container
-        shell: pwsh
+        shell: powershell
         run: |
           docker run -d `
             --name $env:CONTAINER_NAME `
@@ -123,6 +123,6 @@ jobs:
             ${{ env.IMAGE_NAME }}:latest
 
       - name: Prune unused images
-        shell: pwsh
+        shell: powershell
         run: docker image prune -f
 
