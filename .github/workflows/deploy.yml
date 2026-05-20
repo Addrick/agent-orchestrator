@@ -76,49 +76,53 @@ jobs:
           push: true
           tags: ${{ env.IMAGE_NAME }}:latest
 
-  # JOB 3: Deploy to AWS
+  # JOB 3: Deploy to self-hosted runner on .70 (AUX-DESKTOP)
   # Only runs if build-and-push succeeds
   deploy:
     needs: build-and-push
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Windows, derpr]
+    env:
+      DOCKER_CONFIG: C:\Server\derpr\.docker
+      ENV_FILE: C:\Server\derpr\.env
+      DATA_VOLUME: derpr_data
+      CONTAINER_NAME: chatbot
 
     steps:
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.0.0
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ubuntu
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            # 1. Log into the registry on the server
-            # We pass the PAT specifically to ensure the server has pull rights
-            echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-            # 2. Pull the new image
-            docker pull ${{ env.IMAGE_NAME }}:latest
-            # 3. Stop and remove the old container
-            # '|| true' prevents the script from crashing if the container is already stopped
-            docker stop chatbot || true
-            docker rm chatbot || true
-            
-            # --- SECURITY ADDITIONS ---
-            # 4a. Lock down the .env file so only the 'ubuntu' user can read it
-            chmod 600 .env || true
-            
-            # 4b. Ensure the data directory exists and is owned by UID 1000 
-            # (Matches the non-root user we configure in the Dockerfile)
-            mkdir -p /home/ubuntu/data
-            sudo chown -R 1000:1000 /home/ubuntu/data
-            # --------------------------
+      - name: Log in to GHCR
+        shell: pwsh
+        run: |
+          # Write GHCR auth into our pinned docker config dir, bypassing wincred
+          # (wincred fails for non-interactive sessions; see C:\Server\derpr\.docker\config.json)
+          $auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("${{ github.actor }}:${{ secrets.GHCR_PAT }}"))
+          $cfg = @{
+            auths = @{ "ghcr.io" = @{ auth = $auth } }
+            credHelpers = @{ "ghcr.io" = ""; "docker.io" = ""; "index.docker.io" = ""; "registry-1.docker.io" = "" }
+          } | ConvertTo-Json -Compress -Depth 4
+          New-Item -ItemType Directory -Path $env:DOCKER_CONFIG -Force | Out-Null
+          [System.IO.File]::WriteAllText("$env:DOCKER_CONFIG\config.json", $cfg)
 
-            # 5. Run the new container
-            # We reuse the .env file already sitting on the server
-            docker run -d \
-              --name chatbot \
-              --restart unless-stopped \
-              --env-file .env \
-              -v /home/ubuntu/data:/app/data \
-              ${{ env.IMAGE_NAME }}:latest
-            
-            # 6. Cleanup unused images to save disk space on the micro instance
-            docker image prune -f
-            
+      - name: Pull new image
+        shell: pwsh
+        run: docker pull ${{ env.IMAGE_NAME }}:latest
+
+      - name: Stop and remove old container
+        shell: pwsh
+        run: |
+          docker stop $env:CONTAINER_NAME 2>$null
+          docker rm   $env:CONTAINER_NAME 2>$null
+          exit 0   # ignore failures if container absent
+
+      - name: Run new container
+        shell: pwsh
+        run: |
+          docker run -d `
+            --name $env:CONTAINER_NAME `
+            --restart unless-stopped `
+            --env-file $env:ENV_FILE `
+            -v "${env:DATA_VOLUME}:/app/data" `
+            ${{ env.IMAGE_NAME }}:latest
+
+      - name: Prune unused images
+        shell: pwsh
+        run: docker image prune -f
+
