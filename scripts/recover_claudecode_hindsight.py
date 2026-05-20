@@ -330,6 +330,16 @@ async def recover(
     if dry_run:
         return
 
+    await ingest_sessions(sessions)
+
+
+async def ingest_sessions(
+    sessions: List[Tuple[str, str, datetime, str]],
+) -> List[str]:
+    """POST parsed sessions to Hindsight. Returns list of session IDs successfully enqueued."""
+    if not sessions:
+        return []
+    enqueued: List[str] = []
     hindsight = HindsightBackend(url=HINDSIGHT_URL)
     try:
         logger.info("Ensuring '%s' bank exists...", BANK_ID)
@@ -363,6 +373,7 @@ async def recover(
                     "session_start": first_ts.isoformat(),
                 },
             )
+            enqueued.append(session_id)
             if i % 25 == 0:
                 logger.info("  enqueued %d/%d", i, len(sessions))
 
@@ -370,6 +381,7 @@ async def recover(
     finally:
         await hindsight.aclose()
     logger.info("Done. Watch Hindsight container logs for ingestion progress; check pending_consolidation to confirm settled.")
+    return enqueued
 
 
 if __name__ == "__main__":
