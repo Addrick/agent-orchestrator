@@ -121,13 +121,33 @@ async def _post_retain(
 ) -> Dict[str, Any]:
     """Create bank if missing + fire async retain. Returns sizing info."""
     qid = q["question_id"]
-    if not await _bank_exists(client, bank):
-        await client.acreate_bank(
-            bank,
-            retain_mission=retain_mission,
-            reflect_mission=reflect_mission,
+    # Always call acreate_bank (it now handles 409 via PATCH internally).
+    # Skipping when the bank already exists is what silently dropped the
+    # v2a mission on 2026-05-17: an earlier failed attempt created the
+    # bank with no mission, and subsequent runs took the early-return.
+    existed = await _bank_exists(client, bank)
+    await client.acreate_bank(
+        bank,
+        retain_mission=retain_mission,
+        reflect_mission=reflect_mission,
+    )
+    action = "patched" if existed else "created"
+    print(f"  [{qid}] {action} bank '{bank}'", flush=True)
+    # Smoke verify: read back config and check mission landed. Mission
+    # only affects extraction, not recall — so a silent miss now means
+    # the whole ingest is wasted hours.
+    cfg = await client._request(
+        "GET", f"{HINDSIGHT_API_PREFIX}/banks/{bank}/config",
+    )
+    actual_mission = (cfg.get("config") or {}).get("retain_mission")
+    if actual_mission != retain_mission:
+        raise RuntimeError(
+            f"[{qid}] retain_mission did not persist on {bank!r}. "
+            f"Expected {retain_mission[:60]!r}..., "
+            f"got {(actual_mission or '<null>')[:60]!r}. "
+            f"Aborting ingest before wasting LLM cost."
         )
-        print(f"  [{qid}] created bank '{bank}'", flush=True)
+    print(f"  [{qid}] mission verified on {bank}", flush=True)
     items = _build_items(q)
     total_chars = sum(len(i["content"]) for i in items)
     await client.aretain(bank, items, async_=True)

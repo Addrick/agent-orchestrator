@@ -134,9 +134,15 @@ class HindsightRESTClient:
         try:
             await self._request("PUT", f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}", json=payload)
         except HindsightAPIError as e:
-            if e.status_code == 409:  # already exists
-                return
-            raise
+            if e.status_code != 409:
+                raise
+            # Bank exists. PUT is create-only; mission fields would be
+            # silently dropped. Re-issue as PATCH so retain_mission /
+            # reflect_mission / observations_mission actually update.
+            # PATCH /banks/{id} accepts the same CreateBankRequest body.
+            await self._request(
+                "PATCH", f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}", json=payload,
+            )
 
     async def adelete_bank(self, bank_id: str) -> None:
         await self._request("DELETE", f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}")
