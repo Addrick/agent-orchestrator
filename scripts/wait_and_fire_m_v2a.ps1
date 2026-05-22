@@ -29,14 +29,17 @@ Write-Host "Waiting for $sBank retain queue to drain (poll every ${pollSec}s)...
 while ($true) {
     try {
         $stats = Invoke-RestMethod "$base/v1/default/banks/$sBank/stats" -TimeoutSec 15
-        # Direct access: missing props return $null, [int]$null is 0 in PS5.1.
-        $pending    = [int]$stats.operations.pending
-        $processing = [int]$stats.operations.processing
-        $completed  = [int]$stats.operations.completed
-        $busy  = $pending + $processing
+        # API shape: top-level pending_operations / pending_consolidation; per-status
+        # counts under operations_by_status (no "processing" key when zero).
+        # Missing props -> $null, [int]$null is 0 in PS5.1.
+        $pending     = [int]$stats.pending_operations
+        $processing  = [int]$stats.operations_by_status.processing
+        $completed   = [int]$stats.operations_by_status.completed
+        $pendingCons = [int]$stats.pending_consolidation
+        $busy  = $pending + $processing + $pendingCons
         $facts = [int]$stats.total_nodes
         $ts = Get-Date -Format 'HH:mm:ss'
-        Write-Host ("  [{0}] done={1} busy={2}p+{3}r facts={4}" -f $ts, $completed, $pending, $processing, $facts)
+        Write-Host ("  [{0}] done={1} busy={2}p+{3}r+{4}cons facts={5}" -f $ts, $completed, $pending, $processing, $pendingCons, $facts)
         if ($busy -eq 0 -and $completed -gt 0) { break }
     } catch {
         Write-Warning ("poll error: {0}" -f $_.Exception.Message)
