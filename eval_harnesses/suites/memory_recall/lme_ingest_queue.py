@@ -21,7 +21,7 @@ import asyncio
 import json
 import sys
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -44,6 +44,62 @@ def _fmt_dur(s: float) -> str:
     if s < 3600:
         return f"{s/60:.1f}m"
     return f"{s/3600:.1f}h"
+
+
+def _fmt_wallclock(seconds_from_now: float) -> str:
+    """Absolute local finish time, e.g. '2026-05-23 02:14'."""
+    if seconds_from_now <= 0 or seconds_from_now != seconds_from_now:  # NaN guard
+        return "?"
+    return (datetime.now() + timedelta(seconds=seconds_from_now)).strftime("%Y-%m-%d %H:%M")
+
+
+def _load_history(path: Optional[Path]) -> List[Dict[str, Any]]:
+    """Load cross-run JSONL history of completed bank ingests."""
+    if not path or not path.exists():
+        return []
+    out: List[Dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def _append_history(path: Optional[Path], entry: Dict[str, Any]) -> None:
+    if not path:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+def _history_chars_per_sec(
+    history: List[Dict[str, Any]],
+    hindsight_url: str,
+    model: Optional[str] = None,
+) -> Optional[float]:
+    """Average chars/sec from prior runs with matching backend (+model if given).
+
+    Filters strictly so a 4090-local-llama history doesn't poison a Granite
+    estimate. Returns None if no matching samples.
+    """
+    samples = []
+    for h in history:
+        if h.get("hindsight_url") != hindsight_url:
+            continue
+        if model is not None and h.get("model") != model:
+            continue
+        secs = h.get("seconds", 0)
+        chars = h.get("chars", 0)
+        if secs > 0 and chars > 0:
+            samples.append(chars / secs)
+    if not samples:
+        return None
+    return sum(samples) / len(samples)
 
 
 async def _ops_counts(client: HindsightRESTClient, bank: str) -> Dict[str, int]:
@@ -172,27 +228,36 @@ def _save_state(path: Optional[Path], state: Dict[str, Any]) -> None:
     path.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
-def _eta_remaining(
+def _eta_remaining_seconds(
     state: Dict[str, Any], queued_left: int, current_elapsed: float,
     current_remaining: Optional[float] = None,
-) -> str:
-    """Rough ETA: avg observed bank duration × remaining banks.
+    history_avg_seconds: Optional[float] = None,
+) -> tuple[Optional[float], bool]:
+    """Estimate seconds remaining for the whole run. Returns (seconds, bootstrap).
 
-    Bootstrap when no completed samples: estimate per-bank duration as
-    current bank's projected total (elapsed + remaining). Less reliable
-    until first bank finishes but better than 'unknown'.
+    Priority: in-run completed bank durations > cross-run history avg >
+    project from current bank's own remaining. `bootstrap=True` flags low-
+    confidence estimates (rendered with a trailing '~').
     """
     durations = list(state.get("per_bank_seconds", {}).values())
     if durations:
         avg = sum(durations) / len(durations)
         cur_remaining = max(avg - current_elapsed, 0.0)
-        total = cur_remaining + queued_left * avg
-        return _fmt_dur(total)
-    # Bootstrap: project from current bank
+        return cur_remaining + queued_left * avg, False
+    if history_avg_seconds is not None:
+        cur_remaining = max(history_avg_seconds - current_elapsed, 0.0)
+        return cur_remaining + queued_left * history_avg_seconds, True
     if current_remaining is None:
-        return "unknown"
+        return None, True
     est_avg = current_elapsed + current_remaining
-    return _fmt_dur(current_remaining + queued_left * est_avg) + "~"
+    return current_remaining + queued_left * est_avg, True
+
+
+def _fmt_eta(seconds: Optional[float], bootstrap: bool) -> str:
+    if seconds is None:
+        return "unknown"
+    suffix = "~" if bootstrap else ""
+    return f"{_fmt_dur(seconds)}{suffix} (eta {_fmt_wallclock(seconds)})"
 
 
 async def _ingest_one(
@@ -207,27 +272,52 @@ async def _ingest_one(
     queued_left: int,
     retain_mission: str = DEFAULT_RETAIN_MISSION,
     reflect_mission: str = DEFAULT_REFLECT_MISSION,
+    history_avg_seconds: Optional[float] = None,
+    history_path: Optional[Path] = None,
+    hindsight_url: str = "",
+    llm_model: str = "",
+    already_fired: Optional[set] = None,
 ) -> float:
-    """Drive one bank to completion; fire next when close to drain. Returns seconds."""
+    """Drive one bank to completion; fire next when close to drain. Returns seconds.
+
+    `already_fired` (shared across iterations) tracks banks whose retain was
+    POSTed during the previous bank's overlap window, so we don't double-fire.
+    """
     print(f"\n=== qid={qid} [{q['question_type']}] bank={bank} ===", flush=True)
-    # Retry retain on transient 5xx (observed: dupe-500 during overlap window)
-    sizing = None
-    for attempt in range(5):
-        try:
-            sizing = await _post_retain(
-                client, bank, q,
-                retain_mission=retain_mission,
-                reflect_mission=reflect_mission,
-            )
-            break
-        except HindsightAPIError as e:
-            if 500 <= e.status_code < 600 and attempt < 4:
-                wait = 30 * (attempt + 1)
-                print(f"  [{qid}] retain {e.status_code} (attempt {attempt+1}/5); "
-                      f"sleeping {wait}s", file=sys.stderr, flush=True)
-                await asyncio.sleep(wait)
-                continue
-            raise
+    sizing: Optional[Dict[str, Any]] = None
+    # Resume-case detection: if the bank already has retain ops queued
+    # (from a prior crashed/restarted run), don't re-POST aretain — it'd
+    # duplicate the entire session set.
+    remote_busy = 0
+    if await _bank_exists(client, bank):
+        ops_pre = await _ops_counts(client, bank)
+        remote_busy = max(ops_pre.get("pending", 0), 0) + max(ops_pre.get("running", 0), 0)
+    skip_post = (already_fired is not None and bank in already_fired) or remote_busy > 0
+    if skip_post:
+        items = _build_items(q)
+        sizing = {"sessions": len(items),
+                  "chars": sum(len(i["content"]) for i in items)}
+        reason = ("overlap-fired earlier" if (already_fired and bank in already_fired)
+                  else f"bank has {remote_busy} ops already queued")
+        print(f"  [{qid}] skipping aretain ({reason}); resuming poll", flush=True)
+    else:
+        # Retry retain on transient 5xx (observed: dupe-500 during overlap window)
+        for attempt in range(5):
+            try:
+                sizing = await _post_retain(
+                    client, bank, q,
+                    retain_mission=retain_mission,
+                    reflect_mission=reflect_mission,
+                )
+                break
+            except HindsightAPIError as e:
+                if 500 <= e.status_code < 600 and attempt < 4:
+                    wait = 30 * (attempt + 1)
+                    print(f"  [{qid}] retain {e.status_code} (attempt {attempt+1}/5); "
+                          f"sleeping {wait}s", file=sys.stderr, flush=True)
+                    await asyncio.sleep(wait)
+                    continue
+                raise
     if sizing is None:
         raise RuntimeError(f"retain failed for {qid} after retries")
 
@@ -242,18 +332,25 @@ async def _ingest_one(
         elapsed = time.monotonic() - t0
         rate = completed / max(elapsed / 60, 0.001)  # ops/min
         stats = await _bank_stats(client, bank)
-        nc = stats.get("node_counts", {}) or {}
-        facts = sum(nc.values()) if nc else 0
+        # HS schema: prefer total_nodes (current); fall back to legacy node_counts.
+        facts = stats.get("total_nodes")
+        if facts is None:
+            nc = stats.get("nodes_by_fact_type") or stats.get("node_counts") or {}
+            facts = sum(nc.values()) if nc else 0
+        docs_done = stats.get("total_documents", 0)
 
         # progress line — print every ~minute or on completion delta
         if elapsed - last_print >= 60 or completed != last_completed or busy == 0:
             eta_self_s = pending / max(rate, 0.01) * 60 if pending else 0.0
-            eta_self = _fmt_dur(eta_self_s)
-            eta_total = _eta_remaining(state, queued_left, elapsed, eta_self_s)
+            eta_total_s, bootstrap = _eta_remaining_seconds(
+                state, queued_left, elapsed, eta_self_s,
+                history_avg_seconds=history_avg_seconds,
+            )
             print(
                 f"  [{qid}] ops: {completed} done / {busy} busy ({pending}p+{running}r) "
-                f"| facts: {facts} | elapsed {_fmt_dur(elapsed)} "
-                f"| rate {rate:.1f}/m | eta bank {eta_self} | eta total {eta_total}",
+                f"| docs: {docs_done} | facts: {facts} | elapsed {_fmt_dur(elapsed)} "
+                f"| rate {rate:.1f}/m | eta bank {_fmt_dur(eta_self_s)} "
+                f"| eta total {_fmt_eta(eta_total_s, bootstrap)}",
                 flush=True,
             )
             last_print = elapsed
@@ -274,28 +371,44 @@ async def _ingest_one(
                     retain_mission=retain_mission,
                     reflect_mission=reflect_mission,
                 )
+                if already_fired is not None:
+                    already_fired.add(nb)
             except Exception as e:
                 print(f"  [WARN] failed to fire next {nq['question_id']}: {e}",
                       file=sys.stderr, flush=True)
             next_fired = True
 
-        if busy == 0 and completed > 0:
-            # retain queue drained; consolidation may continue in background
+        # Drain condition: ops queue empty AND at least one document extracted
+        # (or completed status incremented, for legacy HS). `completed > 0`
+        # alone was broken on current HS where batch_retain never enters the
+        # 'completed' bucket — relying on docs_done from bank stats instead.
+        if busy == 0 and (completed > 0 or docs_done > 0):
             elapsed_final = time.monotonic() - t0
             state["per_bank_seconds"][bank] = elapsed_final
-            # small delay to let consolidator materialize a few counts
             await asyncio.sleep(5)
             stats = await _bank_stats(client, bank)
-            facts = sum((stats.get("node_counts") or {}).values())
+            facts = stats.get("total_nodes")
+            if facts is None:
+                nc = stats.get("nodes_by_fact_type") or stats.get("node_counts") or {}
+                facts = sum(nc.values()) if nc else 0
+            docs_done = stats.get("total_documents", 0)
             pending_c = stats.get("pending_consolidation", 0)
             print(
                 f"  [{qid}] RETAIN DRAINED in {_fmt_dur(elapsed_final)} | "
-                f"facts so far: {facts} (consolidating: {pending_c}) | "
+                f"docs: {docs_done} facts: {facts} (consolidating: {pending_c}) | "
                 f"moving on; consolidation continues in background",
                 flush=True,
             )
             state.setdefault("completed", []).append(qid)
             _save_state(state_path, state)
+            _append_history(history_path, {
+                "qid": qid, "qtype": q.get("question_type"),
+                "bank": bank, "sessions": sizing["sessions"],
+                "chars": sizing["chars"], "seconds": elapsed_final,
+                "finished_at": datetime.now().isoformat(timespec="seconds"),
+                "hindsight_url": hindsight_url, "model": llm_model,
+                "retain_mission": retain_mission[:200],
+            })
             return elapsed_final
 
         await asyncio.sleep(POLL_INTERVAL_S)
@@ -308,6 +421,9 @@ async def main(
     bank_suffix: str = "",
     retain_mission: str = DEFAULT_RETAIN_MISSION,
     reflect_mission: str = DEFAULT_REFLECT_MISSION,
+    hindsight_url: Optional[str] = None,
+    history_path: Optional[Path] = None,
+    llm_model: str = "",
 ) -> int:
     src = TIER_FILES[tier]
     if not src.exists():
@@ -322,7 +438,24 @@ async def main(
     state = _load_state(state_path)
     already_done = set(state.get("completed", []))
 
-    client = HindsightRESTClient(HINDSIGHT_URL, timeout=300.0)
+    url = hindsight_url or HINDSIGHT_URL
+    print(f"hindsight: {url}  | model tag: {llm_model or '<unset>'}", flush=True)
+    client = HindsightRESTClient(url, timeout=300.0)
+
+    history = _load_history(history_path)
+    history_avg_chars_per_sec = _history_chars_per_sec(
+        history, url, model=llm_model or None,
+    )
+    if history_avg_chars_per_sec:
+        print(f"history: {len(history)} entries total; "
+              f"avg {history_avg_chars_per_sec:.0f} chars/sec for "
+              f"{url} + {llm_model or '<any model>'}", flush=True)
+    elif history:
+        print(f"history: {len(history)} entries total; "
+              f"no matching samples for {url} + {llm_model or '<any model>'}",
+              flush=True)
+    else:
+        print(f"history: empty (file: {history_path})", flush=True)
 
     # Filter: skip qids whose bank already has facts and no pending ops
     queue: List[Dict[str, Any]] = []
@@ -343,14 +476,28 @@ async def main(
         queue.append({"qid": qid, "q": by_id[qid], "bank": bank})
 
     print(f"\n=== queue: {len(queue)} banks to ingest ===", flush=True)
+    total_chars = 0
     for i, item in enumerate(queue):
-        print(f"  {i+1:>2}. {item['qid']} [{item['q']['question_type']}] -> {item['bank']}",
-              flush=True)
+        ic = sum(len(_session_to_text(t)) for t in item["q"]["haystack_sessions"])
+        total_chars += ic
+        print(f"  {i+1:>2}. {item['qid']} [{item['q']['question_type']}] -> {item['bank']} "
+              f"(~{ic/1e6:.1f}M chars)", flush=True)
     if not queue:
         print("nothing to do.", flush=True)
         return 0
 
+    # Up-front estimate from history (only when we have prior data)
+    history_avg_seconds: Optional[float] = None
+    if history_avg_chars_per_sec:
+        est_total_s = total_chars / history_avg_chars_per_sec
+        history_avg_seconds = est_total_s / len(queue)
+        print(f"up-front estimate: ~{_fmt_dur(est_total_s)} "
+              f"(finishes ~{_fmt_wallclock(est_total_s)}) "
+              f"based on history avg {history_avg_chars_per_sec:.0f} chars/sec",
+              flush=True)
+
     run_t0 = time.monotonic()
+    overlap_fired: set = set()
     for i, item in enumerate(queue):
         nxt = queue[i + 1] if i + 1 < len(queue) else None
         await _ingest_one(
@@ -360,6 +507,11 @@ async def main(
             queued_left=len(queue) - i - 1,
             retain_mission=retain_mission,
             reflect_mission=reflect_mission,
+            history_avg_seconds=history_avg_seconds,
+            history_path=history_path,
+            hindsight_url=url,
+            llm_model=llm_model,
+            already_fired=overlap_fired,
         )
 
     total = time.monotonic() - run_t0
@@ -384,6 +536,14 @@ if __name__ == "__main__":
     ap.add_argument("--reflect-mission", default=DEFAULT_REFLECT_MISSION)
     ap.add_argument("--retain-mission-file", type=Path, default=None,
                     help="read retain_mission from file (overrides --retain-mission)")
+    ap.add_argument("--hindsight-url", default=None,
+                    help="override HINDSIGHT_URL (e.g. http://127.0.0.1:8888 for granite stack)")
+    ap.add_argument("--history", type=Path,
+                    default=Path(".eval_cache/lme_ingest_history.jsonl"),
+                    help="append-only JSONL of completed bank ingests across runs")
+    ap.add_argument("--llm-model", default="",
+                    help="tag stored in history for matching prior runs (e.g. 'granite', "
+                         "'us.anthropic.claude-sonnet-4-6'). Does NOT change what Hindsight uses.")
     args = ap.parse_args()
     qlist = [q.strip() for q in args.qids.split(",") if q.strip()]
     retain_mission = args.retain_mission
@@ -395,4 +555,7 @@ if __name__ == "__main__":
         bank_suffix=args.bank_suffix,
         retain_mission=retain_mission,
         reflect_mission=args.reflect_mission,
+        hindsight_url=args.hindsight_url,
+        history_path=args.history,
+        llm_model=args.llm_model,
     )))

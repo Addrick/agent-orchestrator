@@ -1,0 +1,75 @@
+# Standalone Hindsight stack dedicated to the LongMemEval Granite sweep.
+#
+# Runs in parallel with prod (docker-compose.hindsight.yml) and the Bedrock
+# sweep stack (docker-compose.hindsight.sweep.yml). Different container
+# names, separate data volume, separate host ports, own network.
+#
+# Granite extraction LLM is reached over the LAN at 10.0.0.69:5002 (OAI-
+# compatible /v1). The hindsight container needs egress for this, so we
+# do NOT mark the internal network `internal: true` (unlike sweep).
+#
+# Up — local (.67) default ports:
+#   GRANITE_MODEL_ID=<id from /v1/models> \
+#     docker compose -f docker-compose.hindsight.granite.yml up -d
+#
+# Up — on .70 (prod uses 8888, sweep 8889; granite -> 8890):
+#   GRANITE_MODEL_ID=<id> GRANITE_API_PORT=8890 GRANITE_CP_PORT=10002 \
+#     docker compose -f docker-compose.hindsight.granite.yml up -d
+#
+# Default host ports (overridable via env):
+#   8888  — API
+#   10001 — Control Plane UI
+#
+# Tear down (preserves data volume):
+#   docker compose -f docker-compose.hindsight.granite.yml down
+#
+# Tear down + wipe granite data:
+#   docker compose -f docker-compose.hindsight.granite.yml down -v
+services:
+  hindsight-granite:
+    # Same pinned digest as prod (.70) — keep them in lockstep so
+    # granite-vs-bedrock results aren't confounded by a Hindsight delta.
+    image: ghcr.io/vectorize-io/hindsight@sha256:2b92c62863a0841e2a153907462987f6d6f1d7bf9ae07a8ad3d07430eb175217
+    container_name: hindsight-granite-memory
+    restart: unless-stopped
+    networks:
+      - hindsight-granite-net
+    environment:
+      - HINDSIGHT_API_LLM_PROVIDER=openai
+      - HINDSIGHT_API_LLM_BASE_URL=http://10.0.0.69:5002/v1
+      - HINDSIGHT_API_LLM_MODEL=${GRANITE_MODEL_ID:-granite}
+      - HINDSIGHT_API_LLM_API_KEY=unused
+      - HINDSIGHT_API_LLM_MAX_CONCURRENT=${GRANITE_LLM_CONCURRENCY:-20}
+      # HS default is 120s; Granite-8B on llama-server takes 100-275s per
+      # retain call. Bump well above worst-observed so retries don't pile up.
+      - HINDSIGHT_API_LLM_TIMEOUT=${GRANITE_LLM_TIMEOUT:-600}
+      - HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS=4096
+      - HINDSIGHT_API_MAX_CONTEXT_TOKENS=16384
+    ports:
+      # API port: 8888 default; set GRANITE_API_PORT=8890 on .70 to avoid
+      # collision with prod (8888) and bedrock sweep (8889).
+      # Bind: 127.0.0.1 default (loopback); set GRANITE_BIND=0.0.0.0 on .70
+      # so remote ingest from .67 can reach the API.
+      - "${GRANITE_BIND:-127.0.0.1}:${GRANITE_API_PORT:-8888}:8888"
+      - "${GRANITE_BIND:-127.0.0.1}:${GRANITE_CP_PORT:-10001}:9999"
+    volumes:
+      - hindsight-granite-data:/home/hindsight/.pg0
+      - hindsight-granite-cache:/home/hindsight/.cache
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8888/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  hindsight-granite-data:
+  hindsight-granite-cache:
+
+networks:
+  hindsight-granite-net:
+    # Default bridge — needs egress to reach 10.0.0.69:5002 for Granite.
