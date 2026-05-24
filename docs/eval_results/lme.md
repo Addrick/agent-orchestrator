@@ -29,7 +29,10 @@ All judging via local `gemini` CLI subprocess (paid OAuth tier) over the ACP tra
 | 11 | gpt4_61e13b3c | temporal-reasoning | M | gpt4-backbone | `lme_m_gpt4_61e13b3c` | 12,467 | — | 12 | 1.00 | ✅ | "Approximately three weeks." (GPT-4 generated haystack) |
 | 12 | gpt4_68e94287 | temporal-reasoning | M | gpt4-backbone | `lme_m_gpt4_68e94287` | 11,362 | — | 19 | 1.00 | ✅ | vegan-chili-post ordering |
 | 13 | 6aeb4375_abs | knowledge-update | M | abstention | `lme_m_6aeb4375_abs` | 11,856 | — | 15 | 1.00 | ✅ | correctly abstained — "no mention of how many Italian restaurants" |
-| 14 | 91b15a6e | multi-session | M | v2a | `lme_m_91b15a6e_v2a` | 11,150 | 11.1 h | 17 | 1.00 | ✅ | no regression from baseline |
+| 14 | 91b15a6e | multi-session | M | v2a | `lme_m_91b15a6e_v2a` | 15,792 | 11.1 h | 16 | 1.00 | ✅ | no regression from baseline; re-judged 2026-05-24 post-consolidation (was 11,150 facts pre-drain) |
+| 15 | 1c549ce4 | multi-session | S | v3a verbose | `lme_s_1c549ce4_v3a` | 1,280 | — | 7 | 1.00 | ✅ | positive control held under verbose; fewer facts in top-K context (20 → 7) because verbose facts are longer |
+| 16 | 1c0ddc50 | single-session-preference | S | v3a verbose | `lme_s_1c0ddc50_v3a` | 1,322 | — | 6 | 0.00 | ❌ | **regression** — verbose dropped session_hit from 100 % (baseline & v2a) to 0 %. Longer facts evict gold-session facts from the top-K window; failure is now retrieval-miss, not just ranking |
+| 17 | 91b15a6e | multi-session | M | v3a verbose | `lme_m_91b15a6e_v3a` | 11,598 | — | 4 | 1.00 | ✅ | held at M-tier; n_retrieved dropped 19 → 4 (same verbose-fact-length effect) |
 
 ## Aggregate scoring
 
@@ -37,19 +40,21 @@ All judging via local `gemini` CLI subprocess (paid OAuth tier) over the ACP tra
 |-------|--:|-------------:|-----------:|
 | S baseline | 5 | 100.0% | 80.0% |
 | S v2a | 1 | 100.0% | 0.0% |
+| S v3a verbose | 2 | 50.0% | 50.0% |
 | M baseline | 7 | 100.0% | 100.0% |
 | M v2a | 1 | 100.0% | 100.0% |
-| **All** | **14** | **100.0%** | **92.9%** |
+| M v3a verbose | 1 | 100.0% | 100.0% |
+| **All** | **17** | **94.1%** | **82.4%** |
 
 Per-qtype across all rows:
 
 | qtype | n | judge_yes% |
 |-------|--:|-----------:|
-| multi-session | 4 | 100.0% |
+| multi-session | 6 | 100.0% |
 | temporal-reasoning | 4 | 100.0% |
 | knowledge-update | 3 | 100.0% |
 | single-session-assistant | 1 | 100.0% |
-| single-session-preference | 2 | 0.0% |
+| single-session-preference | 3 | 0.0% |
 
 ## Findings
 
@@ -58,6 +63,7 @@ Per-qtype across all rows:
 - **The v2a retain-mission A/B did not move the dial on 1c0ddc50.** Re-ingesting under a mission that explicitly asks for paired specific+general descriptors produced 1,613 facts (vs. 1,293 baseline — 25% more) and pulled in different surface text, but the predicted answer reverted to the same generic "true crime / self-improvement" cluster. Failure is structural to the bi-encoder retrieval layer; mission-level prompting is the wrong lever.
 - **v2a did not regress the multi-session M-tier case** (`91b15a6e_v2a`, judge=yes). So the variant mission is safe but inert for this failure mode — a clean negative result.
 - **M-tier scaled without degradation.** Same precision/recall envelope at 10× haystack on the cases that pass at S-tier. Per-question ingest cost rises ~10× (S ≈ 30–80 min, M ≈ 6+ h on Gemini embeddings), but recall quality is preserved.
+- **v3a verbose extraction makes `1c0ddc50` strictly worse.** Verbose mode emits longer facts, so fewer fit in the `max_tokens=512` top-K context window (S-tier `n_retrieved` 20 → 7, M-tier 19 → 4). On the passing cases (`1c549ce4` S+M, `91b15a6e` M) the gold sessions still surface and the answer is unchanged. On `1c0ddc50`, the truncation pushes gold-session facts out of top-K entirely — `session_hit` collapses from 100 % to 0 %. So verbose: (a) confirms density isn't the lever for the structural failure (consistent with v2a result), and (b) reveals a new retrieval-side regression mode driven by fact length × context budget. Future ingest-side experiments should re-tune `top_k` or `max_tokens` rather than assume the baseline context budget is comparable across extraction modes.
 
 ## Next actions targeted at 1c0ddc50
 

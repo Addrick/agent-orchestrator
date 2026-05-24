@@ -343,38 +343,24 @@ def _hit_session_id(hit: Dict[str, Any]) -> Optional[str]:
     return md.get("session_id")
 
 
-async def _score_one(
-    client: HindsightRESTClient, q: Dict[str, Any], bank: str,
-    top_k: int, max_tokens: int, model_answer: str, model_judge: str,
+def _score_at_k(
+    q: Dict[str, Any], hits: List[Dict[str, Any]], gold_sessions: set,
+    k: int, model_answer: str, model_judge: str,
 ) -> Dict[str, Any]:
-    qid = q["question_id"]
-    gold_sessions = set(q["answer_session_ids"])
-
-    t0 = time.monotonic()
-    hits = await client.arecall(
-        bank, q["question"], tags=[qid], max_tokens=max_tokens,
-    )
-    t_recall = time.monotonic() - t0
-    hits = hits or []
-    top = hits[:top_k]
-
+    """Answer + judge given a precomputed hit list, sliced to K. CC-1."""
+    top = hits[:k]
     retrieved_sids = [s for s in (_hit_session_id(h) for h in top) if s]
     unique_sids = list(dict.fromkeys(retrieved_sids))
-    sess_hit_rate = (
-        len(set(unique_sids) & gold_sessions) / max(len(gold_sessions), 1)
-    )
-
-    context = "\n".join(f"- {_fact_text(h)}" for h in top if _fact_text(h))
+    facts_in_ctx = [_fact_text(h) for h in top if _fact_text(h)]
+    context = "\n".join(f"- {t}" for t in facts_in_ctx)
     ans_prompt = ANSWER_PROMPT.format(context=context, question=q["question"])
 
     t0 = time.monotonic()
     try:
         predicted = _gemini_call(ans_prompt, model=model_answer)
-    except Exception as e:
-        predicted = ""
-        ans_err = str(e)[:200]
-    else:
         ans_err = None
+    except Exception as e:
+        predicted, ans_err = "", str(e)[:200]
     t_answer = time.monotonic() - t0
 
     judge_prompt = JUDGE_PROMPT.format(
@@ -383,25 +369,19 @@ async def _score_one(
     t0 = time.monotonic()
     try:
         judge_raw = _gemini_call(judge_prompt, model=model_judge)
-    except Exception as e:
-        judge_raw = ""
-        judge_err = str(e)[:200]
-    else:
         judge_err = None
+    except Exception as e:
+        judge_raw, judge_err = "", str(e)[:200]
     t_judge = time.monotonic() - t0
 
     verdict = _parse_verdict(judge_raw)
     return {
-        "qid": qid,
-        "question_type": q["question_type"],
-        "bank": bank,
-        "question": q["question"],
-        "gold_answer": q["answer"],
-        "n_facts_retrieved": len(hits),
-        "top_k": top_k,
+        "k": k,
+        "n_facts_in_context": len(facts_in_ctx),
         "retrieved_session_ids": unique_sids,
-        "gold_session_ids": sorted(gold_sessions),
-        "session_hit_rate": sess_hit_rate,
+        "session_hit_rate": (
+            len(set(unique_sids) & gold_sessions) / max(len(gold_sessions), 1)
+        ),
         "session_hit_any": bool(set(unique_sids) & gold_sessions),
         "predicted_answer": predicted,
         "answer_error": ans_err,
@@ -412,14 +392,78 @@ async def _score_one(
             "no" if verdict is False else
             "unparseable"
         ),
-        "judge_label": verdict,  # True/False/None
+        "judge_label": verdict,
+        "timings_s": {"answer": round(t_answer, 2), "judge": round(t_judge, 2)},
+    }
+
+
+# CC-1 default K sweep — precision-decay / recall-climb curve
+DEFAULT_K_SWEEP = (1, 3, 5, 10, 20)
+
+
+async def _score_one(
+    client: HindsightRESTClient, q: Dict[str, Any], bank: str,
+    top_k: int, max_tokens: int, model_answer: str, model_judge: str,
+    per_k_sweep: bool = False,
+    k_values: tuple = DEFAULT_K_SWEEP,
+) -> Dict[str, Any]:
+    qid = q["question_id"]
+    gold_sessions = set(q["answer_session_ids"])
+
+    t0 = time.monotonic()
+    hits = await client.arecall(
+        bank, q["question"], tags=[qid], max_tokens=max_tokens,
+    )
+    t_recall = time.monotonic() - t0
+    hits = hits or []
+
+    # Primary score at the user-specified top_k (preserves flat-field shape)
+    primary = _score_at_k(q, hits, gold_sessions, top_k, model_answer, model_judge)
+
+    per_k: Dict[str, Dict[str, Any]] = {}
+    if per_k_sweep:
+        # Include the user's top_k in the sweep so the matrix is comparable.
+        ks = sorted(set(k_values) | {top_k})
+        for k in ks:
+            if k == top_k:
+                per_k[str(k)] = {
+                    kk: vv for kk, vv in primary.items()
+                    if kk not in ("k",)
+                }
+            else:
+                per_k[str(k)] = {
+                    kk: vv for kk, vv in
+                    _score_at_k(q, hits, gold_sessions, k,
+                                model_answer, model_judge).items()
+                    if kk not in ("k",)
+                }
+
+    return {
+        "qid": qid,
+        "question_type": q["question_type"],
+        "bank": bank,
+        "question": q["question"],
+        "gold_answer": q["answer"],
+        "n_facts_retrieved": len(hits),
+        "top_k": top_k,
+        "retrieved_session_ids": primary["retrieved_session_ids"],
+        "gold_session_ids": sorted(gold_sessions),
+        "session_hit_rate": primary["session_hit_rate"],
+        "session_hit_any": primary["session_hit_any"],
+        "predicted_answer": primary["predicted_answer"],
+        "answer_error": primary["answer_error"],
+        "judge_raw": primary["judge_raw"],
+        "judge_error": primary["judge_error"],
+        "judge_verdict": primary["judge_verdict"],
+        "judge_label": primary["judge_label"],
         "answer_model": model_answer,
         "judge_model": model_judge,
         "timings_s": {
             "recall": round(t_recall, 2),
-            "answer": round(t_answer, 2),
-            "judge": round(t_judge, 2),
+            "answer": primary["timings_s"]["answer"],
+            "judge": primary["timings_s"]["judge"],
         },
+        **({"per_k": per_k} if per_k_sweep else {}),
     }
 
 
@@ -452,6 +496,7 @@ async def main(
     tier: str, qids: List[str], bank_prefix: str,
     model_answer: str, model_judge: str, top_k: int, max_tokens: int,
     out: Path, bank_suffix: str = "",
+    per_k_sweep: bool = False,
 ) -> int:
     src = TIER_FILES[tier]
     if not src.exists():
@@ -470,6 +515,7 @@ async def main(
         print(f"\n--- {qid} [{q['question_type']}] bank={bank} ---", file=sys.stderr)
         r = await _score_one(
             client, q, bank, top_k, max_tokens, model_answer, model_judge,
+            per_k_sweep=per_k_sweep,
         )
         results.append(r)
         flag_sess = "OK" if r["session_hit_any"] else "MISS"
@@ -507,10 +553,14 @@ if __name__ == "__main__":
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--bank-suffix", default="",
                     help="appended to bank name (e.g. '_v2a' for variant)")
+    ap.add_argument("--per-k-sweep", action="store_true",
+                    help="CC-1: also score at K in {1,3,5,10,20} and write "
+                         "per_k.{K} into each row (5x answer+judge LLM calls)")
     args = ap.parse_args()
     qids_list = [q.strip() for q in args.qids.split(",") if q.strip()]
     raise SystemExit(asyncio.run(main(
         args.tier, qids_list, args.bank_prefix,
         args.model_answer, args.model_judge, args.top_k, args.max_tokens,
         args.out, bank_suffix=args.bank_suffix,
+        per_k_sweep=args.per_k_sweep,
     )))

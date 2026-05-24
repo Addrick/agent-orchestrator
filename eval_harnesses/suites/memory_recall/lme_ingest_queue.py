@@ -118,16 +118,32 @@ async def _post_retain(
     client: HindsightRESTClient, bank: str, q: Dict[str, Any],
     retain_mission: str = DEFAULT_RETAIN_MISSION,
     reflect_mission: str = DEFAULT_REFLECT_MISSION,
+    retain_extraction_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Create bank if missing + fire async retain. Returns sizing info."""
+    """Create bank if missing + fire async retain. Returns sizing info.
+
+    `acreate_bank` is called unconditionally (it swallows 409). The config
+    patch is also unconditional when `retain_extraction_mode` is set —
+    enforcing the lever on every ingest start avoids drift if a stale
+    auto-created bank already exists with default config.
+    """
     qid = q["question_id"]
-    if not await _bank_exists(client, bank):
-        await client.acreate_bank(
-            bank,
-            retain_mission=retain_mission,
-            reflect_mission=reflect_mission,
-        )
+    pre_existed = await _bank_exists(client, bank)
+    await client.acreate_bank(
+        bank,
+        retain_mission=retain_mission,
+        reflect_mission=reflect_mission,
+    )
+    if not pre_existed:
         print(f"  [{qid}] created bank '{bank}'", flush=True)
+    if retain_extraction_mode is not None:
+        await client.apatch_bank_config(
+            bank, {"retain_extraction_mode": retain_extraction_mode}
+        )
+        print(
+            f"  [{qid}] patched config: retain_extraction_mode={retain_extraction_mode}",
+            flush=True,
+        )
     items = _build_items(q)
     total_chars = sum(len(i["content"]) for i in items)
     await client.aretain(bank, items, async_=True)
@@ -187,6 +203,7 @@ async def _ingest_one(
     queued_left: int,
     retain_mission: str = DEFAULT_RETAIN_MISSION,
     reflect_mission: str = DEFAULT_REFLECT_MISSION,
+    retain_extraction_mode: Optional[str] = None,
 ) -> float:
     """Drive one bank to completion; fire next when close to drain. Returns seconds."""
     print(f"\n=== qid={qid} [{q['question_type']}] bank={bank} ===", flush=True)
@@ -198,6 +215,7 @@ async def _ingest_one(
                 client, bank, q,
                 retain_mission=retain_mission,
                 reflect_mission=reflect_mission,
+                retain_extraction_mode=retain_extraction_mode,
             )
             break
         except HindsightAPIError as e:
@@ -244,7 +262,7 @@ async def _ingest_one(
             nq = queue_next["q"]
             nb = queue_next["bank"]
             print(
-                f"  [{qid}] near-drain (busy={busy} ≤ {overlap_threshold}); "
+                f"  [{qid}] near-drain (busy={busy} <= {overlap_threshold}); "
                 f"firing next [{nq['question_id']}]",
                 flush=True,
             )
@@ -253,6 +271,7 @@ async def _ingest_one(
                     client, nb, nq,
                     retain_mission=retain_mission,
                     reflect_mission=reflect_mission,
+                    retain_extraction_mode=retain_extraction_mode,
                 )
             except Exception as e:
                 print(f"  [WARN] failed to fire next {nq['question_id']}: {e}",
@@ -288,6 +307,7 @@ async def main(
     bank_suffix: str = "",
     retain_mission: str = DEFAULT_RETAIN_MISSION,
     reflect_mission: str = DEFAULT_REFLECT_MISSION,
+    retain_extraction_mode: Optional[str] = None,
 ) -> int:
     src = TIER_FILES[tier]
     if not src.exists():
@@ -340,6 +360,7 @@ async def main(
             queued_left=len(queue) - i - 1,
             retain_mission=retain_mission,
             reflect_mission=reflect_mission,
+            retain_extraction_mode=retain_extraction_mode,
         )
 
     total = time.monotonic() - run_t0
@@ -364,6 +385,10 @@ if __name__ == "__main__":
     ap.add_argument("--reflect-mission", default=DEFAULT_REFLECT_MISSION)
     ap.add_argument("--retain-mission-file", type=Path, default=None,
                     help="read retain_mission from file (overrides --retain-mission)")
+    ap.add_argument("--retain-extraction-mode", default=None,
+                    choices=["concise", "verbose", "custom"],
+                    help="PATCH bank config with this retain_extraction_mode "
+                         "after bank creation (variant ingest lever, B-1)")
     args = ap.parse_args()
     qlist = [q.strip() for q in args.qids.split(",") if q.strip()]
     retain_mission = args.retain_mission
@@ -375,4 +400,5 @@ if __name__ == "__main__":
         bank_suffix=args.bank_suffix,
         retain_mission=retain_mission,
         reflect_mission=args.reflect_mission,
+        retain_extraction_mode=args.retain_extraction_mode,
     )))
