@@ -198,3 +198,13 @@ If an L1 or L2 memory conflicts with what you observe in the code, **trust the c
 ### Project Scope
 
 This memory system is scoped to this project. User profile and universal feedback (preferences that apply across all projects) are stored here but are conceptually global. If working across multiple projects, these may need manual synchronization. Codebase and project memories are correctly project-scoped and should never leak across projects.
+
+### Hindsight Recall (supplementary)
+
+A separate memory layer is available via the `mcp__hindsight__*` tools. Hindsight auto-ingests Claude Code session transcripts and exposes them through associative `recall`. It is **supplementary**, not a replacement for Viking.
+
+- **Viking is authoritative.** Hindsight is new, the DB has stale entries from earlier sessions, and mental-model tuning is in progress. When recall and a Viking note disagree, trust Viking.
+- **Recall for episodic gaps** — call it when you hit project-specific context Viking didn't give you (referenced prior work, unfamiliar artifact, surprising local state). Overlap with Viking is fine right now; coverage matters more than minimalism.
+- **Flag bad recalls in conversation** — stale, wrong-project, or Viking-contradicting results. No file needed; visibility drives DB and mission tuning.
+
+Mental model candidates under evaluation are tracked in `project/plans/hindsight_mental_models.md`.
