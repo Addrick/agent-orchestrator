@@ -80,6 +80,7 @@ jobs:
   # Only runs if build-and-push succeeds
   deploy:
     needs: build-and-push
+    permissions: {}
     runs-on: [self-hosted, Windows, derpr]
     env:
       DOCKER_CONFIG: C:\Server\derpr\.docker
