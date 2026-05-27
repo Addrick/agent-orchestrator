@@ -44,7 +44,11 @@ All judging via local `gemini` CLI subprocess (paid OAuth tier) over the ACP tra
 | M baseline | 7 | 100.0% | 100.0% |
 | M v2a | 1 | 100.0% | 100.0% |
 | M v3a verbose | 1 | 100.0% | 100.0% |
+| M granite-extract | 3 | 100.0% | 33.3% |
 | **All** | **17** | **94.1%** | **82.4%** |
+
+(The granite-extract row is a separate extraction-model A/B, not folded into
+the 17-bank "All" total — see the Granite extraction A/B section below.)
 
 Per-qtype across all rows:
 
@@ -55,6 +59,50 @@ Per-qtype across all rows:
 | knowledge-update | 3 | 100.0% |
 | single-session-assistant | 1 | 100.0% |
 | single-session-preference | 3 | 0.0% |
+
+## Granite extraction A/B (2026-05-27)
+
+Re-ingested 3 m-tier qids with the **granite-4.1-8b-Q5_K_S** local LLM as the
+consolidation/extraction model (vs. the gemini-extracted baseline), on the
+testing hindsight server `http://10.0.0.70:8890`. Banks
+`lme_m_{qid}_granite`, ~470 docs / ~16.2–16.8k facts each, fully drained
+(`pending_consolidation=0`) before scoring. Scored with the full per-k sweep
+at temp=0 (`--model-answer lme-t0 --model-judge lme-t0 --per-k-sweep`,
+`max_tokens=512`). Raw: `.eval_cache/lme_results/granite_3bank.json` (also
+archived in the notes repo at `project/eval_results/granite_3bank.json`).
+
+| qid | qtype | gold | n_facts | sess_hit (any k≥3) | judge (k=10) | baseline (gemini) |
+|-----|-------|------|--------:|:------------------:|:------------:|:-----------------:|
+| 1c549ce4 | multi-session | `$140` | 12 | HIT | **yes** (k≥10) | yes |
+| 8fb83627 | knowledge-update | `Five` | 9 | HIT | **no** | yes |
+| 7161e7e2 | single-session-assistant | `Admon … 8am-4pm Sundays` | 6 | HIT | **no** | yes |
+
+**Aggregate: session_hit 100% (3/3), judge_yes 33% (1/3 at k=10).** Granite
+extraction **regresses 2 of 3** vs the gemini baseline (which scored all three
+`yes`) while retrieval stays healthy on every bank.
+
+Full per-k matrix (sess_hit / judge per cell):
+
+| qid | k=1 | k=3 | k=5 | k=10 | k=20 |
+|-----|-----|-----|-----|------|------|
+| 1c549ce4 | miss/no | HIT/no | HIT/no | HIT/**yes** | HIT/**yes** |
+| 8fb83627 | HIT/no | HIT/no | HIT/no | HIT/no | HIT/no |
+| 7161e7e2 | HIT/no | HIT/no | HIT/no | HIT/no | HIT/no |
+
+Predicted answers at k=10:
+- `1c549ce4` → "The total cost of the car cover and detailing spray you purchased is $140 ($120 + $20)." — **correct**, but only once k≥10 holds both price facts simultaneously (budget-gated, same as gemini baseline behavior).
+- `8fb83627` → "You have finished reading 3 issues of National Geographic." Gold is "Five". **Count mis-aggregation, stable across all k** — content is retrieved, the answer is wrong.
+- `7161e7e2` → "The provided information states that a rotation table assigns specific agents to each shift…" — describes the table generically, never extracts Admon's specific Sunday day-shift. **Specific-assignment loss, stable across all k.**
+
+**Read:** retrieval (pure-similarity top-k) is decoupled from end-to-end
+correctness here. The gold session's facts are in context on nearly every cell,
+yet 2/3 answers are wrong — the failures are **downstream of retrieval**, in
+fact fidelity. Granite extraction preserves retrievability but degrades the
+fact units for aggregation (count) and specific-assignment questions relative
+to gemini extraction. *Caveat:* single-run verdicts; per the temp=0 + k-repeat
+protocol these are unverified across repeats, but both failing predictions are
+plainly (not marginally) wrong, so the regressions look real rather than judge
+variance.
 
 ## Findings
 
