@@ -64,6 +64,7 @@ class Agent(ABC):
         system_personas = load_system_personas_from_file()
         if system_personas:
             self.chat_system.personas.update(system_personas)
+            self.chat_system.system_persona_names.update(system_personas.keys())
             logger.info(f"Injected {len(system_personas)} system personas into ChatSystem.")
         else:
             logger.warning("No system personas loaded. Agent may fail if personas are missing.")

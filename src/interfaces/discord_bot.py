@@ -97,7 +97,7 @@ async def set_status_streaming(client: discord.Client, persona_name: str) -> Non
 
 
 async def reset_discord_status(client: discord.Client, chat_system: 'ChatSystem') -> None:
-    personas: List[str] = list(chat_system.personas.keys())
+    personas: List[str] = list(chat_system.visible_personas().keys())
     status_text: str = f"as {', '.join(personas)} 👀"
     if len(status_text) > DISCORD_STATUS_LIMIT:
         status_text = status_text[:DISCORD_STATUS_LIMIT - 3] + "..."
