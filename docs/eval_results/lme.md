@@ -2,7 +2,7 @@
 
 Per-question evaluation of Hindsight memory recall on the LongMemEval V1 cleaned dataset (`xiaowu0162/longmemeval-cleaned`). 14 banks total: 5 S-tier baseline, 7 M-tier baseline, 2 variant ("v2a") banks ingested under a modified retain mission.
 
-All judging via local `gemini` CLI subprocess (paid OAuth tier) over the ACP transport — same answer-model and judge-model per run for self-consistency.
+All judging via local `gemini` CLI subprocess (paid OAuth tier) over the ACP transport. A judge meta-eval (below) showed the judge verdict is invariant to judge-model on fixed predictions, so the judge is **locked to `gemini-2.5-flash`** (which benchmarks above the paper's GPT-4o); the answer-model is the experimental variable.
 
 ## Run conditions (constant across rows unless noted)
 
@@ -184,6 +184,63 @@ defining update fact (`finished five issues`) was never extracted (8fb83627);
 latest state. *Caveat:* single-run verdicts; per the temp=0 + k-repeat protocol
 these are unverified across repeats, but the fact-content differences above are
 structural (present/absent in the bank), not judge variance.
+
+## Judge meta-eval (2026-05-27) — judge model is not the lever
+
+To test whether the judge model biases verdicts (and whether we need a stronger
+judge to match the paper's GPT-4o), we isolated the judge from answer-generation
+variance: generate the predicted answer **once** per qid (fixed answer-model),
+then grade that *same* frozen prediction with each candidate judge. Harness:
+`eval_harnesses/suites/memory_recall/lme_judge_meta.py` (freezes the prediction,
+emits a per-qid verdict-per-judge table + pairwise agreement). Raw:
+`.eval_cache/lme_results/judge_meta.{json,md}`.
+
+7 qids weighted to the failure-prone qtypes (preference, knowledge-update, a
+nuance temporal). Answer-model `lme-t0` (gemini-2.5-flash @ t0). Judges:
+`gemini-2.5-flash`, `gemini-2.5-pro`, `gemini-3-flash-preview` (all @ t0).
+
+**Result: all three judges agreed 7/7 (100% pairwise), all verdicts correct on
+inspection.** The earlier "flash is unreliable on `*-preference`" instability
+was **answer-generation** variance (same question → different predictions across
+runs), not the judge disagreeing on a *fixed* prediction. Once the prediction is
+frozen, flash judges as well as pro / 3-flash. So the judge is locked to
+`gemini-2.5-flash` (cheapest, ≥ GPT-4o on benchmarks) and the `lme-25pro-t0`
+alias is kept available for spot-checks. *Limitation:* judges only diverge on
+**borderline** predictions (partial credit, heavy paraphrase, extra-info); this
+set produced mostly unambiguous predictions, so 100% agreement means "no
+difference on clear cases," not "no difference ever." A borderline-engineered
+set + hand-labeled `human` column would be needed for a paper-style agreement
+number.
+
+## Answer-model A/B (2026-05-27) — gemini-3-flash answerer
+
+Full sweep over all 12 baseline banks (5 S + 7 M) with the answerer swapped to
+**`gemini-3-flash-preview` @ t0**, judge held at `gemini-2.5-flash` @ t0,
+standard config (`top_k=10`, `max_tokens=512`). Clean A/B vs the
+`gemini-2.5-flash`-answerer baseline — only the reader changed. Raw:
+`.eval_cache/lme_results/sweep_g3answer_{s,m}.json`.
+
+| tier | n | session_hit% | judge_yes% |
+|------|--:|-------------:|-----------:|
+| S (g3 answerer) | 5 | 100.0% | 80.0% |
+| M (g3 answerer) | 7 | 100.0% | 100.0% |
+| **combined** | **12** | **100.0%** | **91.7% (11/12)** |
+
+**Identical to the 2.5-flash-answerer baseline: 11/12, with `1c0ddc50` the sole
+failure.** Two confirmations:
+- **g3 does not rescue `1c0ddc50`** — still emits the generic "listen to
+  podcasts" answer. Consistent with the retrieval-structural diagnosis: the
+  history-preference fact never reaches context, so no reader can fix it (unlike
+  HyDE-g3, which changed the recall *vector*). A fifth failed intervention by
+  proxy — upgrading the reader doesn't touch a retrieval miss.
+- **g3 corroborates the granite finding from the reader side**: on the
+  qwen-extracted `8fb83627` bank (gold "Five"), g3 answers "finished five
+  issues" → yes. The facts are answerable; granite's failure on its own
+  `8fb83627` bank was extraction, not the reader.
+
+g3 answers are qualitatively richer (operands, dates, formatting) but
+correctness is unchanged. Net: swapping the answerer to gemini-3-flash neither
+gains nor regresses on the baseline set.
 
 ## Findings
 
