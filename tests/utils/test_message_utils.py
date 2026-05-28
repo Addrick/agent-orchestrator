@@ -1,6 +1,6 @@
 # /tests/utils/test_message_utils.py
 
-from src.utils.message_utils import split_string_by_limit
+from src.utils.message_utils import split_string_by_limit, cleanse_message_for_history
 
 def test_split_string_shorter_than_limit():
     """Tests that a string shorter than the limit is not split."""
@@ -184,3 +184,27 @@ def test_force_split_prefers_spaces_over_url():
         # The URL must not be split mid-string
         if "https://" in chunk:
             assert url in chunk, f"URL was chopped in chunk: {chunk!r}"
+
+
+def test_cleanse_message_for_history():
+    """Tests that metadata, citations, and search/source sections are cleansed correctly."""
+    # Test single citation removal
+    assert cleanse_message_for_history("Hello [[1](<https://example.com>)] world") == "Hello world"
+    
+    # Test multiple citations removal
+    assert cleanse_message_for_history("Hello [[1](<url1>), [2](<url2>)] world") == "Hello world"
+    
+    # Test multiple citations with multiline spacing removal
+    assert cleanse_message_for_history("Hello [[1](<url1>),\n [2](<url2>)] world") == "Hello world"
+    
+    # Test no citation change
+    assert cleanse_message_for_history("Hello world") == "Hello world"
+
+    # Test removing Sources and Search Query sections
+    text = (
+        "Some main text [[1](<url>)]\n\n"
+        "Sources:\n"
+        "1. http://example.com\n\n"
+        "Search Query: some query"
+    )
+    assert cleanse_message_for_history(text) == "Some main text"
