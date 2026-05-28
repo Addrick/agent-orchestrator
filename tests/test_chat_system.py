@@ -302,6 +302,48 @@ async def test_resume_pending_confirmation_denied(chat_system_with_mocks):
     assert "won't close" in response
 
 
+@pytest.mark.asyncio
+async def test_resume_pending_confirmation_chained_read(chat_system_with_mocks):
+    """After approving a write, the LLM may emit a chained read (e.g. read-back to confirm).
+    Resume must drive ToolLoop to completion so the chained read executes and the
+    final text response reaches the user. Regression: the prior one-shot
+    text_engine.generate_response silently dropped tool_calls responses.
+    """
+    system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
+    persona.set_execution_mode(ExecutionMode.CONFIRM)
+    persona.set_enabled_tools(['*'])
+
+    # Round 1: initial write request → park
+    text_engine_mock.generate_response.return_value = (
+        {'type': 'tool_calls',
+         'calls': [{'id': 'call_1', 'name': 'update_ticket', 'arguments': {'state': 'closed'}}]},
+        {},
+    )
+    await system.generate_response('test_persona', 'user', 'channel', 'close it')
+
+    # After approval the write executes, then ToolLoop re-enters the LLM.
+    # Round 2: chained read. Round 3: text confirmation. The mock returns each
+    # in sequence as ToolLoop iterates.
+    tool_manager_mock.execute_tool.side_effect = [
+        {"result": {"id": 1, "state": "closed"}},   # update_ticket result
+        {"result": {"id": 1, "state": "closed"}},   # get_ticket_details result
+    ]
+    text_engine_mock.generate_response.side_effect = [
+        ({'type': 'tool_calls',
+          'calls': [{'id': 'call_2', 'name': 'get_ticket_details', 'arguments': {'ticket_number': 1}}]},
+         {}),
+        ({'type': 'text', 'content': 'Confirmed: ticket 1 is now closed.'}, {}),
+    ]
+
+    response, response_type, _, _ = await system.resume_pending_confirmation('user', 'test_persona', approved=True)
+
+    assert response_type == ResponseType.LLM_GENERATION
+    assert response == 'Confirmed: ticket 1 is now closed.'
+    # update_ticket (write) + get_ticket_details (chained read) both executed.
+    executed = [c.args[0] for c in tool_manager_mock.execute_tool.call_args_list]
+    assert executed == ['update_ticket', 'get_ticket_details']
+
+
 # --- Model Prefix Helper Tests ---
 
 @pytest.mark.parametrize("model_name, expected_prefix", [

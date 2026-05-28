@@ -1111,29 +1111,73 @@ class ChatSystem:
                 }
             )
 
-            # Continue the LLM conversation with the tool results
-            history_object = {
-                "persona_prompt": persona.get_prompt(),
-                "message_history": pending.conversation_history,
-                "history": pending.conversation_history,  # Legacy key
-                "current_message": {"text": "", "image_url": pending.image_url}
-            }
-            llm_response, api_payload = await self.text_engine.generate_response(
-                persona.get_config_for_engine(), history_object, tools=pending.tools_for_llm
-            )
-            if api_payload:
+            # Drive ToolLoop to completion so the LLM can issue chained reads
+            # (e.g. read-back-after-write) or even re-park a fresh write. The
+            # old one-shot text_engine.generate_response silently dropped any
+            # response whose `type` was `tool_calls` instead of `text` — joy's
+            # post-update_ticket follow-up vanished that way.
+            params = persona.get_generation_params().copy()
+            tool_loop = ToolLoop(self.text_engine, self.tool_manager)
+            final_text = ""
+            response_type = ResponseType.LLM_GENERATION
+            new_pending_writes: Optional[List[Dict[str, Any]]] = None
+            new_audit_info: Optional[Dict[str, Any]] = None
+            api_payload_seen: Optional[Dict[str, Any]] = None
+
+            async for ev in tool_loop.run(
+                persona=persona,
+                conversation_history=conversation_history,
+                params=params,
+                tools=pending.tools_for_llm,
+                image_url=pending.image_url,
+                turn_tainted=turn_tainted,
+            ):
+                if isinstance(ev, TokenEvent):
+                    # Token deltas are aggregated into _LoopFinishedEvent.final_text by ToolLoop.
+                    pass
+                elif isinstance(ev, _ApiPayloadEvent):
+                    api_payload_seen = ev.payload
+                elif isinstance(ev, ErrorEvent):
+                    return ev.message, ResponseType.DEV_COMMAND, None, None
+                elif isinstance(ev, _LoopFinishedEvent):
+                    final_text = ev.final_text
+                    response_type = ev.response_type
+                    new_pending_writes = ev.pending_writes
+                    new_audit_info = ev.audit_info
+                    turn_tainted = ev.turn_tainted
+
+            if api_payload_seen:
                 self._store_api_request(
-                    user_identifier, persona_name, api_payload,
-                    tools_for_llm=pending.tools_for_llm
+                    user_identifier, persona_name, api_payload_seen,
+                    tools_for_llm=pending.tools_for_llm,
                 )
 
-            final_text = llm_response.get("content", "")
+            # The LLM emitted another write — re-park for a second approval.
+            if new_pending_writes is not None:
+                self._pending_confirmations[(user_identifier, persona_name)] = PendingConfirmation(
+                    write_calls=new_pending_writes,
+                    conversation_history=conversation_history,
+                    persona_name=persona_name,
+                    tools_for_llm=pending.tools_for_llm,
+                    image_url=pending.image_url,
+                    channel=pending.channel,
+                    server_id=pending.server_id,
+                    turn_tainted=turn_tainted,
+                    audit_info=new_audit_info,
+                )
+                self.memory_manager.log_audit_event(
+                    event_type="audit_parked",
+                    operator_id=user_identifier,
+                    new_state="pending",
+                    reason="Universal write-audit gate triggered (resume)",
+                    metadata=new_audit_info,
+                )
 
             assistant_id: Optional[int] = None
-            if final_text and final_text.strip():
+            if final_text and final_text.strip() and response_type == ResponseType.LLM_GENERATION:
                 assistant_id = self.memory_manager.log_message(
                     user_identifier=user_identifier, persona_name=persona_name,
-                    channel="",  # Not available in pending context
+                    channel=pending.channel,
                     author_role='assistant', author_name=persona_name,
                     content=final_text, timestamp=datetime.now(),
                 )
@@ -1141,7 +1185,7 @@ class ChatSystem:
             # Persist taint bit
             self._conversation_taints[taint_key] = turn_tainted
 
-            return final_text, ResponseType.LLM_GENERATION, assistant_id, None
+            return final_text, response_type, assistant_id, None
 
         except Exception as e:
             logger.error(f"Error resuming pending confirmation for {user_identifier}: {e}", exc_info=True)
