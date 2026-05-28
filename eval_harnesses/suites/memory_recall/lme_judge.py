@@ -106,29 +106,82 @@ def _stream_load_qids(path: Path, qids: set[str]) -> Dict[str, Dict[str, Any]]:
     return out
 
 
-# Modeled on LongMemEval autoeval. Plain accuracy judge — does the predicted
-# answer convey the gold answer's content? Numeric / list answers count as
-# correct only if every gold element is present (per paper's strict scoring).
-JUDGE_PROMPT = """You are grading a facts-retrieval assistant's answer.
+# Type-conditioned judge prompts, ported verbatim from upstream
+# https://github.com/xiaowu0162/LongMemEval src/evaluation/evaluate_qa.py
+# `get_anscheck_prompt`. Abstention detected by `'_abs' in qid` per upstream.
+# Single-session-user shares the multi-session template upstream.
+_JUDGE_TEMPLATE_DEFAULT = (
+    "I will give you a question, a correct answer, and a response from a model. "
+    "Please answer yes if the response contains the correct answer. Otherwise, answer no. "
+    "If the response is equivalent to the correct answer or contains all the intermediate "
+    "steps to get the correct answer, you should also answer yes. If the response only "
+    "contains a subset of the information required by the answer, answer no. "
+    "\n\nQuestion: {question}\n\nCorrect Answer: {answer}\n\nModel Response: {response}\n\n"
+    "Is the model response correct? Answer yes or no only."
+)
 
-QUESTION:
-{question}
+_JUDGE_TEMPLATE_TEMPORAL = (
+    "I will give you a question, a correct answer, and a response from a model. "
+    "Please answer yes if the response contains the correct answer. Otherwise, answer no. "
+    "If the response is equivalent to the correct answer or contains all the intermediate "
+    "steps to get the correct answer, you should also answer yes. If the response only "
+    "contains a subset of the information required by the answer, answer no. "
+    "In addition, do not penalize off-by-one errors for the number of days. If the question "
+    "asks for the number of days/weeks/months, etc., and the model makes off-by-one errors "
+    "(e.g., predicting 19 days when the answer is 18), the model's response is still correct. "
+    "\n\nQuestion: {question}\n\nCorrect Answer: {answer}\n\nModel Response: {response}\n\n"
+    "Is the model response correct? Answer yes or no only."
+)
 
-GOLD ANSWER:
-{gold}
+_JUDGE_TEMPLATE_KNOWLEDGE_UPDATE = (
+    "I will give you a question, a correct answer, and a response from a model. "
+    "Please answer yes if the response contains the correct answer. Otherwise, answer no. "
+    "If the response contains some previous information along with an updated answer, "
+    "the response should be considered as correct as long as the updated answer is the "
+    "required answer."
+    "\n\nQuestion: {question}\n\nCorrect Answer: {answer}\n\nModel Response: {response}\n\n"
+    "Is the model response correct? Answer yes or no only."
+)
 
-PREDICTED ANSWER:
-{predicted}
+_JUDGE_TEMPLATE_PREFERENCE = (
+    "I will give you a question, a rubric for desired personalized response, and a response "
+    "from a model. Please answer yes if the response satisfies the desired response. "
+    "Otherwise, answer no. The model does not need to reflect all the points in the rubric. "
+    "The response is correct as long as it recalls and utilizes the user's personal "
+    "information correctly."
+    "\n\nQuestion: {question}\n\nRubric: {answer}\n\nModel Response: {response}\n\n"
+    "Is the model response correct? Answer yes or no only."
+)
 
-Does the predicted answer correctly convey the gold answer?
-- For factual/numeric/list answers: the prediction must contain every fact
-  in the gold answer (no missing items, no contradictions). Paraphrasing is
-  fine. Extra info beyond the gold is fine if it doesn't contradict.
-- For abstention questions where gold says the answer isn't in the history:
-  the prediction is correct only if it abstains or says it doesn't know.
+_JUDGE_TEMPLATE_ABSTENTION = (
+    "I will give you an unanswerable question, an explanation, and a response from a model. "
+    "Please answer yes if the model correctly identifies the question as unanswerable. "
+    "The model could say that the information is incomplete, or some other information is "
+    "given but the asked information is not."
+    "\n\nQuestion: {question}\n\nExplanation: {answer}\n\nModel Response: {response}\n\n"
+    "Does the model correctly identify the question as unanswerable? Answer yes or no only."
+)
 
-Reply with exactly one token: "yes" if correct, "no" if not. Do not add
-explanation, punctuation, or any other text."""
+_JUDGE_TEMPLATES_BY_QTYPE = {
+    "single-session-user": _JUDGE_TEMPLATE_DEFAULT,
+    "single-session-assistant": _JUDGE_TEMPLATE_DEFAULT,
+    "multi-session": _JUDGE_TEMPLATE_DEFAULT,
+    "temporal-reasoning": _JUDGE_TEMPLATE_TEMPORAL,
+    "knowledge-update": _JUDGE_TEMPLATE_KNOWLEDGE_UPDATE,
+    "single-session-preference": _JUDGE_TEMPLATE_PREFERENCE,
+}
+
+
+def _judge_prompt(qtype: str, qid: str, question: str, answer: str, response: str) -> str:
+    """Build the judge prompt. Mirrors upstream's `_abs` qid-suffix detection
+    for abstention; otherwise dispatches by qtype."""
+    if "_abs" in qid:
+        tmpl = _JUDGE_TEMPLATE_ABSTENTION
+    else:
+        tmpl = _JUDGE_TEMPLATES_BY_QTYPE.get(qtype)
+        if tmpl is None:
+            raise ValueError(f"no judge template for qtype={qtype!r} qid={qid!r}")
+    return tmpl.format(question=question, answer=answer, response=response)
 
 
 ANSWER_PROMPT = """{context}
@@ -363,8 +416,12 @@ def _score_at_k(
         predicted, ans_err = "", str(e)[:200]
     t_answer = time.monotonic() - t0
 
-    judge_prompt = JUDGE_PROMPT.format(
-        question=q["question"], gold=q["answer"], predicted=predicted or "(empty)",
+    judge_prompt = _judge_prompt(
+        qtype=q["question_type"],
+        qid=q["question_id"],
+        question=q["question"],
+        answer=q["answer"],
+        response=predicted or "(empty)",
     )
     t0 = time.monotonic()
     try:
