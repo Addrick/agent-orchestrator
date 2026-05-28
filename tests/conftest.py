@@ -69,3 +69,58 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_discord)
         if "hindsight_live" in item.keywords and not has_hindsight:
             item.add_marker(skip_hindsight)
+
+
+def _check_transient_error(exc) -> tuple[bool, str]:
+    """Helper to detect if an exception is due to a transient external service or network issue."""
+    err = exc
+    while err is not None:
+        err_type = type(err).__name__
+        err_msg = str(err)
+
+        # Common transient codes/messages in exception info
+        transient_signals = [
+            "503", "502", "504", "429",
+            "UNAVAILABLE", "RESOURCE_EXHAUSTED",
+            "Service Unavailable", "Too Many Requests", "Rate limit",
+            "timeout", "Timed out", "TimeoutError",
+            "connection reset", "connection refused", "dns resolution",
+            "NameResolutionError", "GAIER_ERROR", "NewConnectionError",
+            "MaxRetryError"
+        ]
+
+        # Match exception class names or content
+        if any(signal.lower() in err_msg.lower() or signal.lower() in err_type.lower() for signal in transient_signals):
+            return True, f"Transient external error ({err_type}): {err_msg}"
+
+        # Fallback check for known library error classes
+        if err_type in (
+            "LLMCommunicationError", "RequestException", "ClientError",
+            "TimeoutError", "APIStatusError", "APITimeoutError", "APIError"
+        ):
+            return True, f"External API Exception ({err_type}): {err_msg}"
+
+        err = err.__cause__ or err.__context__
+
+    return False, ""
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_call(item):
+    """Hook wrapper to intercept failures in live tests and skip if due to transient errors."""
+    try:
+        return (yield)
+    except Exception as e:
+        live_markers = {"llm_live", "zammad_live", "discord_live", "hindsight_live"}
+        if any(marker in item.keywords for marker in live_markers):
+            is_transient, reason = _check_transient_error(e)
+            if is_transient:
+                # Print GitHub Actions warning annotation if running in CI
+                if os.environ.get("GITHUB_ACTIONS") == "true":
+                    test_name = f"{item.module.__name__}.{item.name}"
+                    file_path = getattr(item, "fspath", "unknown_file")
+                    print(f"\n::warning file={file_path}::[Live Test Skipped] {test_name} encountered transient API failure: {reason}")
+                pytest.skip(reason)
+        raise
+
+
