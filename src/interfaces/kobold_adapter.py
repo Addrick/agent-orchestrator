@@ -1,4 +1,10 @@
 # src/interfaces/kobold_adapter.py
+#
+# SECURITY: CodeQL py/stack-trace-exposure is suppressed for this file because
+# the kobold web UI is internal-only and tracebacks in responses aid debugging.
+# See memory/project/decisions/kobold_stack_trace_exposure.md for rationale.
+# If this UI ever becomes externally accessible, re-enable the rule (un-dismiss
+# the alerts in GitHub code scanning) and scrub tracebacks from all responses.
 
 import json
 import logging
