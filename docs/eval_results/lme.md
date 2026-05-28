@@ -63,23 +63,29 @@ Per-qtype across all rows:
 ## Granite extraction A/B (2026-05-27)
 
 Re-ingested 3 m-tier qids with the **granite-4.1-8b-Q5_K_S** local LLM as the
-consolidation/extraction model (vs. the gemini-extracted baseline), on the
-testing hindsight server `http://10.0.0.70:8890`. Banks
-`lme_m_{qid}_granite`, ~470 docs / ~16.2–16.8k facts each, fully drained
-(`pending_consolidation=0`) before scoring. Scored with the full per-k sweep
-at temp=0 (`--model-answer lme-t0 --model-judge lme-t0 --per-k-sweep`,
-`max_tokens=512`). Raw: `.eval_cache/lme_results/granite_3bank.json` (also
-archived in the notes repo at `project/eval_results/granite_3bank.json`).
+consolidation/extraction model, on the testing hindsight server
+`http://10.0.0.70:8890`. The comparison banks (`lme_m_{qid}` on production
+`8888`) were extracted with **qwen3-30b-a3b**. Note: the extraction model is
+the LLM Hindsight uses during consolidation to turn raw sessions into fact
+units — distinct from the gemini answer/judge model in `lme_judge`, which is
+held constant across both arms. Granite banks: ~470 docs / ~16.2–16.8k facts
+each, fully drained (`pending_consolidation=0`) before scoring. Scored with the
+full per-k sweep at temp=0 (`--model-answer lme-t0 --model-judge lme-t0
+--per-k-sweep`, `max_tokens=512`). Raw: `.eval_cache/lme_results/granite_3bank.json`
+(also archived in the notes repo at `project/eval_results/granite_3bank.json`).
 
-| qid | qtype | gold | n_facts | sess_hit (any k≥3) | judge (k=10) | baseline (gemini) |
-|-----|-------|------|--------:|:------------------:|:------------:|:-----------------:|
+| qid | qtype | gold | n_facts | sess_hit (any k≥3) | judge (k=10) | qwen baseline |
+|-----|-------|------|--------:|:------------------:|:------------:|:-------------:|
 | 1c549ce4 | multi-session | `$140` | 12 | HIT | **yes** (k≥10) | yes |
 | 8fb83627 | knowledge-update | `Five` | 9 | HIT | **no** | yes |
-| 7161e7e2 | single-session-assistant | `Admon … 8am-4pm Sundays` | 6 | HIT | **no** | yes |
+| 7161e7e2 | single-session-assistant | `Admon … 8am-4pm Sundays` | 6 | HIT | **no** | n/a — qwen bank empty (0 nodes), no baseline |
 
-**Aggregate: session_hit 100% (3/3), judge_yes 33% (1/3 at k=10).** Granite
-extraction **regresses 2 of 3** vs the gemini baseline (which scored all three
-`yes`) while retrieval stays healthy on every bank.
+**Aggregate: session_hit 100% (3/3), judge_yes 33% (1/3 at k=10).** Of the two
+qids with a qwen baseline (both `yes`), granite **regresses 8fb83627** and
+**matches 1c549ce4**. The third (`7161e7e2`) is a granite failure with no qwen
+counterpart to compare against — the production qwen bank `lme_m_7161e7e2` is
+empty, so it is *not* scored as a regression. Retrieval stays healthy on every
+granite bank.
 
 Full per-k matrix (sess_hit / judge per cell):
 
@@ -90,19 +96,94 @@ Full per-k matrix (sess_hit / judge per cell):
 | 7161e7e2 | HIT/no | HIT/no | HIT/no | HIT/no | HIT/no |
 
 Predicted answers at k=10:
-- `1c549ce4` → "The total cost of the car cover and detailing spray you purchased is $140 ($120 + $20)." — **correct**, but only once k≥10 holds both price facts simultaneously (budget-gated, same as gemini baseline behavior).
-- `8fb83627` → "You have finished reading 3 issues of National Geographic." Gold is "Five". **Count mis-aggregation, stable across all k** — content is retrieved, the answer is wrong.
-- `7161e7e2` → "The provided information states that a rotation table assigns specific agents to each shift…" — describes the table generically, never extracts Admon's specific Sunday day-shift. **Specific-assignment loss, stable across all k.**
+- `1c549ce4` → "The total cost of the car cover and detailing spray you purchased is $140 ($120 + $20)." — **correct**, but only once k≥10 holds both price facts simultaneously (budget-gated).
+- `8fb83627` → "You have finished reading 3 issues of National Geographic." Gold is "Five". **Wrong, stable across all k** — and (see below) granite never extracted the fact that the count reached five.
+- `7161e7e2` → "The provided information states that a rotation table assigns specific agents to each shift…" — describes the table generically, never names Admon's specific Sunday day-shift. **Stable across all k.**
 
-**Read:** retrieval (pure-similarity top-k) is decoupled from end-to-end
-correctness here. The gold session's facts are in context on nearly every cell,
-yet 2/3 answers are wrong — the failures are **downstream of retrieval**, in
-fact fidelity. Granite extraction preserves retrievability but degrades the
-fact units for aggregation (count) and specific-assignment questions relative
-to gemini extraction. *Caveat:* single-run verdicts; per the temp=0 + k-repeat
-protocol these are unverified across repeats, but both failing predictions are
-plainly (not marginally) wrong, so the regressions look real rather than judge
-variance.
+### Fact quality: granite vs qwen (verbatim recall hits)
+
+The judge gap is explained by the *content of the extracted facts*, not by
+retrieval. Below are the actual top recall hits (`arecall(question, tags=[qid],
+max_tokens=512)`) from each bank, copied verbatim.
+
+**8fb83627 — knowledge-update, gold "Five" (the decisive case).** A
+knowledge-update question depends on capturing the *latest* state. The user's
+reading count moves from "finished 1–3, on issue 4" to "finished five issues"
+across sessions. **qwen extracted both states; granite captured only the stale
+one.**
+
+qwen (`lme_m_8fb83627`) top hits — the updated count survived:
+```
+[0] User is reading National Geographic about the Amazon rainforest and indigenous communities, having finished their fifth issue. | Involving: user
+[1] User has been reading about the Amazon rainforest, finishing five issues of National Geographic with great articles on the region. | Involving: user
+[2] User is filling in the National Geographic section of a spreadsheet, having finished three issues and currently on the fourth. | When: 2023-04-20 | Involving: user
+[3] User enjoys The New Yorker for fiction and National Geographic for science and nature articles, having finished the third issue and currently on the fourth | When: 2023-04-20 | Involving: user
+```
+
+granite (`lme_m_8fb83627_granite`) top hits — only the stale "issue 4" state, no "five":
+```
+[0] User reads news, science, and entertainment magazines; newspapers include The New York Times and The Daily News; enjoys The New Yorker for fiction and National Geographic for science and nature, currently on issue 4 after finishing issues 1-3. | When: 2023-04-20 | Involving: user
+[1] Assistant filled in the National Geographic section of the spreadsheet, marking Issues 1‑3 as 'Read' and Issue 4 as 'In Progress' (currently being read). | When: 2023-04-20 | Involving: Assistant ... and User | To help the user organize their National Geographic magazine reading progress in a spreadsheet.
+[2] National Geographic Kids and science kits encourage curiosity and exploration of scientific concepts.
+[3] National Geographic's Yanomami People provides a comprehensive visual and textual overview of Yanomami culture, history, and the ongoing struggles they face.
+```
+Granite's recall is dominated by topical/world facts about National Geographic
+content (Yanomami, Amazon reading lists) and tops out at the obsolete
+"issue 4 / 1–3 read" snapshot. The later "finished five issues" update is
+absent from the bank, so no value of k can recover it → the answer is locked at
+"3 issues". This is an **extraction-recency failure**: granite dropped the
+state-update fact that defines the question.
+
+**1c549ce4 — multi-session, gold "$140" ($120 cover + $20 spray) — granite
+matches qwen but less efficiently.** Both banks hold both prices, but granite's
+facts are **verbose and duplicated** — nearly every fact appears twice, once
+bare and once with a `| Involving: … | To …` annotation tail — which inflates
+token cost and separates the two price facts so they only co-occur at k≥10.
+
+granite (`lme_m_1c549ce4_granite`) — the $20 and $120 facts, each emitted twice:
+```
+[0] User previously used a $20 detailing spray from Amazon that effectively removed tar and bug stains from the car's paint.
+[1] Past positive experience: The user previously used a $20 detailing spray from Amazon that effectively removed tar and bug stains from the car's paint. | Involving: user | To illustrate the effectiveness of detailing sprays.
+...
+[6] Insurance may reimburse a $120 waterproof car cover if it is deemed a valid accessory protecting the vehicle's paint and is covered under the policy.
+[8] Insurance may reimburse the $120 waterproof car cover if it's deemed a valid accessory to protect the vehicle's paint and is covered by the policy. | To determine eligibility ...
+```
+
+qwen (`lme_m_1c549ce4`) — terser, both prices inside the top 3, no near-duplicate pairs:
+```
+[0] User previously purchased a detailing spray from Amazon for $20 that successfully removed tar and bug stains from their car's paint | Involving: user
+[1] User bought a $20 detailing spray from Amazon that worked well, removing tar and bug stains | Involving: user
+[2] User owns a waterproof car cover that cost $120 and protects car paint from elements | When: 2023-05-26 | Involving: user
+```
+Both ultimately answer "$140", but granite needs a larger k to assemble both
+operands because its duplication wastes budget — a precision/efficiency hit, not
+a correctness one.
+
+**7161e7e2 — single-session-assistant, gold "Admon … 8am-4pm Sundays" (granite
+only; no qwen bank).** Granite captured the rotation **schema** (the shifts
+exist, the 7 agents are listed, the table assigns agents Sun–Sat) but not the
+**specific cell value** — no fact states Admon→Sunday→8am-4pm:
+```
+[0] The shift rotation for GM social media agents is set for a 1-week period from Sunday to Saturday, with each of the 7 agents (Admon, Magdy, Ehab, Sara, Mostafa, Nemr, Adam) working one shift per day and having two days off each week. ...
+[1] Assistant created a shift‑rotation sheet for 7 GM social‑media agents with four shifts (8 am‑4 pm, 12 pm‑8 pm, 4 pm‑12 am, 12 am‑8 am) ...
+[5] The rotation table assigns specific agents to each shift on each day from Sunday to Saturday. ... | To clearly outline who works which shift on which day.
+```
+The per-agent-per-day assignments — the table's actual contents — were not
+emitted as facts; only its structure was. This is a **granularity loss** on a
+tabular source. There is no qwen comparison here (the production qwen bank for
+this qid is empty), so it stands as a granite observation rather than an A/B.
+
+**Read.** Retrieval (pure-similarity top-k) is decoupled from end-to-end
+correctness: the gold session's facts are in context on nearly every cell, yet
+2/3 answers are wrong because of *what granite extracted*. Two distinct
+fact-quality deficits show up vs qwen: (1) **recency/state-update loss** — the
+defining update fact (`finished five issues`) was never extracted (8fb83627);
+(2) **verbosity + near-duplicate facts** that waste the context budget
+(1c549ce4). A third, qwen-uncompared, is **granularity loss** on tabular data
+(7161e7e2). qwen's facts are consistently terser, deduplicated, and retain the
+latest state. *Caveat:* single-run verdicts; per the temp=0 + k-repeat protocol
+these are unverified across repeats, but the fact-content differences above are
+structural (present/absent in the bank), not judge variance.
 
 ## Findings
 
