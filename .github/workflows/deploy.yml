@@ -10,6 +10,9 @@ on:
     branches:
       - master
 
+permissions:
+  contents: read
+
 env:
   # Use your actual image name here
   IMAGE_NAME: ghcr.io/addrick/derpr-python
@@ -80,6 +83,7 @@ jobs:
   # Only runs if build-and-push succeeds
   deploy:
     needs: build-and-push
+    permissions: {}
     runs-on: [self-hosted, Windows, derpr]
     permissions:
       packages: read
