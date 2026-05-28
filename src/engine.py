@@ -613,12 +613,13 @@ class TextEngine:
         except Exception as e:
             err_str = str(e)
             rate_limited = '429' in err_str or 'RESOURCE_EXHAUSTED' in err_str
-            is_server_error = '500' in err_str or 'InternalServerError' in err_str or 'INTERNAL' in err_str
-            
+
             if rate_limited:
                 logger.warning(f"Google API rate-limited ({config['model_name']}): retryable.")
             else:
-                logger.error(f"Google API error: {e}", exc_info=not is_server_error)
+                # Only emit the full traceback when verbose (DEBUG) logging is on;
+                # by default a single-line error is plenty for transient API errors.
+                logger.error(f"Google API error: {e}", exc_info=logger.isEnabledFor(logging.DEBUG))
                 
             raise LLMCommunicationError(f"An error occurred with Google API: {e}",
                                         api_payload=api_params_for_dumping, rate_limited=rate_limited) from e
