@@ -91,13 +91,13 @@ class KoboldAdapter:
                 self.active_persona = new_persona
                 logger.info(f"Switched active persona to: {new_persona}")
                 return {"result": self.active_persona}
-            return {"error": f"Persona '{new_persona}' not found", "available": list(self.chat_system.personas.keys())}
+            return {"error": f"Persona '{new_persona}' not found", "available": list(self.chat_system.visible_personas().keys())}
 
         @self.app.get("/v1/models")
         async def list_models() -> Any:
             models = [
                 {"id": name, "object": "model", "owned_by": "derpr", "permission": []}
-                for name in self.chat_system.personas.keys()
+                for name in self.chat_system.visible_personas().keys()
             ]
             return {"object": "list", "data": models}
 

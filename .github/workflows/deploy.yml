@@ -85,6 +85,8 @@ jobs:
     needs: build-and-push
     permissions: {}
     runs-on: [self-hosted, Windows, derpr]
+    permissions:
+      packages: read
     env:
       DOCKER_CONFIG: C:\Server\derpr\.docker
       ENV_FILE: C:\Server\derpr\.env
@@ -97,7 +99,7 @@ jobs:
         run: |
           # Write GHCR auth into our pinned docker config dir, bypassing wincred
           # (wincred fails for non-interactive sessions; see C:\Server\derpr\.docker\config.json)
-          $auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("${{ github.actor }}:${{ secrets.GHCR_PAT }}"))
+          $auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}"))
           $cfg = @{
             auths = @{ "ghcr.io" = @{ auth = $auth } }
             credHelpers = @{ "ghcr.io" = ""; "docker.io" = ""; "index.docker.io" = ""; "registry-1.docker.io" = "" }

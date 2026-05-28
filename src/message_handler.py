@@ -127,7 +127,7 @@ class BotLogic:
             return None, False
         help_msg: str = ("Talk to a specific persona by starting your message with their name. \n \n"
                          "Currently active personas: \n" +
-                         ', '.join(self.chat_system.personas.keys()) + "\n\n"
+                         ', '.join(self.chat_system.visible_personas().keys()) + "\n\n"
                                                                        "Bot commands: \n"
                                                                        "hello (start new conversation), \n"
                                                                        "goodbye (end conversation), \n"
@@ -404,7 +404,7 @@ class BotLogic:
         return None, False
 
     def _what_personas(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        return f"Available personas are: {list(self.chat_system.personas.keys())}", False
+        return f"Available personas are: {list(self.chat_system.visible_personas().keys())}", False
 
     def _what_history(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
         return f"{persona.get_name()} default history message count is {persona.get_base_history_messages()}.", False

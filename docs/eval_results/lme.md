@@ -2,7 +2,7 @@
 
 Per-question evaluation of Hindsight memory recall on the LongMemEval V1 cleaned dataset (`xiaowu0162/longmemeval-cleaned`). 14 banks total: 5 S-tier baseline, 7 M-tier baseline, 2 variant ("v2a") banks ingested under a modified retain mission.
 
-All judging via local `gemini` CLI subprocess (paid OAuth tier) over the ACP transport — same answer-model and judge-model per run for self-consistency.
+All judging via local `gemini` CLI subprocess (paid OAuth tier) over the ACP transport. A judge meta-eval (below) showed the judge verdict is invariant to judge-model on fixed predictions, so the judge is **locked to `gemini-2.5-flash`** (which benchmarks above the paper's GPT-4o); the answer-model is the experimental variable.
 
 ## Run conditions (constant across rows unless noted)
 
@@ -44,7 +44,11 @@ All judging via local `gemini` CLI subprocess (paid OAuth tier) over the ACP tra
 | M baseline | 7 | 100.0% | 100.0% |
 | M v2a | 1 | 100.0% | 100.0% |
 | M v3a verbose | 1 | 100.0% | 100.0% |
+| M granite-extract | 3 | 100.0% | 33.3% |
 | **All** | **17** | **94.1%** | **82.4%** |
+
+(The granite-extract row is a separate extraction-model A/B, not folded into
+the 17-bank "All" total — see the Granite extraction A/B section below.)
 
 Per-qtype across all rows:
 
@@ -55,6 +59,188 @@ Per-qtype across all rows:
 | knowledge-update | 3 | 100.0% |
 | single-session-assistant | 1 | 100.0% |
 | single-session-preference | 3 | 0.0% |
+
+## Granite extraction A/B (2026-05-27)
+
+Re-ingested 3 m-tier qids with the **granite-4.1-8b-Q5_K_S** local LLM as the
+consolidation/extraction model, on the testing hindsight server
+`http://10.0.0.70:8890`. The comparison banks (`lme_m_{qid}` on production
+`8888`) were extracted with **qwen3-30b-a3b**. Note: the extraction model is
+the LLM Hindsight uses during consolidation to turn raw sessions into fact
+units — distinct from the gemini answer/judge model in `lme_judge`, which is
+held constant across both arms. Granite banks: ~470 docs / ~16.2–16.8k facts
+each, fully drained (`pending_consolidation=0`) before scoring. Scored with the
+full per-k sweep at temp=0 (`--model-answer lme-t0 --model-judge lme-t0
+--per-k-sweep`, `max_tokens=512`). Raw: `.eval_cache/lme_results/granite_3bank.json`
+(also archived in the notes repo at `project/eval_results/granite_3bank.json`).
+
+| qid | qtype | gold | n_facts | sess_hit (any k≥3) | judge (k=10) | qwen baseline |
+|-----|-------|------|--------:|:------------------:|:------------:|:-------------:|
+| 1c549ce4 | multi-session | `$140` | 12 | HIT | **yes** (k≥10) | yes |
+| 8fb83627 | knowledge-update | `Five` | 9 | HIT | **no** | yes |
+| 7161e7e2 | single-session-assistant | `Admon … 8am-4pm Sundays` | 6 | HIT | **no** | n/a — qwen bank empty (0 nodes), no baseline |
+
+**Aggregate: session_hit 100% (3/3), judge_yes 33% (1/3 at k=10).** Of the two
+qids with a qwen baseline (both `yes`), granite **regresses 8fb83627** and
+**matches 1c549ce4**. The third (`7161e7e2`) is a granite failure with no qwen
+counterpart to compare against — the production qwen bank `lme_m_7161e7e2` is
+empty, so it is *not* scored as a regression. Retrieval stays healthy on every
+granite bank.
+
+Full per-k matrix (sess_hit / judge per cell):
+
+| qid | k=1 | k=3 | k=5 | k=10 | k=20 |
+|-----|-----|-----|-----|------|------|
+| 1c549ce4 | miss/no | HIT/no | HIT/no | HIT/**yes** | HIT/**yes** |
+| 8fb83627 | HIT/no | HIT/no | HIT/no | HIT/no | HIT/no |
+| 7161e7e2 | HIT/no | HIT/no | HIT/no | HIT/no | HIT/no |
+
+Predicted answers at k=10:
+- `1c549ce4` → "The total cost of the car cover and detailing spray you purchased is $140 ($120 + $20)." — **correct**, but only once k≥10 holds both price facts simultaneously (budget-gated).
+- `8fb83627` → "You have finished reading 3 issues of National Geographic." Gold is "Five". **Wrong, stable across all k** — and (see below) granite never extracted the fact that the count reached five.
+- `7161e7e2` → "The provided information states that a rotation table assigns specific agents to each shift…" — describes the table generically, never names Admon's specific Sunday day-shift. **Stable across all k.**
+
+### Fact quality: granite vs qwen (verbatim recall hits)
+
+The judge gap is explained by the *content of the extracted facts*, not by
+retrieval. Below are the actual top recall hits (`arecall(question, tags=[qid],
+max_tokens=512)`) from each bank, copied verbatim.
+
+**8fb83627 — knowledge-update, gold "Five" (the decisive case).** A
+knowledge-update question depends on capturing the *latest* state. The user's
+reading count moves from "finished 1–3, on issue 4" to "finished five issues"
+across sessions. **qwen extracted both states; granite captured only the stale
+one.**
+
+qwen (`lme_m_8fb83627`) top hits — the updated count survived:
+```
+[0] User is reading National Geographic about the Amazon rainforest and indigenous communities, having finished their fifth issue. | Involving: user
+[1] User has been reading about the Amazon rainforest, finishing five issues of National Geographic with great articles on the region. | Involving: user
+[2] User is filling in the National Geographic section of a spreadsheet, having finished three issues and currently on the fourth. | When: 2023-04-20 | Involving: user
+[3] User enjoys The New Yorker for fiction and National Geographic for science and nature articles, having finished the third issue and currently on the fourth | When: 2023-04-20 | Involving: user
+```
+
+granite (`lme_m_8fb83627_granite`) top hits — only the stale "issue 4" state, no "five":
+```
+[0] User reads news, science, and entertainment magazines; newspapers include The New York Times and The Daily News; enjoys The New Yorker for fiction and National Geographic for science and nature, currently on issue 4 after finishing issues 1-3. | When: 2023-04-20 | Involving: user
+[1] Assistant filled in the National Geographic section of the spreadsheet, marking Issues 1‑3 as 'Read' and Issue 4 as 'In Progress' (currently being read). | When: 2023-04-20 | Involving: Assistant ... and User | To help the user organize their National Geographic magazine reading progress in a spreadsheet.
+[2] National Geographic Kids and science kits encourage curiosity and exploration of scientific concepts.
+[3] National Geographic's Yanomami People provides a comprehensive visual and textual overview of Yanomami culture, history, and the ongoing struggles they face.
+```
+Granite's recall is dominated by topical/world facts about National Geographic
+content (Yanomami, Amazon reading lists) and tops out at the obsolete
+"issue 4 / 1–3 read" snapshot. The later "finished five issues" update is
+absent from the bank, so no value of k can recover it → the answer is locked at
+"3 issues". This is an **extraction-recency failure**: granite dropped the
+state-update fact that defines the question.
+
+**1c549ce4 — multi-session, gold "$140" ($120 cover + $20 spray) — granite
+matches qwen but less efficiently.** Both banks hold both prices, but granite's
+facts are **verbose and duplicated** — nearly every fact appears twice, once
+bare and once with a `| Involving: … | To …` annotation tail — which inflates
+token cost and separates the two price facts so they only co-occur at k≥10.
+
+granite (`lme_m_1c549ce4_granite`) — the $20 and $120 facts, each emitted twice:
+```
+[0] User previously used a $20 detailing spray from Amazon that effectively removed tar and bug stains from the car's paint.
+[1] Past positive experience: The user previously used a $20 detailing spray from Amazon that effectively removed tar and bug stains from the car's paint. | Involving: user | To illustrate the effectiveness of detailing sprays.
+...
+[6] Insurance may reimburse a $120 waterproof car cover if it is deemed a valid accessory protecting the vehicle's paint and is covered under the policy.
+[8] Insurance may reimburse the $120 waterproof car cover if it's deemed a valid accessory to protect the vehicle's paint and is covered by the policy. | To determine eligibility ...
+```
+
+qwen (`lme_m_1c549ce4`) — terser, both prices inside the top 3, no near-duplicate pairs:
+```
+[0] User previously purchased a detailing spray from Amazon for $20 that successfully removed tar and bug stains from their car's paint | Involving: user
+[1] User bought a $20 detailing spray from Amazon that worked well, removing tar and bug stains | Involving: user
+[2] User owns a waterproof car cover that cost $120 and protects car paint from elements | When: 2023-05-26 | Involving: user
+```
+Both ultimately answer "$140", but granite needs a larger k to assemble both
+operands because its duplication wastes budget — a precision/efficiency hit, not
+a correctness one.
+
+**7161e7e2 — single-session-assistant, gold "Admon … 8am-4pm Sundays" (granite
+only; no qwen bank).** Granite captured the rotation **schema** (the shifts
+exist, the 7 agents are listed, the table assigns agents Sun–Sat) but not the
+**specific cell value** — no fact states Admon→Sunday→8am-4pm:
+```
+[0] The shift rotation for GM social media agents is set for a 1-week period from Sunday to Saturday, with each of the 7 agents (Admon, Magdy, Ehab, Sara, Mostafa, Nemr, Adam) working one shift per day and having two days off each week. ...
+[1] Assistant created a shift‑rotation sheet for 7 GM social‑media agents with four shifts (8 am‑4 pm, 12 pm‑8 pm, 4 pm‑12 am, 12 am‑8 am) ...
+[5] The rotation table assigns specific agents to each shift on each day from Sunday to Saturday. ... | To clearly outline who works which shift on which day.
+```
+The per-agent-per-day assignments — the table's actual contents — were not
+emitted as facts; only its structure was. This is a **granularity loss** on a
+tabular source. There is no qwen comparison here (the production qwen bank for
+this qid is empty), so it stands as a granite observation rather than an A/B.
+
+**Read.** Retrieval (pure-similarity top-k) is decoupled from end-to-end
+correctness: the gold session's facts are in context on nearly every cell, yet
+2/3 answers are wrong because of *what granite extracted*. Two distinct
+fact-quality deficits show up vs qwen: (1) **recency/state-update loss** — the
+defining update fact (`finished five issues`) was never extracted (8fb83627);
+(2) **verbosity + near-duplicate facts** that waste the context budget
+(1c549ce4). A third, qwen-uncompared, is **granularity loss** on tabular data
+(7161e7e2). qwen's facts are consistently terser, deduplicated, and retain the
+latest state. *Caveat:* single-run verdicts; per the temp=0 + k-repeat protocol
+these are unverified across repeats, but the fact-content differences above are
+structural (present/absent in the bank), not judge variance.
+
+## Judge meta-eval (2026-05-27) — judge model is not the lever
+
+To test whether the judge model biases verdicts (and whether we need a stronger
+judge to match the paper's GPT-4o), we isolated the judge from answer-generation
+variance: generate the predicted answer **once** per qid (fixed answer-model),
+then grade that *same* frozen prediction with each candidate judge. Harness:
+`eval_harnesses/suites/memory_recall/lme_judge_meta.py` (freezes the prediction,
+emits a per-qid verdict-per-judge table + pairwise agreement). Raw:
+`.eval_cache/lme_results/judge_meta.{json,md}`.
+
+7 qids weighted to the failure-prone qtypes (preference, knowledge-update, a
+nuance temporal). Answer-model `lme-t0` (gemini-2.5-flash @ t0). Judges:
+`gemini-2.5-flash`, `gemini-2.5-pro`, `gemini-3-flash-preview` (all @ t0).
+
+**Result: all three judges agreed 7/7 (100% pairwise), all verdicts correct on
+inspection.** The earlier "flash is unreliable on `*-preference`" instability
+was **answer-generation** variance (same question → different predictions across
+runs), not the judge disagreeing on a *fixed* prediction. Once the prediction is
+frozen, flash judges as well as pro / 3-flash. So the judge is locked to
+`gemini-2.5-flash` (cheapest, ≥ GPT-4o on benchmarks) and the `lme-25pro-t0`
+alias is kept available for spot-checks. *Limitation:* judges only diverge on
+**borderline** predictions (partial credit, heavy paraphrase, extra-info); this
+set produced mostly unambiguous predictions, so 100% agreement means "no
+difference on clear cases," not "no difference ever." A borderline-engineered
+set + hand-labeled `human` column would be needed for a paper-style agreement
+number.
+
+## Answer-model A/B (2026-05-27) — gemini-3-flash answerer
+
+Full sweep over all 12 baseline banks (5 S + 7 M) with the answerer swapped to
+**`gemini-3-flash-preview` @ t0**, judge held at `gemini-2.5-flash` @ t0,
+standard config (`top_k=10`, `max_tokens=512`). Clean A/B vs the
+`gemini-2.5-flash`-answerer baseline — only the reader changed. Raw:
+`.eval_cache/lme_results/sweep_g3answer_{s,m}.json`.
+
+| tier | n | session_hit% | judge_yes% |
+|------|--:|-------------:|-----------:|
+| S (g3 answerer) | 5 | 100.0% | 80.0% |
+| M (g3 answerer) | 7 | 100.0% | 100.0% |
+| **combined** | **12** | **100.0%** | **91.7% (11/12)** |
+
+**Identical to the 2.5-flash-answerer baseline: 11/12, with `1c0ddc50` the sole
+failure.** Two confirmations:
+- **g3 does not rescue `1c0ddc50`** — still emits the generic "listen to
+  podcasts" answer. Consistent with the retrieval-structural diagnosis: the
+  history-preference fact never reaches context, so no reader can fix it (unlike
+  HyDE-g3, which changed the recall *vector*). A fifth failed intervention by
+  proxy — upgrading the reader doesn't touch a retrieval miss.
+- **g3 corroborates the granite finding from the reader side**: on the
+  qwen-extracted `8fb83627` bank (gold "Five"), g3 answers "finished five
+  issues" → yes. The facts are answerable; granite's failure on its own
+  `8fb83627` bank was extraction, not the reader.
+
+g3 answers are qualitatively richer (operands, dates, formatting) but
+correctness is unchanged. Net: swapping the answerer to gemini-3-flash neither
+gains nor regresses on the baseline set.
 
 ## Findings
 

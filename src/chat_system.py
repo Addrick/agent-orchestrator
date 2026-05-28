@@ -122,8 +122,10 @@ class ChatSystem:
         # Ensure system personas are also loaded so they are callable by the engine
         from src.utils.save_utils import load_system_personas_from_file
         system_personas = load_system_personas_from_file()
+        self.system_persona_names: Set[str] = set()
         if system_personas:
             self.personas.update(system_personas)
+            self.system_persona_names.update(system_personas.keys())
 
         self.memory_manager: MemoryManager = memory_manager
         # DP-113: backend boundary for new-shape recall/retain_turn. The
@@ -157,6 +159,19 @@ class ChatSystem:
         self._conversation_taints: Dict[Tuple[str, str, str, Optional[str]], bool] = defaultdict(bool)
         self._services: Dict[str, ServiceIntegration] = {}
         self._embedding_service: Optional[EmbeddingService] = embedding_service
+
+    def visible_personas(self) -> Dict[str, Persona]:
+        """Personas safe to expose in user-facing listings (dropdowns, status text).
+
+        System personas remain in `self.personas` so they are still routable when
+        addressed by name, but are excluded from discovery surfaces — they are
+        background workers, not user-selectable assistants.
+        """
+        return {
+            name: persona
+            for name, persona in self.personas.items()
+            if name not in self.system_persona_names
+        }
 
     def register_service(self, service: ServiceIntegration) -> None:
         """Register a service integration and its tools."""
