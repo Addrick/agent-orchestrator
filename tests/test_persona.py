@@ -316,7 +316,7 @@ def test_meta_visible_round_trip_save_load(base_persona_args, tmp_path):
     p_visible = Persona(**{**base_persona_args, "persona_name": "visible"}, meta_visible=True)
     p_hidden = Persona(**{**base_persona_args, "persona_name": "hidden"}, meta_visible=False)
     save_file = str(tmp_path / "personas.json")
-    save_personas_to_file({"visible": p_visible, "hidden": p_hidden}, file_path_override=save_file)
+    save_personas_to_file({"visible": p_visible, "hidden": p_hidden}, set(), file_path_override=save_file)
 
     loaded = load_personas_from_file(file_path_override=save_file)
     assert loaded["visible"].get_meta_visible() is True

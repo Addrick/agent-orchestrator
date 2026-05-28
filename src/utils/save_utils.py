@@ -5,7 +5,7 @@ import logging
 import os
 import shutil
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Iterable, Optional, List
 
 from config import global_config
 from src.tools.definitions import ALL_TOOL_DEFINITIONS
@@ -47,8 +47,21 @@ def save_models_to_file(models_dict: Dict[str, Any], file_path_override: Optiona
     logger.debug(f"Updated model save to {save_file}.")
 
 
-def save_personas_to_file(personas: Dict[str, Any], file_path_override: Optional[str] = None) -> None:
-    """Save all personas to the JSON file."""
+def save_personas_to_file(
+    personas: Dict[str, Any],
+    exclude_names: Iterable[str],
+    file_path_override: Optional[str] = None,
+) -> None:
+    """Save user personas to the JSON file.
+
+    `exclude_names` MUST be the set of system-persona names (see
+    `ChatSystem.system_persona_names`). System personas live in the same
+    in-memory dict as user personas but are sourced from `system_personas.json`
+    — writing them into the user file corrupts it: the next load injects them
+    twice (once from each file) and any persona dropped by load-time validation
+    gets permanently erased when this function next runs. Filtering here is the
+    single chokepoint that prevents both.
+    """
     save_file = file_path_override or _get_persona_save_file_path()
 
     # Ensure the directory exists
@@ -69,7 +82,9 @@ def save_personas_to_file(personas: Dict[str, Any], file_path_override: Optional
         # If file doesn't exist or is corrupt, start with a default structure
         save_data = {"personas": [], "models": {}}
 
-    persona_dict: List[Dict[str, Any]] = to_dict(personas)
+    excluded = set(exclude_names)
+    user_personas = {name: p for name, p in personas.items() if name not in excluded}
+    persona_dict: List[Dict[str, Any]] = to_dict(user_personas)
     save_data['personas'] = persona_dict
 
     with open(save_file, 'w') as file:

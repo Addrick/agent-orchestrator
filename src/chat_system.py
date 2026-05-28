@@ -772,7 +772,7 @@ class ChatSystem:
         )
         if command_result:
             if command_result.get("mutated", False):
-                save_personas_to_file(self.personas)
+                save_personas_to_file(self.personas, self.system_persona_names)
             yield DoneEvent(
                 text=command_result["response"],
                 response_type=ResponseType.DEV_COMMAND,

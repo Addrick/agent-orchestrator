@@ -39,7 +39,7 @@ def temp_save_file(tmp_path: Path) -> Path:
 def test_save_and_load_personas(temp_save_file: Path, mock_personas: dict):
     """Tests saving persona data to a file and loading it back."""
     # Save the personas.json
-    save_utils.save_personas_to_file(mock_personas, file_path_override=str(temp_save_file))
+    save_utils.save_personas_to_file(mock_personas, set(), file_path_override=str(temp_save_file))
 
     # Load the personas.json
     loaded_personas = save_utils.load_personas_from_file(file_path_override=str(temp_save_file))
@@ -132,7 +132,7 @@ def test_max_context_tokens_round_trip(temp_save_file: Path):
         prompt="p",
         max_context_tokens=8192,
     )
-    save_utils.save_personas_to_file({"ctx_persona": p}, file_path_override=str(temp_save_file))
+    save_utils.save_personas_to_file({"ctx_persona": p}, set(), file_path_override=str(temp_save_file))
     loaded = save_utils.load_personas_from_file(file_path_override=str(temp_save_file))
     assert loaded["ctx_persona"].get_max_context_tokens() == 8192
 
@@ -167,7 +167,7 @@ def test_save_writes_nested_params_block(temp_save_file: Path):
         top_k=40,
         token_limit=2048,
     )
-    save_utils.save_personas_to_file({"phase_a": p}, file_path_override=str(temp_save_file))
+    save_utils.save_personas_to_file({"phase_a": p}, set(), file_path_override=str(temp_save_file))
     with open(temp_save_file) as f:
         on_disk = json.load(f)
     entry = on_disk["personas"][0]
@@ -200,7 +200,7 @@ def test_save_round_trip_preserves_provider_extras(temp_save_file: Path):
             "provider_extras": {"kobold": {"rep_pen": 1.05, "min_p": 0.05}},
         },
     )
-    save_utils.save_personas_to_file({"kbd": p}, file_path_override=str(temp_save_file))
+    save_utils.save_personas_to_file({"kbd": p}, set(), file_path_override=str(temp_save_file))
     loaded = save_utils.load_personas_from_file(file_path_override=str(temp_save_file))
     gp = loaded["kbd"].get_generation_params()
     assert gp.stop_sequences == ["</s>"]
@@ -228,3 +228,24 @@ def test_load_legacy_flat_shape_still_works(tmp_path: Path):
     assert p.get_top_p() == 0.8
     assert p.get_top_k() == 25
     assert p.get_response_token_limit() == 777
+
+
+def test_save_personas_excludes_system_personas(temp_save_file: Path):
+    """System personas in the in-memory dict must not be persisted to the user file.
+
+    Regression: prod chatbot's data/personas.json got contaminated with
+    triage_*, model_selector, etc. after edits. Combined with load-time
+    validation rejections, the next save-on-edit silently erased user
+    personas (e.g. joy). The save path is the single chokepoint for the fix.
+    """
+    user = Persona(persona_name="joy", model_name="m", prompt="p")
+    sys_a = Persona(persona_name="triage_scout", model_name="m", prompt="p")
+    sys_b = Persona(persona_name="model_selector", model_name="m", prompt="p")
+    save_utils.save_personas_to_file(
+        {"joy": user, "triage_scout": sys_a, "model_selector": sys_b},
+        {"triage_scout", "model_selector"},
+        file_path_override=str(temp_save_file),
+    )
+    with open(temp_save_file) as f:
+        data = json.load(f)
+    assert [entry["name"] for entry in data["personas"]] == ["joy"]

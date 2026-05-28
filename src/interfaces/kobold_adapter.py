@@ -201,7 +201,7 @@ class KoboldAdapter:
                     content={"response": "Not a dev command", "mutated": False},
                 )
             if result.get("mutated"):
-                save_personas_to_file(self.chat_system.personas)
+                save_personas_to_file(self.chat_system.personas, self.chat_system.system_persona_names)
             return {"response": result.get("response", ""), "mutated": bool(result.get("mutated"))}
 
         @self.app.get("/api/v1/session/{persona}/kobold_export")
@@ -381,7 +381,7 @@ class KoboldAdapter:
                 logger.warning(f"PATCH /persona/{name}: unknown fields ignored: {unknown}")
 
             try:
-                save_personas_to_file(self.chat_system.personas)
+                save_personas_to_file(self.chat_system.personas, self.chat_system.system_persona_names)
             except Exception as e:
                 logger.error(f"Persona save failed for {name}: {e}")
                 return JSONResponse(

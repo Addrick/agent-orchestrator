@@ -238,7 +238,7 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                 if command_result:
                     mutated = command_result.get("mutated", False)
                     if mutated:
-                        save_personas_to_file(chat_system.personas)
+                        save_personas_to_file(chat_system.personas, chat_system.system_persona_names)
                     response_text = command_result["response"]
                     if response_text.startswith("FILE_RESPONSE::"):
                         parts = response_text.split("::", 2)
