@@ -83,7 +83,6 @@ jobs:
   # Only runs if build-and-push succeeds
   deploy:
     needs: build-and-push
-    permissions: {}
     runs-on: [self-hosted, Windows, derpr]
     permissions:
       packages: read
