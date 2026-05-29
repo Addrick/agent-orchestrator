@@ -5,9 +5,10 @@ import json
 import logging
 import time
 from collections import defaultdict
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, AsyncIterator, Coroutine, Dict, List, Optional, Set, Tuple
+from typing import Any, AsyncGenerator, AsyncIterator, Coroutine, Dict, List, Optional, Set, Tuple
 
 from config import global_config
 from config.global_config import MAX_CACHED_API_REQUESTS, \
@@ -33,7 +34,7 @@ from src.persona import Persona, MemoryMode
 from src.tools.definitions import MODEL_INCOMPATIBLE_TOOLS, get_tool_capabilities
 from src.tools.tool_loop import ToolLoop, _ApiPayloadEvent, _LoopFinishedEvent
 from src.tools.tool_manager import ToolManager, WebSearchHandler, MemoryRecallHandler
-from src.tools.turn_context import TurnContext, set_turn_context, reset_turn_context
+from src.tools.turn_context import TurnContext, turn_scope
 from src.utils.model_utils import get_model_list, get_model_prefix
 from src.utils.save_utils import load_personas_from_file, save_personas_to_file
 from src.utils.message_utils import strip_vertex_links
@@ -759,7 +760,7 @@ class ChatSystem:
             local_inference_config: Optional[Dict[str, Any]] = None,
             is_retry: bool = False,
             client_messages: Optional[List[Dict[str, Any]]] = None,
-    ) -> AsyncIterator[GenerationEvent]:
+    ) -> AsyncGenerator[GenerationEvent, None]:
         """Shared streaming kernel — single source of truth for the request
         pipeline. Yields TokenEvent for each text delta, terminal DoneEvent
         with final ids, or ErrorEvent on failure. Phase C kernel; both
@@ -798,174 +799,173 @@ class ChatSystem:
 
         # DP-113: pin the active turn's scope so engine-side tools (e.g.
         # `recall_memory`) inherit persona/channel/user/server without those
-        # showing up as model-callable args.
-        _turn_token = set_turn_context(TurnContext(
+        # showing up as model-callable args. turn_scope guarantees the
+        # ContextVar is reset on *every* exit — post-loop exception, an
+        # early-breaking consumer (GeneratorExit at a suspended yield), or
+        # normal completion — so a stale scope never leaks into the next turn
+        # sharing the event-loop context.
+        with turn_scope(TurnContext(
             persona_name=persona_name,
             user_identifier=user_identifier,
             channel=channel,
             server_id=server_id,
-        ))
-
-        try:
-            await self._prepare_request(ctx, is_retry=is_retry)
-        except Exception as e:
-            logger.error(
-                f"_prepare_request failed for {user_identifier}: {e}", exc_info=True,
-            )
-            yield ErrorEvent(message="An internal error occurred while processing your request.")
-            reset_turn_context(_turn_token)
-            return
-
-        # 2. Log user turn (or archive for retry). Done after history is built
-        #    (so the freshly-inserted row doesn't show up twice) but before
-        #    the LLM call so the user row is always pinned even if the model
-        #    errors mid-flight.
-        user_ts = timestamp or datetime.now()
-        user_interaction_id, retry_assistant_id = self._log_user_turn(
-            is_retry=is_retry, persona_name=persona_name,
-            user_identifier=user_identifier, channel=channel,
-            user_display_name=user_display_name, message=message,
-            server_id=server_id, platform_message_id=platform_message_id,
-            timestamp=user_ts,
-        )
-
-        # DP-113: retain user turn through the backend boundary. Sqlite_legacy
-        # is a noop (batch SqliteConsolidator still drives consolidation); Hindsight
-        # enqueues fire-and-forget. Either way, retain_turn returns quickly
-        # and does not block the LLM call below.
-        if user_interaction_id is not None and message and message.strip():
-            await self._retain_turn_safe(
-                persona_name=persona_name, role="user", content=message,
-                user_identifier=user_identifier, channel=channel,
-                server_id=server_id, timestamp=user_ts,
-                interaction_id=user_interaction_id, untrusted=False,
-            )
-
-        # 3. Tool loop. ToolLoop owns iteration + tool dispatch; this
-        #    forwards Token / ToolCallStart / ToolCallResult events,
-        #    siphons api_payload into the request cache, and unpacks the
-        #    terminal _LoopFinishedEvent to drive CONFIRM-mode parking +
-        #    assistant persistence.
-        params = ctx.persona.get_generation_params().copy()
-        if ctx.local_inference_config:
-            params.merge_inference_config(ctx.local_inference_config)
-        params_first_iter = True
-        final_text = ""
-        response_type = ResponseType.LLM_GENERATION
-        tool_context_json: Optional[str] = None
-        accumulated_parts: List[str] = []
-        pending_writes: Optional[List[Dict[str, Any]]] = None
-        audit_info: Optional[Dict[str, Any]] = None
-
-        # Construct per-call so tests that swap `chat_system.text_engine`
-        # post-init still see the new engine; ToolLoop is stateless.
-        tool_loop = ToolLoop(self.text_engine, self.tool_manager)
-        try:
-            async for ev in tool_loop.run(
-                persona=ctx.persona,
-                conversation_history=ctx.conversation_history,
-                params=params,
-                tools=ctx.tools_for_llm,
-                local_inference_config=ctx.local_inference_config,
-                image_url=ctx.image_url,
-                turn_tainted=ctx.turn_tainted,
-                initial_taint_sources=ctx.taint_sources,
-            ):
-                if isinstance(ev, _ApiPayloadEvent):
-                    self._store_api_request(
-                        user_identifier, persona_name, ev.payload,
-                        tools_for_llm=ctx.tools_for_llm if params_first_iter else None,
-                    )
-                    params_first_iter = False
-                elif isinstance(ev, TokenEvent):
-                    accumulated_parts.append(ev.delta)
-                    yield ev
-                elif isinstance(ev, (ToolCallStartEvent, ToolCallResultEvent)):
-                    yield ev
-                elif isinstance(ev, ErrorEvent):
-                    yield ev
-                    reset_turn_context(_turn_token)
-                    return
-                elif isinstance(ev, _LoopFinishedEvent):
-                    final_text = ev.final_text
-                    response_type = ev.response_type
-                    tool_context_json = ev.tool_context_json
-                    pending_writes = ev.pending_writes
-                    audit_info = ev.audit_info
-                    ctx.turn_tainted = ev.turn_tainted
-                    # Persist back to the conversation cache for stickiness
-                    taint_key = (ctx.user_identifier, ctx.persona_name, ctx.channel, ctx.server_id)
-                    self._conversation_taints[taint_key] = ev.turn_tainted
-        except asyncio.CancelledError:
-            # Client disconnect / abort. Flush whatever assistant text has
-            # accumulated so the row reflects what the user actually saw,
-            # then re-raise so the surrounding StreamingResponse aborts.
-            partial = "".join(accumulated_parts)
-            if partial.strip():
-                self._commit_or_update_assistant(
-                    persona_name=persona_name, user_identifier=user_identifier,
-                    channel=channel, server_id=server_id,
-                    final_text=partial,
-                    response_type=ResponseType.LLM_GENERATION,
-                    user_interaction_id=user_interaction_id,
-                    retry_assistant_id=retry_assistant_id,
-                    tool_context_json=None,
+        )):
+            try:
+                await self._prepare_request(ctx, is_retry=is_retry)
+            except Exception as e:
+                logger.error(
+                    f"_prepare_request failed for {user_identifier}: {e}", exc_info=True,
                 )
-            reset_turn_context(_turn_token)
-            raise
+                yield ErrorEvent(message="An internal error occurred while processing your request.")
+                return
 
-        if pending_writes is not None:
-            self._pending_confirmations[(ctx.user_identifier, ctx.persona_name)] = (
-                PendingConfirmation(
-                    write_calls=pending_writes,
+            # 2. Log user turn (or archive for retry). Done after history is built
+            #    (so the freshly-inserted row doesn't show up twice) but before
+            #    the LLM call so the user row is always pinned even if the model
+            #    errors mid-flight.
+            user_ts = timestamp or datetime.now()
+            user_interaction_id, retry_assistant_id = self._log_user_turn(
+                is_retry=is_retry, persona_name=persona_name,
+                user_identifier=user_identifier, channel=channel,
+                user_display_name=user_display_name, message=message,
+                server_id=server_id, platform_message_id=platform_message_id,
+                timestamp=user_ts,
+            )
+
+            # DP-113: retain user turn through the backend boundary. Sqlite_legacy
+            # is a noop (batch SqliteConsolidator still drives consolidation); Hindsight
+            # enqueues fire-and-forget. Either way, retain_turn returns quickly
+            # and does not block the LLM call below.
+            if user_interaction_id is not None and message and message.strip():
+                await self._retain_turn_safe(
+                    persona_name=persona_name, role="user", content=message,
+                    user_identifier=user_identifier, channel=channel,
+                    server_id=server_id, timestamp=user_ts,
+                    interaction_id=user_interaction_id, untrusted=False,
+                )
+
+            # 3. Tool loop. ToolLoop owns iteration + tool dispatch; this
+            #    forwards Token / ToolCallStart / ToolCallResult events,
+            #    siphons api_payload into the request cache, and unpacks the
+            #    terminal _LoopFinishedEvent to drive CONFIRM-mode parking +
+            #    assistant persistence.
+            params = ctx.persona.get_generation_params().copy()
+            if ctx.local_inference_config:
+                params.merge_inference_config(ctx.local_inference_config)
+            params_first_iter = True
+            final_text = ""
+            response_type = ResponseType.LLM_GENERATION
+            tool_context_json: Optional[str] = None
+            accumulated_parts: List[str] = []
+            pending_writes: Optional[List[Dict[str, Any]]] = None
+            audit_info: Optional[Dict[str, Any]] = None
+
+            # Construct per-call so tests that swap `chat_system.text_engine`
+            # post-init still see the new engine; ToolLoop is stateless.
+            tool_loop = ToolLoop(self.text_engine, self.tool_manager)
+            try:
+                async for ev in tool_loop.run(
+                    persona=ctx.persona,
                     conversation_history=ctx.conversation_history,
-                    persona_name=ctx.persona_name,
-                    tools_for_llm=ctx.tools_for_llm,
+                    params=params,
+                    tools=ctx.tools_for_llm,
+                    local_inference_config=ctx.local_inference_config,
                     image_url=ctx.image_url,
-                    channel=ctx.channel,
-                    server_id=ctx.server_id,
                     turn_tainted=ctx.turn_tainted,
-                    audit_info=audit_info,
+                    initial_taint_sources=ctx.taint_sources,
+                ):
+                    if isinstance(ev, _ApiPayloadEvent):
+                        self._store_api_request(
+                            user_identifier, persona_name, ev.payload,
+                            tools_for_llm=ctx.tools_for_llm if params_first_iter else None,
+                        )
+                        params_first_iter = False
+                    elif isinstance(ev, TokenEvent):
+                        accumulated_parts.append(ev.delta)
+                        yield ev
+                    elif isinstance(ev, (ToolCallStartEvent, ToolCallResultEvent)):
+                        yield ev
+                    elif isinstance(ev, ErrorEvent):
+                        yield ev
+                        return
+                    elif isinstance(ev, _LoopFinishedEvent):
+                        final_text = ev.final_text
+                        response_type = ev.response_type
+                        tool_context_json = ev.tool_context_json
+                        pending_writes = ev.pending_writes
+                        audit_info = ev.audit_info
+                        ctx.turn_tainted = ev.turn_tainted
+                        # Persist back to the conversation cache for stickiness
+                        taint_key = (ctx.user_identifier, ctx.persona_name, ctx.channel, ctx.server_id)
+                        self._conversation_taints[taint_key] = ev.turn_tainted
+            except asyncio.CancelledError:
+                # Client disconnect / abort. Flush whatever assistant text has
+                # accumulated so the row reflects what the user actually saw,
+                # then re-raise so the surrounding StreamingResponse aborts.
+                partial = "".join(accumulated_parts)
+                if partial.strip():
+                    self._commit_or_update_assistant(
+                        persona_name=persona_name, user_identifier=user_identifier,
+                        channel=channel, server_id=server_id,
+                        final_text=partial,
+                        response_type=ResponseType.LLM_GENERATION,
+                        user_interaction_id=user_interaction_id,
+                        retry_assistant_id=retry_assistant_id,
+                        tool_context_json=None,
+                    )
+                raise
+
+            if pending_writes is not None:
+                self._pending_confirmations[(ctx.user_identifier, ctx.persona_name)] = (
+                    PendingConfirmation(
+                        write_calls=pending_writes,
+                        conversation_history=ctx.conversation_history,
+                        persona_name=ctx.persona_name,
+                        tools_for_llm=ctx.tools_for_llm,
+                        image_url=ctx.image_url,
+                        channel=ctx.channel,
+                        server_id=ctx.server_id,
+                        turn_tainted=ctx.turn_tainted,
+                        audit_info=audit_info,
+                    )
                 )
-            )
-            # Phase 7: Log audit parking
-            self.memory_manager.log_audit_event(
-                event_type="audit_parked",
-                operator_id=ctx.user_identifier,
-                new_state="pending",
-                reason="Universal write-audit gate triggered",
-                metadata=audit_info
-            )
+                # Phase 7: Log audit parking
+                self.memory_manager.log_audit_event(
+                    event_type="audit_parked",
+                    operator_id=ctx.user_identifier,
+                    new_state="pending",
+                    reason="Universal write-audit gate triggered",
+                    metadata=audit_info
+                )
 
-        # 4. Log/update assistant turn. Original text (including links) is preserved.
-        assistant_id = self._commit_or_update_assistant(
-            persona_name=persona_name, user_identifier=user_identifier,
-            channel=channel, server_id=server_id,
-            final_text=final_text, response_type=response_type,
-            user_interaction_id=user_interaction_id,
-            retry_assistant_id=retry_assistant_id,
-            tool_context_json=tool_context_json,
-        )
-
-        # DP-113: retain assistant turn through the backend boundary.
-        # Inherit ctx.turn_tainted so the untrusted bit reaches the
-        # store when the LLM consumed attacker-influenced tool output.
-        if assistant_id is not None and final_text and final_text.strip() \
-                and response_type == ResponseType.LLM_GENERATION:
-            await self._retain_turn_safe(
-                persona_name=persona_name, role="assistant", content=final_text,
-                user_identifier=user_identifier, channel=channel,
-                server_id=server_id, timestamp=datetime.now(),
-                interaction_id=assistant_id, untrusted=ctx.turn_tainted,
+            # 4. Log/update assistant turn. Original text (including links) is preserved.
+            assistant_id = self._commit_or_update_assistant(
+                persona_name=persona_name, user_identifier=user_identifier,
+                channel=channel, server_id=server_id,
+                final_text=final_text, response_type=response_type,
+                user_interaction_id=user_interaction_id,
+                retry_assistant_id=retry_assistant_id,
+                tool_context_json=tool_context_json,
             )
 
-        yield DoneEvent(
-            text=final_text if final_text else "",
-            response_type=response_type,
-            assistant_id=assistant_id,
-            user_interaction_id=user_interaction_id,
-        )
-        reset_turn_context(_turn_token)
+            # DP-113: retain assistant turn through the backend boundary.
+            # Inherit ctx.turn_tainted so the untrusted bit reaches the
+            # store when the LLM consumed attacker-influenced tool output.
+            if assistant_id is not None and final_text and final_text.strip() \
+                    and response_type == ResponseType.LLM_GENERATION:
+                await self._retain_turn_safe(
+                    persona_name=persona_name, role="assistant", content=final_text,
+                    user_identifier=user_identifier, channel=channel,
+                    server_id=server_id, timestamp=datetime.now(),
+                    interaction_id=assistant_id, untrusted=ctx.turn_tainted,
+                )
+
+            yield DoneEvent(
+                text=final_text if final_text else "",
+                response_type=response_type,
+                assistant_id=assistant_id,
+                user_interaction_id=user_interaction_id,
+            )
 
     async def stream_response(
             self,
@@ -990,7 +990,11 @@ class ChatSystem:
         ToolLoop interleaves tool lifecycle events with token deltas in a
         single linear stream.
         """
-        async for ev in self._orchestrate(
+        # aclosing: if the consumer stops early (client disconnect, break),
+        # tearing down this generator must propagate aclose() into the inner
+        # _orchestrate so its turn_scope finally runs — a plain `async for`
+        # delegation leaves the sub-generator suspended and leaks the scope.
+        async with aclosing(self._orchestrate(
             persona_name=persona_name,
             user_identifier=user_identifier,
             channel=channel,
@@ -1004,8 +1008,9 @@ class ChatSystem:
             timestamp=timestamp,
             local_inference_config=local_inference_config,
             client_messages=client_messages,
-        ):
-            yield ev
+        )) as agen:
+            async for ev in agen:
+                yield ev
 
     async def generate_response(
             self,
@@ -1032,7 +1037,7 @@ class ChatSystem:
         response_type = ResponseType.DEV_COMMAND
         assistant_id: Optional[int] = None
         user_interaction_id: Optional[int] = None
-        async for ev in self._orchestrate(
+        async with aclosing(self._orchestrate(
             persona_name=persona_name,
             user_identifier=user_identifier,
             channel=channel,
@@ -1044,19 +1049,20 @@ class ChatSystem:
             platform_message_id=platform_message_id,
             timestamp=timestamp,
             local_inference_config=local_inference_config,
-        ):
-            if isinstance(ev, TokenEvent):
-                continue
-            if isinstance(ev, DoneEvent):
-                final_text = ev.text
-                response_type = ev.response_type
-                assistant_id = ev.assistant_id
-                user_interaction_id = ev.user_interaction_id
-            elif isinstance(ev, ErrorEvent):
-                final_text = ev.message
-                response_type = ResponseType.DEV_COMMAND
-                assistant_id = None
-                user_interaction_id = None
+        )) as agen:
+            async for ev in agen:
+                if isinstance(ev, TokenEvent):
+                    continue
+                if isinstance(ev, DoneEvent):
+                    final_text = ev.text
+                    response_type = ev.response_type
+                    assistant_id = ev.assistant_id
+                    user_interaction_id = ev.user_interaction_id
+                elif isinstance(ev, ErrorEvent):
+                    final_text = ev.message
+                    response_type = ResponseType.DEV_COMMAND
+                    assistant_id = None
+                    user_interaction_id = None
         return final_text, response_type, assistant_id, user_interaction_id
 
     async def resume_pending_confirmation(
@@ -1079,69 +1085,80 @@ class ChatSystem:
         conversation_history = pending.conversation_history
 
         try:
-            taint_key = (user_identifier, persona.get_name(), pending.channel, pending.server_id)
-            turn_tainted = pending.turn_tainted
+            # Pin the turn scope for the resumed continuation, exactly as
+            # _orchestrate does — write-call execution and the follow-up
+            # generate_response run engine-side tools that inherit it. (The
+            # two paths should eventually converge on a single kernel; until
+            # then this keeps the lifecycle consistent.)
+            with turn_scope(TurnContext(
+                persona_name=persona_name,
+                user_identifier=user_identifier,
+                channel=pending.channel,
+                server_id=pending.server_id,
+            )):
+                taint_key = (user_identifier, persona.get_name(), pending.channel, pending.server_id)
+                turn_tainted = pending.turn_tainted
 
-            if approved:
-                await self._execute_write_calls(pending.write_calls, conversation_history)
-                # Update taint from write calls
-                for wc in pending.write_calls:
-                    wc_name = wc.get("name") or "unknown"
-                    if get_tool_capabilities(wc_name).get("produces_untrusted"):
-                        turn_tainted = True
-                
-                decision_state = "approved"
-                decision_reason = "Human approved tool execution"
-            else:
-                self._append_denied_tool_results(pending.write_calls, conversation_history)
-                decision_state = "denied"
-                decision_reason = "Human denied tool execution"
+                if approved:
+                    await self._execute_write_calls(pending.write_calls, conversation_history)
+                    # Update taint from write calls
+                    for wc in pending.write_calls:
+                        wc_name = wc.get("name") or "unknown"
+                        if get_tool_capabilities(wc_name).get("produces_untrusted"):
+                            turn_tainted = True
 
-            # Phase 7: Log audit decision
-            self.memory_manager.log_audit_event(
-                event_type="audit_decision",
-                operator_id=user_identifier,
-                prior_state="pending",
-                new_state=decision_state,
-                reason=decision_reason,
-                metadata={
-                    "write_calls": pending.write_calls,
-                    "audit_info": pending.audit_info,
-                    "turn_tainted": turn_tainted
+                    decision_state = "approved"
+                    decision_reason = "Human approved tool execution"
+                else:
+                    self._append_denied_tool_results(pending.write_calls, conversation_history)
+                    decision_state = "denied"
+                    decision_reason = "Human denied tool execution"
+
+                # Phase 7: Log audit decision
+                self.memory_manager.log_audit_event(
+                    event_type="audit_decision",
+                    operator_id=user_identifier,
+                    prior_state="pending",
+                    new_state=decision_state,
+                    reason=decision_reason,
+                    metadata={
+                        "write_calls": pending.write_calls,
+                        "audit_info": pending.audit_info,
+                        "turn_tainted": turn_tainted
+                    }
+                )
+
+                # Continue the LLM conversation with the tool results
+                history_object = {
+                    "persona_prompt": persona.get_prompt(),
+                    "message_history": pending.conversation_history,
+                    "history": pending.conversation_history,  # Legacy key
+                    "current_message": {"text": "", "image_url": pending.image_url}
                 }
-            )
-
-            # Continue the LLM conversation with the tool results
-            history_object = {
-                "persona_prompt": persona.get_prompt(),
-                "message_history": pending.conversation_history,
-                "history": pending.conversation_history,  # Legacy key
-                "current_message": {"text": "", "image_url": pending.image_url}
-            }
-            llm_response, api_payload = await self.text_engine.generate_response(
-                persona.get_config_for_engine(), history_object, tools=pending.tools_for_llm
-            )
-            if api_payload:
-                self._store_api_request(
-                    user_identifier, persona_name, api_payload,
-                    tools_for_llm=pending.tools_for_llm
+                llm_response, api_payload = await self.text_engine.generate_response(
+                    persona.get_config_for_engine(), history_object, tools=pending.tools_for_llm
                 )
+                if api_payload:
+                    self._store_api_request(
+                        user_identifier, persona_name, api_payload,
+                        tools_for_llm=pending.tools_for_llm
+                    )
 
-            final_text = llm_response.get("content", "")
+                final_text = llm_response.get("content", "")
 
-            assistant_id: Optional[int] = None
-            if final_text and final_text.strip():
-                assistant_id = self.memory_manager.log_message(
-                    user_identifier=user_identifier, persona_name=persona_name,
-                    channel="",  # Not available in pending context
-                    author_role='assistant', author_name=persona_name,
-                    content=final_text, timestamp=datetime.now(),
-                )
+                assistant_id: Optional[int] = None
+                if final_text and final_text.strip():
+                    assistant_id = self.memory_manager.log_message(
+                        user_identifier=user_identifier, persona_name=persona_name,
+                        channel="",  # Not available in pending context
+                        author_role='assistant', author_name=persona_name,
+                        content=final_text, timestamp=datetime.now(),
+                    )
 
-            # Persist taint bit
-            self._conversation_taints[taint_key] = turn_tainted
+                # Persist taint bit
+                self._conversation_taints[taint_key] = turn_tainted
 
-            return final_text, ResponseType.LLM_GENERATION, assistant_id, None
+                return final_text, ResponseType.LLM_GENERATION, assistant_id, None
 
         except Exception as e:
             logger.error(f"Error resuming pending confirmation for {user_identifier}: {e}", exc_info=True)
