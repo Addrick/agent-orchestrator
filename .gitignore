@@ -2,6 +2,7 @@ stuff/
 .huggingface/
 /memory/
 .venv/
+.venv*/
 .idea/
 __pycache__/
 data/
