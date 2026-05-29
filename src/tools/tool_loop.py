@@ -11,6 +11,7 @@ policy decisions live in the caller (currently `ChatSystem`, eventually
 the security framework in the sibling plan).
 """
 
+import asyncio
 import json
 import logging
 import uuid
@@ -125,6 +126,14 @@ class ToolLoop:
                             yield TokenEvent(delta=text_chunk)
                     elif etype == "tool_calls":
                         tool_calls_collected = list(ev.get("calls") or [])
+                        # Normalize identity once, at ingestion: providers may
+                        # omit `id`, and every downstream consumer (assistant
+                        # message, lifecycle events, tool-result history) must
+                        # agree on it or the next iteration sends the model
+                        # unpaired call/result blocks.
+                        for c in tool_calls_collected:
+                            if not c.get("id"):
+                                c["id"] = f"call_{uuid.uuid4().hex[:12]}"
                     elif etype == "done":
                         full_text_from_done = ev.get("full_text")
             except LLMCommunicationError as e:
@@ -270,15 +279,20 @@ class ToolLoop:
         group_id: Optional[str] = None,
     ) -> AsyncIterator[LoopEvent]:
         """Execute a batch of tool calls, yielding start/result events
-        and appending results to the shared conversation history. Tool
-        errors surface via `ToolCallResultEvent.error` and are also
-        threaded into the LLM-visible result string so the model can
+        and appending results to the shared conversation history. Calls in
+        one batch share a `group_id` and are dispatched concurrently (they
+        were grouped precisely because they're independent); results are
+        appended/emitted in the original order so the model sees a stable
+        transcript. Tool errors surface via `ToolCallResultEvent.error` and
+        are also threaded into the LLM-visible result string so the model can
         adapt rather than seeing a hard stop."""
+        # Resolve identity + emit all starts before any execution.
+        resolved: List[Dict[str, Any]] = []
         for call_item in calls:
             tool_name = call_item.get("name", "")
             tool_args = call_item.get("arguments", {}) or {}
             call_id = call_item.get("id") or f"call_{uuid.uuid4().hex[:12]}"
-
+            resolved.append({"name": tool_name, "args": tool_args, "call_id": call_id})
             yield ToolCallStartEvent(
                 tool_name=tool_name,
                 arguments=tool_args,
@@ -286,16 +300,22 @@ class ToolLoop:
                 group_id=group_id,
             )
 
+        async def _run_one(name: str, args: Dict[str, Any]) -> Any:
             try:
-                tool_result = await self.tool_manager.execute_tool(
-                    tool_name, **tool_args
-                )
+                return await self.tool_manager.execute_tool(name, **args)
             except Exception as e:
                 logger.error(
-                    f"Tool {tool_name} raised unexpectedly: {e}", exc_info=True,
+                    f"Tool {name} raised unexpectedly: {e}", exc_info=True,
                 )
-                tool_result = {"error": f"Tool execution failed: {e}"}
+                return {"error": f"Tool execution failed: {e}"}
 
+        results = await asyncio.gather(
+            *(_run_one(r["name"], r["args"]) for r in resolved)
+        )
+
+        # Append/emit in original order — concurrency must not reorder the
+        # transcript the model reads next iteration.
+        for r, tool_result in zip(resolved, results):
             result_str = json.dumps(tool_result)
             err_str: Optional[str] = None
             if isinstance(tool_result, dict) and tool_result.get("error"):
@@ -303,14 +323,14 @@ class ToolLoop:
 
             conversation_history.append({
                 "role": "tool",
-                "tool_call_id": call_item.get("id"),
-                "name": tool_name,
+                "tool_call_id": r["call_id"],
+                "name": r["name"],
                 "content": result_str,
             })
 
             yield ToolCallResultEvent(
-                call_id=call_id,
-                tool_name=tool_name,
+                call_id=r["call_id"],
+                tool_name=r["name"],
                 result=result_str,
                 error=err_str,
                 group_id=group_id,
