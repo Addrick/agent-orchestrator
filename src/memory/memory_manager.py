@@ -91,7 +91,7 @@ class MemoryManager:
                 self.has_vec = False
                 
                 # Python fallback for vec_distance_cosine
-                def python_vec_distance_cosine(a, b):
+                def python_vec_distance_cosine(a: Optional[bytes], b: Optional[bytes]) -> float:
                     import struct
                     import math
                     if not a or not b:
@@ -108,7 +108,7 @@ class MemoryManager:
                         if norm_a == 0 or norm_b == 0:
                             return 1.0
                         similarity = dot_product / (norm_a * norm_b)
-                        return 1.0 - similarity
+                        return float(1.0 - similarity)
                     except Exception:
                         return 0.0
 
