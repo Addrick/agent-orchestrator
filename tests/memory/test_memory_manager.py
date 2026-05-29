@@ -1756,9 +1756,12 @@ def legacy_mem_manager_with_summaries(tmp_path):
 
     db_path = str(tmp_path / "legacy_summaries.db")
     conn = _sqlite3.connect(db_path)
-    conn.enable_load_extension(True)
-    _sqlite_vec.load(conn)
-    conn.enable_load_extension(False)
+    try:
+        conn.enable_load_extension(True)
+        _sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+    except (AttributeError, _sqlite3.OperationalError):
+        pass
 
     conn.executescript("""
         CREATE TABLE User_Interactions (

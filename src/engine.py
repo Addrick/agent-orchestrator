@@ -438,8 +438,10 @@ class TextEngine:
         self, system_prompt: str, history: List[Dict[str, Any]], image_url: Optional[str]
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """Returns (history_for_api, serializable_history)."""
-        history_for_api = [{'parts': [Part(text=system_prompt)]}]
-        serializable_history = [{'role': 'system', 'parts': [{'text': system_prompt}]}]
+        history_for_api = []
+        serializable_history = []
+        if system_prompt:
+            serializable_history.append({'role': 'system', 'parts': [{'text': system_prompt}]})
 
         for item in history:
             role = 'model' if item['role'] == 'assistant' else 'user'
@@ -579,6 +581,8 @@ class TextEngine:
         )
 
         content_config_for_api: Dict[str, Any] = {"safety_settings": self.google_safety_settings}
+        if system_prompt:
+            content_config_for_api['system_instruction'] = system_prompt
 
         api_tools, tool_config = self._build_google_tools(tools)
         if tool_config:

@@ -52,6 +52,7 @@ class MemoryManager:
         self.db_path: str = db_path if db_path is not None else str(DATABASE_FILE)
         self._conn: Optional[sqlite3.Connection] = None
         self._lock: threading.RLock = threading.RLock()
+        self.has_vec: bool = True
         if self.db_path != ':memory:':
             DB_DIR.mkdir(parents=True, exist_ok=True)
         # Lazy import avoids circular: backend modules import MemoryManager for
@@ -80,9 +81,38 @@ class MemoryManager:
                 check_same_thread=False
             )
             self._conn.row_factory = sqlite3.Row
-            self._conn.enable_load_extension(True)
-            sqlite_vec.load(self._conn)
-            self._conn.enable_load_extension(False)
+            try:
+                self._conn.enable_load_extension(True)
+                sqlite_vec.load(self._conn)
+                self._conn.enable_load_extension(False)
+                self.has_vec = True
+            except (AttributeError, sqlite3.OperationalError) as e:
+                logger.warning(f"Could not load sqlite-vec extension: {e}. Vector search features will run using Python fallback.")
+                self.has_vec = False
+                
+                # Python fallback for vec_distance_cosine
+                def python_vec_distance_cosine(a, b):
+                    import struct
+                    import math
+                    if not a or not b:
+                        return 0.0
+                    try:
+                        # Decode float32 vector BLOBs
+                        count_a = len(a) // 4
+                        count_b = len(b) // 4
+                        arr_a = struct.unpack(f'{count_a}f', a)
+                        arr_b = struct.unpack(f'{count_b}f', b)
+                        dot_product = sum(x * y for x, y in zip(arr_a, arr_b))
+                        norm_a = math.sqrt(sum(x * x for x in arr_a))
+                        norm_b = math.sqrt(sum(x * x for x in arr_b))
+                        if norm_a == 0 or norm_b == 0:
+                            return 1.0
+                        similarity = dot_product / (norm_a * norm_b)
+                        return 1.0 - similarity
+                    except Exception:
+                        return 0.0
+
+                self._conn.create_function("vec_distance_cosine", 2, python_vec_distance_cosine)
             self._conn.execute("PRAGMA foreign_keys = ON;")
         return self._conn
 
@@ -322,20 +352,24 @@ class MemoryManager:
             if mem_sum_cols and 'untrusted' not in mem_sum_cols:
                 conn.execute("ALTER TABLE Memory_Summaries ADD COLUMN untrusted INTEGER NOT NULL DEFAULT 0")
 
-            # Verify sqlite-vec virtual table dimensions match current config
-            for table_name in ["vec_Message_Embeddings", "vec_Memory_Summaries"]:
-                cursor.execute(f"SELECT sql FROM sqlite_master WHERE name='{table_name}'")
-                row = cursor.fetchone()
-                if row:
-                    sql = row[0]
-                    # Check for "float[DIM]" in the SQL schema
-                    expected = f"float[{EMBEDDING_DIMENSION}]"
-                    if expected not in sql:
-                        logger.warning(f"Dimension mismatch in {table_name}: schema expected {expected} but found something else. Dropping and recreating...")
-                        conn.execute(f"DROP TABLE {table_name}")
+            if self.has_vec:
+                # Verify sqlite-vec virtual table dimensions match current config
+                for table_name in ["vec_Message_Embeddings", "vec_Memory_Summaries"]:
+                    cursor.execute(f"SELECT sql FROM sqlite_master WHERE name='{table_name}'")
+                    row = cursor.fetchone()
+                    if row:
+                        sql = row[0]
+                        # Check for "float[DIM]" in the SQL schema
+                        expected = f"float[{EMBEDDING_DIMENSION}]"
+                        if expected not in sql:
+                            logger.warning(f"Dimension mismatch in {table_name}: schema expected {expected} but found something else. Dropping and recreating...")
+                            conn.execute(f"DROP TABLE {table_name}")
 
-            conn.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_Message_Embeddings USING vec0(interaction_id INTEGER PRIMARY KEY, embedding float[{EMBEDDING_DIMENSION}])")
-            conn.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_Memory_Summaries USING vec0(summary_id INTEGER PRIMARY KEY, embedding float[{EMBEDDING_DIMENSION}])")
+                conn.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_Message_Embeddings USING vec0(interaction_id INTEGER PRIMARY KEY, embedding float[{EMBEDDING_DIMENSION}])")
+                conn.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_Memory_Summaries USING vec0(summary_id INTEGER PRIMARY KEY, embedding float[{EMBEDDING_DIMENSION}])")
+            else:
+                conn.execute("CREATE TABLE IF NOT EXISTS vec_Message_Embeddings (interaction_id INTEGER PRIMARY KEY, embedding BLOB)")
+                conn.execute("CREATE TABLE IF NOT EXISTS vec_Memory_Summaries (summary_id INTEGER PRIMARY KEY, embedding BLOB)")
 
             # Robustly sync embeddings from main tables to virtual vector tables
             cursor.execute("SELECT COUNT(*) FROM Message_Embeddings WHERE embedding IS NOT NULL AND interaction_id NOT IN (SELECT interaction_id FROM vec_Message_Embeddings)")

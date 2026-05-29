@@ -1473,3 +1473,80 @@ def test_dev_command_preprocess_error_surfaces_in_response():
     assert "boom" in r.json()["response"]
     mock_save.assert_not_called()
     mm.close()
+
+
+@patch('src.engine.genai.client.AsyncClient')
+def test_chat_completions_google_end_to_end_payload_structure(mock_google_client_class, monkeypatch):
+    """
+    Asserts a full input/output chain of the Web UI chat completions endpoint
+    for Google models. Verifies that the engine constructs the correct API
+    payload using system_instruction and excludes system prompt from contents.
+    """
+    import pytest
+    monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy_key_for_testing")
+    
+    # 1. Setup adapter with real ChatSystem, but with our Google model persona
+    mm = MemoryManager(db_path=":memory:")
+    mm.create_schema()
+
+    persona = Persona(
+        persona_name="test_google_persona",
+        model_name="gemini-2.5-flash",
+        prompt="Always speak like a pirate",
+        context_length=10,
+    )
+    
+    # 2. Mock Google Client response
+    mock_instance = mock_google_client_class.return_value
+    mock_part = MagicMock(text="Ahoy matey! I am ready.", function_call=None)
+    mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
+    mock_instance.models.generate_content = AsyncMock(
+        return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+    )
+    
+    text_engine = TextEngine()
+    
+    with patch('src.chat_system.load_personas_from_file', return_value={"test_google_persona": persona}):
+        chat_system = ChatSystem(memory_manager=mm, text_engine=text_engine)
+    chat_system.bot_logic.preprocess_message = AsyncMock(return_value=None)
+    
+    adapter = KoboldAdapter(chat_system=chat_system)
+    
+    # We need to set the current persona name on the adapter
+    adapter._get_current_persona_name = MagicMock(return_value="test_google_persona")
+    
+    # 3. Call endpoint
+    body = {
+        "messages": [
+            {"role": "user", "content": "Hello!"},
+            {"role": "assistant", "content": "", "prefix": True},
+        ],
+        "stream": False,
+        "derpr_user_text": "Hello there!",
+    }
+    
+    with TestClient(adapter.app) as client:
+        r = client.post("/chat/completions", json=body)
+        
+    # 4. Assert responses
+    assert r.status_code == 200
+    res_data = r.json()
+    assert res_data["choices"][0]["message"]["content"] == "Ahoy matey! I am ready."
+    
+    # 5. Assert constructed payload structure for Gemini AsyncClient
+    mock_instance.models.generate_content.assert_called_once()
+    call_kwargs = mock_instance.models.generate_content.call_args.kwargs
+    
+    # Assert system prompt is NOT in contents
+    contents = call_kwargs["contents"]
+    for turn in contents:
+        # Should not have any system role or system prompt content in parts
+        assert getattr(turn, "role", None) != "system"
+        for part in turn.get("parts", []):
+            assert part.text != "Always speak like a pirate"
+            
+    # Assert system prompt IS set in config as system_instruction
+    config = call_kwargs["config"]
+    assert config.system_instruction == "Always speak like a pirate"
+    
+    mm.close()

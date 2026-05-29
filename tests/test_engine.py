@@ -420,8 +420,8 @@ class TestGoogle:
         await text_engine.generate_response(google_config, base_context)
 
         call_args = mock_instance.models.generate_content.call_args[1]
-        # The model turn (index 2: system, user, model, tool, ...) should have thought_signature
-        model_turn = call_args['contents'][2]
+        # The model turn (index 1: user, model, tool, ...) should have thought_signature
+        model_turn = call_args['contents'][1]
         assert model_turn['role'] == 'model'
         assert model_turn['parts'][0].thought_signature == b'sig_abc123'
 
