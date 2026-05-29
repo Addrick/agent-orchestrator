@@ -436,7 +436,8 @@ class KoboldAdapter:
             prompt = data.get("prompt", "")
             user_interaction_id: Optional[int] = None
             if prompt and prompt.strip():
-                user_interaction_id = self._log_interaction(persona_name, "user", prompt)
+                clean_prompt = self._extract_last_user_turn(prompt)
+                user_interaction_id = self._log_interaction(persona_name, "user", clean_prompt)
             url = f"{_kobold_base_url()}/api/v1/generate"
             try:
                 r = await self._http.post(url, json=data)
@@ -458,7 +459,7 @@ class KoboldAdapter:
 
             Logs the user turn from `prompt` on entry, then collects all SSE
             token deltas and commits the assembled assistant turn on [DONE].
-            Persona is selected by adapter.active_persona ΓÇö uniform with the
+            Persona is selected by adapter.active_persona — uniform with the
             OAI path; per-request `model` override is rejected.
             """
             data = await request.json()
@@ -467,7 +468,8 @@ class KoboldAdapter:
             prompt: str = data.get("prompt") or ""
             user_interaction_id: Optional[int] = None
             if prompt.strip():
-                user_interaction_id = self._log_interaction(persona_name, "user", prompt)
+                clean_prompt = self._extract_last_user_turn(prompt)
+                user_interaction_id = self._log_interaction(persona_name, "user", clean_prompt)
 
             forward_body = {k: v for k, v in data.items() if k != "model"}
             url = f"{_kobold_base_url()}/api/extra/generate/stream"
@@ -727,6 +729,92 @@ class KoboldAdapter:
                 if joined:
                     return joined
         return None
+
+    def _extract_last_user_turn(self, prompt: str) -> str:
+        """Extract only the last user turn from a raw Kobold prompt string.
+
+        Supports standard instruct templates (Alpaca, ChatML, Llama-3, etc.).
+        Avoids nested or mangled wrappers by filtering out candidate tag matches.
+        """
+        if not prompt:
+            return ""
+
+        prompt_stripped = prompt.rstrip()
+
+        # Standard candidate tags (user_tag, assistant_tag)
+        candidates = [
+            ("### Instruction:", "### Response:"),
+            ("<|im_start|>user", "<|im_start|>assistant"),
+            ("<|start_header_id|>user<|end_header_id|>", "<|start_header_id|>assistant<|end_header_id|>"),
+            ("{{[INPUT]}}", "{{[OUTPUT]}}"),
+            ("[INST]", "[/INST]"),
+            ("USER:", "ASSISTANT:"),
+            ("User:", "Assistant:"),
+            ("Input:", "Output:"),
+            ("<|user|>", "<|assistant|>"),
+        ]
+
+        all_tags = []
+        for ut, at in candidates:
+            all_tags.append(ut)
+            all_tags.append(at)
+
+        best_message = None
+        best_assistant_idx = -1
+
+        for user_tag, assistant_tag in candidates:
+            idx_assistant = prompt_stripped.rfind(assistant_tag)
+            if idx_assistant == -1:
+                continue
+
+            # Find the user_tag before this assistant_tag
+            idx_user = prompt_stripped[:idx_assistant].rfind(user_tag)
+            if idx_user == -1:
+                continue
+
+            candidate_message = prompt_stripped[idx_user + len(user_tag) : idx_assistant].strip()
+
+            # Check if this candidate message contains any other tags (to avoid nested/mangled wrappers)
+            has_other_tags = any(tag in candidate_message for tag in all_tags)
+
+            if not has_other_tags:
+                if idx_assistant > best_assistant_idx:
+                    best_assistant_idx = idx_assistant
+                    best_message = candidate_message
+
+        if best_message is not None:
+            return best_message
+
+        # Fallback 1: No clean matching tags with assistant suffix, look for last user_tag with nothing after it
+        max_user_idx = -1
+        best_user_tag = None
+        for user_tag, _ in candidates:
+            idx_user = prompt_stripped.rfind(user_tag)
+            if idx_user > max_user_idx:
+                max_user_idx = idx_user
+                best_user_tag = user_tag
+
+        if best_user_tag is not None:
+            candidate_message = prompt_stripped[max_user_idx + len(best_user_tag):].strip()
+            if not any(tag in candidate_message for tag in all_tags):
+                return candidate_message
+
+        # Fallback 2: Retrieve the one with the highest assistant index even if it contains tags
+        best_assistant_idx = -1
+        best_message = None
+        for user_tag, assistant_tag in candidates:
+            idx_assistant = prompt_stripped.rfind(assistant_tag)
+            if idx_assistant != -1 and idx_assistant > best_assistant_idx:
+                idx_user = prompt_stripped[:idx_assistant].rfind(user_tag)
+                if idx_user != -1:
+                    best_assistant_idx = idx_assistant
+                    best_message = prompt_stripped[idx_user + len(user_tag) : idx_assistant].strip()
+
+        if best_message is not None:
+            return best_message
+
+        # Ultimate fallback: return the entire prompt (stripped)
+        return prompt_stripped
 
     def _log_interaction(self, persona_name: str, role: str, content: str) -> Optional[int]:
         """Log an interaction synchronously and return its interaction_id.

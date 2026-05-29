@@ -1578,3 +1578,129 @@ def test_dev_command_preprocess_error_surfaces_in_response():
     assert "boom" in r.json()["response"]
     mock_save.assert_not_called()
     mm.close()
+
+
+def test_extract_last_user_turn():
+    adapter, _, _ = _make_adapter_with_seeded_db()
+
+    # 1. Clean Alpaca
+    alpaca_prompt = (
+        "System prompt\n\n"
+        "### Instruction:\n"
+        "Hello, how are you?\n"
+        "### Response:\n"
+        "I am doing well!\n\n"
+        "### Instruction:\n"
+        "What is the weather today?\n"
+        "### Response:\n"
+    )
+    assert adapter._extract_last_user_turn(alpaca_prompt) == "What is the weather today?"
+
+    # 2. Clean ChatML
+    chatml_prompt = (
+        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+        "<|im_start|>user\nHello!<|im_end|>\n"
+        "<|im_start|>assistant\nHi there!<|im_end|>\n"
+        "<|im_start|>user\nGive me a poem.<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+    assert adapter._extract_last_user_turn(chatml_prompt) == "Give me a poem.<|im_end|>"
+
+    # 3. Mangled/Nested Tags from issue description
+    mangled_prompt = (
+        "{{[INPUT]}}\n"
+        "success\n"
+        "### Instruction:\n"
+        "gfd\n"
+        "### Response:\n"
+        "success\n"
+        "### Instruction:\n"
+        "Test\n"
+        "### Response:\n"
+        "success\n"
+        "### Instruction:\n"
+        "test\n"
+        "### Response:\n"
+        "\n"
+        "### Instruction:\n"
+        "test\n"
+        "### Response:\n"
+        "\n"
+        "### Instruction:\n"
+        "cscs\n"
+        "### Response:\n"
+        "{{[OUTPUT]}}"
+    )
+    assert adapter._extract_last_user_turn(mangled_prompt) == "cscs"
+
+    # 4. Fallback: prompt with only user tag, no assistant tag
+    partial_prompt = (
+        "System prompt\n"
+        "### Instruction:\n"
+        "Just a partial input without response tag"
+    )
+    assert adapter._extract_last_user_turn(partial_prompt) == "Just a partial input without response tag"
+
+    # 5. Fallback: prompt with no known tags
+    plain_prompt = "Hello world this is a test prompt"
+    assert adapter._extract_last_user_turn(plain_prompt) == "Hello world this is a test prompt"
+
+
+def test_generate_stream_logs_clean_user_turn_with_templated_prompt(monkeypatch):
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+
+    chunks = [_kobold_native_chunk("success"), b"data: [DONE]\n\n"]
+    monkeypatch.setattr(adapter._http, "stream", lambda *a, **kw: _make_stream_ctx(chunks))
+
+    templated_prompt = (
+        "### Instruction:\n"
+        "Hello, how are you?\n"
+        "### Response:\n"
+        "I am doing well!\n\n"
+        "### Instruction:\n"
+        "What is the weather today?\n"
+        "### Response:\n"
+    )
+
+    with TestClient(adapter.app) as client:
+        r = client.post("/api/extra/generate/stream", json={"prompt": templated_prompt})
+    assert r.status_code == 200
+
+    rows = _fetch_portal_rows(mm, "test_persona")
+    # We expect exactly one user turn logged, containing ONLY the extracted last message,
+    # NOT the entire templated prompt containing history/tags.
+    user_rows = [r for r in rows if r["author_role"] == "user"]
+    assert len(user_rows) == 1
+    assert user_rows[0]["content"] == "What is the weather today?"
+    mm.close()
+
+
+def test_kobold_export_preserves_clean_history_without_nesting(monkeypatch):
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+
+    chunks = [_kobold_native_chunk("success"), b"data: [DONE]\n\n"]
+    monkeypatch.setattr(adapter._http, "stream", lambda *a, **kw: _make_stream_ctx(chunks))
+
+    # Simulate sending a prompt with templates
+    templated_prompt = (
+        "### Instruction:\n"
+        "test message\n"
+        "### Response:\n"
+    )
+
+    with TestClient(adapter.app) as client:
+        r_gen = client.post("/api/extra/generate/stream", json={"prompt": templated_prompt})
+        assert r_gen.status_code == 200
+        
+        # Now trigger the export endpoint
+        r_export = client.get("/api/v1/session/test_persona/kobold_export")
+        
+    assert r_export.status_code == 200
+    export_data = r_export.json()
+    
+    # In Kobold export format, the first turn goes to prompt, others go to actions.
+    # The prompt should be wrapped in Kobold placeholders only once: \n{{[INPUT]}}\ntest message\n{{[OUTPUT]}}\n
+    assert export_data["prompt"] == "\n{{[INPUT]}}\ntest message\n{{[OUTPUT]}}\n"
+    mm.close()
+
+
