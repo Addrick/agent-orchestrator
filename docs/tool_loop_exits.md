@@ -59,7 +59,7 @@ flowchart TD
 | PENDING_CONFIRMATION | DoneEvent | ✅ `turn_scope` | `log_audit_event` raise no longer leaks |
 | `_log_user_turn` raises | propagates | ✅ `turn_scope` | now inside the scope |
 | max-iter DEV_COMMAND | DoneEvent | ✅ `turn_scope` | |
-| `resume_pending_confirmation` | return tuple | ✅ `turn_scope` | continuation scope pinned (**#4**) |
+| `resume` re-entry (DP-124) | DoneEvent / ErrorEvent | ✅ `turn_scope` | shares the kernel; parked history + applied decision drive the loop |
 
 **Fix for #1 — `turn_scope` + `aclosing` (two non-obvious parts):**
 
@@ -101,12 +101,22 @@ flowchart TD
   order to keep the transcript stable. Writes still short-circuit to
   confirmation, so only the read group is parallelized.
 
-## Known follow-up (not yet done)
+## resume_pending_confirmation re-enters the kernel (DP-124)
 
-`resume_pending_confirmation` is a **partial re-implementation** of the kernel:
-it calls `generate_response` directly (so no further tool-call loop),
-hardcodes `channel=""` when logging the assistant row, and now duplicates the
-`turn_scope` wrapping. The correct end state is for resume to re-enter
-`_orchestrate` with the parked history so the lifecycle lives in one place.
-That's a larger refactor with its own test surface and was deliberately left
-out of the bugfix.
+`resume_pending_confirmation` no longer re-implements the loop. It re-enters
+`_orchestrate(resume=_ResumeState(pending, approved))`, which skips the
+fresh-request front half (dev-command preprocess, history build, user-turn
+logging), applies the approve/deny decision to the **parked history** — the
+approved write results are appended *before* the continuation — then runs the
+shared tool loop + persistence tail. Consequences:
+
+- the continuation can run a **further tool loop** (and re-park if it issues
+  another write — the same `pending_writes` branch handles it);
+- the assistant row is persisted on the **real channel** (`pending.channel`),
+  not the old hardcoded `channel=""`;
+- `turn_scope`, taint write-back, retain, and the terminal event live in
+  **exactly one place** — the duplicate `turn_scope` in resume is gone.
+
+The audit-decision logging (`_apply_resume_decision`) and the parked-turn
+timeout/expiry checks are preserved, the latter ahead of kernel re-entry.
+Coverage: `tests/integration/test_resume_kernel_convergence.py`.
