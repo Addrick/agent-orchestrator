@@ -8216,21 +8216,40 @@ Current version indicated by LITEVER below.
 	function attempt_connect(popup_aiselect = true)
 	{
 		if (localflag) {
-			document.getElementById("customapidropdown").value = 1;
-			localprotocol = "http://";
-			if(window.location.protocol.includes('https') && !is_using_web_lite())
-			{
-				localprotocol = "https://";
+			if (window.DERPR_PORTAL_TYPE === "engine") {
+				// DERPR engine portal: route generation through the OAI
+				// chat-completions endpoint (which runs the DERPR engine),
+				// NOT the native Kobold passthrough — the native /api/.../generate
+				// path forwards verbatim to LOCAL_LLM_URL and bypasses the engine.
+				// epchoice 2 + useoaichatcompl => POST {origin}/v1/chat/completions.
+				let derpr_oai_ep = window.location.origin + "/v1";
+				document.getElementById("customapidropdown").value = 2;
+				document.getElementById("custom_oai_endpoint").value = derpr_oai_ep;
+				document.getElementById("custom_oai_key").value = "derpr";
+				document.getElementById("useoaichatcompl").checked = true;
+				// Populate the model dropdown (DERPR exposes personas as models)
+				// before connecting; fall back to a bare connect if the probe fails.
+				probe_oai_endpoint(derpr_oai_ep + oai_models_endpoint, function(models){
+					let dropdown = get_custom_ep_model_dropdown("2");
+					if (models && models.length > 0 && dropdown && dropdown.options.length > 0) {
+						dropdown.value = dropdown.options[0].value;
+					}
+					connect_custom_endpoint();
+				});
+			} else {
+				document.getElementById("customapidropdown").value = 1;
+				localprotocol = "http://";
+				if(window.location.protocol.includes('https') && !is_using_web_lite())
+				{
+					localprotocol = "https://";
+				}
+				if(localmodekey)
+				{
+					document.getElementById("customkoboldkey").value = localmodekey;
+				}
+				document.getElementById("customkoboldendpoint").value = localprotocol + localmodehost + ":" + localmodeport + sublocalpathname;
+				connect_custom_endpoint();
 			}
-			if(localmodekey)
-			{
-				document.getElementById("customkoboldkey").value = localmodekey;
-			}
-			document.getElementById("customkoboldendpoint").value = localprotocol + localmodehost + ":" + localmodeport + sublocalpathname;
-			if (window.DERPR_PORTAL_TYPE) {
-				document.getElementById("useoaichatcompl").checked = (window.DERPR_PORTAL_TYPE === "engine");
-			}
-			connect_custom_endpoint();
 			document.getElementById("lastreq3").innerHTML = document.getElementById("lastreq2").innerHTML = document.getElementById("lastreq1").innerHTML =
 			`<a href="#" class="color_footer" onclick="msgbox('Source code is available at https://github.com/LostRuins/lite.koboldai.net \\nPlease report any bugs you find there.','Information')">KoboldAI Lite</a> v${LITEVER} Embedded`;
 			document.getElementById("lastreq1lp").innerHTML = document.getElementById("lastreq2lp").innerHTML =	document.getElementById("lastreq3lp").innerHTML = "";
