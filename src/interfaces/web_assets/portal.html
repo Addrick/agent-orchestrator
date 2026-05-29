@@ -14,7 +14,12 @@ Current version indicated by LITEVER below.
 	<script id="init-config">
 	const LITEVER = 328;
 	const urlParams = new URLSearchParams(window.location.search);
-	if (window.location.port === "5003") {
+	// The DERPR adapter serving this page injects DERPR_PORTAL_TYPE_INJECTED
+	// (robust across SSH tunnels / reverse proxies). Fall back to port sniffing
+	// only when the page is opened directly without server-side injection.
+	if (window.DERPR_PORTAL_TYPE_INJECTED) {
+		window.DERPR_PORTAL_TYPE = window.DERPR_PORTAL_TYPE_INJECTED;
+	} else if (window.location.port === "5003") {
 		window.DERPR_PORTAL_TYPE = "engine";
 	} else if (window.location.port === "5002") {
 		window.DERPR_PORTAL_TYPE = "passthrough";
@@ -8222,20 +8227,25 @@ Current version indicated by LITEVER below.
 				// NOT the native Kobold passthrough — the native /api/.../generate
 				// path forwards verbatim to LOCAL_LLM_URL and bypasses the engine.
 				// epchoice 2 + useoaichatcompl => POST {origin}/v1/chat/completions.
+				// Connect to the OAI endpoint SYNCHRONOUSLY here. The
+				// customapidropdown <select> options are populated/rebuilt during
+				// page init, so setting its value must happen in this synchronous
+				// pass (as the legacy Kobold path did) — deferring into an async
+				// callback races the rebuild, the value assignment is dropped, and
+				// connect_custom_endpoint reads epchoice="" and silently falls back
+				// to AI Horde. (DERPR exposes personas as the model list; the engine
+				// ignores the per-request model, so a model probe isn't needed.)
+				// Local mode strips the endpoint dropdown down to just KoboldCPP
+				// (value "1"); restore the full option list so we can select the
+				// OpenAI-compatible endpoint (value "2"). Must be synchronous here,
+				// while the options exist, before connect reads epchoice.
+				restore_endpoint_dropdowns();
 				let derpr_oai_ep = window.location.origin + "/v1";
 				document.getElementById("customapidropdown").value = 2;
 				document.getElementById("custom_oai_endpoint").value = derpr_oai_ep;
 				document.getElementById("custom_oai_key").value = "derpr";
 				document.getElementById("useoaichatcompl").checked = true;
-				// Populate the model dropdown (DERPR exposes personas as models)
-				// before connecting; fall back to a bare connect if the probe fails.
-				probe_oai_endpoint(derpr_oai_ep + oai_models_endpoint, function(models){
-					let dropdown = get_custom_ep_model_dropdown("2");
-					if (models && models.length > 0 && dropdown && dropdown.options.length > 0) {
-						dropdown.value = dropdown.options[0].value;
-					}
-					connect_custom_endpoint();
-				});
+				connect_custom_endpoint();
 			} else {
 				document.getElementById("customapidropdown").value = 1;
 				localprotocol = "http://";

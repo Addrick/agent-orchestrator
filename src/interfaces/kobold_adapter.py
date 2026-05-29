@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
+from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
 import httpx
 import uvicorn
 import asyncio
@@ -23,6 +23,7 @@ from config import global_config
 from src.memory.context_budget import truncate_messages_to_budget
 from src.chat_system import ChatSystem
 from src.interfaces.kobold_export import build_kobold_savefile
+from src.interfaces.portal_render import render_portal_html
 from src.utils.model_utils import get_model_list
 from src.utils.save_utils import save_personas_to_file
 from src.interfaces._persona_patch import (
@@ -74,15 +75,13 @@ class KoboldAdapter:
         self._setup_portal()
 
     def _setup_portal(self) -> None:
-        portal_path = os.path.join(os.path.dirname(__file__), "web_assets", "portal.html")
-
         @self.app.get("/portal")
-        async def get_portal() -> FileResponse:
-            return FileResponse(portal_path)
+        async def get_portal() -> HTMLResponse:
+            return HTMLResponse(render_portal_html("passthrough"))
 
         @self.app.get("/")
-        async def root_redirect() -> FileResponse:
-            return FileResponse(portal_path)
+        async def root_redirect() -> HTMLResponse:
+            return HTMLResponse(render_portal_html("passthrough"))
 
     def _setup_routes(self) -> None:
         @self.app.get("/api/v1/model")
