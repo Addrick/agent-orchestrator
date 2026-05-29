@@ -837,3 +837,80 @@ class TestWebSearch:
         WebSearchHandler().register(manager)
         await manager.execute_tool("web_search", query="test", max_results=3)
         mock_ddgs_instance.text.assert_called_once_with("test", max_results=3)
+
+
+class TestAgyRenderAndConfig:
+    """Sprint 1: SDK-free pieces of the agy route — prompt flattening, image
+    policy, and limiter wiring. The handler/route themselves land in later
+    sprints (they depend on the Antigravity SDK)."""
+
+    def test_render_flattens_full_history_no_dup(self, text_engine):
+        """Every prior turn AND the final user turn appear, exactly once each."""
+        history = [
+            {"role": "user", "content": "first question"},
+            {"role": "assistant", "content": "first answer"},
+            {"role": "user", "content": "current question"},
+        ]
+        rendered = text_engine._render_agy_prompt(history)
+
+        assert "User: first question" in rendered
+        assert "Assistant: first answer" in rendered
+        assert "User: current question" in rendered
+        # "nothing dropped": all three turns present
+        assert rendered.count("User:") == 2
+        assert rendered.count("Assistant:") == 1
+        # "nothing duplicated": the final user turn appears exactly once
+        assert rendered.count("current question") == 1
+        # ordering preserved
+        assert rendered.index("first question") < rendered.index("first answer") < rendered.index("current question")
+
+    def test_render_handles_tool_turns(self, text_engine):
+        """tool-role results and assistant tool_calls render with their tags —
+        this is what lets the engine's multi-turn tool loop reach agy."""
+        history = [
+            {"role": "user", "content": "weather?"},
+            {"role": "assistant", "content": "checking", "tool_calls": [
+                {"id": "c1", "name": "get_weather", "arguments": {"city": "NYC"}},
+            ]},
+            {"role": "tool", "name": "get_weather", "content": '{"temp": 70}'},
+            {"role": "user", "content": "thanks"},
+        ]
+        rendered = text_engine._render_agy_prompt(history)
+
+        assert "Assistant: checking" in rendered
+        assert 'Assistant (tool call get_weather): {"city": "NYC"}' in rendered
+        assert 'Tool(get_weather): {"temp": 70}' in rendered
+        assert "User: thanks" in rendered
+
+    def test_render_tool_loop_followup_reaches_prompt(self, text_engine):
+        """A history ending in a tool result (the engine's follow-up turn)
+        renders that result so agy sees it on the next stateless call."""
+        history = [
+            {"role": "user", "content": "lookup"},
+            {"role": "assistant", "tool_calls": [
+                {"id": "c1", "name": "search", "arguments": {"q": "x"}},
+            ]},
+            {"role": "tool", "name": "search", "content": '{"hits": 3}'},
+        ]
+        rendered = text_engine._render_agy_prompt(history)
+        assert 'Tool(search): {"hits": 3}' in rendered
+        # assistant turn carrying only tool_calls still renders the call
+        assert 'Assistant (tool call search): {"q": "x"}' in rendered
+
+    def test_render_excludes_system_prompt(self, text_engine):
+        """The persona is delivered via CustomSystemInstructions, never in the
+        flattened transcript. _render_agy_prompt only receives post-extraction
+        history, but guard against a stray system turn leaking through."""
+        history = [{"role": "user", "content": "hi"}]
+        rendered = text_engine._render_agy_prompt(history)
+        assert "System" not in rendered
+
+    def test_agy_excluded_from_image_support(self, text_engine):
+        """agy is text-only in v1; excluding it means images get the existing
+        'can't see image' note + strip rather than being silently dropped."""
+        assert text_engine.model_supports_images("agy-flash") is False
+
+    def test_agy_limiter_constructed(self, text_engine):
+        """The agy rate limiter is wired at init, ready for the route."""
+        from aiolimiter import AsyncLimiter
+        assert isinstance(text_engine._agy_limiter, AsyncLimiter)

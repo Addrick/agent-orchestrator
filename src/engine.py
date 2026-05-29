@@ -18,6 +18,7 @@ from config.global_config import (
     RATE_LIMIT_GEMINI_3_RPM,
     RATE_LIMIT_GEMMA_3_RPM, RATE_LIMIT_GEMMA_4_RPM,
     RATE_LIMIT_OPENAI_RPM, RATE_LIMIT_ANTHROPIC_RPM,
+    RATE_LIMIT_AGY_RPM,
 )
 # --- Provider-specific imports ---
 import base64
@@ -80,13 +81,15 @@ class TextEngine:
         self._gemma_4_rpm_limiter   = AsyncLimiter(max_rate=RATE_LIMIT_GEMMA_4_RPM,   time_period=60)
         self._openai_limiter        = AsyncLimiter(max_rate=RATE_LIMIT_OPENAI_RPM,    time_period=60)
         self._anthropic_limiter     = AsyncLimiter(max_rate=RATE_LIMIT_ANTHROPIC_RPM, time_period=60)
+        self._agy_limiter           = AsyncLimiter(max_rate=RATE_LIMIT_AGY_RPM,       time_period=60)
         logger.info(
             f"Rate limiters initialised — "
             f"Gemini 2.5: {RATE_LIMIT_GEMINI_25_RPM} RPM / {RATE_LIMIT_GEMINI_25_RPD} RPD | "
             f"Gemini 3.1: {RATE_LIMIT_GEMINI_3_RPM} RPM | "
             f"Gemma 3: {RATE_LIMIT_GEMMA_3_RPM} RPM | Gemma 4: {RATE_LIMIT_GEMMA_4_RPM} RPM | "
             f"OpenAI: {RATE_LIMIT_OPENAI_RPM} RPM | "
-            f"Anthropic: {RATE_LIMIT_ANTHROPIC_RPM} RPM"
+            f"Anthropic: {RATE_LIMIT_ANTHROPIC_RPM} RPM | "
+            f"AGY: {RATE_LIMIT_AGY_RPM} RPM"
         )
 
         self._initialize_env()
@@ -423,6 +426,40 @@ class TextEngine:
             system_prompt = f"{system_prompt}\n\n{history[0]['content']}"
             history = history[1:]
         return system_prompt, history
+
+    @staticmethod
+    def _render_agy_prompt(history: List[Dict[str, Any]]) -> str:
+        """Flatten a message history into a single role-tagged transcript for the
+        `agy` route.
+
+        The Antigravity SDK's `chat()` accepts only one user turn and offers no
+        API to seed prior assistant turns, while the engine is stateless and
+        rebuilds the full context on every call. We therefore render the entire
+        `history` — which already ends with the current user turn (see
+        `_extract_system_prompt`) — into one deterministic, auditable transcript
+        so `agy` contributes nothing of its own. This is also what lets the
+        engine's multi-turn tool loop work: a `tool`-role result from a prior
+        iteration is just another rendered line.
+
+        The system prompt is delivered separately via `CustomSystemInstructions`
+        and is intentionally not included here. `current_message["text"]` is a
+        duplicate of the final user turn already present in `history`, so it is
+        not appended (doing so would duplicate the last message).
+        """
+        lines: List[str] = []
+        for item in history:
+            role = item.get("role")
+            if role == "tool":
+                lines.append(f"Tool({item.get('name', 'unknown')}): {item.get('content', '')}")
+            elif role == "assistant":
+                if item.get("content"):
+                    lines.append(f"Assistant: {item['content']}")
+                for call in item.get("tool_calls", []) or []:
+                    args = json.dumps(call.get("arguments", {}), ensure_ascii=False)
+                    lines.append(f"Assistant (tool call {call.get('name', 'unknown')}): {args}")
+            else:  # user (and any unlabeled turn) renders as the user
+                lines.append(f"User: {item.get('content', '')}")
+        return "\n\n".join(lines)
 
     async def _download_image(self, image_url: str) -> Tuple[bytes, str]:
         """Downloads image, returns (raw_bytes, mime_type).

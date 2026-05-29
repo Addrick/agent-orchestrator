@@ -6,6 +6,7 @@
 anthropic
 openai
 google-genai
+google-antigravity  # agy local runtime SDK; imported lazily in engine.py (optional at runtime)
 
 # Async / networking
 aiohttp

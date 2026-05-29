@@ -36,6 +36,8 @@ def get_model_prefix(model_name: str) -> str:
         return "gemini-3.1"
     elif "gemini" in name_lower:
         return "gemini"
+    elif name_lower.startswith("agy"):
+        return "agy"
     elif name_lower == "local":
         return "local"
     return "unknown"
@@ -117,6 +119,7 @@ def get_model_list(update: bool = False) -> Optional[Dict[str, Any]]:
             'From OpenAI': refresh_available_openai_models(),
             'From Google': refresh_available_google_models(),
             'From Anthropic': refresh_available_anthropic_models(),
+            'Antigravity (OAuth tier)': ['agy-flash'],
             'Local': ['local']
         }
         save_utils.save_models_to_file(all_available_models)

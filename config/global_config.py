@@ -216,6 +216,11 @@ RATE_LIMIT_GEMMA_4_TPR   = int(os.environ.get("RATE_LIMIT_GEMMA_4_RPD",   "25600
 RATE_LIMIT_OPENAI_RPM    = int(os.environ.get("RATE_LIMIT_OPENAI_RPM",    "60"))
 RATE_LIMIT_ANTHROPIC_RPM = int(os.environ.get("RATE_LIMIT_ANTHROPIC_RPM", "50"))
 
+# Antigravity (agy) local runtime — runs on the user's OAuth tier via the local
+# binary, so the ceiling is the OAuth account's, not a free API quota. Kept
+# conservative; the spawn-per-call cost is the practical limiter.
+RATE_LIMIT_AGY_RPM       = int(os.environ.get("RATE_LIMIT_AGY_RPM",       "15"))
+
 # Models
 EMBEDDING_MODEL = 'gemini-embedding-001'
 EMBEDDING_DIMENSION = 3072
