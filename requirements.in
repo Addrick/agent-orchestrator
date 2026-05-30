@@ -6,7 +6,8 @@
 anthropic
 openai
 google-genai
-google-antigravity  # agy local runtime SDK; imported lazily in engine.py (optional at runtime)
+# NOTE: the `agy` engine route uses the `agy` CLI via subprocess (no Python SDK),
+# so google-antigravity is intentionally NOT a dependency.
 
 # Async / networking
 aiohttp
