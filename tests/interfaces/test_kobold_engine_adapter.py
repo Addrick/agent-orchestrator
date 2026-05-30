@@ -429,6 +429,33 @@ def test_chat_completions_stream_emits_derpr_tool_frames():
     mm.close()
 
 
+def test_chat_completions_stream_emits_dev_command_text():
+    """Dev-command responses emit no TokenEvents (no LLM call), so the engine
+    carries the text on the DoneEvent(DEV_COMMAND). The SSE transcoder must
+    surface it as a content delta — otherwise the portal shows a blank reply
+    even though the command ran + persisted."""
+    adapter, mm, _, chat_system = _make_real_adapter()
+    chat_system.bot_logic.preprocess_message = AsyncMock(
+        return_value={"response": "Temperature for test_persona is set to 0.2.",
+                      "mutated": True},
+    )
+
+    body = _chat_body("what temp", stream=True)
+    body["derpr_user_text"] = "what temp"
+    with TestClient(adapter.app) as client:
+        with client.stream("POST", "/chat/completions", json=body) as r:
+            raw = b"".join(chunk for chunk in r.iter_raw())
+
+    text = raw.decode("utf-8")
+    # The command response is carried as a normal chat.completion.chunk delta.
+    chunk_match = re.search(r"data: (\{.*?\"delta\".*?\})\n\n", text)
+    assert chunk_match is not None, f"missing content delta in:\n{text}"
+    delta = json.loads(chunk_match.group(1))["choices"][0]["delta"]["content"]
+    assert delta == "Temperature for test_persona is set to 0.2."
+    assert text.index("delta") < text.index("[DONE]")
+    mm.close()
+
+
 def test_chat_completions_stream_abort_flushes_partial():
     async def stream_messages_then_cancel(*args, **kwargs):
         yield {"type": "api_payload", "payload": {}}

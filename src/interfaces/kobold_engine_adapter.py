@@ -21,7 +21,7 @@ import asyncio
 
 from config import global_config
 from src.chat_system import (
-    ChatSystem, DoneEvent, ErrorEvent, TokenEvent,
+    ChatSystem, DoneEvent, ErrorEvent, ResponseType, TokenEvent,
     ToolCallResultEvent, ToolCallStartEvent,
 )
 from src.interfaces.kobold_export import build_kobold_savefile, build_transcript
@@ -823,6 +823,22 @@ class KoboldEngineAdapter:
                                         "final_text_preview": (ev.text or "")[:500],
                                     }, ensure_ascii=False).encode("utf-8"),
                                 )
+                            # Dev-command responses carry their full text on the
+                            # DoneEvent and emit no TokenEvents (no LLM call), so
+                            # unlike LLM turns the text was never streamed. Transcode
+                            # it as a content delta here or the portal shows a blank
+                            # reply even though the command ran + persisted.
+                            if ev.response_type == ResponseType.DEV_COMMAND and ev.text:
+                                cmd_chunk = json.dumps({
+                                    "object": "chat.completion.chunk",
+                                    "choices": [{
+                                        "index": 0,
+                                        "delta": {"content": ev.text},
+                                    }],
+                                })
+                                out = f"data: {cmd_chunk}\n\n".encode("utf-8")
+                                _dump_write("DevCommandText", out)
+                                yield out
                             # DP-130 history contract (C3): emit the `event: derpr`
                             # id-frame on EVERY terminal turn — including parked
                             # writes (assistant_id=None), tool-only, and aborts.
