@@ -101,7 +101,7 @@ All commands are entered as the message body when addressing a persona. Commands
 |-----------|-------|
 | `prompt` | Full system prompt text |
 | `model` | Current model name |
-| `models [vendor]` | Available models, optionally filtered by vendor (OpenAI, Google, Anthropic, Local) |
+| `models [vendor]` | Available models, optionally filtered by vendor (OpenAI, Google, Anthropic, Antigravity, Local) |
 | `personas` | All loaded persona names |
 | `context` | Conversation history limit (message count) |
 | `tokens` | Max response token limit |
@@ -153,6 +153,22 @@ All commands are entered as the message body when addressing a persona. Commands
 | `dump_context` | Full context dump as downloadable file (config, tools, conversation history) |
 | `help` | Show command list and active personas |
 | `update_models` | Refresh available model list from configuration |
+
+### Antigravity (`agy`) — OAuth-tier provider
+
+`agy-*` models (e.g. `set model agy-flash`) route through Google Antigravity's
+local `agy` CLI instead of an API. This runs on the user's authenticated
+**OAuth tier** (currently Gemini 3.5 Flash) rather than a metered API key, at the
+cost of a subprocess spawn per call (a few seconds of latency) and no image
+support. Each call is fully isolated (fresh prompt, throwaway working directory,
+`stdin` closed so it never blocks on a permission prompt).
+
+Tools work via an **inline protocol**: the engine injects the tool descriptions
+into the prompt and asks the model to emit a `<tool_call>{…}</tool_call>` block to
+request a tool. The engine parses that block and runs the tool through DERPR's
+normal tool loop — so persona tool policy, the read/write split, CONFIRM-mode
+approval, and untrusted-taint all apply exactly as they do for the other
+providers. The model never executes tools itself.
 
 ## Personas
 

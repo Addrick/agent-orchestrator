@@ -914,3 +914,138 @@ class TestAgyRenderAndConfig:
         """The agy rate limiter is wired at init, ready for the route."""
         from aiolimiter import AsyncLimiter
         assert isinstance(text_engine._agy_limiter, AsyncLimiter)
+
+
+class TestAgyHandler:
+    def test_tool_protocol_includes_tools(self, text_engine):
+        tools = [{
+            "function": {
+                "name": "get_weather",
+                "description": "Get the current weather",
+                "parameters": {"type": "object", "properties": {"location": {"type": "string"}}}
+            }
+        }]
+        protocol = text_engine._render_agy_tool_protocol(tools)
+        assert "get_weather" in protocol
+        assert "Get the current weather" in protocol
+        assert "<tool_call>" in protocol
+
+    def test_tool_protocol_empty_without_tools(self, text_engine):
+        assert text_engine._render_agy_tool_protocol([]) == ""
+        assert text_engine._render_agy_tool_protocol(None) == ""
+
+    def test_parse_clean_tool_call(self, text_engine):
+        text = '<tool_call>{"name": "get_weather", "arguments": {"location": "Tokyo"}}</tool_call>'
+        parsed = text_engine._parse_agy_tool_call(text)
+        assert parsed is not None
+        assert len(parsed) == 1
+        call = parsed[0]
+        assert call["name"] == "get_weather"
+        assert call["arguments"] == {"location": "Tokyo"}
+        assert isinstance(call["id"], str)
+        assert len(call["id"]) > 0
+
+    def test_parse_no_block_returns_none(self, text_engine):
+        assert text_engine._parse_agy_tool_call("This is plain text with no tool call.") is None
+
+    def test_parse_strips_system_message(self, text_engine):
+        text = '<SYSTEM_MESSAGE>system message noise</SYSTEM_MESSAGE>some prose\n<tool_call>{"name": "get_weather", "arguments": {"location": "Tokyo"}}</tool_call>\nmore prose'
+        parsed = text_engine._parse_agy_tool_call(text)
+        assert parsed is not None
+        assert len(parsed) == 1
+        call = parsed[0]
+        assert call["name"] == "get_weather"
+        assert call["arguments"] == {"location": "Tokyo"}
+
+    def test_parse_malformed_json_returns_none(self, text_engine):
+        text = '<tool_call>{"name": "get_weather", "arguments": </tool_call>'
+        assert text_engine._parse_agy_tool_call(text) is None
+
+    @pytest.mark.asyncio
+    async def test_handler_text_path(self, text_engine, base_context, monkeypatch):
+        mock_cli = AsyncMock(return_value="a plain answer")
+        monkeypatch.setattr(text_engine, "_run_agy_cli", mock_cli)
+
+        config = {"model_name": "agy-flash"}
+        response, api_payload = await text_engine._generate_agy_response(config, base_context)
+
+        assert response == {"type": "text", "content": "a plain answer"}
+        assert isinstance(api_payload, dict)
+
+    @pytest.mark.asyncio
+    async def test_handler_tool_path(self, text_engine, base_context, monkeypatch):
+        tool_output = '<tool_call>{"name": "get_weather", "arguments": {"location": "Tokyo"}}</tool_call>'
+        mock_cli = AsyncMock(return_value=tool_output)
+        monkeypatch.setattr(text_engine, "_run_agy_cli", mock_cli)
+
+        config = {"model_name": "agy-flash"}
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get the current weather",
+                "parameters": {"type": "object", "properties": {"location": {"type": "string"}}}
+            }
+        }]
+
+        response, api_payload = await text_engine._generate_agy_response(config, base_context, tools=tools)
+
+        assert response["type"] == "tool_calls"
+        assert len(response["calls"]) == 1
+        call = response["calls"][0]
+        assert call["name"] == "get_weather"
+        assert call["arguments"] == {"location": "Tokyo"}
+        assert isinstance(call["id"], str)
+        assert len(call["id"]) > 0
+        assert isinstance(api_payload, dict)
+
+    @pytest.mark.asyncio
+    async def test_handler_injects_system_and_tools_into_prompt(self, text_engine, base_context, monkeypatch):
+        mock_cli = AsyncMock(return_value="mocked output")
+        monkeypatch.setattr(text_engine, "_run_agy_cli", mock_cli)
+
+        config = {"model_name": "agy-flash"}
+        tools = [{
+            "function": {
+                "name": "get_weather",
+                "description": "Get the current weather",
+                "parameters": {"type": "object", "properties": {"location": {"type": "string"}}}
+            }
+        }]
+
+        await text_engine._generate_agy_response(config, base_context, tools=tools)
+
+        mock_cli.assert_called_once()
+        prompt_arg = mock_cli.call_args[0][0]
+        assert "You are a test bot." in prompt_arg
+        assert "get_weather" in prompt_arg
+        assert "<tool_call>" in prompt_arg
+
+    @pytest.mark.asyncio
+    async def test_handler_api_payload_has_no_secret(self, text_engine, base_context, monkeypatch):
+        mock_cli = AsyncMock(return_value="a plain answer")
+        monkeypatch.setattr(text_engine, "_run_agy_cli", mock_cli)
+
+        config = {"model_name": "agy-flash"}
+        _, api_payload = await text_engine._generate_agy_response(config, base_context)
+
+        # Simple key-name and value scan for secrets
+        payload_str = str(api_payload).lower()
+        for forbidden in ["secret", "token", "oauth", "api_key"]:
+            assert forbidden not in payload_str
+
+    def test_route_resolves_to_agy_handler(self, text_engine):
+        handler, limiters = text_engine._get_provider_route("agy-flash")
+        assert handler == text_engine._generate_agy_response
+        assert limiters == [text_engine._agy_limiter]
+
+    @pytest.mark.asyncio
+    async def test_generate_response_end_to_end_text(self, text_engine, base_context, monkeypatch):
+        mock_cli = AsyncMock(return_value="end-to-end text answer")
+        monkeypatch.setattr(text_engine, "_run_agy_cli", mock_cli)
+
+        config = {"model_name": "agy-flash"}
+        response, api_payload = await text_engine.generate_response(config, base_context)
+
+        assert response == {"type": "text", "content": "end-to-end text answer"}
+        assert isinstance(api_payload, dict)
