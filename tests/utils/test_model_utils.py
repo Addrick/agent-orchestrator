@@ -27,6 +27,7 @@ def test_get_model_list_with_update(mock_openai, mock_google, mock_anthropic, mo
         'From OpenAI': ["gpt-4"],
         'From Google': ["gemini-pro"],
         'From Anthropic': ["claude-3"],
+        'Antigravity (OAuth tier)': ['agy-flash'],
         'Local': ['local']
     }
 
@@ -50,4 +51,19 @@ def test_check_model_available(mock_get_list):
     assert model_utils.check_model_available("model-b1") is True
     assert model_utils.check_model_available("local-model") is True
     assert model_utils.check_model_available("non-existent-model") is False
-    
+
+
+@pytest.mark.parametrize("model_name,expected", [
+    ("agy-flash", "agy"),
+    ("AGY-Flash", "agy"),
+    ("gpt-4", "gpt"),
+    ("claude-3-opus", "claude"),
+    ("gemini-3.1-pro", "gemini-3.1"),
+    ("gemini-pro", "gemini"),
+    ("gemma-4-31b-it", "gemma"),
+    ("local", "local"),
+    ("something-else", "unknown"),
+])
+def test_get_model_prefix(model_name, expected):
+    """The agy family must resolve so routing/registration recognise it."""
+    assert model_utils.get_model_prefix(model_name) == expected

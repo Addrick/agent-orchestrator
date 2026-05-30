@@ -837,3 +837,215 @@ class TestWebSearch:
         WebSearchHandler().register(manager)
         await manager.execute_tool("web_search", query="test", max_results=3)
         mock_ddgs_instance.text.assert_called_once_with("test", max_results=3)
+
+
+class TestAgyRenderAndConfig:
+    """Sprint 1: SDK-free pieces of the agy route — prompt flattening, image
+    policy, and limiter wiring. The handler/route themselves land in later
+    sprints (they depend on the Antigravity SDK)."""
+
+    def test_render_flattens_full_history_no_dup(self, text_engine):
+        """Every prior turn AND the final user turn appear, exactly once each."""
+        history = [
+            {"role": "user", "content": "first question"},
+            {"role": "assistant", "content": "first answer"},
+            {"role": "user", "content": "current question"},
+        ]
+        rendered = text_engine._render_agy_prompt(history)
+
+        assert "User: first question" in rendered
+        assert "Assistant: first answer" in rendered
+        assert "User: current question" in rendered
+        # "nothing dropped": all three turns present
+        assert rendered.count("User:") == 2
+        assert rendered.count("Assistant:") == 1
+        # "nothing duplicated": the final user turn appears exactly once
+        assert rendered.count("current question") == 1
+        # ordering preserved
+        assert rendered.index("first question") < rendered.index("first answer") < rendered.index("current question")
+
+    def test_render_handles_tool_turns(self, text_engine):
+        """tool-role results and assistant tool_calls render with their tags —
+        this is what lets the engine's multi-turn tool loop reach agy."""
+        history = [
+            {"role": "user", "content": "weather?"},
+            {"role": "assistant", "content": "checking", "tool_calls": [
+                {"id": "c1", "name": "get_weather", "arguments": {"city": "NYC"}},
+            ]},
+            {"role": "tool", "name": "get_weather", "content": '{"temp": 70}'},
+            {"role": "user", "content": "thanks"},
+        ]
+        rendered = text_engine._render_agy_prompt(history)
+
+        assert "Assistant: checking" in rendered
+        assert 'Assistant (tool call get_weather): {"city": "NYC"}' in rendered
+        assert 'Tool(get_weather): {"temp": 70}' in rendered
+        assert "User: thanks" in rendered
+
+    def test_render_tool_loop_followup_reaches_prompt(self, text_engine):
+        """A history ending in a tool result (the engine's follow-up turn)
+        renders that result so agy sees it on the next stateless call."""
+        history = [
+            {"role": "user", "content": "lookup"},
+            {"role": "assistant", "tool_calls": [
+                {"id": "c1", "name": "search", "arguments": {"q": "x"}},
+            ]},
+            {"role": "tool", "name": "search", "content": '{"hits": 3}'},
+        ]
+        rendered = text_engine._render_agy_prompt(history)
+        assert 'Tool(search): {"hits": 3}' in rendered
+        # assistant turn carrying only tool_calls still renders the call
+        assert 'Assistant (tool call search): {"q": "x"}' in rendered
+
+    def test_render_excludes_system_prompt(self, text_engine):
+        """The persona is delivered via CustomSystemInstructions, never in the
+        flattened transcript. _render_agy_prompt only receives post-extraction
+        history, but guard against a stray system turn leaking through."""
+        history = [{"role": "user", "content": "hi"}]
+        rendered = text_engine._render_agy_prompt(history)
+        assert "System" not in rendered
+
+    def test_agy_excluded_from_image_support(self, text_engine):
+        """agy is text-only in v1; excluding it means images get the existing
+        'can't see image' note + strip rather than being silently dropped."""
+        assert text_engine.model_supports_images("agy-flash") is False
+
+    def test_agy_limiter_constructed(self, text_engine):
+        """The agy rate limiter is wired at init, ready for the route."""
+        from aiolimiter import AsyncLimiter
+        assert isinstance(text_engine._agy_limiter, AsyncLimiter)
+
+
+class TestAgyHandler:
+    def test_tool_protocol_includes_tools(self, text_engine):
+        tools = [{
+            "function": {
+                "name": "get_weather",
+                "description": "Get the current weather",
+                "parameters": {"type": "object", "properties": {"location": {"type": "string"}}}
+            }
+        }]
+        protocol = text_engine._render_agy_tool_protocol(tools)
+        assert "get_weather" in protocol
+        assert "Get the current weather" in protocol
+        assert "<tool_call>" in protocol
+
+    def test_tool_protocol_empty_without_tools(self, text_engine):
+        assert text_engine._render_agy_tool_protocol([]) == ""
+        assert text_engine._render_agy_tool_protocol(None) == ""
+
+    def test_parse_clean_tool_call(self, text_engine):
+        text = '<tool_call>{"name": "get_weather", "arguments": {"location": "Tokyo"}}</tool_call>'
+        parsed = text_engine._parse_agy_tool_call(text)
+        assert parsed is not None
+        assert len(parsed) == 1
+        call = parsed[0]
+        assert call["name"] == "get_weather"
+        assert call["arguments"] == {"location": "Tokyo"}
+        assert isinstance(call["id"], str)
+        assert len(call["id"]) > 0
+
+    def test_parse_no_block_returns_none(self, text_engine):
+        assert text_engine._parse_agy_tool_call("This is plain text with no tool call.") is None
+
+    def test_parse_strips_system_message(self, text_engine):
+        text = '<SYSTEM_MESSAGE>system message noise</SYSTEM_MESSAGE>some prose\n<tool_call>{"name": "get_weather", "arguments": {"location": "Tokyo"}}</tool_call>\nmore prose'
+        parsed = text_engine._parse_agy_tool_call(text)
+        assert parsed is not None
+        assert len(parsed) == 1
+        call = parsed[0]
+        assert call["name"] == "get_weather"
+        assert call["arguments"] == {"location": "Tokyo"}
+
+    def test_parse_malformed_json_returns_none(self, text_engine):
+        text = '<tool_call>{"name": "get_weather", "arguments": </tool_call>'
+        assert text_engine._parse_agy_tool_call(text) is None
+
+    @pytest.mark.asyncio
+    async def test_handler_text_path(self, text_engine, base_context, monkeypatch):
+        mock_cli = AsyncMock(return_value="a plain answer")
+        monkeypatch.setattr(text_engine, "_run_agy_cli", mock_cli)
+
+        config = {"model_name": "agy-flash"}
+        response, api_payload = await text_engine._generate_agy_response(config, base_context)
+
+        assert response == {"type": "text", "content": "a plain answer"}
+        assert isinstance(api_payload, dict)
+
+    @pytest.mark.asyncio
+    async def test_handler_tool_path(self, text_engine, base_context, monkeypatch):
+        tool_output = '<tool_call>{"name": "get_weather", "arguments": {"location": "Tokyo"}}</tool_call>'
+        mock_cli = AsyncMock(return_value=tool_output)
+        monkeypatch.setattr(text_engine, "_run_agy_cli", mock_cli)
+
+        config = {"model_name": "agy-flash"}
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get the current weather",
+                "parameters": {"type": "object", "properties": {"location": {"type": "string"}}}
+            }
+        }]
+
+        response, api_payload = await text_engine._generate_agy_response(config, base_context, tools=tools)
+
+        assert response["type"] == "tool_calls"
+        assert len(response["calls"]) == 1
+        call = response["calls"][0]
+        assert call["name"] == "get_weather"
+        assert call["arguments"] == {"location": "Tokyo"}
+        assert isinstance(call["id"], str)
+        assert len(call["id"]) > 0
+        assert isinstance(api_payload, dict)
+
+    @pytest.mark.asyncio
+    async def test_handler_injects_system_and_tools_into_prompt(self, text_engine, base_context, monkeypatch):
+        mock_cli = AsyncMock(return_value="mocked output")
+        monkeypatch.setattr(text_engine, "_run_agy_cli", mock_cli)
+
+        config = {"model_name": "agy-flash"}
+        tools = [{
+            "function": {
+                "name": "get_weather",
+                "description": "Get the current weather",
+                "parameters": {"type": "object", "properties": {"location": {"type": "string"}}}
+            }
+        }]
+
+        await text_engine._generate_agy_response(config, base_context, tools=tools)
+
+        mock_cli.assert_called_once()
+        prompt_arg = mock_cli.call_args[0][0]
+        assert "You are a test bot." in prompt_arg
+        assert "get_weather" in prompt_arg
+        assert "<tool_call>" in prompt_arg
+
+    @pytest.mark.asyncio
+    async def test_handler_api_payload_has_no_secret(self, text_engine, base_context, monkeypatch):
+        mock_cli = AsyncMock(return_value="a plain answer")
+        monkeypatch.setattr(text_engine, "_run_agy_cli", mock_cli)
+
+        config = {"model_name": "agy-flash"}
+        _, api_payload = await text_engine._generate_agy_response(config, base_context)
+
+        # Simple key-name and value scan for secrets
+        payload_str = str(api_payload).lower()
+        for forbidden in ["secret", "token", "oauth", "api_key"]:
+            assert forbidden not in payload_str
+
+    def test_route_resolves_to_agy_handler(self, text_engine):
+        handler, limiters = text_engine._get_provider_route("agy-flash")
+        assert handler == text_engine._generate_agy_response
+        assert limiters == [text_engine._agy_limiter]
+
+    @pytest.mark.asyncio
+    async def test_generate_response_end_to_end_text(self, text_engine, base_context, monkeypatch):
+        mock_cli = AsyncMock(return_value="end-to-end text answer")
+        monkeypatch.setattr(text_engine, "_run_agy_cli", mock_cli)
+
+        config = {"model_name": "agy-flash"}
+        response, api_payload = await text_engine.generate_response(config, base_context)
+
+        assert response == {"type": "text", "content": "end-to-end text answer"}
+        assert isinstance(api_payload, dict)
