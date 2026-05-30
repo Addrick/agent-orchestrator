@@ -663,12 +663,12 @@ class TextEngine:
             err_str = str(e)
             rate_limited = '429' in err_str or 'RESOURCE_EXHAUSTED' in err_str
             is_server_error = '500' in err_str or 'InternalServerError' in err_str or 'INTERNAL' in err_str
-            
+
             if rate_limited:
                 logger.warning(f"Google API rate-limited ({config['model_name']}): retryable.")
             else:
                 logger.error(f"Google API error: {e}", exc_info=not is_server_error)
-                
+
             raise LLMCommunicationError(f"An error occurred with Google API: {e}",
                                         api_payload=api_params_for_dumping, rate_limited=rate_limited) from e
 
@@ -774,6 +774,7 @@ class TextEngine:
         args = ["--print-timeout", timeout_sec_str, "-p", prompt]
 
         temp_dir = tempfile.mkdtemp()
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 binary,
@@ -781,15 +782,12 @@ class TextEngine:
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=temp_dir
+                cwd=temp_dir,
+                start_new_session=True
             )
             try:
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
             except asyncio.TimeoutError as e:
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
                 raise LLMCommunicationError(f"agy CLI timed out after {timeout} seconds.") from e
 
             if proc.returncode != 0:
@@ -801,6 +799,25 @@ class TextEngine:
 
             return stdout.decode("utf-8", errors="replace")
         finally:
+            if proc is not None:
+                try:
+                    import signal
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except Exception:
+                    pass
+
+            cli_dir = os.path.join(temp_dir, ".antigravitycli")
+            if os.path.isdir(cli_dir):
+                for f in os.listdir(cli_dir):
+                    p = os.path.join(cli_dir, f)
+                    if os.path.islink(p):
+                        try:
+                            target = os.readlink(p)
+                            if os.path.exists(target):
+                                os.remove(target)
+                        except Exception:
+                            pass
+
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     async def _generate_agy_response(
