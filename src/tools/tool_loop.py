@@ -53,6 +53,11 @@ class _LoopFinishedEvent:
     pending_writes: Optional[List[Dict[str, Any]]] = None
     turn_tainted: bool = False
     audit_info: Optional[Dict[str, Any]] = None
+    # Index into conversation_history marking where this turn's tool messages
+    # begin. Carried on the pending-write event so a resumed continuation can
+    # capture the parked tool calls (+ their results) into tool_context_json
+    # rather than dropping them. See ChatSystem resume path.
+    tool_context_start: int = 0
 
 
 LoopEvent = Union[
@@ -86,12 +91,22 @@ class ToolLoop:
         image_url: Optional[str] = None,
         turn_tainted: bool = False,
         initial_taint_sources: Optional[List[str]] = None,
+        history_start_override: Optional[int] = None,
     ) -> AsyncIterator[LoopEvent]:
         """Yield generation events for one turn. Mutates
         `conversation_history` in-place so the orchestrator (and any
-        CONFIRM-mode resume path) sees the same list."""
+        CONFIRM-mode resume path) sees the same list.
+
+        `history_start_override` lets a resumed write-confirmation point the
+        tool-context boundary back at the parked turn's first tool message, so
+        the captured tool_context_json spans the whole turn (parked read calls,
+        the approved write, and its result) rather than only post-resume calls.
+        """
         persona_config = persona.get_config_for_engine()
-        history_start = len(conversation_history)
+        history_start = (
+            history_start_override if history_start_override is not None
+            else len(conversation_history)
+        )
         taint_sources: List[str] = list(initial_taint_sources or [])
         # turn_tainted is passed in to support conversation-level stickiness
 
@@ -257,6 +272,7 @@ class ToolLoop:
                     pending_writes=write_calls,
                     turn_tainted=turn_tainted,
                     audit_info=audit_info,
+                    tool_context_start=history_start,
                 )
                 return
 

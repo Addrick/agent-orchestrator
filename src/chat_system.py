@@ -89,6 +89,11 @@ class PendingConfirmation:
     turn_tainted: bool = False
     audit_info: Optional[Dict[str, Any]] = None
     created_at: float = field(default_factory=time.time)
+    # Index into conversation_history where this turn's tool messages start.
+    # Passed to the resumed tool loop as history_start_override so the approved
+    # write and its result are captured into tool_context_json (and thus
+    # replayed on later turns) instead of being dropped.
+    tool_context_start: int = 0
 
 
 @dataclass
@@ -168,6 +173,10 @@ class ChatSystem:
 
         self.bot_logic: BotLogic = BotLogic(self)
         self.last_api_requests: Dict[str, Dict[str, Optional[Dict[str, Any]]]] = defaultdict(dict)
+        # Per-turn list of every LLM-call payload in the tool loop (reset at the
+        # first iteration of each turn). last_api_requests keeps only the final
+        # payload for back-compat; this preserves the whole loop for dump_history.
+        self.last_api_iterations: Dict[str, Dict[str, List[Dict[str, Any]]]] = defaultdict(dict)
         self.models_available: Dict[str, Any] = get_model_list() or {}
         self.background_tasks: Set[Coroutine[Any, Any, Any]] = set()
         self._pending_confirmations: Dict[Tuple[str, str], PendingConfirmation] = {}
@@ -196,8 +205,14 @@ class ChatSystem:
 
     def _store_api_request(self, user_identifier: str, persona_name: str,
                            payload: Dict[str, Any],
-                           tools_for_llm: Optional[List[Dict[str, Any]]] = None) -> None:
-        """Stores the last API request payload, evicting the oldest user entry if over capacity."""
+                           tools_for_llm: Optional[List[Dict[str, Any]]] = None,
+                           is_first_iteration: bool = False) -> None:
+        """Stores the last API request payload, evicting the oldest user entry if over capacity.
+
+        `is_first_iteration` marks the opening LLM call of a turn; it resets the
+        per-turn iteration list so dump_history shows the whole tool loop (one
+        payload per LLM call) rather than only the final iteration.
+        """
         if tools_for_llm is not None:
             payload["_tools_for_llm"] = tools_for_llm
         else:
@@ -205,9 +220,15 @@ class ChatSystem:
             if existing and "_tools_for_llm" in existing:
                 payload["_tools_for_llm"] = existing["_tools_for_llm"]
         self.last_api_requests[user_identifier][persona_name] = payload
+
+        if is_first_iteration:
+            self.last_api_iterations[user_identifier][persona_name] = []
+        self.last_api_iterations[user_identifier].setdefault(persona_name, []).append(payload)
+
         if len(self.last_api_requests) > MAX_CACHED_API_REQUESTS:
             oldest_key = next(iter(self.last_api_requests))
             del self.last_api_requests[oldest_key]
+            self.last_api_iterations.pop(oldest_key, None)
 
     def _format_raw_history_for_llm(self, raw_history: List[Dict[str, Any]], memory_mode: str,
                                     persona_name: str, server_id: Optional[str]) -> List[Dict[str, Any]]:
@@ -927,6 +948,7 @@ class ChatSystem:
             accumulated_parts: List[str] = []
             pending_writes: Optional[List[Dict[str, Any]]] = None
             audit_info: Optional[Dict[str, Any]] = None
+            tool_context_start: int = 0
 
             # Construct per-call so tests that swap `chat_system.text_engine`
             # post-init still see the new engine; ToolLoop is stateless.
@@ -941,11 +963,15 @@ class ChatSystem:
                     image_url=ctx.image_url,
                     turn_tainted=ctx.turn_tainted,
                     initial_taint_sources=ctx.taint_sources,
+                    history_start_override=(
+                        resume.pending.tool_context_start if resume is not None else None
+                    ),
                 ):
                     if isinstance(ev, _ApiPayloadEvent):
                         self._store_api_request(
                             user_identifier, persona_name, ev.payload,
                             tools_for_llm=ctx.tools_for_llm if params_first_iter else None,
+                            is_first_iteration=params_first_iter,
                         )
                         params_first_iter = False
                     elif isinstance(ev, TokenEvent):
@@ -962,6 +988,7 @@ class ChatSystem:
                         tool_context_json = ev.tool_context_json
                         pending_writes = ev.pending_writes
                         audit_info = ev.audit_info
+                        tool_context_start = ev.tool_context_start
                         ctx.turn_tainted = ev.turn_tainted
                         # Persist back to the conversation cache for stickiness
                         taint_key = (ctx.user_identifier, ctx.persona_name, ctx.channel, ctx.server_id)
@@ -995,6 +1022,7 @@ class ChatSystem:
                         server_id=ctx.server_id,
                         turn_tainted=ctx.turn_tainted,
                         audit_info=audit_info,
+                        tool_context_start=tool_context_start,
                     )
                 )
                 # Phase 7: Log audit parking

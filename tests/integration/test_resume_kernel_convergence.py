@@ -168,6 +168,63 @@ async def test_resume_persists_assistant_on_correct_channel(mocked_chat_system):
 
 
 @pytest.mark.asyncio
+async def test_resume_persists_write_into_tool_context(mocked_chat_system):
+    """The approved write and its result must be captured in the assistant row's
+    tool_context so they replay on later turns. Regression: the resumed loop used
+    to set history_start *after* the parked tool calls, dropping the executed
+    write from history entirely."""
+    chat_system, mem_manager = mocked_chat_system
+    persona = chat_system.personas["test_persona"]
+    persona.set_execution_mode(ExecutionMode.CONFIRM)
+    persona.set_enabled_tools(["*"])
+
+    async def fake_execute(name, **kwargs):
+        return {"ticket_id": 42}
+    chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[assignment]
+
+    await _park_write(
+        chat_system, user="u6", channel="c6",
+        write_call={"id": "w1", "name": "create_ticket",
+                    "arguments": {"title": "t", "body": "b"}},
+    )
+
+    _set_engine(chat_system, [
+        ({"type": "text", "content": "Ticket created."}, {}),
+    ])
+    await chat_system.resume_pending_confirmation("u6", "test_persona", approved=True)
+
+    conn = mem_manager._get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT tool_context FROM User_Interactions "
+        "WHERE author_role='assistant' AND content='Ticket created.'"
+    )
+    row = cursor.fetchone()
+    assert row is not None and row["tool_context"], \
+        "assistant turn persisted without tool_context"
+
+    import json
+    tool_ctx = json.loads(row["tool_context"])
+    # The parked write tool_call and its execution result must both be present.
+    assert any(
+        m.get("role") == "assistant" and any(
+            c.get("name") == "create_ticket" for c in m.get("tool_calls", [])
+        ) for m in tool_ctx
+    ), "approved write tool_call missing from replayed tool_context"
+    assert any(
+        m.get("role") == "tool" and m.get("name") == "create_ticket" for m in tool_ctx
+    ), "approved write result missing from replayed tool_context"
+
+    # And it actually replays into the next turn's formatted history.
+    replayed = chat_system._format_raw_history_for_llm(
+        [{"author_role": "assistant", "author_name": "test_persona",
+          "content": "Ticket created.", "tool_context": row["tool_context"]}],
+        memory_mode="channel", persona_name="test_persona", server_id=None,
+    )
+    assert any(m.get("role") == "tool" and m.get("name") == "create_ticket" for m in replayed)
+
+
+@pytest.mark.asyncio
 async def test_resume_pins_scope_during_continuation_and_resets(mocked_chat_system):
     """The resumed turn runs with the parked scope pinned (so engine-side tools
     inherit persona/user/channel) and the ContextVar is reset on exit."""
