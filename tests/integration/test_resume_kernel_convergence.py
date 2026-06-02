@@ -18,7 +18,9 @@ import time
 
 import pytest
 
-from src.chat_system import ResponseType, PendingConfirmation
+from src.chat_system import (
+    ResponseType, PendingConfirmation, PendingConfirmationEvent, DoneEvent,
+)
 from src.persona import ExecutionMode
 from src.tools.turn_context import get_turn_context
 from config.global_config import PENDING_CONFIRMATION_TIMEOUT
@@ -297,3 +299,111 @@ async def test_resume_no_pending_confirmation(mocked_chat_system):
     assert rtype == ResponseType.DEV_COMMAND
     assert "No pending confirmation" in text
     assert assistant_id is None
+
+
+# -------- DP-127: portal-facing park event + tokenised streaming resume --------
+
+
+@pytest.mark.asyncio
+async def test_park_yields_pending_confirmation_event(mocked_chat_system):
+    """When a write parks, the stream surfaces a PendingConfirmationEvent
+    (structured calls + resume token) before the terminal DoneEvent, so an
+    interactive surface can render approve/deny. The token matches the park."""
+    chat_system, _ = mocked_chat_system
+    persona = chat_system.personas["test_persona"]
+    persona.set_execution_mode(ExecutionMode.CONFIRM)
+    persona.set_enabled_tools(["*"])
+
+    _set_engine(chat_system, [
+        ({"type": "tool_calls", "calls": [
+            {"id": "w1", "name": "create_ticket",
+             "arguments": {"title": "t", "body": "b"}}]}, {}),
+    ])
+    events = await _drain(
+        chat_system.stream_response("test_persona", "u6", "c6", "do it")
+    )
+
+    pce = [e for e in events if isinstance(e, PendingConfirmationEvent)]
+    assert len(pce) == 1, "exactly one PendingConfirmationEvent expected"
+    ev = pce[0]
+    assert ev.persona_name == "test_persona"
+    assert ev.write_calls[0]["name"] == "create_ticket"
+    assert ev.token, "park event must carry a resume token"
+
+    parked = chat_system._pending_confirmations[("u6", "test_persona")]
+    assert ev.token == parked.token, "event token must match the stored park"
+
+    pce_idx = next(i for i, e in enumerate(events)
+                   if isinstance(e, PendingConfirmationEvent))
+    done_idx = next(i for i, e in enumerate(events) if isinstance(e, DoneEvent))
+    assert pce_idx < done_idx, "park event must precede the terminal DoneEvent"
+
+
+@pytest.mark.asyncio
+async def test_stream_resume_token_mismatch_preserves_park(mocked_chat_system):
+    """A streaming resume with a stale token is rejected and leaves the real
+    park intact, so a correct-token retry can still go through."""
+    chat_system, _ = mocked_chat_system
+    persona = chat_system.personas["test_persona"]
+    persona.set_execution_mode(ExecutionMode.CONFIRM)
+    persona.set_enabled_tools(["*"])
+
+    executed = []
+
+    async def fake_execute(name, **kwargs):
+        executed.append(name)
+        return {"ok": True}
+    chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[assignment]
+
+    await _park_write(
+        chat_system, user="u7", channel="c7",
+        write_call={"id": "w1", "name": "create_ticket",
+                    "arguments": {"title": "t", "body": "b"}},
+    )
+
+    events = await _drain(chat_system.stream_resume_confirmation(
+        "u7", "test_persona", approved=True, expected_token="not-the-token",
+    ))
+    done = [e for e in events if isinstance(e, DoneEvent)][-1]
+    assert done.response_type == ResponseType.DEV_COMMAND
+    assert "no longer valid" in done.text.lower()
+    assert "create_ticket" not in executed, "stale resume must not execute the write"
+    assert ("u7", "test_persona") in chat_system._pending_confirmations, \
+        "stale token must leave the park intact"
+
+
+@pytest.mark.asyncio
+async def test_stream_resume_valid_token_executes_write(mocked_chat_system):
+    """A streaming resume with the matching token consumes the park, executes
+    the write, and streams the continuation."""
+    chat_system, _ = mocked_chat_system
+    persona = chat_system.personas["test_persona"]
+    persona.set_execution_mode(ExecutionMode.CONFIRM)
+    persona.set_enabled_tools(["*"])
+
+    executed = []
+
+    async def fake_execute(name, **kwargs):
+        executed.append(name)
+        return {"ok": True}
+    chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[assignment]
+
+    await _park_write(
+        chat_system, user="u8", channel="c8",
+        write_call={"id": "w1", "name": "create_ticket",
+                    "arguments": {"title": "t", "body": "b"}},
+    )
+    token = chat_system._pending_confirmations[("u8", "test_persona")].token
+
+    _set_engine(chat_system, [
+        ({"type": "text", "content": "Ticket opened."}, {}),
+    ])
+    events = await _drain(chat_system.stream_resume_confirmation(
+        "u8", "test_persona", approved=True, expected_token=token,
+    ))
+    done = [e for e in events if isinstance(e, DoneEvent)][-1]
+    assert done.response_type == ResponseType.LLM_GENERATION
+    assert done.text == "Ticket opened."
+    assert "create_ticket" in executed
+    assert ("u8", "test_persona") not in chat_system._pending_confirmations
+    assert get_turn_context() is None

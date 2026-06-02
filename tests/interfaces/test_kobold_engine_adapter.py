@@ -24,7 +24,7 @@ from memory.memory_manager import MemoryManager
 from src.chat_system import ChatSystem
 from src.engine import TextEngine
 from src.interfaces.kobold_engine_adapter import KoboldEngineAdapter as KoboldAdapter
-from src.persona import Persona
+from src.persona import Persona, ExecutionMode
 
 
 def _make_adapter_with_seeded_db(persona_name: str = "test_persona",
@@ -453,6 +453,107 @@ def test_chat_completions_stream_emits_dev_command_text():
     delta = json.loads(chunk_match.group(1))["choices"][0]["delta"]["content"]
     assert delta == "Temperature for test_persona is set to 0.2."
     assert text.index("delta") < text.index("[DONE]")
+    mm.close()
+
+
+def _confirm_stream_messages():
+    """Stateful stub: turn 1 proposes a write (parks), turn 2 (the resume
+    continuation) answers with text."""
+    state = {"n": 0}
+
+    async def stream_messages(*args, **kwargs):
+        state["n"] += 1
+        if state["n"] == 1:
+            yield {"type": "api_payload", "payload": {}}
+            yield {"type": "tool_calls", "calls": [
+                {"id": "w1", "name": "create_ticket",
+                 "arguments": {"title": "t", "body": "b"}}]}
+            yield {"type": "done", "full_text": ""}
+        else:
+            yield {"type": "api_payload", "payload": {}}
+            yield {"type": "text_delta", "text": "Ticket opened."}
+            yield {"type": "done", "full_text": "Ticket opened."}
+
+    return stream_messages
+
+
+def test_chat_completions_stream_emits_derpr_confirm_frame():
+    """DP-127: a write parked under CONFIRM surfaces an `event: derpr-confirm`
+    SSE frame carrying the structured calls + a resume token, before [DONE].
+    The write itself is NOT executed (parked for approval)."""
+    adapter, mm, persona, chat_system = _make_real_adapter(
+        stream_messages=_confirm_stream_messages(),
+    )
+    persona.set_execution_mode(ExecutionMode.CONFIRM)
+    persona.set_enabled_tools(["*"])
+    chat_system.tool_manager.execute_tool = AsyncMock(return_value={"ok": True})
+
+    body = _chat_body("open a ticket", stream=True)
+    body["derpr_user_text"] = "open a ticket"
+    with TestClient(adapter.app) as client:
+        with client.stream("POST", "/chat/completions", json=body) as r:
+            raw = b"".join(chunk for chunk in r.iter_raw())
+
+    text = raw.decode("utf-8")
+    m = re.search(r"event: derpr-confirm\ndata: (\{.*?\})\n\n", text)
+    assert m is not None, f"missing derpr-confirm frame in:\n{text}"
+    payload = json.loads(m.group(1))
+    assert payload["persona"] == "test_persona"
+    assert payload["token"], "confirm frame must carry a resume token"
+    assert payload["calls"][0]["name"] == "create_ticket"
+    assert payload["calls"][0]["arguments"] == {"title": "t", "body": "b"}
+    assert text.index("derpr-confirm") < text.index("[DONE]")
+
+    chat_system.tool_manager.execute_tool.assert_not_called()
+    assert ("portal", "test_persona") in chat_system._pending_confirmations
+    mm.close()
+
+
+def test_confirm_route_approves_and_streams_continuation():
+    """POST /api/v1/persona/{name}/confirm with approved + token executes the
+    parked write and streams the model's continuation back as SSE."""
+    adapter, mm, persona, chat_system = _make_real_adapter(
+        stream_messages=_confirm_stream_messages(),
+    )
+    persona.set_execution_mode(ExecutionMode.CONFIRM)
+    persona.set_enabled_tools(["*"])
+
+    executed = []
+
+    async def fake_execute(name, **kwargs):
+        executed.append(name)
+        return {"ok": True}
+    chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[method-assign]
+
+    body = _chat_body("open a ticket", stream=True)
+    body["derpr_user_text"] = "open a ticket"
+    with TestClient(adapter.app) as client:
+        with client.stream("POST", "/chat/completions", json=body) as r:
+            park_raw = b"".join(chunk for chunk in r.iter_raw())
+        token = json.loads(
+            re.search(r"event: derpr-confirm\ndata: (\{.*?\})\n\n",
+                      park_raw.decode("utf-8")).group(1)
+        )["token"]
+
+        with client.stream(
+            "POST", "/api/v1/persona/test_persona/confirm",
+            json={"approved": True, "token": token},
+        ) as r2:
+            resume_raw = b"".join(chunk for chunk in r2.iter_raw())
+
+    resume_text = resume_raw.decode("utf-8")
+    assert "create_ticket" in executed, "approved write was not executed"
+    assert "Ticket opened." in resume_text, "continuation text not streamed"
+    assert "[DONE]" in resume_text
+    assert ("portal", "test_persona") not in chat_system._pending_confirmations
+    mm.close()
+
+
+def test_confirm_route_unknown_persona_returns_404():
+    adapter, mm, _, _ = _make_real_adapter()
+    with TestClient(adapter.app) as client:
+        r = client.post("/api/v1/persona/nobody/confirm", json={"approved": True})
+    assert r.status_code == 404
     mm.close()
 
 
