@@ -151,6 +151,8 @@ class KoboldEngineAdapter:
                 "kobold_extras": get_kobold_extras_for_get(p),
                 "enabled_tools": p.get_enabled_tools(),
                 "tool_policy": p.get_tool_policy().to_dict(),
+                "security_blocked": p.is_security_blocked(),
+                "security_block_reasons": p.get_security_block_reasons(),
             }
 
         @self.app.get("/api/v1/session/{persona}/ltm_block")

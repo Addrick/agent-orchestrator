@@ -810,6 +810,23 @@ class ChatSystem:
             )
             return
 
+        # DP-128: a persona quarantined for an insecure tool composition is
+        # refused here — no LLM call, no tools — until its tools are fixed live.
+        # Dev commands (e.g. `set tools ...`) are handled above before this gate,
+        # so the operator can repair the persona in-band without a restart.
+        if persona.is_security_blocked():
+            reasons = persona.get_security_block_reasons()
+            detail = "\n".join(f" - {r}" for r in reasons)
+            yield DoneEvent(
+                text=(
+                    f"⚠️ Persona '{persona_name}' is quarantined (insecure tool "
+                    f"composition):\n{detail}\n"
+                    "Fix its tools in persona config to enable it."
+                ),
+                response_type=ResponseType.DEV_COMMAND,
+            )
+            return
+
         ctx = RequestContext(
             persona=persona, persona_name=persona_name,
             user_identifier=user_identifier, channel=channel, message=message,

@@ -74,6 +74,37 @@ async def test_generate_response_handles_persona_not_found(chat_system_with_mock
 
 
 @pytest.mark.asyncio
+async def test_generate_response_refuses_quarantined_persona(chat_system_with_mocks):
+    """DP-128: a security-quarantined persona is refused with an explanatory
+    message and never reaches the LLM."""
+    system, _, text_engine_mock, mock_persona, _ = chat_system_with_mocks
+    mock_persona._security_block_reasons = [
+        "Insecure composition: network:read + local:write (potential disk rewrite via injection)"
+    ]
+    response, rtype, _, _ = await system.generate_response(
+        "test_persona", "user", "channel", "do something")
+    assert "quarantined" in response.lower()
+    assert "network:read + local:write" in response
+    assert rtype == ResponseType.DEV_COMMAND
+    text_engine_mock.generate_response.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_quarantined_persona_still_accepts_dev_commands(chat_system_with_mocks):
+    """The block gate sits AFTER dev-command preprocessing, so `set tools` can
+    still reach a quarantined persona to repair it live."""
+    system, _, text_engine_mock, mock_persona, _ = chat_system_with_mocks
+    mock_persona._security_block_reasons = ["Insecure composition: ..."]
+    system.bot_logic.preprocess_message.return_value = {
+        "response": "tools updated", "mutated": True}
+    with patch("src.chat_system.save_personas_to_file"):
+        response, _, _, _ = await system.generate_response(
+            "test_persona", "user", "channel", "set tools get_ticket_details")
+    assert response == "tools updated"
+    text_engine_mock.generate_response.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_generate_response_handles_llm_communication_error(chat_system_with_mocks):
     system, _, text_engine_mock, _, _ = chat_system_with_mocks
     text_engine_mock.generate_response.side_effect = LLMCommunicationError("API is down")

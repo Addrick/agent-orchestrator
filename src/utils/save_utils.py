@@ -184,12 +184,16 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
                 allowed_set = set(temp_policy.allow + temp_policy.ask)
                 persona_tools = [t for t in ALL_TOOL_DEFINITIONS if t.get("function", {}).get("name") in allowed_set]
             
+            # DP-128: a persona that fails composition validation is no longer
+            # dropped — it loads *quarantined* (security_block_reasons set) so it
+            # stays selectable/editable and the operator can fix its tools live
+            # (`set tools` / web tools modal). Generation is refused downstream
+            # until a live edit re-validates clean.
             validation_errors = temp_policy.validate_composition(persona_tools)
             if validation_errors:
                 for err in validation_errors:
                     logger.critical(f"Persona '{name}' security violation: {err}")
-                logger.error(f"Refusing to load insecure persona '{name}'.")
-                continue
+                logger.warning(f"Quarantining persona '{name}' (loaded but generation blocked until fixed).")
 
             personas[name] = Persona(
                 persona_name=name,
@@ -208,6 +212,7 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
                 tool_policy=new_persona.get("tool_policy"),
                 meta_visible=new_persona.get("meta_visible", False),
                 ingest_bank=new_persona.get("ingest_bank"),
+                security_block_reasons=validation_errors,
                 **_resolve_params_kwargs(new_persona),
             )
 
@@ -259,12 +264,12 @@ def load_system_personas_from_file() -> Dict[str, Any]:
                 allowed_set = set(temp_policy.allow + temp_policy.ask)
                 persona_tools = [t for t in ALL_TOOL_DEFINITIONS if t.get("function", {}).get("name") in allowed_set]
             
+            # DP-128: quarantine instead of drop (see the user-persona path above).
             validation_errors = temp_policy.validate_composition(persona_tools)
             if validation_errors:
                 for err in validation_errors:
                     logger.critical(f"System Persona '{name}' security violation: {err}")
-                logger.error(f"Refusing to load insecure system persona '{name}'.")
-                continue
+                logger.warning(f"Quarantining system persona '{name}' (loaded but generation blocked until fixed).")
 
             params_kwargs = _resolve_params_kwargs(new_persona)
             # System personas use `response_token_limit` rather than `token_limit`
@@ -288,6 +293,7 @@ def load_system_personas_from_file() -> Dict[str, Any]:
                 tool_policy=new_persona.get("tool_policy"),
                 meta_visible=new_persona.get("meta_visible", False),
                 ingest_bank=new_persona.get("ingest_bank"),
+                security_block_reasons=validation_errors,
                 **params_kwargs,
             )
 

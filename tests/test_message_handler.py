@@ -499,6 +499,36 @@ def test_dump_persona_config_shows_enabled_tools_none(bot_logic, mock_chat_syste
     assert "Enabled Tools: none" in output
 
 
+# --- DP-128: live quarantine fix/trip via `set` dev commands ---
+
+@pytest.mark.asyncio
+async def test_set_tool_policy_clears_quarantine_live(bot_logic, mock_chat_system_with_state):
+    """A quarantined persona is un-blocked live by scoping its policy — no restart.
+    A deny/empty policy is the secure terminal case."""
+    persona = mock_chat_system_with_state.personas["derpr"]
+    persona._security_block_reasons = ["Insecure composition: network:read + local:write"]
+    assert persona.is_security_blocked() is True
+
+    result = await bot_logic.preprocess_message(
+        "derpr", "user1", 'set tool_policy {"default":"deny","allow":[]}')
+
+    assert persona.is_security_blocked() is False
+    assert result is not None and result["mutated"] is True
+
+
+@pytest.mark.asyncio
+async def test_set_tool_policy_allow_all_trips_quarantine_live(bot_logic, mock_chat_system_with_state):
+    """Editing a persona to allow-all live quarantines it and warns the operator."""
+    persona = mock_chat_system_with_state.personas["derpr"]
+    assert persona.is_security_blocked() is False
+
+    result = await bot_logic.preprocess_message(
+        "derpr", "user1", 'set tool_policy {"default":"allow","allow":["*"]}')
+
+    assert persona.is_security_blocked() is True
+    assert result is not None and "QUARANTINED" in result["response"]
+
+
 class TestExtractMessageContentGoogleNative:
     """Tests for Google-native function_call/function_response part handling."""
 
@@ -697,6 +727,7 @@ _GETTER_TO_COMMAND = {
     'get_max_context_tokens': 'max_context_tokens',
     'get_chat_template': 'chat_template',
     'get_tool_policy': 'tool_policy',
+    'get_security_block_reasons': 'security',
 }
 
 # Getters that intentionally have no what command (internal/derived values).

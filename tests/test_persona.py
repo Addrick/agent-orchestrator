@@ -338,3 +338,94 @@ def test_meta_visible_absent_in_legacy_config_defaults_false(base_persona_args, 
     }))
     loaded = load_personas_from_file(file_path_override=str(save_file))
     assert loaded["legacy"].get_meta_visible() is False
+
+
+# --- DP-128: security quarantine (load-but-block) ---
+
+# An insecure tool composition: allow-all exposes web/agent/zammad tools at once,
+# tripping the network:read+local:write and pii:read+foreign-egress rules.
+_INSECURE_POLICY = {"default": "allow", "allow": ["*"], "ask": []}
+# Zammad-only is the documented same-origin clean set.
+_SECURE_ZAMMAD_TOOLS = [
+    "get_ticket_details", "create_ticket", "update_ticket", "search_tickets",
+    "add_note_to_ticket", "search_user", "create_user", "update_user",
+    "delete_user", "merge_tickets",
+]
+
+
+def test_persona_not_security_blocked_by_default(persona):
+    """A persona built without block reasons is not quarantined."""
+    assert persona.is_security_blocked() is False
+    assert persona.get_security_block_reasons() == []
+
+
+def test_persona_security_blocked_via_constructor(base_persona_args):
+    """security_block_reasons passed at construction quarantines the persona."""
+    reasons = ["Insecure composition: network:read + local:write"]
+    p = Persona(**base_persona_args, security_block_reasons=reasons)
+    assert p.is_security_blocked() is True
+    assert p.get_security_block_reasons() == reasons
+    # Returned list is a copy — callers can't mutate internal state.
+    p.get_security_block_reasons().append("x")
+    assert p.get_security_block_reasons() == reasons
+
+
+def test_revalidate_security_trips_block_on_insecure_policy(base_persona_args):
+    """revalidate_security flags an insecure composition even if loaded clean."""
+    p = Persona(**base_persona_args, service_bindings=["zammad", "agents"],
+                tool_policy=_INSECURE_POLICY)
+    assert p.is_security_blocked() is False  # constructor does not auto-validate
+    assert p.revalidate_security() is True
+    assert p.is_security_blocked() is True
+    assert p.get_security_block_reasons()
+
+
+def test_set_enabled_tools_is_a_pure_mutator(base_persona_args):
+    """The raw setter does NOT re-validate (internal callers use it freely);
+    re-validation is an explicit, operator-edit-boundary concern (DP-128)."""
+    p = Persona(**base_persona_args, service_bindings=["zammad", "agents"])
+    p.set_enabled_tools(["*"])  # insecure composition, but setter stays quiet
+    assert p.is_security_blocked() is False
+
+
+def test_revalidate_clears_quarantine_after_scoping_tools(base_persona_args):
+    """A quarantined persona is repaired by scoping tools then re-validating —
+    the sequence the `set tools` dev command runs (no restart)."""
+    p = Persona(**base_persona_args, service_bindings=["zammad", "agents"],
+                tool_policy=_INSECURE_POLICY,
+                security_block_reasons=["Insecure composition: network:read + local:write"])
+    assert p.is_security_blocked() is True
+    p.set_enabled_tools(_SECURE_ZAMMAD_TOOLS)
+    assert p.revalidate_security() is False
+    assert p.is_security_blocked() is False
+    assert p.get_security_block_reasons() == []
+
+
+def test_revalidate_trips_block_on_insecure_edit(base_persona_args):
+    """Editing a clean persona into an insecure policy then re-validating
+    quarantines it."""
+    p = Persona(**base_persona_args, service_bindings=["zammad"],
+                enabled_tools=_SECURE_ZAMMAD_TOOLS)
+    assert p.is_security_blocked() is False
+    p.set_tool_policy(_INSECURE_POLICY)
+    assert p.revalidate_security() is True
+    assert p.is_security_blocked() is True
+
+
+def test_insecure_persona_loads_quarantined_not_dropped(tmp_path):
+    """DP-128: an insecure persona LOADS (quarantined) instead of being dropped."""
+    import json
+    from src.utils.save_utils import load_personas_from_file
+
+    save_file = tmp_path / "personas.json"
+    save_file.write_text(json.dumps({"personas": [
+        {"name": "bad", "model_name": "m", "prompt": "p",
+         "enabled_tools": ["*"], "service_bindings": ["zammad", "agents"]},
+        {"name": "good", "model_name": "m", "prompt": "p",
+         "enabled_tools": _SECURE_ZAMMAD_TOOLS, "service_bindings": ["zammad"]},
+    ]}))
+    loaded = load_personas_from_file(file_path_override=str(save_file))
+    assert "bad" in loaded, "insecure persona must still load (quarantined), not be dropped"
+    assert loaded["bad"].is_security_blocked() is True
+    assert loaded["bad"].get_security_block_reasons()
+    assert loaded["good"].is_security_blocked() is False

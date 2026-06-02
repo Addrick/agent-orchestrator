@@ -58,6 +58,7 @@ class Persona:
             tool_policy: Optional[Union[Dict[str, Any], ToolPolicy]] = None,
             meta_visible: bool = False,
             ingest_bank: Optional[str] = None,
+            security_block_reasons: Optional[List[str]] = None,
             **kwargs: Any,
     ) -> None:
         self._name: str = persona_name
@@ -121,6 +122,15 @@ class Persona:
             self._tool_policy = ToolPolicy.from_dict(tool_policy)
         else:
             self._tool_policy = ToolPolicy.from_legacy_list(self._enabled_tools)
+
+        # Security quarantine: a non-empty list means the persona's tool
+        # composition failed validation at load. It is kept (so it stays
+        # selectable/editable) but generation is refused downstream until a
+        # live edit (`set tools` / web tools modal → set_enabled_tools /
+        # set_tool_policy) re-validates clean. See DP-128.
+        self._security_block_reasons: List[str] = (
+            list(security_block_reasons) if security_block_reasons else []
+        )
 
     # --- Getters ---
 
@@ -198,6 +208,43 @@ class Persona:
     def get_service_bindings(self) -> List[str]:
         """Returns the list of service integrations this persona is bound to."""
         return self._service_bindings
+
+    def is_security_blocked(self) -> bool:
+        """True if this persona is quarantined for an insecure tool composition.
+
+        A quarantined persona stays loaded (selectable/editable) but generation
+        is refused downstream until its tools are fixed live. See DP-128.
+        """
+        return bool(self._security_block_reasons)
+
+    def get_security_block_reasons(self) -> List[str]:
+        """The composition-validation errors that quarantined this persona (or [])."""
+        return list(self._security_block_reasons)
+
+    def revalidate_security(self) -> bool:
+        """Re-run tool composition validation against the current policy and
+        update the quarantine state. Called after any live tool edit so the
+        operator can clear (or trip) the block without a restart. Returns the
+        new ``is_security_blocked()`` value.
+        """
+        # Lazy import: definitions.py does not import persona, but keeping this
+        # local avoids any import-order fragility at module load.
+        from src.tools.definitions import ALL_TOOL_DEFINITIONS
+        if self._tool_policy.default == "allow" and "*" in self._tool_policy.allow:
+            persona_tools = ALL_TOOL_DEFINITIONS
+        else:
+            allowed = set(self._tool_policy.allow + self._tool_policy.ask)
+            persona_tools = [
+                t for t in ALL_TOOL_DEFINITIONS
+                if t.get("function", {}).get("name") in allowed
+            ]
+        self._security_block_reasons = self._tool_policy.validate_composition(persona_tools)
+        if self._security_block_reasons:
+            logger.warning(
+                f"Persona '{self._name}' remains quarantined after edit: "
+                f"{self._security_block_reasons}"
+            )
+        return self.is_security_blocked()
 
     def get_include_ambient_memory(self) -> bool:
         """Whether to include ambient channel memories in long-term memory retrieval."""
@@ -425,13 +472,20 @@ class Persona:
         logger.info(f"Persona '{self._name}' service_bindings set to {self._service_bindings}.")
 
     def set_enabled_tools(self, new_tools: List[str]) -> None:
-        """Sets the list of tools the persona is allowed to use, updating the policy."""
+        """Sets the list of tools the persona is allowed to use, updating the policy.
+
+        Pure mutator — does NOT re-run security validation. Operator-facing edit
+        paths (`set tools` / `set tool_policy` dev commands, web tools modal) call
+        ``revalidate_security()`` afterwards so a live edit can clear or trip the
+        quarantine; see BotLogic._handle_set (DP-128).
+        """
         self._enabled_tools = new_tools
         self._tool_policy = ToolPolicy.from_legacy_list(new_tools)
         logger.info(f"Persona '{self._name}' enabled tools set to: {self._enabled_tools}")
 
     def set_tool_policy(self, policy: Union[Dict[str, Any], ToolPolicy]) -> None:
-        """Sets the structured tool security policy."""
+        """Sets the structured tool security policy. Pure mutator — see
+        ``set_enabled_tools`` re: live re-validation (DP-128)."""
         if isinstance(policy, dict):
             self._tool_policy = ToolPolicy.from_dict(policy)
         else:
