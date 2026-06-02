@@ -1676,3 +1676,33 @@ def test_kobold_export_preserves_clean_history_without_nesting(monkeypatch):
     mm.close()
 
 
+# -------- /api/v1/models/list --------
+
+def test_models_list_sources_from_models_available():
+    """The dropdown endpoint must flatten chat_system.models_available — the
+    same in-memory list `what models` reads — so the two never diverge."""
+    chat_system = SimpleNamespace(
+        models_available={
+            "From OpenAI": ["gpt-5.1"],
+            "Antigravity (OAuth tier)": ["agy-flash"],
+            "Local": ["local"],
+        }
+    )
+    adapter = KoboldAdapter(chat_system=chat_system)
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/models/list")
+    assert r.status_code == 200
+    # Flattened, de-duped, sorted across all groups.
+    assert r.json()["models"] == ["agy-flash", "gpt-5.1", "local"]
+
+
+def test_models_list_empty_when_models_available_empty():
+    """No snapshot yet → empty list, not a crash."""
+    chat_system = SimpleNamespace(models_available={})
+    adapter = KoboldAdapter(chat_system=chat_system)
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/models/list")
+    assert r.status_code == 200
+    assert r.json()["models"] == []
+
+

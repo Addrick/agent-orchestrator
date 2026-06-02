@@ -24,7 +24,6 @@ from src.memory.context_budget import truncate_messages_to_budget
 from src.chat_system import ChatSystem
 from src.interfaces.kobold_export import build_kobold_savefile
 from src.interfaces.portal_render import render_portal_html
-from src.utils.model_utils import get_model_list
 from src.utils.save_utils import save_personas_to_file
 from src.interfaces._persona_patch import (
     _KNOWN_PATCH_KEYS_LEGACY as _KNOWN_PATCH_KEYS,
@@ -172,7 +171,10 @@ class KoboldAdapter:
 
         @self.app.get("/api/v1/models/list")
         async def list_all_models() -> Dict[str, Any]:
-            avail = get_model_list() or {}
+            # Source from the same in-memory list the `what models` command
+            # reads (chat_system.models_available), so the dropdown and the
+            # command never diverge. update_models refreshes both.
+            avail = self.chat_system.models_available or {}
             all_m = []
             for sub in avail.values():
                 if isinstance(sub, list):
