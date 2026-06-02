@@ -120,23 +120,36 @@ class Agent(ABC):
                 target_time_str = self.schedule["daily_at"]
                 target_hour, target_minute = map(int, target_time_str.split(':'))
                 
-                now = datetime.now() # Schedule relative to local time
-                target = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
-                
-                if target <= now:
-                    target += timedelta(days=1)
-                
-                wait_seconds = (target - now).total_seconds()
+                while not self._shutdown_event.is_set():
+                    now = datetime.now() # Schedule relative to local time
+                    target = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
+                    
+                    if target <= now:
+                        target += timedelta(days=1)
+                    
+                    wait_seconds = (target - now).total_seconds()
+                    # Sleep in chunks to handle system clock changes and DST gracefully
+                    sleep_time = min(wait_seconds, 3600.0)
+                    
+                    try:
+                        await asyncio.wait_for(self._shutdown_event.wait(), timeout=sleep_time)
+                        return
+                    except asyncio.TimeoutError:
+                        if datetime.now() >= target:
+                            break
             except Exception as e:
                 logger.error(f"Failed to parse daily_at schedule '{self.schedule.get('daily_at')}': {e}")
                 wait_seconds = 60
+                try:
+                    await asyncio.wait_for(self._shutdown_event.wait(), timeout=wait_seconds)
+                except asyncio.TimeoutError:
+                    pass
         else:
             wait_seconds = float(self.schedule.get("interval", 60))
-
-        try:
-            await asyncio.wait_for(self._shutdown_event.wait(), timeout=wait_seconds)
-        except asyncio.TimeoutError:
-            pass
+            try:
+                await asyncio.wait_for(self._shutdown_event.wait(), timeout=wait_seconds)
+            except asyncio.TimeoutError:
+                pass
 
     # --- Step Logging ---
 
