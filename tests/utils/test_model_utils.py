@@ -1,17 +1,57 @@
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from src.utils import model_utils
+
 
 @patch('src.utils.model_utils.save_utils.load_models_from_file')
 def test_get_model_list_no_update(mock_load_models):
-    """Tests get_model_list when update=False, ensuring it calls the load utility."""
-    expected_models = {"Local": ["local-model"]}
-    mock_load_models.return_value = expected_models
+    """update=False reads the cache and merges the static (non-API) models in."""
+    mock_load_models.return_value = {"From OpenAI": ["gpt-4"]}
 
     result = model_utils.get_model_list(update=False)
 
     mock_load_models.assert_called_once()
-    assert result == expected_models
+    # API group from the cache is preserved...
+    assert result["From OpenAI"] == ["gpt-4"]
+    # ...and the static groups are always present.
+    assert result["Antigravity (OAuth tier)"] == ["agy-flash"]
+    assert result["Local"] == ["local"]
+
+
+@patch('src.utils.model_utils.save_utils.load_models_from_file')
+def test_get_model_list_no_update_stale_cache_gets_static_models(mock_load_models):
+    """A cache written before agy existed still exposes agy/local on read.
+
+    This is the bug the fix targets: the web UI dropdown and `what models`
+    both read the cache, so static models must not depend on update_models
+    having been run after they were introduced.
+    """
+    mock_load_models.return_value = {
+        "From OpenAI": ["gpt-4"],
+        "From Anthropic": ["claude-3"],
+        "Local": ["local"],
+        # NOTE: no 'Antigravity (OAuth tier)' group — pre-agy cache shape.
+    }
+
+    result = model_utils.get_model_list(update=False)
+
+    assert "Antigravity (OAuth tier)" in result
+    assert result["Antigravity (OAuth tier)"] == ["agy-flash"]
+    # The pre-existing API/local groups are untouched.
+    assert result["From OpenAI"] == ["gpt-4"]
+
+
+@patch('src.utils.model_utils.save_utils.load_models_from_file')
+def test_get_model_list_no_update_empty_cache(mock_load_models):
+    """No cache at all (fresh install) still surfaces the static models."""
+    mock_load_models.return_value = None
+
+    result = model_utils.get_model_list(update=False)
+
+    assert result == model_utils.STATIC_MODELS
+    assert result["Antigravity (OAuth tier)"] == ["agy-flash"]
+    assert result["Local"] == ["local"]
+
 
 @patch('src.utils.model_utils.save_utils.save_models_to_file')
 @patch('src.utils.model_utils.refresh_available_anthropic_models')
@@ -38,6 +78,7 @@ def test_get_model_list_with_update(mock_openai, mock_google, mock_anthropic, mo
     mock_anthropic.assert_called_once()
     mock_save.assert_called_once_with(expected_combined_dict)
     assert result == expected_combined_dict
+
 
 @patch('src.utils.model_utils.get_model_list')
 def test_check_model_available(mock_get_list):

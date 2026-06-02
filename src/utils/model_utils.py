@@ -111,21 +111,44 @@ def refresh_available_anthropic_models() -> List[str]:
         return []
 
 
+# Models that exist by code, not by any provider API. They must always appear
+# in the model list regardless of whether `update_models` (the slow API refresh)
+# has ever run, and must survive a cache written before they were introduced.
+# Keyed by display group so they slot into the same shape as the API groups.
+STATIC_MODELS: Dict[str, List[str]] = {
+    'Antigravity (OAuth tier)': ['agy-flash'],
+    'Local': ['local'],
+}
+
+
 def get_model_list(update: bool = False) -> Optional[Dict[str, Any]]:
-    """Get available models, optionally refreshing from APIs."""
+    """Get available models, optionally refreshing from APIs.
+
+    Static (non-API) models in `STATIC_MODELS` are always merged in — on the
+    update path and on the cached-read path — so both the `what models` command
+    and the web UI model dropdown list them even if the cache predates them or
+    `update_models` was never run.
+    """
     if update:
         logger.info('Updating available models from API...')
         all_available_models: Dict[str, List[str]] = {
             'From OpenAI': refresh_available_openai_models(),
             'From Google': refresh_available_google_models(),
             'From Anthropic': refresh_available_anthropic_models(),
-            'Antigravity (OAuth tier)': ['agy-flash'],
-            'Local': ['local']
+            **STATIC_MODELS,
         }
         save_utils.save_models_to_file(all_available_models)
         return all_available_models
-    else:
-        return save_utils.load_models_from_file()
+
+    cached = save_utils.load_models_from_file()
+    if cached is None:
+        # No cache yet (fresh install / before first update): still expose the
+        # static models so agy/local are selectable without an API round-trip.
+        return dict(STATIC_MODELS)
+    # Merge statics over the cache without clobbering refreshed API groups.
+    for group, names in STATIC_MODELS.items():
+        cached[group] = names
+    return cached
 
 
 def check_model_available(model_to_check: str) -> bool:
@@ -145,7 +168,6 @@ def check_model_available(model_to_check: str) -> bool:
     if check_lower in all_names:
         # Return the original casing from the list if possible, but for this check, boolean is enough
         return True
-    
+
     logger.info(f"Model '{model_to_check}' not found in available models.")
     return False
-
