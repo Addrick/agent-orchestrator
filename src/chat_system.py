@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from collections import defaultdict
 from contextlib import aclosing
 from dataclasses import dataclass, field
@@ -94,6 +95,16 @@ class PendingConfirmation:
     # write and its result are captured into tool_context_json (and thus
     # replayed on later turns) instead of being dropped.
     tool_context_start: int = 0
+    # DP-130 history contract: stable handle for the rendered-but-unpersisted
+    # confirmation chunk. Surfaced as `ephemeral_chunk_id` in the SSE id-frame
+    # and the transcript projection, and as the correlation token an interactive
+    # surface (portal) sends back on approve/deny so a resume can be matched to
+    # *this* park. (Reconciles with the DP-127-engine confirm-modal `token`.)
+    token: str = field(default_factory=lambda: uuid.uuid4().hex)
+    # The parked confirmation's rendered text — projected as the ephemeral
+    # chunk's content so a fresh page load (transcript) can render the pending
+    # approval without a DB row.
+    confirmation_text: str = ""
 
 
 @dataclass
@@ -1010,21 +1021,27 @@ class ChatSystem:
                     )
                 raise
 
+            # DP-130 history contract: the ephemeral_chunk_id for this turn's
+            # rendered confirmation chunk. Non-None only on a parked turn — it is
+            # the parked PendingConfirmation's correlation token. Carried on the
+            # terminal DoneEvent so the id-frame can address the unpersisted chunk.
+            ephemeral_chunk_id: Optional[str] = None
             if pending_writes is not None:
-                self._pending_confirmations[(ctx.user_identifier, ctx.persona_name)] = (
-                    PendingConfirmation(
-                        write_calls=pending_writes,
-                        conversation_history=ctx.conversation_history,
-                        persona_name=ctx.persona_name,
-                        tools_for_llm=ctx.tools_for_llm,
-                        image_url=ctx.image_url,
-                        channel=ctx.channel,
-                        server_id=ctx.server_id,
-                        turn_tainted=ctx.turn_tainted,
-                        audit_info=audit_info,
-                        tool_context_start=tool_context_start,
-                    )
+                parked = PendingConfirmation(
+                    write_calls=pending_writes,
+                    conversation_history=ctx.conversation_history,
+                    persona_name=ctx.persona_name,
+                    tools_for_llm=ctx.tools_for_llm,
+                    image_url=ctx.image_url,
+                    channel=ctx.channel,
+                    server_id=ctx.server_id,
+                    turn_tainted=ctx.turn_tainted,
+                    audit_info=audit_info,
+                    tool_context_start=tool_context_start,
+                    confirmation_text=final_text if final_text else "",
                 )
+                self._pending_confirmations[(ctx.user_identifier, ctx.persona_name)] = parked
+                ephemeral_chunk_id = parked.token
                 # Phase 7: Log audit parking
                 self.memory_manager.log_audit_event(
                     event_type="audit_parked",
@@ -1061,6 +1078,7 @@ class ChatSystem:
                 response_type=response_type,
                 assistant_id=assistant_id,
                 user_interaction_id=user_interaction_id,
+                ephemeral_chunk_id=ephemeral_chunk_id,
             )
 
     async def stream_response(

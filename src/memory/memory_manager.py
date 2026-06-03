@@ -6,7 +6,7 @@ import logging
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Coroutine, Dict, List, Callable, Optional, cast, Tuple, Generator
+from typing import Any, Coroutine, Dict, List, Callable, Optional, Set, cast, Tuple, Generator
 from pathlib import Path
 
 # --- NEW: Import the global embedding model variable ---
@@ -639,6 +639,26 @@ class MemoryManager:
                     "created_at": canonical['timestamp'],
                 })
             return results
+
+    def get_ids_with_versions(self, interaction_ids: List[int]) -> Set[int]:
+        """Return the subset of `interaction_ids` that carry ≥1 edit/regen
+        archive (an Interaction_Edit_History row). One query; used by the
+        DP-130 transcript projection to set each chunk's `has_versions` flag
+        without an N+1 `list_interaction_versions` per row.
+        """
+        ids = [i for i in interaction_ids if isinstance(i, int)]
+        if not ids:
+            return set()
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            placeholders = ",".join("?" for _ in ids)
+            cursor.execute(
+                "SELECT DISTINCT interaction_id FROM Interaction_Edit_History"
+                f" WHERE interaction_id IN ({placeholders})",
+                ids,
+            )
+            return {row["interaction_id"] for row in cursor.fetchall()}
 
     def swap_interaction_version(self, interaction_id: int, k: int) -> Dict[str, Any]:
         """Swap archive position `k` with canonical for `interaction_id`.

@@ -589,14 +589,167 @@ def test_stream_emits_derpr_frame_before_done_with_assistant_id():
     mm.close()
 
 
-def test_stream_without_content_does_not_emit_derpr_frame():
-    # Engine emits a DoneEvent with assistant_id=None when no text was produced.
+def test_stream_empty_text_still_emits_derpr_frame_with_null_assistant_id():
+    # DP-130 (C1/C3): the id-frame is emitted on EVERY terminal turn. A turn
+    # that produced no assistant text commits no assistant row (assistant_id
+    # =None) but still emits the frame — carrying user_id, a null assistant_id,
+    # response_type, and a null ephemeral_chunk_id — so the client never has to
+    # infer "no frame" and the positional id array cannot drift.
     adapter, mm, _, _ = _make_real_adapter(deltas=(), commit_text="")
 
     with TestClient(adapter.app) as client:
         r = client.post("/chat/completions", json=_chat_body("hi", stream=True))
     assert r.status_code == 200
-    assert "event: derpr" not in r.text
+    body = r.text
+    assert "event: derpr" in body
+    assert body.index("event: derpr") < body.index("[DONE]")
+    m = re.search(r"event: derpr\ndata: (\{.*?\})\n\n", body)
+    assert m, f"derpr frame not parseable: {body!r}"
+    payload = json.loads(m.group(1))
+    assert payload["assistant_id"] is None
+    assert payload["ephemeral_chunk_id"] is None
+    assert payload["response_type"] == "LLM_GENERATION"
+    # The user turn was logged before the (empty) generation, so user_id is set.
+    rows = _fetch_portal_rows(mm, "test_persona")
+    user_row = next(r for r in rows if r["author_role"] == "user")
+    assert payload["user_id"] == user_row["interaction_id"]
+    mm.close()
+
+
+def test_stream_id_frame_carries_full_contract_shape():
+    # DP-130 frozen frame shape: user_id, assistant_id, response_type,
+    # ephemeral_chunk_id — all four keys present on a normal generation turn.
+    adapter, mm, _, _ = _make_real_adapter(deltas=("hello ", "world"))
+
+    with TestClient(adapter.app) as client:
+        r = client.post("/chat/completions", json=_chat_body("hi", stream=True))
+    body = r.text
+    m = re.search(r"event: derpr\ndata: (\{.*?\})\n\n", body)
+    assert m, f"derpr frame not parseable: {body!r}"
+    payload = json.loads(m.group(1))
+    assert set(payload.keys()) == {
+        "user_id", "assistant_id", "response_type", "ephemeral_chunk_id",
+    }
+    assert payload["response_type"] == "LLM_GENERATION"
+    assert payload["ephemeral_chunk_id"] is None
+    rows = _fetch_portal_rows(mm, "test_persona")
+    assistant_row = next(r for r in rows if r["author_role"] == "assistant")
+    user_row = next(r for r in rows if r["author_role"] == "user")
+    assert payload["assistant_id"] == assistant_row["interaction_id"]
+    assert payload["user_id"] == user_row["interaction_id"]
+    mm.close()
+
+
+def _parked_write_stream():
+    """stream_messages stub: model proposes a write tool (create_ticket) on the
+    first call. The universal write-audit gate parks it → PENDING_CONFIRMATION,
+    no assistant row, an ephemeral_chunk_id for the confirmation chunk."""
+    async def stream_messages(*args, **kwargs):
+        yield {"type": "api_payload", "payload": {}}
+        yield {"type": "text_delta", "text": "I'll create that ticket."}
+        yield {"type": "tool_calls", "calls": [
+            {"id": "call_w1", "name": "create_ticket",
+             "arguments": {"title": "test", "body": "x"}}
+        ]}
+        yield {"type": "done", "full_text": "I'll create that ticket."}
+    return stream_messages
+
+
+def test_parked_write_emits_id_frame_with_ephemeral_chunk_id():
+    # DP-130 (C3): a parked CONFIRM write emits an id-frame with user_id set,
+    # assistant_id null, response_type PENDING_CONFIRMATION, and a stable
+    # ephemeral_chunk_id for the confirmation chunk — the turn that previously
+    # emitted NO frame and drifted the portal's id array.
+    adapter, mm, persona, chat_system = _make_real_adapter(
+        stream_messages=_parked_write_stream(),
+    )
+    persona.set_enabled_tools(["*"])
+
+    body = _chat_body("make a ticket", stream=True)
+    body["derpr_user_text"] = "make a ticket"
+    with TestClient(adapter.app) as client:
+        r = client.post("/chat/completions", json=body)
+    body_text = r.text
+    assert "event: derpr" in body_text
+    assert body_text.index("event: derpr") < body_text.index("[DONE]")
+    m = re.search(r"event: derpr\ndata: (\{.*?\})\n\n", body_text)
+    assert m, f"derpr frame not parseable: {body_text!r}"
+    payload = json.loads(m.group(1))
+    assert payload["response_type"] == "PENDING_CONFIRMATION"
+    assert payload["assistant_id"] is None
+    assert payload["ephemeral_chunk_id"], "parked turn must carry an ephemeral_chunk_id"
+    rows = _fetch_portal_rows(mm, "test_persona")
+    user_row = next(r for r in rows if r["author_role"] == "user")
+    assert payload["user_id"] == user_row["interaction_id"]
+    # And the parked confirmation lives in the pending map under that token.
+    parked = chat_system._pending_confirmations[("portal", "test_persona")]
+    assert parked.token == payload["ephemeral_chunk_id"]
+    mm.close()
+
+
+# -------- DP-130 transcript projection (C1, C3-projection, C5) --------
+
+def test_transcript_unknown_persona_returns_404():
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/session/nobody/transcript")
+    assert r.status_code == 404
+    mm.close()
+
+
+def test_transcript_every_chunk_has_id_xor_ephemeral():
+    # C1: every chunk carries exactly one interaction_id OR ephemeral=true.
+    adapter, mm, _ = _make_adapter_with_seeded_db(context_length=10)
+    _seed_history(mm, "test_persona", turns=3)
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/session/test_persona/transcript")
+    assert r.status_code == 200
+    chunks = r.json()["chunks"]
+    assert len(chunks) == 6
+    for c in chunks:
+        has_id = c["interaction_id"] is not None
+        is_ephemeral = c["ephemeral"] is True
+        assert has_id != is_ephemeral, f"C1 violated: {c}"
+    mm.close()
+
+
+def test_transcript_excludes_suppressed_rows():
+    # C5: suppressed interactions never appear in the transcript.
+    adapter, mm, _ = _make_adapter_with_seeded_db(context_length=10)
+    _seed_history(mm, "test_persona", turns=2)
+    rows = mm.get_global_history("test_persona", limit=10)
+    victim = rows[0]["interaction_id"]
+    mm.suppress_interaction(victim)
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/session/test_persona/transcript")
+    ids = [c["interaction_id"] for c in r.json()["chunks"]]
+    assert victim not in ids
+    mm.close()
+
+
+def test_transcript_appends_live_pending_confirmation_as_ephemeral():
+    # C3 (projection side): a live parked confirmation surfaces as a trailing
+    # ephemeral chunk so a fresh load renders the awaiting-approval text.
+    from src.chat_system import PendingConfirmation
+
+    adapter, mm, persona, chat_system = _make_real_adapter()
+    _seed_history(mm, "test_persona", turns=1)
+    parked = PendingConfirmation(
+        write_calls=[{"name": "create_ticket", "arguments": {}}],
+        conversation_history=[], persona_name="test_persona",
+        tools_for_llm=[], image_url=None, channel="web_ui",
+        confirmation_text="I'll create that ticket.",
+    )
+    chat_system._pending_confirmations[("portal", "test_persona")] = parked
+
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/session/test_persona/transcript")
+    chunks = r.json()["chunks"]
+    last = chunks[-1]
+    assert last["ephemeral"] is True
+    assert last["interaction_id"] is None
+    assert last["ephemeral_chunk_id"] == parked.token
+    assert last["content"] == "I'll create that ticket."
     mm.close()
 
 
