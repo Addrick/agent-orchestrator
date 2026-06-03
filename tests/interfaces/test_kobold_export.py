@@ -183,7 +183,7 @@ def test_build_kobold_savefile_wraps_reasoning_in_think_tags():
     assert "<think>\nmy thoughts\n</think>\nfinal answer" in actions[1]
 
 
-# -------- DP-130 contract invariant C2: len(actions) == len(interaction_ids) --------
+# -------- DP-130 contract invariant C2: gametext alignment (ids == actions + 1) --------
 
 def _rows(n):
     """n alternating user/assistant rows with sequential interaction_ids."""
@@ -198,37 +198,47 @@ def _rows(n):
     return out
 
 
-def test_c2_actions_and_ids_equal_length_simple():
-    # The live bug was actions=12 ids=13 — popping the prompt out of `actions`
-    # only. Both arrays must end equal length, and the prompt id is preserved.
+def test_c2_ids_are_gametext_aligned():
+    # Gametext alignment: one id per VISIBLE chunk including the prompt, so
+    # len(interaction_ids) == len(actions) + 1 == len([prompt, *actions]).
+    # This matches how the portal keys derpr_interaction_ids[gametext_index]
+    # (index 0 == prompt). Anything else drifts the array on restore.
     savefile, _ = build_kobold_savefile(_rows(4))
-    assert len(savefile["actions"]) == len(savefile["interaction_ids"])
-    assert len(savefile["actions"]) == 3  # 4 rows - 1 prompt
-    assert savefile["prompt_interaction_id"] == 100  # first row's id
+    gametext_len = len([savefile["prompt"]] + savefile["actions"])
+    assert len(savefile["interaction_ids"]) == gametext_len == 4
+    assert len(savefile["interaction_ids"]) == len(savefile["actions"]) + 1
+
+def test_c2_ids_align_positionally_with_gametext():
+    # interaction_ids[i] addresses gametext_arr[i]; ids[0] is the prompt's id.
+    savefile, _ = build_kobold_savefile(_rows(4))
+    # Rows have ids 100,101,102,103 → gametext [prompt(100),101,102,103].
+    assert savefile["interaction_ids"] == [100, 101, 102, 103]
 
 def test_c2_holds_for_13_rows_regression():
-    # Direct regression on the reported actions=12 ids=13 divergence.
+    # The reported actions=12 ids=13 was CORRECT gametext alignment (13 chunks:
+    # prompt + 12 actions). Lock that in: ids == chunks, actions == chunks - 1.
     savefile, _ = build_kobold_savefile(_rows(13))
     assert len(savefile["actions"]) == 12
-    assert len(savefile["interaction_ids"]) == 12
+    assert len(savefile["interaction_ids"]) == 13
 
-def test_c2_ids_align_positionally_with_actions():
-    # interaction_ids[i] must address actions[i] (the post-prompt turn).
-    savefile, _ = build_kobold_savefile(_rows(4))
-    # Rows: ids 100(prompt),101,102,103 ; actions are rows 101,102,103.
-    assert savefile["interaction_ids"] == [101, 102, 103]
+def test_c2_single_chunk_has_one_id_zero_actions():
+    savefile, _ = build_kobold_savefile(_rows(1))
+    assert savefile["actions"] == []
+    assert savefile["interaction_ids"] == [100]
 
 def test_c2_holds_when_a_row_lacks_an_int_id():
     # A renderable row with a missing/None id still gets a slot (None) so the
-    # arrays stay aligned — the portal's `if (interactionId)` guard no-ops it.
+    # array stays 1:1 with the story — the portal's `if (interactionId)` guard
+    # no-ops the None slot instead of mis-targeting a neighbour.
     rows = [
         {"author_role": "user", "content": "u0", "interaction_id": 1},
         {"author_role": "assistant", "content": "a0"},  # no interaction_id
         {"author_role": "user", "content": "u1", "interaction_id": 3},
     ]
     savefile, _ = build_kobold_savefile(rows)
-    assert len(savefile["actions"]) == len(savefile["interaction_ids"]) == 2
-    assert savefile["interaction_ids"] == [None, 3]
+    gametext_len = len([savefile["prompt"]] + savefile["actions"])
+    assert len(savefile["interaction_ids"]) == gametext_len == 3
+    assert savefile["interaction_ids"] == [1, None, 3]
 
 def test_c2_holds_with_skipped_system_and_empty_rows():
     rows = [
@@ -239,7 +249,8 @@ def test_c2_holds_with_skipped_system_and_empty_rows():
     ]
     savefile, skipped = build_kobold_savefile(rows)
     assert skipped == 2
-    assert len(savefile["actions"]) == len(savefile["interaction_ids"])
+    gametext_len = len([savefile["prompt"]] + savefile["actions"])
+    assert len(savefile["interaction_ids"]) == gametext_len
 
 
 # -------- DP-130 transcript projection (build_transcript) --------

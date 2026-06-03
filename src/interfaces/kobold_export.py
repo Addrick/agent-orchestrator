@@ -57,24 +57,30 @@ def build_kobold_savefile(
     empty-content rows, assistant rows whose only payload is a tool-call
     (tool_context present, content empty), and unrecognised roles.
 
-    **Invariant C2 (DP-130):** `len(savefile["actions"]) == len(savefile[
-    "interaction_ids"])`. The first renderable row becomes the savefile `prompt`
-    (kobold's story opener, separate from `actions`); its id is carried in
-    `prompt_interaction_id` so it is not lost. Every remaining renderable row
-    contributes exactly one `actions` entry AND one `interaction_ids` entry in
-    lockstep (the id may be `None` for an unaddressable chunk) — so the two
-    arrays can never drift, which was the root of the portal id-drift bug
-    (`actions=12 ids=13` came from popping the prompt out of `actions` only).
+    **Invariant C2 (DP-130) — gametext alignment:** `interaction_ids` carries
+    exactly one entry per *visible story chunk*, in order, including the opening
+    `prompt`. So `len(interaction_ids) == len(actions) + 1` whenever there is a
+    prompt (and equals kobold-lite's `gametext_arr` length, which is
+    `[prompt, *actions]`). This is the invariant that prevents drift: the portal
+    keys `derpr_interaction_ids[modified_turn]` by the gametext index — index 0
+    is the prompt — and the SSE id-frame path likewise pushes one id per visible
+    chunk. The id may be `None` for an unaddressable renderable row (the portal
+    guards `if (interactionId)`), but the *slot* is always present so the array
+    can never desync from the story. The earlier `actions=12 ids=13` shape was
+    in fact correct gametext alignment — the real defect was a conditional
+    id-append that could drop an id without dropping its chunk; fixed here by
+    appending a slot for every renderable row and never popping the id array.
 
     Tool-call / tool-result rendering is explicitly out of scope for Phase 2.1
     — see web_ui_roadmap backlog. Persona system prompt is pushed into
     kobold-lite's `instruct_sysprompt` setting by the UI, not into savefile
     `memory`, so the memory block stays free for future use.
     """
-    actions: List[str] = []
-    # Parallel to `actions`, 1:1 by construction. Optional[int] because a
-    # renderable row could (defensively) lack an int id; the portal guards
-    # `if (interactionId)` so a None slot is a no-op rather than a mis-target.
+    # One entry per visible story chunk, in order: `rendered[0]` is the prompt,
+    # `rendered[1:]` are the actions. `interaction_ids` stays 1:1 with `rendered`
+    # (= gametext_arr) — never popped — so it is gametext-aligned, not
+    # actions-aligned. Optional[int]: a renderable row could lack an int id.
+    rendered: List[str] = []
     interaction_ids: List[Optional[int]] = []
     skipped = 0
 
@@ -90,22 +96,22 @@ def build_kobold_savefile(
         content = _merge_reasoning(role, content, reasoning)
 
         if role == "user":
-            actions.append(f"{_INPUT_PLACEHOLDER}{content}{_OUTPUT_PLACEHOLDER}")
+            rendered.append(f"{_INPUT_PLACEHOLDER}{content}{_OUTPUT_PLACEHOLDER}")
         else:  # assistant
-            actions.append(content)
+            rendered.append(content)
 
         iid = msg.get("interaction_id")
         interaction_ids.append(iid if isinstance(iid, int) else None)
 
-    # Pop the opening turn into `prompt` — popping BOTH arrays in lockstep so
-    # the remaining `actions` / `interaction_ids` stay aligned and equal length.
-    prompt = actions.pop(0) if actions else ""
-    prompt_interaction_id = interaction_ids.pop(0) if interaction_ids else None
+    # The opening chunk is kobold's `prompt` (story opener, separate from
+    # `actions`), but its id stays at `interaction_ids[0]` so the id array
+    # remains 1:1 with `gametext_arr` ([prompt, *actions]).
+    prompt = rendered[0] if rendered else ""
+    actions = rendered[1:]
 
     savefile: Dict[str, Any] = {
         "gamestarted": True,
         "prompt": prompt,
-        "prompt_interaction_id": prompt_interaction_id,
         "memory": "",
         "authorsnote": "",
         "anotetemplate": "",
