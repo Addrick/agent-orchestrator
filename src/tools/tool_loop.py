@@ -212,6 +212,14 @@ class ToolLoop:
 
             # --- All write tools require audit ---
             if write_calls:
+                logger.info(
+                    "tool-loop iter %d: parking %d write call(s) for audit: %s "
+                    "(reads this iter: %s) — turn ends PENDING_CONFIRMATION",
+                    iter_idx,
+                    len(write_calls),
+                    [w.get("name") for w in write_calls],
+                    [r.get("name") for r in read_calls],
+                )
                 model_reasoning = "".join(accumulated_parts).strip()
                 audit_actions = []
                 for wc in write_calls:

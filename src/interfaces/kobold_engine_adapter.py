@@ -769,7 +769,13 @@ class KoboldEngineAdapter:
                                         "final_text_preview": (ev.text or "")[:500],
                                     }, ensure_ascii=False).encode("utf-8"),
                                 )
+                            rtype = getattr(ev.response_type, "name", str(ev.response_type))
                             if ev.assistant_id is not None:
+                                logger.info(
+                                    "OAI relay DoneEvent: emitting derpr id-frame "
+                                    "(assistant_id=%s, user_id=%s, response_type=%s, text_len=%d)",
+                                    ev.assistant_id, ev.user_interaction_id, rtype, len(ev.text or ""),
+                                )
                                 frame = (
                                     f"event: derpr\n"
                                     f"data: {json.dumps({'assistant_id': ev.assistant_id, 'user_id': ev.user_interaction_id})}\n\n"
@@ -777,6 +783,18 @@ class KoboldEngineAdapter:
                                 out = frame.encode("utf-8")
                                 _dump_write("derpr-id-frame", out)
                                 yield out
+                            else:
+                                # No assistant row persisted (e.g. PENDING_CONFIRMATION
+                                # parked write) => NO id-frame. The portal's
+                                # derpr_interaction_ids array will NOT advance for this
+                                # turn, so it drifts vs the visible Lite story and later
+                                # edit/delete targets the wrong row. See DP-129 notes.
+                                logger.warning(
+                                    "OAI relay DoneEvent: NO derpr id-frame "
+                                    "(assistant_id=None, response_type=%s, text_len=%d) — "
+                                    "portal interaction-id array will drift for this turn",
+                                    rtype, len(ev.text or ""),
+                                )
                             out = b"data: [DONE]\n\n"
                             _dump_write("DONE", out)
                             yield out
