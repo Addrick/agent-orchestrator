@@ -33294,6 +33294,33 @@ Current version indicated by LITEVER below.
 		}
 	}
 
+	// DP-131: rebuild window.derpr_interaction_ids as a faithful projection of the
+	// server transcript (DP-130 history contract). The transcript is
+	// gametext-aligned — one chunk per visible story row including the opening
+	// prompt and any trailing ephemeral parked-confirmation chunk — so its ids map
+	// 1:1 onto kobold's gametext_arr. A chunk that is not yet persisted
+	// (ephemeral parked write) projects to a `null` slot, which the edit/delete
+	// path already guards with `if (interactionId)`. This replaces the old
+	// incremental positional push that drifted on any turn without a paired
+	// (user_id, assistant_id) frame.
+	async function _derprResyncIds() {
+		const select = document.getElementById('personaSelectTopNav');
+		const persona = select && select.value;
+		if (!persona) return;
+		// Only re-sync sessions sourced from DERPR (not kobold-native).
+		if (localStorage.getItem('persona_history_source_' + persona) !== 'derpr') return;
+		try {
+			const res = await fetch(`/api/v1/session/${encodeURIComponent(persona)}/transcript`);
+			if (!res.ok) return;
+			const data = await res.json();
+			window.derpr_interaction_ids = (data.chunks || []).map(
+				c => (typeof c.interaction_id === 'number' ? c.interaction_id : null)
+			);
+		} catch (e) {
+			console.warn('DERPR id re-sync failed:', e);
+		}
+	}
+
 	// SSE interception: tee the /chat/completions response body so we can
 	// sniff for the `event: derpr` frame without disturbing kobold's reader.
 	(function() {
@@ -33324,6 +33351,13 @@ Current version indicated by LITEVER below.
 						}
 					}
 				} catch (e) { /* silent — kobold's branch still flows */ }
+				// DP-131: re-project the id array from the server transcript once the
+				// turn finishes. Robust to EVERY turn shape — normal, retry,
+				// tool-only, and parked CONFIRM writes — because it reads the
+				// authoritative gametext-aligned projection instead of incrementally
+				// pushing ids (which drifted whenever a turn emitted no paired
+				// (user_id, assistant_id) frame). See DP-130 history contract.
+				_derprResyncIds();
 			})();
 
 			return new Response(a, {
@@ -33346,16 +33380,13 @@ Current version indicated by LITEVER below.
 			catch (e) { return; /* malformed frame — ignore */ }
 
 			if (ev === 'derpr') {
+				// Chevron (retry/redo) hydration only. The interaction-id array is
+				// NO LONGER maintained here: DP-131 re-projects it from
+				// /transcript after the stream ends (_derprResyncIds), so the
+				// drift-prone positional push that broke on parked/tool-only turns
+				// is gone. The frame is still emitted on every turn (DP-130).
 				if (payload.assistant_id) {
 					_derprHydrateVersions(payload.assistant_id);
-					// If we have a user_id, it's a new turn (User + Assistant)
-					if (payload.user_id) {
-						window.derpr_interaction_ids.push(payload.user_id);
-						window.derpr_interaction_ids.push(payload.assistant_id);
-					} else {
-						// Retry path: update the last assistant ID slot
-						window.derpr_interaction_ids[window.derpr_interaction_ids.length - 1] = payload.assistant_id;
-					}
 				}
 				return;
 			}
@@ -33472,13 +33503,16 @@ Current version indicated by LITEVER below.
 		
 		if (interactionId) {
 			if (wasEmpty && !allow_blank) {
-				// Deletion path: sync the ID array to match gametext_arr shrinkage,
-				// then soft-suppress on the server (filtered from future history /
-				// retrieval / kobold_export).
-				window.derpr_interaction_ids.splice(modified_turn, 1);
+				// Deletion path: soft-suppress on the server (filtered from future
+				// history / retrieval / transcript / kobold_export), then re-project
+				// the id array from the transcript. DP-131: no manual positional
+				// splice — the suppressed row simply drops out of /transcript, so the
+				// re-sync realigns the array to the shrunken gametext_arr without any
+				// index arithmetic that could desync.
 				fetch(`/api/v1/interaction/${interactionId}`, {
 					method: 'DELETE'
-				}).catch(e => console.warn('Failed to propagate delete to DERPR:', e));
+				}).then(() => _derprResyncIds())
+				  .catch(e => console.warn('Failed to propagate delete to DERPR:', e));
 			} else {
 				// Update path: strip placeholders before persisting to DB
 				let cleaned = modified_message;
