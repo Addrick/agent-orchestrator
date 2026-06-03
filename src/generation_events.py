@@ -28,11 +28,20 @@ class TokenEvent:
 
 @dataclass
 class DoneEvent:
-    """Terminal event for stream_response — final committed text + ids."""
+    """Terminal event for stream_response — final committed text + ids.
+
+    `ephemeral_chunk_id` (DP-130 history contract) is a stable handle for a
+    rendered-but-unpersisted chunk — the parked-confirmation text on a
+    PENDING_CONFIRMATION turn, where `assistant_id` is None. It lets a client
+    address that chunk without a DB id, and the server reconcile it on
+    approve/deny resume (it is the parked confirmation's correlation token).
+    None on normal turns (the chunk is addressed by `assistant_id` instead).
+    """
     text: str
     response_type: ResponseType
     assistant_id: Optional[int] = None
     user_interaction_id: Optional[int] = None
+    ephemeral_chunk_id: Optional[str] = None
 
 
 @dataclass

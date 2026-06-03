@@ -24,7 +24,7 @@ from src.chat_system import (
     ChatSystem, DoneEvent, ErrorEvent, TokenEvent,
     ToolCallResultEvent, ToolCallStartEvent,
 )
-from src.interfaces.kobold_export import build_kobold_savefile
+from src.interfaces.kobold_export import build_kobold_savefile, build_transcript
 from src.interfaces.portal_render import render_portal_html
 from src.utils.save_utils import save_personas_to_file
 from src.interfaces._persona_patch import (
@@ -240,6 +240,60 @@ class KoboldEngineAdapter:
                 f"ids={len(savefile.get('interaction_ids', []))} skipped={skipped}"
             )
             return JSONResponse(content=savefile)
+
+        @self.app.get("/api/v1/session/{persona}/transcript")
+        async def session_transcript(persona: str, max_turns: Optional[int] = None) -> Any:
+            """DP-130 history contract — the authoritative transcript projection.
+
+            Returns `{"chunks": [...]}` where every chunk carries a
+            server-authored `interaction_id` (or `ephemeral=true` for a live
+            parked confirmation). This is the single re-sync source for the Lite
+            stopgap (DP-131) and the render source for the bespoke UI (DP-132+):
+            consumers address chunks by identity, never by story position, so
+            the id array can no longer drift on parked/tool-only/abort turns.
+
+            Mirrors `kobold_export`'s persona/global-history scoping (the portal
+            has no channel concept; `max_turns` defaults to the persona's
+            sliding-window size). Suppressed rows are already filtered upstream
+            by `get_global_history` (invariant C5).
+            """
+            if persona not in self.chat_system.personas:
+                return JSONResponse(status_code=404, content={"error": f"Persona '{persona}' not found"})
+
+            p = self.chat_system.personas[persona]
+            limit = max_turns if isinstance(max_turns, int) and max_turns > 0 else p.get_base_history_messages()
+            raw_history = await asyncio.to_thread(
+                self.chat_system.memory_manager.get_global_history, persona, limit
+            )
+            ids = [
+                m["interaction_id"] for m in raw_history
+                if isinstance(m.get("interaction_id"), int)
+            ]
+            ids_with_versions = await asyncio.to_thread(
+                self.chat_system.memory_manager.get_ids_with_versions, ids
+            )
+            # Surface a live parked confirmation (portal session) as a trailing
+            # ephemeral chunk so a fresh load renders the awaiting-approval text.
+            pending_map = getattr(self.chat_system, "_pending_confirmations", {})
+            pending_obj = pending_map.get(("portal", persona))
+            pending: Optional[Dict[str, Any]] = None
+            if pending_obj is not None:
+                pending = {
+                    "ephemeral_chunk_id": pending_obj.token,
+                    "content": pending_obj.confirmation_text,
+                    "tool_context": None,
+                }
+            transcript = build_transcript(
+                raw_history,
+                ids_with_versions=ids_with_versions,
+                pending=pending,
+            )
+            logger.info(
+                "transcript persona=%s limit=%s rows=%d chunks=%d pending=%s",
+                persona, limit, len(raw_history),
+                len(transcript["chunks"]), pending is not None,
+            )
+            return JSONResponse(content=transcript)
 
         @self.app.get("/api/v1/interaction/{interaction_id}/versions")
         async def list_interaction_versions(interaction_id: int) -> Any:
@@ -769,32 +823,36 @@ class KoboldEngineAdapter:
                                         "final_text_preview": (ev.text or "")[:500],
                                     }, ensure_ascii=False).encode("utf-8"),
                                 )
+                            # DP-130 history contract (C3): emit the `event: derpr`
+                            # id-frame on EVERY terminal turn — including parked
+                            # writes (assistant_id=None), tool-only, and aborts.
+                            # Carrying user_id, assistant_id (null when parked),
+                            # response_type, and a stable ephemeral_chunk_id for the
+                            # unpersisted confirmation chunk means the client never
+                            # has to advance an id array positionally, so it can no
+                            # longer drift vs the visible story. The transcript
+                            # endpoint is the authoritative re-sync source.
                             rtype = getattr(ev.response_type, "name", str(ev.response_type))
-                            if ev.assistant_id is not None:
-                                logger.info(
-                                    "OAI relay DoneEvent: emitting derpr id-frame "
-                                    "(assistant_id=%s, user_id=%s, response_type=%s, text_len=%d)",
-                                    ev.assistant_id, ev.user_interaction_id, rtype, len(ev.text or ""),
-                                )
-                                frame = (
-                                    f"event: derpr\n"
-                                    f"data: {json.dumps({'assistant_id': ev.assistant_id, 'user_id': ev.user_interaction_id})}\n\n"
-                                )
-                                out = frame.encode("utf-8")
-                                _dump_write("derpr-id-frame", out)
-                                yield out
-                            else:
-                                # No assistant row persisted (e.g. PENDING_CONFIRMATION
-                                # parked write) => NO id-frame. The portal's
-                                # derpr_interaction_ids array will NOT advance for this
-                                # turn, so it drifts vs the visible Lite story and later
-                                # edit/delete targets the wrong row. See DP-129 notes.
-                                logger.warning(
-                                    "OAI relay DoneEvent: NO derpr id-frame "
-                                    "(assistant_id=None, response_type=%s, text_len=%d) — "
-                                    "portal interaction-id array will drift for this turn",
-                                    rtype, len(ev.text or ""),
-                                )
+                            frame_data = {
+                                "user_id": ev.user_interaction_id,
+                                "assistant_id": ev.assistant_id,
+                                "response_type": rtype,
+                                "ephemeral_chunk_id": ev.ephemeral_chunk_id,
+                            }
+                            logger.info(
+                                "OAI relay DoneEvent: emitting derpr id-frame "
+                                "(user_id=%s, assistant_id=%s, response_type=%s, "
+                                "ephemeral_chunk_id=%s, text_len=%d)",
+                                ev.user_interaction_id, ev.assistant_id, rtype,
+                                ev.ephemeral_chunk_id, len(ev.text or ""),
+                            )
+                            frame = (
+                                f"event: derpr\n"
+                                f"data: {json.dumps(frame_data)}\n\n"
+                            )
+                            out = frame.encode("utf-8")
+                            _dump_write("derpr-id-frame", out)
+                            yield out
                             out = b"data: [DONE]\n\n"
                             _dump_write("DONE", out)
                             yield out
