@@ -1008,11 +1008,23 @@ class BotLogic:
         if not last_request:
             return f"{persona_name}: No previous request to analyze.", False
 
+        # Each entry is one LLM call in the last turn's tool loop (the messages
+        # grow as tool results accumulate). Falls back to the single last
+        # payload if the per-turn list isn't populated.
+        iterations = (
+            self.chat_system.last_api_iterations.get(user_identifier, {}).get(persona_name)
+            or [last_request]
+        )
+
         output_lines = [f"=== History Dump for {persona_name} ==="]
         self._dump_persona_config(output_lines, persona)
         self._dump_tools(output_lines, last_request.get('_tools_for_llm', []))
-        self._dump_api_config(output_lines, last_request)
-        self._dump_conversation(output_lines, last_request)
+
+        output_lines.append(f"\n--- Tool Loop: {len(iterations)} LLM call(s) this turn ---")
+        for idx, payload in enumerate(iterations):
+            output_lines.append(f"\n========== LLM Call {idx + 1} of {len(iterations)} ==========")
+            self._dump_api_config(output_lines, payload)
+            self._dump_conversation(output_lines, payload)
 
         file_content = "\n".join(output_lines)
         return f"FILE_RESPONSE::history_dump.txt::{file_content}", False

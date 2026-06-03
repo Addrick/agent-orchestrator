@@ -17,6 +17,9 @@ def mock_chat_system_with_state():
         "derpr": Persona("derpr", "gpt-4", "You are derpr.", history_messages=20),
         "testbot": Persona("testbot", "gpt-3", "You are testbot.")
     }
+    # Instance attributes aren't part of the spec; tests that exercise the dump
+    # set last_api_requests explicitly and rely on the single-payload fallback.
+    chat_system.last_api_iterations = {}
     return chat_system
 
 
@@ -414,6 +417,48 @@ async def test_dump_history_google_payload_shows_api_config(bot_logic, mock_chat
     # Internal config keys should be excluded
     assert "safety_settings" not in file_content
     assert "tools: [" not in file_content
+
+
+@pytest.mark.asyncio
+async def test_dump_history_renders_each_tool_loop_iteration(bot_logic, mock_chat_system_with_state):
+    """dump_history renders every LLM call in the turn's tool loop, not just the last."""
+    user_identifier = "user1"
+    persona_name = "derpr"
+    iter1 = {
+        'model': 'gpt-4',
+        'messages': [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Search for printer tickets"},
+        ],
+        '_tools_for_llm': [{"type": "function", "function": {"name": "search_tickets"}}],
+    }
+    iter2 = {
+        'model': 'gpt-4',
+        'messages': [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Search for printer tickets"},
+            {"role": "assistant", "tool_calls": [{"name": "search_tickets", "arguments": {"q": "printer"}}]},
+            {"role": "tool", "name": "search_tickets", "content": '{"count": 3}'},
+            {"role": "assistant", "content": "I found 3 printer tickets."},
+        ],
+    }
+    # last_api_requests holds the final payload; iterations holds the whole loop.
+    mock_chat_system_with_state.last_api_requests = {user_identifier: {persona_name: iter2}}
+    mock_chat_system_with_state.last_api_iterations = {user_identifier: {persona_name: [iter1, iter2]}}
+    current_persona = mock_chat_system_with_state.personas[persona_name]
+
+    response, _ = bot_logic._handle_dump_history(args=[], persona=current_persona,
+                                                 user_identifier=user_identifier)
+    file_content = response.split("::", 2)[2]
+
+    # Both iterations rendered, labelled, and the tool round-trip visible.
+    assert "Tool Loop: 2 LLM call(s) this turn" in file_content
+    assert "LLM Call 1 of 2" in file_content
+    assert "LLM Call 2 of 2" in file_content
+    assert "[TOOL CALLS]" in file_content
+    assert "[TOOL RESULT: search_tickets]" in file_content
+    # Tools section appears once (from last_request), not per-iteration.
+    assert file_content.count("--- Tools Sent to LLM") == 1
 
 
 @pytest.mark.asyncio
