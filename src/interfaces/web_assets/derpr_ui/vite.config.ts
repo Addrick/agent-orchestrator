@@ -12,10 +12,6 @@ export default defineConfig(({ command }) => ({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
-    // Disable CSS minify: Vite 8's default lightningcss mis-parses the ported
-    // portal.css theme (dangling-combinator false positive) and esbuild isn't
-    // bundled in this Vite build. Unminified CSS is fine for an internal tool.
-    cssMinify: false,
   },
   server: {
     proxy: {
