@@ -1,5 +1,7 @@
 # Plan: Harmony / Qwen3 channel-aware stop sequences
 
+> **SHIPPED (reconciled 2026-06-04).** Option A landed in `src/stream_engine.py:31-38` (strips bare `<|im_end|>`), with an in-file comment citing this plan.
+
 DP-ID: TBD
 
 ## Why

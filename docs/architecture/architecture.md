@@ -26,7 +26,7 @@ Interface (Discord/Gmail/Zammad)
     -> MemoryManager.log_message()    -- persist user + assistant messages (reply_to_id links A->Q)
     -> Response back to interface
 
-Background (MemoryAgent, every 15min):
+Background (SqliteConsolidator, agent_name="memory", every 15min — registered ONLY when SEMANTIC_BACKEND=="sqlite"; Hindsight backend obsoletes it):
   Phase 1 — Embed unembedded messages (loop until exhausted per channel):
   -> get_active_channels()            -- find channels with unprocessed msgs
   -> get_unembedded_messages()        -- fetch msgs not yet in Message_Embeddings
@@ -59,7 +59,7 @@ Background (MemoryConsolidator, hourly daemon via app.register_task):
 - `_orchestrate()` -> shared streaming kernel — preprocess → set TurnContext (`src/tools/turn_context.py`) → user-log → user `retain_turn` → ToolLoop → assistant-commit → assistant `retain_turn` (taint-aware) → DoneEvent → reset TurnContext. `stream_response()` (portal) and `generate_response()` (Discord/Gmail/agents) both delegate here. Token + tool events forwarded as-is; internal `_ApiPayloadEvent` siphons into `_store_api_request`, `_LoopFinishedEvent` drives universal write-audit parking + assistant persistence. Both retain calls are fire-and-forget (sqlite_legacy noop; Hindsight enqueues + returns).
 - `_retain_turn_safe()` -> wraps `memory_backend.retain_turn(...)` with try/except so a backend hiccup never derails the user turn. Builds scope tags + threads `untrusted` (False for user turns; `ctx.turn_tainted` for assistant turns).
 - `_filter_tools_for_persona()` -> filters by enabled tools, service bindings, model compatibility
-- `resume_pending_confirmation()` -> handles write-tool approval flow (still uses `_execute_write_calls` / `_append_denied_tool_results` retained for this path)
+- `resume_pending_confirmation()` -> handles the write-tool approval flow for any parked turn (all write tools park for audit, not just CONFIRM mode; still uses `_execute_write_calls` / `_append_denied_tool_results` retained for this path)
 - `PendingConfirmation` dataclass stores paused state for write-tool confirmation
 - `RequestContext` dataclass bundles all pipeline state
 
@@ -77,16 +77,17 @@ Background (MemoryConsolidator, hourly daemon via app.register_task):
 - Stream-shaped tool loop extracted from `_orchestrate` (tool revamp v1, supersedes the old `plans/toolloop_extraction.md`).
 - `ToolLoop(text_engine, tool_manager, max_iterations=MAX_TOOL_CALLS)` — constructed per-call by `_orchestrate` so tests that swap `chat_system.text_engine` post-init still take effect.
 - `run(persona, conversation_history, params, tools, ...)` — async generator. Drives `text_engine.stream_messages` per iteration, forwards `TokenEvent`s, surfaces tool calls as `ToolCallStartEvent` / `ToolCallResultEvent`, mutates `conversation_history` in place (orchestrator + resume path read it back).
-- Implements universal write-audit: if any call in a batch has `is_write=True`, the loop yields `_LoopFinishedEvent(response_type=PENDING_CONFIRMATION)` and exits. Taint tracking and irreversibility flags are computed here for the audit surface.
+- Implements **universal write-audit** (`tool_loop.py:213-285`): on any iteration where a batch contains a `WRITE_TOOLS` call, the loop runs the read calls, then yields `_LoopFinishedEvent(response_type=PENDING_CONFIRMATION)` with `pending_writes` + an `audit_info` block (per-action `irreversible` / `always_confirm` / `service_binding` / `sensitivity` / `enrichment`, plus turn `tainted` / `taint_sources` / `model_reasoning`) and exits. This is unconditional — execution mode is recorded in `audit_info` for display only, never gates parking. Taint (`turn_tainted` from `produces_untrusted` read tools) and irreversibility flags are computed here for the audit surface.
 - Tool errors (returned as `{"error": ...}` by `tool_manager.execute_tool`) surface via `ToolCallResultEvent.error`; the loop continues so the model can adapt instead of hard-stopping.
-- Internal events `_ApiPayloadEvent` / `_LoopFinishedEvent` are loop-private — they let the orchestrator handle api-payload caching, CONFIRM-mode `pending_writes` parking, and assistant-row persistence without leaking into the public event surface.
+- Internal events `_ApiPayloadEvent` / `_LoopFinishedEvent` are loop-private — they let the orchestrator handle api-payload caching, write-audit `pending_writes` parking, and assistant-row persistence without leaking into the public event surface.
 
 ### `src/engine.py` -- TextEngine
-- Provider-agnostic LLM abstraction: OpenAI, Anthropic, Google (Gemini/Gemma), local OpenAI-compatible
+- Provider-agnostic LLM abstraction: OpenAI, Anthropic, Google (Gemini/Gemma), local OpenAI-compatible, Antigravity (`agy`)
 - `generate_response()` -> returns `Tuple[Dict[str, Any], Optional[Dict[str, Any]]]` (response, payload)
 - Response dict: `{"type": "text", "content": "..."}` or `{"type": "tool_calls", "calls": [...]}`
 - Per-model-family rate limiters (AsyncLimiter) configured in global_config
-- Provider dispatch: `_generate_openai_response`, `_generate_anthropic_response`, `_generate_google_response`
+- Provider dispatch: `_generate_openai_response`, `_generate_anthropic_response`, `_generate_google_response`, `_generate_agy_response`
+- **`agy` route (DP-127, model prefix `agy-*`):** drives the local `agy` CLI via subprocess on the OAuth tier (Gemini 3.5 Flash), not an API key. `_render_agy_prompt` flattens the full history into one role-tagged transcript (stateless, re-flattened each tool-loop turn); `_render_agy_tool_protocol` injects tool descriptions + asks the model to emit a `<tool_call>{json}</tool_call>` block; `_parse_agy_tool_call` parses that block back into the standard `{"id","name","arguments"}` shape so DERPR's own tool loop executes it (engine keeps full policy/CONFIRM/taint control — agy never runs tools itself). `_run_agy_cli` spawns with `stdin=DEVNULL` (or it blocks on an interactive permission prompt), **no** `--dangerously-skip-permissions`/`--add-dir`, in a throwaway tempdir. Text-only (no images). The Antigravity *SDK* route was rejected (API-key-only, Model-A-native) — see `project/decisions/2026-05-29-agy-sdk-oauth-finding.md`.
 - Each provider builds messages differently but all accept the same context_object format
 - Tool message format (used across all providers): `{"role": "tool", "tool_call_id": "...", "name": "...", "content": "..."}`
 - Google provider translates to Part-based format in `_build_google_history()`
@@ -101,7 +102,7 @@ Background (MemoryConsolidator, hourly daemon via app.register_task):
 
 ### `src/persona.py` -- Persona
 - Stateful LLM config: model, system prompt, token limit, temperature, top_p, top_k
-- `ExecutionMode`: AUTONOMOUS (auto-execute tools), CONFIRM (ask before write tools)
+- `ExecutionMode`: AUTONOMOUS, CONFIRM — recorded in the audit surface for display, but **does not gate write parking** (all write tools park for audit regardless; see ToolLoop universal write-audit)
 - `MemoryMode`: CHANNEL_ISOLATED, SERVER_WIDE, PERSONAL, GLOBAL, TICKET_ISOLATED
 - `get_context_length()` -> supports dynamic override via hello/goodbye commands (increments by 2 per turn)
 - Service bindings list determines which tools and services are available
@@ -113,10 +114,10 @@ Background (MemoryConsolidator, hourly daemon via app.register_task):
 ### `src/tools/` -- Tool System
 - `definitions.py` -- JSON schemas for all tools, `WRITE_TOOLS` set, `MODEL_INCOMPATIBLE_TOOLS` dict
 - `tool_manager.py` -- ToolManager registry, `execute_tool()`, handler registration pattern
-- Tool categories: read-only (search, get) vs write (create, update, close) -- all write tools go through human confirmation
+- Tool categories: read-only (search, get) vs write (create, update, close) -- all write tools are parked for human confirmation regardless of execution mode (universal write-audit, per the security framework)
 - `WebSearchHandler` registered at ChatSystem init
 - Service-specific tools registered via `ServiceIntegration.register_tools()`
-- Memory tools: `submit_memory_summary` (observations[] + outlier_ids[], used by MemoryAgent), `drill_down_memory` (retrieves source messages for a summary), `update_core_memory` (edits core profile summaries)
+- Memory tools: `submit_memory_summary` (observations[] + outlier_ids[], used by SqliteConsolidator), `drill_down_memory` (retrieves source messages for a summary), `update_core_memory` (edits core profile summaries)
 
 ### `src/memory/memory_manager.py` -- MemoryManager
 - SQLite with single persistent connection, `check_same_thread=False`
@@ -167,7 +168,7 @@ All exclude suppressed messages via `_SUPPRESSION_SUBQUERY`.
 
 **Memory retrieval:**
 - `retrieve_relevant_summaries()` -- KNN search via `vec_Memory_Summaries`, filters by channel/persona/model/level, returns top-K summaries by distance; accepts `exclude_after_interaction_id` (skip memories already in sliding window) and `include_ambient` flag
-- `get_unembedded_messages()` -- msgs not yet in Message_Embeddings (Phase 1 of MemoryAgent)
+- `get_unembedded_messages()` -- msgs not yet in Message_Embeddings (Phase 1 of SqliteConsolidator)
 - `get_unsegmented_embedded_messages()` -- finds embedded msgs with `parent_summary_id IS NULL` for segmentation (Phase 2)
 - `get_active_channels()` -- UNION of 3 queries: unembedded msgs, msgs above segment high-water mark, embedded-but-unsummarized msgs
 - `get_last_segment_tail_embeddings()` -- tail N embeddings from last segment (for centroid seeding)
@@ -225,11 +226,20 @@ Pure helpers for enforcing per-persona `max_context_tokens`. Two callsites today
 - Phase 2.2 adds `GET /api/v1/session/{persona}/ltm_block?query=...` — first calls `_build_conversation_history` to get real history + `oldest_id` (needed for the recency filter), then calls `chat_system._retrieve_memory_block(persona, user_identifier="portal", channel="web_ui", server_id=None, conversation_history=history, current_message=query, oldest_interaction_id=oldest_id)` and returns `{"block": str | null}`. The portal wraps `prepare_submit_generation` async to fetch this before each submit, writes the block into kobold-lite's `current_anote` JS variable, and kobold-lite embeds it into the prompt at its normal author's-note position. No server-side prompt mutation occurs. Phase 2.2 also adds `memory_mode` to `GET /api/v1/persona/{name}` and accepts it in `PATCH /api/v1/persona/{name}`, wiring through to `persona.set_memory_mode()`.
 - Phase 2.3a–b semantics (sidecar `derpr_user_text` for the user turn, `derpr_retry` for regens, `event: derpr` SSE frame carrying `assistant_id` for chevron hydration, partial-flush on abort) all survive Phase D — they are now implemented inside `chat_system._orchestrate` instead of in the adapter. The adapter handler is purely transcoding: maps `TokenEvent` → OAI `chat.completion.chunk`, `DoneEvent` → `event: derpr` frame + `[DONE]`, `ErrorEvent` → OAI error envelope. `_find_last_user_content(messages)` remains as the non-portal fallback when no sidecar is supplied. `_log_interaction` and `_commit_assistant` adapter helpers are still used by the native passthrough routes (`/api/v1/generate`, `/api/extra/generate/stream`); they are not on the OAI path anymore.
 - Phase 3 `max_context_tokens` is exposed on `GET/PATCH /api/v1/persona/{name}`; budget enforcement on the OAI path moved to engine-side as of Phase D (`_prepare_request` calls `truncate_messages_to_budget` against the rebuilt history). The native passthrough routes do not prune.
-- Phase 2.4 closes the portal edit/delete round-trip. `PATCH /api/v1/interaction/{id}` (body `{"content": str}`) calls `update_interaction_content`, which now ALSO drops the row's `Message_Embeddings` + `vec_Message_Embeddings` entries so `MemoryAgent._embed_unembedded` re-encodes against the new content on the next batch (the existing LEFT-JOIN-on-`Message_Embeddings` query naturally re-picks rows with stale embeddings cleared); `parent_summary_id` is set to NULL so the next summarizer pass re-groups the row. `DELETE /api/v1/interaction/{id}` calls a new thin wrapper `memory_manager.suppress_interaction(interaction_id)` that inserts a single `Suppressed_Interactions` row (idempotent — second call swallows `IntegrityError` and returns False; the endpoint surfaces this via `already_suppressed: bool`). Suppressed rows are filtered everywhere via `_suppression_filter` (history, sliding window, `kobold_export`, `get_unembedded_messages`, `get_unsegmented_embedded_messages`, `get_active_channels`); reply chains are kept intact (no FK cascade, no nulling of `reply_to_id`), and the segmenter handles orphaned `reply_to_id` references cleanly by falling back to the similarity gate. Portal: `edit_chunk_save` is wrapped to PATCH on non-empty edits and DELETE on empty edits; `interaction_ids[]` is spliced in lockstep with `gametext_arr`. **Archive bloat (option B — dedupe-on-archive)**: `swap_interaction_version` now content-hash-checks before inserting the canonical into `Interaction_Edit_History`; if a row with the same `(interaction_id, old_content)` already exists, the insert is skipped (chevron toggled back to a known content). Stale L0 rows are still dropped because the target restore step overwrites canonical content. This bounds chevron-toggle churn to the unique-content count rather than the click count; genuinely unique edits still grow the archive linearly (intended).
+- Phase 2.4 closes the portal edit/delete round-trip. `PATCH /api/v1/interaction/{id}` (body `{"content": str}`) calls `update_interaction_content`, which now ALSO drops the row's `Message_Embeddings` + `vec_Message_Embeddings` entries so `SqliteConsolidator._embed_unembedded` re-encodes against the new content on the next batch (the existing LEFT-JOIN-on-`Message_Embeddings` query naturally re-picks rows with stale embeddings cleared); `parent_summary_id` is set to NULL so the next summarizer pass re-groups the row. `DELETE /api/v1/interaction/{id}` calls a new thin wrapper `memory_manager.suppress_interaction(interaction_id)` that inserts a single `Suppressed_Interactions` row (idempotent — second call swallows `IntegrityError` and returns False; the endpoint surfaces this via `already_suppressed: bool`). Suppressed rows are filtered everywhere via `_suppression_filter` (history, sliding window, `kobold_export`, `get_unembedded_messages`, `get_unsegmented_embedded_messages`, `get_active_channels`); reply chains are kept intact (no FK cascade, no nulling of `reply_to_id`), and the segmenter handles orphaned `reply_to_id` references cleanly by falling back to the similarity gate. Portal: `edit_chunk_save` is wrapped to PATCH on non-empty edits and DELETE on empty edits; `interaction_ids[]` is spliced in lockstep with `gametext_arr`. **Archive bloat (option B — dedupe-on-archive)**: `swap_interaction_version` now content-hash-checks before inserting the canonical into `Interaction_Edit_History`; if a row with the same `(interaction_id, old_content)` already exists, the insert is skipped (chevron toggled back to a known content). Stale L0 rows are still dropped because the target restore step overwrites canonical content. This bounds chevron-toggle churn to the unique-content count rather than the click count; genuinely unique edits still grow the archive linearly (intended).
 - Phase 2.3b adds version navigation backed by `Edit_History_Embeddings`. Schema: `Edit_History_Embeddings(edit_id PK → Interaction_Edit_History ON DELETE CASCADE, embedding BLOB, model_name, created_at)` — L0 embeddings travel with content across swaps; archives do not participate in k-NN (no `vec_` shadow). Endpoints: `GET /api/v1/interaction/{id}/versions` → `{interaction_id, versions: [{edit_id, content, created_at}, ...]}` with archives ordered `(edited_at ASC, edit_id ASC)` and canonical synthesized last (`edit_id=None`); `POST /api/v1/interaction/{id}/select_version/{k}` invokes `memory_manager.swap_interaction_version(interaction_id, k)` which performs archive-current + restore-target atomically in one txn — archives current canonical (new `Interaction_Edit_History` row, `Message_Embeddings` → `Edit_History_Embeddings`, delete `vec_Message_Embeddings`), restores target archive at position `k` (copy `old_content` → `User_Interactions.content`, move `Edit_History_Embeddings(target)` back into `Message_Embeddings` + `vec_Message_Embeddings`, delete target archive row). Returns `{current_content, interaction_id, total_versions}`; raises `IndexError` (400) on out-of-bounds k and `ValueError` (404) on unknown id with no state mutation. The stream relay in `_setup_routes` now detects `[DONE]` in the upstream chunk, commits the assistant buffer first, and emits `event: derpr\ndata: {"assistant_id": N}\n\n` immediately before forwarding `[DONE]` so the portal can hydrate chevron stacks (`retry_prev_text` / `redo_prev_text`) via `/versions`. Error and abort paths skip the frame (no chevron-able assistant turn). Portal-side: a `window.fetch` wrapper tees the `/chat/completions` response body, parses SSE blocks out-of-band to catch `event: derpr`, and on receipt calls `_derprHydrateVersions(assistant_id)` which fetches `/versions`, populates `derpr_version_chain` + `derpr_cursor`, and derives `retry_prev_text` / `redo_prev_text` from the chain. `btn_back` / `btn_redo` are wrapped to POST `/select_version/{k}` (k looked up by content-match against the current server version list) and advance the cursor; original kobold behavior is the fallback when no assistant_id is known. The kobold-side 10-entry cap on `retry_prev_text` has been removed — full regen history lives in the DB. A `PATCH /api/v1/interaction/{id}` route is also exposed (body `{"content": str}`) for manual edits from the portal; it calls `update_interaction_content` directly and does not archive (the prior content is whatever the caller wants replaced).
 
-### `src/interfaces/kobold_export.py` -- Savefile builder
+- **Phase 4.1 — history contract (DP-130, server port-forward).** Replaces the brittle positional `interaction_ids[]` shadowing (Phase 2.4) with a server-authored per-chunk identity contract. Three server-side pieces (portal.html left untouched — that re-keying is DP-131's Lite stopgap; the bespoke UI is DP-132+). Full spec + invariants C1–C5: `project/decisions/2026-06-02-portal-history-contract.md`.
+  - **id-frame on EVERY turn.** `DoneEvent` gained `ephemeral_chunk_id: Optional[str]`. The OAI relay in `kobold_engine_adapter` now emits `event: derpr\ndata: {"user_id", "assistant_id", "response_type", "ephemeral_chunk_id"}\n\n` before `[DONE]` on *every* terminal turn — including a parked CONFIRM write (`assistant_id=None`), a tool-only turn, or an empty generation. Previously the frame was emitted only when `assistant_id is not None`, so parked/tool-only/abort turns sent no frame and the portal's positional id array drifted vs the visible story (root cause of "dispatchr is useless in the web UI"; live evidence `ids_len=11 storyLen=13`, `actions=12 ids=13`). The frame shape is **frozen** as of DP-130 — DP-131/DP-132 consume it.
+  - **`ephemeral_chunk_id`.** A stable handle for the rendered-but-unpersisted confirmation chunk on a parked turn. It is the parked `PendingConfirmation.token` (uuid4 hex; reconciles with the DP-127-engine confirm-modal `token` — same correlation id the interactive surface sends back on approve/deny). `PendingConfirmation` also gained `confirmation_text` (the parked chunk's rendered text) so a fresh load can render the awaiting-approval text. Non-parked turns carry `ephemeral_chunk_id=None` and are addressed by `assistant_id`.
+  - **`GET /api/v1/session/{persona}/transcript`** — the authoritative projection: `{"chunks": [...]}`, each chunk `{interaction_id|null, role, content, ephemeral, reasoning, tool_context, has_versions}` (invariant **C1**: exactly one `interaction_id` OR `ephemeral=true`). Same persona/global-history scoping as `kobold_export`; suppressed rows already filtered upstream (**C5**). `has_versions` comes from a single batch query `memory_manager.get_ids_with_versions(ids)` (no N+1). A live parked confirmation for `("portal", persona)` is appended as a trailing ephemeral chunk carrying its `ephemeral_chunk_id`. This is the re-sync source for the Lite stopgap and the render source for the bespoke UI — consumers address chunks by identity, never by position, so the array can no longer drift.
+  - **`build_kobold_savefile` C2 fix** — see kobold_export section below.
+  - **What converges now vs DP-131 (DP-130 is server-only):** the gametext-aligned `kobold_export` (C2) makes the **session restore/reload** path converge with the *unchanged* portal today (`ids_len==storyLen`, verified live). What still needs DP-131 is the **in-session per-turn** path: portal.html line ~33349 guards id pushes on `if (payload.assistant_id)`, so a parked turn mid-session won't advance the array until the next reload — DP-131 drops that guard / re-keys off `/transcript`. The contract test `test_parked_write_emits_id_frame_with_ephemeral_chunk_id` proves the on-wire parked frame deterministically through the real kernel.
+
+### `src/interfaces/kobold_export.py` -- Savefile builder + transcript projection
 - Pure function `build_kobold_savefile(raw_history)` → `(savefile_dict, skipped_count)`.
+- **Invariant C2 (DP-130) — gametext alignment:** `interaction_ids` carries one entry per *visible story chunk* including the prompt, so `len(interaction_ids) == len(actions) + 1` (= kobold-lite's `gametext_arr` length, `[prompt, *actions]`). This is the alignment the portal actually uses — `derpr_interaction_ids[modified_turn]` is keyed by the gametext index (index 0 == prompt), and the SSE id-frame path pushes one id per visible chunk. The loop appends a slot (id or `None`) for every renderable row and **never pops the id array**; only `rendered[0]` is split off into `prompt`. **Correction (this is the real C2):** the decision doc's literal `len(actions)==len(interaction_ids)` was itself off-by-one — the reported `actions=12 ids=13` was *correct* gametext alignment (13 chunks = prompt + 12 actions). The actual pre-fix defect was a conditional `if isinstance(iid,int)` append that could drop an id without dropping its chunk; the gametext-aligned rewrite fixes that and makes the **unchanged portal restore correct today** (verified live: `ids_len==storyLen==7`, was 5 vs 6 under a transient actions-aligned implementation). Renderability is shared with the transcript via `_is_renderable` / `_merge_reasoning` helpers.
+- `build_transcript(raw_history, *, ids_with_versions, pending)` → `{"chunks": [...]}` — the DP-130 projection (see Phase 4.1 above). Shares the row-filter helpers with the savefile builder so both stay consistent. `pending` (the live parked confirmation, when present) is appended as a trailing `ephemeral=true` chunk.
 - Wraps `author_role='user'` rows in the literal placeholders `\n{{[INPUT]}}\n…\n{{[OUTPUT]}}\n`; emits `author_role='assistant'` rows as raw text. System rows, empty-content rows, and unknown-role rows are counted once in `skipped` and dropped. Assistant rows with `tool_context` are treated as normal rows — they're skipped only when content is empty (tool-call-only), otherwise their visible text is preserved. Proper tool-turn rendering is backlog.
 - The placeholders mirror kobold-lite's `instructstartplaceholder` / `instructendplaceholder` constants; kobold's render layer substitutes them with the active `instruct_starttag` / `endtag` at submit time, so DERPR never picks the actual instruct tags.
 - The first emitted entry becomes the savefile's `prompt`, the rest go into `actions[]`. `memory` is left empty — the persona system prompt is routed into kobold-lite's `instruct_sysprompt` (Sys. Prompt) setting by the UI's `applyPersonaToUI`, keeping the Memory block user-owned.
@@ -241,20 +251,21 @@ Abstract base for autonomous background workers. Not user-interactive — poll e
 - Lifecycle: `start()` → `_on_start()` → `[loop: deploy() every interval]` → `stop()`
 - `deploy()`: Abstract — subclass implements one work cycle
 - `_build_llm_context()`: Minimal context (user prompt + optional action history injection)
-- Action-log helpers (DP-116a enriched contract):
-  - `_log_task_root(action_type, trigger_context, action_payload, contexts, outcome="pending")`: opens a root row, JSON-serialises and ASCII-safe-truncates `action_payload`, attaches `Agent_Action_Contexts` rows
-  - `_log_step(parent_id, action_type, action_payload, outcome, outcome_payload, contexts)`: child row under a root; accepts dict payloads, same serialisation rules
-  - `_add_contexts(action_id, [(type, value), ...])`: idempotent context tag insert
-  - `_finalize_action(action_id, outcome, outcome_payload)`: terminal update on a root; serialises `outcome_payload`
-  - `_serialize_payload(data)` / `_truncate_ascii(text)`: dict→JSON, ASCII-only (`encode("ascii","replace")`), capped at `MAX_PAYLOAD_CHARS` (4000) with `...[truncated]` marker. ASCII-only is defensive against Hindsight's utf-8→latin-1 mangling on some endpoints.
-- Hindsight bridging (DP-116b):
-  - `_format_action_series_prose(parent, steps, contexts)`: flattens a root + children + context tags into dense k:v prose (no JSON braces, no nulls). Caps at 8000 chars.
-  - `_retain_action_series(action_id)`: called by subclasses after `_finalize_action` on a root. Re-reads the series from `Agent_Actions` (idempotent across restarts), formats prose, enqueues a `retain_experience` POST with `document_id=f"agent_action:{action_id}"` and `content_override=<prose>`. Fire-and-forget through `HindsightBackend._ensure_worker`. SQLite-shape backends raise `NotImplementedError`, which is swallowed — bridging is Hindsight-only and opportunistic.
-  - Class attrs `experience_bank` / `experience_persona` select the destination bank. DispatchAgent points both at `DISPATCH_PERSONA_NAME` so dispatch series mingle into the dispatch_analyst persona bank alongside chat-prose extractions. ReminderAgent defaults to `agent_name` ("reminder").
-  - Idempotency: stable `document_id` + Hindsight `update_mode="replace"` (set via `HindsightBackend._build_item` when `document_id` is passed explicitly, bypassing the rolling `_doc_scope` heuristic) — re-retain on the same id replaces the prior content.
 - `_get_action_history_message()`: Injects recent actions into LLM context if `action_history_limit > 0`
 - Auto-loads system personas from file on init (agents invoke system personas for read-only analysis)
 - Config: `schedule` (dict, e.g. `{"interval": 30}`), `action_history_limit` (int), `agent_name` (str)
+
+Trajectory-logging contract (DP-116a) — root + children written to `Agent_Actions`:
+- `_log_task_root(action_type, trigger_context, action_payload, contexts, outcome="pending")`: opens a root row, JSON-serialises + ASCII-safe-truncates `action_payload`, attaches `Agent_Action_Contexts` rows; returns the root `action_id`.
+- `_log_step(parent_id, action_type, action_payload, outcome, outcome_payload, contexts)`: child row under a root.
+- `_add_contexts(action_id, [(type, value), ...])`: idempotent context-tag insert (drops null/empty).
+- `_finalize_action(action_id, outcome, outcome_payload)`: terminal update on a root.
+- `_serialize_payload(data)` / `_truncate_ascii(text, max_len=None)`: dict→JSON, ASCII-only (`encode("ascii","replace")`), capped at `MAX_PAYLOAD_CHARS` (4000) unless `max_len` overrides. ASCII-only is defensive against Hindsight's utf-8→latin-1 mangling on some endpoints.
+
+Hindsight bridging (DP-116b) — fire-and-forget bridge of a finalized series into Hindsight:
+- `_format_action_series_prose(parent, steps, contexts)`: flattens a root + children + context tags into dense k:v prose (no JSON braces, no nulls). Capped at **16000** chars (Hindsight chunks at 10k internally — a belt on pathological loops, never expected to fire when log-time ref discipline holds).
+- `_retain_action_series(action_id)`: called by subclasses after `_finalize_action` on a root. Re-reads the series from `Agent_Actions` (idempotent across restarts), formats prose, enqueues a `retain_experience` POST with stable `document_id=f"agent_action:{action_id}"` (`_action_document_id`, prefix `AGENT_HISTORY_DOC_PREFIX`) + `content_override=<prose>`. Fire-and-forget through `HindsightBackend`'s queue; SQLite-shape backends raise `NotImplementedError`, which is swallowed — bridging is Hindsight-only and opportunistic.
+- Class attrs `experience_bank` / `experience_persona` select the destination bank (default: `agent_name`). DispatchAgent points both at `DISPATCH_PERSONA_NAME` so dispatch series mingle into the `dispatch_analyst` persona bank; ReminderAgent + SqliteConsolidator default to their `agent_name`.
 
 **`agent_manager.py` -- AgentManager**
 Central registry and lifecycle controller.
@@ -273,7 +284,10 @@ Routes triaged tickets to notifications. Pipeline per ticket:
 4. Tag ticket as dispatched in Zammad
 5. Log action outcome
 
-Trajectory logging (DP-116a): each `_dispatch_ticket()` call writes one `dispatch` root row plus child rows for `tool:zammad.get_ticket`, `tool:zammad.get_ticket_articles`, `llm_step` (dispatch_analyst), `tool:notification.send`, `tool:zammad.add_tag`. Root `action_payload` carries `{ticket_id}`, `outcome_payload` carries `{ticket_id, number, title, priority, channel, recipient, sent, decision}`. Contexts attached to the root: `ticket_id`, `persona`, `priority`, `channel`, `recipient`.
+Trajectory logging (DP-116a): each `_dispatch_ticket()` call writes one `dispatch` root row plus child rows for `tool:zammad.get_ticket`, `tool:zammad.get_ticket_articles`, `llm_step` (dispatch_analyst), `tool:notification.send`, `tool:zammad.add_tag`. Root `action_payload` carries `{ticket_id}`, `outcome_payload` the dispatch result; contexts `ticket_id` + `persona`. On finalize the series is bridged to Hindsight via `_retain_action_series` (into the `dispatch_analyst` bank).
+
+**`reminder_agent.py` -- ReminderAgent**
+Scheduled open-ticket nudge agent (shipped — registered in `main.py` when Zammad is available). Polls for tickets needing follow-up and routes a reminder notification via `NotificationRouter`. Uses the same DP-116a/b trajectory logging: `_log_task_root` per cycle + `_retain_action_series` on completion (bridges into its own `reminder` bank; `experience_bank` unset → defaults to `agent_name`).
 
 **`zammad_bot.py` -- ZammadBot**
 Multi-stage AI triage pipeline for new, untagged tickets. Uses 4 system personas:
@@ -284,8 +298,8 @@ Multi-stage AI triage pipeline for new, untagged tickets. Uses 4 system personas
 5. `triage_analyst` → full analysis with context → internal note posted to ticket
 Tags ticket as triaged. No tools used — all LLM calls are read-only.
 
-**`memory_agent.py` -- MemoryAgent**
-Batch agent that segments conversations by topic, extracts observations via LLM, and stores embedded summaries. Two-phase pipeline per channel:
+**`sqlite_consolidator.py` -- SqliteConsolidator** (formerly `MemoryAgent`; `agent_name="memory"`)
+Batch agent that segments conversations by topic, extracts observations via LLM, and stores embedded summaries. **Registered only when `SEMANTIC_BACKEND=="sqlite"`** — the Hindsight backend drives consolidation upstream, and registering this agent under it would crash `deploy()` on the first cycle (legacy SQL ops raise `NotImplementedError`). Two-phase pipeline per channel:
 
 **Phase 1 — Embed (loop until no unembedded messages):**
 1. `get_unembedded_messages()` fetches msgs not yet in Message_Embeddings
@@ -325,8 +339,8 @@ Plugs agent tools into ChatSystem's service binding system. Personas with `servi
 Four tools gated behind `service_bindings: ["agents"]`:
 - `get_agent_status` (read): Running state, deploy counts, errors for one or all agents
 - `get_agent_history` (read): Recent action log with optional ticket_id/customer filters
-- `lookup_agent_history` (read, DP-116b): Dereference a single action series by `action_id` — returns parent row + child steps + context tags. Used to recover the full trajectory after a Hindsight recall hit surfaces `action_id:<n>` from the bridged experience.
-- `manage_agent` (write): Start/stop/restart — goes through confirmation if persona is in CONFIRM mode
+- `manage_agent` (write): Start/stop/restart — parked for audit like any write tool (regardless of execution mode)
+- `lookup_agent_history` (read, DP-116b): Dereference a single action series by `action_id` — returns the parent row + child steps + context tags. Used to recover the full trajectory after a Hindsight recall hit surfaces `action_id:<n>` from the bridged experience.
 
 ### `src/clients/notification.py` -- Notification System
 - `Notifier` (ABC): `async send(recipient, subject, body) → bool`
@@ -347,17 +361,17 @@ Top-level lifecycle coordinator. Starts agent_manager.auto_start(), launches int
 ### `src/utils/`
 - `google_utils.py` -- `process_grounding_metadata()`: extracts citations and sources from Google grounding responses, inserts inline citation markers
 - `message_utils.py` -- `cleanse_message_for_history()`: strips citation markup and source blocks from messages before storing in history. `resolve_redirect_url()`: follows redirects with 429 retry for URL resolution
-- `model_utils.py` -- `get_model_prefix()`: maps model names to family prefixes for routing and rate limiting. Model list refresh functions for OpenAI/Google/Anthropic APIs
+- `model_utils.py` -- `get_model_prefix()`: maps model names to family prefixes for routing and rate limiting. Model list refresh functions for OpenAI/Google/Anthropic APIs. **Model list — single source of truth is `chat_system.models_available`** (a snapshot taken at startup via `get_model_list()`, refreshed by the `update_models` command). Both consumers read it: the `what models` command, and the web UI model dropdown (`GET /api/v1/models/list` in both kobold adapters → flattens `chat_system.models_available`). The dropdown used to re-read the cache file via `get_model_list()` per request — unified to `models_available` on 2026-06-02 (DP-127) so it can't drift from `what models`. Underlying cache: `data/personas.json` → `"models"`. `get_model_list(update=True)` is the only path that hits provider APIs (slow) and rewrites the cache. **`STATIC_MODELS`** (`agy-flash`, `local`) are code-known, non-API models merged in on *both* the update and cached-read paths so they're always selectable without an API refresh — fixed 2026-06-01 (DP-127); previously they only existed on the update path and a pre-agy cache hid them.
 - `save_utils.py` -- Persona JSON file I/O: load/save personas and models to disk. Handles default + system persona merging on startup
 
 ### `src/main.py` -- Startup Sequence
 1. MemoryManager (SQLite) + schema migration
 2. TextEngine (LLM API router)
 3. ZammadClient (optional, fails gracefully if no credentials)
-4. EmbeddingService (GeminiEmbeddingProvider) — shared by ChatSystem and MemoryAgent
+4. EmbeddingService (GeminiEmbeddingProvider) — shared by ChatSystem and SqliteConsolidator
 5. ChatSystem (DI hub, injected with memory + engine + embedding_service)
 6. Register ZammadIntegration service (if Zammad available)
-7. AgentManager + register agent classes (MemoryAgent always; ZammadBot + DispatchAgent only if Zammad available)
+7. AgentManager + register agent classes (`SqliteConsolidator` only when `SEMANTIC_BACKEND=="sqlite"`; `ZammadBot` + `DispatchAgent` + `ReminderAgent` only if Zammad available)
 8. Register AgentServiceIntegration service (agent tools)
 9. AppManager + NotificationRouter (Discord/Zammad notifiers)
 10. Register interface tasks (Discord bot, Gmail bot)
