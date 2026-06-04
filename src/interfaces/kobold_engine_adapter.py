@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 import httpx
 import uvicorn
 import asyncio
@@ -84,6 +85,40 @@ class KoboldEngineAdapter:
         @self.app.get("/")
         async def root_redirect() -> HTMLResponse:
             return HTMLResponse(render_portal_html("engine"))
+
+        # --- DP-132: bespoke "DERPR Portal" web UI (React/Vite build) ---------
+        # Additive only. The existing /portal (Kobold-Lite PoC) is untouched.
+        # The Vite app is built with base="/derpr/" so its asset URLs resolve
+        # under the StaticFiles mount below. GET /derpr returns the SPA entry
+        # (index.html); the mount serves the hashed JS/CSS assets. If the build
+        # output is absent (UI not yet built), /derpr returns a short hint so
+        # the engine still boots without the front-end artifacts present.
+        derpr_dist = os.path.join(
+            os.path.dirname(__file__), "web_assets", "derpr_ui", "dist"
+        )
+        derpr_index = os.path.join(derpr_dist, "index.html")
+
+        @self.app.get("/derpr")
+        async def get_derpr_portal() -> HTMLResponse:
+            try:
+                with open(derpr_index, "r", encoding="utf-8") as fh:
+                    return HTMLResponse(fh.read())
+            except FileNotFoundError:
+                return HTMLResponse(
+                    "<h1>DERPR Portal not built</h1>"
+                    "<p>Run <code>npm run build</code> in "
+                    "<code>src/interfaces/web_assets/derpr_ui</code>.</p>",
+                    status_code=503,
+                )
+
+        if os.path.isdir(derpr_dist):
+            # html=True so the mount serves index.html for /derpr/ and falls
+            # back gracefully; assets live under /derpr/assets/*.
+            self.app.mount(
+                "/derpr",
+                StaticFiles(directory=derpr_dist, html=True),
+                name="derpr_portal",
+            )
 
     def _setup_routes(self) -> None:
         @self.app.get("/api/v1/model")
