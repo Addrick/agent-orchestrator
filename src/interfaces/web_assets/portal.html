@@ -7519,6 +7519,16 @@ Current version indicated by LITEVER below.
 								// Assistant_id hydration handled by tee sniffer.
 								continue;
 							}
+							if (event.event === "derpr-confirm" && event.data && event.data.token) {
+								// DP-127: a write parked for CONFIRM-mode approval.
+								// The model emitted only a tool call (empty text), so
+								// pop an approve/deny modal; the choice resumes via
+								// POST /api/v1/persona/<persona>/confirm.
+								window._derpr_pending_confirm = event.data;
+								try { derprShowConfirm(event.data); }
+								catch (e) { console.error("derprShowConfirm failed", e); }
+								continue;
+							}
 							//for gemini
 							if (event.data && event.data.candidates && event.data.candidates.length>0) {
 								if(event.data.candidates[0].content && event.data.candidates[0].content.parts && event.data.candidates[0].content.parts.length>0)
@@ -32951,6 +32961,62 @@ Current version indicated by LITEVER below.
 			console.error("Kobold export failed", e);
 			msgbox("Could not load DERPR history. See console for details.");
 			return false;
+		}
+	}
+
+	// DP-127: CONFIRM-mode write confirmation. When the engine parks a write it
+	// emits an `event: derpr-confirm` SSE frame (handled in the OAI stream
+	// dispatch); this pops an approve/deny modal built on the existing
+	// `msgboxYesNo` primitive. `payload.text` is the server-built human-readable
+	// summary (tool names, flags, taint warning), so we render it verbatim.
+	function derprShowConfirm(payload) {
+		if (!payload || !payload.token || !payload.persona) { return; }
+		const summary = payload.text
+			|| 'The assistant wants to perform a write action.';
+		const body = escape_html(summary).replace(/\n/g, '<br>');
+		msgboxYesNo(
+			body,
+			'Confirm action',
+			() => { derprResumeConfirm(payload.persona, payload.token, true); },
+			() => { derprResumeConfirm(payload.persona, payload.token, false); },
+			true,
+		);
+	}
+
+	// POST the approve/deny decision to the confirm route and refresh the
+	// conversation from DERPR's DB so the continuation (and the executed write's
+	// effects) appear. The continuation streams as SSE; we read it to completion
+	// so the engine finishes executing + persisting before the reload, and scan
+	// for a *chained* derpr-confirm (a continuation that itself parks a write).
+	async function derprResumeConfirm(persona, token, approved) {
+		try {
+			const res = await fetch(
+				`/api/v1/persona/${encodeURIComponent(persona)}/confirm`,
+				{
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ approved: approved, token: token }),
+				},
+			);
+			const raw = await res.text();
+			let chained = null;
+			for (const frame of raw.split(/\r?\n\r?\n/)) {
+				let etype = 'message';
+				const dataLines = [];
+				for (const line of frame.split(/\r?\n/)) {
+					if (line.startsWith('event:')) etype = line.slice(6).trim();
+					else if (line.startsWith('data:')) dataLines.push(line.slice(5).replace(/^ /, ''));
+				}
+				if (etype === 'derpr-confirm' && dataLines.length) {
+					try { chained = JSON.parse(dataLines.join('\n')); } catch (e) { /* ignore */ }
+				}
+			}
+			window._derpr_pending_confirm = null;
+			await loadDerprSession(persona);
+			if (chained && chained.token) { derprShowConfirm(chained); }
+		} catch (e) {
+			console.error('derpr confirm resume failed', e);
+			msgbox('Could not complete the confirmation. See console for details.');
 		}
 	}
 

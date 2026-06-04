@@ -24,6 +24,7 @@ from src.generation_events import (
     DoneEvent as DoneEvent,
     ErrorEvent as ErrorEvent,
     GenerationEvent as GenerationEvent,
+    PendingConfirmationEvent as PendingConfirmationEvent,
     ResponseType as ResponseType,
     TokenEvent as TokenEvent,
     ToolCallResultEvent as ToolCallResultEvent,
@@ -1050,6 +1051,18 @@ class ChatSystem:
                     reason="Universal write-audit gate triggered",
                     metadata=audit_info
                 )
+                # Surface the park to interactive consumers (the portal) so they
+                # can render an approve/deny affordance and resume via the token.
+                # Emitted before the terminal DoneEvent; non-interactive callers
+                # (generate_response, the non-streaming resume drain) ignore it
+                # and rely on the DoneEvent text instead.
+                yield PendingConfirmationEvent(
+                    text=final_text,
+                    write_calls=pending_writes,
+                    persona_name=ctx.persona_name,
+                    token=parked.token,
+                    audit_info=audit_info,
+                )
 
             # 4. Log/update assistant turn. Original text (including links) is preserved.
             assistant_id = self._commit_or_update_assistant(
@@ -1218,32 +1231,63 @@ class ChatSystem:
             },
         )
 
-    async def resume_pending_confirmation(
-            self, user_identifier: str, persona_name: str, approved: bool
-    ) -> Tuple[str, ResponseType, Optional[int], Optional[int]]:
-        """Resume a write that was parked for confirmation.
+    async def stream_resume_confirmation(
+            self, user_identifier: str, persona_name: str, approved: bool,
+            *, expected_token: Optional[str] = None,
+    ) -> AsyncGenerator[GenerationEvent, None]:
+        """Streaming resume of a parked write — single source of truth for the
+        approve/deny continuation.
 
-        DP-124: re-enters the `_orchestrate` kernel with the parked turn so the
+        DP-124 re-enters the `_orchestrate` kernel with the parked turn so the
         continuation runs the full tool loop, persists the assistant row on the
         correct channel, and shares the single turn lifecycle (scope, taint
-        write-back, retain, terminal event). The audit decision + parked-turn
-        timeout/expiry behaviour are preserved here, ahead of kernel re-entry.
+        write-back, retain, terminal event). DP-127 makes this streaming so the
+        portal can render the continuation (and any *chained* confirmation) just
+        like a normal turn. The not-found / expired / persona-missing guards are
+        surfaced as a terminal DEV_COMMAND DoneEvent so every consumer renders
+        them uniformly.
+
+        `expected_token` (the portal path) rejects a resume whose token no longer
+        matches the live park — i.e. the model proposed a different write since.
+        It is validated *before* the park is consumed, so a stale request leaves
+        the real pending confirmation intact. Discord passes None and resumes by
+        (user, persona) alone.
         """
         key = (user_identifier, persona_name)
-        pending = self._pending_confirmations.pop(key, None)
+        pending = self._pending_confirmations.get(key)
 
         if not pending:
-            return "No pending confirmation found.", ResponseType.DEV_COMMAND, None, None
+            yield DoneEvent(
+                text="No pending confirmation found.",
+                response_type=ResponseType.DEV_COMMAND,
+            )
+            return
+
+        if expected_token is not None and pending.token != expected_token:
+            yield DoneEvent(
+                text="This confirmation is no longer valid. Please try again.",
+                response_type=ResponseType.DEV_COMMAND,
+            )
+            return
+
+        # Commit to acting on this park: remove it so a duplicate approve/deny
+        # (double-click, retried POST) can't execute the writes twice.
+        self._pending_confirmations.pop(key, None)
 
         if time.time() - pending.created_at > PENDING_CONFIRMATION_TIMEOUT:
-            return "Confirmation expired. Please try again.", ResponseType.DEV_COMMAND, None, None
+            yield DoneEvent(
+                text="Confirmation expired. Please try again.",
+                response_type=ResponseType.DEV_COMMAND,
+            )
+            return
 
         if pending.persona_name not in self.personas:
-            return "Error: Persona not found.", ResponseType.DEV_COMMAND, None, None
+            yield DoneEvent(
+                text="Error: Persona not found.",
+                response_type=ResponseType.DEV_COMMAND,
+            )
+            return
 
-        final_text = ""
-        response_type = ResponseType.DEV_COMMAND
-        assistant_id: Optional[int] = None
         async with aclosing(self._orchestrate(
             persona_name=pending.persona_name,
             user_identifier=user_identifier,
@@ -1254,7 +1298,25 @@ class ChatSystem:
             resume=_ResumeState(pending=pending, approved=approved),
         )) as agen:
             async for ev in agen:
-                if isinstance(ev, (TokenEvent, ToolCallStartEvent, ToolCallResultEvent)):
+                yield ev
+
+    async def resume_pending_confirmation(
+            self, user_identifier: str, persona_name: str, approved: bool
+    ) -> Tuple[str, ResponseType, Optional[int], Optional[int]]:
+        """Non-streaming resume — drains `stream_resume_confirmation` into the
+        4-tuple Discord expects. Token validation is skipped (Discord keys the
+        confirmation by reaction on a specific message, so a stale token can't
+        arise the way it can over HTTP).
+        """
+        final_text = ""
+        response_type = ResponseType.DEV_COMMAND
+        assistant_id: Optional[int] = None
+        async with aclosing(self.stream_resume_confirmation(
+            user_identifier, persona_name, approved,
+        )) as agen:
+            async for ev in agen:
+                if isinstance(ev, (TokenEvent, ToolCallStartEvent,
+                                   ToolCallResultEvent, PendingConfirmationEvent)):
                     continue
                 if isinstance(ev, DoneEvent):
                     final_text = ev.text

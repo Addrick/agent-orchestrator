@@ -9,7 +9,7 @@
 import json
 import logging
 import os
-from typing import Any, AsyncIterator, Dict, Optional, List
+from typing import Any, AsyncIterator, Dict, Optional, List, Tuple
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request
@@ -21,8 +21,8 @@ import asyncio
 
 from config import global_config
 from src.chat_system import (
-    ChatSystem, DoneEvent, ErrorEvent, TokenEvent,
-    ToolCallResultEvent, ToolCallStartEvent,
+    ChatSystem, DoneEvent, ErrorEvent, GenerationEvent, PendingConfirmationEvent,
+    ResponseType, TokenEvent, ToolCallResultEvent, ToolCallStartEvent,
 )
 from src.interfaces.kobold_export import build_kobold_savefile, build_transcript
 from src.interfaces.portal_render import render_portal_html
@@ -216,6 +216,50 @@ class KoboldEngineAdapter:
             if result.get("mutated"):
                 save_personas_to_file(self.chat_system.personas)
             return {"response": result.get("response", ""), "mutated": bool(result.get("mutated"))}
+
+        @self.app.post("/api/v1/persona/{name}/confirm")
+        async def confirm_pending(name: str, request: Request) -> Any:
+            """Approve or deny a CONFIRM-mode write parked for persona `name`.
+
+            The portal calls this after a `derpr-confirm` SSE frame surfaces a
+            parked write. The continuation (write execution on approve, denial
+            results on deny, then the model's follow-up turn) streams back as
+            SSE using the same wire protocol as /v1/chat/completions — so any
+            chained confirmation re-surfaces as another `derpr-confirm` frame.
+
+            Body: {"approved": bool, "token": "<token from the frame>"}. The
+            token guards against resuming a stale park (model proposed different
+            writes since); omit or send empty to skip the check. The portal user
+            is always "portal", matching the park key (user, persona).
+            """
+            if name not in self.chat_system.personas:
+                return JSONResponse(status_code=404,
+                                    content={"error": f"Persona '{name}' not found"})
+            body = await request.json()
+            approved = bool(body.get("approved"))
+            token = body.get("token") or None
+
+            async def relay() -> AsyncIterator[bytes]:
+                async for ev in self.chat_system.stream_resume_confirmation(
+                    user_identifier="portal",
+                    persona_name=name,
+                    approved=approved,
+                    expected_token=token,
+                ):
+                    if await request.is_disconnected():
+                        return
+                    for _label, frame in self._event_to_sse(ev):
+                        yield frame
+
+            return StreamingResponse(
+                relay(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                    "Connection": "keep-alive",
+                },
+            )
 
         @self.app.get("/api/v1/session/{persona}/kobold_export")
         async def kobold_export(persona: str, max_turns: Optional[int] = None) -> Any:
@@ -775,93 +819,22 @@ class KoboldEngineAdapter:
 
                         if await request.is_disconnected():
                             return
-                        if isinstance(ev, TokenEvent):
-                            chunk = json.dumps({
-                                "object": "chat.completion.chunk",
-                                "choices": [{
-                                    "index": 0,
-                                    "delta": {"content": ev.delta},
-                                }],
-                            })
-                            out = f"data: {chunk}\n\n".encode("utf-8")
-                            _dump_write("TokenEvent", out)
-                            yield out
-                        elif isinstance(ev, ToolCallStartEvent):
-                            payload_obj: Dict[str, Any] = {
-                                "tool_name": ev.tool_name,
-                                "arguments": ev.arguments,
-                                "call_id": ev.call_id,
-                            }
-                            if ev.group_id is not None:
-                                payload_obj["group_id"] = ev.group_id
-                            payload = json.dumps(payload_obj)
-                            out = f"event: derpr-tool-start\ndata: {payload}\n\n".encode("utf-8")
-                            _dump_write("ToolCallStartEvent", out)
-                            yield out
-                        elif isinstance(ev, ToolCallResultEvent):
-                            payload_obj = {
-                                "call_id": ev.call_id,
-                                "tool_name": ev.tool_name,
-                                "result": ev.result,
-                                "error": ev.error,
-                            }
-                            if ev.group_id is not None:
-                                payload_obj["group_id"] = ev.group_id
-                            payload = json.dumps(payload_obj)
-                            out = f"event: derpr-tool-result\ndata: {payload}\n\n".encode("utf-8")
-                            _dump_write("ToolCallResultEvent", out)
-                            yield out
-                        elif isinstance(ev, DoneEvent):
-                            if dump_fh is not None:
-                                _dump_write(
-                                    "DoneEvent",
-                                    json.dumps({
-                                        "assistant_id": ev.assistant_id,
-                                        "user_interaction_id": ev.user_interaction_id,
-                                        "response_type": getattr(ev.response_type, "name", str(ev.response_type)),
-                                        "final_text_len": len(ev.text or ""),
-                                        "final_text_preview": (ev.text or "")[:500],
-                                    }, ensure_ascii=False).encode("utf-8"),
-                                )
-                            # DP-130 history contract (C3): emit the `event: derpr`
-                            # id-frame on EVERY terminal turn — including parked
-                            # writes (assistant_id=None), tool-only, and aborts.
-                            # Carrying user_id, assistant_id (null when parked),
-                            # response_type, and a stable ephemeral_chunk_id for the
-                            # unpersisted confirmation chunk means the client never
-                            # has to advance an id array positionally, so it can no
-                            # longer drift vs the visible story. The transcript
-                            # endpoint is the authoritative re-sync source.
-                            rtype = getattr(ev.response_type, "name", str(ev.response_type))
-                            frame_data = {
-                                "user_id": ev.user_interaction_id,
-                                "assistant_id": ev.assistant_id,
-                                "response_type": rtype,
-                                "ephemeral_chunk_id": ev.ephemeral_chunk_id,
-                            }
-                            logger.info(
-                                "OAI relay DoneEvent: emitting derpr id-frame "
-                                "(user_id=%s, assistant_id=%s, response_type=%s, "
-                                "ephemeral_chunk_id=%s, text_len=%d)",
-                                ev.user_interaction_id, ev.assistant_id, rtype,
-                                ev.ephemeral_chunk_id, len(ev.text or ""),
+                        # Rich diagnostic dump for DoneEvent (dump-only, not a
+                        # wire frame) — preserved alongside the shared transcoder.
+                        if dump_fh is not None and isinstance(ev, DoneEvent):
+                            _dump_write(
+                                "DoneEvent",
+                                json.dumps({
+                                    "assistant_id": ev.assistant_id,
+                                    "user_interaction_id": ev.user_interaction_id,
+                                    "response_type": getattr(ev.response_type, "name", str(ev.response_type)),
+                                    "final_text_len": len(ev.text or ""),
+                                    "final_text_preview": (ev.text or "")[:500],
+                                }, ensure_ascii=False).encode("utf-8"),
                             )
-                            frame = (
-                                f"event: derpr\n"
-                                f"data: {json.dumps(frame_data)}\n\n"
-                            )
-                            out = frame.encode("utf-8")
-                            _dump_write("derpr-id-frame", out)
-                            yield out
-                            out = b"data: [DONE]\n\n"
-                            _dump_write("DONE", out)
-                            yield out
-                        elif isinstance(ev, ErrorEvent):
-                            err = json.dumps({"error": {"message": ev.message}})
-                            out = f"data: {err}\n\n".encode("utf-8")
-                            _dump_write("ErrorEvent", out)
-                            yield out
-                            yield b"data: [DONE]\n\n"
+                        for label, frame in self._event_to_sse(ev):
+                            _dump_write(label, frame)
+                            yield frame
                 except asyncio.CancelledError:
                     # Engine kernel flushes the partial assistant row on cancel.
                     _dump_write("CANCELLED", b"client disconnected / asyncio.CancelledError")
@@ -883,6 +856,102 @@ class KoboldEngineAdapter:
                     "Connection": "keep-alive",
                 },
             )
+
+    @staticmethod
+    def _event_to_sse(ev: GenerationEvent) -> List[Tuple[str, bytes]]:
+        """Transcode one generation event into labelled SSE wire frames.
+
+        Returns (debug_label, frame_bytes) pairs — usually one, but DoneEvent
+        and ErrorEvent emit several (optional content delta, id-frame, [DONE]).
+        Shared by the chat-completions stream and the confirm-resume stream so
+        both speak the same wire protocol; the label feeds the optional SSE dump.
+        """
+        frames: List[Tuple[str, bytes]] = []
+        if isinstance(ev, TokenEvent):
+            chunk = json.dumps({
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {"content": ev.delta}}],
+            })
+            frames.append(("TokenEvent", f"data: {chunk}\n\n".encode("utf-8")))
+        elif isinstance(ev, ToolCallStartEvent):
+            payload_obj: Dict[str, Any] = {
+                "tool_name": ev.tool_name,
+                "arguments": ev.arguments,
+                "call_id": ev.call_id,
+            }
+            if ev.group_id is not None:
+                payload_obj["group_id"] = ev.group_id
+            frames.append((
+                "ToolCallStartEvent",
+                f"event: derpr-tool-start\ndata: {json.dumps(payload_obj)}\n\n".encode("utf-8"),
+            ))
+        elif isinstance(ev, ToolCallResultEvent):
+            payload_obj = {
+                "call_id": ev.call_id,
+                "tool_name": ev.tool_name,
+                "result": ev.result,
+                "error": ev.error,
+            }
+            if ev.group_id is not None:
+                payload_obj["group_id"] = ev.group_id
+            frames.append((
+                "ToolCallResultEvent",
+                f"event: derpr-tool-result\ndata: {json.dumps(payload_obj)}\n\n".encode("utf-8"),
+            ))
+        elif isinstance(ev, PendingConfirmationEvent):
+            # A write parked for CONFIRM-mode approval. Carries the structured
+            # calls + a resume token so the portal can render approve/deny and
+            # POST back to /api/v1/persona/{name}/confirm. The terminal DoneEvent
+            # that follows ends the stream without echoing this text into the
+            # chat bubble — the modal is the canonical surface.
+            payload = json.dumps({
+                "text": ev.text,
+                "persona": ev.persona_name,
+                "token": ev.token,
+                "calls": [
+                    {
+                        "name": c.get("name"),
+                        "arguments": c.get("arguments", {}),
+                        "id": c.get("id"),
+                    }
+                    for c in ev.write_calls
+                ],
+                "audit_info": ev.audit_info,
+            })
+            frames.append((
+                "PendingConfirmationEvent",
+                f"event: derpr-confirm\ndata: {payload}\n\n".encode("utf-8"),
+            ))
+        elif isinstance(ev, DoneEvent):
+            # Dev-command responses carry their full text on the DoneEvent and
+            # emit no TokenEvents (no LLM call), so unlike LLM turns the text was
+            # never streamed. Transcode it as a content delta here or the portal
+            # shows a blank reply even though the command ran + persisted.
+            if ev.response_type == ResponseType.DEV_COMMAND and ev.text:
+                cmd_chunk = json.dumps({
+                    "object": "chat.completion.chunk",
+                    "choices": [{"index": 0, "delta": {"content": ev.text}}],
+                })
+                frames.append(("DevCommandText", f"data: {cmd_chunk}\n\n".encode("utf-8")))
+            # DP-130 history contract (C3): emit the `event: derpr` id-frame on
+            # EVERY terminal turn — including parked writes (assistant_id=None),
+            # tool-only, and aborts. Carrying user_id, assistant_id (null when
+            # parked), response_type, and a stable ephemeral_chunk_id for the
+            # unpersisted confirmation chunk means the client never has to advance
+            # an id array positionally, so it can no longer drift vs the visible
+            # story. The transcript endpoint is the authoritative re-sync source.
+            rtype = getattr(ev.response_type, "name", str(ev.response_type))
+            frame = (
+                f"event: derpr\n"
+                f"data: {json.dumps({'user_id': ev.user_interaction_id, 'assistant_id': ev.assistant_id, 'response_type': rtype, 'ephemeral_chunk_id': ev.ephemeral_chunk_id})}\n\n"
+            )
+            frames.append(("derpr-id-frame", frame.encode("utf-8")))
+            frames.append(("DONE", b"data: [DONE]\n\n"))
+        elif isinstance(ev, ErrorEvent):
+            err = json.dumps({"error": {"message": ev.message}})
+            frames.append(("ErrorEvent", f"data: {err}\n\n".encode("utf-8")))
+            frames.append(("DONE", b"data: [DONE]\n\n"))
+        return frames
 
     @staticmethod
     def _find_last_user_content(messages: List[Dict[str, Any]]) -> Optional[str]:
