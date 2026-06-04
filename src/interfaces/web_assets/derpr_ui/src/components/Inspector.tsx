@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { Persona, ToolDef } from '../types/contracts'
+import { policyLabel } from '../state/util'
 
 type Tab = 'persona' | 'tools' | 'raw'
 
@@ -66,10 +67,12 @@ function PersonaPane({ persona: p }: { persona: Persona | null }) {
       </div>
       <Row2 a={['model_name', p.model_name]} b={['memory_mode', p.memory_mode]} />
       <div className="field">
-        <span className="lbl">temperature · {p.temperature.toFixed(2)}</span>
+        <span className="lbl">
+          temperature · {p.temperature != null ? p.temperature.toFixed(2) : '—'}
+        </span>
         <div className="slider">
-          <input type="range" min={0} max={2} step={0.05} value={p.temperature} readOnly />
-          <span className="val">{p.temperature.toFixed(2)}</span>
+          <input type="range" min={0} max={2} step={0.05} value={p.temperature ?? 0} readOnly />
+          <span className="val">{p.temperature != null ? p.temperature.toFixed(2) : '—'}</span>
         </div>
       </div>
       <Row2 a={['max_tokens', p.max_tokens]} b={['history_messages', p.history_messages]} />
@@ -77,7 +80,7 @@ function PersonaPane({ persona: p }: { persona: Persona | null }) {
         a={['max_context_tokens', p.max_context_tokens]}
         b={['thinking_level', p.thinking_level]}
       />
-      <Row2 a={['chat_template', p.chat_template]} b={['tool_policy.mode', p.tool_policy.mode]} />
+      <Row2 a={['chat_template', p.chat_template]} b={['tool_policy', policyLabel(p.tool_policy)]} />
 
       <div
         className={'section kobold' + (koboldCollapsed ? ' collapsed' : '')}
@@ -131,13 +134,13 @@ function Row2({
         <div>
           <span className="lbl">{a[0]}</span>
           <div className="ctrl">
-            <span>{String(a[1])}</span>
+            <span>{a[1] == null ? '—' : String(a[1])}</span>
           </div>
         </div>
         <div>
           <span className="lbl">{b[0]}</span>
           <div className="ctrl">
-            <span>{String(b[1])}</span>
+            <span>{b[1] == null ? '—' : String(b[1])}</span>
           </div>
         </div>
       </div>

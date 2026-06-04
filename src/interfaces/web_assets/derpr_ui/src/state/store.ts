@@ -167,9 +167,11 @@ export function usePortalStore() {
           derpr_user_text: trimmed,
           derpr_retry: retry,
           model: persona.name,
-          temperature: persona.temperature,
-          top_p: persona.top_p,
-          top_k: persona.top_k,
+          // null = persona leaves it unset; omit so the engine uses its own
+          // default rather than forwarding a literal null.
+          temperature: persona.temperature ?? undefined,
+          top_p: persona.top_p ?? undefined,
+          top_k: persona.top_k ?? undefined,
           max_tokens: persona.max_tokens,
           rep_pen: persona.kobold_extras.rep_pen,
           min_p: persona.kobold_extras.min_p,

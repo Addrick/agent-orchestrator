@@ -11,6 +11,17 @@ export function fmtTok(n: number): string {
   return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n)
 }
 
+/** Display label for a tool_policy. The live engine omits `mode` and exposes
+ *  `default` ('deny'|'allow'|'ask') instead; fall back to that. */
+export function policyLabel(
+  tp?: { mode?: string; default?: string } | null,
+): string {
+  if (!tp) return '—'
+  if (tp.mode) return tp.mode
+  if (tp.default) return tp.default.toUpperCase()
+  return '—'
+}
+
 /** Cheap client-side estimate — DEMO/budget-only. Production token counts must
  *  come from POST /api/extra/tokencount or the /assemble payload (S4/S5). */
 export function estimateTokens(s: string): number {

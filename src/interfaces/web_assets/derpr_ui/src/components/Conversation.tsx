@@ -1,5 +1,5 @@
 import type { PortalStore } from '../state/store'
-import { splitThink } from '../state/util'
+import { splitThink, policyLabel } from '../state/util'
 import { MessageRow } from './MessageRow'
 import { StreamRow } from './StreamRow'
 import { BudgetBar } from './BudgetBar'
@@ -55,7 +55,7 @@ export function Conversation({ store }: { store: PortalStore }) {
             </span>
             <span className="chip">
               <span className="dot" />
-              {persona.tool_policy.mode}
+              {policyLabel(persona.tool_policy)}
             </span>
             {persona.security_blocked && (
               <span className="chip blocked">security-blocked</span>

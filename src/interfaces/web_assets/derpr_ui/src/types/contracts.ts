@@ -32,7 +32,13 @@ export interface TranscriptResponse {
 
 // ---- GET /api/v1/persona/{name} ----
 export interface ToolPolicy {
-  mode: string // CONFIRM | AUTO | ...
+  // The live engine returns {default, allow, ask, ...}; there is NO `mode`
+  // field (the handoff contract was wrong about that). Keep `mode` optional
+  // for forward-compat and derive a display label from `default` otherwise.
+  mode?: string
+  default?: string // 'deny' | 'allow' | 'ask'
+  allow?: string[]
+  ask?: string[]
   [k: string]: unknown
 }
 
@@ -56,18 +62,20 @@ export interface Persona {
   prompt: string
   // base params
   model_name: string
-  temperature: number
+  // Optional base params are null on personas that don't set them (the live
+  // engine returns null, unlike the fully-populated mock).
+  temperature: number | null
   max_tokens: number
   history_messages: number
-  thinking_level: string
+  thinking_level: string | null
   memory_mode: string
   max_context_tokens: number
-  chat_template: string
-  tool_policy: ToolPolicy
+  chat_template: string | null
+  tool_policy: ToolPolicy | null
   enabled_tools: string[]
   // kobold-only
-  top_p: number
-  top_k: number
+  top_p: number | null
+  top_k: number | null
   instruct_tags: Record<string, string> | null
   kobold_extras: KoboldExtras
   // security
