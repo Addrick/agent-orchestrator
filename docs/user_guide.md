@@ -78,6 +78,8 @@ Saving from the Inference Matrix persists the `memory_mode` to the backend. The 
 
 **Editing and deleting messages (Phase 2.4):** Editing a portal turn from the inline edit UI propagates the new content to the DERPR DB via `PATCH /api/v1/interaction/{id}`. The L0 embedding is invalidated on edit so the next batch from `MemoryAgent` re-encodes against the updated text; the row is also re-queued for L1 summarization (`parent_summary_id` is cleared). Saving an empty edit deletes the message: a soft-suppression flag is recorded server-side via `DELETE /api/v1/interaction/{id}`, after which the row no longer appears in subsequent `kobold_export`s, sliding-window history, or LTM retrieval. Reply chains are left intact (no nulling of `reply_to_id`); orphaned assistant turns whose paired user row was deleted still segment cleanly. Toggling the chevrons back and forth between two contents does not grow the archive — repeat-content swaps reuse the existing archive row instead of inserting a duplicate.
 
+**History contract (Phase 4.1):** Every turn on the `/chat/completions` stream now ends with a server-authored `event: derpr` frame carrying `{user_id, assistant_id, response_type, ephemeral_chunk_id}` — emitted even when a turn parks a write for confirmation (`assistant_id` is `null`, with a stable `ephemeral_chunk_id` for the pending-approval text), runs tools only, or produces no text. A companion `GET /api/v1/session/{persona}/transcript` returns the ordered conversation as identity-addressed chunks (each carries an `interaction_id`, or `ephemeral: true` for a not-yet-saved parked confirmation). Together these let a client address each message by its server identity instead of its position in the story, so edit/delete reliably target the right row even after a parked-write or tool-only turn. (This release is server-side only; the kobold-lite portal's own edit/delete still uses the older positional mapping until the Phase 4.2 stopgap re-syncs it from `/transcript`.)
+
 > The portal's normal generation path is the OpenAI-style `/chat/completions` route (KoboldCPP jinja mode). The kobold-native `/api/v1/generate` and `/api/extra/generate/stream` routes are still served by the adapter for clients that prefer per-token SSE; both proxy to KoboldCPP and log user/assistant turns under `channel="web_ui"` the same way the OAI route does. Token-by-token portal usage falls on the native streaming route.
 
 **Tool-enabled personas in the portal (tool revamp v1):** A persona with `enabled_tools` set can run over the portal SSE stream — token deltas and tool calls interleave in a single linear stream with no drain-and-restart. While the model is invoking a tool, the portal renders an inline collapsible block (using kobold-lite's existing `<think>` Reflective-Process pipeline) showing the tool name, JSON arguments, and the result/error. The block is streaming-only — the database stores the resolved assistant text without it, so reload / version-chevron / retry flows stay clean. CONFIRM-mode write-tool gating is unchanged; the portal currently runs autonomous, so write tools execute immediately. The adapter also emits structured `event: derpr-tool-start` / `event: derpr-tool-result` SSE frames carrying `{tool_name, arguments, call_id}` and `{call_id, result, error}` for portal-aware listeners (`window.derprOnToolStart` / `derprOnToolResult` hooks; latest payloads accumulate in `window.derpr_tool_calls[call_id]`).
@@ -101,7 +103,7 @@ All commands are entered as the message body when addressing a persona. Commands
 |-----------|-------|
 | `prompt` | Full system prompt text |
 | `model` | Current model name |
-| `models [vendor]` | Available models, optionally filtered by vendor (OpenAI, Google, Anthropic, Local) |
+| `models [vendor]` | Available models, optionally filtered by vendor (OpenAI, Google, Anthropic, Antigravity, Local) |
 | `personas` | All loaded persona names |
 | `context` | Conversation history limit (message count) |
 | `tokens` | Max response token limit |
@@ -153,6 +155,22 @@ All commands are entered as the message body when addressing a persona. Commands
 | `dump_context` | Full context dump as downloadable file (config, tools, conversation history) |
 | `help` | Show command list and active personas |
 | `update_models` | Refresh available model list from configuration |
+
+### Antigravity (`agy`) — OAuth-tier provider
+
+`agy-*` models (e.g. `set model agy-flash`) route through Google Antigravity's
+local `agy` CLI instead of an API. This runs on the user's authenticated
+**OAuth tier** (currently Gemini 3.5 Flash) rather than a metered API key, at the
+cost of a subprocess spawn per call (a few seconds of latency) and no image
+support. Each call is fully isolated (fresh prompt, throwaway working directory,
+`stdin` closed so it never blocks on a permission prompt).
+
+Tools work via an **inline protocol**: the engine injects the tool descriptions
+into the prompt and asks the model to emit a `<tool_call>{…}</tool_call>` block to
+request a tool. The engine parses that block and runs the tool through DERPR's
+normal tool loop — so persona tool policy, the read/write split, CONFIRM-mode
+approval, and untrusted-taint all apply exactly as they do for the other
+providers. The model never executes tools itself.
 
 ## Personas
 

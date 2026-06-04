@@ -98,6 +98,7 @@ To support multiple agents working concurrently, the following rules are mandato
 
 ### 3. Integration & QA
 - No task is considered "QA_READY" until `pytest` passes within its dedicated worktree.
+- Verify all CI/CD checks (including `pytest`, `flake8` lint, and `mypy` type check as defined in `.github/workflows/deploy.yml`) after finishing any commit-ready change.
 - Human approval is required for all merges to `main` or `develop`.
 - After merge, the worktree directory `worktrees/DP-XXX/` should be removed via `git worktree remove`.
 

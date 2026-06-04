@@ -4,10 +4,12 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from collections import defaultdict
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, AsyncIterator, Coroutine, Dict, List, Optional, Set, Tuple
+from typing import Any, AsyncGenerator, AsyncIterator, Coroutine, Dict, List, Optional, Set, Tuple
 
 from config import global_config
 from config.global_config import MAX_CACHED_API_REQUESTS, \
@@ -22,6 +24,7 @@ from src.generation_events import (
     DoneEvent as DoneEvent,
     ErrorEvent as ErrorEvent,
     GenerationEvent as GenerationEvent,
+    PendingConfirmationEvent as PendingConfirmationEvent,
     ResponseType as ResponseType,
     TokenEvent as TokenEvent,
     ToolCallResultEvent as ToolCallResultEvent,
@@ -33,7 +36,7 @@ from src.persona import Persona, MemoryMode
 from src.tools.definitions import MODEL_INCOMPATIBLE_TOOLS, get_tool_capabilities
 from src.tools.tool_loop import ToolLoop, _ApiPayloadEvent, _LoopFinishedEvent
 from src.tools.tool_manager import ToolManager, WebSearchHandler, MemoryRecallHandler
-from src.tools.turn_context import TurnContext, set_turn_context, reset_turn_context
+from src.tools.turn_context import TurnContext, turn_scope
 from src.utils.model_utils import get_model_list, get_model_prefix
 from src.utils.save_utils import load_personas_from_file, save_personas_to_file
 from src.utils.message_utils import strip_vertex_links
@@ -88,6 +91,35 @@ class PendingConfirmation:
     turn_tainted: bool = False
     audit_info: Optional[Dict[str, Any]] = None
     created_at: float = field(default_factory=time.time)
+    # Index into conversation_history where this turn's tool messages start.
+    # Passed to the resumed tool loop as history_start_override so the approved
+    # write and its result are captured into tool_context_json (and thus
+    # replayed on later turns) instead of being dropped.
+    tool_context_start: int = 0
+    # DP-130 history contract: stable handle for the rendered-but-unpersisted
+    # confirmation chunk. Surfaced as `ephemeral_chunk_id` in the SSE id-frame
+    # and the transcript projection, and as the correlation token an interactive
+    # surface (portal) sends back on approve/deny so a resume can be matched to
+    # *this* park. (Reconciles with the DP-127-engine confirm-modal `token`.)
+    token: str = field(default_factory=lambda: uuid.uuid4().hex)
+    # The parked confirmation's rendered text — projected as the ephemeral
+    # chunk's content so a fresh page load (transcript) can render the pending
+    # approval without a DB row.
+    confirmation_text: str = ""
+
+
+@dataclass
+class _ResumeState:
+    """Carries a resumed write-confirmation into the orchestration kernel.
+
+    `_orchestrate(resume=...)` re-enters with the parked turn instead of a
+    fresh request: it skips dev-command preprocessing, history build, and
+    user-turn logging, applies the operator's approve/deny decision to the
+    parked history, then drives the tool loop + persistence tail through the
+    same code path as a normal turn (DP-124).
+    """
+    pending: PendingConfirmation
+    approved: bool
 
 
 @dataclass
@@ -153,6 +185,10 @@ class ChatSystem:
 
         self.bot_logic: BotLogic = BotLogic(self)
         self.last_api_requests: Dict[str, Dict[str, Optional[Dict[str, Any]]]] = defaultdict(dict)
+        # Per-turn list of every LLM-call payload in the tool loop (reset at the
+        # first iteration of each turn). last_api_requests keeps only the final
+        # payload for back-compat; this preserves the whole loop for dump_history.
+        self.last_api_iterations: Dict[str, Dict[str, List[Dict[str, Any]]]] = defaultdict(dict)
         self.models_available: Dict[str, Any] = get_model_list() or {}
         self.background_tasks: Set[Coroutine[Any, Any, Any]] = set()
         self._pending_confirmations: Dict[Tuple[str, str], PendingConfirmation] = {}
@@ -181,8 +217,14 @@ class ChatSystem:
 
     def _store_api_request(self, user_identifier: str, persona_name: str,
                            payload: Dict[str, Any],
-                           tools_for_llm: Optional[List[Dict[str, Any]]] = None) -> None:
-        """Stores the last API request payload, evicting the oldest user entry if over capacity."""
+                           tools_for_llm: Optional[List[Dict[str, Any]]] = None,
+                           is_first_iteration: bool = False) -> None:
+        """Stores the last API request payload, evicting the oldest user entry if over capacity.
+
+        `is_first_iteration` marks the opening LLM call of a turn; it resets the
+        per-turn iteration list so dump_history shows the whole tool loop (one
+        payload per LLM call) rather than only the final iteration.
+        """
         if tools_for_llm is not None:
             payload["_tools_for_llm"] = tools_for_llm
         else:
@@ -190,9 +232,15 @@ class ChatSystem:
             if existing and "_tools_for_llm" in existing:
                 payload["_tools_for_llm"] = existing["_tools_for_llm"]
         self.last_api_requests[user_identifier][persona_name] = payload
+
+        if is_first_iteration:
+            self.last_api_iterations[user_identifier][persona_name] = []
+        self.last_api_iterations[user_identifier].setdefault(persona_name, []).append(payload)
+
         if len(self.last_api_requests) > MAX_CACHED_API_REQUESTS:
             oldest_key = next(iter(self.last_api_requests))
             del self.last_api_requests[oldest_key]
+            self.last_api_iterations.pop(oldest_key, None)
 
     def _format_raw_history_for_llm(self, raw_history: List[Dict[str, Any]], memory_mode: str,
                                     persona_name: str, server_id: Optional[str]) -> List[Dict[str, Any]]:
@@ -759,30 +807,55 @@ class ChatSystem:
             local_inference_config: Optional[Dict[str, Any]] = None,
             is_retry: bool = False,
             client_messages: Optional[List[Dict[str, Any]]] = None,
-    ) -> AsyncIterator[GenerationEvent]:
+            resume: Optional[_ResumeState] = None,
+    ) -> AsyncGenerator[GenerationEvent, None]:
         """Shared streaming kernel — single source of truth for the request
         pipeline. Yields TokenEvent for each text delta, terminal DoneEvent
         with final ids, or ErrorEvent on failure. Phase C kernel; both
         `generate_response` (collect-stream wrapper) and `stream_response`
         (portal entry) delegate here.
+
+        `resume` (DP-124) re-enters this kernel to continue a write that was
+        parked for confirmation: dev-command preprocessing, history build, and
+        user-turn logging are skipped; the parked history carries the turn and
+        the approve/deny decision is applied before the tool loop runs.
         """
         # 1. Dev command preprocessing — short-circuits before any LLM call.
-        command_result: Optional[Dict[str, Any]] = await self.bot_logic.preprocess_message(
-            persona_name, user_identifier, message
-        )
-        if command_result:
-            if command_result.get("mutated", False):
-                save_personas_to_file(self.personas, self.system_persona_names)
-            yield DoneEvent(
-                text=command_result["response"],
-                response_type=ResponseType.DEV_COMMAND,
+        #    Skipped on resume: there is no fresh user message to interpret.
+        if resume is None:
+            command_result: Optional[Dict[str, Any]] = await self.bot_logic.preprocess_message(
+                persona_name, user_identifier, message
             )
-            return
+            if command_result:
+                if command_result.get("mutated", False):
+                    save_personas_to_file(self.personas, self.system_persona_names)
+                yield DoneEvent(
+                    text=command_result["response"],
+                    response_type=ResponseType.DEV_COMMAND,
+                )
+                return
 
         persona: Optional[Persona] = self.personas.get(persona_name)
         if persona is None:
             yield DoneEvent(
                 text="Error: Persona not found.",
+                response_type=ResponseType.DEV_COMMAND,
+            )
+            return
+
+        # DP-128: a persona quarantined for an insecure tool composition is
+        # refused here — no LLM call, no tools — until its tools are fixed live.
+        # Dev commands (e.g. `set tools ...`) are handled above before this gate,
+        # so the operator can repair the persona in-band without a restart.
+        if persona.is_security_blocked():
+            reasons = persona.get_security_block_reasons()
+            detail = "\n".join(f" - {r}" for r in reasons)
+            yield DoneEvent(
+                text=(
+                    f"⚠️ Persona '{persona_name}' is quarantined (insecure tool "
+                    f"composition):\n{detail}\n"
+                    "Fix its tools in persona config to enable it."
+                ),
                 response_type=ResponseType.DEV_COMMAND,
             )
             return
@@ -796,127 +869,166 @@ class ChatSystem:
             client_messages=client_messages,
         )
 
+        # On resume the parked turn replaces the freshly-built request state:
+        # the conversation history already terminates in the assistant
+        # tool_calls message (+ any read results), and the tool/taint context
+        # carries over from when the write was parked.
+        if resume is not None:
+            ctx.conversation_history = resume.pending.conversation_history
+            ctx.tools_for_llm = resume.pending.tools_for_llm
+            ctx.turn_tainted = resume.pending.turn_tainted
+
         # DP-113: pin the active turn's scope so engine-side tools (e.g.
         # `recall_memory`) inherit persona/channel/user/server without those
-        # showing up as model-callable args.
-        _turn_token = set_turn_context(TurnContext(
+        # showing up as model-callable args. turn_scope guarantees the
+        # ContextVar is reset on *every* exit — post-loop exception, an
+        # early-breaking consumer (GeneratorExit at a suspended yield), or
+        # normal completion — so a stale scope never leaks into the next turn
+        # sharing the event-loop context.
+        with turn_scope(TurnContext(
             persona_name=persona_name,
             user_identifier=user_identifier,
             channel=channel,
             server_id=server_id,
-        ))
-
-        try:
-            await self._prepare_request(ctx, is_retry=is_retry)
-        except Exception as e:
-            logger.error(
-                f"_prepare_request failed for {user_identifier}: {e}", exc_info=True,
-            )
-            yield ErrorEvent(message="An internal error occurred while processing your request.")
-            reset_turn_context(_turn_token)
-            return
-
-        # 2. Log user turn (or archive for retry). Done after history is built
-        #    (so the freshly-inserted row doesn't show up twice) but before
-        #    the LLM call so the user row is always pinned even if the model
-        #    errors mid-flight.
-        user_ts = timestamp or datetime.now()
-        user_interaction_id, retry_assistant_id = self._log_user_turn(
-            is_retry=is_retry, persona_name=persona_name,
-            user_identifier=user_identifier, channel=channel,
-            user_display_name=user_display_name, message=message,
-            server_id=server_id, platform_message_id=platform_message_id,
-            timestamp=user_ts,
-        )
-
-        # DP-113: retain user turn through the backend boundary. Sqlite_legacy
-        # is a noop (batch SqliteConsolidator still drives consolidation); Hindsight
-        # enqueues fire-and-forget. Either way, retain_turn returns quickly
-        # and does not block the LLM call below.
-        if user_interaction_id is not None and message and message.strip():
-            await self._retain_turn_safe(
-                persona_name=persona_name, role="user", content=message,
-                user_identifier=user_identifier, channel=channel,
-                server_id=server_id, timestamp=user_ts,
-                interaction_id=user_interaction_id, untrusted=False,
-            )
-
-        # 3. Tool loop. ToolLoop owns iteration + tool dispatch; this
-        #    forwards Token / ToolCallStart / ToolCallResult events,
-        #    siphons api_payload into the request cache, and unpacks the
-        #    terminal _LoopFinishedEvent to drive CONFIRM-mode parking +
-        #    assistant persistence.
-        params = ctx.persona.get_generation_params().copy()
-        if ctx.local_inference_config:
-            params.merge_inference_config(ctx.local_inference_config)
-        params_first_iter = True
-        final_text = ""
-        response_type = ResponseType.LLM_GENERATION
-        tool_context_json: Optional[str] = None
-        accumulated_parts: List[str] = []
-        pending_writes: Optional[List[Dict[str, Any]]] = None
-        audit_info: Optional[Dict[str, Any]] = None
-
-        # Construct per-call so tests that swap `chat_system.text_engine`
-        # post-init still see the new engine; ToolLoop is stateless.
-        tool_loop = ToolLoop(self.text_engine, self.tool_manager)
-        try:
-            async for ev in tool_loop.run(
-                persona=ctx.persona,
-                conversation_history=ctx.conversation_history,
-                params=params,
-                tools=ctx.tools_for_llm,
-                local_inference_config=ctx.local_inference_config,
-                image_url=ctx.image_url,
-                turn_tainted=ctx.turn_tainted,
-                initial_taint_sources=ctx.taint_sources,
-            ):
-                if isinstance(ev, _ApiPayloadEvent):
-                    self._store_api_request(
-                        user_identifier, persona_name, ev.payload,
-                        tools_for_llm=ctx.tools_for_llm if params_first_iter else None,
+        )):
+            if resume is None:
+                try:
+                    await self._prepare_request(ctx, is_retry=is_retry)
+                except Exception as e:
+                    logger.error(
+                        f"_prepare_request failed for {user_identifier}: {e}", exc_info=True,
                     )
-                    params_first_iter = False
-                elif isinstance(ev, TokenEvent):
-                    accumulated_parts.append(ev.delta)
-                    yield ev
-                elif isinstance(ev, (ToolCallStartEvent, ToolCallResultEvent)):
-                    yield ev
-                elif isinstance(ev, ErrorEvent):
-                    yield ev
-                    reset_turn_context(_turn_token)
+                    yield ErrorEvent(message="An internal error occurred while processing your request.")
                     return
-                elif isinstance(ev, _LoopFinishedEvent):
-                    final_text = ev.final_text
-                    response_type = ev.response_type
-                    tool_context_json = ev.tool_context_json
-                    pending_writes = ev.pending_writes
-                    audit_info = ev.audit_info
-                    ctx.turn_tainted = ev.turn_tainted
-                    # Persist back to the conversation cache for stickiness
-                    taint_key = (ctx.user_identifier, ctx.persona_name, ctx.channel, ctx.server_id)
-                    self._conversation_taints[taint_key] = ev.turn_tainted
-        except asyncio.CancelledError:
-            # Client disconnect / abort. Flush whatever assistant text has
-            # accumulated so the row reflects what the user actually saw,
-            # then re-raise so the surrounding StreamingResponse aborts.
-            partial = "".join(accumulated_parts)
-            if partial.strip():
-                self._commit_or_update_assistant(
-                    persona_name=persona_name, user_identifier=user_identifier,
-                    channel=channel, server_id=server_id,
-                    final_text=partial,
-                    response_type=ResponseType.LLM_GENERATION,
-                    user_interaction_id=user_interaction_id,
-                    retry_assistant_id=retry_assistant_id,
-                    tool_context_json=None,
-                )
-            reset_turn_context(_turn_token)
-            raise
 
-        if pending_writes is not None:
-            self._pending_confirmations[(ctx.user_identifier, ctx.persona_name)] = (
-                PendingConfirmation(
+                # 2. Log user turn (or archive for retry). Done after history is built
+                #    (so the freshly-inserted row doesn't show up twice) but before
+                #    the LLM call so the user row is always pinned even if the model
+                #    errors mid-flight.
+                user_ts = timestamp or datetime.now()
+                user_interaction_id, retry_assistant_id = self._log_user_turn(
+                    is_retry=is_retry, persona_name=persona_name,
+                    user_identifier=user_identifier, channel=channel,
+                    user_display_name=user_display_name, message=message,
+                    server_id=server_id, platform_message_id=platform_message_id,
+                    timestamp=user_ts,
+                )
+
+                # DP-113: retain user turn through the backend boundary. Sqlite_legacy
+                # is a noop (batch SqliteConsolidator still drives consolidation); Hindsight
+                # enqueues fire-and-forget. Either way, retain_turn returns quickly
+                # and does not block the LLM call below.
+                if user_interaction_id is not None and message and message.strip():
+                    await self._retain_turn_safe(
+                        persona_name=persona_name, role="user", content=message,
+                        user_identifier=user_identifier, channel=channel,
+                        server_id=server_id, timestamp=user_ts,
+                        interaction_id=user_interaction_id, untrusted=False,
+                    )
+            else:
+                # 2'. Resume: no fresh user turn. Apply the operator's
+                #     approve/deny decision to the parked history (write results
+                #     land *before* the continuation) and log the audit
+                #     decision. Runs inside turn_scope so write-tool execution
+                #     inherits the persona/channel/user scope.
+                user_interaction_id = None
+                retry_assistant_id = None
+                try:
+                    await self._apply_resume_decision(resume, ctx)
+                except Exception as e:
+                    logger.error(
+                        f"Error resuming pending confirmation for {user_identifier}: {e}",
+                        exc_info=True,
+                    )
+                    yield ErrorEvent(
+                        message="An error occurred while processing the confirmed action.",
+                    )
+                    return
+
+            # 3. Tool loop. ToolLoop owns iteration + tool dispatch; this
+            #    forwards Token / ToolCallStart / ToolCallResult events,
+            #    siphons api_payload into the request cache, and unpacks the
+            #    terminal _LoopFinishedEvent to drive CONFIRM-mode parking +
+            #    assistant persistence.
+            params = ctx.persona.get_generation_params().copy()
+            if ctx.local_inference_config:
+                params.merge_inference_config(ctx.local_inference_config)
+            params_first_iter = True
+            final_text = ""
+            response_type = ResponseType.LLM_GENERATION
+            tool_context_json: Optional[str] = None
+            accumulated_parts: List[str] = []
+            pending_writes: Optional[List[Dict[str, Any]]] = None
+            audit_info: Optional[Dict[str, Any]] = None
+            tool_context_start: int = 0
+
+            # Construct per-call so tests that swap `chat_system.text_engine`
+            # post-init still see the new engine; ToolLoop is stateless.
+            tool_loop = ToolLoop(self.text_engine, self.tool_manager)
+            try:
+                async for ev in tool_loop.run(
+                    persona=ctx.persona,
+                    conversation_history=ctx.conversation_history,
+                    params=params,
+                    tools=ctx.tools_for_llm,
+                    local_inference_config=ctx.local_inference_config,
+                    image_url=ctx.image_url,
+                    turn_tainted=ctx.turn_tainted,
+                    initial_taint_sources=ctx.taint_sources,
+                    history_start_override=(
+                        resume.pending.tool_context_start if resume is not None else None
+                    ),
+                ):
+                    if isinstance(ev, _ApiPayloadEvent):
+                        self._store_api_request(
+                            user_identifier, persona_name, ev.payload,
+                            tools_for_llm=ctx.tools_for_llm if params_first_iter else None,
+                            is_first_iteration=params_first_iter,
+                        )
+                        params_first_iter = False
+                    elif isinstance(ev, TokenEvent):
+                        accumulated_parts.append(ev.delta)
+                        yield ev
+                    elif isinstance(ev, (ToolCallStartEvent, ToolCallResultEvent)):
+                        yield ev
+                    elif isinstance(ev, ErrorEvent):
+                        yield ev
+                        return
+                    elif isinstance(ev, _LoopFinishedEvent):
+                        final_text = ev.final_text
+                        response_type = ev.response_type
+                        tool_context_json = ev.tool_context_json
+                        pending_writes = ev.pending_writes
+                        audit_info = ev.audit_info
+                        tool_context_start = ev.tool_context_start
+                        ctx.turn_tainted = ev.turn_tainted
+                        # Persist back to the conversation cache for stickiness
+                        taint_key = (ctx.user_identifier, ctx.persona_name, ctx.channel, ctx.server_id)
+                        self._conversation_taints[taint_key] = ev.turn_tainted
+            except asyncio.CancelledError:
+                # Client disconnect / abort. Flush whatever assistant text has
+                # accumulated so the row reflects what the user actually saw,
+                # then re-raise so the surrounding StreamingResponse aborts.
+                partial = "".join(accumulated_parts)
+                if partial.strip():
+                    self._commit_or_update_assistant(
+                        persona_name=persona_name, user_identifier=user_identifier,
+                        channel=channel, server_id=server_id,
+                        final_text=partial,
+                        response_type=ResponseType.LLM_GENERATION,
+                        user_interaction_id=user_interaction_id,
+                        retry_assistant_id=retry_assistant_id,
+                        tool_context_json=None,
+                    )
+                raise
+
+            # DP-130 history contract: the ephemeral_chunk_id for this turn's
+            # rendered confirmation chunk. Non-None only on a parked turn — it is
+            # the parked PendingConfirmation's correlation token. Carried on the
+            # terminal DoneEvent so the id-frame can address the unpersisted chunk.
+            ephemeral_chunk_id: Optional[str] = None
+            if pending_writes is not None:
+                parked = PendingConfirmation(
                     write_calls=pending_writes,
                     conversation_history=ctx.conversation_history,
                     persona_name=ctx.persona_name,
@@ -926,46 +1038,61 @@ class ChatSystem:
                     server_id=ctx.server_id,
                     turn_tainted=ctx.turn_tainted,
                     audit_info=audit_info,
+                    tool_context_start=tool_context_start,
+                    confirmation_text=final_text if final_text else "",
                 )
-            )
-            # Phase 7: Log audit parking
-            self.memory_manager.log_audit_event(
-                event_type="audit_parked",
-                operator_id=ctx.user_identifier,
-                new_state="pending",
-                reason="Universal write-audit gate triggered",
-                metadata=audit_info
+                self._pending_confirmations[(ctx.user_identifier, ctx.persona_name)] = parked
+                ephemeral_chunk_id = parked.token
+                # Phase 7: Log audit parking
+                self.memory_manager.log_audit_event(
+                    event_type="audit_parked",
+                    operator_id=ctx.user_identifier,
+                    new_state="pending",
+                    reason="Universal write-audit gate triggered",
+                    metadata=audit_info
+                )
+                # Surface the park to interactive consumers (the portal) so they
+                # can render an approve/deny affordance and resume via the token.
+                # Emitted before the terminal DoneEvent; non-interactive callers
+                # (generate_response, the non-streaming resume drain) ignore it
+                # and rely on the DoneEvent text instead.
+                yield PendingConfirmationEvent(
+                    text=final_text,
+                    write_calls=pending_writes,
+                    persona_name=ctx.persona_name,
+                    token=parked.token,
+                    audit_info=audit_info,
+                )
+
+            # 4. Log/update assistant turn. Original text (including links) is preserved.
+            assistant_id = self._commit_or_update_assistant(
+                persona_name=persona_name, user_identifier=user_identifier,
+                channel=channel, server_id=server_id,
+                final_text=final_text, response_type=response_type,
+                user_interaction_id=user_interaction_id,
+                retry_assistant_id=retry_assistant_id,
+                tool_context_json=tool_context_json,
             )
 
-        # 4. Log/update assistant turn. Original text (including links) is preserved.
-        assistant_id = self._commit_or_update_assistant(
-            persona_name=persona_name, user_identifier=user_identifier,
-            channel=channel, server_id=server_id,
-            final_text=final_text, response_type=response_type,
-            user_interaction_id=user_interaction_id,
-            retry_assistant_id=retry_assistant_id,
-            tool_context_json=tool_context_json,
-        )
+            # DP-113: retain assistant turn through the backend boundary.
+            # Inherit ctx.turn_tainted so the untrusted bit reaches the
+            # store when the LLM consumed attacker-influenced tool output.
+            if assistant_id is not None and final_text and final_text.strip() \
+                    and response_type == ResponseType.LLM_GENERATION:
+                await self._retain_turn_safe(
+                    persona_name=persona_name, role="assistant", content=final_text,
+                    user_identifier=user_identifier, channel=channel,
+                    server_id=server_id, timestamp=datetime.now(),
+                    interaction_id=assistant_id, untrusted=ctx.turn_tainted,
+                )
 
-        # DP-113: retain assistant turn through the backend boundary.
-        # Inherit ctx.turn_tainted so the untrusted bit reaches the
-        # store when the LLM consumed attacker-influenced tool output.
-        if assistant_id is not None and final_text and final_text.strip() \
-                and response_type == ResponseType.LLM_GENERATION:
-            await self._retain_turn_safe(
-                persona_name=persona_name, role="assistant", content=final_text,
-                user_identifier=user_identifier, channel=channel,
-                server_id=server_id, timestamp=datetime.now(),
-                interaction_id=assistant_id, untrusted=ctx.turn_tainted,
+            yield DoneEvent(
+                text=final_text if final_text else "",
+                response_type=response_type,
+                assistant_id=assistant_id,
+                user_interaction_id=user_interaction_id,
+                ephemeral_chunk_id=ephemeral_chunk_id,
             )
-
-        yield DoneEvent(
-            text=final_text if final_text else "",
-            response_type=response_type,
-            assistant_id=assistant_id,
-            user_interaction_id=user_interaction_id,
-        )
-        reset_turn_context(_turn_token)
 
     async def stream_response(
             self,
@@ -990,7 +1117,11 @@ class ChatSystem:
         ToolLoop interleaves tool lifecycle events with token deltas in a
         single linear stream.
         """
-        async for ev in self._orchestrate(
+        # aclosing: if the consumer stops early (client disconnect, break),
+        # tearing down this generator must propagate aclose() into the inner
+        # _orchestrate so its turn_scope finally runs — a plain `async for`
+        # delegation leaves the sub-generator suspended and leaks the scope.
+        async with aclosing(self._orchestrate(
             persona_name=persona_name,
             user_identifier=user_identifier,
             channel=channel,
@@ -1004,8 +1135,9 @@ class ChatSystem:
             timestamp=timestamp,
             local_inference_config=local_inference_config,
             client_messages=client_messages,
-        ):
-            yield ev
+        )) as agen:
+            async for ev in agen:
+                yield ev
 
     async def generate_response(
             self,
@@ -1032,7 +1164,7 @@ class ChatSystem:
         response_type = ResponseType.DEV_COMMAND
         assistant_id: Optional[int] = None
         user_interaction_id: Optional[int] = None
-        async for ev in self._orchestrate(
+        async with aclosing(self._orchestrate(
             persona_name=persona_name,
             user_identifier=user_identifier,
             channel=channel,
@@ -1044,153 +1176,157 @@ class ChatSystem:
             platform_message_id=platform_message_id,
             timestamp=timestamp,
             local_inference_config=local_inference_config,
-        ):
-            if isinstance(ev, TokenEvent):
-                continue
-            if isinstance(ev, DoneEvent):
-                final_text = ev.text
-                response_type = ev.response_type
-                assistant_id = ev.assistant_id
-                user_interaction_id = ev.user_interaction_id
-            elif isinstance(ev, ErrorEvent):
-                final_text = ev.message
-                response_type = ResponseType.DEV_COMMAND
-                assistant_id = None
-                user_interaction_id = None
+        )) as agen:
+            async for ev in agen:
+                if isinstance(ev, TokenEvent):
+                    continue
+                if isinstance(ev, DoneEvent):
+                    final_text = ev.text
+                    response_type = ev.response_type
+                    assistant_id = ev.assistant_id
+                    user_interaction_id = ev.user_interaction_id
+                elif isinstance(ev, ErrorEvent):
+                    final_text = ev.message
+                    response_type = ResponseType.DEV_COMMAND
+                    assistant_id = None
+                    user_interaction_id = None
         return final_text, response_type, assistant_id, user_interaction_id
+
+    async def _apply_resume_decision(
+            self, resume: _ResumeState, ctx: RequestContext
+    ) -> None:
+        """Apply an approve/deny decision to the parked turn before continuation.
+
+        On approval the write calls execute and their results are appended to
+        the parked history (so they precede the model's continuation); denial
+        appends synthetic denial results instead. Either way the audit decision
+        is logged. Read-side taint is recomputed from the executed write calls
+        and folded into `ctx.turn_tainted` so the continuation loop inherits it.
+        """
+        pending = resume.pending
+        if resume.approved:
+            await self._execute_write_calls(pending.write_calls, ctx.conversation_history)
+            for wc in pending.write_calls:
+                wc_name = wc.get("name") or "unknown"
+                if get_tool_capabilities(wc_name).get("produces_untrusted"):
+                    ctx.turn_tainted = True
+            decision_state = "approved"
+            decision_reason = "Human approved tool execution"
+        else:
+            self._append_denied_tool_results(pending.write_calls, ctx.conversation_history)
+            decision_state = "denied"
+            decision_reason = "Human denied tool execution"
+
+        # Phase 7: Log audit decision
+        self.memory_manager.log_audit_event(
+            event_type="audit_decision",
+            operator_id=ctx.user_identifier,
+            prior_state="pending",
+            new_state=decision_state,
+            reason=decision_reason,
+            metadata={
+                "write_calls": pending.write_calls,
+                "audit_info": pending.audit_info,
+                "turn_tainted": ctx.turn_tainted,
+            },
+        )
+
+    async def stream_resume_confirmation(
+            self, user_identifier: str, persona_name: str, approved: bool,
+            *, expected_token: Optional[str] = None,
+    ) -> AsyncGenerator[GenerationEvent, None]:
+        """Streaming resume of a parked write — single source of truth for the
+        approve/deny continuation.
+
+        DP-124 re-enters the `_orchestrate` kernel with the parked turn so the
+        continuation runs the full tool loop, persists the assistant row on the
+        correct channel, and shares the single turn lifecycle (scope, taint
+        write-back, retain, terminal event). DP-127 makes this streaming so the
+        portal can render the continuation (and any *chained* confirmation) just
+        like a normal turn. The not-found / expired / persona-missing guards are
+        surfaced as a terminal DEV_COMMAND DoneEvent so every consumer renders
+        them uniformly.
+
+        `expected_token` (the portal path) rejects a resume whose token no longer
+        matches the live park — i.e. the model proposed a different write since.
+        It is validated *before* the park is consumed, so a stale request leaves
+        the real pending confirmation intact. Discord passes None and resumes by
+        (user, persona) alone.
+        """
+        key = (user_identifier, persona_name)
+        pending = self._pending_confirmations.get(key)
+
+        if not pending:
+            yield DoneEvent(
+                text="No pending confirmation found.",
+                response_type=ResponseType.DEV_COMMAND,
+            )
+            return
+
+        if expected_token is not None and pending.token != expected_token:
+            yield DoneEvent(
+                text="This confirmation is no longer valid. Please try again.",
+                response_type=ResponseType.DEV_COMMAND,
+            )
+            return
+
+        # Commit to acting on this park: remove it so a duplicate approve/deny
+        # (double-click, retried POST) can't execute the writes twice.
+        self._pending_confirmations.pop(key, None)
+
+        if time.time() - pending.created_at > PENDING_CONFIRMATION_TIMEOUT:
+            yield DoneEvent(
+                text="Confirmation expired. Please try again.",
+                response_type=ResponseType.DEV_COMMAND,
+            )
+            return
+
+        if pending.persona_name not in self.personas:
+            yield DoneEvent(
+                text="Error: Persona not found.",
+                response_type=ResponseType.DEV_COMMAND,
+            )
+            return
+
+        async with aclosing(self._orchestrate(
+            persona_name=pending.persona_name,
+            user_identifier=user_identifier,
+            channel=pending.channel,
+            message="",
+            server_id=pending.server_id,
+            image_url=pending.image_url,
+            resume=_ResumeState(pending=pending, approved=approved),
+        )) as agen:
+            async for ev in agen:
+                yield ev
 
     async def resume_pending_confirmation(
             self, user_identifier: str, persona_name: str, approved: bool
     ) -> Tuple[str, ResponseType, Optional[int], Optional[int]]:
-        """Resumes a tool execution that was paused for user confirmation."""
-        key = (user_identifier, persona_name)
-        pending = self._pending_confirmations.pop(key, None)
-
-        if not pending:
-            return "No pending confirmation found.", ResponseType.DEV_COMMAND, None, None
-
-        if time.time() - pending.created_at > PENDING_CONFIRMATION_TIMEOUT:
-            return "Confirmation expired. Please try again.", ResponseType.DEV_COMMAND, None, None
-
-        persona = self.personas.get(pending.persona_name)
-        if not persona:
-            return "Error: Persona not found.", ResponseType.DEV_COMMAND, None, None
-
-        conversation_history = pending.conversation_history
-
-        try:
-            taint_key = (user_identifier, persona.get_name(), pending.channel, pending.server_id)
-            turn_tainted = pending.turn_tainted
-
-            if approved:
-                await self._execute_write_calls(pending.write_calls, conversation_history)
-                # Update taint from write calls
-                for wc in pending.write_calls:
-                    wc_name = wc.get("name") or "unknown"
-                    if get_tool_capabilities(wc_name).get("produces_untrusted"):
-                        turn_tainted = True
-                
-                decision_state = "approved"
-                decision_reason = "Human approved tool execution"
-            else:
-                self._append_denied_tool_results(pending.write_calls, conversation_history)
-                decision_state = "denied"
-                decision_reason = "Human denied tool execution"
-
-            # Phase 7: Log audit decision
-            self.memory_manager.log_audit_event(
-                event_type="audit_decision",
-                operator_id=user_identifier,
-                prior_state="pending",
-                new_state=decision_state,
-                reason=decision_reason,
-                metadata={
-                    "write_calls": pending.write_calls,
-                    "audit_info": pending.audit_info,
-                    "turn_tainted": turn_tainted
-                }
-            )
-
-            # Drive ToolLoop to completion so the LLM can issue chained reads
-            # (e.g. read-back-after-write) or even re-park a fresh write. The
-            # old one-shot text_engine.generate_response silently dropped any
-            # response whose `type` was `tool_calls` instead of `text` — joy's
-            # post-update_ticket follow-up vanished that way.
-            params = persona.get_generation_params().copy()
-            tool_loop = ToolLoop(self.text_engine, self.tool_manager)
-            final_text = ""
-            response_type = ResponseType.LLM_GENERATION
-            new_pending_writes: Optional[List[Dict[str, Any]]] = None
-            new_audit_info: Optional[Dict[str, Any]] = None
-            api_payload_seen: Optional[Dict[str, Any]] = None
-
-            async for ev in tool_loop.run(
-                persona=persona,
-                conversation_history=conversation_history,
-                params=params,
-                tools=pending.tools_for_llm,
-                image_url=pending.image_url,
-                turn_tainted=turn_tainted,
-            ):
-                if isinstance(ev, TokenEvent):
-                    # Token deltas are aggregated into _LoopFinishedEvent.final_text by ToolLoop.
-                    pass
-                elif isinstance(ev, _ApiPayloadEvent):
-                    api_payload_seen = ev.payload
-                elif isinstance(ev, ErrorEvent):
-                    return ev.message, ResponseType.DEV_COMMAND, None, None
-                elif isinstance(ev, _LoopFinishedEvent):
-                    final_text = ev.final_text
+        """Non-streaming resume — drains `stream_resume_confirmation` into the
+        4-tuple Discord expects. Token validation is skipped (Discord keys the
+        confirmation by reaction on a specific message, so a stale token can't
+        arise the way it can over HTTP).
+        """
+        final_text = ""
+        response_type = ResponseType.DEV_COMMAND
+        assistant_id: Optional[int] = None
+        async with aclosing(self.stream_resume_confirmation(
+            user_identifier, persona_name, approved,
+        )) as agen:
+            async for ev in agen:
+                if isinstance(ev, (TokenEvent, ToolCallStartEvent,
+                                   ToolCallResultEvent, PendingConfirmationEvent)):
+                    continue
+                if isinstance(ev, DoneEvent):
+                    final_text = ev.text
                     response_type = ev.response_type
-                    new_pending_writes = ev.pending_writes
-                    new_audit_info = ev.audit_info
-                    turn_tainted = ev.turn_tainted
-
-            if api_payload_seen:
-                self._store_api_request(
-                    user_identifier, persona_name, api_payload_seen,
-                    tools_for_llm=pending.tools_for_llm,
-                )
-
-            # The LLM emitted another write — re-park for a second approval.
-            if new_pending_writes is not None:
-                self._pending_confirmations[(user_identifier, persona_name)] = PendingConfirmation(
-                    write_calls=new_pending_writes,
-                    conversation_history=conversation_history,
-                    persona_name=persona_name,
-                    tools_for_llm=pending.tools_for_llm,
-                    image_url=pending.image_url,
-                    channel=pending.channel,
-                    server_id=pending.server_id,
-                    turn_tainted=turn_tainted,
-                    audit_info=new_audit_info,
-                )
-                self.memory_manager.log_audit_event(
-                    event_type="audit_parked",
-                    operator_id=user_identifier,
-                    new_state="pending",
-                    reason="Universal write-audit gate triggered (resume)",
-                    metadata=new_audit_info,
-                )
-
-            assistant_id: Optional[int] = None
-            if final_text and final_text.strip() and response_type == ResponseType.LLM_GENERATION:
-                assistant_id = self.memory_manager.log_message(
-                    user_identifier=user_identifier, persona_name=persona_name,
-                    channel=pending.channel,
-                    author_role='assistant', author_name=persona_name,
-                    content=final_text, timestamp=datetime.now(),
-                )
-
-            # Persist taint bit
-            self._conversation_taints[taint_key] = turn_tainted
-
-            return final_text, response_type, assistant_id, None
-
-        except Exception as e:
-            logger.error(f"Error resuming pending confirmation for {user_identifier}: {e}", exc_info=True)
-            return ("An error occurred while processing the confirmed action.",
-                    ResponseType.DEV_COMMAND, None, None)
+                    assistant_id = ev.assistant_id
+                elif isinstance(ev, ErrorEvent):
+                    final_text = ev.message
+                    response_type = ResponseType.DEV_COMMAND
+                    assistant_id = None
+        return final_text, response_type, assistant_id, None
 
     async def startup(self) -> None:
         """Post-init async startup tasks (e.g. Hindsight memory bank provisioning)."""

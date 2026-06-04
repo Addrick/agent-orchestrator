@@ -10,7 +10,7 @@ continue to work unchanged.
 
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 
 class ResponseType(Enum):
@@ -28,17 +28,46 @@ class TokenEvent:
 
 @dataclass
 class DoneEvent:
-    """Terminal event for stream_response — final committed text + ids."""
+    """Terminal event for stream_response — final committed text + ids.
+
+    `ephemeral_chunk_id` (DP-130 history contract) is a stable handle for a
+    rendered-but-unpersisted chunk — the parked-confirmation text on a
+    PENDING_CONFIRMATION turn, where `assistant_id` is None. It lets a client
+    address that chunk without a DB id, and the server reconcile it on
+    approve/deny resume (it is the parked confirmation's correlation token).
+    None on normal turns (the chunk is addressed by `assistant_id` instead).
+    """
     text: str
     response_type: ResponseType
     assistant_id: Optional[int] = None
     user_interaction_id: Optional[int] = None
+    ephemeral_chunk_id: Optional[str] = None
 
 
 @dataclass
 class ErrorEvent:
     """Terminal event for stream_response when generation fails."""
     message: str
+
+
+@dataclass
+class PendingConfirmationEvent:
+    """One or more write-tool calls parked awaiting user approval (CONFIRM mode).
+
+    Yielded mid-stream by the orchestration kernel when a turn parks writes for
+    the universal write-audit gate, *before* the terminal DoneEvent. It carries
+    the structured write calls + audit metadata so an interactive surface (e.g.
+    the web portal) can render an approve/deny affordance, and a `token` that
+    correlates the park with the resume request — guarding against resuming a
+    stale park if the model proposed a new set of writes in the meantime.
+    `text` is the same human-readable summary the DoneEvent would carry, so a
+    non-interactive consumer can still display it.
+    """
+    text: str
+    write_calls: List[Dict[str, Any]]
+    persona_name: str
+    token: str
+    audit_info: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -69,4 +98,5 @@ class ToolCallResultEvent:
 GenerationEvent = Union[
     TokenEvent, DoneEvent, ErrorEvent,
     ToolCallStartEvent, ToolCallResultEvent,
+    PendingConfirmationEvent,
 ]

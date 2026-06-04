@@ -4,6 +4,10 @@ import json
 import logging
 import os
 import asyncio
+import re
+import shutil
+import tempfile
+import uuid
 from typing import Dict, Any, Optional, Tuple, List, Callable, AsyncIterator
 from contextlib import asynccontextmanager, AsyncExitStack
 
@@ -18,6 +22,7 @@ from config.global_config import (
     RATE_LIMIT_GEMINI_3_RPM,
     RATE_LIMIT_GEMMA_3_RPM, RATE_LIMIT_GEMMA_4_RPM,
     RATE_LIMIT_OPENAI_RPM, RATE_LIMIT_ANTHROPIC_RPM,
+    RATE_LIMIT_AGY_RPM,
 )
 # --- Provider-specific imports ---
 import base64
@@ -29,6 +34,8 @@ from google.genai.types import GenerateContentConfig, Tool, GoogleSearch, Candid
     FunctionDeclaration, Part, ThinkingConfig
 from src.utils.google_utils import process_grounding_metadata
 from src.generation_params import GenerationParams
+
+AGY_CALL_TIMEOUT_SECONDS = 120.0
 
 logger = logging.getLogger(__name__)
 
@@ -80,13 +87,15 @@ class TextEngine:
         self._gemma_4_rpm_limiter   = AsyncLimiter(max_rate=RATE_LIMIT_GEMMA_4_RPM,   time_period=60)
         self._openai_limiter        = AsyncLimiter(max_rate=RATE_LIMIT_OPENAI_RPM,    time_period=60)
         self._anthropic_limiter     = AsyncLimiter(max_rate=RATE_LIMIT_ANTHROPIC_RPM, time_period=60)
+        self._agy_limiter           = AsyncLimiter(max_rate=RATE_LIMIT_AGY_RPM,       time_period=60)
         logger.info(
             f"Rate limiters initialised — "
             f"Gemini 2.5: {RATE_LIMIT_GEMINI_25_RPM} RPM / {RATE_LIMIT_GEMINI_25_RPD} RPD | "
             f"Gemini 3.1: {RATE_LIMIT_GEMINI_3_RPM} RPM | "
             f"Gemma 3: {RATE_LIMIT_GEMMA_3_RPM} RPM | Gemma 4: {RATE_LIMIT_GEMMA_4_RPM} RPM | "
             f"OpenAI: {RATE_LIMIT_OPENAI_RPM} RPM | "
-            f"Anthropic: {RATE_LIMIT_ANTHROPIC_RPM} RPM"
+            f"Anthropic: {RATE_LIMIT_ANTHROPIC_RPM} RPM | "
+            f"AGY: {RATE_LIMIT_AGY_RPM} RPM"
         )
 
         self._initialize_env()
@@ -164,6 +173,8 @@ class TextEngine:
             return self._generate_google_response, [self._gemini_3_rpm_limiter]
         if "gemini" in model_name:
             return self._generate_google_response, [self._gemini_25_rpm_limiter, self._gemini_25_rpd_limiter]
+        if model_name.startswith("agy"):
+            return self._generate_agy_response, [self._agy_limiter]
         if model_name == 'local':
             return self._generate_local_response, []
         raise LLMCommunicationError(f"Error: Model '{model_name}' is not supported.")
@@ -424,6 +435,40 @@ class TextEngine:
             history = history[1:]
         return system_prompt, history
 
+    @staticmethod
+    def _render_agy_prompt(history: List[Dict[str, Any]]) -> str:
+        """Flatten a message history into a single role-tagged transcript for the
+        `agy` route.
+
+        The Antigravity SDK's `chat()` accepts only one user turn and offers no
+        API to seed prior assistant turns, while the engine is stateless and
+        rebuilds the full context on every call. We therefore render the entire
+        `history` — which already ends with the current user turn (see
+        `_extract_system_prompt`) — into one deterministic, auditable transcript
+        so `agy` contributes nothing of its own. This is also what lets the
+        engine's multi-turn tool loop work: a `tool`-role result from a prior
+        iteration is just another rendered line.
+
+        The system prompt is delivered separately via `CustomSystemInstructions`
+        and is intentionally not included here. `current_message["text"]` is a
+        duplicate of the final user turn already present in `history`, so it is
+        not appended (doing so would duplicate the last message).
+        """
+        lines: List[str] = []
+        for item in history:
+            role = item.get("role")
+            if role == "tool":
+                lines.append(f"Tool({item.get('name', 'unknown')}): {item.get('content', '')}")
+            elif role == "assistant":
+                if item.get("content"):
+                    lines.append(f"Assistant: {item['content']}")
+                for call in item.get("tool_calls", []) or []:
+                    args = json.dumps(call.get("arguments", {}), ensure_ascii=False)
+                    lines.append(f"Assistant (tool call {call.get('name', 'unknown')}): {args}")
+            else:  # user (and any unlabeled turn) renders as the user
+                lines.append(f"User: {item.get('content', '')}")
+        return "\n\n".join(lines)
+
     async def _download_image(self, image_url: str) -> Tuple[bytes, str]:
         """Downloads image, returns (raw_bytes, mime_type).
         Raises aiohttp.ClientError on failure."""
@@ -438,8 +483,10 @@ class TextEngine:
         self, system_prompt: str, history: List[Dict[str, Any]], image_url: Optional[str]
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """Returns (history_for_api, serializable_history)."""
-        history_for_api = [{'parts': [Part(text=system_prompt)]}]
-        serializable_history = [{'role': 'system', 'parts': [{'text': system_prompt}]}]
+        history_for_api = []
+        serializable_history = []
+        if system_prompt:
+            serializable_history.append({'role': 'system', 'parts': [{'text': system_prompt}]})
 
         for item in history:
             role = 'model' if item['role'] == 'assistant' else 'user'
@@ -579,6 +626,8 @@ class TextEngine:
         )
 
         content_config_for_api: Dict[str, Any] = {"safety_settings": self.google_safety_settings}
+        if system_prompt:
+            content_config_for_api['system_instruction'] = system_prompt
 
         api_tools, tool_config = self._build_google_tools(tools)
         if tool_config:
@@ -620,7 +669,7 @@ class TextEngine:
                 # Only emit the full traceback when verbose (DEBUG) logging is on;
                 # by default a single-line error is plenty for transient API errors.
                 logger.error(f"Google API error: {e}", exc_info=logger.isEnabledFor(logging.DEBUG))
-                
+
             raise LLMCommunicationError(f"An error occurred with Google API: {e}",
                                         api_payload=api_params_for_dumping, rate_limited=rate_limited) from e
 
@@ -671,6 +720,154 @@ class TextEngine:
             # CRITICAL: Always restore the original client to avoid breaking
             # subsequent calls to the actual OpenAI API.
             self.openai_client = original_openai_client
+
+    @staticmethod
+    def _render_agy_tool_protocol(tools: Optional[List[Dict[str, Any]]]) -> str:
+        if not tools:
+            return ""
+
+        protocol_desc = (
+            "You may request a tool by emitting EXACTLY "
+            "<tool_call>{\"name\": \"<tool_name>\", \"arguments\": {<json args>}}</tool_call> "
+            "as the last thing. Answer in plain text otherwise, and use no other tools/files/shell/web."
+        )
+
+        lines = [protocol_desc]
+        for t in tools:
+            func = t.get("function", {})
+            name = func.get("name", "")
+            description = func.get("description", "")
+            parameters = func.get("parameters", {})
+            lines.append(f"name: {name}, description: {description}, parameters: {parameters}")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _parse_agy_tool_call(text: str) -> Optional[List[Dict[str, Any]]]:
+        if not text:
+            return None
+        cleaned = re.sub(r"<SYSTEM_MESSAGE>.*?</SYSTEM_MESSAGE>", "", text, flags=re.DOTALL)
+        match = re.search(r"<tool_call>(.*?)</tool_call>", cleaned, flags=re.DOTALL)
+        if not match:
+            return None
+        inner = match.group(1).strip()
+        try:
+            parsed = json.loads(inner)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        if "name" not in parsed or "arguments" not in parsed:
+            return None
+        call_id = f"agy_{uuid.uuid4().hex}"
+        return [{
+            "id": call_id,
+            "name": parsed["name"],
+            "arguments": parsed["arguments"]
+        }]
+
+    async def _run_agy_cli(self, prompt: str, timeout: float = AGY_CALL_TIMEOUT_SECONDS) -> str:
+        binary = os.environ.get("ANTIGRAVITY_HARNESS_PATH") or shutil.which("agy")
+        if not binary:
+            raise LLMCommunicationError("Antigravity harness/agy binary not found.")
+
+        timeout_sec_str = f"{int(timeout) + 30}s"
+        args = ["--print-timeout", timeout_sec_str, "-p", prompt]
+
+        temp_dir = tempfile.mkdtemp()
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                binary,
+                *args,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=temp_dir,
+                start_new_session=True
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
+            except asyncio.TimeoutError as e:
+                raise LLMCommunicationError(f"agy CLI timed out after {timeout} seconds.") from e
+
+            if proc.returncode != 0:
+                stderr_excerpt = stderr.decode("utf-8", errors="replace").strip()
+                excerpt = stderr_excerpt[-200:] if len(stderr_excerpt) > 200 else stderr_excerpt
+                raise LLMCommunicationError(
+                    f"agy CLI failed with exit code {proc.returncode}. Stderr: {excerpt}"
+                )
+
+            return stdout.decode("utf-8", errors="replace")
+        finally:
+            if proc is not None:
+                try:
+                    import signal
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except Exception:
+                    pass
+
+            cli_dir = os.path.join(temp_dir, ".antigravitycli")
+            if os.path.isdir(cli_dir):
+                for f in os.listdir(cli_dir):
+                    p = os.path.join(cli_dir, f)
+                    if os.path.islink(p):
+                        try:
+                            target = os.readlink(p)
+                            if os.path.exists(target):
+                                os.remove(target)
+                        except Exception:
+                            pass
+
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    async def _generate_agy_response(
+        self, config: Dict[str, Any], history_object: Dict[str, Any], tools: Optional[List[Dict[str, Any]]] = None
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        system_prompt, history = self._extract_system_prompt(history_object)
+
+        prompt_parts = []
+        if system_prompt:
+            prompt_parts.append(system_prompt)
+
+        if tools:
+            rendered_tools = self._render_agy_tool_protocol(tools)
+            if rendered_tools:
+                prompt_parts.append(rendered_tools)
+
+        rendered_history = self._render_agy_prompt(history)
+        if rendered_history:
+            prompt_parts.append(rendered_history)
+
+        prompt = "\n\n".join(prompt_parts)
+
+        tool_names = []
+        if tools:
+            tool_names = [t["function"]["name"] for t in tools if "function" in t and "name" in t["function"]]
+
+        api_payload = {
+            "model": config.get("model_name"),
+            "prompt_chars": len(prompt),
+            "tools": tool_names,
+            "isolation": {
+                "stdin": "devnull",
+                "skip_permissions": False
+            }
+        }
+
+        try:
+            raw = await self._run_agy_cli(prompt)
+        except LLMCommunicationError as e:
+            if e.api_payload is None:
+                e.api_payload = api_payload
+            raise
+
+        calls = self._parse_agy_tool_call(raw)
+        if calls:
+            return {"type": "tool_calls", "calls": calls}, api_payload
+        else:
+            cleaned_content = re.sub(r"<SYSTEM_MESSAGE>.*?</SYSTEM_MESSAGE>", "", raw, flags=re.DOTALL).strip()
+            return {"type": "text", "content": cleaned_content}, api_payload
 
     # ------------------------------------------------------------------
     # Phase B — provider streaming surface

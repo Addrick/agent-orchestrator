@@ -63,6 +63,7 @@ class BotLogic:
             'max_context_tokens': self._what_max_context_tokens,
             'chat_template': self._what_chat_template,
             'tool_policy': self._what_tool_policy,
+            'security': self._what_security,
         }
         self.set_handlers = {
             'prompt': self._set_prompt,
@@ -482,6 +483,20 @@ class BotLogic:
         policy = persona.get_tool_policy()
         return f"Tool policy for '{persona.get_name()}': {json.dumps(policy.to_dict(), indent=2)}", False
 
+    def _what_security(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
+        """Report whether the persona is quarantined for an insecure tool
+        composition, and why. See DP-128."""
+        reasons = persona.get_security_block_reasons()
+        if not reasons:
+            return f"Persona '{persona.get_name()}' is not security-blocked.", False
+        detail = "\n".join(f" - {r}" for r in reasons)
+        return (
+            f"Persona '{persona.get_name()}' is QUARANTINED (insecure tool "
+            f"composition); generation is blocked until fixed:\n{detail}\n"
+            "Fix with `set tools <safe list>` or `set tool_policy <json>`.",
+            False,
+        )
+
 
     async def _handle_set(
             self,
@@ -501,6 +516,21 @@ class BotLogic:
                 result = await set_handler(args, persona)
             else:
                 result = set_handler(args, persona)
+
+            # DP-128: a live tool/policy edit re-runs security validation so the
+            # operator can clear (or trip) the quarantine without a restart. Done
+            # here — the operator-edit boundary — rather than in the pure setters,
+            # which internal callers use for many non-policy reasons.
+            message, mutated = result
+            if mutated and sub_command in ('tools', 'tool_policy'):
+                if persona.revalidate_security():
+                    reasons = "; ".join(persona.get_security_block_reasons())
+                    message = (
+                        f"{message}\n⚠️ Persona '{persona.get_name()}' is now QUARANTINED "
+                        f"(insecure tool composition): {reasons}. Generation is blocked "
+                        "until you scope its tools to a safe set."
+                    )
+                result = (message, mutated)
             return result
 
         if '.' in sub_command:
@@ -978,11 +1008,23 @@ class BotLogic:
         if not last_request:
             return f"{persona_name}: No previous request to analyze.", False
 
+        # Each entry is one LLM call in the last turn's tool loop (the messages
+        # grow as tool results accumulate). Falls back to the single last
+        # payload if the per-turn list isn't populated.
+        iterations = (
+            self.chat_system.last_api_iterations.get(user_identifier, {}).get(persona_name)
+            or [last_request]
+        )
+
         output_lines = [f"=== History Dump for {persona_name} ==="]
         self._dump_persona_config(output_lines, persona)
         self._dump_tools(output_lines, last_request.get('_tools_for_llm', []))
-        self._dump_api_config(output_lines, last_request)
-        self._dump_conversation(output_lines, last_request)
+
+        output_lines.append(f"\n--- Tool Loop: {len(iterations)} LLM call(s) this turn ---")
+        for idx, payload in enumerate(iterations):
+            output_lines.append(f"\n========== LLM Call {idx + 1} of {len(iterations)} ==========")
+            self._dump_api_config(output_lines, payload)
+            self._dump_conversation(output_lines, payload)
 
         file_content = "\n".join(output_lines)
         return f"FILE_RESPONSE::history_dump.txt::{file_content}", False

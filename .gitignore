@@ -2,6 +2,7 @@ stuff/
 .huggingface/
 /memory/
 .venv/
+.venv*/
 .idea/
 __pycache__/
 data/
@@ -43,3 +44,6 @@ eval_harnesses/results/*.log
 # Eval harness slice cache + transient seeder state
 .eval_cache/
 eval_harnesses/suites/memory_recall/fixtures/.test_persona_seeded.json
+
+# Local exploration artifacts (not for the public repo)
+scratch/

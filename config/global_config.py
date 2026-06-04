@@ -190,7 +190,7 @@ SEMANTIC_BACKEND = os.environ.get("SEMANTIC_BACKEND", "sqlite") # Literal["sqlit
 HINDSIGHT_URL = os.environ.get("HINDSIGHT_URL", "http://10.0.0.70:8888")
 HINDSIGHT_LLM_MODEL = os.environ.get("HINDSIGHT_LLM_MODEL", "qwen2.5-32b")
 
-LOCAL_LLM_URL = "http://omen:5001/v1"
+LOCAL_LLM_URL = os.environ.get("LOCAL_LLM_URL", "http://10.0.0.69:5001/v1")
 
 # =============================================================================
 # --- API Rate Limiting ---
@@ -215,6 +215,11 @@ RATE_LIMIT_GEMMA_4_TPR   = int(os.environ.get("RATE_LIMIT_GEMMA_4_RPD",   "25600
 # OpenAI and Anthropic — set generously; adjust if you hit 429s on those providers.
 RATE_LIMIT_OPENAI_RPM    = int(os.environ.get("RATE_LIMIT_OPENAI_RPM",    "60"))
 RATE_LIMIT_ANTHROPIC_RPM = int(os.environ.get("RATE_LIMIT_ANTHROPIC_RPM", "50"))
+
+# Antigravity (agy) local runtime — runs on the user's OAuth tier via the local
+# binary, so the ceiling is the OAuth account's, not a free API quota. Kept
+# conservative; the spawn-per-call cost is the practical limiter.
+RATE_LIMIT_AGY_RPM       = int(os.environ.get("RATE_LIMIT_AGY_RPM",       "15"))
 
 # Models
 EMBEDDING_MODEL = 'gemini-embedding-001'

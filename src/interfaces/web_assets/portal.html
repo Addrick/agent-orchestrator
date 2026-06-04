@@ -14,7 +14,12 @@ Current version indicated by LITEVER below.
 	<script id="init-config">
 	const LITEVER = 328;
 	const urlParams = new URLSearchParams(window.location.search);
-	if (window.location.port === "5003") {
+	// The DERPR adapter serving this page injects DERPR_PORTAL_TYPE_INJECTED
+	// (robust across SSH tunnels / reverse proxies). Fall back to port sniffing
+	// only when the page is opened directly without server-side injection.
+	if (window.DERPR_PORTAL_TYPE_INJECTED) {
+		window.DERPR_PORTAL_TYPE = window.DERPR_PORTAL_TYPE_INJECTED;
+	} else if (window.location.port === "5003") {
 		window.DERPR_PORTAL_TYPE = "engine";
 	} else if (window.location.port === "5002") {
 		window.DERPR_PORTAL_TYPE = "passthrough";
@@ -7514,6 +7519,16 @@ Current version indicated by LITEVER below.
 								// Assistant_id hydration handled by tee sniffer.
 								continue;
 							}
+							if (event.event === "derpr-confirm" && event.data && event.data.token) {
+								// DP-127: a write parked for CONFIRM-mode approval.
+								// The model emitted only a tool call (empty text), so
+								// pop an approve/deny modal; the choice resumes via
+								// POST /api/v1/persona/<persona>/confirm.
+								window._derpr_pending_confirm = event.data;
+								try { derprShowConfirm(event.data); }
+								catch (e) { console.error("derprShowConfirm failed", e); }
+								continue;
+							}
 							//for gemini
 							if (event.data && event.data.candidates && event.data.candidates.length>0) {
 								if(event.data.candidates[0].content && event.data.candidates[0].content.parts && event.data.candidates[0].content.parts.length>0)
@@ -8216,21 +8231,45 @@ Current version indicated by LITEVER below.
 	function attempt_connect(popup_aiselect = true)
 	{
 		if (localflag) {
-			document.getElementById("customapidropdown").value = 1;
-			localprotocol = "http://";
-			if(window.location.protocol.includes('https') && !is_using_web_lite())
-			{
-				localprotocol = "https://";
+			if (window.DERPR_PORTAL_TYPE === "engine") {
+				// DERPR engine portal: route generation through the OAI
+				// chat-completions endpoint (which runs the DERPR engine),
+				// NOT the native Kobold passthrough — the native /api/.../generate
+				// path forwards verbatim to LOCAL_LLM_URL and bypasses the engine.
+				// epchoice 2 + useoaichatcompl => POST {origin}/v1/chat/completions.
+				// Connect to the OAI endpoint SYNCHRONOUSLY here. The
+				// customapidropdown <select> options are populated/rebuilt during
+				// page init, so setting its value must happen in this synchronous
+				// pass (as the legacy Kobold path did) — deferring into an async
+				// callback races the rebuild, the value assignment is dropped, and
+				// connect_custom_endpoint reads epchoice="" and silently falls back
+				// to AI Horde. (DERPR exposes personas as the model list; the engine
+				// ignores the per-request model, so a model probe isn't needed.)
+				// Local mode strips the endpoint dropdown down to just KoboldCPP
+				// (value "1"); restore the full option list so we can select the
+				// OpenAI-compatible endpoint (value "2"). Must be synchronous here,
+				// while the options exist, before connect reads epchoice.
+				restore_endpoint_dropdowns();
+				let derpr_oai_ep = window.location.origin + "/v1";
+				document.getElementById("customapidropdown").value = 2;
+				document.getElementById("custom_oai_endpoint").value = derpr_oai_ep;
+				document.getElementById("custom_oai_key").value = "derpr";
+				document.getElementById("useoaichatcompl").checked = true;
+				connect_custom_endpoint();
+			} else {
+				document.getElementById("customapidropdown").value = 1;
+				localprotocol = "http://";
+				if(window.location.protocol.includes('https') && !is_using_web_lite())
+				{
+					localprotocol = "https://";
+				}
+				if(localmodekey)
+				{
+					document.getElementById("customkoboldkey").value = localmodekey;
+				}
+				document.getElementById("customkoboldendpoint").value = localprotocol + localmodehost + ":" + localmodeport + sublocalpathname;
+				connect_custom_endpoint();
 			}
-			if(localmodekey)
-			{
-				document.getElementById("customkoboldkey").value = localmodekey;
-			}
-			document.getElementById("customkoboldendpoint").value = localprotocol + localmodehost + ":" + localmodeport + sublocalpathname;
-			if (window.DERPR_PORTAL_TYPE) {
-				document.getElementById("useoaichatcompl").checked = (window.DERPR_PORTAL_TYPE === "engine");
-			}
-			connect_custom_endpoint();
 			document.getElementById("lastreq3").innerHTML = document.getElementById("lastreq2").innerHTML = document.getElementById("lastreq1").innerHTML =
 			`<a href="#" class="color_footer" onclick="msgbox('Source code is available at https://github.com/LostRuins/lite.koboldai.net \\nPlease report any bugs you find there.','Information')">KoboldAI Lite</a> v${LITEVER} Embedded`;
 			document.getElementById("lastreq1lp").innerHTML = document.getElementById("lastreq2lp").innerHTML =	document.getElementById("lastreq3lp").innerHTML = "";
@@ -32925,6 +32964,62 @@ Current version indicated by LITEVER below.
 		}
 	}
 
+	// DP-127: CONFIRM-mode write confirmation. When the engine parks a write it
+	// emits an `event: derpr-confirm` SSE frame (handled in the OAI stream
+	// dispatch); this pops an approve/deny modal built on the existing
+	// `msgboxYesNo` primitive. `payload.text` is the server-built human-readable
+	// summary (tool names, flags, taint warning), so we render it verbatim.
+	function derprShowConfirm(payload) {
+		if (!payload || !payload.token || !payload.persona) { return; }
+		const summary = payload.text
+			|| 'The assistant wants to perform a write action.';
+		const body = escape_html(summary).replace(/\n/g, '<br>');
+		msgboxYesNo(
+			body,
+			'Confirm action',
+			() => { derprResumeConfirm(payload.persona, payload.token, true); },
+			() => { derprResumeConfirm(payload.persona, payload.token, false); },
+			true,
+		);
+	}
+
+	// POST the approve/deny decision to the confirm route and refresh the
+	// conversation from DERPR's DB so the continuation (and the executed write's
+	// effects) appear. The continuation streams as SSE; we read it to completion
+	// so the engine finishes executing + persisting before the reload, and scan
+	// for a *chained* derpr-confirm (a continuation that itself parks a write).
+	async function derprResumeConfirm(persona, token, approved) {
+		try {
+			const res = await fetch(
+				`/api/v1/persona/${encodeURIComponent(persona)}/confirm`,
+				{
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ approved: approved, token: token }),
+				},
+			);
+			const raw = await res.text();
+			let chained = null;
+			for (const frame of raw.split(/\r?\n\r?\n/)) {
+				let etype = 'message';
+				const dataLines = [];
+				for (const line of frame.split(/\r?\n/)) {
+					if (line.startsWith('event:')) etype = line.slice(6).trim();
+					else if (line.startsWith('data:')) dataLines.push(line.slice(5).replace(/^ /, ''));
+				}
+				if (etype === 'derpr-confirm' && dataLines.length) {
+					try { chained = JSON.parse(dataLines.join('\n')); } catch (e) { /* ignore */ }
+				}
+			}
+			window._derpr_pending_confirm = null;
+			await loadDerprSession(persona);
+			if (chained && chained.token) { derprShowConfirm(chained); }
+		} catch (e) {
+			console.error('derpr confirm resume failed', e);
+			msgbox('Could not complete the confirmation. See console for details.');
+		}
+	}
+
 	async function onHistorySourceToggle() {
 		const toggle = document.getElementById('historySourceToggle');
 		const select = document.getElementById('personaSelectTopNav');
@@ -33265,6 +33360,33 @@ Current version indicated by LITEVER below.
 		}
 	}
 
+	// DP-131: rebuild window.derpr_interaction_ids as a faithful projection of the
+	// server transcript (DP-130 history contract). The transcript is
+	// gametext-aligned — one chunk per visible story row including the opening
+	// prompt and any trailing ephemeral parked-confirmation chunk — so its ids map
+	// 1:1 onto kobold's gametext_arr. A chunk that is not yet persisted
+	// (ephemeral parked write) projects to a `null` slot, which the edit/delete
+	// path already guards with `if (interactionId)`. This replaces the old
+	// incremental positional push that drifted on any turn without a paired
+	// (user_id, assistant_id) frame.
+	async function _derprResyncIds() {
+		const select = document.getElementById('personaSelectTopNav');
+		const persona = select && select.value;
+		if (!persona) return;
+		// Only re-sync sessions sourced from DERPR (not kobold-native).
+		if (localStorage.getItem('persona_history_source_' + persona) !== 'derpr') return;
+		try {
+			const res = await fetch(`/api/v1/session/${encodeURIComponent(persona)}/transcript`);
+			if (!res.ok) return;
+			const data = await res.json();
+			window.derpr_interaction_ids = (data.chunks || []).map(
+				c => (typeof c.interaction_id === 'number' ? c.interaction_id : null)
+			);
+		} catch (e) {
+			console.warn('DERPR id re-sync failed:', e);
+		}
+	}
+
 	// SSE interception: tee the /chat/completions response body so we can
 	// sniff for the `event: derpr` frame without disturbing kobold's reader.
 	(function() {
@@ -33295,6 +33417,13 @@ Current version indicated by LITEVER below.
 						}
 					}
 				} catch (e) { /* silent — kobold's branch still flows */ }
+				// DP-131: re-project the id array from the server transcript once the
+				// turn finishes. Robust to EVERY turn shape — normal, retry,
+				// tool-only, and parked CONFIRM writes — because it reads the
+				// authoritative gametext-aligned projection instead of incrementally
+				// pushing ids (which drifted whenever a turn emitted no paired
+				// (user_id, assistant_id) frame). See DP-130 history contract.
+				_derprResyncIds();
 			})();
 
 			return new Response(a, {
@@ -33317,16 +33446,13 @@ Current version indicated by LITEVER below.
 			catch (e) { return; /* malformed frame — ignore */ }
 
 			if (ev === 'derpr') {
+				// Chevron (retry/redo) hydration only. The interaction-id array is
+				// NO LONGER maintained here: DP-131 re-projects it from
+				// /transcript after the stream ends (_derprResyncIds), so the
+				// drift-prone positional push that broke on parked/tool-only turns
+				// is gone. The frame is still emitted on every turn (DP-130).
 				if (payload.assistant_id) {
 					_derprHydrateVersions(payload.assistant_id);
-					// If we have a user_id, it's a new turn (User + Assistant)
-					if (payload.user_id) {
-						window.derpr_interaction_ids.push(payload.user_id);
-						window.derpr_interaction_ids.push(payload.assistant_id);
-					} else {
-						// Retry path: update the last assistant ID slot
-						window.derpr_interaction_ids[window.derpr_interaction_ids.length - 1] = payload.assistant_id;
-					}
 				}
 				return;
 			}
@@ -33443,13 +33569,16 @@ Current version indicated by LITEVER below.
 		
 		if (interactionId) {
 			if (wasEmpty && !allow_blank) {
-				// Deletion path: sync the ID array to match gametext_arr shrinkage,
-				// then soft-suppress on the server (filtered from future history /
-				// retrieval / kobold_export).
-				window.derpr_interaction_ids.splice(modified_turn, 1);
+				// Deletion path: soft-suppress on the server (filtered from future
+				// history / retrieval / transcript / kobold_export), then re-project
+				// the id array from the transcript. DP-131: no manual positional
+				// splice — the suppressed row simply drops out of /transcript, so the
+				// re-sync realigns the array to the shrunken gametext_arr without any
+				// index arithmetic that could desync.
 				fetch(`/api/v1/interaction/${interactionId}`, {
 					method: 'DELETE'
-				}).catch(e => console.warn('Failed to propagate delete to DERPR:', e));
+				}).then(() => _derprResyncIds())
+				  .catch(e => console.warn('Failed to propagate delete to DERPR:', e));
 			} else {
 				// Update path: strip placeholders before persisting to DB
 				let cleaned = modified_message;

@@ -1,25 +1,31 @@
-# src/interfaces/kobold_adapter.py
+# src/interfaces/kobold_engine_adapter.py
+#
+# SECURITY: CodeQL py/stack-trace-exposure is suppressed for this file because
+# the kobold web UI is internal-only and tracebacks in responses aid debugging.
+# See memory/project/decisions/kobold_stack_trace_exposure.md for rationale.
+# If this UI ever becomes externally accessible, re-enable the rule (un-dismiss
+# the alerts in GitHub code scanning) and scrub tracebacks from all responses.
 
 import json
 import logging
 import os
-from typing import Any, AsyncIterator, Dict, Optional, List
+from typing import Any, AsyncIterator, Dict, Optional, List, Tuple
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
+from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
 import httpx
 import uvicorn
 import asyncio
 
 from config import global_config
 from src.chat_system import (
-    ChatSystem, DoneEvent, ErrorEvent, TokenEvent,
-    ToolCallResultEvent, ToolCallStartEvent,
+    ChatSystem, DoneEvent, ErrorEvent, GenerationEvent, PendingConfirmationEvent,
+    ResponseType, TokenEvent, ToolCallResultEvent, ToolCallStartEvent,
 )
-from src.interfaces.kobold_export import build_kobold_savefile
-from src.utils.model_utils import get_model_list
+from src.interfaces.kobold_export import build_kobold_savefile, build_transcript
+from src.interfaces.portal_render import render_portal_html
 from src.utils.save_utils import save_personas_to_file
 from src.interfaces._persona_patch import (
     _KNOWN_PATCH_KEYS_ENGINE as _KNOWN_PATCH_KEYS,
@@ -71,15 +77,13 @@ class KoboldEngineAdapter:
         self._setup_portal()
 
     def _setup_portal(self) -> None:
-        portal_path = os.path.join(os.path.dirname(__file__), "web_assets", "portal.html")
-
         @self.app.get("/portal")
-        async def get_portal() -> FileResponse:
-            return FileResponse(portal_path)
+        async def get_portal() -> HTMLResponse:
+            return HTMLResponse(render_portal_html("engine"))
 
         @self.app.get("/")
-        async def root_redirect() -> FileResponse:
-            return FileResponse(portal_path)
+        async def root_redirect() -> HTMLResponse:
+            return HTMLResponse(render_portal_html("engine"))
 
     def _setup_routes(self) -> None:
         @self.app.get("/api/v1/model")
@@ -146,6 +150,8 @@ class KoboldEngineAdapter:
                 "kobold_extras": get_kobold_extras_for_get(p),
                 "enabled_tools": p.get_enabled_tools(),
                 "tool_policy": p.get_tool_policy().to_dict(),
+                "security_blocked": p.is_security_blocked(),
+                "security_block_reasons": p.get_security_block_reasons(),
             }
 
         @self.app.get("/api/v1/session/{persona}/ltm_block")
@@ -171,7 +177,10 @@ class KoboldEngineAdapter:
 
         @self.app.get("/api/v1/models/list")
         async def list_all_models() -> Dict[str, Any]:
-            avail = get_model_list() or {}
+            # Source from the same in-memory list the `what models` command
+            # reads (chat_system.models_available), so the dropdown and the
+            # command never diverge. update_models refreshes both.
+            avail = self.chat_system.models_available or {}
             all_m = []
             for sub in avail.values():
                 if isinstance(sub, list):
@@ -208,6 +217,50 @@ class KoboldEngineAdapter:
                 save_personas_to_file(self.chat_system.personas, self.chat_system.system_persona_names)
             return {"response": result.get("response", ""), "mutated": bool(result.get("mutated"))}
 
+        @self.app.post("/api/v1/persona/{name}/confirm")
+        async def confirm_pending(name: str, request: Request) -> Any:
+            """Approve or deny a CONFIRM-mode write parked for persona `name`.
+
+            The portal calls this after a `derpr-confirm` SSE frame surfaces a
+            parked write. The continuation (write execution on approve, denial
+            results on deny, then the model's follow-up turn) streams back as
+            SSE using the same wire protocol as /v1/chat/completions — so any
+            chained confirmation re-surfaces as another `derpr-confirm` frame.
+
+            Body: {"approved": bool, "token": "<token from the frame>"}. The
+            token guards against resuming a stale park (model proposed different
+            writes since); omit or send empty to skip the check. The portal user
+            is always "portal", matching the park key (user, persona).
+            """
+            if name not in self.chat_system.personas:
+                return JSONResponse(status_code=404,
+                                    content={"error": f"Persona '{name}' not found"})
+            body = await request.json()
+            approved = bool(body.get("approved"))
+            token = body.get("token") or None
+
+            async def relay() -> AsyncIterator[bytes]:
+                async for ev in self.chat_system.stream_resume_confirmation(
+                    user_identifier="portal",
+                    persona_name=name,
+                    approved=approved,
+                    expected_token=token,
+                ):
+                    if await request.is_disconnected():
+                        return
+                    for _label, frame in self._event_to_sse(ev):
+                        yield frame
+
+            return StreamingResponse(
+                relay(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                    "Connection": "keep-alive",
+                },
+            )
+
         @self.app.get("/api/v1/session/{persona}/kobold_export")
         async def kobold_export(persona: str, max_turns: Optional[int] = None) -> Any:
             """Build a kobold-lite savefile from DERPR's global history for `persona`.
@@ -231,6 +284,60 @@ class KoboldEngineAdapter:
                 f"ids={len(savefile.get('interaction_ids', []))} skipped={skipped}"
             )
             return JSONResponse(content=savefile)
+
+        @self.app.get("/api/v1/session/{persona}/transcript")
+        async def session_transcript(persona: str, max_turns: Optional[int] = None) -> Any:
+            """DP-130 history contract — the authoritative transcript projection.
+
+            Returns `{"chunks": [...]}` where every chunk carries a
+            server-authored `interaction_id` (or `ephemeral=true` for a live
+            parked confirmation). This is the single re-sync source for the Lite
+            stopgap (DP-131) and the render source for the bespoke UI (DP-132+):
+            consumers address chunks by identity, never by story position, so
+            the id array can no longer drift on parked/tool-only/abort turns.
+
+            Mirrors `kobold_export`'s persona/global-history scoping (the portal
+            has no channel concept; `max_turns` defaults to the persona's
+            sliding-window size). Suppressed rows are already filtered upstream
+            by `get_global_history` (invariant C5).
+            """
+            if persona not in self.chat_system.personas:
+                return JSONResponse(status_code=404, content={"error": f"Persona '{persona}' not found"})
+
+            p = self.chat_system.personas[persona]
+            limit = max_turns if isinstance(max_turns, int) and max_turns > 0 else p.get_base_history_messages()
+            raw_history = await asyncio.to_thread(
+                self.chat_system.memory_manager.get_global_history, persona, limit
+            )
+            ids = [
+                m["interaction_id"] for m in raw_history
+                if isinstance(m.get("interaction_id"), int)
+            ]
+            ids_with_versions = await asyncio.to_thread(
+                self.chat_system.memory_manager.get_ids_with_versions, ids
+            )
+            # Surface a live parked confirmation (portal session) as a trailing
+            # ephemeral chunk so a fresh load renders the awaiting-approval text.
+            pending_map = getattr(self.chat_system, "_pending_confirmations", {})
+            pending_obj = pending_map.get(("portal", persona))
+            pending: Optional[Dict[str, Any]] = None
+            if pending_obj is not None:
+                pending = {
+                    "ephemeral_chunk_id": pending_obj.token,
+                    "content": pending_obj.confirmation_text,
+                    "tool_context": None,
+                }
+            transcript = build_transcript(
+                raw_history,
+                ids_with_versions=ids_with_versions,
+                pending=pending,
+            )
+            logger.info(
+                "transcript persona=%s limit=%s rows=%d chunks=%d pending=%s",
+                persona, limit, len(raw_history),
+                len(transcript["chunks"]), pending is not None,
+            )
+            return JSONResponse(content=transcript)
 
         @self.app.get("/api/v1/interaction/{interaction_id}/versions")
         async def list_interaction_versions(interaction_id: int) -> Any:
@@ -437,7 +544,8 @@ class KoboldEngineAdapter:
             prompt = data.get("prompt", "")
             user_interaction_id: Optional[int] = None
             if prompt and prompt.strip():
-                user_interaction_id = self._log_interaction(persona_name, "user", prompt)
+                clean_prompt = self._extract_last_user_turn(prompt)
+                user_interaction_id = self._log_interaction(persona_name, "user", clean_prompt)
             url = f"{_kobold_base_url()}/api/v1/generate"
             try:
                 r = await self._http.post(url, json=data)
@@ -468,7 +576,8 @@ class KoboldEngineAdapter:
             prompt: str = data.get("prompt") or ""
             user_interaction_id: Optional[int] = None
             if prompt.strip():
-                user_interaction_id = self._log_interaction(persona_name, "user", prompt)
+                clean_prompt = self._extract_last_user_turn(prompt)
+                user_interaction_id = self._log_interaction(persona_name, "user", clean_prompt)
 
             forward_body = {k: v for k, v in data.items() if k != "model"}
             url = f"{_kobold_base_url()}/api/extra/generate/stream"
@@ -710,71 +819,22 @@ class KoboldEngineAdapter:
 
                         if await request.is_disconnected():
                             return
-                        if isinstance(ev, TokenEvent):
-                            chunk = json.dumps({
-                                "object": "chat.completion.chunk",
-                                "choices": [{
-                                    "index": 0,
-                                    "delta": {"content": ev.delta},
-                                }],
-                            })
-                            out = f"data: {chunk}\n\n".encode("utf-8")
-                            _dump_write("TokenEvent", out)
-                            yield out
-                        elif isinstance(ev, ToolCallStartEvent):
-                            payload_obj: Dict[str, Any] = {
-                                "tool_name": ev.tool_name,
-                                "arguments": ev.arguments,
-                                "call_id": ev.call_id,
-                            }
-                            if ev.group_id is not None:
-                                payload_obj["group_id"] = ev.group_id
-                            payload = json.dumps(payload_obj)
-                            out = f"event: derpr-tool-start\ndata: {payload}\n\n".encode("utf-8")
-                            _dump_write("ToolCallStartEvent", out)
-                            yield out
-                        elif isinstance(ev, ToolCallResultEvent):
-                            payload_obj = {
-                                "call_id": ev.call_id,
-                                "tool_name": ev.tool_name,
-                                "result": ev.result,
-                                "error": ev.error,
-                            }
-                            if ev.group_id is not None:
-                                payload_obj["group_id"] = ev.group_id
-                            payload = json.dumps(payload_obj)
-                            out = f"event: derpr-tool-result\ndata: {payload}\n\n".encode("utf-8")
-                            _dump_write("ToolCallResultEvent", out)
-                            yield out
-                        elif isinstance(ev, DoneEvent):
-                            if dump_fh is not None:
-                                _dump_write(
-                                    "DoneEvent",
-                                    json.dumps({
-                                        "assistant_id": ev.assistant_id,
-                                        "user_interaction_id": ev.user_interaction_id,
-                                        "response_type": getattr(ev.response_type, "name", str(ev.response_type)),
-                                        "final_text_len": len(ev.text or ""),
-                                        "final_text_preview": (ev.text or "")[:500],
-                                    }, ensure_ascii=False).encode("utf-8"),
-                                )
-                            if ev.assistant_id is not None:
-                                frame = (
-                                    f"event: derpr\n"
-                                    f"data: {json.dumps({'assistant_id': ev.assistant_id, 'user_id': ev.user_interaction_id})}\n\n"
-                                )
-                                out = frame.encode("utf-8")
-                                _dump_write("derpr-id-frame", out)
-                                yield out
-                            out = b"data: [DONE]\n\n"
-                            _dump_write("DONE", out)
-                            yield out
-                        elif isinstance(ev, ErrorEvent):
-                            err = json.dumps({"error": {"message": ev.message}})
-                            out = f"data: {err}\n\n".encode("utf-8")
-                            _dump_write("ErrorEvent", out)
-                            yield out
-                            yield b"data: [DONE]\n\n"
+                        # Rich diagnostic dump for DoneEvent (dump-only, not a
+                        # wire frame) — preserved alongside the shared transcoder.
+                        if dump_fh is not None and isinstance(ev, DoneEvent):
+                            _dump_write(
+                                "DoneEvent",
+                                json.dumps({
+                                    "assistant_id": ev.assistant_id,
+                                    "user_interaction_id": ev.user_interaction_id,
+                                    "response_type": getattr(ev.response_type, "name", str(ev.response_type)),
+                                    "final_text_len": len(ev.text or ""),
+                                    "final_text_preview": (ev.text or "")[:500],
+                                }, ensure_ascii=False).encode("utf-8"),
+                            )
+                        for label, frame in self._event_to_sse(ev):
+                            _dump_write(label, frame)
+                            yield frame
                 except asyncio.CancelledError:
                     # Engine kernel flushes the partial assistant row on cancel.
                     _dump_write("CANCELLED", b"client disconnected / asyncio.CancelledError")
@@ -798,6 +858,102 @@ class KoboldEngineAdapter:
             )
 
     @staticmethod
+    def _event_to_sse(ev: GenerationEvent) -> List[Tuple[str, bytes]]:
+        """Transcode one generation event into labelled SSE wire frames.
+
+        Returns (debug_label, frame_bytes) pairs — usually one, but DoneEvent
+        and ErrorEvent emit several (optional content delta, id-frame, [DONE]).
+        Shared by the chat-completions stream and the confirm-resume stream so
+        both speak the same wire protocol; the label feeds the optional SSE dump.
+        """
+        frames: List[Tuple[str, bytes]] = []
+        if isinstance(ev, TokenEvent):
+            chunk = json.dumps({
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {"content": ev.delta}}],
+            })
+            frames.append(("TokenEvent", f"data: {chunk}\n\n".encode("utf-8")))
+        elif isinstance(ev, ToolCallStartEvent):
+            payload_obj: Dict[str, Any] = {
+                "tool_name": ev.tool_name,
+                "arguments": ev.arguments,
+                "call_id": ev.call_id,
+            }
+            if ev.group_id is not None:
+                payload_obj["group_id"] = ev.group_id
+            frames.append((
+                "ToolCallStartEvent",
+                f"event: derpr-tool-start\ndata: {json.dumps(payload_obj)}\n\n".encode("utf-8"),
+            ))
+        elif isinstance(ev, ToolCallResultEvent):
+            payload_obj = {
+                "call_id": ev.call_id,
+                "tool_name": ev.tool_name,
+                "result": ev.result,
+                "error": ev.error,
+            }
+            if ev.group_id is not None:
+                payload_obj["group_id"] = ev.group_id
+            frames.append((
+                "ToolCallResultEvent",
+                f"event: derpr-tool-result\ndata: {json.dumps(payload_obj)}\n\n".encode("utf-8"),
+            ))
+        elif isinstance(ev, PendingConfirmationEvent):
+            # A write parked for CONFIRM-mode approval. Carries the structured
+            # calls + a resume token so the portal can render approve/deny and
+            # POST back to /api/v1/persona/{name}/confirm. The terminal DoneEvent
+            # that follows ends the stream without echoing this text into the
+            # chat bubble — the modal is the canonical surface.
+            payload = json.dumps({
+                "text": ev.text,
+                "persona": ev.persona_name,
+                "token": ev.token,
+                "calls": [
+                    {
+                        "name": c.get("name"),
+                        "arguments": c.get("arguments", {}),
+                        "id": c.get("id"),
+                    }
+                    for c in ev.write_calls
+                ],
+                "audit_info": ev.audit_info,
+            })
+            frames.append((
+                "PendingConfirmationEvent",
+                f"event: derpr-confirm\ndata: {payload}\n\n".encode("utf-8"),
+            ))
+        elif isinstance(ev, DoneEvent):
+            # Dev-command responses carry their full text on the DoneEvent and
+            # emit no TokenEvents (no LLM call), so unlike LLM turns the text was
+            # never streamed. Transcode it as a content delta here or the portal
+            # shows a blank reply even though the command ran + persisted.
+            if ev.response_type == ResponseType.DEV_COMMAND and ev.text:
+                cmd_chunk = json.dumps({
+                    "object": "chat.completion.chunk",
+                    "choices": [{"index": 0, "delta": {"content": ev.text}}],
+                })
+                frames.append(("DevCommandText", f"data: {cmd_chunk}\n\n".encode("utf-8")))
+            # DP-130 history contract (C3): emit the `event: derpr` id-frame on
+            # EVERY terminal turn — including parked writes (assistant_id=None),
+            # tool-only, and aborts. Carrying user_id, assistant_id (null when
+            # parked), response_type, and a stable ephemeral_chunk_id for the
+            # unpersisted confirmation chunk means the client never has to advance
+            # an id array positionally, so it can no longer drift vs the visible
+            # story. The transcript endpoint is the authoritative re-sync source.
+            rtype = getattr(ev.response_type, "name", str(ev.response_type))
+            frame = (
+                f"event: derpr\n"
+                f"data: {json.dumps({'user_id': ev.user_interaction_id, 'assistant_id': ev.assistant_id, 'response_type': rtype, 'ephemeral_chunk_id': ev.ephemeral_chunk_id})}\n\n"
+            )
+            frames.append(("derpr-id-frame", frame.encode("utf-8")))
+            frames.append(("DONE", b"data: [DONE]\n\n"))
+        elif isinstance(ev, ErrorEvent):
+            err = json.dumps({"error": {"message": ev.message}})
+            frames.append(("ErrorEvent", f"data: {err}\n\n".encode("utf-8")))
+            frames.append(("DONE", b"data: [DONE]\n\n"))
+        return frames
+
+    @staticmethod
     def _find_last_user_content(messages: List[Dict[str, Any]]) -> Optional[str]:
         """Scan messages in reverse for the last role=='user' entry with string content."""
         for msg in reversed(messages):
@@ -813,6 +969,92 @@ class KoboldEngineAdapter:
                 if joined:
                     return joined
         return None
+
+    def _extract_last_user_turn(self, prompt: str) -> str:
+        """Extract only the last user turn from a raw Kobold prompt string.
+
+        Supports standard instruct templates (Alpaca, ChatML, Llama-3, etc.).
+        Avoids nested or mangled wrappers by filtering out candidate tag matches.
+        """
+        if not prompt:
+            return ""
+
+        prompt_stripped = prompt.rstrip()
+
+        # Standard candidate tags (user_tag, assistant_tag)
+        candidates = [
+            ("### Instruction:", "### Response:"),
+            ("<|im_start|>user", "<|im_start|>assistant"),
+            ("<|start_header_id|>user<|end_header_id|>", "<|start_header_id|>assistant<|end_header_id|>"),
+            ("{{[INPUT]}}", "{{[OUTPUT]}}"),
+            ("[INST]", "[/INST]"),
+            ("USER:", "ASSISTANT:"),
+            ("User:", "Assistant:"),
+            ("Input:", "Output:"),
+            ("<|user|>", "<|assistant|>"),
+        ]
+
+        all_tags = []
+        for ut, at in candidates:
+            all_tags.append(ut)
+            all_tags.append(at)
+
+        best_message = None
+        best_assistant_idx = -1
+
+        for user_tag, assistant_tag in candidates:
+            idx_assistant = prompt_stripped.rfind(assistant_tag)
+            if idx_assistant == -1:
+                continue
+
+            # Find the user_tag before this assistant_tag
+            idx_user = prompt_stripped[:idx_assistant].rfind(user_tag)
+            if idx_user == -1:
+                continue
+
+            candidate_message = prompt_stripped[idx_user + len(user_tag) : idx_assistant].strip()
+
+            # Check if this candidate message contains any other tags (to avoid nested/mangled wrappers)
+            has_other_tags = any(tag in candidate_message for tag in all_tags)
+
+            if not has_other_tags:
+                if idx_assistant > best_assistant_idx:
+                    best_assistant_idx = idx_assistant
+                    best_message = candidate_message
+
+        if best_message is not None:
+            return best_message
+
+        # Fallback 1: No clean matching tags with assistant suffix, look for last user_tag with nothing after it
+        max_user_idx = -1
+        best_user_tag = None
+        for user_tag, _ in candidates:
+            idx_user = prompt_stripped.rfind(user_tag)
+            if idx_user > max_user_idx:
+                max_user_idx = idx_user
+                best_user_tag = user_tag
+
+        if best_user_tag is not None:
+            candidate_message = prompt_stripped[max_user_idx + len(best_user_tag):].strip()
+            if not any(tag in candidate_message for tag in all_tags):
+                return candidate_message
+
+        # Fallback 2: Retrieve the one with the highest assistant index even if it contains tags
+        best_assistant_idx = -1
+        best_message = None
+        for user_tag, assistant_tag in candidates:
+            idx_assistant = prompt_stripped.rfind(assistant_tag)
+            if idx_assistant != -1 and idx_assistant > best_assistant_idx:
+                idx_user = prompt_stripped[:idx_assistant].rfind(user_tag)
+                if idx_user != -1:
+                    best_assistant_idx = idx_assistant
+                    best_message = prompt_stripped[idx_user + len(user_tag) : idx_assistant].strip()
+
+        if best_message is not None:
+            return best_message
+
+        # Ultimate fallback: return the entire prompt (stripped)
+        return prompt_stripped
 
     def _log_interaction(self, persona_name: str, role: str, content: str) -> Optional[int]:
         """Log an interaction synchronously and return its interaction_id.

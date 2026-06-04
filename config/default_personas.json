@@ -103,11 +103,10 @@
             "top_k": null,
             "display_name_in_chat": false,
             "execution_mode": "CONFIRM",
-            "enabled_tools": [
-                "*"
-            ],
+            "enabled_tools": ["get_ticket_details", "create_ticket", "update_ticket", "search_tickets", "add_note_to_ticket", "merge_tickets", "search_user", "create_user", "update_user", "delete_user", "get_agent_status", "get_agent_history", "lookup_agent_history"],
             "memory_mode": "CHANNEL_ISOLATED",
-            "service_bindings": ["zammad", "agents"],
+            "service_bindings": ["zammad"],
+            "tool_policy": {"default": "deny", "allow": ["get_ticket_details", "create_ticket", "update_ticket", "search_tickets", "add_note_to_ticket", "merge_tickets", "search_user", "create_user", "update_user", "delete_user", "get_agent_status", "get_agent_history", "lookup_agent_history"], "ask": [], "capabilities_required": [], "explicit_overrides": []},
             "meta_visible": false
         }
     ],

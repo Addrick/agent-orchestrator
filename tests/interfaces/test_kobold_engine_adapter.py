@@ -24,7 +24,7 @@ from memory.memory_manager import MemoryManager
 from src.chat_system import ChatSystem
 from src.engine import TextEngine
 from src.interfaces.kobold_engine_adapter import KoboldEngineAdapter as KoboldAdapter
-from src.persona import Persona
+from src.persona import Persona, ExecutionMode
 
 
 def _make_adapter_with_seeded_db(persona_name: str = "test_persona",
@@ -429,6 +429,134 @@ def test_chat_completions_stream_emits_derpr_tool_frames():
     mm.close()
 
 
+def test_chat_completions_stream_emits_dev_command_text():
+    """Dev-command responses emit no TokenEvents (no LLM call), so the engine
+    carries the text on the DoneEvent(DEV_COMMAND). The SSE transcoder must
+    surface it as a content delta — otherwise the portal shows a blank reply
+    even though the command ran + persisted."""
+    adapter, mm, _, chat_system = _make_real_adapter()
+    chat_system.bot_logic.preprocess_message = AsyncMock(
+        return_value={"response": "Temperature for test_persona is set to 0.2.",
+                      "mutated": True},
+    )
+
+    body = _chat_body("what temp", stream=True)
+    body["derpr_user_text"] = "what temp"
+    with TestClient(adapter.app) as client:
+        with client.stream("POST", "/chat/completions", json=body) as r:
+            raw = b"".join(chunk for chunk in r.iter_raw())
+
+    text = raw.decode("utf-8")
+    # The command response is carried as a normal chat.completion.chunk delta.
+    chunk_match = re.search(r"data: (\{.*?\"delta\".*?\})\n\n", text)
+    assert chunk_match is not None, f"missing content delta in:\n{text}"
+    delta = json.loads(chunk_match.group(1))["choices"][0]["delta"]["content"]
+    assert delta == "Temperature for test_persona is set to 0.2."
+    assert text.index("delta") < text.index("[DONE]")
+    mm.close()
+
+
+def _confirm_stream_messages():
+    """Stateful stub: turn 1 proposes a write (parks), turn 2 (the resume
+    continuation) answers with text."""
+    state = {"n": 0}
+
+    async def stream_messages(*args, **kwargs):
+        state["n"] += 1
+        if state["n"] == 1:
+            yield {"type": "api_payload", "payload": {}}
+            yield {"type": "tool_calls", "calls": [
+                {"id": "w1", "name": "create_ticket",
+                 "arguments": {"title": "t", "body": "b"}}]}
+            yield {"type": "done", "full_text": ""}
+        else:
+            yield {"type": "api_payload", "payload": {}}
+            yield {"type": "text_delta", "text": "Ticket opened."}
+            yield {"type": "done", "full_text": "Ticket opened."}
+
+    return stream_messages
+
+
+def test_chat_completions_stream_emits_derpr_confirm_frame():
+    """DP-127: a write parked under CONFIRM surfaces an `event: derpr-confirm`
+    SSE frame carrying the structured calls + a resume token, before [DONE].
+    The write itself is NOT executed (parked for approval)."""
+    adapter, mm, persona, chat_system = _make_real_adapter(
+        stream_messages=_confirm_stream_messages(),
+    )
+    persona.set_execution_mode(ExecutionMode.CONFIRM)
+    persona.set_enabled_tools(["*"])
+    chat_system.tool_manager.execute_tool = AsyncMock(return_value={"ok": True})
+
+    body = _chat_body("open a ticket", stream=True)
+    body["derpr_user_text"] = "open a ticket"
+    with TestClient(adapter.app) as client:
+        with client.stream("POST", "/chat/completions", json=body) as r:
+            raw = b"".join(chunk for chunk in r.iter_raw())
+
+    text = raw.decode("utf-8")
+    m = re.search(r"event: derpr-confirm\ndata: (\{.*?\})\n\n", text)
+    assert m is not None, f"missing derpr-confirm frame in:\n{text}"
+    payload = json.loads(m.group(1))
+    assert payload["persona"] == "test_persona"
+    assert payload["token"], "confirm frame must carry a resume token"
+    assert payload["calls"][0]["name"] == "create_ticket"
+    assert payload["calls"][0]["arguments"] == {"title": "t", "body": "b"}
+    assert text.index("derpr-confirm") < text.index("[DONE]")
+
+    chat_system.tool_manager.execute_tool.assert_not_called()
+    assert ("portal", "test_persona") in chat_system._pending_confirmations
+    mm.close()
+
+
+def test_confirm_route_approves_and_streams_continuation():
+    """POST /api/v1/persona/{name}/confirm with approved + token executes the
+    parked write and streams the model's continuation back as SSE."""
+    adapter, mm, persona, chat_system = _make_real_adapter(
+        stream_messages=_confirm_stream_messages(),
+    )
+    persona.set_execution_mode(ExecutionMode.CONFIRM)
+    persona.set_enabled_tools(["*"])
+
+    executed = []
+
+    async def fake_execute(name, **kwargs):
+        executed.append(name)
+        return {"ok": True}
+    chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[method-assign]
+
+    body = _chat_body("open a ticket", stream=True)
+    body["derpr_user_text"] = "open a ticket"
+    with TestClient(adapter.app) as client:
+        with client.stream("POST", "/chat/completions", json=body) as r:
+            park_raw = b"".join(chunk for chunk in r.iter_raw())
+        token = json.loads(
+            re.search(r"event: derpr-confirm\ndata: (\{.*?\})\n\n",
+                      park_raw.decode("utf-8")).group(1)
+        )["token"]
+
+        with client.stream(
+            "POST", "/api/v1/persona/test_persona/confirm",
+            json={"approved": True, "token": token},
+        ) as r2:
+            resume_raw = b"".join(chunk for chunk in r2.iter_raw())
+
+    resume_text = resume_raw.decode("utf-8")
+    assert "create_ticket" in executed, "approved write was not executed"
+    assert "Ticket opened." in resume_text, "continuation text not streamed"
+    assert "[DONE]" in resume_text
+    assert ("portal", "test_persona") not in chat_system._pending_confirmations
+    mm.close()
+
+
+def test_confirm_route_unknown_persona_returns_404():
+    adapter, mm, _, _ = _make_real_adapter()
+    with TestClient(adapter.app) as client:
+        r = client.post("/api/v1/persona/nobody/confirm", json={"approved": True})
+    assert r.status_code == 404
+    mm.close()
+
+
 def test_chat_completions_stream_abort_flushes_partial():
     async def stream_messages_then_cancel(*args, **kwargs):
         yield {"type": "api_payload", "payload": {}}
@@ -589,14 +717,167 @@ def test_stream_emits_derpr_frame_before_done_with_assistant_id():
     mm.close()
 
 
-def test_stream_without_content_does_not_emit_derpr_frame():
-    # Engine emits a DoneEvent with assistant_id=None when no text was produced.
+def test_stream_empty_text_still_emits_derpr_frame_with_null_assistant_id():
+    # DP-130 (C1/C3): the id-frame is emitted on EVERY terminal turn. A turn
+    # that produced no assistant text commits no assistant row (assistant_id
+    # =None) but still emits the frame — carrying user_id, a null assistant_id,
+    # response_type, and a null ephemeral_chunk_id — so the client never has to
+    # infer "no frame" and the positional id array cannot drift.
     adapter, mm, _, _ = _make_real_adapter(deltas=(), commit_text="")
 
     with TestClient(adapter.app) as client:
         r = client.post("/chat/completions", json=_chat_body("hi", stream=True))
     assert r.status_code == 200
-    assert "event: derpr" not in r.text
+    body = r.text
+    assert "event: derpr" in body
+    assert body.index("event: derpr") < body.index("[DONE]")
+    m = re.search(r"event: derpr\ndata: (\{.*?\})\n\n", body)
+    assert m, f"derpr frame not parseable: {body!r}"
+    payload = json.loads(m.group(1))
+    assert payload["assistant_id"] is None
+    assert payload["ephemeral_chunk_id"] is None
+    assert payload["response_type"] == "LLM_GENERATION"
+    # The user turn was logged before the (empty) generation, so user_id is set.
+    rows = _fetch_portal_rows(mm, "test_persona")
+    user_row = next(r for r in rows if r["author_role"] == "user")
+    assert payload["user_id"] == user_row["interaction_id"]
+    mm.close()
+
+
+def test_stream_id_frame_carries_full_contract_shape():
+    # DP-130 frozen frame shape: user_id, assistant_id, response_type,
+    # ephemeral_chunk_id — all four keys present on a normal generation turn.
+    adapter, mm, _, _ = _make_real_adapter(deltas=("hello ", "world"))
+
+    with TestClient(adapter.app) as client:
+        r = client.post("/chat/completions", json=_chat_body("hi", stream=True))
+    body = r.text
+    m = re.search(r"event: derpr\ndata: (\{.*?\})\n\n", body)
+    assert m, f"derpr frame not parseable: {body!r}"
+    payload = json.loads(m.group(1))
+    assert set(payload.keys()) == {
+        "user_id", "assistant_id", "response_type", "ephemeral_chunk_id",
+    }
+    assert payload["response_type"] == "LLM_GENERATION"
+    assert payload["ephemeral_chunk_id"] is None
+    rows = _fetch_portal_rows(mm, "test_persona")
+    assistant_row = next(r for r in rows if r["author_role"] == "assistant")
+    user_row = next(r for r in rows if r["author_role"] == "user")
+    assert payload["assistant_id"] == assistant_row["interaction_id"]
+    assert payload["user_id"] == user_row["interaction_id"]
+    mm.close()
+
+
+def _parked_write_stream():
+    """stream_messages stub: model proposes a write tool (create_ticket) on the
+    first call. The universal write-audit gate parks it → PENDING_CONFIRMATION,
+    no assistant row, an ephemeral_chunk_id for the confirmation chunk."""
+    async def stream_messages(*args, **kwargs):
+        yield {"type": "api_payload", "payload": {}}
+        yield {"type": "text_delta", "text": "I'll create that ticket."}
+        yield {"type": "tool_calls", "calls": [
+            {"id": "call_w1", "name": "create_ticket",
+             "arguments": {"title": "test", "body": "x"}}
+        ]}
+        yield {"type": "done", "full_text": "I'll create that ticket."}
+    return stream_messages
+
+
+def test_parked_write_emits_id_frame_with_ephemeral_chunk_id():
+    # DP-130 (C3): a parked CONFIRM write emits an id-frame with user_id set,
+    # assistant_id null, response_type PENDING_CONFIRMATION, and a stable
+    # ephemeral_chunk_id for the confirmation chunk — the turn that previously
+    # emitted NO frame and drifted the portal's id array.
+    adapter, mm, persona, chat_system = _make_real_adapter(
+        stream_messages=_parked_write_stream(),
+    )
+    persona.set_enabled_tools(["*"])
+
+    body = _chat_body("make a ticket", stream=True)
+    body["derpr_user_text"] = "make a ticket"
+    with TestClient(adapter.app) as client:
+        r = client.post("/chat/completions", json=body)
+    body_text = r.text
+    assert "event: derpr" in body_text
+    assert body_text.index("event: derpr") < body_text.index("[DONE]")
+    m = re.search(r"event: derpr\ndata: (\{.*?\})\n\n", body_text)
+    assert m, f"derpr frame not parseable: {body_text!r}"
+    payload = json.loads(m.group(1))
+    assert payload["response_type"] == "PENDING_CONFIRMATION"
+    assert payload["assistant_id"] is None
+    assert payload["ephemeral_chunk_id"], "parked turn must carry an ephemeral_chunk_id"
+    rows = _fetch_portal_rows(mm, "test_persona")
+    user_row = next(r for r in rows if r["author_role"] == "user")
+    assert payload["user_id"] == user_row["interaction_id"]
+    # And the parked confirmation lives in the pending map under that token.
+    parked = chat_system._pending_confirmations[("portal", "test_persona")]
+    assert parked.token == payload["ephemeral_chunk_id"]
+    mm.close()
+
+
+# -------- DP-130 transcript projection (C1, C3-projection, C5) --------
+
+def test_transcript_unknown_persona_returns_404():
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/session/nobody/transcript")
+    assert r.status_code == 404
+    mm.close()
+
+
+def test_transcript_every_chunk_has_id_xor_ephemeral():
+    # C1: every chunk carries exactly one interaction_id OR ephemeral=true.
+    adapter, mm, _ = _make_adapter_with_seeded_db(context_length=10)
+    _seed_history(mm, "test_persona", turns=3)
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/session/test_persona/transcript")
+    assert r.status_code == 200
+    chunks = r.json()["chunks"]
+    assert len(chunks) == 6
+    for c in chunks:
+        has_id = c["interaction_id"] is not None
+        is_ephemeral = c["ephemeral"] is True
+        assert has_id != is_ephemeral, f"C1 violated: {c}"
+    mm.close()
+
+
+def test_transcript_excludes_suppressed_rows():
+    # C5: suppressed interactions never appear in the transcript.
+    adapter, mm, _ = _make_adapter_with_seeded_db(context_length=10)
+    _seed_history(mm, "test_persona", turns=2)
+    rows = mm.get_global_history("test_persona", limit=10)
+    victim = rows[0]["interaction_id"]
+    mm.suppress_interaction(victim)
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/session/test_persona/transcript")
+    ids = [c["interaction_id"] for c in r.json()["chunks"]]
+    assert victim not in ids
+    mm.close()
+
+
+def test_transcript_appends_live_pending_confirmation_as_ephemeral():
+    # C3 (projection side): a live parked confirmation surfaces as a trailing
+    # ephemeral chunk so a fresh load renders the awaiting-approval text.
+    from src.chat_system import PendingConfirmation
+
+    adapter, mm, persona, chat_system = _make_real_adapter()
+    _seed_history(mm, "test_persona", turns=1)
+    parked = PendingConfirmation(
+        write_calls=[{"name": "create_ticket", "arguments": {}}],
+        conversation_history=[], persona_name="test_persona",
+        tools_for_llm=[], image_url=None, channel="web_ui",
+        confirmation_text="I'll create that ticket.",
+    )
+    chat_system._pending_confirmations[("portal", "test_persona")] = parked
+
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/session/test_persona/transcript")
+    chunks = r.json()["chunks"]
+    last = chunks[-1]
+    assert last["ephemeral"] is True
+    assert last["interaction_id"] is None
+    assert last["ephemeral_chunk_id"] == parked.token
+    assert last["content"] == "I'll create that ticket."
     mm.close()
 
 
@@ -1473,3 +1754,236 @@ def test_dev_command_preprocess_error_surfaces_in_response():
     assert "boom" in r.json()["response"]
     mock_save.assert_not_called()
     mm.close()
+
+
+@patch('src.engine.genai.client.AsyncClient')
+def test_chat_completions_google_end_to_end_payload_structure(mock_google_client_class, monkeypatch):
+    """
+    Asserts a full input/output chain of the Web UI chat completions endpoint
+    for Google models. Verifies that the engine constructs the correct API
+    payload using system_instruction and excludes system prompt from contents.
+    """
+    import pytest
+    monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy_key_for_testing")
+    
+    # 1. Setup adapter with real ChatSystem, but with our Google model persona
+    mm = MemoryManager(db_path=":memory:")
+    mm.create_schema()
+
+    persona = Persona(
+        persona_name="test_google_persona",
+        model_name="gemini-2.5-flash",
+        prompt="Always speak like a pirate",
+        context_length=10,
+    )
+    
+    # 2. Mock Google Client response
+    mock_instance = mock_google_client_class.return_value
+    mock_part = MagicMock(text="Ahoy matey! I am ready.", function_call=None)
+    mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
+    mock_instance.models.generate_content = AsyncMock(
+        return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+    )
+    
+    text_engine = TextEngine()
+    
+    with patch('src.chat_system.load_personas_from_file', return_value={"test_google_persona": persona}):
+        chat_system = ChatSystem(memory_manager=mm, text_engine=text_engine)
+    chat_system.bot_logic.preprocess_message = AsyncMock(return_value=None)
+    
+    adapter = KoboldAdapter(chat_system=chat_system)
+    
+    # We need to set the current persona name on the adapter
+    adapter._get_current_persona_name = MagicMock(return_value="test_google_persona")
+    
+    # 3. Call endpoint
+    body = {
+        "messages": [
+            {"role": "user", "content": "Hello!"},
+            {"role": "assistant", "content": "", "prefix": True},
+        ],
+        "stream": False,
+        "derpr_user_text": "Hello there!",
+    }
+    
+    with TestClient(adapter.app) as client:
+        r = client.post("/chat/completions", json=body)
+        
+    # 4. Assert responses
+    assert r.status_code == 200
+    res_data = r.json()
+    assert res_data["choices"][0]["message"]["content"] == "Ahoy matey! I am ready."
+    
+    # 5. Assert constructed payload structure for Gemini AsyncClient
+    mock_instance.models.generate_content.assert_called_once()
+    call_kwargs = mock_instance.models.generate_content.call_args.kwargs
+    
+    # Assert system prompt is NOT in contents
+    contents = call_kwargs["contents"]
+    for turn in contents:
+        # Should not have any system role or system prompt content in parts
+        assert getattr(turn, "role", None) != "system"
+        for part in turn.get("parts", []):
+            assert part.text != "Always speak like a pirate"
+            
+    # Assert system prompt IS set in config as system_instruction
+    config = call_kwargs["config"]
+    assert config.system_instruction == "Always speak like a pirate"
+    
+    mm.close()
+
+
+def test_extract_last_user_turn():
+    adapter, _, _ = _make_adapter_with_seeded_db()
+
+    # 1. Clean Alpaca
+    alpaca_prompt = (
+        "System prompt\n\n"
+        "### Instruction:\n"
+        "Hello, how are you?\n"
+        "### Response:\n"
+        "I am doing well!\n\n"
+        "### Instruction:\n"
+        "What is the weather today?\n"
+        "### Response:\n"
+    )
+    assert adapter._extract_last_user_turn(alpaca_prompt) == "What is the weather today?"
+
+    # 2. Clean ChatML
+    chatml_prompt = (
+        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+        "<|im_start|>user\nHello!<|im_end|>\n"
+        "<|im_start|>assistant\nHi there!<|im_end|>\n"
+        "<|im_start|>user\nGive me a poem.<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+    assert adapter._extract_last_user_turn(chatml_prompt) == "Give me a poem.<|im_end|>"
+
+    # 3. Mangled/Nested Tags from issue description
+    mangled_prompt = (
+        "{{[INPUT]}}\n"
+        "success\n"
+        "### Instruction:\n"
+        "gfd\n"
+        "### Response:\n"
+        "success\n"
+        "### Instruction:\n"
+        "Test\n"
+        "### Response:\n"
+        "success\n"
+        "### Instruction:\n"
+        "test\n"
+        "### Response:\n"
+        "\n"
+        "### Instruction:\n"
+        "test\n"
+        "### Response:\n"
+        "\n"
+        "### Instruction:\n"
+        "cscs\n"
+        "### Response:\n"
+        "{{[OUTPUT]}}"
+    )
+    assert adapter._extract_last_user_turn(mangled_prompt) == "cscs"
+
+    # 4. Fallback: prompt with only user tag, no assistant tag
+    partial_prompt = (
+        "System prompt\n"
+        "### Instruction:\n"
+        "Just a partial input without response tag"
+    )
+    assert adapter._extract_last_user_turn(partial_prompt) == "Just a partial input without response tag"
+
+    # 5. Fallback: prompt with no known tags
+    plain_prompt = "Hello world this is a test prompt"
+    assert adapter._extract_last_user_turn(plain_prompt) == "Hello world this is a test prompt"
+
+
+def test_generate_stream_logs_clean_user_turn_with_templated_prompt(monkeypatch):
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+
+    chunks = [_kobold_native_chunk("success"), b"data: [DONE]\n\n"]
+    monkeypatch.setattr(adapter._http, "stream", lambda *a, **kw: _make_stream_ctx(chunks))
+
+    templated_prompt = (
+        "### Instruction:\n"
+        "Hello, how are you?\n"
+        "### Response:\n"
+        "I am doing well!\n\n"
+        "### Instruction:\n"
+        "What is the weather today?\n"
+        "### Response:\n"
+    )
+
+    with TestClient(adapter.app) as client:
+        r = client.post("/api/extra/generate/stream", json={"prompt": templated_prompt})
+    assert r.status_code == 200
+
+    rows = _fetch_portal_rows(mm, "test_persona")
+    # We expect exactly one user turn logged, containing ONLY the extracted last message,
+    # NOT the entire templated prompt containing history/tags.
+    user_rows = [r for r in rows if r["author_role"] == "user"]
+    assert len(user_rows) == 1
+    assert user_rows[0]["content"] == "What is the weather today?"
+    mm.close()
+
+
+def test_kobold_export_preserves_clean_history_without_nesting(monkeypatch):
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+
+    chunks = [_kobold_native_chunk("success"), b"data: [DONE]\n\n"]
+    monkeypatch.setattr(adapter._http, "stream", lambda *a, **kw: _make_stream_ctx(chunks))
+
+    # Simulate sending a prompt with templates
+    templated_prompt = (
+        "### Instruction:\n"
+        "test message\n"
+        "### Response:\n"
+    )
+
+    with TestClient(adapter.app) as client:
+        r_gen = client.post("/api/extra/generate/stream", json={"prompt": templated_prompt})
+        assert r_gen.status_code == 200
+        
+        # Now trigger the export endpoint
+        r_export = client.get("/api/v1/session/test_persona/kobold_export")
+        
+    assert r_export.status_code == 200
+    export_data = r_export.json()
+    
+    # In Kobold export format, the first turn goes to prompt, others go to actions.
+    # The prompt should be wrapped in Kobold placeholders only once: \n{{[INPUT]}}\ntest message\n{{[OUTPUT]}}\n
+    assert export_data["prompt"] == "\n{{[INPUT]}}\ntest message\n{{[OUTPUT]}}\n"
+    mm.close()
+
+
+# -------- /api/v1/models/list --------
+
+def test_models_list_sources_from_models_available():
+    """The dropdown endpoint must flatten chat_system.models_available — the
+    same in-memory list `what models` reads — so the two never diverge."""
+    chat_system = SimpleNamespace(
+        models_available={
+            "From OpenAI": ["gpt-5.1"],
+            "Antigravity (OAuth tier)": ["agy-flash"],
+            "Local": ["local"],
+        }
+    )
+    adapter = KoboldAdapter(chat_system=chat_system)
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/models/list")
+    assert r.status_code == 200
+    # Flattened, de-duped, sorted across all groups.
+    assert r.json()["models"] == ["agy-flash", "gpt-5.1", "local"]
+
+
+def test_models_list_empty_when_models_available_empty():
+    """No snapshot yet → empty list, not a crash."""
+    chat_system = SimpleNamespace(models_available={})
+    adapter = KoboldAdapter(chat_system=chat_system)
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/models/list")
+    assert r.status_code == 200
+    assert r.json()["models"] == []
+
+

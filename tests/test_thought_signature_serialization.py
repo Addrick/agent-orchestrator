@@ -75,8 +75,8 @@ async def test_thought_signature_reconstruction():
             "system prompt", history, None
         )
     
-    # The assistant turn is index 1 (0 is system)
-    model_turn = history_for_api[1]
+    # The assistant turn is index 0
+    model_turn = history_for_api[0]
     assert model_turn['role'] == 'model'
     # Check that it was decoded back to bytes
     assert model_turn['parts'][0].thought_signature == test_sig
