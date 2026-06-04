@@ -25,4 +25,4 @@ Extract `_run_tool_loop()` from ChatSystem into a shared `ToolLoop` class in `sr
 
 ## Status
 
-Not yet started. Adam indicated he'd likely rebuild the plan in a fresh conversation.
+**SHIPPED (reconciled 2026-06-04).** `ToolLoop` extracted into `src/tools/tool_loop.py` with an event-yielding `run()`; `_orchestrate` is now a thin forwarder. Delivered under DP-104, superseded by `tool_revamp_v1.md` (event-yielding shape). Retained as historical reference.

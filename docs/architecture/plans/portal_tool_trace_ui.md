@@ -1,5 +1,7 @@
 # Plan: Portal tool-trace UI (event-driven)
 
+> **SHIPPED (reconciled 2026-06-04).** `event: derpr-tool-start`/`derpr-tool-result` SSE frames in `kobold_engine_adapter.py` + `[[DERPR_TOOL:<call_id>]]` markers and renderer in `web_assets/portal.html`. (The `web_ui_v2.md` OAI-native `delta.tool_calls` migration that would retire the marker scheme is still pending.)
+
 DP-ID: TBD (was the original ask: "show tool traces in the web ui").
 
 ## Why

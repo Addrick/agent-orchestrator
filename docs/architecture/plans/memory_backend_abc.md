@@ -6,7 +6,7 @@ type: project
 
 ## Status
 
-Planning. Not yet implemented. Sibling to ongoing tool-security work — independent.
+**SHIPPED (reconciled 2026-06-04).** Implemented and merged to master via DP-108/109: `src/memory/backend/base.py` (ABC), `sqlite.py` (`SqliteSemanticBackend`), `hindsight.py` (`HindsightBackend`). Sibling to tool-security work — independent.
 
 ## Goal
 
