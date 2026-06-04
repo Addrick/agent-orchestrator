@@ -61,10 +61,24 @@ export function getPersona(name: string): Promise<Persona> {
   )
 }
 
+// Persona list for the picker. Personas come from /v1/models (OpenAI-style
+// data[].id), NOT /api/v1/models/list — the latter returns the LLM model
+// catalog (gpt-4o, claude-*, …), which would wrongly fill the picker with
+// ~150 model ids. The mock fallback returns persona-ish names.
+export function listPersonas(): Promise<string[]> {
+  return liveOr(
+    async () =>
+      (await getJSON<{ data: { id: string }[] }>(`/v1/models`)).data.map((m) => m.id),
+    () => [MOCK_PERSONA.name, 'gemini', 'claude'],
+  )
+}
+
+// The LLM model catalog (for a future model dropdown, S4). Distinct from the
+// persona list above.
 export function getModelList(): Promise<string[]> {
   return liveOr(
     async () => (await getJSON<{ models: string[] }>(`/api/v1/models/list`)).models,
-    () => [MOCK_PERSONA.name, 'gemini', 'claude'],
+    () => ['gpt-4o-mini', 'gemini-2.5-flash', 'claude-sonnet-4-5-20250929'],
   )
 }
 

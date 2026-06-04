@@ -109,7 +109,7 @@ export function usePortalStore() {
     ;(async () => {
       const [active, list] = await Promise.all([
         api.getActivePersona(),
-        api.getModelList(),
+        api.listPersonas(),
       ])
       setActivePersona(active)
       setPersonaList(list.length ? list : [active])
