@@ -12,10 +12,13 @@ from pathlib import Path
 import pytest
 
 from scripts.agy_config import (
+    DEFAULT_AGY_MODEL,
     DispatchConfig,
     DispatchConfigError,
     ensure_mcp_servers,
     load_dispatch_config,
+    prune_workspace_on_exit,
+    set_cli_model,
     stage_agents_md,
 )
 
@@ -189,3 +192,150 @@ def test_ensure_no_tmp_file_left_behind(tmp_path: Path) -> None:
     ensure_mcp_servers({"t": {"command": "python3"}}, config_path=cfg_path)
     leftovers = list(tmp_path.glob("*.dispatch-tmp"))
     assert leftovers == []
+
+
+# ---------- prune_workspace_on_exit ----------
+
+
+def _project_json(pid: str, folder: Path) -> dict:
+    """Shape of an agy --add-dir workspace record."""
+    return {
+        "id": pid,
+        "name": str(folder),
+        "projectResources": {"resources": [{"folderUri": folder.as_uri()}]},
+    }
+
+
+def test_prune_removes_only_new_workspace_for_worktree(tmp_path: Path) -> None:
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    # A pre-existing, unrelated real project that must survive.
+    other = projects / "keep.json"
+    _write(other, _project_json("keep", tmp_path / "some-other-repo"))
+
+    prune = prune_workspace_on_exit(worktree, projects_dir=projects)
+    # agy now registers the worktree as a one-off workspace mid-run.
+    ours = projects / "ours.json"
+    _write(ours, _project_json("ours", worktree))
+
+    prune()
+    assert not ours.exists()          # our one-off workspace pruned
+    assert other.exists()             # unrelated project untouched
+
+
+def test_prune_keeps_preexisting_workspace_for_same_worktree(tmp_path: Path) -> None:
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    # A workspace for this same path that already existed at snapshot time is
+    # the user's own — only entries created during the run are pruned.
+    pre = projects / "pre.json"
+    _write(pre, _project_json("pre", worktree))
+
+    prune = prune_workspace_on_exit(worktree, projects_dir=projects)
+    prune()
+    assert pre.exists()
+
+
+def test_prune_matches_git_folder_uri(tmp_path: Path) -> None:
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    prune = prune_workspace_on_exit(worktree, projects_dir=projects)
+    nested = projects / "git.json"
+    _write(nested, {
+        "id": "g",
+        "name": "label",
+        "projectResources": {
+            "resources": [{"gitFolder": {"folderUri": worktree.as_uri()}}]
+        },
+    })
+    prune()
+    assert not nested.exists()
+
+
+def test_prune_ignores_foreign_and_corrupt_files(tmp_path: Path) -> None:
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    prune = prune_workspace_on_exit(worktree, projects_dir=projects)
+    corrupt = projects / "corrupt.json"
+    corrupt.write_text("}{ not json", encoding="utf-8")
+    foreign = projects / "foreign.json"
+    _write(foreign, _project_json("f", tmp_path / "elsewhere"))
+    prune()
+    assert corrupt.exists() and foreign.exists()
+
+
+def test_prune_missing_projects_dir_is_noop(tmp_path: Path) -> None:
+    # No projects dir at all (fresh machine) must not raise.
+    prune = prune_workspace_on_exit(tmp_path / "wt", projects_dir=tmp_path / "nope")
+    prune()
+
+
+# ---------- set_cli_model ----------
+
+
+def test_set_cli_model_writes_and_restores_prior(tmp_path: Path) -> None:
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({
+        "colorScheme": "tokyo night", "model": "Gemini 3.5 Flash (Low)",
+    }), encoding="utf-8")
+    restore = set_cli_model(DispatchConfig(model="Gemini 3.5 Flash (High)"),
+                            settings_path=settings)
+    data = json.loads(settings.read_text())
+    assert data["model"] == "Gemini 3.5 Flash (High)"
+    assert data["colorScheme"] == "tokyo night"   # other keys preserved
+    restore()
+    assert json.loads(settings.read_text())["model"] == "Gemini 3.5 Flash (Low)"
+
+
+def test_set_cli_model_defaults_when_config_unset(tmp_path: Path) -> None:
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"model": "Gemini 3.1 Pro (High)"}), encoding="utf-8")
+    set_cli_model(DispatchConfig(), settings_path=settings)
+    assert json.loads(settings.read_text())["model"] == DEFAULT_AGY_MODEL
+
+
+def test_set_cli_model_restore_removes_key_when_absent(tmp_path: Path) -> None:
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"colorScheme": "x"}), encoding="utf-8")  # no model
+    restore = set_cli_model(DispatchConfig(model="Gemini 3.5 Flash (High)"),
+                            settings_path=settings)
+    assert json.loads(settings.read_text())["model"] == "Gemini 3.5 Flash (High)"
+    restore()
+    data = json.loads(settings.read_text())
+    assert "model" not in data           # restored to absent
+    assert data["colorScheme"] == "x"
+
+
+def test_set_cli_model_noop_when_already_target(tmp_path: Path) -> None:
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"model": DEFAULT_AGY_MODEL}), encoding="utf-8")
+    before = settings.read_text()
+    restore = set_cli_model(DispatchConfig(), settings_path=settings)
+    assert settings.read_text() == before   # untouched
+    restore()
+    assert settings.read_text() == before
+
+
+def test_set_cli_model_creates_missing_settings_file(tmp_path: Path) -> None:
+    settings = tmp_path / "nested" / "settings.json"
+    restore = set_cli_model(DispatchConfig(model="Gemini 3.5 Flash (High)"),
+                            settings_path=settings)
+    assert json.loads(settings.read_text())["model"] == "Gemini 3.5 Flash (High)"
+    restore()
+    # Was absent before -> key removed on restore (file may remain, key gone).
+    assert "model" not in json.loads(settings.read_text())
+
+
+def test_set_cli_model_recovers_from_corrupt_settings(tmp_path: Path) -> None:
+    settings = tmp_path / "settings.json"
+    settings.write_text("}{ not json", encoding="utf-8")
+    set_cli_model(DispatchConfig(model="Gemini 3.5 Flash (High)"), settings_path=settings)
+    assert json.loads(settings.read_text())["model"] == "Gemini 3.5 Flash (High)"
