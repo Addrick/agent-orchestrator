@@ -104,3 +104,22 @@ def fake_agy_spawner() -> Callable[..., Callable[[Path], subprocess.Popen]]:
         return spawn
 
     return factory
+
+
+@pytest.fixture(autouse=True)
+def _isolate_agy_global_state(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the agy dispatcher off the developer's real ~/.gemini state.
+
+    ``run_dispatch`` now writes the CLI model into the agy settings file and
+    prunes the Antigravity projects dir; without this, tests would mutate the
+    real machine config. Point both at throwaway tmp paths for every tools test.
+    """
+    base = tmp_path_factory.mktemp("agy_global")
+    monkeypatch.setattr(
+        "scripts.agy_config.DEFAULT_AGY_CLI_SETTINGS_PATH", base / "settings.json"
+    )
+    monkeypatch.setattr(
+        "scripts.agy_config.DEFAULT_PROJECTS_DIR", base / "projects"
+    )

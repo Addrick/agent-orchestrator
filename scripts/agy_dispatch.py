@@ -38,10 +38,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from scripts.agy_config import (
+    DEFAULT_AGY_MODEL,
     DispatchConfig,
     DispatchConfigError,
     ensure_mcp_servers,
     load_dispatch_config,
+    prune_workspace_on_exit,
+    set_cli_model,
     stage_agents_md,
 )
 from scripts.gemini_acp_dispatch import (  # reused verbatim — DP-119 core
@@ -86,16 +89,15 @@ def spawn_agy(
     worktree: Path,
     packet_text: str,
     wall_clock_seconds: float,
-    model: str | None = None,
 ) -> subprocess.Popen[str]:
     """Spawn ``agy -p`` in the worktree with the packet as its prompt.
 
     ``--dangerously-skip-permissions`` auto-approves agy's tool calls (the
     equivalent of the ACP auto-approve path), and ``--add-dir`` scopes the
     workspace to the worktree. ``--print-timeout`` is set above our wall-clock
-    so the outer cap wins. ``agy`` has no model-selection flag, so ``model`` is
-    accepted only for interface parity with the gemini dispatcher and ignored
-    here.
+    so the outer cap wins. Model selection is NOT a CLI flag — ``agy --model`` is
+    a no-op in print mode; the model is set in ``antigravity-cli/settings.json``
+    by ``set_cli_model`` before this spawn (see ``agy_config``).
     """
     binary = shutil.which("agy")
     if not binary:
@@ -148,18 +150,34 @@ def _log_stderr(event_log: StreamingEventLog, stderr_text: str) -> None:
             event_log.write({"_stderr": line})
 
 
+def _persist_raw_stdout(out_dir: Path, stdout_text: str) -> None:
+    """Write agy's full, uncleaned stdout to ``out_dir/stdout.txt``.
+
+    The parsed ``## Result`` block in ``summary.json`` is lossy (and absent on a
+    parse-failure); the full narration is the signal needed to tune packets and
+    debug runs. Written on every path (including partial output captured before a
+    timeout/cancel kill). Best-effort: an IO error here must not mask the run.
+    """
+    try:
+        (out_dir / "stdout.txt").write_text(stdout_text, encoding="utf-8")
+    except OSError:
+        pass
+
+
 def _drive_subprocess(
     proc: subprocess.Popen[str],
     event_log: StreamingEventLog,
     wall_clock_seconds: float,
     cancel_flag: threading.Event,
     start: float,
+    out_dir: Path,
 ) -> tuple[str, dict[str, Any] | None, str | None, float | None]:
     """Run one ``agy -p`` child with cancel + wall-clock monitoring.
 
     Mirrors the DP-119 ``_drive_prompt`` contract: returns
     ``(outer_stop, parsed, raw_message, elapsed_at_decision)`` where
-    ``elapsed_at_decision`` is None on the natural-completion path.
+    ``elapsed_at_decision`` is None on the natural-completion path. Always
+    persists the full raw stdout to ``out_dir/stdout.txt`` before returning.
     """
     result_holder: dict[str, Any] = {}
 
@@ -191,6 +209,7 @@ def _drive_subprocess(
 
     worker.join(timeout=_CANCEL_DRAIN_SECONDS)
     _log_stderr(event_log, result_holder.get("stderr") or "")
+    _persist_raw_stdout(out_dir, result_holder.get("stdout") or "")
 
     if outer_stop != "ok":
         return outer_stop, None, (result_holder.get("stdout") or None), elapsed_at_decision
@@ -213,17 +232,29 @@ def _apply_config(
 ) -> Callable[[], None]:
     """Apply config side effects before spawn; return a restore callable.
 
-    Stages ``AGENTS.md`` into the worktree (restored on teardown) and merges any
-    declared MCP servers into agy's global config. What was applied is recorded
-    to the event log. MCP merges are global and not torn down (tool capabilities
-    are stable across dispatches); only the worktree ``AGENTS.md`` is restored.
+    Stages ``AGENTS.md`` into the worktree (restored on teardown), sets the agy
+    CLI model for the run (restored on teardown), snapshots the Antigravity
+    projects dir so the worktree's one-off workspace can be pruned on teardown,
+    and merges any declared MCP servers into agy's global config. What was applied
+    is recorded to the event log. MCP merges are global and not torn down (tool
+    capabilities are stable across dispatches); the worktree ``AGENTS.md``, the
+    CLI model, and the one-off workspace JSON are.
     """
-    restore = stage_agents_md(worktree, config)
+    restore_agents = stage_agents_md(worktree, config)
     if config.agents_md is not None or config.agents_md_path is not None:
         event_log.write({"_config": "staged AGENTS.md into worktree"})
+    restore_model = set_cli_model(config)
+    event_log.write({"_config": "set cli model", "model": config.model or DEFAULT_AGY_MODEL})
+    prune_workspace = prune_workspace_on_exit(worktree)
     ensured = ensure_mcp_servers(config.mcp_servers)
     if ensured:
         event_log.write({"_config": "ensured mcp_servers", "servers": ensured})
+
+    def restore() -> None:
+        restore_agents()
+        restore_model()
+        prune_workspace()
+
     return restore
 
 
@@ -254,23 +285,21 @@ def run_dispatch(
     session_id: str,
     wall_clock_seconds: float,
     spawn_fn: Callable[[Path], subprocess.Popen[str]] | None = None,
-    model: str | None = None,
     config: DispatchConfig | None = None,
 ) -> int:
     """Execute one sprint attempt via ``agy -p``. Returns the process exit code.
 
     Test seam: ``spawn_fn`` lets the suite swap in a fake-agy child. Wall-clock
     is in seconds (``main()`` converts from minutes). ``config`` carries the
-    optional dispatcher config (model / AGENTS.md / MCP servers); an explicit
-    ``model`` arg overrides ``config.model``.
+    optional dispatcher config (model / AGENTS.md / MCP servers); the model is
+    applied to ``antigravity-cli/settings.json`` for the run and restored after.
     """
     if config is None:
         config = DispatchConfig()
-    effective_model = model if model is not None else config.model
 
     if spawn_fn is None:
         def spawn_fn(wt: Path) -> subprocess.Popen[str]:
-            return spawn_agy(wt, packet_text, wall_clock_seconds, model=effective_model)
+            return spawn_agy(wt, packet_text, wall_clock_seconds)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     event_log = StreamingEventLog(out_dir / "events.jsonl")
@@ -283,12 +312,6 @@ def run_dispatch(
 
     try:
         _warn_if_orchestrator_root(worktree, event_log)
-        if effective_model is not None:
-            event_log.write({
-                "_warning": "model override set; --model can trigger print-mode "
-                            "loops/timeouts on the OAuth tier",
-                "model": effective_model,
-            })
         try:
             restore_context = _apply_config(config, worktree, event_log)
         except DispatchConfigError as e:
@@ -306,7 +329,7 @@ def run_dispatch(
             )
 
         outer_stop, parsed, raw_message, elapsed_at_decision = _drive_subprocess(
-            proc, event_log, wall_clock_seconds, cancel_flag, start,
+            proc, event_log, wall_clock_seconds, cancel_flag, start, out_dir,
         )
         return _finalize_and_exit(
             out_dir, event_log, session_id, start,
@@ -338,18 +361,19 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--worktree", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--session-id", type=str, required=True)
-    # Accept float so tests can use sub-minute caps without a hidden flag.
-    parser.add_argument("--wall-clock", type=float, default=10)
+    # Wall-clock can be given in either unit; they are mutually exclusive. Float
+    # so tests (and sub-minute caps) need no hidden flag. Default: 10 minutes.
+    wall = parser.add_mutually_exclusive_group()
+    wall.add_argument("--wall-clock", "--wall-clock-minutes", dest="wall_clock_minutes",
+                      type=float, default=None,
+                      help="Outer cap in MINUTES (default 10).")
+    wall.add_argument("--wall-clock-seconds", dest="wall_clock_seconds",
+                      type=float, default=None,
+                      help="Outer cap in SECONDS (alternative to --wall-clock).")
     parser.add_argument("--config", type=Path, default=None,
                         help="Path to a dispatcher config JSON "
                              "(model / agents_md / mcp_servers). See "
                              "scripts/agy_config.py for the schema.")
-    parser.add_argument("--model", type=str, default=None,
-                        help="Passed to agy as --model (e.g. "
-                             "MODEL_GOOGLE_GEMINI_2_5_PRO); overrides "
-                             "config.model. WARNING: on the OAuth print tier this "
-                             "is unreliable and can trigger diagnostic loops / "
-                             "timeouts; leave unset to use agy's default.")
     return parser.parse_args(argv)
 
 
@@ -367,13 +391,17 @@ def main(argv: list[str]) -> int:
         except DispatchConfigError as e:
             sys.stderr.write(f"{e}\n")
             return 1
+    if args.wall_clock_seconds is not None:
+        wall_clock_seconds = args.wall_clock_seconds
+    else:
+        minutes = args.wall_clock_minutes if args.wall_clock_minutes is not None else 10.0
+        wall_clock_seconds = minutes * 60.0
     return run_dispatch(
         packet_text=packet_text,
         worktree=args.worktree,
         out_dir=args.out_dir,
         session_id=args.session_id,
-        wall_clock_seconds=float(args.wall_clock) * 60.0,
-        model=args.model,
+        wall_clock_seconds=wall_clock_seconds,
         config=config,
     )
 
