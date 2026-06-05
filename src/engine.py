@@ -6,6 +6,7 @@ import os
 import asyncio
 import re
 import shutil
+import subprocess
 import tempfile
 import uuid
 from typing import Dict, Any, Optional, Tuple, List, Callable, AsyncIterator
@@ -766,16 +767,60 @@ class TextEngine:
             "arguments": parsed["arguments"]
         }]
 
+    @staticmethod
+    def _terminate_agy_proc(proc: Optional[asyncio.subprocess.Process]) -> None:
+        """Best-effort, cross-platform kill of a (possibly still-running) agy
+        process and the background daemon it spawns.
+
+        POSIX: agy was started in its own session (``start_new_session``), so we
+        kill the whole process group — this reaps the daemon even after the main
+        process has exited cleanly (the case the original cleanup targeted).
+
+        Windows: there is no session/group here, and after a clean exit agy's
+        PID may be reused, so tree-killing a dead PID could hit an unrelated
+        process. We therefore tree-kill (``taskkill /F /T``) only while agy is
+        still alive — i.e. the timeout path, which is what leaves the temp
+        workspace locked and the daemon orphaned.
+        """
+        if proc is None:
+            return
+        try:
+            if os.name == "posix":
+                import signal
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            elif proc.returncode is None:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+        except Exception:
+            pass
+
     async def _run_agy_cli(self, prompt: str, timeout: float = AGY_CALL_TIMEOUT_SECONDS) -> str:
         binary = os.environ.get("ANTIGRAVITY_HARNESS_PATH") or shutil.which("agy")
         if not binary:
             raise LLMCommunicationError("Antigravity harness/agy binary not found.")
 
         timeout_sec_str = f"{int(timeout) + 30}s"
-        args = ["--print-timeout", timeout_sec_str, "-p", prompt]
+        # --dangerously-skip-permissions: agy runs in a fresh, untrusted temp
+        # workspace each call (cwd below). Without this flag it blocks on an
+        # interactive trust/permission prompt that can never be answered
+        # (stdin is DEVNULL), hanging until the timeout fires — no stdout, no
+        # logs. It is safe here because agy is used purely as a text generator:
+        # DERPR runs every tool itself through its own policy/CONFIRM/taint
+        # loop, so agy never actually executes a tool to approve.
+        args = ["--dangerously-skip-permissions", "--print-timeout", timeout_sec_str, "-p", prompt]
 
         temp_dir = tempfile.mkdtemp()
         proc = None
+        # start_new_session puts agy in its own POSIX session so we can kill the
+        # whole group (incl. its spawned daemon) later. It is POSIX-only and
+        # silently ignored on Windows, where we tree-kill via taskkill instead.
+        popen_kwargs: Dict[str, Any] = {}
+        if os.name == "posix":
+            popen_kwargs["start_new_session"] = True
         try:
             proc = await asyncio.create_subprocess_exec(
                 binary,
@@ -784,7 +829,7 @@ class TextEngine:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=temp_dir,
-                start_new_session=True
+                **popen_kwargs,
             )
             try:
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
@@ -800,12 +845,7 @@ class TextEngine:
 
             return stdout.decode("utf-8", errors="replace")
         finally:
-            if proc is not None:
-                try:
-                    import signal
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except Exception:
-                    pass
+            self._terminate_agy_proc(proc)
 
             cli_dir = os.path.join(temp_dir, ".antigravitycli")
             if os.path.isdir(cli_dir):

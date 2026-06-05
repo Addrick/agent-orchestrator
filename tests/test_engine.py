@@ -1049,3 +1049,125 @@ class TestAgyHandler:
 
         assert response == {"type": "text", "content": "end-to-end text answer"}
         assert isinstance(api_payload, dict)
+
+
+class TestAgyCliInvocation:
+    """Covers the real subprocess wiring of ``_run_agy_cli`` / the cross-platform
+    termination helper — the parts the mocked handler tests above skip.
+
+    Regression target: agy ran in a fresh temp workspace without
+    --dangerously-skip-permissions (hung on a trust prompt with stdin=DEVNULL),
+    and cleanup used POSIX-only os.killpg/os.getpgid that silently no-op on
+    Windows, leaving timed-out agy procs alive and temp workspaces undeletable.
+    """
+
+    class _FakeProc:
+        def __init__(self, *, stdout=b"", stderr=b"", returncode=0, hang=False, pid=4321):
+            self._stdout = stdout
+            self._stderr = stderr
+            self.returncode = returncode
+            self._hang = hang
+            self.pid = pid
+
+        async def communicate(self):
+            if self._hang:
+                import asyncio
+                await asyncio.sleep(3600)
+            return self._stdout, self._stderr
+
+    @pytest.mark.asyncio
+    async def test_run_agy_cli_passes_skip_permissions_and_returns_stdout(
+        self, text_engine, monkeypatch
+    ):
+        import src.engine as engine_mod
+
+        captured = {}
+
+        async def fake_exec(*args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return self._FakeProc(stdout=b"hello from agy")
+
+        monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/agy")
+        monkeypatch.delenv("ANTIGRAVITY_HARNESS_PATH", raising=False)
+
+        out = await text_engine._run_agy_cli("say hi", timeout=5)
+
+        assert out == "hello from agy"
+        # binary first, then the skip-permissions flag before -p/prompt
+        assert captured["args"][0] == "/usr/bin/agy"
+        assert "--dangerously-skip-permissions" in captured["args"]
+        # start_new_session is gated to POSIX (where killpg works); never on Windows
+        expect_sns = engine_mod.os.name == "posix"
+        assert ("start_new_session" in captured["kwargs"]) == expect_sns
+
+    @pytest.mark.asyncio
+    async def test_run_agy_cli_terminates_proc_on_timeout(self, text_engine, monkeypatch):
+        import src.engine as engine_mod
+
+        terminated = []
+
+        async def fake_exec(*args, **kwargs):
+            return self._FakeProc(returncode=None, hang=True, pid=9999)
+
+        monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/agy")
+        monkeypatch.delenv("ANTIGRAVITY_HARNESS_PATH", raising=False)
+        monkeypatch.setattr(
+            text_engine, "_terminate_agy_proc", lambda proc: terminated.append(getattr(proc, "pid", None))
+        )
+
+        with pytest.raises(LLMCommunicationError, match="timed out"):
+            await text_engine._run_agy_cli("hang please", timeout=0.05)
+
+        # finally-block must have reaped the still-running child
+        assert terminated == [9999]
+
+    def test_terminate_posix_kills_process_group(self, text_engine, monkeypatch):
+        import src.engine as engine_mod
+        from types import SimpleNamespace
+
+        import signal
+
+        monkeypatch.setattr(engine_mod.os, "name", "posix")
+        # SIGKILL is absent on Windows hosts; provide it so the POSIX branch runs
+        monkeypatch.setattr(signal, "SIGKILL", 9, raising=False)
+        killed = {}
+        monkeypatch.setattr(engine_mod.os, "getpgid", lambda pid: pid, raising=False)
+        monkeypatch.setattr(
+            engine_mod.os, "killpg", lambda pgid, sig: killed.setdefault("pgid", pgid), raising=False
+        )
+
+        text_engine._terminate_agy_proc(SimpleNamespace(pid=777, returncode=None))
+        assert killed["pgid"] == 777
+
+    def test_terminate_windows_tree_kills_live_proc(self, text_engine, monkeypatch):
+        import src.engine as engine_mod
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(engine_mod.os, "name", "nt")
+        calls = []
+        monkeypatch.setattr(engine_mod.subprocess, "run", lambda *a, **k: calls.append(a[0]))
+
+        text_engine._terminate_agy_proc(SimpleNamespace(pid=4321, returncode=None))
+
+        assert len(calls) == 1
+        cmd = calls[0]
+        assert cmd[0] == "taskkill" and "/T" in cmd and "4321" in cmd
+
+    def test_terminate_windows_skips_exited_proc_to_avoid_pid_reuse(self, text_engine, monkeypatch):
+        import src.engine as engine_mod
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(engine_mod.os, "name", "nt")
+        calls = []
+        monkeypatch.setattr(engine_mod.subprocess, "run", lambda *a, **k: calls.append(a[0]))
+
+        # returncode set => agy already exited; PID may be reused, so do NOT taskkill
+        text_engine._terminate_agy_proc(SimpleNamespace(pid=4321, returncode=0))
+        assert calls == []
+
+    def test_terminate_handles_none_proc(self, text_engine):
+        # No process was ever spawned (e.g. binary-not-found path) — must not raise
+        text_engine._terminate_agy_proc(None)
