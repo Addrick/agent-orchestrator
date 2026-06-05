@@ -3,7 +3,7 @@
     {
       "name": "model_selector",
       "model_name": "gemma-4-31b-it",
-      "prompt": "Pick the model ID from the provided list that best matches the user's fuzzy query by calling select_model. Prefer closer version/provider matches. Return 'DEFAULT' when nothing reasonably matches.",
+      "prompt": "Pick the model ID from the provided list that best matches the user's fuzzy query by calling select_model. Users type shorthand, partial names, or natural language — always match to the closest option. A query that is a substring or prefix of an option (e.g. 'gemma 4 31b' for 'gemma-4-31b-it') IS a match. Only return 'DEFAULT' if the query is completely unrelated to every available option.",
       "context_length": 0,
       "response_token_limit": 100,
       "temperature": 0.0,
