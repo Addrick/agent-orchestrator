@@ -10,6 +10,7 @@ import type {
   ChannelGroup,
   Chunk,
   VersionsResponse,
+  AssembledRequest,
 } from '../types/contracts'
 
 export const MOCK_PERSONA: Persona = {
@@ -234,5 +235,44 @@ export const MOCK_VERSIONS_1042: VersionsResponse = {
         "Heads up — reissuing a VPN cert is gated by policy DP-204 (L2 approval). I've staged the reset; approve below and I'll run it.",
       canonical: true,
     },
+  ],
+}
+
+// Offline fallback for the Raw-req inspector. The source is deliberately
+// 'client_fallback' so the parity banner goes RED when the engine is
+// unreachable — the mock is NOT the shared live builder and could drift.
+export const MOCK_ASSEMBLED: AssembledRequest = {
+  parity: {
+    source: 'client_fallback',
+    builder: 'mock',
+    matches_live: false,
+  },
+  route: 'engine · POST /v1/chat/completions',
+  model_name: MOCK_PERSONA.model_name,
+  params: {
+    temperature: MOCK_PERSONA.temperature,
+    top_p: MOCK_PERSONA.top_p,
+    top_k: MOCK_PERSONA.top_k,
+    max_tokens: MOCK_PERSONA.max_tokens,
+    stop: null,
+    seed: null,
+    rep_pen: MOCK_PERSONA.kobold_extras.rep_pen,
+    min_p: MOCK_PERSONA.kobold_extras.min_p,
+    tfs: MOCK_PERSONA.kobold_extras.tfs,
+  },
+  messages: [
+    { role: 'system', content: MOCK_PERSONA.prompt, src: 'persona.prompt' },
+    {
+      role: 'user',
+      content: MOCK_LTM_BLOCK ?? '<memory>…</memory>',
+      src: 'ltm_block',
+    },
+    { role: 'user', content: 'Reset the VPN cert for jdoe.', src: '#1041' },
+    {
+      role: 'assistant',
+      content: 'Reissuing a VPN cert is gated by policy DP-204 (L2 approval).',
+      src: '#1042 · v3 canonical',
+    },
+    { role: 'user', content: 'Email Jane the confirmation too.', src: 'composer' },
   ],
 }

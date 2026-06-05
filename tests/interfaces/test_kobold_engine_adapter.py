@@ -1987,3 +1987,103 @@ def test_models_list_empty_when_models_available_empty():
     assert r.json()["models"] == []
 
 
+
+
+# -------- S5 (DP-137): /assemble dry-run parity inspector --------
+#
+# The headline parity feature: GET /assemble must return the EXACT request the
+# engine would send, sourced from the shared builder so it cannot drift from a
+# live submit. The first test is the parity guarantee itself.
+
+def test_assemble_matches_live_wire_messages():
+    """Parity by construction: the messages[] /assemble produces are identical
+    (role + content) to what a live stream_response submit forwards on iter 0.
+
+    Both paths share `_prepare_request` + `build_wire_messages`, so this asserts
+    the contract that makes the inspector trustworthy. The dry-run runs first and
+    writes nothing, so the live turn rebuilds from the same DB history."""
+    captured = {"messages": None}
+
+    async def stream_messages(persona_config, messages, params, **kwargs):
+        # Capture the first LLM call's wire messages (tool-loop iteration 0).
+        if captured["messages"] is None:
+            captured["messages"] = [dict(m) for m in messages]
+        yield {"type": "api_payload", "payload": {}}
+        yield {"type": "text_delta", "text": "ok"}
+        yield {"type": "done", "full_text": "ok"}
+
+    adapter, mm, persona, chat_system = _make_real_adapter(stream_messages=stream_messages)
+    base = datetime(2026, 4, 1, 12, 0, 0)
+    mm.log_message(
+        user_identifier="portal", persona_name="test_persona", channel="web_ui",
+        author_role="user", author_name="portal", content="first question", timestamp=base,
+    )
+    mm.log_message(
+        user_identifier="portal", persona_name="test_persona", channel="web_ui",
+        author_role="assistant", author_name="test_persona", content="first reply",
+        timestamp=base + timedelta(seconds=1),
+    )
+
+    async def run():
+        assembled = await chat_system.assemble_request(
+            persona_name="test_persona", user_identifier="portal",
+            channel="web_ui", message="second question",
+        )
+        # Live submit over the SAME history (dry-run wrote nothing).
+        await chat_system.generate_response(
+            "test_persona", "portal", "web_ui", "second question",
+        )
+        return assembled
+
+    assembled = asyncio.run(run())
+    assert captured["messages"] is not None, "live path never called stream_messages"
+
+    def rc(msgs):
+        return [{"role": m.get("role"), "content": m.get("content")} for m in msgs]
+
+    assert rc(assembled.messages) == rc(captured["messages"])
+    # Sanity: system prompt first, the new user turn last.
+    assert assembled.messages[0]["role"] == "system"
+    assert assembled.messages[0]["content"] == "you are test"
+    assert assembled.messages[-1] == {"role": "user", "content": "second question"}
+    mm.close()
+
+
+def test_assemble_endpoint_unknown_persona_returns_404():
+    adapter, mm, _, _ = _make_real_adapter()
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/session/nobody/assemble?message=hi")
+    assert r.status_code == 404
+    assert "not found" in r.json()["error"].lower()
+    mm.close()
+
+
+def test_assemble_endpoint_returns_parity_contract_shape():
+    """The §9 wire shape: parity banner data, route, model, flattened params,
+    and src-tagged messages with the composer's new turn last."""
+    adapter, mm, persona, chat_system = _make_real_adapter()
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/session/test_persona/assemble?message=hello+world")
+    assert r.status_code == 200
+    body = r.json()
+
+    assert body["parity"] == {
+        "source": "engine.dry_run",
+        "builder": "chat_system.stream_response",
+        "matches_live": True,
+    }
+    assert body["route"].startswith("engine")
+    assert body["model_name"] == "local"
+    # params is the flattened resolved GenerationParams.
+    for key in ("temperature", "top_p", "top_k", "max_tokens", "stop", "seed"):
+        assert key in body["params"]
+
+    msgs = body["messages"]
+    assert msgs[0]["role"] == "system"
+    assert msgs[0]["src"] == "persona.prompt"
+    assert msgs[0]["content"] == "you are test"
+    # No prior history → just system + the new composer turn.
+    assert msgs[-1]["role"] == "user"
+    assert msgs[-1]["content"] == "hello world"
+    assert msgs[-1]["src"] == "composer"
+    mm.close()

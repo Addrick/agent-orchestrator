@@ -15,6 +15,7 @@ import {
   MOCK_LTM_BLOCK,
   MOCK_TRANSCRIPT,
   MOCK_VERSIONS_1042,
+  MOCK_ASSEMBLED,
 } from './mock'
 import type {
   Persona,
@@ -27,6 +28,7 @@ import type {
   PatchPersonaResult,
   VersionsResponse,
   DevCommandResponse,
+  AssembledRequest,
 } from '../types/contracts'
 
 // Same-origin in production (served under /derpr by the adapter); the dev
@@ -221,6 +223,25 @@ export async function devCommand(
   })
   // 400 returns { response: "Not a dev command" } — still JSON.
   return (await r.json()) as DevCommandResponse
+}
+
+// ---- assemble (S5 parity inspector) ----------------------------------
+// Dry-run of the exact request the engine would send, from the shared live
+// builder. On the live path source='engine.dry_run' (parity verified); the
+// mock fallback returns source='client_fallback' so the banner flags drift.
+export function getAssembled(
+  persona: string,
+  message = '',
+  retry = false,
+): Promise<AssembledRequest> {
+  const q = new URLSearchParams({ message, retry: String(retry) }).toString()
+  return liveOr(
+    () =>
+      getJSON<AssembledRequest>(
+        `/api/v1/session/${encodeURIComponent(persona)}/assemble?${q}`,
+      ),
+    () => MOCK_ASSEMBLED,
+  )
 }
 
 // ---- abort -----------------------------------------------------------

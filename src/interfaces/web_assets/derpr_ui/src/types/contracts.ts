@@ -179,3 +179,27 @@ export interface DevCommandResponse {
   response: string
   mutated?: boolean
 }
+
+// ---- GET /api/v1/session/{persona}/assemble (S5 parity inspector) ----
+export interface AssembledMessage {
+  role: string
+  content: string
+  // provenance tag: persona.prompt | ltm_block | history | composer |
+  // tool_call | tool_result — maps the wire line back to its source row.
+  src: string
+}
+export interface AssembledParity {
+  // engine.dry_run = produced by the shared live builder (green banner);
+  // client_fallback = reconstructed in the browser, may drift (red banner).
+  source: 'engine.dry_run' | 'client_fallback'
+  builder: string
+  matches_live: boolean
+}
+export interface AssembledRequest {
+  parity: AssembledParity
+  route: string
+  model_name: string
+  // flattened resolved params (universal + kobold extras forwarded for the route)
+  params: Record<string, unknown>
+  messages: AssembledMessage[]
+}

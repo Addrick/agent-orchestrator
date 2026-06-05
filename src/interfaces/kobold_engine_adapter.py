@@ -22,8 +22,9 @@ import asyncio
 
 from config import global_config
 from src.chat_system import (
-    ChatSystem, DoneEvent, ErrorEvent, GenerationEvent, PendingConfirmationEvent,
-    ResponseType, TokenEvent, ToolCallResultEvent, ToolCallStartEvent,
+    AssembledRequest, ChatSystem, DoneEvent, ErrorEvent, GenerationEvent,
+    PendingConfirmationEvent, ResponseType, TokenEvent, ToolCallResultEvent,
+    ToolCallStartEvent,
 )
 from src.interfaces.kobold_export import build_kobold_savefile, build_transcript
 from src.interfaces.portal_render import render_portal_html
@@ -209,6 +210,42 @@ class KoboldEngineAdapter:
                 query=query,
             )
             return {"block": block}
+
+        @self.app.get("/api/v1/session/{persona}/assemble")
+        async def assemble(
+            persona: str,
+            message: str = "",
+            channel: str = "web_ui",
+            ltm: bool = True,
+            retry: bool = False,
+        ) -> Any:
+            """Dry-run request assembler — the Raw-req parity inspector source.
+
+            Runs the SAME assembly path as a live `/v1/chat/completions` submit
+            (history rebuild from DB + LTM injection + token truncation + param
+            resolution + system-prompt prepend) with inference OFF, and returns
+            exactly what would be sent: {parity, route, model_name, params,
+            messages[]} per API_CONTRACTS.md §9. Parity is true by construction —
+            `ChatSystem.assemble_request` shares `_prepare_request`,
+            `_resolve_generation_params`, and `build_wire_messages` with the live
+            kernel, so the inspector cannot drift from a live submit.
+
+            `ltm` is accepted for API-shape compatibility but assembly follows the
+            persona's own `long_term_memory` setting (the engine path has no
+            client LTM toggle), so the dry-run mirrors true engine behavior.
+            """
+            if persona not in self.chat_system.personas:
+                return JSONResponse(status_code=404, content={"error": f"Persona '{persona}' not found"})
+            assembled = await self.chat_system.assemble_request(
+                persona_name=persona,
+                user_identifier="portal",
+                channel=channel,
+                message=message,
+                is_retry=retry,
+            )
+            if assembled is None:
+                return JSONResponse(status_code=404, content={"error": f"Persona '{persona}' not found"})
+            return JSONResponse(content=self._assembled_to_dict(assembled))
 
         @self.app.get("/api/v1/models/list")
         async def list_all_models() -> Dict[str, Any]:
@@ -1158,6 +1195,50 @@ class KoboldEngineAdapter:
         except Exception as e:
             logger.warning(f"Forward POST {path} failed: {e}")
             return JSONResponse(status_code=502, content={"error": str(e)})
+
+    @staticmethod
+    def _assembled_to_dict(assembled: "AssembledRequest") -> Dict[str, Any]:
+        """Project an AssembledRequest into the API_CONTRACTS.md §9 wire shape.
+
+        Flattens the resolved GenerationParams (universal fields + kobold sampler
+        extras the route forwards) into the `params` block, and zips each wire
+        message with its provenance `src` tag. `source: engine.dry_run` +
+        `matches_live: true` because the assembler shares the live builder.
+        """
+        p = assembled.params
+        flat: Dict[str, Any] = {
+            "temperature": p.temperature,
+            "top_p": p.top_p,
+            "top_k": p.top_k,
+            "max_tokens": p.max_tokens,
+            "stop": p.stop_sequences or None,
+            "seed": p.seed,
+        }
+        flat.update(p.get_provider_extras("kobold"))
+
+        messages: List[Dict[str, Any]] = []
+        for m, src in zip(assembled.messages, assembled.sources):
+            content = m.get("content")
+            if content is None and m.get("tool_calls"):
+                # Replayed assistant tool-call rows carry no prose content.
+                content = json.dumps(m["tool_calls"])
+            messages.append({
+                "role": m.get("role"),
+                "content": content if content is not None else "",
+                "src": src,
+            })
+
+        return {
+            "parity": {
+                "source": "engine.dry_run",
+                "builder": "chat_system.stream_response",
+                "matches_live": True,
+            },
+            "route": assembled.route,
+            "model_name": assembled.model_name,
+            "params": flat,
+            "messages": messages,
+        }
 
     def _get_current_persona_name(self) -> str:
         if self.active_persona and self.active_persona in self.chat_system.personas:

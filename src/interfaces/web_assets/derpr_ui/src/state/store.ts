@@ -16,6 +16,7 @@ import type {
   DerprIdFrame,
   PatchPersonaResult,
   DevCommandResponse,
+  AssembledRequest,
 } from '../types/contracts'
 
 export type ViewMode = 'rendered' | 'context'
@@ -67,6 +68,10 @@ export function usePortalStore() {
   const [stream, setStream] = useState<StreamState>(EMPTY_STREAM)
   const [devRow, setDevRow] = useState<DevRow | null>(null)
   const [banner, setBanner] = useState<string | null>(null)
+  // The /assemble dry-run payload for the Raw-req inspector (S5). Lazily
+  // fetched by the Raw tab, keyed on the active persona + an optional preview
+  // message; null until first fetched.
+  const [assembled, setAssembled] = useState<AssembledRequest | null>(null)
 
   const abortRef = useRef<{ abort: () => void } | null>(null)
   const idFrameRef = useRef<DerprIdFrame | null>(null)
@@ -318,6 +323,20 @@ export function usePortalStore() {
     [persona, refreshPersona],
   )
 
+  // ---- assemble dry-run (S5 Raw-req parity inspector) ---------------
+  // Fetch the exact request the engine would send for the active persona,
+  // optionally previewing a hypothetical new user turn (`message`). Keyed on
+  // the active persona so switching personas re-derives it.
+  const fetchAssembled = useCallback(
+    async (message = '') => {
+      if (!persona) return
+      const a = await api.getAssembled(persona.name, message)
+      setAssembled(a)
+      setOffline(api.usingMock())
+    },
+    [persona],
+  )
+
   return {
     // state
     activePersona,
@@ -335,7 +354,9 @@ export function usePortalStore() {
     stream,
     devRow,
     banner,
+    assembled,
     // actions
+    fetchAssembled,
     setViewMode,
     toggleLtm,
     switchPersona,

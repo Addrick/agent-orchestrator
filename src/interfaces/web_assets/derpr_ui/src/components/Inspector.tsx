@@ -1,7 +1,7 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { Persona, ToolDef } from '../types/contracts'
 import type { PortalStore } from '../state/store'
-import { policyLabel } from '../state/util'
+import { policyLabel, estimateTokens, fmtTok } from '../state/util'
 
 type Tab = 'persona' | 'tools' | 'raw'
 
@@ -35,7 +35,7 @@ export function Inspector({ store }: Props) {
             re-derives dirtiness from the new baseline. */}
         {tab === 'persona' && <PersonaPane key={persona?.name ?? '∅'} store={store} />}
         {tab === 'tools' && <ToolsPane persona={persona} tools={tools} store={store} />}
-        {tab === 'raw' && <RawPane />}
+        {tab === 'raw' && <RawPane store={store} />}
       </div>
     </div>
   )
@@ -485,19 +485,145 @@ function ToolsPane({
   )
 }
 
-function RawPane() {
+// Raw req — THE parity inspector (S5/DP-137). Renders the exact request the
+// engine would send, sourced from GET /assemble (the shared live builder), so
+// the parity banner is green ONLY when source === 'engine.dry_run'. A
+// pane-local preview field lets you dry-run a hypothetical next user turn
+// without sending it; empty = the request as it stands.
+function RawPane({ store }: { store: PortalStore }) {
+  const { persona, assembled, fetchAssembled, offline } = store
+  const [preview, setPreview] = useState('')
+
+  // Re-fetch when the active persona changes (keyed on persona name).
+  useEffect(() => {
+    fetchAssembled('')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [persona?.name])
+
+  const verified = assembled?.parity.source === 'engine.dry_run'
+
   return (
     <div className="insp-pane raw active">
-      <div className="parity warn">
-        <span className="pi warn">⚠ parity inspector — S5</span>
-        <span className="pd">
-          The exact assembled request, proven to match{' '}
-          <code>chat_system.stream_response</code>, is sourced from the proposed{' '}
-          <code>/assemble</code> dry-run endpoint (Sprint S5). Until that backend
-          builder ships, this pane intentionally shows no reconstructed request to
-          avoid implying a parity guarantee it can't make.
+      {/* parity banner — green when the engine's shared builder produced it,
+          red on client fallback (engine unreachable → mock). */}
+      {assembled ? (
+        <div className={'parity ' + (verified ? 'ok' : 'warn')}>
+          <span className={'pi' + (verified ? '' : ' warn')}>
+            {verified
+              ? '✓ parity verified — dry-run of the live builder'
+              : '⚠ client fallback — may drift'}
+          </span>
+          <span className="pd">
+            {verified ? (
+              <>
+                Same code path as a live submit: <code>{assembled.parity.builder}</code>{' '}
+                via the shared <code>_prepare_request</code> +{' '}
+                <code>build_wire_messages</code> helpers — not reconstructed
+                client-side.
+              </>
+            ) : (
+              <>
+                The engine&apos;s <code>/assemble</code> dry-run is unavailable
+                {offline ? ' (offline · mock)' : ''}, so this is a client
+                approximation and is <b>not</b> guaranteed to match what a live
+                submit assembles.
+              </>
+            )}
+          </span>
+        </div>
+      ) : (
+        <div className="rawfoot">loading assembled request…</div>
+      )}
+
+      {/* preview a hypothetical next user turn (does NOT send it) */}
+      <div className="rawsec">
+        <span className="rk">preview turn</span>
+        <span className="rv">
+          <input
+            value={preview}
+            onChange={(e) => setPreview(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') fetchAssembled(preview)
+            }}
+            placeholder="(optional) dry-run a new user message"
+            style={{
+              width: '100%',
+              background: 'var(--panel-3)',
+              border: '1px solid var(--line-2)',
+              borderRadius: 5,
+              color: 'var(--ink)',
+              font: 'inherit',
+              fontSize: 11,
+              padding: '4px 6px',
+            }}
+          />
+          <button
+            className="mini"
+            style={{ marginTop: 6 }}
+            onClick={() => fetchAssembled(preview)}
+          >
+            re-assemble
+          </button>
         </span>
       </div>
+
+      {assembled && (
+        <>
+          {/* routing */}
+          <div className="rawsec">
+            <span className="rk">route</span>
+            <span className="rv accent">{assembled.route}</span>
+            <span className="rk">model_name</span>
+            <span className="rv">{assembled.model_name}</span>
+          </div>
+
+          {/* local_inference_config — resolved sampling params forwarded */}
+          <div className="rawlbl">local_inference_config</div>
+          <div className="rawsec">
+            {Object.entries(assembled.params).map(([k, v]) => (
+              <RawKV key={k} k={k} v={v} />
+            ))}
+          </div>
+
+          {/* messages[] — each wire line tagged to its source row */}
+          <div className="rawlbl wrap">
+            messages[{assembled.messages.length}]
+            <span className="rawnote">
+              History is rebuilt from the DB; the client message array is
+              discarded. Each line maps back to its source row.
+            </span>
+          </div>
+          {assembled.messages.map((m, i) => (
+            <div key={i} className={'wire ' + m.role}>
+              <div className="wh">
+                <span className="wrole">⟦{m.role}⟧</span>
+                <span className="wsrc">{m.src}</span>
+                <span className="widx">{fmtTok(estimateTokens(m.content))} tok</span>
+              </div>
+              <div className="wtext">{m.content}</div>
+            </div>
+          ))}
+
+          <div className="rawfoot">
+            Edit any line by editing its source row — never a free-text blob. The
+            next submit re-runs this exact assembly.
+          </div>
+        </>
+      )}
     </div>
+  )
+}
+
+// One key/value row in the local_inference_config block. null/undefined render
+// dimmed-italic; everything else stringified.
+function RawKV({ k, v }: { k: string; v: unknown }) {
+  const isNull = v === null || v === undefined
+  return (
+    <>
+      <span className="rk">{k}</span>
+      <span className={'rv' + (isNull ? ' null' : '')}>
+        {isNull ? 'null' : typeof v === 'object' ? JSON.stringify(v) : String(v)}
+      </span>
+    </>
   )
 }
