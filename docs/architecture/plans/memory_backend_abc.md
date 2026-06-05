@@ -149,7 +149,7 @@ Largest sprint, pure internal refactor. No new dependencies, no Hindsight code y
 Standalone service work + new backend impl. Self-contained; no caller changes.
 
 - Add `hindsight-client` to `requirements.txt`.
-- `docker-compose.hindsight.yml` for local dev (Postgres + Hindsight, port 8888 API / 9999 UI).
+- `docker-compose.hindsight.yml` for local dev (Postgres + Hindsight, port 8888 API / 9999 UI). _(Historical: this template was later removed from the repo; the stack is now maintained out-of-repo on derpr-host at `C:\Server\Hindsight\`. See `docs/user_guide.md` Hindsight section.)_
 - `src/memory/backend/hindsight.py` implementing `MemoryBackend` via `hindsight-client`.
   - `retain_async=True` default on retain calls.
   - Tag enforcement helper: every retain stamps `scope:*`, `mode:*`, `source:*`, `source_persona:*`.

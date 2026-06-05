@@ -375,26 +375,19 @@ Long-term memory retrieval is filtered by channel, persona, and embedding model.
 
 The semantic memory tier can be backed by [vectorize-io/hindsight](https://github.com/vectorize-io/hindsight) instead of the default SQLite store. Hindsight runs in Docker with an embedded Postgres + pgvector and handles retain/recall/reflect via a REST API. This is alpha — the SQLite backend remains the default.
 
-### Bring up the stack
+### Deployment
 
-**Production deployment (since 2026-05-19):** Hindsight runs on `aux-desktop` (`10.0.0.70`), bound to `0.0.0.0:8888`. The derpr default `HINDSIGHT_URL` points there. The `docker-compose.hindsight.yml` in this repo is the **legacy local stack**, kept for offline development and as a known-good config reference; the live deployment uses a near-identical compose on the remote host with the bind changed to `0.0.0.0` and the kobold-proxy upstream pointed at LAN IPs instead of `host.docker.internal`.
+**Production (since 2026-05-19):** Hindsight runs on `aux-desktop` / `derpr-host` (`10.0.0.70`), bound to `0.0.0.0:8888`; the derpr default `HINDSIGHT_URL` points there. The stack is **maintained out-of-repo** on that host at `C:\Server\Hindsight\` (`docker-compose.hindsight.yml` + `kobold-lb.conf` + engine patches) — this repo no longer ships a Hindsight compose template. For offline/local development, recreate a compose from the host copy (bind `127.0.0.1:8888` and point the kobold-proxy upstream at a reachable kobold).
 
-```bash
-# Legacy / local-only bring-up:
-docker compose -f docker-compose.hindsight.yml up -d
-```
+The stack runs two containers:
 
-The compose file starts two containers:
-
-- `hindsight-memory` — the API server. Local compose binds to `127.0.0.1:8888`; production binds to `0.0.0.0:8888` on `10.0.0.70`.
-- `hindsight-kobold-proxy` — nginx LB sidecar that load-balances `:5001` across one or more host-side koboldcpp instances. The hindsight container itself has **no** internet egress (paranoid mode, see `memory/project/decisions/2026-05-05-hindsight-paranoid-mode.md`).
-
-Both images are pinned by SHA digest. Rotate digests intentionally; do not drift to floating tags.
+- `hindsight-memory` — the API server (`ghcr.io/vectorize-io/hindsight`), bound to `0.0.0.0:8888` on `10.0.0.70`.
+- `hindsight-kobold-proxy` — nginx LB sidecar that load-balances `:5001` across LAN koboldcpp instances (`kobold-lb.conf`). The hindsight container itself has **no** internet egress (paranoid mode, see `memory/project/decisions/2026-05-05-hindsight-paranoid-mode.md`).
 
 ### Required host services
 
-- **kobold.cpp** running with an OpenAI-compatible `/v1` endpoint and a model loaded (default: `qwen2.5-32b`). The local compose reaches kobold via `host.docker.internal:5001`; the production compose on `10.0.0.70` reaches the two LAN kobold instances at `10.0.0.67:5001` and `10.0.0.69:5001` (configured in `kobold-lb.conf`).
-- Docker Desktop / Docker Engine with the `host-gateway` extra-host alias supported.
+- **kobold.cpp** with an OpenAI-compatible `/v1` endpoint and a model loaded. The production proxy on `10.0.0.70` routes to the LAN kobold instances configured in `kobold-lb.conf` (live: `10.0.0.69:5001`; `10.0.0.67:5001` is the laptop, intermittent).
+- Docker Desktop / Docker Engine.
 
 If kobold is offline, retain operations are silently dropped (see failure modes below) and recall returns the existing corpus.
 
@@ -439,7 +432,7 @@ docker exec hindsight-memory pg_dump -U hindsight hindsight > hindsight.sql
 **Restore** (into a fresh stack):
 
 ```bash
-docker compose -f docker-compose.hindsight.yml up -d
+# bring up the Hindsight stack on the host (see Deployment above), then:
 docker exec -i hindsight-memory psql -U hindsight hindsight < hindsight.sql
 ```
 

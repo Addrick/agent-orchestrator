@@ -111,11 +111,10 @@ Once the bot is online, message a persona on Discord (e.g. `gemini hello`) or op
 ### Docker
 
 ```bash
-docker compose up -d --build                              # main app
-docker compose -f docker-compose.hindsight.yml up -d      # optional Hindsight stack
+docker compose up -d --build      # main app
 ```
 
-The Hindsight compose file pins images by SHA digest and runs the API server with no internet egress (an nginx LB sidecar routes LLM traffic to one or more host-side kobold.cpp instances). The committed compose is the legacy local stack; the live deployment runs on `aux-desktop` (`10.0.0.70`) with bind changed to `0.0.0.0:8888` and the LB upstream pointed at LAN IPs. See `docs/user_guide.md` (Hindsight section) for bring-up, bank bootstrap, backup/restore, and failure modes.
+The optional Hindsight semantic-memory stack is **deployed out-of-repo** on `aux-desktop` / `derpr-host` (`10.0.0.70`) at `C:\Server\Hindsight\` — this repo no longer ships a Hindsight compose template. It runs the API server with no internet egress; an nginx LB sidecar (`kobold-lb.conf`) routes LLM traffic to LAN kobold.cpp instances. See `docs/user_guide.md` (Hindsight section) for deployment, bank bootstrap, backup/restore, and failure modes.
 
 ## Environment
 
