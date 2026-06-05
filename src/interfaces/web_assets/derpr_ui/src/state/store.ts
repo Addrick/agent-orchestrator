@@ -52,6 +52,9 @@ export interface DevRow {
 export function usePortalStore() {
   const [activePersona, setActivePersona] = useState<string>('assistant')
   const [personaList, setPersonaList] = useState<string[]>([])
+  // The LLM model catalog (same source as the `what models` dev command);
+  // drives the inspector's model_name dropdown. Persona-independent, loaded once.
+  const [modelList, setModelList] = useState<string[]>([])
   const [persona, setPersona] = useState<Persona | null>(null)
   const [tools, setTools] = useState<ToolDef[]>([])
   const [channels, setChannels] = useState<ChannelGroup[]>([])
@@ -109,12 +112,14 @@ export function usePortalStore() {
   // initial boot
   useEffect(() => {
     ;(async () => {
-      const [active, list] = await Promise.all([
+      const [active, list, models] = await Promise.all([
         api.getActivePersona(),
         api.listPersonas(),
+        api.getModelList(),
       ])
       setActivePersona(active)
       setPersonaList(list.length ? list : [active])
+      setModelList(models)
       await loadAll(active)
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -317,6 +322,7 @@ export function usePortalStore() {
     // state
     activePersona,
     personaList,
+    modelList,
     persona,
     tools,
     channels,

@@ -99,6 +99,7 @@ function coerceNum(s: string): number | string {
 
 function PersonaPane({ store }: { store: PortalStore }) {
   const p = store.persona
+  const modelList = store.modelList
   const [koboldCollapsed, setKoboldCollapsed] = useState(true)
   const [buf, setBuf] = useState<Buf>(() => (p ? buildBuffer(p) : {}))
   const [saving, setSaving] = useState(false)
@@ -195,7 +196,17 @@ function PersonaPane({ store }: { store: PortalStore }) {
 
       <Pair>
         <Cell label="model_name">
-          <input value={buf.model_name} onChange={(e) => set('model_name', e.target.value)} />
+          {/* same catalog as the `what models` dev command (models_available) */}
+          <select value={buf.model_name} onChange={(e) => set('model_name', e.target.value)}>
+            {buf.model_name && !modelList.includes(buf.model_name) && (
+              <option value={buf.model_name}>{buf.model_name}</option>
+            )}
+            {modelList.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </select>
         </Cell>
         <Cell label="memory_mode">
           <select value={buf.memory_mode} onChange={(e) => set('memory_mode', e.target.value)}>
@@ -271,8 +282,8 @@ function PersonaPane({ store }: { store: PortalStore }) {
         className={'section kobold' + (koboldCollapsed ? ' collapsed' : '')}
         onClick={() => setKoboldCollapsed((c) => !c)}
       >
-        ⚠ kobold samplers<span className="pill">local-model passthrough</span>
-        <span className="desc">provider_extra · forwarded to kcpp route</span>
+        ⚠ kobold samplers<span className="pill">local-model only</span>
+        <span className="desc">provider_extra · engine forwards these to local models</span>
         <span className="car">▾</span>
       </div>
       <div className={'kobold-fields' + (koboldCollapsed ? ' collapsed' : '')}>
