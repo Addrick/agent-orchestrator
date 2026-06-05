@@ -5,7 +5,7 @@ import json
 import logging
 import time
 import uuid
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -42,6 +42,13 @@ from src.utils.save_utils import load_personas_from_file, save_personas_to_file
 from src.utils.message_utils import strip_vertex_links
 
 logger = logging.getLogger(__name__)
+
+# Upper bound on the sticky per-conversation taint map. The taint bit is keyed
+# by (user, persona, channel, server); a long-running deployment serving many
+# distinct conversations would otherwise grow this map without bound. We evict
+# the least-recently-touched entry once over capacity (taint is a soft cache —
+# a re-derived False on a cold key is safe, and recall re-taints if needed).
+MAX_CONVERSATION_TAINTS = 10000
 
 
 def _relative_time(dt: datetime) -> str:
@@ -192,7 +199,9 @@ class ChatSystem:
         self.models_available: Dict[str, Any] = get_model_list() or {}
         self.background_tasks: Set[Coroutine[Any, Any, Any]] = set()
         self._pending_confirmations: Dict[Tuple[str, str], PendingConfirmation] = {}
-        self._conversation_taints: Dict[Tuple[str, str, str, Optional[str]], bool] = defaultdict(bool)
+        # OrderedDict (not defaultdict) so eviction order is well-defined and
+        # the map stays bounded — see _set_conversation_taint.
+        self._conversation_taints: "OrderedDict[Tuple[str, str, str, Optional[str]], bool]" = OrderedDict()
         self._services: Dict[str, ServiceIntegration] = {}
         self._embedding_service: Optional[EmbeddingService] = embedding_service
 
@@ -231,6 +240,14 @@ class ChatSystem:
             existing = self.last_api_requests.get(user_identifier, {}).get(persona_name)
             if existing and "_tools_for_llm" in existing:
                 payload["_tools_for_llm"] = existing["_tools_for_llm"]
+
+        # LRU touch: re-storing a user's payload moves them to the most-recent
+        # end so eviction drops a genuinely idle user, not whoever was seen
+        # first. dict preserves insertion order; pop+reinsert is the move.
+        if user_identifier in self.last_api_requests:
+            self.last_api_requests[user_identifier] = self.last_api_requests.pop(user_identifier)
+            if user_identifier in self.last_api_iterations:
+                self.last_api_iterations[user_identifier] = self.last_api_iterations.pop(user_identifier)
         self.last_api_requests[user_identifier][persona_name] = payload
 
         if is_first_iteration:
@@ -238,9 +255,26 @@ class ChatSystem:
         self.last_api_iterations[user_identifier].setdefault(persona_name, []).append(payload)
 
         if len(self.last_api_requests) > MAX_CACHED_API_REQUESTS:
+            # Evict the least-recently-used user (front of insertion order).
             oldest_key = next(iter(self.last_api_requests))
             del self.last_api_requests[oldest_key]
             self.last_api_iterations.pop(oldest_key, None)
+
+    def _set_conversation_taint(
+            self, key: Tuple[str, str, str, Optional[str]], value: bool
+    ) -> None:
+        """Set the sticky taint bit for a conversation, bounding the map.
+
+        The newest key moves to the MRU end; once over MAX_CONVERSATION_TAINTS
+        the least-recently-touched entry is evicted. Taint is a soft cache — a
+        cold key re-derives as False and memory recall re-taints if warranted —
+        so eviction is safe and keeps the map from growing without bound.
+        """
+        if key in self._conversation_taints:
+            self._conversation_taints.move_to_end(key)
+        self._conversation_taints[key] = value
+        while len(self._conversation_taints) > MAX_CONVERSATION_TAINTS:
+            self._conversation_taints.popitem(last=False)
 
     def _format_raw_history_for_llm(self, raw_history: List[Dict[str, Any]], memory_mode: str,
                                     persona_name: str, server_id: Optional[str]) -> List[Dict[str, Any]]:
@@ -609,9 +643,11 @@ class ChatSystem:
             ctx.server_id, ctx.history_limit
         )
 
-        # Load sticky taint bit for this conversation
+        # Load sticky taint bit for this conversation (touch for LRU recency)
         taint_key = (ctx.user_identifier, ctx.persona_name, ctx.channel, ctx.server_id)
         ctx.turn_tainted = self._conversation_taints.get(taint_key, False)
+        if taint_key in self._conversation_taints:
+            self._conversation_taints.move_to_end(taint_key)
 
         # If the client supplied its own message array (kobold-lite jinja mode),
         # prefer it over the DB result. The portal export already uses global
@@ -647,12 +683,16 @@ class ChatSystem:
                 if last_content == ctx.message.strip():
                     fallback.pop()
             
+            # Capture the discarded DB row count *before* reassigning, so the
+            # diagnostic distinguishes "DB returned N rows we ignored" from
+            # "DB returned 0 rows" — the fallback size is a different number.
+            db_row_count = len(ctx.conversation_history)
             ctx.conversation_history = fallback
             logger.info(
                 "_prepare_request: using %d client messages (cleaned kobold-lite history) "
                 "for %s / %s — DB result (%d rows) discarded",
                 len(ctx.conversation_history), ctx.persona_name, ctx.channel,
-                len(ctx.conversation_history),
+                db_row_count,
             )
 
         # Inject long-term memory block before the sliding window
@@ -674,7 +714,11 @@ class ChatSystem:
         if is_retry:
             if ctx.conversation_history and ctx.conversation_history[-1].get("role") == "assistant":
                 ctx.conversation_history.pop()
-        else:
+        elif ctx.message and ctx.message.strip():
+            # Symmetric with the DB-side guard in _log_user_turn: an empty /
+            # whitespace-only message (kobold-lite continue/prefetch) must not
+            # land a phantom `{'role':'user','content':''}` turn in the prompt,
+            # which would otherwise make the model generate off a blank turn.
             # Noise reduction: Strip vertexai grounding redirect URLs from user message for LLM context.
             ctx.conversation_history.append({"role": "user", "content": strip_vertex_links(ctx.message)})
 
@@ -766,8 +810,11 @@ class ChatSystem:
 
         if retry_assistant_id is not None:
             try:
+                # Forward tool_context so the regenerated row's stored tool calls
+                # stay paired with its new content — a retried turn may use a
+                # different (or no) set of tools than the failed attempt.
                 self.memory_manager.update_interaction_content(
-                    retry_assistant_id, final_text,
+                    retry_assistant_id, final_text, tool_context=tool_context_json,
                 )
                 return retry_assistant_id
             except Exception as e:
@@ -1004,7 +1051,7 @@ class ChatSystem:
                         ctx.turn_tainted = ev.turn_tainted
                         # Persist back to the conversation cache for stickiness
                         taint_key = (ctx.user_identifier, ctx.persona_name, ctx.channel, ctx.server_id)
-                        self._conversation_taints[taint_key] = ev.turn_tainted
+                        self._set_conversation_taint(taint_key, ev.turn_tainted)
             except asyncio.CancelledError:
                 # Client disconnect / abort. Flush whatever assistant text has
                 # accumulated so the row reflects what the user actually saw,
@@ -1041,7 +1088,22 @@ class ChatSystem:
                     tool_context_start=tool_context_start,
                     confirmation_text=final_text if final_text else "",
                 )
-                self._pending_confirmations[(ctx.user_identifier, ctx.persona_name)] = parked
+                confirm_key = (ctx.user_identifier, ctx.persona_name)
+                # A still-pending write for this (user, persona) is silently
+                # superseded by this one — the operator's eventual approve/deny
+                # would resolve the wrong intent. We can't queue both (the key
+                # is 1:1), so at minimum the eviction must leave an audit trail.
+                evicted = self._pending_confirmations.get(confirm_key)
+                if evicted is not None:
+                    self.memory_manager.log_audit_event(
+                        event_type="audit_parked_evicted",
+                        operator_id=ctx.user_identifier,
+                        prior_state="pending",
+                        new_state="evicted",
+                        reason="Superseded by a newer pending write for the same persona",
+                        metadata=evicted.audit_info,
+                    )
+                self._pending_confirmations[confirm_key] = parked
                 ephemeral_chunk_id = parked.token
                 # Phase 7: Log audit parking
                 self.memory_manager.log_audit_event(
