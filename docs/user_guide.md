@@ -163,7 +163,19 @@ local `agy` CLI instead of an API. This runs on the user's authenticated
 **OAuth tier** (currently Gemini 3.5 Flash) rather than a metered API key, at the
 cost of a subprocess spawn per call (a few seconds of latency) and no image
 support. Each call is fully isolated (fresh prompt, throwaway working directory,
-`stdin` closed so it never blocks on a permission prompt).
+`stdin` closed, and `--dangerously-skip-permissions` so agy never blocks on the
+workspace-trust prompt it would otherwise raise in a fresh directory — safe here
+because agy is used purely as a text generator and never executes tools itself).
+
+> **Platform: POSIX only.** The `agy` provider works on Linux/macOS (and WSL or
+> Docker). It does **not** work on **native Windows**: `agy` is a TUI that only
+> writes its response to a TTY, while the engine captures `stdout` through a
+> pipe — on Windows that capture comes back empty (agy renders to the console
+> and emits nothing to a non-TTY stdout/file; no flag or env var changes this).
+> The engine therefore refuses the `agy` route on native Windows with a clear
+> error rather than returning silent empty responses. To test the `agy` route
+> from a Windows dev box, run the engine on the POSIX host (e.g. the Docker
+> deployment) or under WSL, where it behaves normally.
 
 Tools work via an **inline protocol**: the engine injects the tool descriptions
 into the prompt and asks the model to emit a `<tool_call>{…}</tool_call>` block to

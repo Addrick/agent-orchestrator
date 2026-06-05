@@ -1091,6 +1091,8 @@ class TestAgyCliInvocation:
         monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
         monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/agy")
         monkeypatch.delenv("ANTIGRAVITY_HARNESS_PATH", raising=False)
+        # bypass the POSIX-only guard so the subprocess wiring runs on any host
+        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
 
         out = await text_engine._run_agy_cli("say hi", timeout=5)
 
@@ -1114,6 +1116,7 @@ class TestAgyCliInvocation:
         monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
         monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/agy")
         monkeypatch.delenv("ANTIGRAVITY_HARNESS_PATH", raising=False)
+        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
         monkeypatch.setattr(
             text_engine, "_terminate_agy_proc", lambda proc: terminated.append(getattr(proc, "pid", None))
         )
@@ -1171,3 +1174,36 @@ class TestAgyCliInvocation:
     def test_terminate_handles_none_proc(self, text_engine):
         # No process was ever spawned (e.g. binary-not-found path) — must not raise
         text_engine._terminate_agy_proc(None)
+
+    def test_agy_unsupported_on_windows_raises_clear_error(self, text_engine, monkeypatch):
+        import src.engine as engine_mod
+
+        monkeypatch.setattr(engine_mod.os, "name", "nt")
+        with pytest.raises(LLMCommunicationError, match="native Windows"):
+            text_engine._ensure_agy_supported()
+
+    def test_agy_supported_on_posix(self, text_engine, monkeypatch):
+        import src.engine as engine_mod
+
+        monkeypatch.setattr(engine_mod.os, "name", "posix")
+        text_engine._ensure_agy_supported()  # no raise
+
+    @pytest.mark.asyncio
+    async def test_run_agy_cli_aborts_before_spawn_on_windows(self, text_engine, monkeypatch):
+        """On Windows the guard must fire before any temp dir or subprocess."""
+        import src.engine as engine_mod
+
+        monkeypatch.setattr(engine_mod.os, "name", "nt")
+        spawned = []
+        made_dirs = []
+
+        async def fake_exec(*a, **k):
+            spawned.append(True)
+            raise AssertionError("should not spawn agy on Windows")
+
+        monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(engine_mod.tempfile, "mkdtemp", lambda: made_dirs.append(True) or "x")
+
+        with pytest.raises(LLMCommunicationError, match="native Windows"):
+            await text_engine._run_agy_cli("hi", timeout=5)
+        assert spawned == [] and made_dirs == []
