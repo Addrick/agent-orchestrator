@@ -47,6 +47,7 @@ def _make_adapter_with_seeded_db(persona_name: str = "test_persona",
     chat_system = SimpleNamespace(
         personas={persona_name: persona},
         memory_manager=mm,
+        system_persona_names=set(),
         get_session_memory_block=retrieve_memory_block or AsyncMock(return_value=None),
     )
     adapter = KoboldAdapter(chat_system=chat_system)
@@ -1515,7 +1516,7 @@ def test_dev_command_happy_path_mutates_and_saves():
     assert r.status_code == 200
     assert r.json() == {"response": "Tools set to none.", "mutated": True}
     chat_system.bot_logic.preprocess_message.assert_awaited_once_with("test_persona", "portal", "set tools none")
-    mock_save.assert_called_once_with(chat_system.personas)
+    mock_save.assert_called_once_with(chat_system.personas, chat_system.system_persona_names)
     mm.close()
 
 
