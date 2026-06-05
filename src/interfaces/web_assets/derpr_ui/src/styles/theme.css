@@ -493,3 +493,46 @@ body.persona-blocked .secbanner { display: block; }
 .send:disabled { opacity: 0.5; cursor: not-allowed; }
 .busy-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--write); box-shadow: 0 0 7px var(--write); animation: blink 1s step-end infinite; }
 .errbanner { margin: 10px 14px; padding: 9px 11px; border: 1px solid rgba(229,114,114,0.4); border-radius: var(--r); background: var(--danger-bg); font-size: 10.5px; color: var(--danger); font-family: var(--sans); }
+
+/* ---- editable persona inspector (S4) ---- */
+/* inputs/selects live inside .ctrl so they inherit the boxed control look */
+.ctrl input, .ctrl select {
+  flex: 1; width: 100%; min-width: 0; background: none; border: none; outline: none;
+  color: var(--ink); font-family: var(--mono); font-size: 11.5px; padding: 0;
+}
+.ctrl select option { background: var(--panel-2); color: var(--ink); }
+.ctrl input:focus, .ctrl select:focus { color: var(--accent-2); }
+.ctrl:focus-within { border-color: var(--accent-dim); }
+/* editable system-prompt textarea */
+.ctrl.area.edit {
+  width: 100%; background: var(--bg); color: var(--ink); font-family: var(--sans);
+  font-size: 12px; line-height: 1.5; resize: vertical; min-height: 76px; outline: none;
+}
+.ctrl.area.edit:focus { border-color: var(--accent-dim); }
+
+/* sticky save bar at the bottom of the persona pane */
+.savebar {
+  position: sticky; bottom: 0; display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px; background: var(--panel); border-top: 1px solid var(--line-2);
+}
+.savebar .grow { flex: 1; }
+.savebtn {
+  font-size: 10.5px; letter-spacing: 0.5px; color: var(--accent); background: var(--accent-bg);
+  border: 1px solid var(--accent-dim); border-radius: 5px; padding: 5px 14px;
+}
+.savebtn:hover:not(:disabled) { color: var(--accent-2); }
+.savebtn:disabled, .savebar .mini:disabled { opacity: 0.45; cursor: not-allowed; }
+.savestatus { font-size: 10px; font-family: var(--sans); }
+.savestatus.ok { color: var(--ok); }
+.savestatus.warn { color: var(--write); }
+.savestatus.err { color: var(--danger); }
+
+/* tools tab: toggle is now a button; reset native chrome, keep the switch look */
+.toolrow .en { margin-left: auto; background: none; border: none; padding: 0; }
+.toolrow .en:disabled { opacity: 0.5; cursor: not-allowed; }
+.toolnote {
+  margin: 10px 14px; padding: 8px 11px; border-radius: var(--r); font-size: 10.5px;
+  font-family: var(--sans); white-space: pre-wrap;
+}
+.toolnote.ok { color: var(--ok); border: 1px solid rgba(132,207,143,0.4); background: var(--ok-bg); }
+.toolnote.warn { color: var(--write); border: 1px solid rgba(231,173,98,0.4); background: var(--write-bg); }

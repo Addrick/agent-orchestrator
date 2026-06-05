@@ -38,7 +38,7 @@ export default function App() {
         <NavRail />
         <Channels channels={store.channels} />
         <Conversation store={store} />
-        <Inspector persona={store.persona} tools={store.tools} />
+        <Inspector store={store} />
       </div>
     </div>
   )

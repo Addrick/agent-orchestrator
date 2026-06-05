@@ -14,6 +14,8 @@ import type {
   Chunk,
   ToolContext,
   DerprIdFrame,
+  PatchPersonaResult,
+  DevCommandResponse,
 } from '../types/contracts'
 
 export type ViewMode = 'rendered' | 'context'
@@ -269,6 +271,48 @@ export function usePortalStore() {
     [persona, refreshTranscript],
   )
 
+  // ---- persona inspector edits (S4) ---------------------------------
+  // Two mutation channels: PATCH /persona for the fields the adapter accepts
+  // (prompt, model_name, samplers, memory_mode, …) and dev_command for the ones
+  // it doesn't (thinking_level, tools, tool_policy). savePersona runs the PATCH,
+  // then any dev_commands, then a single authoritative refetch. Rejections from
+  // the PATCH are returned so the inspector can surface them.
+  const savePersona = useCallback(
+    async (
+      patchBody: Record<string, unknown>,
+      devCommands: string[] = [],
+    ): Promise<PatchPersonaResult> => {
+      let result: PatchPersonaResult = {
+        result: 'success',
+        rejected_fields: [],
+        unknown_fields: [],
+      }
+      if (!persona) return result
+      if (Object.keys(patchBody).length) {
+        result = await api.patchPersona(persona.name, patchBody)
+      }
+      for (const cmd of devCommands) {
+        await api.devCommand(persona.name, cmd)
+      }
+      await refreshPersona(persona.name)
+      return result
+    },
+    [persona, refreshPersona],
+  )
+
+  // Tools tab toggles route through `set tools …` (the DP-120 dev_command path),
+  // since enabled_tools is not a PATCH key. Returns the response so the pane can
+  // surface an insecure-composition warning. Refreshes persona on mutation.
+  const runToolsCommand = useCallback(
+    async (command: string): Promise<DevCommandResponse> => {
+      if (!persona) return { response: 'no persona', mutated: false }
+      const resp = await api.devCommand(persona.name, command)
+      if (resp.mutated) await refreshPersona(persona.name)
+      return resp
+    },
+    [persona, refreshPersona],
+  )
+
   return {
     // state
     activePersona,
@@ -296,6 +340,8 @@ export function usePortalStore() {
     regen,
     editRow,
     deleteRow,
+    savePersona,
+    runToolsCommand,
     refreshTranscript,
     refreshPersona,
     setPersona,
