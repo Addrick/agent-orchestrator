@@ -65,24 +65,28 @@ export const MOCK_TOOLS: ToolDef[] = [
     name: 'search_tickets',
     description: 'Full-text search the Zammad ticket store.',
     is_write: false,
+    service_binding: 'zammad',
     capabilities: { locality: 'remote', sensitivity: 'low', produces_untrusted: true },
   },
   {
     name: 'lookup_user',
     description: 'Resolve a username to directory record.',
     is_write: false,
+    service_binding: null,
     capabilities: { locality: 'local', sensitivity: 'low', produces_untrusted: false },
   },
   {
     name: 'reset_vpn_cert',
     description: "Reissue a user's VPN client certificate.",
     is_write: true,
+    service_binding: null,
     capabilities: { locality: 'local', sensitivity: 'high', produces_untrusted: false },
   },
   {
     name: 'email_user',
     description: 'Send a templated email to a directory user.',
     is_write: true,
+    service_binding: 'zammad',
     capabilities: { locality: 'remote', sensitivity: 'medium', produces_untrusted: false },
   },
 ]

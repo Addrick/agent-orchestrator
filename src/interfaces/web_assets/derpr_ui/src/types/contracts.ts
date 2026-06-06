@@ -106,6 +106,8 @@ export interface ToolDef {
   name: string
   description: string
   is_write: boolean
+  // owning service (e.g. 'zammad'); null/absent for built-in/local tools.
+  service_binding?: string | null
   capabilities: ToolCapabilities
 }
 

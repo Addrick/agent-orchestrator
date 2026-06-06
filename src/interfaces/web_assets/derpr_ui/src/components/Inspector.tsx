@@ -394,6 +394,9 @@ function Pair({ children }: { children: React.ReactNode }) {
 
 type ToolState = 'off' | 'allow' | 'ask'
 
+// catalog group key for tools with no owning service (built-in / local)
+const BUILTIN_GROUP = 'built-in'
+
 // The three security-invariant escape hatches in policy.py:validate_composition.
 const OVERRIDE_FLAGS: { key: string; label: string }[] = [
   { key: 'network_read_local_write', label: 'network:read + local:write' },
@@ -471,7 +474,25 @@ function ToolsPane({
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState<{ kind: 'ok' | 'warn' | 'err'; text: string } | null>(null)
   const [advOpen, setAdvOpen] = useState(false)
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const [draft, setDraft] = useState<PolicyDraft>(() => deriveDraft(persona, tools))
+
+  // Group the catalog by owning service so the (often long) per-service tool
+  // sets can be collapsed. Null binding = built-in/local; sorted last.
+  const groups = useMemo(() => {
+    const by = new Map<string, ToolDef[]>()
+    for (const t of tools) {
+      const key = t.service_binding || BUILTIN_GROUP
+      const arr = by.get(key)
+      if (arr) arr.push(t)
+      else by.set(key, [t])
+    }
+    return [...by.entries()].sort(([a], [b]) => {
+      if (a === BUILTIN_GROUP) return 1
+      if (b === BUILTIN_GROUP) return -1
+      return a.localeCompare(b)
+    })
+  }, [tools])
 
   // Re-derive the baseline whenever the canonical persona changes (e.g. after a
   // save → refetch); dirtiness is then measured against the saved values.
@@ -488,9 +509,70 @@ function ToolsPane({
       else next.add(key)
       return { ...d, overrides: next }
     })
+  const toggleGroup = (key: string) =>
+    setCollapsed((c) => {
+      const next = new Set(c)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
   const reset = () => {
     setDraft(deriveDraft(persona, tools))
     setNote(null)
+  }
+
+  // one tool's row (tri-state + capability badges)
+  const toolRow = (t: ToolDef) => {
+    const caps = t.capabilities
+    const st = draft.states[t.name] ?? 'off'
+    return (
+      <div className="toolrow" key={t.name}>
+        <div className="tt">
+          <span className="nm">{t.name}</span>
+          <div className="tristate" role="group" aria-label={`${t.name} policy`}>
+            {(['off', 'allow', 'ask'] as ToolState[]).map((s) => (
+              <button
+                key={s}
+                className={'tri' + (st === s ? ' on ' + s : '')}
+                disabled={busy}
+                title={
+                  s === 'off'
+                    ? 'tool hidden from the model'
+                    : s === 'allow'
+                      ? 'auto-runs when the model calls it'
+                      : 'parks for CONFIRM approval before running'
+                }
+                onClick={() => setToolState(t.name, s)}
+              >
+                {s}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="ds">{t.description}</div>
+        <div className="tags">
+          {t.is_write ? (
+            <span className="badge write">write</span>
+          ) : (
+            <span className="badge read">read</span>
+          )}
+          <span
+            className={
+              'badge ' +
+              (caps.sensitivity === 'high'
+                ? 'high'
+                : caps.sensitivity === 'medium'
+                  ? 'med'
+                  : 'low')
+            }
+          >
+            {caps.sensitivity}
+          </span>
+          <span className={'badge ' + caps.locality}>{caps.locality}</span>
+          {caps.produces_untrusted && <span className="badge low">untrusted</span>}
+        </div>
+      </div>
+    )
   }
 
   const onSave = async () => {
@@ -534,55 +616,28 @@ function ToolsPane({
         </select>
       </div>
 
-      {tools.map((t) => {
-        const caps = t.capabilities
-        const st = draft.states[t.name] ?? 'off'
+      {groups.map(([key, groupTools]) => {
+        const isCollapsed = collapsed.has(key)
+        const nAllow = groupTools.filter((t) => draft.states[t.name] === 'allow').length
+        const nAsk = groupTools.filter((t) => draft.states[t.name] === 'ask').length
+        const label = key === BUILTIN_GROUP ? 'built-in · local' : key
         return (
-          <div className="toolrow" key={t.name}>
-            <div className="tt">
-              <span className="nm">{t.name}</span>
-              <div className="tristate" role="group" aria-label={`${t.name} policy`}>
-                {(['off', 'allow', 'ask'] as ToolState[]).map((s) => (
-                  <button
-                    key={s}
-                    className={'tri' + (st === s ? ' on ' + s : '')}
-                    disabled={busy}
-                    title={
-                      s === 'off'
-                        ? 'tool hidden from the model'
-                        : s === 'allow'
-                          ? 'auto-runs when the model calls it'
-                          : 'parks for CONFIRM approval before running'
-                    }
-                    onClick={() => setToolState(t.name, s)}
-                  >
-                    {s}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div className="ds">{t.description}</div>
-            <div className="tags">
-              {t.is_write ? (
-                <span className="badge write">write</span>
-              ) : (
-                <span className="badge read">read</span>
-              )}
-              <span
-                className={
-                  'badge ' +
-                  (caps.sensitivity === 'high'
-                    ? 'high'
-                    : caps.sensitivity === 'medium'
-                      ? 'med'
-                      : 'low')
-                }
-              >
-                {caps.sensitivity}
+          <div key={key}>
+            <div
+              className={'section toolgrp' + (isCollapsed ? ' collapsed' : '')}
+              onClick={() => toggleGroup(key)}
+            >
+              {label}
+              <span className="pill">{groupTools.length}</span>
+              <span className="desc">
+                {nAllow ? `${nAllow} allow` : ''}
+                {nAllow && nAsk ? ' · ' : ''}
+                {nAsk ? `${nAsk} ask` : ''}
+                {!nAllow && !nAsk ? 'none enabled' : ''}
               </span>
-              <span className={'badge ' + caps.locality}>{caps.locality}</span>
-              {caps.produces_untrusted && <span className="badge low">untrusted</span>}
+              <span className="car">▾</span>
             </div>
+            {!isCollapsed && groupTools.map((t) => toolRow(t))}
           </div>
         )
       })}

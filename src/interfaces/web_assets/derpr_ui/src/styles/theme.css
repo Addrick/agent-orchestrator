@@ -556,6 +556,12 @@ body.persona-blocked .secbanner { display: block; }
 .tristate .tri.on.allow { color: var(--ok); background: var(--ok-bg); }
 .tristate .tri.on.ask { color: var(--write); background: var(--write-bg); }
 
+/* tool catalog group header (collapsible, grouped by service_binding) */
+.section.toolgrp { cursor: pointer; }
+.section.toolgrp .car { margin-left: 8px; transition: .15s; }
+.section.toolgrp.collapsed .car { transform: rotate(-90deg); }
+.section.toolgrp .desc { margin-left: auto; }
+
 /* security-overrides advanced section */
 .section.adv { color: var(--danger); cursor: pointer; }
 .section.adv .desc { color: var(--ink-faint); text-transform: none; letter-spacing: 0; font-size: 9px; font-family: var(--sans); }

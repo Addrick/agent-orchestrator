@@ -176,6 +176,9 @@ class KoboldEngineAdapter:
                     "name": func.get("name"),
                     "description": func.get("description"),
                     "is_write": bool(t.get("is_write", False)),
+                    # null for built-in/local tools (no external service); the UI
+                    # groups the catalog by this into collapsible categories.
+                    "service_binding": t.get("service_binding"),
                     "capabilities": {
                         "locality": caps.get("locality"),
                         "sensitivity": caps.get("sensitivity"),
