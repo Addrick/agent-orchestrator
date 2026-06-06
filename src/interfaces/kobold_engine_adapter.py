@@ -36,7 +36,7 @@ from src.chat_system import (
     PendingConfirmationEvent, ResponseType, TokenEvent, ToolCallResultEvent,
     ToolCallStartEvent,
 )
-from src.interfaces.kobold_export import build_kobold_savefile, build_transcript
+from src.interfaces.kobold_export import build_kobold_savefile, build_transcript, _parse_tool_context
 from src.interfaces.portal_render import render_portal_html
 from src.utils.save_utils import save_personas_to_file
 from src.interfaces._persona_patch import (
@@ -487,10 +487,11 @@ class KoboldEngineAdapter:
             pending_obj = pending_map.get((user_identifier, persona))
             pending: Optional[Dict[str, Any]] = None
             if pending_obj is not None:
+                tool_msgs = pending_obj.conversation_history[pending_obj.tool_context_start:] if pending_obj.conversation_history else []
                 pending = {
                     "ephemeral_chunk_id": pending_obj.token,
                     "content": pending_obj.confirmation_text,
-                    "tool_context": None,
+                    "tool_context": _parse_tool_context(tool_msgs) if tool_msgs else None,
                 }
             transcript = build_transcript(
                 raw_history,

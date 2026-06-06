@@ -15,7 +15,11 @@ from datetime import datetime, timedelta
 import pytest
 
 from memory.memory_manager import MemoryManager
-from src.interfaces.kobold_export import build_kobold_savefile, build_transcript
+from src.interfaces.kobold_export import (
+    build_kobold_savefile,
+    build_transcript,
+    _parse_tool_context,
+)
 
 
 REQUIRED_SAVEFILE_KEYS = {
@@ -311,3 +315,83 @@ def test_transcript_appends_pending_ephemeral_chunk():
     assert last["interaction_id"] is None
     assert last["ephemeral_chunk_id"] == "tok123"
     assert last["content"] == "awaiting approval"
+
+
+# -------- _parse_tool_context: raw-OpenAI-message -> frontend ToolContext --------
+# The parked-CONFIRM path slices the still-in-flight conversation_history (raw
+# OpenAI messages) into _parse_tool_context so the pending chunk can render the
+# tool call that is awaiting approval. Persisted rows already store the structured
+# shape and must pass through untouched.
+
+def test_parse_tool_context_transforms_openai_tool_call_and_result():
+    raw = [
+        {"role": "assistant", "tool_calls": [
+            {"id": "call_1", "name": "search_tickets", "group_id": "g1",
+             "arguments": {"query": "vpn"}},
+        ]},
+        {"role": "tool", "tool_call_id": "call_1", "content": '{"result": []}'},
+    ]
+    out = _parse_tool_context(raw)
+    assert out == [{
+        "call_id": "call_1",
+        "group_id": "g1",
+        "tool_name": "search_tickets",
+        "arguments": {"query": "vpn"},
+        "result": '{"result": []}',
+        "error": None,
+    }]
+
+
+def test_parse_tool_context_function_shape_and_stringified_args():
+    # OpenAI's nested `function` envelope with arguments as a JSON string.
+    raw = [
+        {"role": "assistant", "tool_calls": [
+            {"id": "call_9", "function": {"name": "create_ticket"},
+             "arguments": '{"title": "x"}'},
+        ]},
+    ]
+    out = _parse_tool_context(raw)
+    assert len(out) == 1
+    assert out[0]["tool_name"] == "create_ticket"
+    assert out[0]["arguments"] == {"title": "x"}
+    assert out[0]["result"] is None
+
+
+def test_parse_tool_context_surfaces_tool_error():
+    raw = [
+        {"role": "assistant", "tool_calls": [{"id": "c", "name": "t"}]},
+        {"role": "tool", "tool_call_id": "c",
+         "content": '{"error": "boom"}'},
+    ]
+    out = _parse_tool_context(raw)
+    assert out[0]["result"] == '{"error": "boom"}'
+    assert out[0]["error"] == "boom"
+
+
+def test_parse_tool_context_accepts_json_string():
+    raw = json.dumps([
+        {"role": "assistant", "tool_calls": [{"id": "c", "name": "t"}]},
+    ])
+    out = _parse_tool_context(raw)
+    assert out == [{
+        "call_id": "c", "group_id": None, "tool_name": "t",
+        "arguments": {}, "result": None, "error": None,
+    }]
+
+
+def test_parse_tool_context_passthrough_already_structured():
+    # Persisted rows store the structured shape (no `role` keys) — must be
+    # returned unchanged so existing transcript rendering keeps working.
+    structured = [{"call_id": "c", "tool_name": "t", "arguments": {},
+                   "result": "ok", "error": None}]
+    assert _parse_tool_context(structured) == structured
+
+
+def test_parse_tool_context_none_and_unparseable():
+    assert _parse_tool_context(None) is None
+    assert _parse_tool_context("") is None
+    assert _parse_tool_context("not json{") is None
+
+
+def test_parse_tool_context_non_list_returned_as_is():
+    assert _parse_tool_context({"a": 1}) == {"a": 1}

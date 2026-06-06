@@ -127,13 +127,59 @@ def build_kobold_savefile(
 
 def _parse_tool_context(raw: Any) -> Optional[Any]:
     """tool_context is stored as a JSON string (or None). Return the parsed
-    structure for the transcript, or None when absent/unparseable."""
+    structure for the transcript, or None when absent/unparseable.
+    Transforms raw OpenAI message dicts into the frontend ToolContext shape."""
     if not raw:
         return None
-    if isinstance(raw, (list, dict)):
-        return raw
     try:
-        return json.loads(raw)
+        if isinstance(raw, str):
+            msgs = json.loads(raw)
+        else:
+            msgs = raw
+            
+        if not isinstance(msgs, list):
+            return msgs
+            
+        contexts = {}
+        for msg in msgs:
+            if msg.get("role") == "assistant" and "tool_calls" in msg:
+                for call in msg.get("tool_calls", []):
+                    call_id = call.get("id")
+                    if call_id:
+                        args_val = call.get("arguments", {})
+                        if isinstance(args_val, str):
+                            try:
+                                args_val = json.loads(args_val)
+                            except json.JSONDecodeError:
+                                pass
+                                
+                        tool_name = call.get("name")
+                        if not tool_name and "function" in call:
+                            tool_name = call["function"].get("name")
+                            
+                        contexts[call_id] = {
+                            "call_id": call_id,
+                            "group_id": call.get("group_id"),
+                            "tool_name": tool_name,
+                            "arguments": args_val if isinstance(args_val, dict) else {},
+                            "result": None,
+                            "error": None,
+                        }
+            elif msg.get("role") == "tool":
+                call_id = msg.get("tool_call_id")
+                if call_id and call_id in contexts:
+                    content_str = msg.get("content", "")
+                    contexts[call_id]["result"] = content_str
+                    try:
+                        parsed = json.loads(content_str)
+                        if isinstance(parsed, dict) and "error" in parsed:
+                            contexts[call_id]["error"] = str(parsed["error"])
+                    except Exception:
+                        pass
+        
+        if contexts:
+            return list(contexts.values())
+        return msgs
     except (TypeError, ValueError):
         return None
 

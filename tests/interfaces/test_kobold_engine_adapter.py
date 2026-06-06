@@ -951,6 +951,41 @@ def test_transcript_appends_live_pending_confirmation_as_ephemeral():
     mm.close()
 
 
+def test_transcript_pending_confirmation_surfaces_tool_context():
+    # The parked chunk renders the tool call awaiting approval by slicing the
+    # in-flight conversation_history from tool_context_start and parsing those
+    # raw OpenAI messages into the structured ToolContext shape.
+    from src.chat_system import PendingConfirmation
+
+    adapter, mm, persona, chat_system = _make_real_adapter()
+    _seed_history(mm, "test_persona", turns=1)
+    convo = [
+        {"role": "user", "content": "make a ticket"},
+        {"role": "assistant", "tool_calls": [
+            {"id": "call_7", "name": "create_ticket",
+             "arguments": {"title": "x"}},
+        ]},
+    ]
+    parked = PendingConfirmation(
+        write_calls=[{"name": "create_ticket", "arguments": {"title": "x"}}],
+        conversation_history=convo, persona_name="test_persona",
+        tools_for_llm=[], image_url=None, channel="web_ui",
+        confirmation_text="I'll create that ticket.",
+        tool_context_start=1,  # slice from the assistant tool-call message
+    )
+    chat_system._pending_confirmations[("portal", "test_persona")] = parked
+
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/session/test_persona/transcript")
+    last = r.json()["chunks"][-1]
+    assert last["ephemeral"] is True
+    assert last["tool_context"] == [{
+        "call_id": "call_7", "group_id": None, "tool_name": "create_ticket",
+        "arguments": {"title": "x"}, "result": None, "error": None,
+    }]
+    mm.close()
+
+
 def test_list_versions_unknown_id_returns_404():
     adapter, mm, _ = _make_adapter_with_seeded_db()
     with TestClient(adapter.app) as client:
