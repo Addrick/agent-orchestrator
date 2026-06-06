@@ -2,7 +2,6 @@
 
 import json
 import logging
-import re
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from config.global_config import (
@@ -93,11 +92,16 @@ class BotLogic:
             user_identifier: str,
             message: str
     ) -> Optional[Dict[str, Any]]:
-        split_args: List[str] = re.split(r'[ ]', message.lower())
+        # Preserve the original case of VALUE args — only the dispatch keys are
+        # matched case-insensitively (lowercased at each lookup site below).
+        # Blanket-lowercasing the whole message (an early-project shortcut for
+        # persona-name/command matching) silently corrupted case-sensitive
+        # values like `set prompt …`, `set model …`, and `set tool_policy <json>`.
+        split_args: List[str] = message.split(' ')
         command: str
         args: List[str]
         try:
-            command, args = split_args[0], split_args[1:]
+            command, args = split_args[0].lower(), split_args[1:]
         except IndexError:
             return None
 
@@ -294,7 +298,8 @@ class BotLogic:
     def _handle_add(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[Optional[str], bool]:
         if not args:
             return None, False
-        new_persona_name: str = args[0]
+        # persona names are lowercase-keyed by convention (prompt text keeps case)
+        new_persona_name: str = args[0].lower()
 
         if new_persona_name in self.chat_system.personas:
             return f"Error: Persona '{new_persona_name}' already exists.", False
@@ -313,7 +318,7 @@ class BotLogic:
     def _handle_delete(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[Optional[str], bool]:
         if not args:
             return None, False
-        persona_to_delete: str = args[0]
+        persona_to_delete: str = args[0].lower()
 
         if persona_to_delete not in self.chat_system.personas:
             return f"Error: Persona '{persona_to_delete}' not found.", False
@@ -367,7 +372,7 @@ class BotLogic:
     def _handle_what(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[Optional[str], bool]:
         if not args:
             return None, False
-        sub_command: str = args[0]
+        sub_command: str = args[0].lower()
         handler = self.what_handlers.get(sub_command)
         if handler:
             return handler(args, persona)
@@ -507,7 +512,7 @@ class BotLogic:
         if not args:
             return None, False
 
-        sub_command: str = args[0]
+        sub_command: str = args[0].lower()
         set_handler: Any = self.set_handlers.get(sub_command)
 
         if set_handler:
@@ -543,7 +548,7 @@ class BotLogic:
         """Fallback dotted-path setter: `set <provider>.<key> <value>`.
         Stores in persona.params.provider_extras[provider][key]. Phase E
         of plans/portal_engine_reintegration.md."""
-        dotted = args[0]
+        dotted = args[0].lower()  # provider/key are matched case-insensitively
         provider, _, key = dotted.partition('.')
         if not provider or not key:
             return f"Error: Invalid dotted path '{dotted}'. Use '<provider>.<key>'.", False
@@ -551,7 +556,7 @@ class BotLogic:
             return f"Usage: set {dotted} <value> (or 'none' to clear).", False
 
         raw = args[1]
-        if raw in ('none', 'null', 'clear'):
+        if raw.lower() in ('none', 'null', 'clear'):
             cleared = persona.clear_provider_extra(provider, key)
             if cleared:
                 return f"{provider}.{key} cleared for {persona.get_name()}.", True
@@ -572,9 +577,10 @@ class BotLogic:
             return float(raw)
         except ValueError:
             pass
-        if raw in ('true', 'on', 'yes'):
+        low = raw.lower()
+        if low in ('true', 'on', 'yes'):
             return True
-        if raw in ('false', 'off', 'no'):
+        if low in ('false', 'off', 'no'):
             return False
         return raw
 
