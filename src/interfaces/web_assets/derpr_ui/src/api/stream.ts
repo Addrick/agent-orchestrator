@@ -41,6 +41,12 @@ export interface ChatRequest {
   derpr_user_text: string
   derpr_retry?: boolean
   model?: string
+  // DP-136 6b: scope the turn to a channel (defaults to web_ui server-side).
+  // The engine logs the turn under this channel and rebuilds history per the
+  // persona's memory_mode, so submitting with a fresh tag "creates" a channel.
+  channel?: string
+  user_identifier?: string
+  server_id?: string
   temperature?: number
   top_p?: number
   top_k?: number

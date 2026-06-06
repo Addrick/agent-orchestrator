@@ -6,7 +6,7 @@
    ============================================================ */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import * as api from '../api/client'
-import { streamChat } from '../api/stream'
+import { streamChat, streamConfirm } from '../api/stream'
 import type {
   Persona,
   ToolDef,
@@ -14,6 +14,8 @@ import type {
   Chunk,
   ToolContext,
   DerprIdFrame,
+  ToolStartFrame,
+  ToolResultFrame,
   PatchPersonaResult,
   DevCommandResponse,
   AssembledRequest,
@@ -59,6 +61,10 @@ export function usePortalStore() {
   const [persona, setPersona] = useState<Persona | null>(null)
   const [tools, setTools] = useState<ToolDef[]>([])
   const [channels, setChannels] = useState<ChannelGroup[]>([])
+  // The channel string the transcript + next submit are scoped to (DP-136 6b).
+  // 'web_ui' is the default; switching channels re-fetches the transcript with
+  // ?channel=, "+ new channel" sets a fresh tag that persists on first submit.
+  const [activeChannel, setActiveChannel] = useState<string>('web_ui')
   const [chunks, setChunks] = useState<Chunk[]>([])
   const [ltmBlock, setLtmBlock] = useState<string | null>(null)
   const [ltmOn, setLtmOn] = useState<boolean>(true)
@@ -75,11 +81,21 @@ export function usePortalStore() {
 
   const abortRef = useRef<{ abort: () => void } | null>(null)
   const idFrameRef = useRef<DerprIdFrame | null>(null)
+  // True while a CONFIRM-mode write is parked awaiting approval — drives the
+  // approve/deny bar's busy state on the ephemeral chunk.
+  const [resolvingConfirm, setResolvingConfirm] = useState<boolean>(false)
 
   // ---- loaders -------------------------------------------------------
+  // Transcript is scoped to the active channel (DP-136 6b). The engine honors
+  // the persona's memory_mode: a CHANNEL-mode persona isolates per channel; a
+  // GLOBAL-mode persona merges all channels regardless of this tag.
+  const activeChannelRef = useRef(activeChannel)
+  useEffect(() => {
+    activeChannelRef.current = activeChannel
+  }, [activeChannel])
   const refreshTranscript = useCallback(
     async (p: string) => {
-      const cs = await api.getTranscript(p)
+      const cs = await api.getTranscript(p, undefined, activeChannelRef.current)
       setChunks(cs)
       setOffline(api.usingMock())
     },
@@ -90,6 +106,10 @@ export function usePortalStore() {
     const persObj = await api.getPersona(p)
     setPersona(persObj)
     setOffline(api.usingMock())
+  }, [])
+
+  const refreshChannels = useCallback(async (p: string) => {
+    setChannels(await api.getChannels(p))
   }, [])
 
   const loadAll = useCallback(
@@ -145,9 +165,101 @@ export function usePortalStore() {
     async (name: string) => {
       setActivePersona(name)
       await api.setActivePersona(name)
+      // A persona switch resets to its default channel; channel list reloads
+      // inside loadAll for the new persona.
+      setActiveChannel('web_ui')
+      activeChannelRef.current = 'web_ui'
       await loadAll(name)
     },
     [loadAll],
+  )
+
+  // ---- channel switch / create (6b) ---------------------------------
+  // Switch the active channel and re-fetch the transcript scoped to it. The
+  // engine honors the persona's memory_mode for isolation.
+  const switchChannel = useCallback(
+    async (channel: string) => {
+      setActiveChannel(channel)
+      activeChannelRef.current = channel
+      if (persona) {
+        await refreshTranscript(persona.name)
+        if (ltmOn) setLtmBlock(await api.getLtmBlock(persona.name, '', channel))
+      }
+    },
+    [persona, ltmOn, refreshTranscript],
+  )
+
+  // "+ new channel" — just point the active channel at a fresh tag. No row
+  // exists yet, so the transcript comes back empty; the channel materializes
+  // in the DB (and the channel list) on the first submit.
+  const newChannel = useCallback(
+    async (rawName?: string) => {
+      const base = (rawName || '').trim() || `web_ui_${Date.now().toString(36)}`
+      const tag = base.startsWith('web_ui') ? base : `web_ui_${base}`
+      await switchChannel(tag)
+    },
+    [switchChannel],
+  )
+
+  // Shared SSE handler set for any turn-producing stream (`/v1/chat/completions`
+  // and the `/confirm` resume — same wire protocol). `onConfirm` is a no-op on
+  // the wire: a parked write surfaces as the trailing ephemeral chunk after the
+  // authoritative `/transcript` re-sync (which the engine also re-emits), so we
+  // don't render the confirm frame directly — we just let the re-sync show it.
+  // This means a CHAINED confirm (approve → another parked write) re-appears as
+  // a new ephemeral chunk with a fresh token, and the approve/deny bar re-arms.
+  const buildHandlers = useCallback(
+    (personaName: string) => ({
+      onToken: (delta: string) =>
+        setStream((s) => ({ ...s, text: s.text + delta })),
+      onToolStart: (f: ToolStartFrame) =>
+        setStream((s) => ({
+          ...s,
+          tools: [
+            ...s.tools,
+            {
+              call_id: f.call_id,
+              group_id: f.group_id,
+              tool_name: f.tool_name,
+              arguments: f.arguments,
+              result: null,
+              error: null,
+            },
+          ],
+        })),
+      onToolResult: (f: ToolResultFrame) =>
+        setStream((s) => ({
+          ...s,
+          tools: s.tools.map((t) =>
+            t.call_id === f.call_id
+              ? { ...t, result: f.result, error: f.error }
+              : t,
+          ),
+        })),
+      onIdFrame: (f: DerprIdFrame) => {
+        idFrameRef.current = f
+        setStream((s) => ({ ...s, responseType: f.response_type }))
+      },
+      onError: (msg: string) =>
+        setStream((s) => ({ ...s, errored: true, errorMsg: msg })),
+      onDone: async () => {
+        // Authoritative re-sync: the id-frame is an optimization only. The
+        // re-fetch surfaces a newly-persisted row, or the trailing ephemeral
+        // chunk when the turn (or a chained confirm) parked again.
+        await refreshTranscript(personaName)
+        // A first turn on a brand-new channel materializes it in the DB; reload
+        // the channel list so it appears in the rail.
+        await refreshChannels(personaName)
+        setStream((s) => {
+          if (s.errored) return { ...s, active: false }
+          if (s.aborted) return { ...s, active: false }
+          return { ...EMPTY_STREAM }
+        })
+        setResolvingConfirm(false)
+        abortRef.current = null
+      },
+    }),
+    [refreshTranscript, refreshChannels],
   )
 
   // ---- send a chat turn ---------------------------------------------
@@ -179,6 +291,7 @@ export function usePortalStore() {
           derpr_user_text: trimmed,
           derpr_retry: retry,
           model: persona.name,
+          channel: activeChannel,
           // null = persona leaves it unset; omit so the engine uses its own
           // default rather than forwarding a literal null.
           temperature: persona.temperature ?? undefined,
@@ -189,62 +302,36 @@ export function usePortalStore() {
           min_p: persona.kobold_extras.min_p,
           tfs: persona.kobold_extras.tfs,
         },
-        {
-          onToken: (delta) =>
-            setStream((s) => ({ ...s, text: s.text + delta })),
-          onToolStart: (f) =>
-            setStream((s) => ({
-              ...s,
-              tools: [
-                ...s.tools,
-                {
-                  call_id: f.call_id,
-                  group_id: f.group_id,
-                  tool_name: f.tool_name,
-                  arguments: f.arguments,
-                  result: null,
-                  error: null,
-                },
-              ],
-            })),
-          onToolResult: (f) =>
-            setStream((s) => ({
-              ...s,
-              tools: s.tools.map((t) =>
-                t.call_id === f.call_id
-                  ? { ...t, result: f.result, error: f.error }
-                  : t,
-              ),
-            })),
-          onIdFrame: (f) => {
-            idFrameRef.current = f
-            setStream((s) => ({ ...s, responseType: f.response_type }))
-          },
-          onError: (msg) =>
-            setStream((s) => ({
-              ...s,
-              errored: true,
-              errorMsg: msg,
-            })),
-          onDone: async () => {
-            // Authoritative re-sync: the id-frame is an optimization only.
-            const frame = idFrameRef.current
-            await refreshTranscript(persona.name)
-            setStream((s) => {
-              // keep an error/aborted transient visible (no committed row)
-              if (s.errored) return { ...s, active: false }
-              if (s.aborted) return { ...s, active: false }
-              // parked? leave the ephemeral chunk to the transcript re-sync
-              if (frame?.ephemeral_chunk_id) return { ...EMPTY_STREAM }
-              return { ...EMPTY_STREAM }
-            })
-            abortRef.current = null
-          },
-        },
+        buildHandlers(persona.name),
       )
       abortRef.current = handle
     },
-    [persona, refreshTranscript, refreshPersona],
+    [persona, activeChannel, refreshTranscript, refreshPersona, buildHandlers],
+  )
+
+  // ---- resolve a parked CONFIRM write (6a) --------------------------
+  // Approve/deny a parked write via the dedicated POST /confirm endpoint
+  // (NOT a free-text chat turn). `token` is the ephemeral chunk's
+  // ephemeral_chunk_id (== the engine's resume token). The continuation
+  // streams back over the same SSE protocol; on [DONE] we re-sync from
+  // /transcript so the ephemeral chunk becomes a persisted row (approve) or
+  // vanishes (deny). A chained write re-parks as a fresh ephemeral chunk.
+  const resolveConfirm = useCallback(
+    async (token: string, approved: boolean) => {
+      if (!persona) return
+      setBanner(null)
+      idFrameRef.current = null
+      setResolvingConfirm(true)
+      setStream({ ...EMPTY_STREAM, active: true })
+      const handle = streamConfirm(
+        persona.name,
+        approved,
+        token,
+        buildHandlers(persona.name),
+      )
+      abortRef.current = handle
+    },
+    [persona, buildHandlers],
   )
 
   const abortTurn = useCallback(async () => {
@@ -345,6 +432,7 @@ export function usePortalStore() {
     persona,
     tools,
     channels,
+    activeChannel,
     chunks,
     ltmBlock,
     ltmOn,
@@ -352,6 +440,7 @@ export function usePortalStore() {
     offline,
     loading,
     stream,
+    resolvingConfirm,
     devRow,
     banner,
     assembled,
@@ -360,6 +449,9 @@ export function usePortalStore() {
     setViewMode,
     toggleLtm,
     switchPersona,
+    switchChannel,
+    newChannel,
+    resolveConfirm,
     sendTurn,
     abortTurn,
     dismissStream,

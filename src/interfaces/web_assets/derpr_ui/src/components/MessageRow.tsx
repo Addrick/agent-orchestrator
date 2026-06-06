@@ -12,9 +12,20 @@ interface Props {
   onDelete: (id: number) => void
   onRegen: () => void
   onResync: () => void
+  onResolveConfirm: (token: string, approved: boolean) => void
+  resolvingConfirm: boolean
 }
 
-export function MessageRow({ chunk: c, tools, onEdit, onDelete, onRegen, onResync }: Props) {
+export function MessageRow({
+  chunk: c,
+  tools,
+  onEdit,
+  onDelete,
+  onRegen,
+  onResync,
+  onResolveConfirm,
+  resolvingConfirm,
+}: Props) {
   const { reasoning, body } = splitThink(c.content)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(body)
@@ -100,17 +111,38 @@ export function MessageRow({ chunk: c, tools, onEdit, onDelete, onRegen, onResyn
           )
         )}
 
-        {/* CONFIRM bar for ephemeral parked write (rendered, resolve is S6) */}
+        {/* CONFIRM bar for ephemeral parked write — resolves via POST /confirm
+            (DP-136 6a) with the ephemeral_chunk_id as the resume token. */}
         {c.ephemeral && (
           <div className="confirm">
             <span className="lbl">CONFIRM</span>
-            <button className="btn approve" disabled title="resolve flow is S6">
+            <button
+              className="btn approve"
+              disabled={resolvingConfirm || !c.ephemeral_chunk_id}
+              title="approve & run the parked write"
+              onClick={() =>
+                c.ephemeral_chunk_id &&
+                onResolveConfirm(c.ephemeral_chunk_id, true)
+              }
+            >
               ✓ approve &amp; run
             </button>
-            <button className="btn deny" disabled title="resolve flow is S6">
+            <button
+              className="btn deny"
+              disabled={resolvingConfirm || !c.ephemeral_chunk_id}
+              title="deny the parked write"
+              onClick={() =>
+                c.ephemeral_chunk_id &&
+                onResolveConfirm(c.ephemeral_chunk_id, false)
+              }
+            >
               ✕ deny
             </button>
-            <span className="note">resolves via /confirm (S6) · tool_policy = CONFIRM</span>
+            <span className="note">
+              {resolvingConfirm
+                ? 'resolving…'
+                : 'resolves via /confirm · tool_policy = CONFIRM'}
+            </span>
           </div>
         )}
       </div>

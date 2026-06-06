@@ -46,6 +46,27 @@ def _kobold_base_url() -> str:
     return raw
 
 
+def _channel_source(channel: str) -> str:
+    """Derive a coarse source tag from a `channel` string (DP-136 / handoff §10).
+
+    `channel` is a source-agnostic tag on the engine side; the bespoke portal
+    groups channels by their originating interface. Web UI channels are tagged
+    `web_ui` (or `web_ui:<name>`); Discord/Zammad/Gmail channels carry their own
+    conventions. This is a best-effort prefix match for grouping/badge styling
+    only — it never gates behavior.
+    """
+    c = (channel or "").lower()
+    if c.startswith("web_ui") or c.startswith("web"):
+        return "web"
+    if c.startswith("discord") or c.startswith("dsc"):
+        return "dsc"
+    if c.startswith("zammad") or c.startswith("ticket") or c.startswith("zmd"):
+        return "zmd"
+    if c.startswith("gmail") or c.startswith("email") or c.startswith("gml"):
+        return "gml"
+    return "web"
+
+
 class KoboldEngineAdapter:
     """HTTP boundary between kobold-lite and the DERPR engine.
 
@@ -190,8 +211,47 @@ class KoboldEngineAdapter:
                 "security_block_reasons": p.get_security_block_reasons(),
             }
 
+        @self.app.get("/api/v1/channels")
+        async def list_channels(persona: Optional[str] = None) -> Any:
+            """List the distinct channels seen in history (DP-136 / handoff §10).
+
+            Drives the bespoke portal's channel list. Each entry carries the raw
+            `channel` tag, a derived `source` prefix (web/dsc/zmd/gml) for
+            grouping + badge styling, the most recent `last_ts`, and a row
+            `count`. Scoped to `persona` when given so the list reflects the
+            channels the active persona has been used in. The portal always
+            includes a synthetic `web_ui` row so a fresh persona with no history
+            still offers a default channel to talk in.
+            """
+            rows = await asyncio.to_thread(
+                self.chat_system.memory_manager.get_distinct_channels, persona
+            )
+            channels = [
+                {
+                    "channel": r.get("channel"),
+                    "server_id": r.get("server_id"),
+                    "source": _channel_source(r.get("channel") or ""),
+                    "count": r.get("count", 0),
+                    "last_ts": r.get("last_ts"),
+                }
+                for r in rows
+                if r.get("channel")
+            ]
+            if not any(c["channel"] == "web_ui" for c in channels):
+                channels.append({
+                    "channel": "web_ui", "server_id": None, "source": "web",
+                    "count": 0, "last_ts": None,
+                })
+            return {"channels": channels}
+
         @self.app.get("/api/v1/session/{persona}/ltm_block")
-        async def ltm_block(persona: str, query: str = "") -> Any:
+        async def ltm_block(
+            persona: str,
+            query: str = "",
+            channel: str = "web_ui",
+            user_identifier: str = "portal",
+            server_id: Optional[str] = None,
+        ) -> Any:
             """Retrieve an LTM memory block for the given persona and query text.
 
             Returns {"block": "<memory>...</memory>"} or {"block": null} when
@@ -199,14 +259,17 @@ class KoboldEngineAdapter:
             Phase 2.2: called client-side before each submit when LTM is on;
             the block is written into kobold-lite's current_anote so kobold
             places it at its normal author's-note position in the prompt.
+            DP-136: `channel`/`user_identifier`/`server_id` are accepted so the
+            recalled block is scoped to the active channel (defaults preserve the
+            single web_ui/portal behavior).
             """
             if persona not in self.chat_system.personas:
                 return JSONResponse(status_code=404, content={"error": f"Persona '{persona}' not found"})
             block = await self.chat_system.get_session_memory_block(
                 persona_name=persona,
-                user_identifier="portal",
-                channel="web_ui",
-                server_id=None,
+                user_identifier=user_identifier,
+                channel=channel,
+                server_id=server_id,
                 query=query,
             )
             return {"block": block}
@@ -358,7 +421,13 @@ class KoboldEngineAdapter:
             return JSONResponse(content=savefile)
 
         @self.app.get("/api/v1/session/{persona}/transcript")
-        async def session_transcript(persona: str, max_turns: Optional[int] = None) -> Any:
+        async def session_transcript(
+            persona: str,
+            max_turns: Optional[int] = None,
+            channel: Optional[str] = None,
+            user_identifier: str = "portal",
+            server_id: Optional[str] = None,
+        ) -> Any:
             """DP-130 history contract — the authoritative transcript projection.
 
             Returns `{"chunks": [...]}` where every chunk carries a
@@ -368,18 +437,26 @@ class KoboldEngineAdapter:
             consumers address chunks by identity, never by story position, so
             the id array can no longer drift on parked/tool-only/abort turns.
 
-            Mirrors `kobold_export`'s persona/global-history scoping (the portal
-            has no channel concept; `max_turns` defaults to the persona's
-            sliding-window size). Suppressed rows are already filtered upstream
-            by `get_global_history` (invariant C5).
+            `max_turns` defaults to the persona's sliding-window size. Suppressed
+            rows are filtered upstream (invariant C5).
+
+            DP-136 channel scoping: when `channel` is supplied, history is fetched
+            through the SAME memory-mode dispatch the live `/v1/chat/completions`
+            path uses (`ChatSystem.get_view_history`), so the rendered transcript
+            mirrors exactly what the engine would feed the model for that
+            (persona, channel) — a CHANNEL-mode persona isolates per channel, a
+            GLOBAL-mode persona merges all channels. When `channel` is omitted the
+            legacy global-history behavior is preserved (back-compat for the
+            single-channel Lite/DP-132 callers).
             """
             if persona not in self.chat_system.personas:
                 return JSONResponse(status_code=404, content={"error": f"Persona '{persona}' not found"})
 
             p = self.chat_system.personas[persona]
             limit = max_turns if isinstance(max_turns, int) and max_turns > 0 else p.get_base_history_messages()
-            raw_history = await asyncio.to_thread(
-                self.chat_system.memory_manager.get_global_history, persona, limit
+            raw_history, mode_used = await asyncio.to_thread(
+                self.chat_system.get_view_history,
+                persona, user_identifier, channel, server_id, limit,
             )
             ids = [
                 m["interaction_id"] for m in raw_history
@@ -390,8 +467,9 @@ class KoboldEngineAdapter:
             )
             # Surface a live parked confirmation (portal session) as a trailing
             # ephemeral chunk so a fresh load renders the awaiting-approval text.
+            # Park key is (user_identifier, persona) — honor the requested user.
             pending_map = getattr(self.chat_system, "_pending_confirmations", {})
-            pending_obj = pending_map.get(("portal", persona))
+            pending_obj = pending_map.get((user_identifier, persona))
             pending: Optional[Dict[str, Any]] = None
             if pending_obj is not None:
                 pending = {
@@ -405,8 +483,9 @@ class KoboldEngineAdapter:
                 pending=pending,
             )
             logger.info(
-                "transcript persona=%s limit=%s rows=%d chunks=%d pending=%s",
-                persona, limit, len(raw_history),
+                "transcript persona=%s channel=%s mode=%s limit=%s rows=%d "
+                "chunks=%d pending=%s",
+                persona, channel, mode_used, limit, len(raw_history),
                 len(transcript["chunks"]), pending is not None,
             )
             return JSONResponse(content=transcript)
@@ -746,6 +825,14 @@ class KoboldEngineAdapter:
             sidecar_user = data.get("derpr_user_text")
             is_stream = bool(data.get("stream"))
             persona_name = self._get_current_persona_name()
+            # DP-136 channel scoping: the portal may target a specific channel
+            # (and optionally user_identifier/server_id). Defaults preserve the
+            # single web_ui/portal behavior. Creating a "new channel" is just
+            # submitting the first turn with a fresh `channel` string — the
+            # engine's memory_mode then governs isolation (see get_view_history).
+            channel = data.get("channel") or "web_ui"
+            user_identifier = data.get("user_identifier") or "portal"
+            server_id = data.get("server_id") or None
 
             if isinstance(sidecar_user, str) and sidecar_user.strip():
                 user_text: str = sidecar_user
@@ -799,8 +886,9 @@ class KoboldEngineAdapter:
                 assistant_id: Optional[int] = None
                 async for ev in self.chat_system.stream_response(
                     persona_name=persona_name,
-                    user_identifier="portal",
-                    channel="web_ui",
+                    user_identifier=user_identifier,
+                    channel=channel,
+                    server_id=server_id,
                     message=user_text,
                     is_retry=is_retry,
                     local_inference_config=local_inference_config,
@@ -881,8 +969,9 @@ class KoboldEngineAdapter:
                     # UI might be empty but the DB has rich context.
                     async for ev in self.chat_system.stream_response(
                         persona_name=persona_name,
-                        user_identifier="portal",
-                        channel="web_ui",
+                        user_identifier=user_identifier,
+                        channel=channel,
+                        server_id=server_id,
                         message=user_text,
                         is_retry=is_retry,
                         local_inference_config=local_inference_config,

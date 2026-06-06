@@ -86,6 +86,7 @@ export const MOCK_CHANNELS: ChannelGroup[] = [
     items: [
       {
         id: 'web_ui:scratch',
+        channel: 'web_ui',
         name: 'assistant · scratch',
         source: 'web',
         persona: 'assistant',
@@ -94,6 +95,7 @@ export const MOCK_CHANNELS: ChannelGroup[] = [
       },
       {
         id: 'web_ui:tune',
+        channel: 'web_ui',
         name: 'gemini · prompt-tune',
         source: 'web',
         persona: 'gemini',
@@ -106,6 +108,7 @@ export const MOCK_CHANNELS: ChannelGroup[] = [
     items: [
       {
         id: 'discord:it',
+        channel: 'discord',
         name: 'claude · #it-support',
         source: 'dsc',
         persona: 'claude',
@@ -113,6 +116,7 @@ export const MOCK_CHANNELS: ChannelGroup[] = [
       },
       {
         id: 'discord:ops',
+        channel: 'discord',
         name: 'dispatch · #ops',
         source: 'dsc',
         persona: 'dispatch',
@@ -125,6 +129,7 @@ export const MOCK_CHANNELS: ChannelGroup[] = [
     items: [
       {
         id: 'zammad:q2',
+        channel: 'zammad',
         name: 'triage · queue#2',
         source: 'zmd',
         persona: 'triage',
@@ -137,6 +142,7 @@ export const MOCK_CHANNELS: ChannelGroup[] = [
     items: [
       {
         id: 'gmail:sup',
+        channel: 'gmail',
         name: 'support@ inbox',
         source: 'gml',
         persona: 'assistant',

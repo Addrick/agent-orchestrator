@@ -923,6 +923,32 @@ class MemoryManager:
             cursor.execute(query, params)
             return [dict(row) for row in reversed(cursor.fetchall())]
 
+    def get_distinct_channels(self, persona_name: Optional[str] = None) -> List[Dict[str, Any]]:
+        """List the distinct (channel, server_id) pairs seen in history.
+
+        Drives the bespoke portal's channel list (DP-136 / handoff §10): the UI
+        groups these by the channel's source prefix (`web_ui`, `discord`,
+        `zammad`, `gmail`). Scoped to `persona_name` when given so the list
+        reflects the channels the active persona has actually been used in.
+        Each entry carries a `last_ts` (most recent activity) so the UI can sort
+        and a `count` of non-suppressed rows. Suppressed rows are excluded.
+        """
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            query = (
+                "SELECT channel, server_id, COUNT(*) AS count,"
+                " MAX(timestamp) AS last_ts FROM User_Interactions"
+                " WHERE channel IS NOT NULL" + self._SUPPRESSION_SUBQUERY
+            )
+            params: List[Any] = []
+            if persona_name is not None:
+                query += " AND persona_name = ?"
+                params.append(persona_name)
+            query += " GROUP BY channel, server_id ORDER BY last_ts DESC"
+            cursor.execute(query, params)
+            return [dict(row) for row in cursor.fetchall()]
+
     def log_agent_action(self, agent_name: str, action_type: str, trigger_context: Optional[str] = None,
                          action_payload: Optional[str] = None, outcome: Optional[str] = None,
                          outcome_payload: Optional[str] = None, parent_id: Optional[int] = None) -> int:

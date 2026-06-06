@@ -44,10 +44,23 @@ def _make_adapter_with_seeded_db(persona_name: str = "test_persona",
         prompt="you are test",
         context_length=context_length,
     )
+    def _get_view_history(persona_name, user_identifier, channel,
+                          server_id=None, limit=None):
+        # Mirror ChatSystem.get_view_history: channel=None → global history;
+        # a concrete channel scopes per channel (memory_mode is CHANNEL here by
+        # default for the bare Persona). Returns (rows, mode_label).
+        if channel is None:
+            return mm.get_global_history(persona_name, limit), "global"
+        return (
+            mm.get_channel_history(channel, persona_name, server_id, limit),
+            "channel",
+        )
+
     chat_system = SimpleNamespace(
         personas={persona_name: persona},
         memory_manager=mm,
         get_session_memory_block=retrieve_memory_block or AsyncMock(return_value=None),
+        get_view_history=_get_view_history,
     )
     adapter = KoboldAdapter(chat_system=chat_system)
     return adapter, mm, persona
@@ -2086,4 +2099,129 @@ def test_assemble_endpoint_returns_parity_contract_shape():
     assert msgs[-1]["role"] == "user"
     assert msgs[-1]["content"] == "hello world"
     assert msgs[-1]["src"] == "composer"
+    mm.close()
+
+
+# -------- DP-136 (6b): channel scoping --------
+
+def _seed_channel(mm: MemoryManager, persona_name: str, channel: str,
+                  user: str, n: int, base_offset: int = 0):
+    base = datetime(2026, 5, 1, 12, 0, 0)
+    for i in range(n):
+        mm.log_message(
+            user_identifier=user, persona_name=persona_name, channel=channel,
+            author_role="user", author_name=user,
+            content=f"{channel} user {i}",
+            timestamp=base + timedelta(seconds=base_offset + 2 * i),
+        )
+
+
+def test_get_distinct_channels_lists_per_persona_with_counts():
+    mm = MemoryManager(db_path=":memory:")
+    mm.create_schema()
+    _seed_channel(mm, "p", "web_ui", "portal", 2)
+    _seed_channel(mm, "p", "discord_ops", "u1", 3, base_offset=100)
+    _seed_channel(mm, "other", "zammad_q1", "u2", 1, base_offset=200)
+
+    rows = mm.get_distinct_channels("p")
+    chans = {r["channel"]: r["count"] for r in rows}
+    assert chans == {"web_ui": 2, "discord_ops": 3}, chans
+    # ordered by last activity desc → discord_ops (offset 100) first
+    assert rows[0]["channel"] == "discord_ops"
+    mm.close()
+
+
+def test_get_distinct_channels_excludes_suppressed():
+    mm = MemoryManager(db_path=":memory:")
+    mm.create_schema()
+    iid = mm.log_message(
+        user_identifier="portal", persona_name="p", channel="web_ui",
+        author_role="user", author_name=None, content="hi",
+        timestamp=datetime(2026, 5, 1, 12, 0, 0),
+    )
+    mm.suppress_interaction(iid)
+    rows = mm.get_distinct_channels("p")
+    assert rows == []
+    mm.close()
+
+
+def test_channels_endpoint_groups_by_source_and_injects_web_ui():
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    _seed_channel(mm, "test_persona", "discord_ops", "u1", 1)
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/channels?persona=test_persona")
+    assert r.status_code == 200
+    chans = r.json()["channels"]
+    by_chan = {c["channel"]: c for c in chans}
+    # discord channel keeps its real tag + derives the dsc source
+    assert by_chan["discord_ops"]["source"] == "dsc"
+    # a synthetic web_ui row is always present so a fresh persona can chat
+    assert "web_ui" in by_chan
+    assert by_chan["web_ui"]["source"] == "web"
+    mm.close()
+
+
+def test_transcript_channel_scoping_isolates_per_channel():
+    # CHANNEL_ISOLATED persona: ?channel= must return only that channel's rows.
+    adapter, mm, _ = _make_adapter_with_seeded_db(context_length=20)
+    _seed_channel(mm, "test_persona", "web_ui", "portal", 2)
+    _seed_channel(mm, "test_persona", "web_ui_alt", "portal", 3, base_offset=100)
+
+    with TestClient(adapter.app) as client:
+        r_main = client.get(
+            "/api/v1/session/test_persona/transcript?channel=web_ui")
+        r_alt = client.get(
+            "/api/v1/session/test_persona/transcript?channel=web_ui_alt")
+        r_all = client.get("/api/v1/session/test_persona/transcript")
+
+    assert len(r_main.json()["chunks"]) == 2
+    assert len(r_alt.json()["chunks"]) == 3
+    # No channel param → legacy global history merges both channels.
+    assert len(r_all.json()["chunks"]) == 5
+    mm.close()
+
+
+def test_ltm_block_passes_channel_to_retrieval():
+    mock_retrieve = AsyncMock(return_value=None)
+    adapter, mm, _ = _make_adapter_with_seeded_db(retrieve_memory_block=mock_retrieve)
+    with TestClient(adapter.app) as client:
+        client.get(
+            "/api/v1/session/test_persona/ltm_block",
+            params={"query": "q", "channel": "web_ui_alt"},
+        )
+    mock_retrieve.assert_awaited_once()
+    assert mock_retrieve.call_args.kwargs.get("channel") == "web_ui_alt"
+    mm.close()
+
+
+def test_ltm_block_defaults_channel_to_web_ui():
+    mock_retrieve = AsyncMock(return_value=None)
+    adapter, mm, _ = _make_adapter_with_seeded_db(retrieve_memory_block=mock_retrieve)
+    with TestClient(adapter.app) as client:
+        client.get("/api/v1/session/test_persona/ltm_block", params={"query": "q"})
+    assert mock_retrieve.call_args.kwargs.get("channel") == "web_ui"
+    mm.close()
+
+
+def test_chat_completions_logs_turn_under_requested_channel():
+    # Submitting with a fresh `channel` materializes it (channel "creation").
+    adapter, mm, _, _ = _make_real_adapter(deltas=("ok",))
+    body = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": False,
+        "derpr_user_text": "hi there",
+        "channel": "web_ui_newchan",
+    }
+    with TestClient(adapter.app) as client:
+        r = client.post("/v1/chat/completions", json=body)
+    assert r.status_code == 200
+
+    conn = mm._get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT DISTINCT channel FROM User_Interactions WHERE persona_name = ?",
+        ("test_persona",),
+    )
+    channels = {row[0] for row in cur.fetchall()}
+    assert channels == {"web_ui_newchan"}, channels
     mm.close()

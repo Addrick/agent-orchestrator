@@ -26,6 +26,8 @@ export function Conversation({ store }: { store: PortalStore }) {
     regen,
     editRow,
     deleteRow,
+    resolveConfirm,
+    resolvingConfirm,
     refreshTranscript,
   } = store
 
@@ -123,6 +125,8 @@ export function Conversation({ store }: { store: PortalStore }) {
                     onDelete={deleteRow}
                     onRegen={regen}
                     onResync={onResync}
+                    onResolveConfirm={resolveConfirm}
+                    resolvingConfirm={resolvingConfirm}
                   />
                 </RenderedSlot>
               ))}

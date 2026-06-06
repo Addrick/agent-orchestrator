@@ -357,6 +357,44 @@ class ChatSystem:
         else:
             return self.memory_manager.get_channel_history(channel, persona_name, server_id, effective_limit), "channel"
 
+    def get_view_history(
+            self,
+            persona_name: str,
+            user_identifier: str,
+            channel: Optional[str],
+            server_id: Optional[str] = None,
+            limit: Optional[int] = None,
+    ) -> Tuple[List[Dict[str, Any]], str]:
+        """Raw history the way the engine would see it, for the transcript view.
+
+        DP-136 / handoff §10. The bespoke portal's transcript must mirror what
+        the engine would actually feed the model for a given (persona, channel).
+        That depends on the persona's `memory_mode`:
+          - GLOBAL  → all channels merge (the `channel` arg is irrelevant)
+          - CHANNEL → only the supplied channel's rows
+          - PERSONAL/SERVER/TICKET → scoped by user/server/ticket respectively
+        So we dispatch through the SAME `_fetch_raw_history` the live path uses,
+        keyed on the persona's mode — guaranteeing the rendered transcript and a
+        live submit see the same isolation behavior. When `channel` is None we
+        preserve the legacy behavior (global history regardless of mode) so
+        existing single-channel callers are unchanged.
+
+        Returns (raw_history, memory_mode_label). Rows are NOT formatted for the
+        LLM (the transcript projection wants the raw columns).
+        """
+        if persona_name not in self.personas:
+            return [], "global"
+        if channel is None:
+            return self.memory_manager.get_global_history(persona_name, limit), "global"
+        persona = self.personas[persona_name]
+        effective_limit = persona.get_history_messages()
+        if limit is not None:
+            effective_limit = min(effective_limit, limit)
+        return self._fetch_raw_history(
+            persona.get_memory_mode(), persona_name,
+            user_identifier, channel, server_id, effective_limit,
+        )
+
     def _build_conversation_history(
             self,
             persona: Persona,

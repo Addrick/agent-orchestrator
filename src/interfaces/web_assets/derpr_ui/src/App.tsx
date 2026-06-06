@@ -36,7 +36,7 @@ export default function App() {
       <TopBar store={store} collapsed={collapsed} toggle={toggle} />
       <div className="body">
         <NavRail />
-        <Channels channels={store.channels} />
+        <Channels store={store} />
         <Conversation store={store} />
         <Inspector store={store} />
       </div>

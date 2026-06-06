@@ -116,8 +116,20 @@ export interface LtmBlockResponse {
 
 // ---- channel tags (source-agnostic `channel` string) ----
 export type ChannelSource = 'web' | 'dsc' | 'zmd' | 'gml'
+
+// ---- GET /api/v1/channels → { channels: ChannelRow[] } (DP-136 6b) ----
+export interface ChannelRow {
+  channel: string
+  server_id: string | null
+  source: ChannelSource
+  count: number
+  last_ts: string | null
+}
+
 export interface ChannelItem {
   id: string
+  // the raw source-agnostic `channel` string used to scope transcript/submit
+  channel: string
   name: string
   source: ChannelSource
   persona: string

@@ -21,6 +21,9 @@ import type {
   Persona,
   ToolDef,
   ChannelGroup,
+  ChannelItem,
+  ChannelRow,
+  ChannelSource,
   Chunk,
   TranscriptResponse,
   ToolsCatalog,
@@ -126,37 +129,61 @@ export function getTools(): Promise<ToolDef[]> {
 }
 
 // ---- channels --------------------------------------------------------
-// No channel-listing endpoint exists yet (S6). For now the live path
-// reflects the single active web_ui channel; mock supplies the grouped
-// demo list. Single-channel is acceptable per spec.
+// GET /api/v1/channels (DP-136 6b) returns the distinct channels seen in
+// history for the active persona, each with a derived source tag. We group
+// them by source for the channel rail. The engine always includes a synthetic
+// `web_ui` row so a fresh persona still offers a default channel.
+const SOURCE_LABEL: Record<ChannelSource, string> = {
+  web: 'Web UI',
+  dsc: 'Discord',
+  zmd: 'Zammad',
+  gml: 'Gmail',
+}
+
 export function getChannels(activePersona: string): Promise<ChannelGroup[]> {
   return liveOr(
     async () => {
-      // Probe the engine is alive; if so, present the single real channel.
-      await getActivePersona()
-      return [
-        {
-          group: 'Web UI',
-          items: [
-            {
-              id: 'web_ui:portal',
-              name: `${activePersona} · web_ui`,
-              source: 'web',
-              persona: activePersona,
-              active: true,
-              preview: 'live channel',
-            },
-          ],
-        },
-      ] as ChannelGroup[]
+      const { channels } = await getJSON<{ channels: ChannelRow[] }>(
+        `/api/v1/channels?persona=${encodeURIComponent(activePersona)}`,
+      )
+      const bySource = new Map<ChannelSource, ChannelItem[]>()
+      for (const c of channels) {
+        const src = (c.source || 'web') as ChannelSource
+        const item: ChannelItem = {
+          id: `${c.channel}:${c.server_id ?? ''}`,
+          channel: c.channel,
+          name: c.channel,
+          source: src,
+          persona: activePersona,
+          active: c.channel === 'web_ui',
+          preview: c.count ? `${c.count} msgs` : 'no history yet',
+        }
+        const list = bySource.get(src) ?? []
+        list.push(item)
+        bySource.set(src, list)
+      }
+      const order: ChannelSource[] = ['web', 'dsc', 'zmd', 'gml']
+      return order
+        .filter((s) => bySource.has(s))
+        .map((s) => ({ group: SOURCE_LABEL[s], items: bySource.get(s)! }))
     },
     () => MOCK_CHANNELS,
   )
 }
 
 // ---- transcript ------------------------------------------------------
-export function getTranscript(persona: string, maxTurns?: number): Promise<Chunk[]> {
-  const q = maxTurns ? `?max_turns=${maxTurns}` : ''
+// `channel` (DP-136 6b) scopes the transcript; the engine honors the persona's
+// memory_mode (CHANNEL isolates, GLOBAL merges). Omitting it keeps the legacy
+// global-history view.
+export function getTranscript(
+  persona: string,
+  maxTurns?: number,
+  channel?: string,
+): Promise<Chunk[]> {
+  const qs = new URLSearchParams()
+  if (maxTurns) qs.set('max_turns', String(maxTurns))
+  if (channel) qs.set('channel', channel)
+  const q = qs.toString() ? `?${qs}` : ''
   return liveOr(
     async () =>
       (await getJSON<TranscriptResponse>(
@@ -167,11 +194,17 @@ export function getTranscript(persona: string, maxTurns?: number): Promise<Chunk
 }
 
 // ---- ltm -------------------------------------------------------------
-export function getLtmBlock(persona: string, query: string): Promise<string | null> {
+export function getLtmBlock(
+  persona: string,
+  query: string,
+  channel?: string,
+): Promise<string | null> {
+  const qs = new URLSearchParams({ query })
+  if (channel) qs.set('channel', channel)
   return liveOr(
     async () =>
       (await getJSON<LtmBlockResponse>(
-        `/api/v1/session/${encodeURIComponent(persona)}/ltm_block?query=${encodeURIComponent(query)}`,
+        `/api/v1/session/${encodeURIComponent(persona)}/ltm_block?${qs}`,
       )).block,
     () => MOCK_LTM_BLOCK,
   )
