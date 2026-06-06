@@ -498,7 +498,7 @@ class KoboldEngineAdapter:
                 ids_with_versions=ids_with_versions,
                 pending=pending,
             )
-            logger.info(
+            logger.debug(
                 "transcript persona=%s channel=%s mode=%s limit=%s rows=%d "
                 "chunks=%d pending=%s",
                 persona, channel, mode_used, limit, len(raw_history),
@@ -556,6 +556,10 @@ class KoboldEngineAdapter:
                     f"swap_interaction_version({interaction_id}, {k}) failed: {e}"
                 )
                 return JSONResponse(status_code=500, content={"error": str(e)})
+            logger.debug(
+                "select_version id=%s archive_k=%d -> total_versions=%s",
+                interaction_id, k, result.get("total_versions"),
+            )
             versions = await asyncio.to_thread(
                 self.chat_system.memory_manager.list_interaction_versions,
                 interaction_id,

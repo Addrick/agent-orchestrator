@@ -1604,17 +1604,17 @@ def test_swap_interaction_version_round_trip_preserves_embedding(mem_manager):
     cur.execute("SELECT embedding FROM vec_Message_Embeddings WHERE interaction_id = ?", (iid,))
     assert cur.fetchone()['embedding'] == emb_v1
 
-    # v2 now lives in archive with its embedding intact.
+    # Stable design keeps the target archive row, so both versions live in the
+    # archive with their embeddings intact: v2 (the just-archived canonical) and
+    # v1 (the kept source archive, now duplicated by canonical).
     cur.execute(
         "SELECT e.old_content, eh.embedding FROM Interaction_Edit_History e"
         " LEFT JOIN Edit_History_Embeddings eh ON e.edit_id = eh.edit_id"
         " WHERE e.interaction_id = ?",
         (iid,),
     )
-    archived = cur.fetchall()
-    assert len(archived) == 1
-    assert archived[0]['old_content'] == "v2"
-    assert archived[0]['embedding'] == emb_v2
+    archived = {r['old_content']: r['embedding'] for r in cur.fetchall()}
+    assert archived == {"v1": emb_v1, "v2": emb_v2}
 
 
 def test_swap_interaction_version_out_of_bounds_raises_no_mutation(mem_manager):
@@ -1665,6 +1665,64 @@ def test_swap_total_versions_stable_across_multiple_swaps(mem_manager):
 
     versions_after = mem_manager.list_interaction_versions(iid)
     assert len(versions_after) == total_before
+
+
+def test_chevron_navigation_round_trip_matches_displayed_content(mem_manager):
+    """Drive the bespoke-UI VersionChevrons pointer math against the backend and
+    assert the displayed version matches at every step.
+
+    Encodes the frontend navigation contract (VersionChevrons.tsx):
+      - on load, `cur` (1-based) = position of the canonical-flagged entry;
+      - clicking a chevron posts swap with k = target1 - 1 (0-indexed archive
+        position pre-swap), refetches versions, and sets `cur = target1`;
+      - the rendered content is `versions[cur - 1]`.
+
+    The stable-array design must keep `total` constant, the counter tracking the
+    true position, every version reachable, and rendered content == backend
+    canonical at each step. This is the regression that the abandoned
+    delete-on-promote redesign broke (counter froze at N/N; '>' permanently
+    disabled; oldest versions unreachable).
+    """
+    iid = _seed_portal_assistant(mem_manager, "v1", _make_fake_embedding())
+    for content in ("v2", "v3", "v4"):
+        mem_manager.handle_portal_retry("persona_a", "web_ui", "portal")
+        mem_manager.update_interaction_content(iid, content)
+        mem_manager.store_message_embedding(iid, _make_fake_embedding(), EMBEDDING_MODEL, datetime.now())
+
+    def load():
+        versions = mem_manager.list_interaction_versions(iid)
+        cidx = next((i for i, v in enumerate(versions) if v.get("canonical")), None)
+        cur = (cidx + 1) if cidx is not None else len(versions)
+        return versions, cur
+
+    versions, cur = load()
+    total = len(versions)
+    assert total == 4
+    assert cur == 4
+    assert versions[cur - 1]["content"] == "v4"
+
+    def click(direction):
+        nonlocal versions, cur, total
+        target1 = cur - 1 if direction == "<" else cur + 1
+        result = mem_manager.swap_interaction_version(iid, target1 - 1)
+        versions = mem_manager.list_interaction_versions(iid)
+        cur = target1
+        assert len(versions) == total, "total versions must stay constant"
+        rendered = versions[cur - 1]["content"]
+        assert rendered == result["current_content"], (
+            f"rendered version ({rendered!r}) must match backend canonical "
+            f"({result['current_content']!r})"
+        )
+        return rendered
+
+    # Walk back to the oldest version, then forward, then back again.
+    assert click("<") == "v3"   # 3/4
+    assert click("<") == "v2"   # 2/4
+    assert click("<") == "v1"   # 1/4 — oldest reachable
+    assert cur == 1
+    assert click(">") == "v2"   # 3/4 forward
+    assert click(">") == "v3"
+    assert click("<") == "v2"
 
 
 # --- Phase 2.4: portal edit/delete round-trip ---
@@ -1733,8 +1791,14 @@ def test_update_interaction_content_clears_l0_embedding(mem_manager):
 
 
 def test_swap_dedupe_does_not_grow_archive_count(mem_manager):
-    """Toggling between two contents repeatedly leaves Interaction_Edit_History at
-    one row — the dup-content check skips redundant archive inserts."""
+    """Toggling between two contents repeatedly keeps Interaction_Edit_History
+    bounded at one row per distinct version (2) — the dup-content check skips
+    redundant archive inserts so churn never grows the table.
+
+    Stable design keeps the target archive row (so the numbered version list is
+    fixed), so the bound is the distinct-version count, not 1. Index 0 is v1 and
+    index 1 is v2 by archival order, so a real toggle alternates swap(1)/swap(0).
+    """
     iid = _seed_portal_assistant(mem_manager, "v1", _make_fake_embedding())
     mem_manager.handle_portal_retry("persona_a", "web_ui", "portal")
     mem_manager.update_interaction_content(iid, "v2")
@@ -1743,19 +1807,26 @@ def test_swap_dedupe_does_not_grow_archive_count(mem_manager):
     conn = mem_manager._get_connection()
     cur = conn.cursor()
 
+    def canonical():
+        cur.execute("SELECT content FROM User_Interactions WHERE interaction_id = ?", (iid,))
+        return cur.fetchone()['content']
+
+    def archive_count():
+        cur.execute("SELECT count(*) FROM Interaction_Edit_History WHERE interaction_id = ?", (iid,))
+        return cur.fetchone()[0]
+
     for _ in range(5):
-        # Swap 0 -> v1 canonical, v2 archived.
-        mem_manager.swap_interaction_version(iid, 0)
-        cur.execute("SELECT count(*) FROM Interaction_Edit_History WHERE interaction_id = ?", (iid,))
-        assert cur.fetchone()[0] == 1
-        # Swap 0 -> v2 canonical, v1 archived (dedupe hits — v1 archive already exists).
-        mem_manager.swap_interaction_version(iid, 0)
-        cur.execute("SELECT count(*) FROM Interaction_Edit_History WHERE interaction_id = ?", (iid,))
-        assert cur.fetchone()[0] == 1
+        mem_manager.swap_interaction_version(iid, 0)  # -> v1 canonical
+        assert canonical() == "v1"
+        assert archive_count() == 2  # both distinct versions retained, no growth
+        mem_manager.swap_interaction_version(iid, 1)  # -> v2 canonical
+        assert canonical() == "v2"
+        assert archive_count() == 2
 
 
 def test_swap_dedupe_total_versions_stable_across_churn(mem_manager):
-    """Across N back-and-forth swaps total_versions stays at 2 (canonical + 1 archive)."""
+    """Across N back-and-forth swaps total_versions stays at 2 (the distinct
+    version count = displayed, content-deduped list length)."""
     iid = _seed_portal_assistant(mem_manager, "v1", _make_fake_embedding())
     mem_manager.handle_portal_retry("persona_a", "web_ui", "portal")
     mem_manager.update_interaction_content(iid, "v2")

@@ -707,10 +707,15 @@ class MemoryManager:
              move Message_Embeddings row (if any) into Edit_History_Embeddings keyed
              by the new edit_id; delete from vec_Message_Embeddings.
           2. Restore target archive k — copy old_content into User_Interactions.content;
-             move Edit_History_Embeddings(target) back into Message_Embeddings +
-             vec_Message_Embeddings if present; delete the target archive row.
+             copy Edit_History_Embeddings(target) into Message_Embeddings +
+             vec_Message_Embeddings if present. The target archive row is KEPT so the
+             numbered version list stays stable across navigation (the chevron `k/n`
+             counter addresses a fixed list; deleting on promote would make it a
+             rotating MRU and strand older versions). list_interaction_versions
+             content-dedupes the now-duplicate canonical against its source archive.
 
-        Returns `{"current_content": str, "interaction_id": int, "total_versions": int}`.
+        Returns `{"current_content": str, "interaction_id": int, "total_versions": int}`
+        where total_versions matches the displayed (content-deduped) version count.
 
         Raises IndexError if k is out of bounds (no state mutation).
         Raises ValueError if interaction_id does not exist.
@@ -804,16 +809,26 @@ class MemoryManager:
                 conn.rollback()
                 raise
 
+            # total_versions must match what list_interaction_versions DISPLAYS:
+            # all archive rows, plus canonical only if its content isn't already an
+            # archive row (content-dedupe). After a swap the restored canonical
+            # always duplicates its source archive row, so it is not double-counted.
             cursor.execute(
                 "SELECT COUNT(*) FROM Interaction_Edit_History WHERE interaction_id = ?",
                 (interaction_id,),
             )
-            total_archives = cursor.fetchone()[0]
+            total_archives = int(cursor.fetchone()[0])
+            cursor.execute(
+                "SELECT 1 FROM Interaction_Edit_History"
+                " WHERE interaction_id = ? AND old_content = ? LIMIT 1",
+                (interaction_id, target_content),
+            )
+            canonical_in_archives = cursor.fetchone() is not None
             return {
                 "current_content": target_content,
                 "reasoning_content": target_reasoning,
                 "interaction_id": interaction_id,
-                "total_versions": int(total_archives) + 1,
+                "total_versions": total_archives + (0 if canonical_in_archives else 1),
             }
 
     def suppress_interaction(self, interaction_id: int) -> bool:
