@@ -527,20 +527,37 @@ class MemoryManager:
         embedding. Returns the interaction_id so the caller can UPDATE the
         canonical row in place with the new response.
 
-        Returns None if no prior assistant row exists (first-turn retry is a no-op).
+        Returns None if no prior assistant row exists (first-turn retry is a
+        no-op). Also returns None when the latest *visible* interaction is a
+        *user* turn with no response yet: that is a "generate a reply to this
+        turn" action, not a regen, so the caller must INSERT a fresh assistant
+        row rather than archive + overwrite the earlier assistant turn that
+        sits before it.
+
+        Suppressed (soft-deleted) rows are excluded from the "most recent"
+        lookup so it matches the transcript projection the UI renders. Without
+        this, deleting an assistant reply (which leaves its user turn trailing
+        in the UI) and then retrying that user turn would archive + overwrite
+        the still-suppressed assistant row — landing the regenerated response
+        in an invisible row, so it appears to vanish after streaming.
         """
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
+            # Inspect the single most recent *visible* interaction (any role).
+            # Only a trailing assistant turn is eligible for archive-in-place;
+            # if a user turn is newer (or the trailing assistant was deleted),
+            # there is nothing to regenerate in place.
             cursor.execute(
-                "SELECT interaction_id, content, reasoning_content FROM User_Interactions"
+                "SELECT interaction_id, content, reasoning_content, author_role"
+                " FROM User_Interactions"
                 " WHERE persona_name = ? AND user_identifier = ? AND channel = ?"
-                "   AND author_role = 'assistant'"
+                + self._SUPPRESSION_SUBQUERY +
                 " ORDER BY timestamp DESC, interaction_id DESC LIMIT 1",
                 (persona_name, user_identifier, channel),
             )
             row = cursor.fetchone()
-            if not row:
+            if not row or row['author_role'] != 'assistant':
                 return None
 
             interaction_id = row['interaction_id']
@@ -575,23 +592,36 @@ class MemoryManager:
                 return None
 
     def update_interaction_content(self, interaction_id: int, new_content: str,
-                                   reasoning_content: Optional[str] = None) -> bool:
+                                   reasoning_content: Optional[str] = None,
+                                   tool_context: Optional[str] = None) -> bool:
         """Overwrite the content of an existing interaction row in place.
 
         Used by portal retry and portal manual-edit flows. Clears
         `parent_summary_id` so the next summarizer pass re-groups the row, and
         drops the stale L0 embedding (`Message_Embeddings` + `vec_*`) so
         `MemoryAgent._embed_unembedded` re-encodes against the new content.
+
+        `tool_context` is only rewritten when explicitly provided (a regen that
+        produced tool calls); manual text edits pass None and leave the stored
+        tool_context untouched.
         """
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
             try:
-                cursor.execute(
-                    "UPDATE User_Interactions SET content = ?, reasoning_content = ?, parent_summary_id = NULL"
-                    " WHERE interaction_id = ?",
-                    (new_content, reasoning_content, interaction_id),
-                )
+                if tool_context is not None:
+                    cursor.execute(
+                        "UPDATE User_Interactions SET content = ?, reasoning_content = ?,"
+                        " tool_context = ?, parent_summary_id = NULL"
+                        " WHERE interaction_id = ?",
+                        (new_content, reasoning_content, tool_context, interaction_id),
+                    )
+                else:
+                    cursor.execute(
+                        "UPDATE User_Interactions SET content = ?, reasoning_content = ?, parent_summary_id = NULL"
+                        " WHERE interaction_id = ?",
+                        (new_content, reasoning_content, interaction_id),
+                    )
                 updated = cursor.rowcount > 0
                 cursor.execute("DELETE FROM Message_Embeddings WHERE interaction_id = ?", (interaction_id,))
                 cursor.execute("DELETE FROM vec_Message_Embeddings WHERE interaction_id = ?", (interaction_id,))

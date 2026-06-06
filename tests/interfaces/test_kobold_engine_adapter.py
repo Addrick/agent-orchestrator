@@ -382,6 +382,61 @@ def test_handle_portal_retry_returns_none_when_no_prior_assistant():
     mm.close()
 
 
+def test_chat_completions_retry_on_trailing_user_turn_appends_new_assistant():
+    """Retry on a trailing USER turn must INSERT a fresh assistant row.
+
+    Regression for the "block disappears" bug: when the conversation ends with
+    an un-answered user turn, "retry" means "generate a reply to it". The engine
+    must NOT archive + overwrite the earlier assistant turn (which sits before
+    the user turn) — doing so misroutes the response into an older row as a
+    version, so it never appears at the bottom on /transcript re-sync.
+    """
+    adapter, mm, _, _ = _make_real_adapter(deltas=("fresh reply",))
+
+    base = datetime(2026, 4, 20, 12, 0, 0)
+    user1 = mm.log_message(
+        user_identifier="portal", persona_name="test_persona", channel="web_ui",
+        author_role="user", author_name=None, content="first prompt", timestamp=base,
+    )
+    prior_assistant = mm.log_message(
+        user_identifier="portal", persona_name="test_persona", channel="web_ui",
+        author_role="assistant", author_name=None, content="prior reply",
+        timestamp=base + timedelta(seconds=1), reply_to_id=user1,
+    )
+    # Trailing user turn with no reply yet — the row whose "retry" we click.
+    mm.log_message(
+        user_identifier="portal", persona_name="test_persona", channel="web_ui",
+        author_role="user", author_name=None, content="second prompt",
+        timestamp=base + timedelta(seconds=2),
+    )
+
+    with TestClient(adapter.app) as client:
+        r = client.post("/chat/completions", json=_chat_body("", retry=True))
+    assert r.status_code == 200
+
+    rows = _fetch_portal_rows(mm, "test_persona")
+    # A new assistant row was appended (4 total), not an overwrite (would be 3).
+    assert len(rows) == 4
+    assert rows[-1]["author_role"] == "assistant"
+    assert rows[-1]["content"] == "fresh reply"
+    assert rows[-1]["interaction_id"] != prior_assistant
+
+    # The earlier assistant turn was left untouched — no spurious version.
+    conn = mm._get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT content FROM User_Interactions WHERE interaction_id = ?",
+        (prior_assistant,),
+    )
+    assert cur.fetchone()["content"] == "prior reply"
+    cur.execute(
+        "SELECT COUNT(*) FROM Interaction_Edit_History WHERE interaction_id = ?",
+        (prior_assistant,),
+    )
+    assert cur.fetchone()[0] == 0
+    mm.close()
+
+
 def test_chat_completions_stream_emits_derpr_tool_frames():
     """tool_revamp_v1 Phase 3: portal SSE relay forwards
     `event: derpr-tool-start` / `event: derpr-tool-result` for tool calls."""

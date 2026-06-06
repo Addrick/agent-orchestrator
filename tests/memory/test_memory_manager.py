@@ -1459,6 +1459,78 @@ def test_handle_portal_retry_moves_embedding_to_edit_history(mem_manager):
     assert rows[0]['embedding'] == emb
 
 
+def test_handle_portal_retry_noop_when_trailing_turn_is_user(mem_manager):
+    """Retry on a trailing user turn must NOT archive the earlier assistant row.
+
+    Conversation ends `assistant -> user` (a user turn with no reply yet). The
+    portal's "retry" on that user turn means "generate a reply", not "regenerate
+    the previous assistant". handle_portal_retry must return None so the caller
+    INSERTs a fresh assistant row after the user turn instead of overwriting the
+    earlier assistant turn in place (which would misroute the response and make
+    the streamed block vanish on re-sync).
+    """
+    iid = _seed_portal_assistant(mem_manager, "prior reply", emb=_make_fake_embedding())
+    # A newer user turn now terminates the conversation.
+    mem_manager.log_message(
+        "web_ui", "persona_a", "portal", "user", "Adam",
+        "follow-up question", datetime.now(),
+    )
+
+    returned = mem_manager.handle_portal_retry("persona_a", "web_ui", "portal")
+    assert returned is None
+
+    conn = mem_manager._get_connection()
+    cur = conn.cursor()
+    # The earlier assistant row was left untouched: no archive, embedding intact.
+    cur.execute("SELECT COUNT(*) FROM Interaction_Edit_History WHERE interaction_id = ?", (iid,))
+    assert cur.fetchone()[0] == 0
+    cur.execute("SELECT COUNT(*) FROM Message_Embeddings WHERE interaction_id = ?", (iid,))
+    assert cur.fetchone()[0] == 1
+
+
+def test_handle_portal_retry_noop_when_trailing_assistant_is_suppressed(mem_manager):
+    """Retry must ignore a soft-deleted trailing assistant row.
+
+    Reproduces the bespoke-UI "retry poof": the user deletes an assistant reply
+    (which suppresses it but leaves the row newest in the DB), so the user turn
+    becomes the trailing *visible* row. Clicking retry on that user turn must
+    behave like "generate a reply" — handle_portal_retry returns None so the
+    caller INSERTs a fresh *visible* assistant row. Before the suppression
+    filter it would archive + overwrite the still-suppressed assistant row,
+    landing the regenerated response in an invisible row (it streamed, then
+    vanished on re-sync because the transcript projection filters suppressed
+    rows).
+    """
+    # user -> assistant, then the assistant reply is deleted (suppressed).
+    mem_manager.log_message(
+        "web_ui", "persona_a", "portal", "user", "Adam",
+        "list joy's tickets", datetime.now(),
+    )
+    assistant_iid = _seed_portal_assistant(
+        mem_manager, "here are joy's tickets", emb=_make_fake_embedding(),
+    )
+    assert mem_manager.suppress_interaction(assistant_iid) is True
+
+    # The suppressed assistant is still the newest row in the DB, but the
+    # trailing *visible* row is the user turn -> retry is a no-op.
+    returned = mem_manager.handle_portal_retry("persona_a", "web_ui", "portal")
+    assert returned is None
+
+    conn = mem_manager._get_connection()
+    cur = conn.cursor()
+    # The suppressed assistant row was left untouched: not archived, embedding intact.
+    cur.execute(
+        "SELECT COUNT(*) FROM Interaction_Edit_History WHERE interaction_id = ?",
+        (assistant_iid,),
+    )
+    assert cur.fetchone()[0] == 0
+    cur.execute(
+        "SELECT COUNT(*) FROM Message_Embeddings WHERE interaction_id = ?",
+        (assistant_iid,),
+    )
+    assert cur.fetchone()[0] == 1
+
+
 def test_handle_portal_retry_without_embedding_is_noop_for_archive_embedding(mem_manager):
     """Retry with no prior embedding still archives content but no Edit_History_Embeddings row is inserted."""
     iid = _seed_portal_assistant(mem_manager, "no-embed content", emb=None)

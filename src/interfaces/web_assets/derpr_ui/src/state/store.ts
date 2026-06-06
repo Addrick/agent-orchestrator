@@ -278,7 +278,7 @@ export function usePortalStore() {
     async (text: string, retry = false) => {
       if (!persona) return
       const trimmed = text.trim()
-      if (!trimmed) return
+      if (!trimmed && !retry) return
 
       // dev command path
       if (trimmed.startsWith('/')) {
@@ -299,7 +299,7 @@ export function usePortalStore() {
 
       const handle = streamChat(
         {
-          derpr_user_text: trimmed,
+          derpr_user_text: retry && !trimmed ? text : trimmed,
           derpr_retry: retry,
           model: persona.name,
           channel: activeChannel,

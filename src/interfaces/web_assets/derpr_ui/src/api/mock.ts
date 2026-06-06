@@ -26,6 +26,7 @@ export const MOCK_PERSONA: Persona = {
   history_messages: 24,
   thinking_level: 'medium',
   memory_mode: 'GLOBAL',
+  long_term_memory: false,
   max_context_tokens: 16384,
   chat_template: 'chatml',
   top_p: 0.92,

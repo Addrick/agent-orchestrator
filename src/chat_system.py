@@ -942,13 +942,14 @@ class ChatSystem:
         Returns the canonical assistant interaction_id, or None when the
         text is empty or the response_type isn't a normal LLM generation.
         """
-        if not final_text or not final_text.strip():
+        if (not final_text or not final_text.strip()) and not tool_context_json:
             return None
 
         if retry_assistant_id is not None:
             try:
                 self.memory_manager.update_interaction_content(
                     retry_assistant_id, final_text,
+                    tool_context=tool_context_json
                 )
                 return retry_assistant_id
             except Exception as e:

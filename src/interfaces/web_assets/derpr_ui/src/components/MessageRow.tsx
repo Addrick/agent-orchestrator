@@ -14,6 +14,7 @@ interface Props {
   onResync: () => void
   onResolveConfirm: (token: string, approved: boolean) => void
   resolvingConfirm: boolean
+  isLastUser?: boolean
 }
 
 export function MessageRow({
@@ -25,6 +26,7 @@ export function MessageRow({
   onResync,
   onResolveConfirm,
   resolvingConfirm,
+  isLastUser,
 }: Props) {
   const { reasoning, body } = splitThink(c.content)
   const [editing, setEditing] = useState(false)
@@ -153,6 +155,11 @@ export function MessageRow({
           {c.role === 'assistant' && (
             <button className="ract" title="regenerate" onClick={onRegen}>
               ⟲ regen
+            </button>
+          )}
+          {c.role === 'user' && isLastUser && (
+            <button className="ract" title="retry" onClick={onRegen}>
+              ⟲ retry
             </button>
           )}
           <button className="ract" title="edit" onClick={beginEdit}>

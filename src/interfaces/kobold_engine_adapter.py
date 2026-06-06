@@ -8,7 +8,17 @@
 
 import json
 import logging
+import mimetypes
 import os
+
+# On Windows, mimetypes seeds from the registry, where `.js` is frequently
+# mapped to `text/plain`. Starlette's StaticFiles uses mimetypes.guess_type, so
+# the bespoke UI bundle would be served as text/plain and browsers refuse to
+# execute the ES module (strict MIME checking) → blank /derpr page. Force the
+# correct types at import so the SPA mounts regardless of the host registry.
+mimetypes.add_type("application/javascript", ".js")
+mimetypes.add_type("application/javascript", ".mjs")
+mimetypes.add_type("text/css", ".css")
 from typing import Any, AsyncIterator, Dict, Optional, List, Tuple
 from datetime import datetime, timezone
 

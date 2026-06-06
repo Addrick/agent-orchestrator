@@ -912,7 +912,9 @@ async def test_stream_response_is_retry_archives_via_handle_portal_retry(
         user_identifier="portal",
         channel="web_ui",
     )
-    memory_mock.update_interaction_content.assert_called_once_with(99, "LLM Reply")
+    memory_mock.update_interaction_content.assert_called_once_with(
+        99, "LLM Reply", tool_context=None
+    )
     # No new user log_message on retry path
     log_calls = [c for c in memory_mock.log_message.call_args_list
                  if c.kwargs.get('author_role') == 'user']

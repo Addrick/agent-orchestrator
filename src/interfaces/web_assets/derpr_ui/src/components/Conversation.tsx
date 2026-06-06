@@ -110,26 +110,33 @@ export function Conversation({ store }: { store: PortalStore }) {
                 <div className="text">{persona.prompt}</div>
               </div>
 
-              {chunks.map((c, i) => (
-                <RenderedSlot
-                  key={c.interaction_id ?? c.ephemeral_chunk_id ?? `slot-${i}`}
-                  index={i}
-                  ltmOn={ltmOn}
-                  ltmBlock={ltmBlock}
-                  persona={persona}
-                >
-                  <MessageRow
-                    chunk={c}
-                    tools={tools}
-                    onEdit={editRow}
-                    onDelete={deleteRow}
-                    onRegen={regen}
-                    onResync={onResync}
-                    onResolveConfirm={resolveConfirm}
-                    resolvingConfirm={resolvingConfirm}
-                  />
-                </RenderedSlot>
-              ))}
+              {(() => {
+                const lastUserChunkIndex = chunks.reduce(
+                  (acc, c, i) => (c.role === 'user' && !c.ephemeral ? i : acc),
+                  -1,
+                )
+                return chunks.map((c, i) => (
+                  <RenderedSlot
+                    key={c.interaction_id ?? c.ephemeral_chunk_id ?? `slot-${i}`}
+                    index={i}
+                    ltmOn={ltmOn}
+                    ltmBlock={ltmBlock}
+                    persona={persona}
+                  >
+                    <MessageRow
+                      chunk={c}
+                      tools={tools}
+                      isLastUser={i === lastUserChunkIndex}
+                      onEdit={editRow}
+                      onDelete={deleteRow}
+                      onRegen={regen}
+                      onResync={onResync}
+                      onResolveConfirm={resolveConfirm}
+                      resolvingConfirm={resolvingConfirm}
+                    />
+                  </RenderedSlot>
+                ))
+              })()}
 
               <StreamRow
                 stream={stream}
