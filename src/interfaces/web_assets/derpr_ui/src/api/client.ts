@@ -130,8 +130,8 @@ export async function patchPersona(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
-  const data = (await r.json()) as PatchPersonaResult
-  return data
+  if (!r.ok) throw new Error(`patch persona → ${r.status}`)
+  return (await r.json()) as PatchPersonaResult
 }
 
 // ---- tools -----------------------------------------------------------

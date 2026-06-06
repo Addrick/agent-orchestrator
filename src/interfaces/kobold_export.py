@@ -142,8 +142,12 @@ def _parse_tool_context(raw: Any) -> Optional[Any]:
             
         contexts = {}
         for msg in msgs:
+            if not isinstance(msg, dict):
+                continue
             if msg.get("role") == "assistant" and "tool_calls" in msg:
                 for call in msg.get("tool_calls", []):
+                    if not isinstance(call, dict):
+                        continue
                     call_id = call.get("id")
                     if call_id:
                         args_val = call.get("arguments", {})
@@ -180,7 +184,7 @@ def _parse_tool_context(raw: Any) -> Optional[Any]:
         if contexts:
             return list(contexts.values())
         return msgs
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, AttributeError):
         return None
 
 

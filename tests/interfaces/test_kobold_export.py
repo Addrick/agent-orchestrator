@@ -395,3 +395,13 @@ def test_parse_tool_context_none_and_unparseable():
 
 def test_parse_tool_context_non_list_returned_as_is():
     assert _parse_tool_context({"a": 1}) == {"a": 1}
+
+
+def test_parse_tool_context_malformed_elements_do_not_raise():
+    # A corrupted tool_context (non-dict list element, or a non-dict tool_call)
+    # must not raise AttributeError — that would escape the (TypeError, ValueError)
+    # guard and 500 the entire /transcript endpoint rather than one row.
+    assert _parse_tool_context(["x"]) == ["x"]
+    assert _parse_tool_context(
+        [{"role": "assistant", "tool_calls": ["bad"]}]
+    ) == [{"role": "assistant", "tool_calls": ["bad"]}]

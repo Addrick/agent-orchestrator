@@ -98,8 +98,8 @@ export function usePortalStore() {
     activeChannelRef.current = activeChannel
   }, [activeChannel])
   const refreshTranscript = useCallback(
-    async (p: string) => {
-      const cs = await api.getTranscript(p, undefined, activeChannelRef.current)
+    async (p: string, channel?: string) => {
+      const cs = await api.getTranscript(p, undefined, channel ?? activeChannelRef.current)
       setChunks(cs)
       setOffline(api.usingMock())
     },
@@ -164,18 +164,25 @@ export function usePortalStore() {
 
   // ---- LTM toggle re-fetch ------------------------------------------
   const toggleLtm = useCallback(async () => {
+    if (!persona) return
     const next = !ltmOn
+    const prevBlock = ltmBlock
     setLtmOn(next)
-    if (next && persona) {
-      const blk = await api.getLtmBlock(persona.name, '')
-      setLtmBlock(blk)
+    if (next) {
+      setLtmBlock(await api.getLtmBlock(persona.name, ''))
     } else {
       setLtmBlock(null)
     }
-    if (persona) {
-      api.patchPersona(persona.name, { long_term_memory: next }).catch(e => console.error(e))
+    try {
+      await api.patchPersona(persona.name, { long_term_memory: next })
+    } catch (e) {
+      // roll back the optimistic flip so the UI matches the server
+      console.error(e)
+      setLtmOn(!next)
+      setLtmBlock(prevBlock)
+      setBanner('Failed to update LTM setting — reverted')
     }
-  }, [ltmOn, persona])
+  }, [ltmOn, ltmBlock, persona])
 
   // ---- persona switch -----------------------------------------------
   const switchPersona = useCallback(
@@ -226,7 +233,7 @@ export function usePortalStore() {
   // This means a CHAINED confirm (approve → another parked write) re-appears as
   // a new ephemeral chunk with a fresh token, and the approve/deny bar re-arms.
   const buildHandlers = useCallback(
-    (personaName: string) => ({
+    (personaName: string, channel: string) => ({
       onToken: (delta: string) =>
         setStream((s) => ({ ...s, text: s.text + delta })),
       onToolStart: (f: ToolStartFrame) =>
@@ -258,12 +265,14 @@ export function usePortalStore() {
         setStream((s) => ({ ...s, responseType: f.response_type }))
       },
       onError: (msg: string) =>
-        setStream((s) => ({ ...s, errored: true, errorMsg: msg })),
+        setStream((s) => ({ ...s, active: false, errored: true, errorMsg: msg })),
       onDone: async () => {
         // Authoritative re-sync: the id-frame is an optimization only. The
         // re-fetch surfaces a newly-persisted row, or the trailing ephemeral
-        // chunk when the turn (or a chained confirm) parked again.
-        await refreshTranscript(personaName)
+        // chunk when the turn (or a chained confirm) parked again. Re-sync the
+        // channel the turn was SENT under (captured at stream start), not the
+        // currently-active one — the user may have switched channels mid-stream.
+        await refreshTranscript(personaName, channel)
         // A first turn on a brand-new channel materializes it in the DB; reload
         // the channel list so it appears in the rail.
         await refreshChannels(personaName)
@@ -319,7 +328,7 @@ export function usePortalStore() {
           min_p: persona.kobold_extras.min_p,
           tfs: persona.kobold_extras.tfs,
         },
-        buildHandlers(persona.name),
+        buildHandlers(persona.name, activeChannel),
       )
       abortRef.current = handle
     },
@@ -344,7 +353,7 @@ export function usePortalStore() {
         persona.name,
         approved,
         token,
-        buildHandlers(persona.name),
+        buildHandlers(persona.name, activeChannelRef.current),
       )
       abortRef.current = handle
     },
@@ -403,7 +412,13 @@ export function usePortalStore() {
       }
       if (!persona) return result
       if (Object.keys(patchBody).length) {
-        result = await api.patchPersona(persona.name, patchBody)
+        try {
+          result = await api.patchPersona(persona.name, patchBody)
+        } catch (e) {
+          console.error(e)
+          setBanner('Persona save failed')
+          return { result: 'error', rejected_fields: [], unknown_fields: [] }
+        }
       }
       for (const cmd of devCommands) {
         await api.devCommand(persona.name, cmd)
