@@ -25,6 +25,7 @@ _KNOWN_PATCH_KEYS_LEGACY = {
     "memory_mode",
     "max_context_tokens",
     "instruct_tags",
+    "long_term_memory",
     # kobold provider extras
     "rep_pen",
     "rep_pen_range",

@@ -73,6 +73,7 @@ export interface Persona {
   history_messages: number
   thinking_level: string | null
   memory_mode: string
+  long_term_memory: boolean
   max_context_tokens: number
   chat_template: string | null
   tool_policy: ToolPolicy | null

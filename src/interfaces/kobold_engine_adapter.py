@@ -205,6 +205,7 @@ class KoboldEngineAdapter:
                 "thinking_level": p.get_thinking_level(),
                 "memory_mode": p.get_memory_mode().name,
                 "max_context_tokens": p.get_max_context_tokens(),
+                "long_term_memory": p.get_long_term_memory(),
                 "chat_template": p.get_chat_template(),
                 "instruct_tags": p.get_provider_extra("kobold", "instruct_tags"),
                 "kobold_extras": get_kobold_extras_for_get(p),
@@ -634,6 +635,8 @@ class KoboldEngineAdapter:
                     rejected.append("memory_mode")
             if "max_context_tokens" in data:
                 p.set_max_context_tokens(data["max_context_tokens"])
+            if "long_term_memory" in data:
+                p.set_long_term_memory(bool(data["long_term_memory"]))
             if "chat_template" in data:
                 p.set_chat_template(data["chat_template"])
             if "instruct_tags" in data:

@@ -124,14 +124,20 @@ export function usePortalStore() {
       setTools(toolList)
       setChannels(chanList)
       await refreshTranscript(p)
-      if (ltmOn) {
+      
+      const isLtmOn = persObj.long_term_memory ?? true
+      setLtmOn(isLtmOn)
+      
+      if (isLtmOn) {
         const blk = await api.getLtmBlock(p, '')
         setLtmBlock(blk)
+      } else {
+        setLtmBlock(null)
       }
       setOffline(api.usingMock())
       setLoading(false)
     },
-    [ltmOn, refreshTranscript],
+    [refreshTranscript],
   )
 
   // initial boot
@@ -157,6 +163,11 @@ export function usePortalStore() {
     if (next && persona) {
       const blk = await api.getLtmBlock(persona.name, '')
       setLtmBlock(blk)
+    } else {
+      setLtmBlock(null)
+    }
+    if (persona) {
+      api.patchPersona(persona.name, { long_term_memory: next }).catch(e => console.error(e))
     }
   }, [ltmOn, persona])
 
