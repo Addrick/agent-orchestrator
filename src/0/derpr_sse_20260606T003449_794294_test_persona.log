@@ -1,0 +1,32 @@
+=== REQUEST ===
+{
+  "ts": "20260606T003449_794294",
+  "persona": "test_persona",
+  "is_retry": false,
+  "is_stream": true,
+  "user_text": "can you create a new ticket for testing?",
+  "derpr_user_text_sidecar": "can you create a new ticket for testing?",
+  "msg_count": 0,
+  "roles": [],
+  "local_inference_config": {
+    "temperature": null,
+    "top_p": null,
+    "top_k": null,
+    "max_tokens": 4096,
+    "stop_sequence": null
+  },
+  "raw_body": {
+    "stream": true,
+    "derpr_user_text": "can you create a new ticket for testing?",
+    "derpr_retry": false,
+    "model": "test_persona",
+    "channel": "web_ui",
+    "max_tokens": 4096
+  }
+}
+
+=== SSE STREAM ===
+--- CANCELLED ---
+client disconnected / asyncio.CancelledError
+
+=== END ===

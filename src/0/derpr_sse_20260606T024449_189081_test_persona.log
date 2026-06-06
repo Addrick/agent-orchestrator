@@ -1,0 +1,42 @@
+=== REQUEST ===
+{
+  "ts": "20260606T024449_189081",
+  "persona": "test_persona",
+  "is_retry": false,
+  "is_stream": true,
+  "user_text": "set service_binding zammad",
+  "derpr_user_text_sidecar": "set service_binding zammad",
+  "msg_count": 0,
+  "roles": [],
+  "local_inference_config": {
+    "temperature": null,
+    "top_p": null,
+    "top_k": null,
+    "max_tokens": 4096,
+    "stop_sequence": null
+  },
+  "raw_body": {
+    "stream": true,
+    "derpr_user_text": "set service_binding zammad",
+    "derpr_retry": false,
+    "model": "test_persona",
+    "channel": "web_ui",
+    "max_tokens": 4096
+  }
+}
+
+=== SSE STREAM ===
+--- DoneEvent ---
+{"assistant_id": null, "user_interaction_id": null, "response_type": "DEV_COMMAND", "final_text_len": 45, "final_text_preview": "Error: Unknown 'set' command: service_binding"}
+--- DevCommandText ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "Error: Unknown 'set' command: service_binding"}}]}
+
+--- derpr-id-frame ---
+event: derpr
+data: {"user_id": null, "assistant_id": null, "response_type": "DEV_COMMAND", "ephemeral_chunk_id": null}
+
+--- DONE ---
+data: [DONE]
+
+
+=== END ===

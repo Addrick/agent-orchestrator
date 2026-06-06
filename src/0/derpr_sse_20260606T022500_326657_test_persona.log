@@ -1,0 +1,42 @@
+=== REQUEST ===
+{
+  "ts": "20260606T022500_326657",
+  "persona": "test_persona",
+  "is_retry": false,
+  "is_stream": true,
+  "user_text": "any tools in this message?",
+  "derpr_user_text_sidecar": "any tools in this message?",
+  "msg_count": 0,
+  "roles": [],
+  "local_inference_config": {
+    "temperature": null,
+    "top_p": null,
+    "top_k": null,
+    "max_tokens": 4096,
+    "stop_sequence": null
+  },
+  "raw_body": {
+    "stream": true,
+    "derpr_user_text": "any tools in this message?",
+    "derpr_retry": false,
+    "model": "test_persona",
+    "channel": "web_ui",
+    "max_tokens": 4096
+  }
+}
+
+=== SSE STREAM ===
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "I have scanned the current context and the provided `<memory>` block.\n\n**No, there are no tools defined in this message.**\n\nThe current conversation only contains:\n1.  **System/Persona definition:** I am a test persona.\n2.  **Memory:** A list of past interactions (Thunderbird, BrowseComp, riddles, and a failed `drill_down_memory` test).\n3.  **Recent dialogue:** Our current exchange about test tickets.\n\nIt appears the tool definitions (such as `create_ticket`, `drill_down_memory`, or any other functional API) were not provided in your prompt or the memory block. If you have a specific toolset or API documentation you'd like me to use, please paste it, and I will be able to perform the actions you require."}}]}
+
+--- DoneEvent ---
+{"assistant_id": 12, "user_interaction_id": 11, "response_type": "LLM_GENERATION", "final_text_len": 713, "final_text_preview": "I have scanned the current context and the provided `<memory>` block.\n\n**No, there are no tools defined in this message.**\n\nThe current conversation only contains:\n1.  **System/Persona definition:** I am a test persona.\n2.  **Memory:** A list of past interactions (Thunderbird, BrowseComp, riddles, and a failed `drill_down_memory` test).\n3.  **Recent dialogue:** Our current exchange about test tickets.\n\nIt appears the tool definitions (such as `create_ticket`, `drill_down_memory`, or any other fu"}
+--- derpr-id-frame ---
+event: derpr
+data: {"user_id": 11, "assistant_id": 12, "response_type": "LLM_GENERATION", "ephemeral_chunk_id": null}
+
+--- DONE ---
+data: [DONE]
+
+
+=== END ===
