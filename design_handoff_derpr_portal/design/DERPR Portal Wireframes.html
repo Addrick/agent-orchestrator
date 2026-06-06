@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>DERPR Portal — Wireframes</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Caveat:wght@400;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="wireframe.css" />
+</head>
+<body class="show-notes show-meters">
+
+<!-- ===================== TOOLBAR ===================== -->
+<div class="toolbar">
+  <div class="brand">
+    <b>DERPR&nbsp;//&nbsp;PORTAL</b>
+    <small>web-ui rework · low-fi wireframes · 2 directions</small>
+  </div>
+  <div class="tabs" role="tablist">
+    <button class="tab" role="tab" aria-selected="true" data-dir="a"><span class="dot"></span>A · Control Room</button>
+    <button class="tab" role="tab" aria-selected="false" data-dir="b"><span class="dot"></span>B · Focus Workspace</button>
+  </div>
+  <div class="toolspacer"></div>
+  <div class="toggles">
+    <button class="toggle" data-cls="show-notes" aria-pressed="true"><span class="sw"></span>Annotations</button>
+    <button class="toggle" data-cls="show-meters" aria-pressed="true"><span class="sw"></span>Token meters</button>
+  </div>
+</div>
+
+<div class="stage">
+
+<!-- ================================================================= -->
+<!-- DIRECTION A — CONTROL ROOM                                         -->
+<!-- ================================================================= -->
+<section class="direction active" id="dir-a" data-screen-label="Direction A">
+  <div class="board-head">
+    <h2>Direction <span>A</span> — Control Room</h2>
+    <p>Everything persistent &amp; visible. 4-pane IDE. Navigate by rails + columns.</p>
+    <span class="hand">"see the whole machine at once"</span>
+  </div>
+
+  <div class="legend-row">
+    <div class="li"><span class="sw" style="border-color:var(--accent-dim);background:rgba(88,214,207,.12)"></span> teal = engine / interactive</div>
+    <div class="li"><span class="sw" style="border-color:rgba(157,140,240,.4);background:rgba(157,140,240,.15)"></span> violet = memory / LTM</div>
+    <div class="li"><span class="sw" style="border-color:rgba(224,164,94,.45);background:rgba(224,164,94,.15)"></span> amber = is_write / mutation / kobold-only</div>
+    <div class="li"><span class="sw" style="border-color:rgba(127,201,138,.4);background:rgba(127,201,138,.15)"></span> green = read / approve</div>
+    <div class="li" style="margin-left:auto;color:var(--note);font-family:var(--hand);font-size:16px">◷ = expansion slot, reserved not built</div>
+  </div>
+
+  <div class="appframe">
+    <div class="winbar">
+      <div class="lights"><i></i><i></i><i></i></div>
+      <span class="url">aux-desktop:8888 / portal</span>
+      <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
+        <span class="chip"><span class="dot" style="background:var(--ok)"></span>kcpp · omen:5001</span>
+        <span class="chip accent"><span class="dot"></span>engine route</span>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:58px 234px 1fr 366px;height:760px">
+
+      <!-- ---- NAV RAIL ---- -->
+      <div class="rail">
+        <div class="railitem active"><span class="ic">▤</span><span class="t">CHAT</span></div>
+        <div class="railitem soon"><span class="ic">◈</span><span class="t">MEMORY</span></div>
+        <div class="railitem soon"><span class="ic">⊞</span><span class="t">AGENTS</span></div>
+        <div class="railitem soon"><span class="ic">▰</span><span class="t">BUDGET</span></div>
+        <div class="railitem soon"><span class="ic">◔</span><span class="t">STATS</span></div>
+        <div class="railitem soon"><span class="ic">❏</span><span class="t">PERSONA</span></div>
+        <div style="flex:1"></div>
+        <div class="railitem"><span class="ic">⚙</span><span class="t">CFG</span></div>
+      </div>
+
+      <!-- ---- CHANNEL LIST ---- -->
+      <div style="border-right:1px solid var(--line);display:flex;flex-direction:column;min-width:0">
+        <div class="pane-head">Channels<span class="grow"></span><button class="iconbtn" title="new channel">+</button></div>
+        <div class="searchbar">⌕ filter channels…</div>
+        <div style="overflow:hidden;flex:1">
+          <div class="chan-group">Web UI</div>
+          <div class="chan active">
+            <div class="avatar bot">AS</div>
+            <div class="ci"><div class="top"><span class="nm">assistant · scratch</span><span class="src web">web</span></div><div class="pv">…rebuild the budget calc so it</div></div>
+          </div>
+          <div class="chan">
+            <div class="avatar bot">GM</div>
+            <div class="ci"><div class="top"><span class="nm">gemini · prompt-tune</span><span class="src web">web</span></div><div class="pv">temp 0.4 felt better, keep</div></div>
+          </div>
+          <div class="chan-group">Discord (live)</div>
+          <div class="chan">
+            <div class="avatar bot">CL</div>
+            <div class="ci"><div class="top"><span class="nm">claude · #it-support</span><span class="src dsc">dsc</span></div><div class="pv">ticket 8821 escalated to</div></div>
+          </div>
+          <div class="chan">
+            <div class="avatar bot">DP</div>
+            <div class="ci"><div class="top"><span class="nm">dispatch · #ops</span><span class="src dsc">dsc</span></div><div class="pv">routed 3 notifications</div></div>
+          </div>
+          <div class="chan-group">Zammad triage</div>
+          <div class="chan">
+            <div class="avatar bot">ZB</div>
+            <div class="ci"><div class="top"><span class="nm">triage · queue#2</span><span class="src zmd">zmd</span></div><div class="pv">stage 2/3 · classifying</div></div>
+          </div>
+        </div>
+        <div style="padding:11px 12px;border-top:1px solid var(--line)">
+          <div class="ph" style="height:34px">+ NEW CONVERSATION</div>
+        </div>
+      </div>
+
+      <!-- ---- CONVERSATION ---- -->
+      <div style="display:flex;flex-direction:column;min-width:0;position:relative">
+        <!-- convo header -->
+        <div class="pane-head" style="gap:10px">
+          <span class="avatar bot" style="width:22px;height:22px">AS</span>
+          <span style="color:var(--ink);text-transform:none;letter-spacing:.3px;font-size:12px">assistant · scratch</span>
+          <span class="chip"><span class="dot"></span>gpt-4o-mini</span>
+          <span class="chip"><span class="dot"></span>GLOBAL mem</span>
+          <span class="grow"></span>
+          <!-- view toggle: the key idea -->
+          <div style="display:flex;border:1px solid var(--line);border-radius:6px;overflow:hidden">
+            <span style="padding:5px 11px;font-size:10px;background:var(--panel-3);color:var(--ink)">RENDERED</span>
+            <span style="padding:5px 11px;font-size:10px;color:var(--ink-faint)">CONTEXT ↦ LLM</span>
+          </div>
+        </div>
+
+        <!-- token budget meter -->
+        <div class="meter-zone" style="padding:11px 22px;border-bottom:1px solid var(--line)">
+          <div class="budget">
+            <div class="bar"><i class="sys"></i><i class="ltm"></i><i class="hist"></i><i class="resv"></i></div>
+            <div class="legend">
+              <span><i style="background:var(--accent-dim)"></i>system 1.4k</span>
+              <span><i style="background:var(--mem)"></i>LTM 2.1k</span>
+              <span><i style="background:rgba(150,170,205,.4)"></i>history 5.0k</span>
+              <span><i style="background:var(--write);opacity:.6"></i>reply reserve 1.6k</span>
+              <span style="margin-left:auto;color:var(--ink-dim)">11.3k / 16k ctx</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="convo" style="overflow:hidden;flex:1">
+          <!-- system prompt row (always pinned, editable) -->
+          <div class="sysrow">
+            <div class="lh"><span class="lbl">System · persona prompt</span><span class="idtag">editable inline ✎</span></div>
+            <div class="text">You are a terse IT-support assistant. Prefer tool calls over guessing. Never fabricate ticket IDs…</div>
+          </div>
+
+          <!-- user msg -->
+          <div class="msg">
+            <div class="gutter"><span class="avatar">U</span></div>
+            <div class="body">
+              <div class="meta"><span class="who">portal</span><span class="tstamp">14:02:11</span><span class="idtag">#1041</span></div>
+              <div class="text">Can you reset the VPN cert for jdoe and confirm the ticket?</div>
+            </div>
+            <div class="rowacts"><span class="rowact">✎ edit</span><span class="rowact danger">✕ del</span></div>
+          </div>
+
+          <!-- LTM injected as a real row -->
+          <div class="ltmrow">
+            <div class="lh"><span class="lbl">◈ LTM recalled · injected as author's-note</span><span class="chip mem"><span class="dot"></span>2 memories · 2.1k tok</span></div>
+            <div class="text"><em>[mem]</em> jdoe = Jane Doe, eng, prefers email confirmations. <em>[mem]</em> VPN cert resets require L2 approval per policy DP-204.</div>
+          </div>
+
+          <!-- assistant msg with think + tool call -->
+          <div class="msg">
+            <div class="gutter"><span class="avatar bot">AS</span></div>
+            <div class="body">
+              <div class="meta"><span class="who bot">assistant</span><span class="tstamp">14:02:14</span><span class="idtag">#1042</span></div>
+
+              <div class="foldblock">
+                <div class="fold-h"><span class="tw">⟁ reasoning</span><span style="color:var(--ink-faint)">312 tok</span><span class="car">▸ expand</span></div>
+              </div>
+
+              <div class="toolcard">
+                <div class="tc-h"><span class="fn">→ <b>reset_vpn_cert</b>(user="jdoe")</span><span class="badge write">write</span><span class="badge sens">sensitive</span><span class="badge local">local</span></div>
+                <div class="tc-b">
+                  <div class="kv"><span class="k">args</span><span class="v">{ user: "jdoe", reason: "ticket #8821" }</span></div>
+                  <div class="result">✓ cert reissued · serial 0x4F…A1 · expires 2027-06-03</div>
+                </div>
+              </div>
+
+              <div class="text" style="margin-top:10px">Done — reissued jdoe's VPN cert and noted it on ticket #8821. Want me to email Jane the confirmation?</div>
+            </div>
+            <div class="rowacts"><span class="rowact">⟲ regen</span><span class="rowact">✎ edit</span><span class="rowact">⧉ raw</span><span class="rowact danger">✕ del</span></div>
+          </div>
+
+          <!-- assistant msg with version chevrons -->
+          <div class="msg">
+            <div class="gutter"><span class="avatar bot">AS</span></div>
+            <div class="body">
+              <div class="meta">
+                <span class="who bot">assistant</span><span class="tstamp">14:03:02</span><span class="idtag">#1044</span>
+                <span class="chevrons"><button>‹</button><span class="count">2&#8202;/&#8202;3</span><button>›</button></span>
+                <span class="lbl" style="color:var(--ink-faint)">version</span>
+              </div>
+              <div class="text dim">Sent. Jane will get the confirmation at jdoe@corp — anything else on this ticket?</div>
+            </div>
+            <div class="rowacts"><span class="rowact">⟲ regen</span><span class="rowact">✎ edit</span><span class="rowact danger">✕ del</span></div>
+          </div>
+        </div>
+
+        <!-- composer -->
+        <div class="composer">
+          <div class="cbar">
+            <span class="chip"><span class="dot" style="background:var(--write)"></span>ENTER ↵ send</span>
+            <span class="chip">/ dev-command</span>
+            <span class="chip"><span class="dot" style="background:var(--mem)"></span>LTM on</span>
+            <span class="grow" style="flex:1"></span>
+            <span class="lbl">attach ctx</span>
+          </div>
+          <div class="cbox">
+            <span>Message assistant…&nbsp;&nbsp;or type <span class="kbd">/set temp 0.4</span></span>
+            <span class="ph send" style="width:84px;height:32px;border-style:solid;border-color:var(--accent-dim);color:var(--accent)">SEND ↵</span>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- ---- INSPECTOR ---- -->
+      <div style="border-left:1px solid var(--line);display:flex;flex-direction:column;min-width:0;position:relative">
+        <div class="insp-tabs">
+          <div class="insp-tab active">Persona</div>
+          <div class="insp-tab">Tools</div>
+          <div class="insp-tab">Raw ctx</div>
+        </div>
+        <div style="overflow:hidden;flex:1">
+          <div class="field">
+            <span class="lbl">Identity</span>
+            <div class="input"><span>assistant</span><span style="color:var(--ink-faint)">fork ⑂ · save as…</span></div>
+          </div>
+          <div class="field">
+            <span class="lbl">System prompt</span>
+            <div class="input" style="min-height:64px;align-items:flex-start">You are a terse IT-support assistant…</div>
+          </div>
+
+          <!-- BASE PARAMS -->
+          <div class="section-tag">▣ base params<span style="color:var(--ink-faint);text-transform:none;letter-spacing:0">· sent to every provider</span></div>
+          <div class="field">
+            <div class="row2">
+              <div><span class="lbl">model</span><div class="input"><span>gpt-4o-mini</span><span style="color:var(--ink-faint)">▾</span></div></div>
+              <div><span class="lbl">memory mode</span><div class="input"><span>GLOBAL</span><span style="color:var(--ink-faint)">▾</span></div></div>
+            </div>
+          </div>
+          <div class="field">
+            <span class="lbl">temperature · 0.40</span>
+            <div class="slider"><div class="track" style="--v:28%"></div><span class="val">0.40</span></div>
+          </div>
+          <div class="field">
+            <div class="row2">
+              <div><span class="lbl">max tokens</span><div class="input"><span>1024</span></div></div>
+              <div><span class="lbl">history window</span><div class="input"><span>24 msgs</span></div></div>
+            </div>
+          </div>
+          <div class="field">
+            <div class="row2">
+              <div><span class="lbl">max ctx tok</span><div class="input"><span>16384</span></div></div>
+              <div><span class="lbl">thinking</span><div class="input"><span>medium</span><span style="color:var(--ink-faint)">▾</span></div></div>
+            </div>
+          </div>
+
+          <!-- KOBOLD-ONLY -->
+          <div class="section-tag kobold">⚠ kobold-only<span class="pill">passthrough route</span><span style="margin-left:auto;font-family:var(--hand);font-size:14px;text-transform:none;letter-spacing:0">collapsible ▾</span></div>
+          <div class="field">
+            <div class="row2">
+              <div><span class="lbl">top_p</span><div class="input"><span>0.92</span></div></div>
+              <div><span class="lbl">top_k</span><div class="input"><span>40</span></div></div>
+            </div>
+          </div>
+          <div class="field">
+            <span class="lbl">sampler extras · rep_pen, mirostat, tfs…</span>
+            <div class="ph" style="height:30px">+ 11 kobold sampler fields</div>
+          </div>
+          <div class="field" style="border-bottom:none">
+            <span class="lbl">instruct tags</span>
+            <div class="input"><span>ChatML</span><span style="color:var(--ink-faint)">▾</span></div>
+          </div>
+        </div>
+
+      </div>
+
+    </div>
+  </div>
+
+  <div class="pinrow">
+    <div class="pin"><b>history = the exact prompt.</b> flip RENDERED ⇄ CONTEXT in the header — no separate bleeding textbox to keep in sync.</div>
+    <div class="pin"><b>LTM is a real row.</b> recall shows inline exactly as injected, so you see what the model actually got.</div>
+    <div class="pin"><b>params split.</b> base params (every provider) sit above the amber kobold-only block (passthrough route).</div>
+    <div class="pin"><b>left rail = expansion docks.</b> the 6 future areas each get a permanent home. ◷ = reserved, not built.</div>
+  </div>
+
+  <!-- ============ DIRECTION A INSETS ============ -->
+  <div class="insets">
+    <h3>Detail — Direction A</h3>
+    <div class="inset-grid">
+
+      <!-- message row anatomy -->
+      <div class="inset">
+        <div class="cap">Message row — anatomy <span class="n">every row = one db interaction</span></div>
+        <div class="pad" style="position:relative">
+          <div class="msg" style="border:1px solid var(--line);border-radius:8px;background:var(--panel)">
+            <div class="gutter"><span class="avatar bot">AS</span></div>
+            <div class="body">
+              <div class="meta"><span class="who bot">assistant</span><span class="tstamp">14:03:02</span><span class="idtag">#1044</span><span class="chevrons"><button>‹</button><span class="count">2/3</span><button>›</button></span></div>
+              <div class="text">…canonical version shown. ‹ › swaps archived versions via select_version/k.</div>
+            </div>
+            <div class="rowacts" style="opacity:1"><span class="rowact">⟲</span><span class="rowact">✎</span><span class="rowact">⧉</span><span class="rowact danger">✕</span></div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:7px;margin-top:14px">
+            <span class="tag-anno">#1044 = interaction_id → PATCH / DELETE / versions hang off this</span>
+            <span class="tag-anno">‹ 2/3 › = version chevrons (regen archives, doesn't overwrite)</span>
+            <span class="tag-anno">⟲ regen · ✎ edit · ⧉ view raw token-form · ✕ soft-suppress</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- context view -->
+      <div class="inset">
+        <div class="cap">CONTEXT ↦ LLM view <span class="n">same code as real requests</span></div>
+        <div class="pad">
+          <div style="border:1px solid var(--line);border-radius:8px;overflow:hidden">
+            <div class="sysrow" style="border-radius:0"><div class="lh"><span class="lbl">⟦system⟧</span></div><div class="text">You are a terse IT-support assistant…</div></div>
+            <div class="ltmrow"><div class="lh"><span class="lbl">⟦author's-note / LTM⟧</span></div><div class="text">jdoe = Jane Doe… policy DP-204…</div></div>
+            <div style="padding:11px 16px;border-bottom:1px solid var(--line)"><span class="lbl" style="color:var(--ok)">⟦user⟧</span><div class="text" style="font-size:11.5px;margin-top:4px">Can you reset the VPN cert for jdoe…</div></div>
+            <div style="padding:11px 16px"><span class="lbl" style="color:var(--accent)">⟦assistant⟧</span><div class="text" style="font-size:11.5px;margin-top:4px">Done — reissued jdoe's VPN cert…</div></div>
+          </div>
+          <div style="margin-top:14px;display:flex;flex-direction:column;gap:7px">
+            <span class="tag-anno up">rebuilt by the engine's own history-gathering code → can't drift from real requests</span>
+            <span class="tag-anno">raw text-edit lands <i style="color:var(--ink-dim);font-style:normal">here</i>, but writes back to discrete rows on save</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- tool card detail -->
+      <div class="inset">
+        <div class="cap">Tool call card <span class="n">capability tags from /tools/catalog</span></div>
+        <div class="pad">
+          <div class="toolcard">
+            <div class="tc-h"><span class="fn">→ <b>reset_vpn_cert</b>(user="jdoe")</span><span class="badge write">write</span><span class="badge sens">sensitive</span></div>
+            <div class="tc-b">
+              <div class="kv"><span class="k">locality</span><span class="v">local</span></div>
+              <div class="kv"><span class="k">produces</span><span class="v">trusted output</span></div>
+              <div class="result">✓ cert reissued · serial 0x4F…A1</div>
+            </div>
+          </div>
+          <div class="toolcard readonly" style="margin-top:12px">
+            <div class="tc-h"><span class="fn">→ <b style="color:var(--ok)">search_tickets</b>(q="jdoe vpn")</span><span class="badge read">read</span></div>
+            <div class="tc-b"><div class="result">3 results · #8821 open, #8190 closed…</div></div>
+          </div>
+          <span class="tag-anno up" style="margin-top:13px">colour + badge encode is_write / sensitivity / locality at a glance</span>
+        </div>
+      </div>
+
+      <!-- expansion destinations -->
+      <div class="inset">
+        <div class="cap">Reserved expansion slots <span class="n">nav-rail destinations, stubbed</span></div>
+        <div class="pad">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+            <div class="ph" style="height:58px;flex-direction:column;gap:4px"><b style="color:var(--mem)">◈ MEMORY</b>inspect / edit recall</div>
+            <div class="ph" style="height:58px;flex-direction:column;gap:4px"><b style="color:var(--write)">⊞ AGENTS</b>triage · dispatch · mem</div>
+            <div class="ph" style="height:58px;flex-direction:column;gap:4px"><b style="color:var(--accent)">▰ BUDGET</b>context visualizer</div>
+            <div class="ph" style="height:58px;flex-direction:column;gap:4px"><b style="color:var(--ink-dim)">◔ STATS</b>tokens · cost · latency</div>
+            <div class="ph" style="height:58px;flex-direction:column;gap:4px;grid-column:span 2"><b style="color:var(--ink)">❏ PERSONA LIBRARY</b>compare · fork · A/B</div>
+          </div>
+          <span class="tag-anno up" style="margin-top:13px">layout leaves a permanent home for each — ship chat first, fill the rest in later</span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="note-margin">
+    <b>Why Control Room:</b> when you do "an even mix of all of these," a persistent shell wins — channels, conversation, persona &amp; budget are always on-screen, and the six expansion areas each get a fixed dock in the left rail. Cost: dense, less breathing room. Best if the portal is your primary cockpit.
+  </div>
+</section>
+
+<!-- ================================================================= -->
+<!-- DIRECTION B — FOCUS WORKSPACE                                      -->
+<!-- ================================================================= -->
+<section class="direction" id="dir-b" data-screen-label="Direction B">
+  <div class="board-head">
+    <h2>Direction <span>B</span> — Focus Workspace</h2>
+    <p>One conversation is the hero. Power tools &amp; expansions are summoned, not always-on.</p>
+    <span class="hand">"quiet canvas, everything a keystroke away"</span>
+  </div>
+
+  <div class="appframe">
+    <div class="winbar">
+      <div class="lights"><i></i><i></i><i></i></div>
+      <span class="url">aux-desktop:8888 / portal</span>
+      <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
+        <span class="chip"><span class="dot" style="background:var(--ok)"></span>kcpp · omen:5001</span>
+      </div>
+    </div>
+
+    <div style="display:flex;height:760px;position:relative">
+
+      <!-- slim left strip: channel switch only -->
+      <div style="width:50px;border-right:1px solid var(--line);background:var(--panel);display:flex;flex-direction:column;align-items:center;gap:8px;padding:12px 0">
+        <div class="avatar bot" style="border-color:var(--accent)">AS</div>
+        <div class="avatar">GM</div>
+        <div class="avatar">CL</div>
+        <div class="ph" style="width:30px;height:30px;border-radius:7px">+</div>
+        <div style="flex:1"></div>
+        <div class="ph" style="width:30px;height:30px;border-radius:7px">⌘K</div>
+      </div>
+
+      <!-- center conversation column -->
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0;position:relative">
+        <!-- minimal header with channel switcher + command hint -->
+        <div class="pane-head" style="justify-content:center;gap:12px;border-bottom:1px solid var(--line)">
+          <span style="color:var(--ink);text-transform:none;letter-spacing:.3px;font-size:12px">assistant · scratch</span>
+          <span style="color:var(--ink-faint)">▾</span>
+          <span class="grow"></span>
+          <span class="chip" style="position:absolute;right:16px"><span class="dot" style="background:var(--accent)"></span>⌘K commands</span>
+        </div>
+
+        <!-- centered scroll column -->
+        <div style="flex:1;overflow:hidden;display:flex;justify-content:center">
+          <div class="convo" style="max-width:680px;width:100%;border-left:1px solid var(--line);border-right:1px solid var(--line)">
+
+            <div class="sysrow">
+              <div class="lh"><span class="lbl">System · persona prompt</span><span class="idtag">tap to edit ✎</span></div>
+              <div class="text">You are a terse IT-support assistant. Prefer tool calls over guessing…</div>
+            </div>
+
+            <div class="msg">
+              <div class="gutter"><span class="avatar">U</span></div>
+              <div class="body">
+                <div class="meta"><span class="who">portal</span><span class="tstamp">14:02</span><span class="idtag">#1041</span></div>
+                <div class="text">Can you reset the VPN cert for jdoe and confirm the ticket?</div>
+              </div>
+              <div class="rowacts"><span class="rowact">✎</span><span class="rowact danger">✕</span></div>
+            </div>
+
+            <div class="ltmrow">
+              <div class="lh"><span class="lbl">◈ LTM recalled · inline</span><span class="chip mem"><span class="dot"></span>2 · 2.1k tok</span></div>
+              <div class="text"><em>[mem]</em> jdoe = Jane Doe… <em>[mem]</em> cert resets need L2 approval (DP-204).</div>
+            </div>
+
+            <!-- CONFIRM-mode interrupt — the key B moment -->
+            <div class="confirmcard">
+              <div class="cc-h"><span class="badge write">write</span><span class="badge sens">sensitive</span><b>&nbsp;reset_vpn_cert</b> wants to run</div>
+              <div class="cc-b">
+                <div class="kv" style="font-size:11px;display:flex;gap:8px"><span style="color:var(--ink-faint);width:54px">args</span><span style="color:var(--ink-dim)">{ user: "jdoe", reason: "#8821" }</span></div>
+                <div class="acts"><span class="btn approve">✓ approve</span><span class="btn deny">✕ deny</span><span class="btn">edit args</span><span style="margin-left:auto;align-self:center;color:var(--ink-faint);font-size:10px">CONFIRM mode · persona policy</span></div>
+              </div>
+            </div>
+
+            <div class="msg">
+              <div class="gutter"><span class="avatar bot">AS</span></div>
+              <div class="body">
+                <div class="meta"><span class="who bot">assistant</span><span class="tstamp">14:03</span><span class="idtag">#1044</span><span class="chevrons"><button>‹</button><span class="count">2&#8202;/&#8202;3</span><button>›</button></span></div>
+                <div class="foldblock"><div class="fold-h"><span class="tw">⟁ reasoning</span><span style="color:var(--ink-faint)">312 tok</span><span class="car">▸</span></div></div>
+                <div class="text" style="margin-top:9px">Done — reissued jdoe's VPN cert and noted it on #8821. Email Jane the confirmation?</div>
+              </div>
+              <div class="rowacts"><span class="rowact">⟲</span><span class="rowact">✎</span><span class="rowact danger">✕</span></div>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- "what gets sent" peeking drawer handle + composer -->
+        <div class="meter-zone" style="border-top:1px solid var(--line);padding:8px 16px;display:flex;align-items:center;gap:12px">
+          <span class="lbl">context ledger</span>
+          <div class="budget" style="flex:1"><div class="bar"><i class="sys"></i><i class="ltm"></i><i class="hist"></i><i class="resv"></i></div></div>
+          <span style="color:var(--ink-dim);font-size:10.5px">11.3k / 16k</span>
+          <span class="chip" style="cursor:pointer">what gets sent ⌃</span>
+        </div>
+
+        <div class="composer">
+          <div class="cbox">
+            <span>Message assistant…&nbsp;&nbsp;<span class="kbd">⌘K</span> for memory · agents · budget · personas</span>
+            <span class="ph send" style="width:84px;height:32px;border-style:solid;border-color:var(--accent-dim);color:var(--accent)">SEND ↵</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- slide-over persona panel (peeking) -->
+      <div style="width:60px;border-left:1px solid var(--line);background:var(--panel);display:flex;flex-direction:column;align-items:center;padding:14px 0;gap:10px;position:relative">
+        <div style="writing-mode:vertical-rl;transform:rotate(180deg);font-size:10px;letter-spacing:1.5px;color:var(--accent);text-transform:uppercase">persona ‹ slide out</div>
+        <div style="flex:1"></div>
+        <div class="ph" style="width:34px;height:34px;border-radius:7px">⚙</div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="pinrow">
+    <div class="pin"><b>one conversation is the hero.</b> chrome stays minimal so the chat never competes for space.</div>
+    <div class="pin"><b>CONFIRM-mode interrupts inline.</b> sensitive writes pause for approve / deny / edit-args before running.</div>
+    <div class="pin"><b>⌘K summons everything.</b> memory, agents, budget, personas live behind the palette — no permanent rail.</div>
+    <div class="pin"><b>context = thin ledger.</b> raw prompt is a slide-up drawer; both rebuilt by the engine's own code.</div>
+  </div>
+
+  <!-- ============ DIRECTION B INSETS ============ -->
+  <div class="insets">
+    <h3>Detail — Direction B</h3>
+    <div class="inset-grid">
+
+      <!-- command palette -->
+      <div class="inset">
+        <div class="cap">⌘K command palette <span class="n">how expansions are reached</span></div>
+        <div class="pad">
+          <div class="palette">
+            <div class="pq">⌕ <span class="cur">mem</span><span style="margin-left:auto;font-size:10px">esc to close</span></div>
+            <div class="pgrp">Jump to</div>
+            <div class="pitem sel"><span class="ic">◈</span>Memory inspector — see &amp; edit recall<span class="soon">soon</span></div>
+            <div class="pitem"><span class="ic">▰</span>Context budget visualizer<span class="soon">soon</span></div>
+            <div class="pgrp">Workspace</div>
+            <div class="pitem"><span class="ic">⊞</span>Agent monitor (Zammad · dispatch)<span class="soon">soon</span></div>
+            <div class="pitem"><span class="ic">◔</span>Analytics &amp; cost<span class="soon">soon</span></div>
+            <div class="pitem"><span class="ic">❏</span>Persona library · fork / A-B<span class="soon">soon</span></div>
+            <div class="pitem"><span class="ic">⤺</span>Switch channel…<span class="kb"><span class="kbd">↵</span></span></div>
+          </div>
+          <span class="tag-anno up" style="margin-top:13px">every expansion is a palette entry — no rail needed, canvas stays clean</span>
+        </div>
+      </div>
+
+      <!-- what gets sent drawer -->
+      <div class="inset">
+        <div class="cap">"What gets sent" drawer <span class="n">slides up from composer</span></div>
+        <div class="pad">
+          <div class="drawer">
+            <div class="dh"><span class="accent">▦</span> assembled prompt · 11.3k tok<span style="margin-left:auto;color:var(--ink-faint)">edit raw ✎ · close ⌄</span></div>
+            <div style="padding:11px 14px;display:flex;flex-direction:column;gap:8px">
+              <div style="font-size:11px"><span class="lbl" style="color:var(--accent)">system</span> <span style="color:var(--ink-dim)">You are a terse IT-support assistant…</span></div>
+              <div style="font-size:11px"><span class="lbl" style="color:var(--mem)">author's-note</span> <span style="color:var(--ink-dim)">jdoe = Jane Doe… DP-204…</span></div>
+              <div style="font-size:11px"><span class="lbl" style="color:var(--ok)">user</span> <span style="color:var(--ink-dim)">reset the VPN cert for jdoe…</span></div>
+            </div>
+          </div>
+          <span class="tag-anno up" style="margin-top:13px">same rebuild path as the engine — raw edits write back to rows, never a free-text blob</span>
+        </div>
+      </div>
+
+      <!-- persona slide-over -->
+      <div class="inset">
+        <div class="cap">Persona slide-over <span class="n">base vs kobold-only split</span></div>
+        <div class="pad" style="display:flex;gap:0">
+          <div style="flex:1;border:1px solid var(--line);border-radius:8px;overflow:hidden">
+            <div class="section-tag" style="border-top:none">▣ base params</div>
+            <div class="field" style="padding:9px 12px"><div class="row2"><div><span class="lbl">model</span><div class="input" style="padding:5px 8px"><span>gpt-4o-mini</span></div></div><div><span class="lbl">mem mode</span><div class="input" style="padding:5px 8px"><span>GLOBAL</span></div></div></div></div>
+            <div class="field" style="padding:9px 12px"><span class="lbl">temperature 0.40</span><div class="slider"><div class="track" style="--v:28%"></div><span class="val">.40</span></div></div>
+            <div class="section-tag kobold">⚠ kobold-only<span class="pill">passthrough</span></div>
+            <div class="field" style="padding:9px 12px;border-bottom:none"><div class="row2"><div><span class="lbl">top_p</span><div class="input" style="padding:5px 8px"><span>0.92</span></div></div><div><span class="lbl">top_k</span><div class="input" style="padding:5px 8px"><span>40</span></div></div></div></div>
+          </div>
+          <div style="width:130px;padding-left:14px;display:flex;align-items:center"><span class="tag-anno">amber section only applies on the kobold route — base params hit every provider</span></div>
+        </div>
+      </div>
+
+      <!-- channel switcher -->
+      <div class="inset">
+        <div class="cap">Channel switcher + new <span class="n">hooks engine channels</span></div>
+        <div class="pad">
+          <div class="palette">
+            <div class="pq">⌕ <span style="color:var(--ink-faint)">switch or create channel…</span></div>
+            <div class="pgrp">Existing (from engine)</div>
+            <div class="pitem"><span class="ic" style="color:var(--accent)">▤</span>assistant · scratch <span style="margin-left:auto;font-size:9px;color:var(--ink-faint)">web_ui</span></div>
+            <div class="pitem"><span class="ic" style="color:#8aa0e0">▤</span>claude · #it-support <span style="margin-left:auto;font-size:9px;color:var(--ink-faint)">discord</span></div>
+            <div class="pitem"><span class="ic" style="color:var(--write)">▤</span>triage · queue#2 <span style="margin-left:auto;font-size:9px;color:var(--ink-faint)">zammad</span></div>
+            <div class="pgrp">Create</div>
+            <div class="pitem sel"><span class="ic">+</span>New web_ui channel<span class="kb"><span class="kbd">↵</span></span></div>
+          </div>
+          <span class="tag-anno up" style="margin-top:13px">reads existing channels across interfaces; new ones spawn fresh web_ui rows</span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="note-margin">
+    <b>Why Focus Workspace:</b> a calmer canvas that scales down to a phone or a tucked-away tab. Expansions live behind ⌘K and drawers so the chat never competes for space. Cost: power features are one keystroke <i>away</i> rather than always visible — better if you mostly chat/tune and dip into the heavy tooling occasionally.
+  </div>
+</section>
+
+<div class="scrollhint">↔ wide artboards — scroll horizontally if clipped · toggle annotations &amp; meters in the toolbar</div>
+
+</div>
+
+<script>
+  // direction tabs
+  const dirs = { a: document.getElementById('dir-a'), b: document.getElementById('dir-b') };
+  document.querySelectorAll('.tab').forEach(t => {
+    t.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(x => x.setAttribute('aria-selected', x === t ? 'true' : 'false'));
+      const d = t.dataset.dir;
+      Object.entries(dirs).forEach(([k, el]) => el.classList.toggle('active', k === d));
+      window.scrollTo({ top: 0, behavior: 'instant' });
+    });
+  });
+  // toggles
+  document.querySelectorAll('.toggle').forEach(b => {
+    b.addEventListener('click', () => {
+      const on = b.getAttribute('aria-pressed') === 'true';
+      b.setAttribute('aria-pressed', on ? 'false' : 'true');
+      document.body.classList.toggle(b.dataset.cls, !on);
+    });
+  });
+  // inspector tab switch (cosmetic)
+  document.querySelectorAll('.insp-tab').forEach(t => {
+    t.addEventListener('click', () => {
+      const sibs = t.parentElement.querySelectorAll('.insp-tab');
+      sibs.forEach(s => s.classList.toggle('active', s === t));
+    });
+  });
+</script>
+</body>
+</html>
