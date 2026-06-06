@@ -25,6 +25,7 @@ from src.chat_system import (
     ResponseType, TokenEvent, ToolCallResultEvent, ToolCallStartEvent,
 )
 from src.interfaces.kobold_export import build_kobold_savefile, build_transcript
+from src.stream_engine import CHAT_TEMPLATES
 from src.interfaces.portal_render import render_portal_html
 from src.utils.save_utils import save_personas_to_file
 from src.interfaces._persona_patch import (
@@ -188,6 +189,15 @@ class KoboldEngineAdapter:
                 else:
                     all_m.append(sub)
             return {"models": sorted(list(set(all_m)))}
+
+        @self.app.get("/api/v1/chat_templates")
+        async def list_chat_templates() -> Dict[str, Any]:
+            # The instruct templates the local renderer understands
+            # (StreamEngine.CHAT_TEMPLATES keys). Single source of truth for the
+            # persona inspector's chat_template dropdown so the UI never drifts
+            # from what the engine can actually render. Empty/None on a persona
+            # = fall back to the env/global default at render time.
+            return {"templates": sorted(CHAT_TEMPLATES.keys())}
 
         @self.app.post("/api/v1/persona/{name}/reset")
         async def reset_persona_history(name: str) -> Any:

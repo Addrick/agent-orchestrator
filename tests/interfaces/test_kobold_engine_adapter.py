@@ -582,6 +582,23 @@ def test_chat_completions_stream_abort_flushes_partial():
     mm.close()
 
 
+# -------- DP-140: /api/v1/chat_templates --------
+
+def test_chat_templates_endpoint_lists_engine_presets():
+    # Single source of truth for the inspector dropdown: the endpoint must
+    # return exactly the engine's CHAT_TEMPLATES keys, sorted, incl. the new
+    # thinking variants. Drift here is what the endpoint exists to prevent.
+    from src.stream_engine import CHAT_TEMPLATES
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/chat_templates")
+    assert r.status_code == 200
+    templates = r.json()["templates"]
+    assert templates == sorted(CHAT_TEMPLATES.keys())
+    assert {"chatml", "chatml-nothink", "gemma4-think", "gemma4-nothink"} <= set(templates)
+    mm.close()
+
+
 # -------- Phase 2.2: /api/v1/persona/{name} memory_mode --------
 
 def test_get_persona_includes_memory_mode():
