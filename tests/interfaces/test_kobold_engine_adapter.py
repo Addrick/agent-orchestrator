@@ -61,6 +61,7 @@ def _make_adapter_with_seeded_db(persona_name: str = "test_persona",
         memory_manager=mm,
         get_session_memory_block=retrieve_memory_block or AsyncMock(return_value=None),
         get_view_history=_get_view_history,
+        system_persona_names=set(),
     )
     adapter = KoboldAdapter(chat_system=chat_system)
     return adapter, mm, persona
@@ -141,6 +142,7 @@ def _make_real_adapter(persona_name: str = "test_persona",
     with patch('src.chat_system.load_personas_from_file', return_value={persona_name: persona}):
         chat_system = ChatSystem(memory_manager=mm, text_engine=text_engine)
     chat_system.bot_logic.preprocess_message = AsyncMock(return_value=None)
+    chat_system.system_persona_names = set()
 
     adapter = KoboldAdapter(chat_system=chat_system)
     return adapter, mm, persona, chat_system
@@ -1704,7 +1706,7 @@ def test_dev_command_happy_path_mutates_and_saves():
     assert r.status_code == 200
     assert r.json() == {"response": "Tools set to none.", "mutated": True}
     chat_system.bot_logic.preprocess_message.assert_awaited_once_with("test_persona", "portal", "set tools none")
-    mock_save.assert_called_once_with(chat_system.personas)
+    mock_save.assert_called_once_with(chat_system.personas, chat_system.system_persona_names)
     mm.close()
 
 
@@ -1992,7 +1994,7 @@ def test_models_list_sources_from_models_available():
 
 def test_models_list_empty_when_models_available_empty():
     """No snapshot yet → empty list, not a crash."""
-    chat_system = SimpleNamespace(models_available={})
+    chat_system = SimpleNamespace(models_available={}, system_persona_names=set())
     adapter = KoboldAdapter(chat_system=chat_system)
     with TestClient(adapter.app) as client:
         r = client.get("/api/v1/models/list")
