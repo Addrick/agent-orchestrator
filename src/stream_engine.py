@@ -16,55 +16,11 @@ from src.generation_params import GenerationParams
 logger = logging.getLogger(__name__)
 
 
-# Chat templates used when flattening OpenAI-style `messages` into a raw prompt
-# for KoboldCPP's native `/api/extra/generate/stream` endpoint.
-#
-# The OAI endpoint in koboldcpp batches streamed deltas into a single chunk,
-# defeating token-by-token rendering. The native endpoint emits per-token SSE
-# events but requires a pre-formatted prompt string — so we render here.
-CHAT_TEMPLATES: Dict[str, Dict[str, Any]] = {
-    "chatml": {
-        "system": "<|im_start|>system\n{content}<|im_end|>\n",
-        "user": "<|im_start|>user\n{content}<|im_end|>\n",
-        "assistant": "<|im_start|>assistant\n{content}<|im_end|>\n",
-        "assistant_start": "<|im_start|>assistant\n",
-        # Bare `<|im_end|>` was removed (harmony_channel_stop_seq.md):
-        # Qwen3/harmony models emit `<|im_end|>` between channels
-        # (thinking → tool_call → message) inside a single turn, so
-        # halting on it truncated tool_calls mid-turn. Rely on the
-        # model's EOS token for normal stop; `<|im_start|>user` /
-        # `<|im_start|>system` still guard against the model rolling
-        # into a new role.
-        "stop": ["<|im_start|>user", "<|im_start|>system"],
-    },
-    "gemma": {
-        "system": "",  # gemma has no system role — merge into first user turn
-        "user": "<start_of_turn>user\n{content}<end_of_turn>\n",
-        "assistant": "<start_of_turn>model\n{content}<end_of_turn>\n",
-        "assistant_start": "<start_of_turn>model\n",
-        "stop": ["<end_of_turn>", "<start_of_turn>"],
-    },
-    "llama3": {
-        "system": "<|start_header_id|>system<|end_header_id|>\n\n{content}<|eot_id|>",
-        "user": "<|start_header_id|>user<|end_header_id|>\n\n{content}<|eot_id|>",
-        "assistant": "<|start_header_id|>assistant<|end_header_id|>\n\n{content}<|eot_id|>",
-        "assistant_start": "<|start_header_id|>assistant<|end_header_id|>\n\n",
-        "stop": ["<|eot_id|>"],
-    },
-    "alpaca": {
-        "system": "{content}\n\n",
-        "user": "### Instruction:\n{content}\n\n",
-        "assistant": "### Response:\n{content}\n\n",
-        "assistant_start": "### Response:\n",
-        "stop": ["### Instruction:"],
-    },
-}
-
-
 def _template_from_instruct_tags(tags: Dict[str, Any]) -> Dict[str, Any]:
     """Build a CHAT_TEMPLATES-shape dict from kobold-lite's raw `instruct_*`
-    vocabulary. Portal forwards `localsettings.instruct_*` verbatim — this is
-    the single translation point.
+    vocabulary. The live portal forwards `localsettings.instruct_*` verbatim,
+    and the named-preset registry below is mapped onto the same vocabulary, so
+    this is the single translation point for both paths.
 
     Field semantics (kobold-lite):
       - `instruct_starttag` / `instruct_starttag_end` — user-turn open / close
@@ -73,6 +29,10 @@ def _template_from_instruct_tags(tags: Dict[str, Any]) -> Dict[str, Any]:
       - `instruct_gentag`   — gen-time assistant prefix; carries the `<think>`
         trigger for thinking presets (or the empty `<think></think>` for the
         non-thinking variants). Falls back to assistant-open when blank.
+
+    `stop` here is the naive tag-derived guess; named presets override it with a
+    curated list (see `_PRESET_STOPS`), so callers building from the registry
+    replace it. The live-passthrough path keeps the derived value.
     """
     usr_s = tags.get("instruct_starttag") or ""
     usr_e = tags.get("instruct_starttag_end") or ""
@@ -89,6 +49,119 @@ def _template_from_instruct_tags(tags: Dict[str, Any]) -> Dict[str, Any]:
         "assistant_start": ast_gen,
         "stop": stops,
     }
+
+
+# Named instruct presets for KoboldCPP's native `/api/extra/generate/stream`
+# endpoint (the OAI endpoint batches streamed deltas into one chunk, defeating
+# token-by-token rendering; the native one needs a pre-formatted prompt string).
+#
+# Sourced verbatim from KoboldCpp Lite's `instructpresets` array
+# (lite.koboldai.net index.html, fetched 2026-06-06) and mapped from its
+# field names (`user_start`/`assistant_start`/`system_start`/`assistant_gen`,
+# …) onto our `instruct_*` vocabulary. Lite stores `\n` escaped and unescapes
+# at use (`replaceAll("\\n","\n")`); here they are real newlines. The thinking
+# control lives entirely in the gen-time prefix (`instruct_gentag`):
+#   - chatml          → no gentag → model thinks by default (qwen3)
+#   - chatml-nothink  → gentag emits an empty `<think></think>` to suppress it
+#   - gemma4-think    → gentag opens a thought channel
+#   - gemma4-nothink  → gentag opens+closes an empty thought channel
+#
+# Deliberate divergences from a literal kobold transcription:
+#   - `gemma` blanks the system tags so the system message defers/merges into
+#     the first user turn (gemma's official behavior). Kobold's preset instead
+#     gives system its own `<start_of_turn>user` block; we keep DERPR's merge.
+_KOBOLD_INSTRUCT_PRESETS: Dict[str, Dict[str, str]] = {
+    "chatml": {
+        "instruct_systag": "<|im_start|>system\n", "instruct_systag_end": "<|im_end|>\n",
+        "instruct_starttag": "<|im_start|>user\n", "instruct_starttag_end": "<|im_end|>\n",
+        "instruct_endtag": "<|im_start|>assistant\n", "instruct_endtag_end": "<|im_end|>\n",
+    },
+    "chatml-nothink": {
+        "instruct_systag": "<|im_start|>system\n", "instruct_systag_end": "<|im_end|>\n",
+        "instruct_starttag": "<|im_start|>user\n", "instruct_starttag_end": "<|im_end|>\n",
+        "instruct_endtag": "<|im_start|>assistant\n", "instruct_endtag_end": "<|im_end|>\n",
+        "instruct_gentag": "<|im_start|>assistant\n<think>\n\n</think>\n",
+    },
+    "gemma": {  # Gemma 2 & 3 — system blanked → deferred-merge (see note above)
+        "instruct_systag": "", "instruct_systag_end": "",
+        "instruct_starttag": "<start_of_turn>user\n", "instruct_starttag_end": "<end_of_turn>\n",
+        "instruct_endtag": "<start_of_turn>model\n", "instruct_endtag_end": "<end_of_turn>\n",
+    },
+    "gemma4-think": {  # Gemma 4 (26B/31B) thinking
+        "instruct_systag": "<|turn>system\n", "instruct_systag_end": "<turn|>\n",
+        "instruct_starttag": "<|turn>user\n", "instruct_starttag_end": "<turn|>\n",
+        "instruct_endtag": "<|turn>model\n", "instruct_endtag_end": "<turn|>\n",
+        "instruct_gentag": "<|turn>model\n<|think|><|channel>thought",
+    },
+    "gemma4-nothink": {  # Gemma 4 (26B/31B) — empty thought channel suppresses
+        "instruct_systag": "<|turn>system\n", "instruct_systag_end": "<turn|>\n",
+        "instruct_starttag": "<|turn>user\n", "instruct_starttag_end": "<turn|>\n",
+        "instruct_endtag": "<|turn>model\n", "instruct_endtag_end": "<turn|>\n",
+        "instruct_gentag": "<|turn>model\n<|channel>thought\n<channel|>",
+    },
+    "gemma4-e-nothink": {  # Gemma 4 E2B/E4B — no thinking
+        "instruct_systag": "<|turn>system\n", "instruct_systag_end": "<turn|>\n",
+        "instruct_starttag": "<|turn>user\n", "instruct_starttag_end": "<turn|>\n",
+        "instruct_endtag": "<|turn>model\n", "instruct_endtag_end": "<turn|>\n",
+    },
+    "llama2": {
+        "instruct_systag": "", "instruct_systag_end": "",
+        "instruct_starttag": "[INST] ", "instruct_starttag_end": "",
+        "instruct_endtag": " [/INST]", "instruct_endtag_end": "",
+    },
+    "llama3": {
+        "instruct_systag": "<|start_header_id|>system<|end_header_id|>\n\n", "instruct_systag_end": "<|eot_id|>",
+        "instruct_starttag": "<|start_header_id|>user<|end_header_id|>\n\n", "instruct_starttag_end": "<|eot_id|>",
+        "instruct_endtag": "<|start_header_id|>assistant<|end_header_id|>\n\n", "instruct_endtag_end": "<|eot_id|>",
+    },
+    "llama4": {
+        "instruct_systag": "<|header_start|>system<|header_end|>\n\n", "instruct_systag_end": "<|eot|>",
+        "instruct_starttag": "<|header_start|>user<|header_end|>\n\n", "instruct_starttag_end": "<|eot|>",
+        "instruct_endtag": "<|header_start|>assistant<|header_end|>\n\n", "instruct_endtag_end": "<|eot|>",
+    },
+}
+
+# Curated stop sequences per preset. The tag-derived stops from
+# `_template_from_instruct_tags` are deliberately NOT used: for chatml-family
+# models a bare turn-end (`<|im_end|>`) is emitted *between channels* within one
+# turn (thinking → tool_call → message), so stopping on it truncates tool calls
+# mid-turn (harmony_channel_stop_seq.md). These curated lists guard only against
+# the model rolling into a *new* role and leave normal turn-end to the EOS token.
+_PRESET_STOPS: Dict[str, List[str]] = {
+    "chatml": ["<|im_start|>user", "<|im_start|>system"],
+    "chatml-nothink": ["<|im_start|>user", "<|im_start|>system"],
+    "gemma": ["<end_of_turn>", "<start_of_turn>"],
+    "gemma4-think": ["<turn|>", "<|turn>"],
+    "gemma4-nothink": ["<turn|>", "<|turn>"],
+    "gemma4-e-nothink": ["<turn|>", "<|turn>"],
+    "llama2": ["</s>", "[INST]"],
+    "llama3": ["<|eot_id|>"],
+    "llama4": ["<|eot|>"],
+}
+
+
+def _build_chat_templates() -> Dict[str, Dict[str, Any]]:
+    """Assemble the render-time template registry from the kobold-sourced
+    presets (tag strings via the shared converter) + curated stops."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for slug, tags in _KOBOLD_INSTRUCT_PRESETS.items():
+        tpl = _template_from_instruct_tags(tags)
+        tpl["stop"] = list(_PRESET_STOPS[slug])
+        out[slug] = tpl
+    # alpaca cannot be reproduced from kobold's preset (kobold puts `\n` before
+    # each tag and has no system format; DERPR puts `\n\n` after content and
+    # formats system). Kept verbatim so existing alpaca personas are unchanged.
+    out["alpaca"] = {
+        "system": "{content}\n\n",
+        "user": "### Instruction:\n{content}\n\n",
+        "assistant": "### Response:\n{content}\n\n",
+        "assistant_start": "### Response:\n",
+        "stop": ["### Instruction:"],
+    }
+    return out
+
+
+CHAT_TEMPLATES: Dict[str, Dict[str, Any]] = _build_chat_templates()
 
 
 def _render_prompt(

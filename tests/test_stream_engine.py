@@ -6,7 +6,12 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
-from src.stream_engine import StreamEngine, _render_prompt, _ToolCallStreamParser
+from src.stream_engine import (
+    CHAT_TEMPLATES,
+    StreamEngine,
+    _render_prompt,
+    _ToolCallStreamParser,
+)
 from src.engine import LLMCommunicationError
 from src.generation_params import GenerationParams
 
@@ -108,6 +113,93 @@ def test_render_prompt_stop_sequence_merging():
     # harmony_channel_stop_seq.md — role-qualified variants remain.
     assert "<|im_start|>user" in stop
     assert stop[0] == "OVERRIDE_STOP"  # Priority
+
+
+# --- DP-139: kobold-sourced named instruct presets -------------------------
+
+# The exact pre-refactor (master) template dicts. The registry now regenerates
+# chatml/gemma/llama3 from kobold instruct tags + curated stops; this asserts
+# the regeneration is byte-identical so existing personas render unchanged.
+# alpaca is kept verbatim in the registry (kobold's preset can't reproduce it).
+_LEGACY_TEMPLATES_BEFORE = {
+    "chatml": {
+        "system": "<|im_start|>system\n{content}<|im_end|>\n",
+        "user": "<|im_start|>user\n{content}<|im_end|>\n",
+        "assistant": "<|im_start|>assistant\n{content}<|im_end|>\n",
+        "assistant_start": "<|im_start|>assistant\n",
+        "stop": ["<|im_start|>user", "<|im_start|>system"],
+    },
+    "gemma": {
+        "system": "",
+        "user": "<start_of_turn>user\n{content}<end_of_turn>\n",
+        "assistant": "<start_of_turn>model\n{content}<end_of_turn>\n",
+        "assistant_start": "<start_of_turn>model\n",
+        "stop": ["<end_of_turn>", "<start_of_turn>"],
+    },
+    "llama3": {
+        "system": "<|start_header_id|>system<|end_header_id|>\n\n{content}<|eot_id|>",
+        "user": "<|start_header_id|>user<|end_header_id|>\n\n{content}<|eot_id|>",
+        "assistant": "<|start_header_id|>assistant<|end_header_id|>\n\n{content}<|eot_id|>",
+        "assistant_start": "<|start_header_id|>assistant<|end_header_id|>\n\n",
+        "stop": ["<|eot_id|>"],
+    },
+    "alpaca": {
+        "system": "{content}\n\n",
+        "user": "### Instruction:\n{content}\n\n",
+        "assistant": "### Response:\n{content}\n\n",
+        "assistant_start": "### Response:\n",
+        "stop": ["### Instruction:"],
+    },
+}
+
+
+@pytest.mark.parametrize("name", ["chatml", "gemma", "llama3", "alpaca"])
+def test_legacy_templates_bytematch_after_regen(name):
+    # Regenerating from kobold tags must not alter any pre-existing template.
+    assert CHAT_TEMPLATES[name] == _LEGACY_TEMPLATES_BEFORE[name]
+
+
+def test_new_presets_registered():
+    expected = {
+        "chatml", "chatml-nothink", "gemma", "gemma4-think", "gemma4-nothink",
+        "gemma4-e-nothink", "llama2", "llama3", "llama4", "alpaca",
+    }
+    assert expected <= set(CHAT_TEMPLATES)
+
+
+def test_chatml_nothink_suppresses_thinking_only_at_gen():
+    # The empty <think></think> belongs to the gen-time prefix; completed
+    # assistant turns in history must NOT carry it.
+    messages = [
+        {"role": "user", "content": "Q1"},
+        {"role": "assistant", "content": "A1"},
+        {"role": "user", "content": "Q2"},
+    ]
+    prompt, _ = _render_prompt(messages, "chatml-nothink")
+    assert prompt.endswith("<|im_start|>assistant\n<think>\n\n</think>\n")
+    # the historical assistant turn renders plainly (no suppressor)
+    assert "<|im_start|>assistant\nA1<|im_end|>" in prompt
+    # plain chatml never injects the suppressor
+    plain, _ = _render_prompt(messages, "chatml")
+    assert "<think>" not in plain
+
+
+def test_gemma4_think_vs_nothink_gen_prefix():
+    msgs = [{"role": "user", "content": "Hi"}]
+    think, _ = _render_prompt(msgs, "gemma4-think")
+    assert think.endswith("<|turn>model\n<|think|><|channel>thought")
+    nothink, _ = _render_prompt(msgs, "gemma4-nothink")
+    assert nothink.endswith("<|turn>model\n<|channel>thought\n<channel|>")
+    e_nothink, _ = _render_prompt(msgs, "gemma4-e-nothink")
+    assert e_nothink.endswith("<|turn>model\n")
+
+
+def test_chatml_family_stops_exclude_bare_turn_end():
+    # The channel-separator trap: neither chatml nor its nothink variant may
+    # stop on a bare <|im_end|> (harmony_channel_stop_seq.md).
+    for name in ("chatml", "chatml-nothink"):
+        assert "<|im_end|>" not in CHAT_TEMPLATES[name]["stop"]
+        assert "<|im_end|>\n" not in CHAT_TEMPLATES[name]["stop"]
 
 
 # --------------------------------------------------------------------------
