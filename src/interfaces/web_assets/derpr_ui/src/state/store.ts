@@ -58,6 +58,10 @@ export function usePortalStore() {
   // The LLM model catalog (same source as the `what models` dev command);
   // drives the inspector's model_name dropdown. Persona-independent, loaded once.
   const [modelList, setModelList] = useState<string[]>([])
+  // Instruct templates the local renderer understands (engine CHAT_TEMPLATES
+  // keys); drives the inspector's chat_template dropdown. Fetched, not
+  // hardcoded, so it never drifts from the engine (DP-140). Loaded once.
+  const [chatTemplates, setChatTemplates] = useState<string[]>([])
   const [persona, setPersona] = useState<Persona | null>(null)
   const [tools, setTools] = useState<ToolDef[]>([])
   const [channels, setChannels] = useState<ChannelGroup[]>([])
@@ -143,14 +147,16 @@ export function usePortalStore() {
   // initial boot
   useEffect(() => {
     ;(async () => {
-      const [active, list, models] = await Promise.all([
+      const [active, list, models, templates] = await Promise.all([
         api.getActivePersona(),
         api.listPersonas(),
         api.getModelList(),
+        api.getChatTemplates(),
       ])
       setActivePersona(active)
       setPersonaList(list.length ? list : [active])
       setModelList(models)
+      setChatTemplates(templates)
       await loadAll(active)
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -440,6 +446,7 @@ export function usePortalStore() {
     activePersona,
     personaList,
     modelList,
+    chatTemplates,
     persona,
     tools,
     channels,

@@ -87,6 +87,20 @@ export function getModelList(): Promise<string[]> {
   )
 }
 
+// The instruct templates the local renderer understands (the engine's
+// StreamEngine.CHAT_TEMPLATES keys), for the persona inspector's chat_template
+// dropdown. Fetched rather than hardcoded so the UI never drifts from what the
+// engine can actually render (DP-140). Mock mirrors the engine's current set.
+export function getChatTemplates(): Promise<string[]> {
+  return liveOr(
+    async () => (await getJSON<{ templates: string[] }>(`/api/v1/chat_templates`)).templates,
+    () => [
+      'alpaca', 'chatml', 'chatml-nothink', 'gemma', 'gemma4-e-nothink',
+      'gemma4-nothink', 'gemma4-think', 'llama2', 'llama3', 'llama4',
+    ],
+  )
+}
+
 export function getActivePersona(): Promise<string> {
   return liveOr(
     async () => (await getJSON<{ result: string }>(`/api/v1/model`)).result,

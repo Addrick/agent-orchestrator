@@ -121,7 +121,17 @@ body.no-rail.no-insp .body { grid-template-columns: 0 var(--chan-w) 1fr 0; }
 .col.rail  { background: var(--panel); border-right: 1px solid var(--line); }
 .col.chan  { background: var(--panel); border-right: 1px solid var(--line); }
 .col.convo { background: var(--bg); }
-.col.insp  { background: var(--panel); border-left: 1px solid var(--line); }
+.col.insp  { background: var(--panel); border-left: 1px solid var(--line); position: relative; }
+
+/* drag-to-resize handle on the inspector's left edge (rewrites --insp-w) */
+.insp-resizer {
+  position: absolute; top: 0; left: -3px; width: 7px; height: 100%;
+  cursor: col-resize; z-index: 5;
+}
+.insp-resizer:hover { background: var(--accent-bg); }
+/* suppress the column-collapse animation while actively dragging */
+body.resizing .body { transition: none; }
+body.resizing { cursor: col-resize; user-select: none; }
 
 /* ============================================================ NAV RAIL */
 .rail { align-items: center; padding: 10px 0; gap: 4px; }

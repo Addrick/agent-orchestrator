@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Persona, ToolDef } from '../types/contracts'
 import type { PortalStore } from '../state/store'
 import { policyLabel, estimateTokens, fmtTok } from '../state/util'
@@ -12,12 +12,51 @@ interface Props {
 // Inspector chrome. Persona tab = editable base-vs-kobold split (PATCH for the
 // fields the adapter accepts, dev_command for thinking_level); Tools tab = live
 // enable toggles via `set tools`; Raw req = the parity /assemble tab (S5).
+// Min/max for the draggable inspector width (px). The grid column reads
+// --insp-w; dragging the left-edge handle rewrites it on :root.
+const INSP_MIN = 300
+const INSP_MAX = 720
+
 export function Inspector({ store }: Props) {
   const [tab, setTab] = useState<Tab>('persona')
   const { persona, tools } = store
+  const dragRef = useRef<{ startX: number; startW: number } | null>(null)
+
+  const onResizeStart = useCallback((e: React.PointerEvent) => {
+    e.preventDefault()
+    const root = document.documentElement
+    const cur =
+      parseInt(getComputedStyle(root).getPropertyValue('--insp-w'), 10) || INSP_MIN
+    dragRef.current = { startX: e.clientX, startW: cur }
+    document.body.classList.add('resizing')
+
+    const onMove = (ev: PointerEvent) => {
+      const d = dragRef.current
+      if (!d) return
+      // handle is on the inspector's LEFT edge → dragging left widens it
+      const next = Math.min(
+        INSP_MAX,
+        Math.max(INSP_MIN, d.startW + (d.startX - ev.clientX)),
+      )
+      root.style.setProperty('--insp-w', `${next}px`)
+    }
+    const onUp = () => {
+      dragRef.current = null
+      document.body.classList.remove('resizing')
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }, [])
 
   return (
     <div className="col insp">
+      <div
+        className="insp-resizer"
+        onPointerDown={onResizeStart}
+        title="drag to resize"
+      />
       <div className="insp-tabs">
         {(['persona', 'tools', 'raw'] as Tab[]).map((t) => (
           <button
@@ -57,6 +96,13 @@ const MEMORY_MODES = [
   'GLOBAL',
   'TICKET_ISOLATED',
 ]
+
+// The instruct templates the engine's LOCAL renderer understands are fetched
+// from GET /api/v1/chat_templates (the keys of StreamEngine.CHAT_TEMPLATES) via
+// store.chatTemplates — never hardcoded, so the dropdown can't drift from what
+// the engine can render (DP-140). The field is only read on the local-inference
+// path (cloud providers ignore it); empty selection = leave unset → engine uses
+// KOBOLD_CHAT_TEMPLATE / chatml. Any unknown value falls back to chatml.
 
 // PATCH-able base params that are plain strings on the wire.
 const STR_BASE: (keyof Persona)[] = ['model_name', 'chat_template']
@@ -102,6 +148,7 @@ function coerceNum(s: string): number | string {
 function PersonaPane({ store }: { store: PortalStore }) {
   const p = store.persona
   const modelList = store.modelList
+  const chatTemplates = store.chatTemplates
   const [koboldCollapsed, setKoboldCollapsed] = useState(true)
   const [buf, setBuf] = useState<Buf>(() => (p ? buildBuffer(p) : {}))
   const [saving, setSaving] = useState(false)
@@ -271,7 +318,21 @@ function PersonaPane({ store }: { store: PortalStore }) {
 
       <Pair>
         <Cell label="chat_template">
-          <input value={buf.chat_template} onChange={(e) => set('chat_template', e.target.value)} />
+          <select
+            value={buf.chat_template}
+            onChange={(e) => set('chat_template', e.target.value)}
+            title="local-inference only — overrides the engine's instruct template when this persona runs on a local model. Ignored by cloud providers. Empty = leave unset (engine uses KOBOLD_CHAT_TEMPLATE / chatml)."
+          >
+            <option value="">none · server default</option>
+            {buf.chat_template && !chatTemplates.includes(buf.chat_template) && (
+              <option value={buf.chat_template}>{buf.chat_template}</option>
+            )}
+            {chatTemplates.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
         </Cell>
         <Cell label="tool_policy">
           <span title="edit in the Tools tab (default · allow/ask · overrides)">

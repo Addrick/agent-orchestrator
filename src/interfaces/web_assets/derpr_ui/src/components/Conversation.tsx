@@ -115,6 +115,11 @@ export function Conversation({ store }: { store: PortalStore }) {
                   (acc, c, i) => (c.role === 'user' && !c.ephemeral ? i : acc),
                   -1,
                 )
+                const lastAssistantChunkIndex = chunks.reduce(
+                  (acc, c, i) =>
+                    c.role === 'assistant' && !c.ephemeral ? i : acc,
+                  -1,
+                )
                 return chunks.map((c, i) => (
                   <RenderedSlot
                     key={c.interaction_id ?? c.ephemeral_chunk_id ?? `slot-${i}`}
@@ -126,7 +131,14 @@ export function Conversation({ store }: { store: PortalStore }) {
                     <MessageRow
                       chunk={c}
                       tools={tools}
-                      isLastUser={i === lastUserChunkIndex}
+                      isLastUser={
+                        i === lastUserChunkIndex &&
+                        lastUserChunkIndex > lastAssistantChunkIndex
+                      }
+                      isLastAssistant={
+                        i === lastAssistantChunkIndex &&
+                        lastAssistantChunkIndex > lastUserChunkIndex
+                      }
                       onEdit={editRow}
                       onDelete={deleteRow}
                       onRegen={regen}

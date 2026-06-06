@@ -15,6 +15,7 @@ interface Props {
   onResolveConfirm: (token: string, approved: boolean) => void
   resolvingConfirm: boolean
   isLastUser?: boolean
+  isLastAssistant?: boolean
 }
 
 export function MessageRow({
@@ -27,6 +28,7 @@ export function MessageRow({
   onResolveConfirm,
   resolvingConfirm,
   isLastUser,
+  isLastAssistant,
 }: Props) {
   const { reasoning, body } = splitThink(c.content)
   const [editing, setEditing] = useState(false)
@@ -152,7 +154,7 @@ export function MessageRow({
       {/* row hover actions — not on ephemeral */}
       {!c.ephemeral && !editing && c.interaction_id != null && (
         <div className="rowacts">
-          {c.role === 'assistant' && (
+          {c.role === 'assistant' && isLastAssistant && (
             <button className="ract" title="regenerate" onClick={onRegen}>
               ⟲ regen
             </button>
