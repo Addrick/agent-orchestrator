@@ -536,3 +536,32 @@ body.persona-blocked .secbanner { display: block; }
 }
 .toolnote.ok { color: var(--ok); border: 1px solid rgba(132,207,143,0.4); background: var(--ok-bg); }
 .toolnote.warn { color: var(--write); border: 1px solid rgba(231,173,98,0.4); background: var(--write-bg); }
+.toolnote.err { color: var(--danger); border: 1px solid rgba(229,114,114,0.4); background: var(--danger-bg); }
+
+/* tools tab: tool_policy editor */
+.polhead { display: flex; align-items: center; gap: 10px; padding: 11px 14px; border-bottom: 1px solid var(--line-2); }
+.polhead .lbl { font-size: 9px; letter-spacing: 0.5px; text-transform: uppercase; color: var(--ink-faint); }
+.polhead select { flex: 1; }
+
+/* per-tool tri-state (off / allow / ask) segmented control */
+.toolrow .tristate { margin-left: auto; display: inline-flex; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+.tristate .tri {
+  font-size: 9.5px; letter-spacing: 0.4px; color: var(--ink-faint); background: none;
+  border: none; border-left: 1px solid var(--line); padding: 2px 8px; cursor: pointer;
+}
+.tristate .tri:first-child { border-left: none; }
+.tristate .tri:hover:not(:disabled) { color: var(--ink-2); }
+.tristate .tri:disabled { cursor: not-allowed; }
+.tristate .tri.on.off { color: var(--ink-dim); background: var(--panel-3); }
+.tristate .tri.on.allow { color: var(--ok); background: var(--ok-bg); }
+.tristate .tri.on.ask { color: var(--write); background: var(--write-bg); }
+
+/* security-overrides advanced section */
+.section.adv { color: var(--danger); cursor: pointer; }
+.section.adv .desc { color: var(--ink-faint); text-transform: none; letter-spacing: 0; font-size: 9px; font-family: var(--sans); }
+.section.adv .car { margin-left: auto; transition: .15s; }
+.section.adv.collapsed .car { transform: rotate(-90deg); }
+.advbody { padding: 4px 14px 10px; }
+.ovrow { display: flex; align-items: center; gap: 8px; padding: 5px 0; cursor: pointer; }
+.ovrow .ovlbl { font-size: 10.5px; color: var(--ink-2); font-family: var(--sans); }
+.ovrow code { font-size: 9.5px; color: var(--ink-faint); }

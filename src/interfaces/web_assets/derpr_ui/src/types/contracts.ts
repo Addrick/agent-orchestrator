@@ -39,6 +39,10 @@ export interface ToolPolicy {
   default?: string // 'deny' | 'allow' | 'ask'
   allow?: string[]
   ask?: string[]
+  // Security-invariant escape hatches (policy.py validate_composition) and
+  // any capability gates — preserved on round-trip through the editor.
+  explicit_overrides?: string[]
+  capabilities_required?: string[]
   [k: string]: unknown
 }
 

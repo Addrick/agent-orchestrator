@@ -48,7 +48,14 @@ export const MOCK_PERSONA: Persona = {
     sampler_order: [6, 0, 1, 3, 4, 2, 5],
   },
   enabled_tools: ['search_tickets', 'reset_vpn_cert', 'email_user', 'lookup_user'],
-  tool_policy: { mode: 'CONFIRM', confirm_writes: true, auto_read: true },
+  // realistic engine shape: reads auto-run, writes park for CONFIRM (ask)
+  tool_policy: {
+    default: 'deny',
+    allow: ['search_tickets', 'lookup_user'],
+    ask: ['reset_vpn_cert', 'email_user'],
+    explicit_overrides: [],
+    capabilities_required: [],
+  },
   security_blocked: false,
   security_block_reasons: [],
 }

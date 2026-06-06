@@ -34,7 +34,9 @@ export function Inspector({ store }: Props) {
             buffer fresh; a same-persona refetch keeps typed edits and just
             re-derives dirtiness from the new baseline. */}
         {tab === 'persona' && <PersonaPane key={persona?.name ?? '∅'} store={store} />}
-        {tab === 'tools' && <ToolsPane persona={persona} tools={tools} store={store} />}
+        {tab === 'tools' && (
+          <ToolsPane key={persona?.name ?? '∅'} persona={persona} tools={tools} store={store} />
+        )}
         {tab === 'raw' && <RawPane store={store} />}
       </div>
     </div>
@@ -271,9 +273,9 @@ function PersonaPane({ store }: { store: PortalStore }) {
         <Cell label="chat_template">
           <input value={buf.chat_template} onChange={(e) => set('chat_template', e.target.value)} />
         </Cell>
-        <Cell label="tool_policy · read-only">
-          <span title="edit via the Tools tab / `set tool_policy`">
-            {policyLabel(p.tool_policy)}
+        <Cell label="tool_policy">
+          <span title="edit in the Tools tab (default · allow/ask · overrides)">
+            {policyLabel(p.tool_policy)} · edit in Tools ›
           </span>
         </Cell>
       </Pair>
@@ -383,17 +385,78 @@ function Pair({ children }: { children: React.ReactNode }) {
   )
 }
 
-// ---- Tools tab ------------------------------------------------------------
-// Mirrors the DP-120 Lite modal command builder: derive a `set tools …` string
-// from the desired selection, then POST it through dev_command.
-function buildToolsCommand(allNames: string[], selected: string[]): string {
-  if (selected.length === 0) return 'set tools none'
-  if (selected.length === allNames.length) return 'set tools all'
-  if (selected.length > allNames.length / 2) {
-    const excluded = allNames.filter((n) => !selected.includes(n))
-    return 'set tools all ' + excluded.map((n) => '-' + n).join(' ')
+// ---- Tools tab — structured tool_policy editor ----------------------------
+// The full policy (default + per-tool allow/ask + security overrides) is edited
+// here and saved as ONE `set tool_policy <json>` dev_command — the engine path
+// that revalidates security (message_handler `_handle_set`, DP-128). `set tools`
+// could only express the allow-list; `ask` and `explicit_overrides` need the
+// JSON setter. Persona refetch re-derives the baseline so dirtiness clears.
+
+type ToolState = 'off' | 'allow' | 'ask'
+
+// The three security-invariant escape hatches in policy.py:validate_composition.
+const OVERRIDE_FLAGS: { key: string; label: string }[] = [
+  { key: 'network_read_local_write', label: 'network:read + local:write' },
+  { key: 'untrusted_read_network_write', label: 'untrusted:read + network:write' },
+  { key: 'pii_read_network_any', label: 'pii:read + network:* egress' },
+]
+
+interface PolicyDraft {
+  default: string // 'deny' | 'allow'
+  states: Record<string, ToolState>
+  overrides: Set<string>
+  // wildcard allow=['*'] is preserved verbatim until the user edits the toolset,
+  // so an "allow everything (incl. future tools)" policy isn't silently frozen
+  // into the current catalog.
+  wildcard: boolean
+}
+
+function deriveDraft(persona: Persona | null, tools: ToolDef[]): PolicyDraft {
+  const tp = persona?.tool_policy || {}
+  const def = (tp.default as string) || 'deny'
+  const allow = new Set(tp.allow || [])
+  const ask = new Set(tp.ask || [])
+  const wildcard = def === 'allow' && allow.has('*')
+  const states: Record<string, ToolState> = {}
+  for (const t of tools) {
+    if (ask.has(t.name)) states[t.name] = 'ask'
+    else if (wildcard || allow.has(t.name)) states[t.name] = 'allow'
+    else states[t.name] = 'off'
   }
-  return 'set tools ' + selected.join(' ')
+  return { default: def, states, overrides: new Set(tp.explicit_overrides || []), wildcard }
+}
+
+// Build the tool_policy dict the engine expects. `capabilities_required` is
+// passed through untouched (not editable here).
+function draftToPolicy(
+  draft: PolicyDraft,
+  tools: ToolDef[],
+  persona: Persona | null,
+): Record<string, unknown> {
+  const allTouchedAllowed =
+    draft.default === 'allow' &&
+    draft.wildcard &&
+    tools.every((t) => draft.states[t.name] === 'allow')
+  const allow = allTouchedAllowed
+    ? ['*']
+    : tools.filter((t) => draft.states[t.name] === 'allow').map((t) => t.name)
+  const ask = tools.filter((t) => draft.states[t.name] === 'ask').map((t) => t.name)
+  return {
+    default: draft.default,
+    allow,
+    ask,
+    explicit_overrides: [...draft.overrides],
+    capabilities_required: persona?.tool_policy?.capabilities_required || [],
+  }
+}
+
+function sameDraft(a: PolicyDraft, b: PolicyDraft): boolean {
+  if (a.default !== b.default) return false
+  if (a.overrides.size !== b.overrides.size) return false
+  for (const o of a.overrides) if (!b.overrides.has(o)) return false
+  const keys = new Set([...Object.keys(a.states), ...Object.keys(b.states)])
+  for (const k of keys) if (a.states[k] !== b.states[k]) return false
+  return true
 }
 
 function ToolsPane({
@@ -406,55 +469,97 @@ function ToolsPane({
   store: PortalStore
 }) {
   const [busy, setBusy] = useState(false)
-  const [note, setNote] = useState<{ kind: 'ok' | 'warn'; text: string } | null>(null)
+  const [note, setNote] = useState<{ kind: 'ok' | 'warn' | 'err'; text: string } | null>(null)
+  const [advOpen, setAdvOpen] = useState(false)
+  const [draft, setDraft] = useState<PolicyDraft>(() => deriveDraft(persona, tools))
 
-  const allNames = tools.map((t) => t.name)
-  const wildcard = (persona?.enabled_tools || []).includes('*')
-  const enabled = new Set(wildcard ? allNames : persona?.enabled_tools || [])
+  // Re-derive the baseline whenever the canonical persona changes (e.g. after a
+  // save → refetch); dirtiness is then measured against the saved values.
+  const baseline = useMemo(() => deriveDraft(persona, tools), [persona, tools])
+  const dirty = useMemo(() => !sameDraft(draft, baseline), [draft, baseline])
 
-  const onToggle = async (name: string) => {
-    if (!persona || busy) return
-    const next = new Set(enabled)
-    if (next.has(name)) next.delete(name)
-    else next.add(name)
-    const command = buildToolsCommand(allNames, [...next])
+  const setToolState = (name: string, s: ToolState) =>
+    setDraft((d) => ({ ...d, states: { ...d.states, [name]: s } }))
+  const setDefault = (def: string) => setDraft((d) => ({ ...d, default: def }))
+  const toggleOverride = (key: string) =>
+    setDraft((d) => {
+      const next = new Set(d.overrides)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return { ...d, overrides: next }
+    })
+  const reset = () => {
+    setDraft(deriveDraft(persona, tools))
+    setNote(null)
+  }
+
+  const onSave = async () => {
+    if (!persona) return
+    const policy = draftToPolicy(draft, tools, persona)
     setBusy(true)
     setNote(null)
     try {
-      const resp = await store.runToolsCommand(command)
+      // compact JSON (no spaces) survives the dev-command whitespace tokenizer
+      const resp = await store.runToolsCommand(`set tool_policy ${JSON.stringify(policy)}`)
       if (resp.mutated) {
-        setNote({ kind: 'ok', text: resp.response || 'updated' })
+        // a now-quarantined persona comes back in the response text + the banner
+        const warn = /quarantin|insecure/i.test(resp.response || '')
+        setNote({ kind: warn ? 'warn' : 'ok', text: resp.response || 'policy updated' })
       } else {
-        setNote({ kind: 'warn', text: resp.response || 'no change' })
+        setNote({ kind: 'err', text: resp.response || 'rejected — policy unchanged' })
       }
+    } catch (e) {
+      setNote({ kind: 'err', text: `save failed: ${e}` })
     } finally {
       setBusy(false)
     }
   }
 
+  if (!persona) return <div className="dimrow">no persona loaded</div>
+
   return (
     <div className="insp-pane active">
-      {persona?.security_blocked && (
+      {persona.security_blocked && (
         <div className="secbanner" style={{ display: 'block' }}>
           ⚠ security-blocked — generation refused until tools are scoped to a safe set
         </div>
       )}
       {note && <div className={'toolnote ' + note.kind}>{note.text}</div>}
+
+      <div className="polhead">
+        <span className="lbl">default</span>
+        <select value={draft.default} onChange={(e) => setDefault(e.target.value)}>
+          <option value="deny">deny — only listed tools</option>
+          <option value="allow">allow — all tools (incl. wildcard)</option>
+        </select>
+      </div>
+
       {tools.map((t) => {
         const caps = t.capabilities
-        const on = enabled.has(t.name)
+        const st = draft.states[t.name] ?? 'off'
         return (
           <div className="toolrow" key={t.name}>
             <div className="tt">
               <span className="nm">{t.name}</span>
-              <button
-                className={'en' + (on ? ' on' : '')}
-                title={on ? 'enabled — click to disable' : 'disabled — click to enable'}
-                disabled={busy}
-                onClick={() => onToggle(t.name)}
-              >
-                <span className="sw" />
-              </button>
+              <div className="tristate" role="group" aria-label={`${t.name} policy`}>
+                {(['off', 'allow', 'ask'] as ToolState[]).map((s) => (
+                  <button
+                    key={s}
+                    className={'tri' + (st === s ? ' on ' + s : '')}
+                    disabled={busy}
+                    title={
+                      s === 'off'
+                        ? 'tool hidden from the model'
+                        : s === 'allow'
+                          ? 'auto-runs when the model calls it'
+                          : 'parks for CONFIRM approval before running'
+                    }
+                    onClick={() => setToolState(t.name, s)}
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
             </div>
             <div className="ds">{t.description}</div>
             <div className="tags">
@@ -481,6 +586,43 @@ function ToolsPane({
           </div>
         )
       })}
+
+      <div
+        className={'section adv' + (advOpen ? '' : ' collapsed')}
+        onClick={() => setAdvOpen((o) => !o)}
+      >
+        ⚠ security overrides
+        <span className="desc">disable a composition guard — only if you know why</span>
+        <span className="car">▾</span>
+      </div>
+      {advOpen && (
+        <div className="advbody">
+          {OVERRIDE_FLAGS.map((f) => (
+            <label className="ovrow" key={f.key}>
+              <input
+                type="checkbox"
+                checked={draft.overrides.has(f.key)}
+                disabled={busy}
+                onChange={() => toggleOverride(f.key)}
+              />
+              <span className="ovlbl">
+                {f.label} <code>{f.key}</code>
+              </span>
+            </label>
+          ))}
+        </div>
+      )}
+
+      <div className="savebar">
+        {note && <span className={'savestatus ' + note.kind}>{note.text}</span>}
+        <span className="grow" />
+        <button className="mini" onClick={reset} disabled={!dirty || busy}>
+          reset
+        </button>
+        <button className="savebtn" onClick={onSave} disabled={!dirty || busy}>
+          {busy ? 'saving…' : 'save'}
+        </button>
+      </div>
     </div>
   )
 }
