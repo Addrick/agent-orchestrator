@@ -210,6 +210,7 @@ class KoboldEngineAdapter:
                 "kobold_extras": get_kobold_extras_for_get(p),
                 "enabled_tools": p.get_enabled_tools(),
                 "tool_policy": p.get_tool_policy().to_dict(),
+                "service_bindings": p.get_service_bindings(),
                 "security_blocked": p.is_security_blocked(),
                 "security_block_reasons": p.get_security_block_reasons(),
             }

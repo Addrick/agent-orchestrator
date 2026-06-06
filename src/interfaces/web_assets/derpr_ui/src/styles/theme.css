@@ -556,6 +556,13 @@ body.persona-blocked .secbanner { display: block; }
 .tristate .tri.on.allow { color: var(--ok); background: var(--ok-bg); }
 .tristate .tri.on.ask { color: var(--write); background: var(--write-bg); }
 
+/* persona service bindings (gate 2) */
+.bindbody { padding: 6px 14px 10px; }
+.bindrow { display: flex; align-items: center; gap: 9px; padding: 5px 0; cursor: pointer; }
+.bindrow .bindlbl { font-size: 11px; color: var(--ink-2); }
+.bindrow .bindoff { margin-left: auto; font-size: 9px; color: var(--ink-faint); font-family: var(--sans); }
+.pill.bindwarn { color: var(--write); border-color: rgba(231,173,98,0.4); margin-left: 6px; }
+
 /* tool catalog group header (collapsible, grouped by service_binding) */
 .section.toolgrp { cursor: pointer; }
 .section.toolgrp .car { margin-left: 8px; transition: .15s; }

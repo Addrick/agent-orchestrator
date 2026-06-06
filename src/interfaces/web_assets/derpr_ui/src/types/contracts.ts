@@ -77,6 +77,9 @@ export interface Persona {
   chat_template: string | null
   tool_policy: ToolPolicy | null
   enabled_tools: string[]
+  // services this persona may use tools from (gate 2 in _filter_tools_for_persona).
+  // a service tool is only offered to the model if its binding is listed here.
+  service_bindings: string[]
   // kobold-only
   top_p: number | null
   top_k: number | null

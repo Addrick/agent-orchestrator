@@ -56,6 +56,7 @@ export const MOCK_PERSONA: Persona = {
     explicit_overrides: [],
     capabilities_required: [],
   },
+  service_bindings: ['zammad'],
   security_blocked: false,
   security_block_reasons: [],
 }

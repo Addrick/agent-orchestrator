@@ -408,6 +408,9 @@ interface PolicyDraft {
   default: string // 'deny' | 'allow'
   states: Record<string, ToolState>
   overrides: Set<string>
+  // service bindings the persona is granted (gate 2). A service group's tools
+  // are inert until its binding is listed here, regardless of allow/ask.
+  bindings: Set<string>
   // wildcard allow=['*'] is preserved verbatim until the user edits the toolset,
   // so an "allow everything (incl. future tools)" policy isn't silently frozen
   // into the current catalog.
@@ -426,7 +429,13 @@ function deriveDraft(persona: Persona | null, tools: ToolDef[]): PolicyDraft {
     else if (wildcard || allow.has(t.name)) states[t.name] = 'allow'
     else states[t.name] = 'off'
   }
-  return { default: def, states, overrides: new Set(tp.explicit_overrides || []), wildcard }
+  return {
+    default: def,
+    states,
+    overrides: new Set(tp.explicit_overrides || []),
+    bindings: new Set(persona?.service_bindings || []),
+    wildcard,
+  }
 }
 
 // Build the tool_policy dict the engine expects. `capabilities_required` is
@@ -453,13 +462,18 @@ function draftToPolicy(
   }
 }
 
-function sameDraft(a: PolicyDraft, b: PolicyDraft): boolean {
-  if (a.default !== b.default) return false
-  if (a.overrides.size !== b.overrides.size) return false
-  for (const o of a.overrides) if (!b.overrides.has(o)) return false
-  const keys = new Set([...Object.keys(a.states), ...Object.keys(b.states)])
-  for (const k of keys) if (a.states[k] !== b.states[k]) return false
+function sameSet(a: Set<string>, b: Set<string>): boolean {
+  if (a.size !== b.size) return false
+  for (const x of a) if (!b.has(x)) return false
   return true
+}
+
+function policyChanged(a: PolicyDraft, b: PolicyDraft): boolean {
+  if (a.default !== b.default) return true
+  if (!sameSet(a.overrides, b.overrides)) return true
+  const keys = new Set([...Object.keys(a.states), ...Object.keys(b.states)])
+  for (const k of keys) if (a.states[k] !== b.states[k]) return true
+  return false
 }
 
 function ToolsPane({
@@ -494,14 +508,32 @@ function ToolsPane({
     })
   }, [tools])
 
+  // distinct services present in the catalog — the bindings that can be granted
+  const knownBindings = useMemo(
+    () => [...new Set(tools.map((t) => t.service_binding).filter((b): b is string => !!b))].sort(),
+    [tools],
+  )
+
   // Re-derive the baseline whenever the canonical persona changes (e.g. after a
   // save → refetch); dirtiness is then measured against the saved values.
   const baseline = useMemo(() => deriveDraft(persona, tools), [persona, tools])
-  const dirty = useMemo(() => !sameDraft(draft, baseline), [draft, baseline])
+  const policyDirty = useMemo(() => policyChanged(draft, baseline), [draft, baseline])
+  const bindingsDirty = useMemo(
+    () => !sameSet(draft.bindings, baseline.bindings),
+    [draft, baseline],
+  )
+  const dirty = policyDirty || bindingsDirty
 
   const setToolState = (name: string, s: ToolState) =>
     setDraft((d) => ({ ...d, states: { ...d.states, [name]: s } }))
   const setDefault = (def: string) => setDraft((d) => ({ ...d, default: def }))
+  const toggleBinding = (b: string) =>
+    setDraft((d) => {
+      const next = new Set(d.bindings)
+      if (next.has(b)) next.delete(b)
+      else next.add(b)
+      return { ...d, bindings: next }
+    })
   const toggleOverride = (key: string) =>
     setDraft((d) => {
       const next = new Set(d.overrides)
@@ -577,18 +609,28 @@ function ToolsPane({
 
   const onSave = async () => {
     if (!persona) return
-    const policy = draftToPolicy(draft, tools, persona)
     setBusy(true)
     setNote(null)
     try {
-      // compact JSON (no spaces) survives the dev-command whitespace tokenizer
-      const resp = await store.runToolsCommand(`set tool_policy ${JSON.stringify(policy)}`)
-      if (resp.mutated) {
+      // service_bindings first (gate 2 — controls which tools are even
+      // offered), then tool_policy. Both go through dev_command, which
+      // persists to personas.json on mutation. Send only what changed.
+      let last = { response: '', mutated: false } as { response: string; mutated?: boolean }
+      if (bindingsDirty) {
+        const list = [...draft.bindings].join(',') || 'none'
+        last = await store.runToolsCommand(`set service_bindings ${list}`)
+      }
+      if (policyDirty) {
+        const policy = draftToPolicy(draft, tools, persona)
+        // compact JSON (no spaces) survives the dev-command whitespace tokenizer
+        last = await store.runToolsCommand(`set tool_policy ${JSON.stringify(policy)}`)
+      }
+      if (last.mutated) {
         // a now-quarantined persona comes back in the response text + the banner
-        const warn = /quarantin|insecure/i.test(resp.response || '')
-        setNote({ kind: warn ? 'warn' : 'ok', text: resp.response || 'policy updated' })
+        const warn = /quarantin|insecure/i.test(last.response || '')
+        setNote({ kind: warn ? 'warn' : 'ok', text: last.response || 'saved' })
       } else {
-        setNote({ kind: 'err', text: resp.response || 'rejected — policy unchanged' })
+        setNote({ kind: 'err', text: last.response || 'rejected — unchanged' })
       }
     } catch (e) {
       setNote({ kind: 'err', text: `save failed: ${e}` })
@@ -616,7 +658,33 @@ function ToolsPane({
         </select>
       </div>
 
+      {knownBindings.length > 0 && (
+        <>
+          <div className="section">
+            service bindings
+            <span className="desc">a service&apos;s tools are inert until its binding is granted</span>
+          </div>
+          <div className="bindbody">
+            {knownBindings.map((b) => (
+              <label className="bindrow" key={b}>
+                <button
+                  type="button"
+                  className={'toggle-chip' + (draft.bindings.has(b) ? ' on' : '')}
+                  disabled={busy}
+                  onClick={() => toggleBinding(b)}
+                >
+                  <span className="sw" />
+                </button>
+                <span className="bindlbl">{b}</span>
+                {!draft.bindings.has(b) && <span className="bindoff">tools hidden</span>}
+              </label>
+            ))}
+          </div>
+        </>
+      )}
+
       {groups.map(([key, groupTools]) => {
+        const bindingOff = key !== BUILTIN_GROUP && !draft.bindings.has(key)
         const isCollapsed = collapsed.has(key)
         const nAllow = groupTools.filter((t) => draft.states[t.name] === 'allow').length
         const nAsk = groupTools.filter((t) => draft.states[t.name] === 'ask').length
@@ -629,6 +697,7 @@ function ToolsPane({
             >
               {label}
               <span className="pill">{groupTools.length}</span>
+              {bindingOff && <span className="pill bindwarn">binding off</span>}
               <span className="desc">
                 {nAllow ? `${nAllow} allow` : ''}
                 {nAllow && nAsk ? ' · ' : ''}
