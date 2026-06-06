@@ -632,12 +632,20 @@ class MemoryManager:
             )
             canonical = cursor.fetchone()
             if canonical is not None:
-                results.append({
-                    "edit_id": None,
-                    "content": canonical['content'],
-                    "reasoning_content": canonical['reasoning_content'],
-                    "created_at": canonical['timestamp'],
-                })
+                # Only append canonical if it's not already in the archives
+                canonical_in_archives = any(r['content'] == canonical['content'] for r in results)
+                if not canonical_in_archives:
+                    results.append({
+                        "edit_id": None,
+                        "content": canonical['content'],
+                        "reasoning_content": canonical['reasoning_content'],
+                        "created_at": canonical['timestamp'],
+                    })
+                
+                # Flag the active canonical entry
+                for r in results:
+                    r['canonical'] = (r['content'] == canonical['content'])
+
             return results
 
     def get_ids_with_versions(self, interaction_ids: List[int]) -> Set[int]:
@@ -706,11 +714,9 @@ class MemoryManager:
             now = datetime.now()
 
             try:
-                # 1. Archive current canonical (with content-hash dedupe — option B).
+                # 1. Archive current canonical (with content-hash dedupe).
                 #    If an archive row with the same (interaction_id, old_content) already
-                #    exists, skip the insert; the chevron toggled back to a content we
-                #    already have on file. Drop stale L0 rows either way — the target
-                #    restore step below overwrites canonical content.
+                #    exists, skip the insert.
                 cursor.execute(
                     "SELECT 1 FROM Interaction_Edit_History"
                     " WHERE interaction_id = ? AND old_content = ? LIMIT 1",
@@ -734,6 +740,7 @@ class MemoryManager:
                             "INSERT INTO Edit_History_Embeddings (edit_id, embedding, model_name, created_at) VALUES (?, ?, ?, ?)",
                             (new_edit_id, canonical_emb['embedding'], canonical_emb['model_name'], canonical_emb['created_at']),
                         )
+                
                 cursor.execute("DELETE FROM Message_Embeddings WHERE interaction_id = ?", (interaction_id,))
                 cursor.execute("DELETE FROM vec_Message_Embeddings WHERE interaction_id = ?", (interaction_id,))
 
@@ -758,12 +765,8 @@ class MemoryManager:
                         (interaction_id, target_emb['embedding']),
                     )
 
-                # Delete the target archive (its content is now canonical). Cascades to
-                # Edit_History_Embeddings(target_edit_id).
-                cursor.execute(
-                    "DELETE FROM Interaction_Edit_History WHERE edit_id = ?",
-                    (target_edit_id,),
-                )
+                # We DO NOT delete the target archive. It remains in Interaction_Edit_History
+                # so that the list of versions remains perfectly stable.
 
                 conn.commit()
             except sqlite3.Error as e:

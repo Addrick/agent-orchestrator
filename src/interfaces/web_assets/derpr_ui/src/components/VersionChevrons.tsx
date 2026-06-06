@@ -22,7 +22,9 @@ export function VersionChevrons({ interactionId, onResync }: Props) {
     api.getVersions(interactionId).then((v) => {
       if (!live) return
       setVers(v)
-      setCur(v.versions.length) // canonical = last
+      // Find the 1-indexed position of the canonical version
+      const canonicalIdx = v.versions.findIndex((entry) => entry.canonical)
+      setCur(canonicalIdx !== -1 ? canonicalIdx + 1 : v.versions.length)
     })
     return () => {
       live = false
@@ -45,7 +47,7 @@ export function VersionChevrons({ interactionId, onResync }: Props) {
     const k = target1 - 1 // 0-indexed
     const next = await api.selectVersion(interactionId, k)
     setVers(next)
-    setCur(next.versions.length) // selection becomes canonical (last)
+    setCur(target1) // selection index becomes current
     onResync()
   }
 
