@@ -44,11 +44,24 @@ def _make_adapter_with_seeded_db(persona_name: str = "test_persona",
         prompt="you are test",
         context_length=context_length,
     )
+    def _get_view_history(persona_name, user_identifier, channel,
+                          server_id=None, limit=None):
+        # Mirror ChatSystem.get_view_history: channel=None → global history;
+        # a concrete channel scopes per channel (memory_mode is CHANNEL here by
+        # default for the bare Persona). Returns (rows, mode_label).
+        if channel is None:
+            return mm.get_global_history(persona_name, limit), "global"
+        return (
+            mm.get_channel_history(channel, persona_name, server_id, limit),
+            "channel",
+        )
+
     chat_system = SimpleNamespace(
         personas={persona_name: persona},
         memory_manager=mm,
         system_persona_names=set(),
         get_session_memory_block=retrieve_memory_block or AsyncMock(return_value=None),
+        get_view_history=_get_view_history,
     )
     adapter = KoboldAdapter(chat_system=chat_system)
     return adapter, mm, persona
@@ -129,6 +142,7 @@ def _make_real_adapter(persona_name: str = "test_persona",
     with patch('src.chat_system.load_personas_from_file', return_value={persona_name: persona}):
         chat_system = ChatSystem(memory_manager=mm, text_engine=text_engine)
     chat_system.bot_logic.preprocess_message = AsyncMock(return_value=None)
+    chat_system.system_persona_names = set()
 
     adapter = KoboldAdapter(chat_system=chat_system)
     return adapter, mm, persona, chat_system
@@ -365,6 +379,61 @@ def test_handle_portal_retry_returns_none_when_no_prior_assistant():
     mm.create_schema()
     result = mm.handle_portal_retry("test_persona", "portal", "web_ui")
     assert result is None
+    mm.close()
+
+
+def test_chat_completions_retry_on_trailing_user_turn_appends_new_assistant():
+    """Retry on a trailing USER turn must INSERT a fresh assistant row.
+
+    Regression for the "block disappears" bug: when the conversation ends with
+    an un-answered user turn, "retry" means "generate a reply to it". The engine
+    must NOT archive + overwrite the earlier assistant turn (which sits before
+    the user turn) — doing so misroutes the response into an older row as a
+    version, so it never appears at the bottom on /transcript re-sync.
+    """
+    adapter, mm, _, _ = _make_real_adapter(deltas=("fresh reply",))
+
+    base = datetime(2026, 4, 20, 12, 0, 0)
+    user1 = mm.log_message(
+        user_identifier="portal", persona_name="test_persona", channel="web_ui",
+        author_role="user", author_name=None, content="first prompt", timestamp=base,
+    )
+    prior_assistant = mm.log_message(
+        user_identifier="portal", persona_name="test_persona", channel="web_ui",
+        author_role="assistant", author_name=None, content="prior reply",
+        timestamp=base + timedelta(seconds=1), reply_to_id=user1,
+    )
+    # Trailing user turn with no reply yet — the row whose "retry" we click.
+    mm.log_message(
+        user_identifier="portal", persona_name="test_persona", channel="web_ui",
+        author_role="user", author_name=None, content="second prompt",
+        timestamp=base + timedelta(seconds=2),
+    )
+
+    with TestClient(adapter.app) as client:
+        r = client.post("/chat/completions", json=_chat_body("", retry=True))
+    assert r.status_code == 200
+
+    rows = _fetch_portal_rows(mm, "test_persona")
+    # A new assistant row was appended (4 total), not an overwrite (would be 3).
+    assert len(rows) == 4
+    assert rows[-1]["author_role"] == "assistant"
+    assert rows[-1]["content"] == "fresh reply"
+    assert rows[-1]["interaction_id"] != prior_assistant
+
+    # The earlier assistant turn was left untouched — no spurious version.
+    conn = mm._get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT content FROM User_Interactions WHERE interaction_id = ?",
+        (prior_assistant,),
+    )
+    assert cur.fetchone()["content"] == "prior reply"
+    cur.execute(
+        "SELECT COUNT(*) FROM Interaction_Edit_History WHERE interaction_id = ?",
+        (prior_assistant,),
+    )
+    assert cur.fetchone()[0] == 0
     mm.close()
 
 
@@ -882,6 +951,41 @@ def test_transcript_appends_live_pending_confirmation_as_ephemeral():
     mm.close()
 
 
+def test_transcript_pending_confirmation_surfaces_tool_context():
+    # The parked chunk renders the tool call awaiting approval by slicing the
+    # in-flight conversation_history from tool_context_start and parsing those
+    # raw OpenAI messages into the structured ToolContext shape.
+    from src.chat_system import PendingConfirmation
+
+    adapter, mm, persona, chat_system = _make_real_adapter()
+    _seed_history(mm, "test_persona", turns=1)
+    convo = [
+        {"role": "user", "content": "make a ticket"},
+        {"role": "assistant", "tool_calls": [
+            {"id": "call_7", "name": "create_ticket",
+             "arguments": {"title": "x"}},
+        ]},
+    ]
+    parked = PendingConfirmation(
+        write_calls=[{"name": "create_ticket", "arguments": {"title": "x"}}],
+        conversation_history=convo, persona_name="test_persona",
+        tools_for_llm=[], image_url=None, channel="web_ui",
+        confirmation_text="I'll create that ticket.",
+        tool_context_start=1,  # slice from the assistant tool-call message
+    )
+    chat_system._pending_confirmations[("portal", "test_persona")] = parked
+
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/session/test_persona/transcript")
+    last = r.json()["chunks"][-1]
+    assert last["ephemeral"] is True
+    assert last["tool_context"] == [{
+        "call_id": "call_7", "group_id": None, "tool_name": "create_ticket",
+        "arguments": {"title": "x"}, "result": None, "error": None,
+    }]
+    mm.close()
+
+
 def test_list_versions_unknown_id_returns_404():
     adapter, mm, _ = _make_adapter_with_seeded_db()
     with TestClient(adapter.app) as client:
@@ -938,8 +1042,10 @@ def test_retry_retry_select_version_round_trip_via_endpoints():
 
     Initial assistant content = "v0". After retry #1 canonical = "v1",
     archives = [v0]. After retry #2 canonical = "v2", archives = [v0, v1].
-    select_version(0) swaps archive[0] (v0) with canonical (v2):
-    new canonical = "v0", archives = [v1, v2].
+    select_version(0) restores archive[0] (v0) as canonical. The STABLE design
+    keeps the version list fixed (so the numbered chevron `k/n` counter stays
+    valid): the list order is unchanged and v0 is flagged canonical in place,
+    rather than being deleted-and-appended last.
     """
     adapter, mm, _, _ = _make_real_adapter(
         stream_messages=_make_stream_messages([
@@ -968,6 +1074,9 @@ def test_retry_retry_select_version_round_trip_via_endpoints():
         versions = client.get(f"/api/v1/interaction/{assistant_id}/versions").json()
         contents = [v["content"] for v in versions["versions"]]
         assert contents == ["v0", "v1", "v2"]
+        # v2 is canonical (synthesized last with edit_id=None) before the swap.
+        assert versions["versions"][-1]["canonical"] is True
+        assert versions["versions"][-1]["edit_id"] is None
 
         swap = client.post(f"/api/v1/interaction/{assistant_id}/select_version/0").json()
         assert swap["current_content"] == "v0"
@@ -976,8 +1085,11 @@ def test_retry_retry_select_version_round_trip_via_endpoints():
 
         after = client.get(f"/api/v1/interaction/{assistant_id}/versions").json()
         after_contents = [v["content"] for v in after["versions"]]
-        assert after_contents == ["v1", "v2", "v0"]
-        assert after["versions"][-1]["edit_id"] is None  # v0 now canonical
+        # Order is preserved (stable list); v0 is now the canonical-flagged entry.
+        assert after_contents == ["v0", "v1", "v2"]
+        canonical_entries = [v for v in after["versions"] if v.get("canonical")]
+        assert len(canonical_entries) == 1
+        assert canonical_entries[0]["content"] == "v0"
 
     rows = _fetch_portal_rows(mm, "test_persona")
     assistant_row = next(r for r in rows if r["author_role"] == "assistant")
@@ -1980,7 +2092,7 @@ def test_models_list_sources_from_models_available():
 
 def test_models_list_empty_when_models_available_empty():
     """No snapshot yet → empty list, not a crash."""
-    chat_system = SimpleNamespace(models_available={})
+    chat_system = SimpleNamespace(models_available={}, system_persona_names=set())
     adapter = KoboldAdapter(chat_system=chat_system)
     with TestClient(adapter.app) as client:
         r = client.get("/api/v1/models/list")
@@ -1988,3 +2100,228 @@ def test_models_list_empty_when_models_available_empty():
     assert r.json()["models"] == []
 
 
+
+
+# -------- S5 (DP-137): /assemble dry-run parity inspector --------
+#
+# The headline parity feature: GET /assemble must return the EXACT request the
+# engine would send, sourced from the shared builder so it cannot drift from a
+# live submit. The first test is the parity guarantee itself.
+
+def test_assemble_matches_live_wire_messages():
+    """Parity by construction: the messages[] /assemble produces are identical
+    (role + content) to what a live stream_response submit forwards on iter 0.
+
+    Both paths share `_prepare_request` + `build_wire_messages`, so this asserts
+    the contract that makes the inspector trustworthy. The dry-run runs first and
+    writes nothing, so the live turn rebuilds from the same DB history."""
+    captured = {"messages": None}
+
+    async def stream_messages(persona_config, messages, params, **kwargs):
+        # Capture the first LLM call's wire messages (tool-loop iteration 0).
+        if captured["messages"] is None:
+            captured["messages"] = [dict(m) for m in messages]
+        yield {"type": "api_payload", "payload": {}}
+        yield {"type": "text_delta", "text": "ok"}
+        yield {"type": "done", "full_text": "ok"}
+
+    adapter, mm, persona, chat_system = _make_real_adapter(stream_messages=stream_messages)
+    base = datetime(2026, 4, 1, 12, 0, 0)
+    mm.log_message(
+        user_identifier="portal", persona_name="test_persona", channel="web_ui",
+        author_role="user", author_name="portal", content="first question", timestamp=base,
+    )
+    mm.log_message(
+        user_identifier="portal", persona_name="test_persona", channel="web_ui",
+        author_role="assistant", author_name="test_persona", content="first reply",
+        timestamp=base + timedelta(seconds=1),
+    )
+
+    async def run():
+        assembled = await chat_system.assemble_request(
+            persona_name="test_persona", user_identifier="portal",
+            channel="web_ui", message="second question",
+        )
+        # Live submit over the SAME history (dry-run wrote nothing).
+        await chat_system.generate_response(
+            "test_persona", "portal", "web_ui", "second question",
+        )
+        return assembled
+
+    assembled = asyncio.run(run())
+    assert captured["messages"] is not None, "live path never called stream_messages"
+
+    def rc(msgs):
+        return [{"role": m.get("role"), "content": m.get("content")} for m in msgs]
+
+    assert rc(assembled.messages) == rc(captured["messages"])
+    # Sanity: system prompt first, the new user turn last.
+    assert assembled.messages[0]["role"] == "system"
+    assert assembled.messages[0]["content"] == "you are test"
+    assert assembled.messages[-1] == {"role": "user", "content": "second question"}
+    mm.close()
+
+
+def test_assemble_endpoint_unknown_persona_returns_404():
+    adapter, mm, _, _ = _make_real_adapter()
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/session/nobody/assemble?message=hi")
+    assert r.status_code == 404
+    assert "not found" in r.json()["error"].lower()
+    mm.close()
+
+
+def test_assemble_endpoint_returns_parity_contract_shape():
+    """The §9 wire shape: parity banner data, route, model, flattened params,
+    and src-tagged messages with the composer's new turn last."""
+    adapter, mm, persona, chat_system = _make_real_adapter()
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/session/test_persona/assemble?message=hello+world")
+    assert r.status_code == 200
+    body = r.json()
+
+    assert body["parity"] == {
+        "source": "engine.dry_run",
+        "builder": "chat_system.stream_response",
+        "matches_live": True,
+    }
+    assert body["route"].startswith("engine")
+    assert body["model_name"] == "local"
+    # params is the flattened resolved GenerationParams.
+    for key in ("temperature", "top_p", "top_k", "max_tokens", "stop", "seed"):
+        assert key in body["params"]
+
+    msgs = body["messages"]
+    assert msgs[0]["role"] == "system"
+    assert msgs[0]["src"] == "persona.prompt"
+    assert msgs[0]["content"] == "you are test"
+    # No prior history → just system + the new composer turn.
+    assert msgs[-1]["role"] == "user"
+    assert msgs[-1]["content"] == "hello world"
+    assert msgs[-1]["src"] == "composer"
+    mm.close()
+
+
+# -------- DP-136 (6b): channel scoping --------
+
+def _seed_channel(mm: MemoryManager, persona_name: str, channel: str,
+                  user: str, n: int, base_offset: int = 0):
+    base = datetime(2026, 5, 1, 12, 0, 0)
+    for i in range(n):
+        mm.log_message(
+            user_identifier=user, persona_name=persona_name, channel=channel,
+            author_role="user", author_name=user,
+            content=f"{channel} user {i}",
+            timestamp=base + timedelta(seconds=base_offset + 2 * i),
+        )
+
+
+def test_get_distinct_channels_lists_per_persona_with_counts():
+    mm = MemoryManager(db_path=":memory:")
+    mm.create_schema()
+    _seed_channel(mm, "p", "web_ui", "portal", 2)
+    _seed_channel(mm, "p", "discord_ops", "u1", 3, base_offset=100)
+    _seed_channel(mm, "other", "zammad_q1", "u2", 1, base_offset=200)
+
+    rows = mm.get_distinct_channels("p")
+    chans = {r["channel"]: r["count"] for r in rows}
+    assert chans == {"web_ui": 2, "discord_ops": 3}, chans
+    # ordered by last activity desc → discord_ops (offset 100) first
+    assert rows[0]["channel"] == "discord_ops"
+    mm.close()
+
+
+def test_get_distinct_channels_excludes_suppressed():
+    mm = MemoryManager(db_path=":memory:")
+    mm.create_schema()
+    iid = mm.log_message(
+        user_identifier="portal", persona_name="p", channel="web_ui",
+        author_role="user", author_name=None, content="hi",
+        timestamp=datetime(2026, 5, 1, 12, 0, 0),
+    )
+    mm.suppress_interaction(iid)
+    rows = mm.get_distinct_channels("p")
+    assert rows == []
+    mm.close()
+
+
+def test_channels_endpoint_groups_by_source_and_injects_web_ui():
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    _seed_channel(mm, "test_persona", "discord_ops", "u1", 1)
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/v1/channels?persona=test_persona")
+    assert r.status_code == 200
+    chans = r.json()["channels"]
+    by_chan = {c["channel"]: c for c in chans}
+    # discord channel keeps its real tag + derives the dsc source
+    assert by_chan["discord_ops"]["source"] == "dsc"
+    # a synthetic web_ui row is always present so a fresh persona can chat
+    assert "web_ui" in by_chan
+    assert by_chan["web_ui"]["source"] == "web"
+    mm.close()
+
+
+def test_transcript_channel_scoping_isolates_per_channel():
+    # CHANNEL_ISOLATED persona: ?channel= must return only that channel's rows.
+    adapter, mm, _ = _make_adapter_with_seeded_db(context_length=20)
+    _seed_channel(mm, "test_persona", "web_ui", "portal", 2)
+    _seed_channel(mm, "test_persona", "web_ui_alt", "portal", 3, base_offset=100)
+
+    with TestClient(adapter.app) as client:
+        r_main = client.get(
+            "/api/v1/session/test_persona/transcript?channel=web_ui")
+        r_alt = client.get(
+            "/api/v1/session/test_persona/transcript?channel=web_ui_alt")
+        r_all = client.get("/api/v1/session/test_persona/transcript")
+
+    assert len(r_main.json()["chunks"]) == 2
+    assert len(r_alt.json()["chunks"]) == 3
+    # No channel param → legacy global history merges both channels.
+    assert len(r_all.json()["chunks"]) == 5
+    mm.close()
+
+
+def test_ltm_block_passes_channel_to_retrieval():
+    mock_retrieve = AsyncMock(return_value=None)
+    adapter, mm, _ = _make_adapter_with_seeded_db(retrieve_memory_block=mock_retrieve)
+    with TestClient(adapter.app) as client:
+        client.get(
+            "/api/v1/session/test_persona/ltm_block",
+            params={"query": "q", "channel": "web_ui_alt"},
+        )
+    mock_retrieve.assert_awaited_once()
+    assert mock_retrieve.call_args.kwargs.get("channel") == "web_ui_alt"
+    mm.close()
+
+
+def test_ltm_block_defaults_channel_to_web_ui():
+    mock_retrieve = AsyncMock(return_value=None)
+    adapter, mm, _ = _make_adapter_with_seeded_db(retrieve_memory_block=mock_retrieve)
+    with TestClient(adapter.app) as client:
+        client.get("/api/v1/session/test_persona/ltm_block", params={"query": "q"})
+    assert mock_retrieve.call_args.kwargs.get("channel") == "web_ui"
+    mm.close()
+
+
+def test_chat_completions_logs_turn_under_requested_channel():
+    # Submitting with a fresh `channel` materializes it (channel "creation").
+    adapter, mm, _, _ = _make_real_adapter(deltas=("ok",))
+    body = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": False,
+        "derpr_user_text": "hi there",
+        "channel": "web_ui_newchan",
+    }
+    with TestClient(adapter.app) as client:
+        r = client.post("/v1/chat/completions", json=body)
+    assert r.status_code == 200
+
+    conn = mm._get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT DISTINCT channel FROM User_Interactions WHERE persona_name = ?",
+        ("test_persona",),
+    )
+    channels = {row[0] for row in cur.fetchall()}
+    assert channels == {"web_ui_newchan"}, channels
+    mm.close()

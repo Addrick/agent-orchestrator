@@ -67,6 +67,20 @@ LoopEvent = Union[
 ]
 
 
+def build_wire_messages(
+    persona: Persona, conversation_history: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Prepend the persona system prompt to the conversation history to form
+    the exact message array sent to the provider.
+
+    Single source of truth for the system-prompt prepend: both the live tool
+    loop's first iteration (`ToolLoop.run`) and the `/assemble` dry-run
+    (`ChatSystem.assemble_request`) call this, so the wire messages the inspector
+    shows cannot drift from what a live submit actually sends.
+    """
+    return [{"role": "system", "content": persona.get_prompt()}] + list(conversation_history)
+
+
 class ToolLoop:
     """Drives the stream_messages → tool_calls → execute → repeat cycle."""
 
@@ -116,9 +130,8 @@ class ToolLoop:
             tool_calls_collected: Optional[List[Dict[str, Any]]] = None
             accumulated_parts: List[str] = []
 
-            messages_for_llm: List[Dict[str, Any]] = (
-                [{"role": "system", "content": persona.get_prompt()}]
-                + list(conversation_history)
+            messages_for_llm: List[Dict[str, Any]] = build_wire_messages(
+                persona, conversation_history,
             )
 
             try:

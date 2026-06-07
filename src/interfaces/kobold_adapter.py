@@ -142,6 +142,7 @@ class KoboldAdapter:
                 "thinking_level": p.get_thinking_level(),
                 "memory_mode": p.get_memory_mode().name,
                 "max_context_tokens": p.get_max_context_tokens(),
+                "long_term_memory": p.get_long_term_memory(),
                 "instruct_tags": p.get_provider_extra("kobold", "instruct_tags"),
                 "kobold_extras": get_kobold_extras_for_get(p),
                 "enabled_tools": p.get_enabled_tools(),
@@ -374,6 +375,8 @@ class KoboldAdapter:
                     rejected.append("memory_mode")
             if "max_context_tokens" in data:
                 p.set_max_context_tokens(data["max_context_tokens"])
+            if "long_term_memory" in data:
+                p.set_long_term_memory(bool(data["long_term_memory"]))
             if "instruct_tags" in data:
                 tags = data["instruct_tags"]
                 if isinstance(tags, dict) and any(tags.values()):

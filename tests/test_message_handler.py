@@ -1103,3 +1103,47 @@ async def test_what_dotted_path_unset(bot_logic):
     result = await bot_logic.preprocess_message("derpr", "user1", "what kobold.mirostat")
     assert result is not None and result["mutated"] is False
     assert "not set" in result["response"]
+
+
+# --- Dev-command case handling: dispatch keys fold case, VALUES keep it -----
+# Regression guard for the blanket `message.lower()` removal: free-text/JSON
+# values must round-trip verbatim while command/sub-command matching stays
+# case-insensitive and enumerated values self-normalize.
+
+
+@pytest.mark.asyncio
+async def test_set_prompt_preserves_value_case(bot_logic, mock_chat_system_with_state):
+    res = await bot_logic.preprocess_message("derpr", "u", "set prompt You are a HELPFUL Bot.")
+    assert res["mutated"] is True
+    assert mock_chat_system_with_state.personas["derpr"].get_prompt() == "You are a HELPFUL Bot."
+
+
+@pytest.mark.asyncio
+async def test_uppercase_command_and_subcommand_still_dispatch(bot_logic, mock_chat_system_with_state):
+    res = await bot_logic.preprocess_message("derpr", "u", "SET PROMPT Mixed Case Value")
+    assert res is not None and res["mutated"] is True
+    assert mock_chat_system_with_state.personas["derpr"].get_prompt() == "Mixed Case Value"
+
+
+@pytest.mark.asyncio
+async def test_set_tool_policy_json_preserves_case(bot_logic, mock_chat_system_with_state):
+    # the JSON (incl. a mixed-case tool name) must not be lowercased in transit
+    cmd = 'set tool_policy {"default":"deny","allow":["Foo_Bar"],"ask":[]}'
+    res = await bot_logic.preprocess_message("derpr", "u", cmd)
+    assert res["mutated"] is True
+    assert mock_chat_system_with_state.personas["derpr"].get_tool_policy().allow == ["Foo_Bar"]
+
+
+@pytest.mark.asyncio
+async def test_set_memory_mode_remains_case_insensitive(bot_logic, mock_chat_system_with_state):
+    for val in ("global", "GLOBAL", "GloBal"):
+        res = await bot_logic.preprocess_message("derpr", "u", f"set memory_mode {val}")
+        assert res["mutated"] is True
+        assert mock_chat_system_with_state.personas["derpr"].get_memory_mode().name == "GLOBAL"
+
+
+@pytest.mark.asyncio
+async def test_add_persona_lowercases_name_but_keeps_prompt_case(bot_logic, mock_chat_system_with_state):
+    await bot_logic.preprocess_message("derpr", "u", "add NewBot You are New")
+    assert "newbot" in mock_chat_system_with_state.personas
+    assert mock_chat_system_with_state.personas["newbot"].get_prompt() == "You are New"

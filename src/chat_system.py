@@ -32,9 +32,12 @@ from src.generation_events import (
 )
 from src.stream_engine import StreamEngine
 from src.message_handler import BotLogic
+from src.generation_params import GenerationParams
 from src.persona import Persona, MemoryMode
 from src.tools.definitions import MODEL_INCOMPATIBLE_TOOLS, get_tool_capabilities
-from src.tools.tool_loop import ToolLoop, _ApiPayloadEvent, _LoopFinishedEvent
+from src.tools.tool_loop import (
+    ToolLoop, _ApiPayloadEvent, _LoopFinishedEvent, build_wire_messages,
+)
 from src.tools.tool_manager import ToolManager, WebSearchHandler, MemoryRecallHandler
 from src.tools.turn_context import TurnContext, turn_scope
 from src.utils.model_utils import get_model_list, get_model_prefix
@@ -151,6 +154,30 @@ class RequestContext:
     # Optional: OAI-format messages from the client (e.g. kobold-lite jinja history).
     # Used as a fallback when the DB returns no history for this channel.
     client_messages: Optional[List[Dict[str, Any]]] = None
+
+
+@dataclass
+class AssembledRequest:
+    """Pure dry-run projection of the request the engine would send.
+
+    Produced by `ChatSystem.assemble_request` via the *same* helpers the live
+    `_orchestrate` path uses — `_prepare_request` (history + LTM + truncation),
+    `_resolve_generation_params`, and `build_wire_messages` — so the `/assemble`
+    inspector cannot drift from a live submit. No inference, DB writes, or
+    turn logging happen during assembly.
+
+    `messages` are the raw wire dicts (system + history + new user turn, with
+    any replayed tool_calls/tool rows); `sources[i]` is a provenance tag for
+    `messages[i]` (`persona.prompt`, `ltm_block`, `history`, `composer`,
+    `tool_call`, `tool_result`).
+    """
+    persona_name: str
+    model_name: str
+    route: str
+    params: GenerationParams
+    messages: List[Dict[str, Any]]
+    sources: List[str]
+    oldest_interaction_id: Optional[int] = None
 
 
 class ChatSystem:
@@ -364,6 +391,44 @@ class ChatSystem:
         else:
             return self.memory_manager.get_channel_history(channel, persona_name, server_id, effective_limit), "channel"
 
+    def get_view_history(
+            self,
+            persona_name: str,
+            user_identifier: str,
+            channel: Optional[str],
+            server_id: Optional[str] = None,
+            limit: Optional[int] = None,
+    ) -> Tuple[List[Dict[str, Any]], str]:
+        """Raw history the way the engine would see it, for the transcript view.
+
+        DP-136 / handoff §10. The bespoke portal's transcript must mirror what
+        the engine would actually feed the model for a given (persona, channel).
+        That depends on the persona's `memory_mode`:
+          - GLOBAL  → all channels merge (the `channel` arg is irrelevant)
+          - CHANNEL → only the supplied channel's rows
+          - PERSONAL/SERVER/TICKET → scoped by user/server/ticket respectively
+        So we dispatch through the SAME `_fetch_raw_history` the live path uses,
+        keyed on the persona's mode — guaranteeing the rendered transcript and a
+        live submit see the same isolation behavior. When `channel` is None we
+        preserve the legacy behavior (global history regardless of mode) so
+        existing single-channel callers are unchanged.
+
+        Returns (raw_history, memory_mode_label). Rows are NOT formatted for the
+        LLM (the transcript projection wants the raw columns).
+        """
+        if persona_name not in self.personas:
+            return [], "global"
+        if channel is None:
+            return self.memory_manager.get_global_history(persona_name, limit), "global"
+        persona = self.personas[persona_name]
+        effective_limit = persona.get_history_messages()
+        if limit is not None:
+            effective_limit = min(effective_limit, limit)
+        return self._fetch_raw_history(
+            persona.get_memory_mode(), persona_name,
+            user_identifier, channel, server_id, effective_limit,
+        )
+
     def _build_conversation_history(
             self,
             persona: Persona,
@@ -550,6 +615,122 @@ class ChatSystem:
             oldest_interaction_id=oldest_id,
         )
         return block
+
+    @staticmethod
+    def _resolve_generation_params(
+        persona: Persona, local_inference_config: Optional[Dict[str, Any]],
+    ) -> GenerationParams:
+        """Resolve the per-request generation params: persona defaults with the
+        optional per-call inference overrides merged in.
+
+        Single source of truth for param resolution — both `_orchestrate` (live
+        submit) and `assemble_request` (dry-run) call this, so the params the
+        inspector shows are exactly the params a live submit would forward.
+        """
+        params = persona.get_generation_params().copy()
+        if local_inference_config:
+            params.merge_inference_config(local_inference_config)
+        return params
+
+    @staticmethod
+    def _derive_message_sources(
+        messages: List[Dict[str, Any]], *, is_retry: bool,
+    ) -> List[str]:
+        """Tag each assembled wire message with its provenance for the inspector.
+
+        Structural derivation (the flat wire dicts carry no provenance): index 0
+        is the persona system prompt; a leading `<memory>` user row is the LTM
+        block; replayed tool turns are tagged tool_call/tool_result; on a
+        non-retry turn the final non-LTM user row is the composer's new message;
+        everything else is sliding-window history.
+        """
+        sources: List[str] = []
+        for i, m in enumerate(messages):
+            if i == 0:
+                sources.append("persona.prompt")
+                continue
+            role = m.get("role")
+            content = m.get("content")
+            if role == "user" and isinstance(content, str) and content.startswith("<memory>"):
+                sources.append("ltm_block")
+            elif role == "tool":
+                sources.append("tool_result")
+            elif role == "assistant" and m.get("tool_calls"):
+                sources.append("tool_call")
+            else:
+                sources.append("history")
+        # The new user turn is appended last on a non-retry submit; tag it so the
+        # inspector distinguishes "what I'm about to send" from prior history.
+        if not is_retry:
+            for i in range(len(messages) - 1, 0, -1):
+                if sources[i] == "history" and messages[i].get("role") == "user":
+                    sources[i] = "composer"
+                    break
+        return sources
+
+    async def assemble_request(
+            self,
+            persona_name: str,
+            user_identifier: str,
+            channel: str,
+            message: str,
+            *,
+            server_id: Optional[str] = None,
+            image_url: Optional[str] = None,
+            history_limit: Optional[int] = None,
+            local_inference_config: Optional[Dict[str, Any]] = None,
+            is_retry: bool = False,
+            client_messages: Optional[List[Dict[str, Any]]] = None,
+    ) -> Optional[AssembledRequest]:
+        """Dry-run assembler — the parity primitive behind the Raw-req inspector.
+
+        Produces the exact `{route, model_name, params, messages}` the engine
+        would send for this turn, with **inference disabled and no DB writes /
+        turn logging**. Parity with a live submit is true by construction: this
+        reuses `_prepare_request` (history rebuild + LTM injection + token
+        truncation), `_resolve_generation_params`, and `build_wire_messages` —
+        the identical helpers `_orchestrate` and `ToolLoop` drive on a live call.
+
+        Returns None when the persona is unknown. Note LTM injection follows the
+        persona's own `long_term_memory` setting (the engine path has no client
+        LTM toggle), so the dry-run matches what a live submit actually assembles.
+        """
+        persona = self.personas.get(persona_name)
+        if persona is None:
+            return None
+
+        ctx = RequestContext(
+            persona=persona, persona_name=persona_name,
+            user_identifier=user_identifier, channel=channel, message=message,
+            server_id=server_id, image_url=image_url,
+            history_limit=history_limit,
+            local_inference_config=local_inference_config,
+            client_messages=client_messages,
+        )
+
+        # turn_scope so a scoped recall during _retrieve_memory_block inherits
+        # persona/channel/user/server. Read-only: the dry-run never writes the
+        # sticky taint bit back (that happens only on _LoopFinishedEvent).
+        with turn_scope(TurnContext(
+            persona_name=persona_name,
+            user_identifier=user_identifier,
+            channel=channel,
+            server_id=server_id,
+        )):
+            await self._prepare_request(ctx, is_retry=is_retry)
+
+        params = self._resolve_generation_params(persona, local_inference_config)
+        messages = build_wire_messages(persona, ctx.conversation_history)
+        sources = self._derive_message_sources(messages, is_retry=is_retry)
+        return AssembledRequest(
+            persona_name=persona_name,
+            model_name=persona.get_model_name(),
+            route="engine · POST /v1/chat/completions",
+            params=params,
+            messages=messages,
+            sources=sources,
+            oldest_interaction_id=ctx.oldest_interaction_id,
+        )
 
     @staticmethod
     def _format_memory_block(hits: List[MemoryHit]) -> Optional[str]:
@@ -805,7 +986,7 @@ class ChatSystem:
         Returns the canonical assistant interaction_id, or None when the
         text is empty or the response_type isn't a normal LLM generation.
         """
-        if not final_text or not final_text.strip():
+        if (not final_text or not final_text.strip()) and not tool_context_json:
             return None
 
         if retry_assistant_id is not None:
@@ -997,9 +1178,9 @@ class ChatSystem:
             #    siphons api_payload into the request cache, and unpacks the
             #    terminal _LoopFinishedEvent to drive CONFIRM-mode parking +
             #    assistant persistence.
-            params = ctx.persona.get_generation_params().copy()
-            if ctx.local_inference_config:
-                params.merge_inference_config(ctx.local_inference_config)
+            params = self._resolve_generation_params(
+                ctx.persona, ctx.local_inference_config,
+            )
             params_first_iter = True
             final_text = ""
             response_type = ResponseType.LLM_GENERATION
