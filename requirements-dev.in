@@ -9,6 +9,7 @@ pytest
 pytest-asyncio
 pytest-env
 pytest-order
+pytest-xdist
 coverage
 
 # Code quality
