@@ -195,7 +195,11 @@ class BotLogic:
         prompt = (
             f"User query: {user_query}\n\n"
             f"Available options:\n" + "\n".join(f"- {c}" for c in choices) + "\n\n"
-            f"Call {tool_name} with the best match. Use '{none_sentinel}' if nothing matches."
+            f"The user's query is a fuzzy/abbreviated name. Match it to the closest option "
+            f"even if the query is a partial name, is missing a suffix like '-it' or '-preview', "
+            f"uses spaces instead of hyphens, or drops version details. "
+            f"Only use '{none_sentinel}' if the query is completely unrelated to every option.\n\n"
+            f"Call {tool_name} with your selection."
         )
 
         try:
@@ -225,7 +229,7 @@ class BotLogic:
         none_sentinel: str,
     ) -> Optional[str]:
         if response.get("type") != "tool_calls":
-            logger.warning(f"{tool_name}: model returned text, not a tool call: {response.get('content', '')[:120]}")
+            logger.warning(f"{tool_name}: model returned text, not a tool call: {response.get('content', '')[:200]}")
             return None
 
         for call in response.get("calls", []):
@@ -239,7 +243,9 @@ class BotLogic:
                     logger.warning(f"{tool_name}: bad JSON args: {args!r}")
                     return None
             choice = args.get(arg_name)
+            logger.debug(f"{tool_name}: model selected '{choice}'")
             if not isinstance(choice, str) or choice == none_sentinel:
+                logger.info(f"{tool_name}: model returned sentinel/null (choice={choice!r})")
                 return None
             for c in choices:
                 if c.lower() == choice.lower():

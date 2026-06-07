@@ -1,0 +1,54 @@
+=== REQUEST ===
+{
+  "ts": "20260606T033324_524462",
+  "persona": "test_persona",
+  "is_retry": false,
+  "is_stream": true,
+  "user_text": "hi",
+  "derpr_user_text_sidecar": null,
+  "msg_count": 2,
+  "roles": [
+    "user",
+    "assistant"
+  ],
+  "local_inference_config": {
+    "temperature": null,
+    "top_p": null,
+    "top_k": null,
+    "max_tokens": null,
+    "stop_sequence": null
+  },
+  "raw_body": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "hi"
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "prefix": true
+      }
+    ],
+    "stream": true
+  }
+}
+
+=== SSE STREAM ===
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "hello "}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "world"}}]}
+
+--- DoneEvent ---
+{"assistant_id": 2, "user_interaction_id": 1, "response_type": "LLM_GENERATION", "final_text_len": 11, "final_text_preview": "hello world"}
+--- derpr-id-frame ---
+event: derpr
+data: {"user_id": 1, "assistant_id": 2, "response_type": "LLM_GENERATION", "ephemeral_chunk_id": null}
+
+--- DONE ---
+data: [DONE]
+
+
+=== END ===

@@ -766,7 +766,26 @@ class TextEngine:
             "arguments": parsed["arguments"]
         }]
 
+    @staticmethod
+    def _ensure_agy_supported() -> None:
+        """agy is a TUI CLI that only emits its response to a TTY. DERPR captures
+        stdout via a pipe — fine on POSIX, but on native Windows agy renders to
+        the console and writes *nothing* to a non-TTY stdout/file, so the route
+        silently returns empty. Fail loudly instead and point at the docs; run
+        the engine on the POSIX host (Linux/macOS/WSL/Docker) to use agy.
+        """
+        if os.name != "posix":
+            raise LLMCommunicationError(
+                "The 'agy' provider is unsupported on native Windows: agy only "
+                "writes its response to a TTY, but DERPR captures stdout via a "
+                "pipe, so the response is always empty. Run the engine on the "
+                "POSIX host (Linux/macOS/WSL/Docker) to use agy. "
+                "See docs/user_guide.md (Antigravity / agy provider)."
+            )
+
     async def _run_agy_cli(self, prompt: str, timeout: float = AGY_CALL_TIMEOUT_SECONDS) -> str:
+        self._ensure_agy_supported()
+
         binary = os.environ.get("ANTIGRAVITY_HARNESS_PATH") or shutil.which("agy")
         if not binary:
             raise LLMCommunicationError("Antigravity harness/agy binary not found.")

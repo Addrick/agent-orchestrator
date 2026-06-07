@@ -1,0 +1,5 @@
+# Shell scripts and git hooks must stay LF regardless of core.autocrlf.
+# They run via /bin/sh; a CRLF shebang breaks on macOS/Linux with
+# "bad interpreter: /bin/sh^M".
+.githooks/** text eol=lf
+*.sh        text eol=lf

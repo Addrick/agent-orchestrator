@@ -1049,3 +1049,87 @@ class TestAgyHandler:
 
         assert response == {"type": "text", "content": "end-to-end text answer"}
         assert isinstance(api_payload, dict)
+
+
+class TestAgyCliInvocation:
+    """Covers the real subprocess wiring of ``_run_agy_cli`` and the POSIX-only
+    guard — the parts the mocked handler tests above skip.
+
+    agy works on POSIX (macOS/Docker); on native Windows it is a TUI that only
+    emits its response to a TTY, so DERPR's piped capture comes back empty.
+    ``_ensure_agy_supported`` refuses the route on Windows rather than returning
+    silent empty responses. We deliberately do NOT pass
+    --dangerously-skip-permissions: agy must keep its own tools gated so it can
+    never run them (DERPR drives every tool itself).
+    """
+
+    class _FakeProc:
+        def __init__(self, *, stdout=b"", stderr=b"", returncode=0, pid=4321):
+            self._stdout = stdout
+            self._stderr = stderr
+            self.returncode = returncode
+            self.pid = pid
+
+        async def communicate(self):
+            return self._stdout, self._stderr
+
+    @pytest.mark.asyncio
+    async def test_run_agy_cli_args_match_working_posix_behavior(self, text_engine, monkeypatch):
+        """Regression guard: the spawn args stay exactly the known-good POSIX set
+        — no --dangerously-skip-permissions (would un-gate agy's own tools)."""
+        import src.engine as engine_mod
+
+        captured = {}
+
+        async def fake_exec(*args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return self._FakeProc(stdout=b"hello from agy")
+
+        monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/agy")
+        monkeypatch.delenv("ANTIGRAVITY_HARNESS_PATH", raising=False)
+        # bypass the POSIX-only guard so the subprocess wiring runs on any host
+        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
+
+        out = await text_engine._run_agy_cli("say hi", timeout=5)
+
+        assert out == "hello from agy"
+        assert captured["args"][0] == "/usr/bin/agy"
+        assert "--dangerously-skip-permissions" not in captured["args"]
+        assert "-p" in captured["args"] and "--print-timeout" in captured["args"]
+        # agy is isolated in its own POSIX session for cleanup
+        assert captured["kwargs"].get("start_new_session") is True
+
+    def test_agy_unsupported_on_windows_raises_clear_error(self, text_engine, monkeypatch):
+        import src.engine as engine_mod
+
+        monkeypatch.setattr(engine_mod.os, "name", "nt")
+        with pytest.raises(LLMCommunicationError, match="native Windows"):
+            text_engine._ensure_agy_supported()
+
+    def test_agy_supported_on_posix(self, text_engine, monkeypatch):
+        import src.engine as engine_mod
+
+        monkeypatch.setattr(engine_mod.os, "name", "posix")
+        text_engine._ensure_agy_supported()  # no raise
+
+    @pytest.mark.asyncio
+    async def test_run_agy_cli_aborts_before_spawn_on_windows(self, text_engine, monkeypatch):
+        """On Windows the guard must fire before any temp dir or subprocess."""
+        import src.engine as engine_mod
+
+        monkeypatch.setattr(engine_mod.os, "name", "nt")
+        spawned = []
+        made_dirs = []
+
+        async def fake_exec(*a, **k):
+            spawned.append(True)
+            raise AssertionError("should not spawn agy on Windows")
+
+        monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(engine_mod.tempfile, "mkdtemp", lambda: made_dirs.append(True) or "x")
+
+        with pytest.raises(LLMCommunicationError, match="native Windows"):
+            await text_engine._run_agy_cli("hi", timeout=5)
+        assert spawned == [] and made_dirs == []

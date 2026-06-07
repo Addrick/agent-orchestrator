@@ -1,0 +1,52 @@
+=== REQUEST ===
+{
+  "ts": "20260605T224250_656953",
+  "persona": "test_persona",
+  "is_retry": false,
+  "is_stream": true,
+  "user_text": "what temp",
+  "derpr_user_text_sidecar": "what temp",
+  "msg_count": 2,
+  "roles": [
+    "user",
+    "assistant"
+  ],
+  "local_inference_config": {
+    "temperature": null,
+    "top_p": null,
+    "top_k": null,
+    "max_tokens": null,
+    "stop_sequence": null
+  },
+  "raw_body": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "what temp"
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "prefix": true
+      }
+    ],
+    "stream": true,
+    "derpr_user_text": "what temp"
+  }
+}
+
+=== SSE STREAM ===
+--- DoneEvent ---
+{"assistant_id": null, "user_interaction_id": null, "response_type": "DEV_COMMAND", "final_text_len": 43, "final_text_preview": "Temperature for test_persona is set to 0.2."}
+--- DevCommandText ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "Temperature for test_persona is set to 0.2."}}]}
+
+--- derpr-id-frame ---
+event: derpr
+data: {"user_id": null, "assistant_id": null, "response_type": "DEV_COMMAND", "ephemeral_chunk_id": null}
+
+--- DONE ---
+data: [DONE]
+
+
+=== END ===

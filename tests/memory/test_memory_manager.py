@@ -1790,6 +1790,64 @@ def test_update_interaction_content_clears_l0_embedding(mem_manager):
     assert cur.fetchone()[0] == 0
 
 
+def test_update_interaction_content_rewrites_tool_context_when_passed(mem_manager):
+    """Retry (review finding #8): a regenerated turn may use a different set of
+    tool calls, so update_interaction_content must rewrite tool_context when it
+    is explicitly passed — otherwise the row's stored tools desync from content."""
+    iid = mem_manager.log_message(
+        "web_ui", "persona_a", "portal", "assistant", "persona_a",
+        "first attempt", datetime.now(),
+        tool_context='[{"role": "tool", "name": "old_tool"}]',
+    )
+
+    assert mem_manager.update_interaction_content(
+        iid, "regenerated", tool_context='[{"role": "tool", "name": "new_tool"}]'
+    ) is True
+
+    conn = mem_manager._get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT content, tool_context FROM User_Interactions WHERE interaction_id = ?", (iid,))
+    row = cur.fetchone()
+    assert row['content'] == "regenerated"
+    assert row['tool_context'] == '[{"role": "tool", "name": "new_tool"}]'
+
+
+def test_update_interaction_content_preserves_tool_context_when_omitted(mem_manager):
+    """Manual-edit flow (no tool change) must NOT clobber tool_context: omitting
+    the argument leaves the existing column value intact (sentinel default)."""
+    iid = mem_manager.log_message(
+        "web_ui", "persona_a", "portal", "assistant", "persona_a",
+        "v1", datetime.now(),
+        tool_context='[{"role": "tool", "name": "keep_me"}]',
+    )
+
+    assert mem_manager.update_interaction_content(iid, "v1-edited") is True
+
+    conn = mem_manager._get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT content, tool_context FROM User_Interactions WHERE interaction_id = ?", (iid,))
+    row = cur.fetchone()
+    assert row['content'] == "v1-edited"
+    assert row['tool_context'] == '[{"role": "tool", "name": "keep_me"}]'
+
+
+def test_update_interaction_content_can_clear_tool_context(mem_manager):
+    """A retry that drops all tool calls passes tool_context=None explicitly,
+    which writes NULL (distinct from the omitted/sentinel case above)."""
+    iid = mem_manager.log_message(
+        "web_ui", "persona_a", "portal", "assistant", "persona_a",
+        "v1", datetime.now(),
+        tool_context='[{"role": "tool", "name": "gone"}]',
+    )
+
+    assert mem_manager.update_interaction_content(iid, "v2", tool_context=None) is True
+
+    conn = mem_manager._get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT tool_context FROM User_Interactions WHERE interaction_id = ?", (iid,))
+    assert cur.fetchone()['tool_context'] is None
+
+
 def test_swap_dedupe_does_not_grow_archive_count(mem_manager):
     """Toggling between two contents repeatedly keeps Interaction_Edit_History
     bounded at one row per distinct version (2) — the dup-content check skips

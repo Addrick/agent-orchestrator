@@ -16,9 +16,9 @@ import sqlite_vec
 
 logger = logging.getLogger(__name__)
 
-# Sentinel distinguishing "argument omitted, leave the column untouched" from an
-# explicit None (which means "clear the column"). Used by
-# update_interaction_content's tool_context handling (DP-132 #3).
+# Sentinel for optional column updates: distinguishes "caller omitted this
+# argument" (leave the column untouched) from "caller explicitly passed None"
+# (write NULL). Used by update_interaction_content for tool_context.
 _UNSET: Any = object()
 
 # --- Universal Summary Levels ---
@@ -609,7 +609,7 @@ class MemoryManager:
 
     def update_interaction_content(self, interaction_id: int, new_content: str,
                                    reasoning_content: Optional[str] = None,
-                                   tool_context: Optional[str] = _UNSET) -> bool:
+                                   tool_context: Any = _UNSET) -> bool:
         """Overwrite the content of an existing interaction row in place.
 
         Used by portal retry and portal manual-edit flows. Clears
@@ -617,28 +617,27 @@ class MemoryManager:
         drops the stale L0 embedding (`Message_Embeddings` + `vec_*`) so
         `MemoryAgent._embed_unembedded` re-encodes against the new content.
 
-        `tool_context` uses a `_UNSET` sentinel to separate "leave untouched"
-        from "clear": manual text edits omit the arg (sentinel → untouched),
-        while a regen always passes its result explicitly — including `None`,
-        which CLEARS the stored tool_context so a regen to a plain-text answer
-        no longer renders phantom tool cards (DP-132 #3).
+        `tool_context` is left untouched unless explicitly passed: a regenerated
+        (retry) assistant turn may have produced a *different* set of tool calls,
+        so the row's tool_context must be rewritten to stay paired with the new
+        content. Manual edits that don't change tools omit it (sentinel default)
+        so the existing tool_context is preserved.
         """
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
             try:
-                if tool_context is not _UNSET:
-                    cursor.execute(
-                        "UPDATE User_Interactions SET content = ?, reasoning_content = ?,"
-                        " tool_context = ?, parent_summary_id = NULL"
-                        " WHERE interaction_id = ?",
-                        (new_content, reasoning_content, tool_context, interaction_id),
-                    )
-                else:
+                if tool_context is _UNSET:
                     cursor.execute(
                         "UPDATE User_Interactions SET content = ?, reasoning_content = ?, parent_summary_id = NULL"
                         " WHERE interaction_id = ?",
                         (new_content, reasoning_content, interaction_id),
+                    )
+                else:
+                    cursor.execute(
+                        "UPDATE User_Interactions SET content = ?, reasoning_content = ?, tool_context = ?,"
+                        " parent_summary_id = NULL WHERE interaction_id = ?",
+                        (new_content, reasoning_content, tool_context, interaction_id),
                     )
                 updated = cursor.rowcount > 0
                 cursor.execute("DELETE FROM Message_Embeddings WHERE interaction_id = ?", (interaction_id,))

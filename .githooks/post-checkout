@@ -1,0 +1,58 @@
+#!/bin/sh
+# Auto-populate gitignored essentials into new worktrees.
+#
+# `git worktree add` does NOT copy gitignored files, but it DOES run this
+# post-checkout hook inside the freshly-created worktree (with $3 = 1, a branch
+# checkout). Worktrees share one hooks dir, so this one hook serves every
+# worktree. We copy the gitignored config the app/tests need (.env, .env.test)
+# from the MAIN worktree into the new one.
+#
+# Idempotent + safe: only copies a file that is ABSENT here and PRESENT in the
+# main worktree, and no-ops entirely when run in the main worktree itself. So it
+# never clobbers an edited .env and is harmless on ordinary `git checkout`.
+#
+# Tracked + activated via `core.hooksPath=.githooks` (see scripts/setup-hooks.sh).
+
+# $1 old HEAD, $2 new HEAD, $3 flag (1 = branch checkout, incl. worktree add)
+[ "$3" = "1" ] || exit 0
+
+common=$(git rev-parse --git-common-dir 2>/dev/null) || exit 0
+main_root=$(cd "$(dirname "$common")" 2>/dev/null && pwd) || exit 0
+here=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+
+# In the main worktree there is nothing to populate.
+[ "$main_root" = "$here" ] && exit 0
+
+for f in .env .env.test; do
+  if [ ! -e "$here/$f" ] && [ -f "$main_root/$f" ]; then
+    cp "$main_root/$f" "$here/$f" && echo "[post-checkout] seeded $f into worktree"
+  fi
+done
+
+# Link the main worktree's .venv in so `.venv/Scripts/python.exe` (and PyCharm
+# auto-detection) resolve identically here as in main — no per-worktree venv to
+# create, no fragile `../../.venv` paths. Shared interpreter (option 1): right
+# when the worktree isn't changing requirements*.txt. Delete the link and make a
+# real venv if you need isolated deps. Junction on Windows (no admin needed),
+# symlink on POSIX.
+if [ ! -e "$here/.venv" ] && [ -d "$main_root/.venv" ]; then
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      # Drive the junction through PowerShell (accepts Windows paths, no admin
+      # needed). cygpath gives PS a native path; `cmd //c mklink` is avoided
+      # because MSYS path-mangling of `/c` and `/J` makes it unreliable.
+      win_here=$(cygpath -w "$here/.venv" 2>/dev/null) || win_here="$here\\.venv"
+      win_main=$(cygpath -w "$main_root/.venv" 2>/dev/null) || win_main="$main_root\\.venv"
+      powershell -NoProfile -Command \
+        "New-Item -ItemType Junction -Path '$win_here' -Target '$win_main' | Out-Null" \
+        >/dev/null 2>&1 \
+        && echo "[post-checkout] linked .venv -> main worktree (junction)"
+      ;;
+    *)
+      ln -s "$main_root/.venv" "$here/.venv" \
+        && echo "[post-checkout] linked .venv -> main worktree (symlink)"
+      ;;
+  esac
+fi
+
+exit 0

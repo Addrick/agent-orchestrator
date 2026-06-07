@@ -1,0 +1,53 @@
+=== REQUEST ===
+{
+  "ts": "20260606T033321_024032",
+  "persona": "test_persona",
+  "is_retry": false,
+  "is_stream": true,
+  "user_text": "open a ticket",
+  "derpr_user_text_sidecar": "open a ticket",
+  "msg_count": 2,
+  "roles": [
+    "user",
+    "assistant"
+  ],
+  "local_inference_config": {
+    "temperature": null,
+    "top_p": null,
+    "top_k": null,
+    "max_tokens": null,
+    "stop_sequence": null
+  },
+  "raw_body": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "open a ticket"
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "prefix": true
+      }
+    ],
+    "stream": true,
+    "derpr_user_text": "open a ticket"
+  }
+}
+
+=== SSE STREAM ===
+--- PendingConfirmationEvent ---
+event: derpr-confirm
+data: {"text": "I'd like to perform the following actions:\n- **create_ticket** [ZAMMAD, INTERNAL, IRREVERSIBLE]: {\"title\": \"t\", \"body\": \"b\"}", "persona": "test_persona", "token": "8b377e98e7c6409a80e175cf9f399556", "calls": [{"name": "create_ticket", "arguments": {"title": "t", "body": "b"}, "id": "w1"}], "audit_info": {"actions": [{"tool": "create_ticket", "arguments": {"title": "t", "body": "b"}, "irreversible": true, "always_confirm": false, "service_binding": "zammad", "sensitivity": "internal", "enrichment": null}], "tainted": false, "taint_sources": [], "model_reasoning": null, "execution_mode": "CONFIRM"}}
+
+--- DoneEvent ---
+{"assistant_id": null, "user_interaction_id": 1, "response_type": "PENDING_CONFIRMATION", "final_text_len": 124, "final_text_preview": "I'd like to perform the following actions:\n- **create_ticket** [ZAMMAD, INTERNAL, IRREVERSIBLE]: {\"title\": \"t\", \"body\": \"b\"}"}
+--- derpr-id-frame ---
+event: derpr
+data: {"user_id": 1, "assistant_id": null, "response_type": "PENDING_CONFIRMATION", "ephemeral_chunk_id": "8b377e98e7c6409a80e175cf9f399556"}
+
+--- DONE ---
+data: [DONE]
+
+
+=== END ===

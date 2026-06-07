@@ -47,6 +47,7 @@ def _make_adapter_with_seeded_db(persona_name: str = "test_persona",
     chat_system = SimpleNamespace(
         personas={persona_name: persona},
         memory_manager=mm,
+        system_persona_names=set(),
         get_session_memory_block=retrieve_memory_block or AsyncMock(return_value=None),
         system_persona_names=set(),
     )

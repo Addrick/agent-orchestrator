@@ -912,9 +912,10 @@ async def test_stream_response_is_retry_archives_via_handle_portal_retry(
         user_identifier="portal",
         channel="web_ui",
     )
+    # Retry forwards the regenerated turn's tool_context (None here — this turn
+    # used no tools — which correctly clears any stale tools on the row).
     memory_mock.update_interaction_content.assert_called_once_with(
-        99, "LLM Reply", tool_context=None
-    )
+        99, "LLM Reply", tool_context=None)
     # No new user log_message on retry path
     log_calls = [c for c in memory_mock.log_message.call_args_list
                  if c.kwargs.get('author_role') == 'user']

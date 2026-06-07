@@ -1,0 +1,42 @@
+=== REQUEST ===
+{
+  "ts": "20260606T004849_665200",
+  "persona": "test_persona",
+  "is_retry": false,
+  "is_stream": true,
+  "user_text": "set tools allow",
+  "derpr_user_text_sidecar": "set tools allow",
+  "msg_count": 0,
+  "roles": [],
+  "local_inference_config": {
+    "temperature": null,
+    "top_p": null,
+    "top_k": null,
+    "max_tokens": 4096,
+    "stop_sequence": null
+  },
+  "raw_body": {
+    "stream": true,
+    "derpr_user_text": "set tools allow",
+    "derpr_retry": false,
+    "model": "test_persona",
+    "channel": "web_ui",
+    "max_tokens": 4096
+  }
+}
+
+=== SSE STREAM ===
+--- DoneEvent ---
+{"assistant_id": null, "user_interaction_id": null, "response_type": "DEV_COMMAND", "final_text_len": 337, "final_text_preview": "Error: Could not match tool 'allow'. Available: add_note_to_ticket, create_ticket, create_user, delete_user, get_agent_history, get_agent_status, get_ticket_details, google_grounding_search, ingest_path, lookup_agent_history, manage_agent, merge_tickets, recall_memory, search_tickets, search_user, update_ticket, update_user, web_search"}
+--- DevCommandText ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "Error: Could not match tool 'allow'. Available: add_note_to_ticket, create_ticket, create_user, delete_user, get_agent_history, get_agent_status, get_ticket_details, google_grounding_search, ingest_path, lookup_agent_history, manage_agent, merge_tickets, recall_memory, search_tickets, search_user, update_ticket, update_user, web_search"}}]}
+
+--- derpr-id-frame ---
+event: derpr
+data: {"user_id": null, "assistant_id": null, "response_type": "DEV_COMMAND", "ephemeral_chunk_id": null}
+
+--- DONE ---
+data: [DONE]
+
+
+=== END ===

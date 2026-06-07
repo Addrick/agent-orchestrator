@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>DERPR Portal — Control Room</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="portal.css" />
+</head>
+<body>
+<div class="app">
+
+  <!-- ============ TOP BAR ============ -->
+  <header class="topbar">
+    <div class="brand"><b>DERPR</b><span class="v">// PORTAL · ENGINE</span></div>
+    <button class="persona-pick" id="persona-pick">
+      <span class="av">AS</span>
+      <span class="nm">assistant</span>
+      <span class="car">▾</span>
+    </button>
+    <div class="spacer"></div>
+    <div class="statgrp">
+      <span class="stat"><span class="dot"></span>kcpp · omen:5001</span>
+      <span class="stat route"><span class="dot"></span>engine route · /v1/chat/completions</span>
+    </div>
+    <div class="collapse-btns">
+      <button class="cbtn" id="tg-rail" title="toggle nav rail" aria-pressed="true">⊟</button>
+      <button class="cbtn" id="tg-chan" title="toggle channels" aria-pressed="true">◧</button>
+      <button class="cbtn" id="tg-insp" title="toggle inspector" aria-pressed="true">◨</button>
+    </div>
+  </header>
+
+  <!-- ============ BODY ============ -->
+  <div class="body">
+
+    <!-- NAV RAIL -->
+    <nav class="col rail">
+      <button class="railitem active" data-tip="Chat"><span class="ic">▤</span><span class="t">CHAT</span></button>
+      <button class="railitem soon" data-tip="Memory inspector — see &amp; edit recall"><span class="ic">◈</span><span class="t">MEMORY</span><span class="badge-soon"></span></button>
+      <button class="railitem soon" data-tip="Agent monitor — triage · dispatch · memory"><span class="ic">⊞</span><span class="t">AGENTS</span><span class="badge-soon"></span></button>
+      <button class="railitem soon" data-tip="Context budget visualizer"><span class="ic">▰</span><span class="t">BUDGET</span><span class="badge-soon"></span></button>
+      <button class="railitem soon" data-tip="Analytics &amp; cost"><span class="ic">◔</span><span class="t">STATS</span><span class="badge-soon"></span></button>
+      <button class="railitem soon" data-tip="Persona library — compare · fork · A/B"><span class="ic">❏</span><span class="t">PERSONA</span><span class="badge-soon"></span></button>
+      <span class="grow"></span>
+      <button class="railitem" data-tip="Settings"><span class="ic">⚙</span><span class="t">CFG</span></button>
+    </nav>
+
+    <!-- CHANNELS -->
+    <aside class="col chan">
+      <div class="chead">Channels<span class="grow"></span><button class="ibtn" title="new">+</button></div>
+      <div class="searchwrap"><div class="search">⌕&nbsp; filter channels…</div></div>
+      <div class="chanlist" id="chanlist"></div>
+    </aside>
+
+    <!-- CONVERSATION -->
+    <main class="col convo" data-screen-label="Conversation">
+      <div class="convohead">
+        <span class="av">AS</span>
+        <span class="title">assistant · scratch</span>
+        <span class="chip"><span class="dot" style="background:var(--ok)"></span>gpt-4o-mini</span>
+        <span class="chip mem"><span class="dot"></span>GLOBAL mem</span>
+        <span class="chip"><span class="dot" style="background:var(--write)"></span>CONFIRM</span>
+        <span class="spacer" style="flex:1"></span>
+        <div class="seg">
+          <button id="seg-rendered" class="on">RENDERED</button>
+          <button id="seg-context">CONTEXT ↦ LLM</button>
+        </div>
+      </div>
+
+      <div class="budget" id="budget">
+        <div class="bar" id="budgetbar"></div>
+        <div class="legend" id="budgetlegend"></div>
+      </div>
+
+      <div class="scroll">
+        <div class="transcript" id="transcript"></div>
+      </div>
+
+      <div class="composer">
+        <div class="cbar">
+          <button class="toggle-chip on" id="ltm-toggle"><span class="sw"></span>LTM recall</button>
+          <span class="chip">/ dev-command</span>
+          <span class="grow"></span>
+          <span class="chip" style="border:none;background:none;color:var(--ink-faint)"><span class="kbd">↵</span> send · <span class="kbd">⇧↵</span> newline</span>
+        </div>
+        <div class="cbox">
+          <textarea placeholder="Message assistant…   try /set temp 0.4 — or approve the pending write above"></textarea>
+          <button class="send">SEND ↵</button>
+        </div>
+      </div>
+    </main>
+
+    <!-- INSPECTOR -->
+    <aside class="col insp">
+      <div class="insp-tabs">
+        <button class="insp-tab active" data-pane="persona">Persona</button>
+        <button class="insp-tab" data-pane="tools">Tools</button>
+        <button class="insp-tab" data-pane="raw">Raw req</button>
+      </div>
+      <div class="insp-body">
+        <div class="insp-pane active" id="pane-persona"></div>
+        <div class="insp-pane" id="pane-tools"></div>
+        <div class="insp-pane raw" id="pane-raw"></div>
+      </div>
+    </aside>
+
+  </div>
+</div>
+
+<script src="portal-data.js"></script>
+<script src="portal-app.js"></script>
+</body>
+</html>
