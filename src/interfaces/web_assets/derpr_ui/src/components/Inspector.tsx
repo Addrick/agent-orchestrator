@@ -837,16 +837,19 @@ function RawPane({ store }: { store: PortalStore }) {
         <div className={'parity ' + (verified ? 'ok' : 'warn')}>
           <span className={'pi' + (verified ? '' : ' warn')}>
             {verified
-              ? '✓ parity verified — dry-run of the live builder'
+              ? '✓ parity verified — dry-run of the live builder (portal client)'
               : '⚠ client fallback — may drift'}
           </span>
           <span className="pd">
             {verified ? (
               <>
-                Same code path as a live submit: <code>{assembled.parity.builder}</code>{' '}
-                via the shared <code>_prepare_request</code> +{' '}
-                <code>build_wire_messages</code> helpers — not reconstructed
-                client-side.
+                Same code path as a live submit from <b>this portal</b>:{' '}
+                <code>{assembled.parity.builder}</code> via the shared{' '}
+                <code>_prepare_request</code> + <code>build_wire_messages</code>{' '}
+                helpers — not reconstructed client-side. Scoped to the portal
+                client (<code>user=portal</code>, persona-default samplers); a
+                different user/server or a sampler-overriding client would
+                assemble differently.
               </>
             ) : (
               <>

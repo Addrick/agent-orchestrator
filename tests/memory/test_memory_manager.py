@@ -1837,6 +1837,89 @@ def test_swap_dedupe_total_versions_stable_across_churn(mem_manager):
         assert result['total_versions'] == 2
 
 
+def test_update_interaction_content_tool_context_sentinel(mem_manager):
+    """DP-132 #3: tool_context uses a sentinel so the three intents are distinct.
+
+      - arg omitted (manual text edit) → tool_context left UNTOUCHED;
+      - tool_context=None (regen produced no tool calls) → CLEARED;
+      - tool_context="..." (regen produced tool calls) → REWRITTEN.
+
+    The None-clears branch is the bug fix: before, None meant "leave", so a regen
+    from a tool-call answer to a plain-text answer kept stale tool_context and the
+    transcript rendered phantom tool cards.
+    """
+    tool_ctx = json.dumps([{"role": "assistant", "tool_calls": [{"id": "c1"}]}])
+    iid = mem_manager.log_message(
+        "web_ui", "persona_a", "portal", "assistant", "persona_a",
+        "ran a tool", datetime.now(), tool_context=tool_ctx,
+    )
+
+    conn = mem_manager._get_connection()
+    cur = conn.cursor()
+
+    def stored_tool_context():
+        cur.execute("SELECT tool_context FROM User_Interactions WHERE interaction_id = ?", (iid,))
+        return cur.fetchone()['tool_context']
+
+    # 1. Manual edit (arg omitted) leaves tool_context untouched.
+    assert mem_manager.update_interaction_content(iid, "edited text") is True
+    assert stored_tool_context() == tool_ctx
+
+    # 2. Regen with tool calls rewrites it.
+    new_ctx = json.dumps([{"role": "assistant", "tool_calls": [{"id": "c2"}]}])
+    assert mem_manager.update_interaction_content(iid, "ran another tool", tool_context=new_ctx) is True
+    assert stored_tool_context() == new_ctx
+
+    # 3. Regen to a plain-text answer (tool_context=None) CLEARS it.
+    assert mem_manager.update_interaction_content(iid, "just text", tool_context=None) is True
+    assert stored_tool_context() is None
+
+
+def test_handle_portal_retry_dedupes_identical_content(mem_manager):
+    """DP-132 #7: archiving identical content twice must not create duplicate
+    archive rows, which would flag multiple versions canonical and desync the
+    chevron's findIndex(canonical) counter from the rendered version."""
+    iid = _seed_portal_assistant(mem_manager, "dup", emb=_make_fake_embedding())
+
+    # First retry archives "dup".
+    mem_manager.handle_portal_retry("persona_a", "web_ui", "portal")
+    # Regen reproduces identical text, then retry again — the duplicate-content
+    # archive insert must be skipped.
+    mem_manager.update_interaction_content(iid, "dup")
+    mem_manager.handle_portal_retry("persona_a", "web_ui", "portal")
+
+    conn = mem_manager._get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COUNT(*) FROM Interaction_Edit_History"
+        " WHERE interaction_id = ? AND old_content = ?",
+        (iid, "dup"),
+    )
+    assert cur.fetchone()[0] == 1  # not 2 — dedupe held
+
+    # Exactly one version is flagged canonical, so the chevron points correctly.
+    versions = mem_manager.list_interaction_versions(iid)
+    assert sum(1 for v in versions if v.get('canonical')) == 1
+
+
+def test_get_distinct_channels_groups_by_channel_only(mem_manager):
+    """DP-132 #8: one logical channel logged under both a NULL and a non-NULL
+    server_id must collapse to a single rail entry with the combined count, not
+    render twice with split counts."""
+    ts = datetime.now()
+    mem_manager.log_message("u1", "persona_a", "general", "user", "Adam", "m1", ts, server_id="123")
+    mem_manager.log_message("u2", "persona_a", "general", "user", "Joy", "m2", ts, server_id=None)
+    mem_manager.log_message("u1", "persona_a", "general", "user", "Adam", "m3", ts, server_id="123")
+    mem_manager.log_message("u1", "persona_a", "random", "user", "Adam", "m4", ts, server_id="123")
+
+    rows = mem_manager.get_distinct_channels("persona_a")
+    by_channel = {r['channel']: r for r in rows}
+
+    assert sorted(by_channel) == ["general", "random"]  # 'general' appears once
+    assert by_channel["general"]["count"] == 3  # 2 server + 1 NULL, combined
+    assert by_channel["random"]["count"] == 1
+
+
 # --- Phase 5: Memory Taint (untrusted column) Tests ---
 
 def test_store_summary_untrusted_roundtrip(mem_manager):

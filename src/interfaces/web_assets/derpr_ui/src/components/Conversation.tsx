@@ -120,10 +120,17 @@ export function Conversation({ store }: { store: PortalStore }) {
                     c.role === 'assistant' && !c.ephemeral ? i : acc,
                   -1,
                 )
+                // LTM author's-note row renders after the FIRST real user turn,
+                // located by identity (not positional index===1, which vanished
+                // on a single-chunk transcript and mispositioned when chunk[0]
+                // was an assistant turn) — DP-132 #9.
+                const firstUserChunkIndex = chunks.findIndex(
+                  (c) => c.role === 'user' && !c.ephemeral,
+                )
                 return chunks.map((c, i) => (
                   <RenderedSlot
                     key={c.interaction_id ?? c.ephemeral_chunk_id ?? `slot-${i}`}
-                    index={i}
+                    showLtm={i === firstUserChunkIndex}
                     ltmOn={ltmOn}
                     ltmBlock={ltmBlock}
                     persona={persona}
@@ -199,21 +206,22 @@ export function Conversation({ store }: { store: PortalStore }) {
 }
 
 // Injects the LTM row right after the first user turn (matches the prototype's
-// author's-note placement) without indexing chunks positionally for identity.
+// author's-note placement). The caller locates that turn by identity and passes
+// `showLtm`, so the row no longer depends on a positional index.
 function RenderedSlot({
-  index,
+  showLtm: showLtmSlot,
   ltmOn,
   ltmBlock,
   persona,
   children,
 }: {
-  index: number
+  showLtm: boolean
   ltmOn: boolean
   ltmBlock: string | null
   persona: { name: string }
   children: React.ReactNode
 }) {
-  const showLtm = ltmOn && ltmBlock && index === 1
+  const showLtm = ltmOn && ltmBlock && showLtmSlot
   return (
     <>
       {showLtm && (

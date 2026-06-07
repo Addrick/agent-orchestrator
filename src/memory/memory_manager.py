@@ -16,6 +16,11 @@ import sqlite_vec
 
 logger = logging.getLogger(__name__)
 
+# Sentinel distinguishing "argument omitted, leave the column untouched" from an
+# explicit None (which means "clear the column"). Used by
+# update_interaction_content's tool_context handling (DP-132 #3).
+_UNSET: Any = object()
+
 # --- Universal Summary Levels ---
 # L0 conceptually refers to raw User_Interactions data.
 LEVEL_UNPROCESSED = 0  # Pre-migration summaries not yet classified; still retrievable
@@ -565,23 +570,34 @@ class MemoryManager:
             old_reasoning = row['reasoning_content']
             now = datetime.now()
             try:
+                # Content-hash dedupe (mirrors swap_interaction_version): if an
+                # archive row with the same (interaction_id, old_content) already
+                # exists, skip the insert. Duplicate-content archives would make
+                # list_interaction_versions flag multiple rows canonical, so the
+                # chevron's findIndex(canonical) picks the wrong index (DP-132 #7).
                 cursor.execute(
-                    "INSERT INTO Interaction_Edit_History (interaction_id, old_content, old_reasoning_content, edited_at) VALUES (?, ?, ?, ?)",
-                    (interaction_id, old_content, old_reasoning, now),
+                    "SELECT 1 FROM Interaction_Edit_History"
+                    " WHERE interaction_id = ? AND old_content = ? LIMIT 1",
+                    (interaction_id, old_content),
                 )
-                new_edit_id = cursor.lastrowid
-                # Move L0 embedding to Edit_History_Embeddings so chevron restore can bring it back.
-                # vec_Message_Embeddings is dropped — archives don't participate in retrieval k-NN.
-                cursor.execute(
-                    "SELECT embedding, model_name, created_at FROM Message_Embeddings WHERE interaction_id = ?",
-                    (interaction_id,),
-                )
-                emb = cursor.fetchone()
-                if emb is not None:
+                if cursor.fetchone() is None:
                     cursor.execute(
-                        "INSERT INTO Edit_History_Embeddings (edit_id, embedding, model_name, created_at) VALUES (?, ?, ?, ?)",
-                        (new_edit_id, emb['embedding'], emb['model_name'], emb['created_at']),
+                        "INSERT INTO Interaction_Edit_History (interaction_id, old_content, old_reasoning_content, edited_at) VALUES (?, ?, ?, ?)",
+                        (interaction_id, old_content, old_reasoning, now),
                     )
+                    new_edit_id = cursor.lastrowid
+                    # Move L0 embedding to Edit_History_Embeddings so chevron restore can bring it back.
+                    # vec_Message_Embeddings is dropped — archives don't participate in retrieval k-NN.
+                    cursor.execute(
+                        "SELECT embedding, model_name, created_at FROM Message_Embeddings WHERE interaction_id = ?",
+                        (interaction_id,),
+                    )
+                    emb = cursor.fetchone()
+                    if emb is not None:
+                        cursor.execute(
+                            "INSERT INTO Edit_History_Embeddings (edit_id, embedding, model_name, created_at) VALUES (?, ?, ?, ?)",
+                            (new_edit_id, emb['embedding'], emb['model_name'], emb['created_at']),
+                        )
                 cursor.execute("DELETE FROM Message_Embeddings WHERE interaction_id = ?", (interaction_id,))
                 cursor.execute("DELETE FROM vec_Message_Embeddings WHERE interaction_id = ?", (interaction_id,))
                 conn.commit()
@@ -593,7 +609,7 @@ class MemoryManager:
 
     def update_interaction_content(self, interaction_id: int, new_content: str,
                                    reasoning_content: Optional[str] = None,
-                                   tool_context: Optional[str] = None) -> bool:
+                                   tool_context: Optional[str] = _UNSET) -> bool:
         """Overwrite the content of an existing interaction row in place.
 
         Used by portal retry and portal manual-edit flows. Clears
@@ -601,15 +617,17 @@ class MemoryManager:
         drops the stale L0 embedding (`Message_Embeddings` + `vec_*`) so
         `MemoryAgent._embed_unembedded` re-encodes against the new content.
 
-        `tool_context` is only rewritten when explicitly provided (a regen that
-        produced tool calls); manual text edits pass None and leave the stored
-        tool_context untouched.
+        `tool_context` uses a `_UNSET` sentinel to separate "leave untouched"
+        from "clear": manual text edits omit the arg (sentinel → untouched),
+        while a regen always passes its result explicitly — including `None`,
+        which CLEARS the stored tool_context so a regen to a plain-text answer
+        no longer renders phantom tool cards (DP-132 #3).
         """
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
             try:
-                if tool_context is not None:
+                if tool_context is not _UNSET:
                     cursor.execute(
                         "UPDATE User_Interactions SET content = ?, reasoning_content = ?,"
                         " tool_context = ?, parent_summary_id = NULL"
@@ -984,8 +1002,13 @@ class MemoryManager:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
+            # Group by channel ONLY (not channel+server_id): one logical channel
+            # logged under both a NULL and a non-NULL server_id would otherwise
+            # return two rows and render the same channel twice with split counts
+            # (DP-132 #8). MAX(server_id) picks a representative for the rare
+            # multi-server case; the UI switches by channel name regardless.
             query = (
-                "SELECT channel, server_id, COUNT(*) AS count,"
+                "SELECT channel, MAX(server_id) AS server_id, COUNT(*) AS count,"
                 " MAX(timestamp) AS last_ts FROM User_Interactions"
                 " WHERE channel IS NOT NULL" + self._SUPPRESSION_SUBQUERY
             )
@@ -993,7 +1016,7 @@ class MemoryManager:
             if persona_name is not None:
                 query += " AND persona_name = ?"
                 params.append(persona_name)
-            query += " GROUP BY channel, server_id ORDER BY last_ts DESC"
+            query += " GROUP BY channel ORDER BY last_ts DESC"
             cursor.execute(query, params)
             return [dict(row) for row in cursor.fetchall()]
 

@@ -303,10 +303,19 @@ class KoboldEngineAdapter:
             (history rebuild from DB + LTM injection + token truncation + param
             resolution + system-prompt prepend) with inference OFF, and returns
             exactly what would be sent: {parity, route, model_name, params,
-            messages[]} per API_CONTRACTS.md §9. Parity is true by construction —
-            `ChatSystem.assemble_request` shares `_prepare_request`,
-            `_resolve_generation_params`, and `build_wire_messages` with the live
-            kernel, so the inspector cannot drift from a live submit.
+            messages[]} per API_CONTRACTS.md §9. Because `assemble_request`
+            shares `_prepare_request`, `_resolve_generation_params`, and
+            `build_wire_messages` with the live kernel, the messages/params it
+            returns cannot drift from a live submit *with the same inputs*.
+
+            SCOPE: the parity guarantee holds for the bespoke portal client,
+            which is the only caller — it submits as `user_identifier="portal"`
+            with persona-default samplers and no `server_id`, exactly what this
+            endpoint hardcodes. It is NOT a parity claim for arbitrary clients: a
+            different user/server (PERSONAL/SERVER-mode personas) or a
+            sampler-overriding client (e.g. kobold-lite) assembles a different
+            history window / merges different params, which this dry-run does not
+            model. (DP-132 #12 — broadening to accept those inputs is deferred.)
 
             `ltm` is accepted for API-shape compatibility but assembly follows the
             persona's own `long_term_memory` setting (the engine path has no
