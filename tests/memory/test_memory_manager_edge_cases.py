@@ -315,21 +315,26 @@ def test_swap_identical_archives_no_dupe(mem_manager):
     assert alpha_archives <= 1, "content-hash dedupe should cap alpha archives at 1"
 
 
-def test_swap_twice_returns_other_version(mem_manager):
-    """Swap to same archive index twice — second call returns the *other*
-    version (the previously-canonical one), because each swap re-archives
-    what was current. Not idempotent, but deterministic."""
+def test_swap_twice_returns_same_version(mem_manager):
+    """Swap to the same archive index twice is idempotent under the stable
+    version-list design: the target archive row is KEPT on promote and the
+    re-archive of the now-canonical content is content-hash deduped, so k=0
+    always addresses the same fixed version. (The old rotating-MRU design
+    re-archived on every swap and was deliberately reverted for the chevron
+    k/n counter — see swap_interaction_version docstring.)"""
     now = datetime.now()
     mem_manager.log_message("u1", "p", "c", "user", "Human", "v1", now, platform_message_id="sw", server_id=None)
     mem_manager.handle_message_edit("sw", "v2")
     conn = mem_manager._get_connection()
     iid = conn.execute("SELECT interaction_id FROM User_Interactions WHERE platform_message_id='sw'").fetchone()[0]
 
-    mem_manager.swap_interaction_version(iid, 0)
-    # After the swap, original target is removed; the new archive is v2.
-    # Swapping k=0 again returns v2 (which was archived).
+    # k=0 addresses the oldest archive (v1). First swap makes v1 canonical;
+    # second swap to the same fixed index returns v1 again (dedupe keeps the
+    # list stable rather than rotating v2 back to the front).
+    first = mem_manager.swap_interaction_version(iid, 0)
+    assert first["current_content"] == "v1"
     res = mem_manager.swap_interaction_version(iid, 0)
-    assert res["current_content"] == "v2"
+    assert res["current_content"] == "v1"
 
 
 def test_edit_history_vec_cleanup_cascade(mem_manager):

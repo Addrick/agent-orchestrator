@@ -62,7 +62,6 @@ def _make_adapter_with_seeded_db(persona_name: str = "test_persona",
         system_persona_names=set(),
         get_session_memory_block=retrieve_memory_block or AsyncMock(return_value=None),
         get_view_history=_get_view_history,
-        system_persona_names=set(),
     )
     adapter = KoboldAdapter(chat_system=chat_system)
     return adapter, mm, persona
