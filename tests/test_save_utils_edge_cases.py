@@ -180,7 +180,8 @@ def test_load_personas_security_violation(tmp_path):
     loaded = load_personas_from_file(file_path_override=str(save_file))
     assert loaded is not None
     assert "good" in loaded
-    assert "insecure" not in loaded
+    assert "insecure" in loaded
+    assert len(loaded["insecure"].get_security_block_reasons()) > 0
 
 
 def test_load_personas_context_length_legacy(tmp_path):

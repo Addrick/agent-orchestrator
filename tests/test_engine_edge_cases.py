@@ -227,10 +227,10 @@ class TestGoogleEdgeCases:
         ]
         await text_engine.generate_response({"model_name": "gemini-pro"}, base_context)
         contents = mock_instance.models.generate_content.call_args[1]["contents"]
-        # First content entry is the persona system prompt (no role key in handler — that's the "system" entry).
-        # Then alternating: user, model, user.
-        roles_after_sys = [c.get("role") for c in contents[1:]]
-        assert roles_after_sys == ["user", "model", "user"]
+        # The Google handler combines the system prompt into the first user turn.
+        # So we expect alternating: user, model, user.
+        roles = [c.get("role") for c in contents]
+        assert roles == ["user", "model", "user"]
 
     @pytest.mark.asyncio
     async def test_google_tool_response_ordering(
