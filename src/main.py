@@ -189,7 +189,6 @@ async def main() -> None:
         memory_manager=memory_manager,
         text_engine=text_engine,
         embedding_service=embedding_service,
-        stream_engine=stream_engine,
     )
 
     # 5. Register service integrations

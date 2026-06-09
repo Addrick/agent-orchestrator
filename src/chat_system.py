@@ -30,7 +30,6 @@ from src.generation_events import (
     ToolCallResultEvent as ToolCallResultEvent,
     ToolCallStartEvent as ToolCallStartEvent,
 )
-from src.stream_engine import StreamEngine
 from src.message_handler import BotLogic
 from src.generation_params import GenerationParams
 from src.persona import Persona, MemoryMode
@@ -182,8 +181,7 @@ class AssembledRequest:
 
 class ChatSystem:
     def __init__(self, memory_manager: MemoryManager, text_engine: TextEngine,
-                 embedding_service: Optional[EmbeddingService] = None,
-                 stream_engine: Optional[StreamEngine] = None) -> None:
+                 embedding_service: Optional[EmbeddingService] = None) -> None:
         self.personas: Dict[str, Persona] = load_personas_from_file() or {}
         # Ensure system personas are also loaded so they are callable by the engine
         from src.utils.save_utils import load_system_personas_from_file
@@ -202,7 +200,6 @@ class ChatSystem:
         if embedding_service is not None and hasattr(self.memory_backend, "set_embedding_service"):
             self.memory_backend.set_embedding_service(embedding_service)
         self.text_engine: TextEngine = text_engine
-        self.stream_engine: Optional[StreamEngine] = stream_engine
         self.tool_manager: ToolManager = ToolManager()
         WebSearchHandler().register(self.tool_manager)
 
