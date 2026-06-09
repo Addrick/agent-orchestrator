@@ -199,7 +199,7 @@ async def test_resume_sets_and_resets_turn_context(mocked_chat_system):
     chat_system, _ = mocked_chat_system
     chat_system.personas["test_persona"].set_enabled_tools(["*"])
     chat_system.tool_manager.enrich_audit_action = AsyncMock(return_value=None)  # type: ignore[assignment]
-    chat_system._execute_write_calls = AsyncMock()  # type: ignore[assignment]
+    chat_system.confirmations.execute_write_calls = AsyncMock()  # type: ignore[assignment]
 
     # Turn 1: drive a write tool to park a PendingConfirmation, drained clean.
     _script_engine(chat_system, [

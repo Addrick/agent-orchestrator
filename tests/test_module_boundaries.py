@@ -125,6 +125,11 @@ CONTRACTS: List[Tuple[str, Tuple[str, ...]]] = [
         "src.chat_system", "src.message_handler", "src.memory",
         "src.interfaces", "src.agents",
     )),
+    # Confirmation parking sits below the orchestrator: tools + storage only.
+    ("src.confirmations", (
+        "src.chat_system", "src.message_handler", "src.interfaces",
+        "src.agents", "src.engine", "src.stream_engine",
+    )),
     # Engine layer never reaches up into orchestration/storage/transports.
     ("src.engine", ("src.chat_system", "src.message_handler", "src.memory", "src.interfaces", "src.agents")),
     ("src.stream_engine", ("src.chat_system", "src.message_handler", "src.memory", "src.interfaces", "src.agents")),

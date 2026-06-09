@@ -120,7 +120,7 @@ async def test_chat_system_audit_decision_approved(chat_system, mem_manager):
     chat_system.personas["test_p"] = Persona("test_p", "model", "prompt")
     
     # Mock dependencies for resume
-    chat_system._execute_write_calls = AsyncMock()
+    chat_system.confirmations.execute_write_calls = AsyncMock()
     chat_system.text_engine.generate_response = AsyncMock(return_value=({"content": "Done"}, {}))
     
     # Resume with approval
@@ -158,7 +158,7 @@ async def test_chat_system_audit_decision_denied(chat_system, mem_manager):
     chat_system.personas["test_p"] = Persona("test_p", "model", "prompt")
     
     # Mock dependencies for resume
-    chat_system._append_denied_tool_results = MagicMock()
+    chat_system.confirmations.append_denied_tool_results = MagicMock()
     chat_system.text_engine.generate_response = AsyncMock(return_value=({"content": "Denied"}, {}))
     
     # Resume with denial

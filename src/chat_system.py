@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import time
-import uuid
 from collections import defaultdict, OrderedDict
 from contextlib import aclosing
 from dataclasses import dataclass, field
@@ -16,6 +15,7 @@ from config.global_config import MAX_CACHED_API_REQUESTS, \
 from src.memory.context_budget import truncate_messages_to_budget
 from src.embedding_service import EmbeddingService
 from src.clients.service_integration import ServiceIntegration
+from src.confirmations import ConfirmationManager, PendingConfirmation as PendingConfirmation
 from src.memory.backend.base import MemoryBackend, MemoryHit
 from src.memory.memory_manager import MemoryManager
 from src.engine import TextEngine
@@ -32,7 +32,7 @@ from src.generation_events import (
 from src.message_handler import BotLogic
 from src.generation_params import GenerationParams
 from src.persona import Persona, MemoryMode
-from src.tools.definitions import MODEL_INCOMPATIBLE_TOOLS, get_tool_capabilities
+from src.tools.definitions import MODEL_INCOMPATIBLE_TOOLS
 from src.tools.tool_loop import (
     ToolLoop, _ApiPayloadEvent, _LoopFinishedEvent, build_wire_messages,
 )
@@ -78,42 +78,6 @@ def _relative_time(dt: datetime) -> str:
         return f"{months} month{'s' if months != 1 else ''} ago"
     years = days // 365
     return f"{years} year{'s' if years != 1 else ''} ago"
-
-
-@dataclass
-class PendingConfirmation:
-    """Stores state for a tool call awaiting user approval.
-
-    All write-tool calls are parked here for audit before execution,
-    regardless of execution mode. The audit_info dict carries structured
-    metadata (irreversibility flags, taint sources, model reasoning) so
-    the approval surface can present an informed review.
-    """
-    write_calls: List[Dict[str, Any]]
-    conversation_history: List[Dict[str, Any]]
-    persona_name: str
-    tools_for_llm: List[Dict[str, Any]]
-    image_url: Optional[str]
-    channel: str = ""
-    server_id: Optional[str] = None
-    turn_tainted: bool = False
-    audit_info: Optional[Dict[str, Any]] = None
-    created_at: float = field(default_factory=time.time)
-    # Index into conversation_history where this turn's tool messages start.
-    # Passed to the resumed tool loop as history_start_override so the approved
-    # write and its result are captured into tool_context_json (and thus
-    # replayed on later turns) instead of being dropped.
-    tool_context_start: int = 0
-    # DP-130 history contract: stable handle for the rendered-but-unpersisted
-    # confirmation chunk. Surfaced as `ephemeral_chunk_id` in the SSE id-frame
-    # and the transcript projection, and as the correlation token an interactive
-    # surface (portal) sends back on approve/deny so a resume can be matched to
-    # *this* park. (Reconciles with the DP-127-engine confirm-modal `token`.)
-    token: str = field(default_factory=lambda: uuid.uuid4().hex)
-    # The parked confirmation's rendered text — projected as the ephemeral
-    # chunk's content so a fresh page load (transcript) can render the pending
-    # approval without a DB row.
-    confirmation_text: str = ""
 
 
 @dataclass
@@ -209,12 +173,24 @@ class ChatSystem:
         self.last_api_iterations: Dict[str, Dict[str, List[Dict[str, Any]]]] = defaultdict(dict)
         self.models_available: Dict[str, Any] = get_model_list() or {}
         self.background_tasks: Set[Coroutine[Any, Any, Any]] = set()
-        self._pending_confirmations: Dict[Tuple[str, str], PendingConfirmation] = {}
+        self.confirmations: ConfirmationManager = ConfirmationManager(
+            tool_manager, memory_manager,
+        )
         # OrderedDict (not defaultdict) so eviction order is well-defined and
         # the map stays bounded — see _set_conversation_taint.
         self._conversation_taints: "OrderedDict[Tuple[str, str, str, Optional[str]], bool]" = OrderedDict()
         self._services: Dict[str, ServiceIntegration] = {}
         self._embedding_service: Optional[EmbeddingService] = embedding_service
+
+    @property
+    def _pending_confirmations(self) -> Dict[Tuple[str, str], PendingConfirmation]:
+        """Back-compat view of the confirmation store.
+
+        The store itself lives on `self.confirmations` (DP-200 slice B);
+        existing tests and the portal's transcript projection still address
+        the map through this name.
+        """
+        return self.confirmations.pending
 
     def visible_personas(self) -> Dict[str, Persona]:
         """Personas safe to expose in user-facing listings (dropdowns, status text).
@@ -333,37 +309,6 @@ class ChatSystem:
                     formatted_content = f"{author_name}: {content_clean}"
                     final_history.append({'role': 'user', 'content': formatted_content})
         return final_history
-
-    async def _execute_write_calls(
-            self,
-            write_calls: List[Dict[str, Any]],
-            conversation_history: List[Dict[str, Any]]
-    ) -> None:
-        """Execute write tool calls and append results to history."""
-        for call_item in write_calls:
-            tool_name: str = call_item.get("name", "")
-            tool_args = call_item.get("arguments", {})
-            tool_result = await self.tool_manager.execute_tool(tool_name, **tool_args)
-            conversation_history.append({
-                "role": "tool",
-                "tool_call_id": call_item.get("id"),
-                "name": tool_name,
-                "content": json.dumps(tool_result)
-            })
-
-    @staticmethod
-    def _append_denied_tool_results(
-            write_calls: List[Dict[str, Any]],
-            conversation_history: List[Dict[str, Any]]
-    ) -> None:
-        """Appends denial results for write tools the user rejected."""
-        for call_item in write_calls:
-            conversation_history.append({
-                "role": "tool",
-                "tool_call_id": call_item.get("id"),
-                "name": call_item.get("name"),
-                "content": json.dumps({"error": "Tool call denied by user"})
-            })
 
     def _fetch_raw_history(
             self,
@@ -1161,7 +1106,11 @@ class ChatSystem:
                 user_interaction_id = None
                 retry_assistant_id = None
                 try:
-                    await self._apply_resume_decision(resume, ctx)
+                    ctx.turn_tainted = await self.confirmations.apply_resume_decision(
+                        resume.pending, resume.approved, ctx.conversation_history,
+                        operator_id=ctx.user_identifier,
+                        turn_tainted=ctx.turn_tainted,
+                    )
                 except Exception as e:
                     logger.error(
                         f"Error resuming pending confirmation for {user_identifier}: {e}",
@@ -1268,31 +1217,10 @@ class ChatSystem:
                     tool_context_start=tool_context_start,
                     confirmation_text=final_text if final_text else "",
                 )
-                confirm_key = (ctx.user_identifier, ctx.persona_name)
-                # A still-pending write for this (user, persona) is silently
-                # superseded by this one — the operator's eventual approve/deny
-                # would resolve the wrong intent. We can't queue both (the key
-                # is 1:1), so at minimum the eviction must leave an audit trail.
-                evicted = self._pending_confirmations.get(confirm_key)
-                if evicted is not None:
-                    self.memory_manager.log_audit_event(
-                        event_type="audit_parked_evicted",
-                        operator_id=ctx.user_identifier,
-                        prior_state="pending",
-                        new_state="evicted",
-                        reason="Superseded by a newer pending write for the same persona",
-                        metadata=evicted.audit_info,
-                    )
-                self._pending_confirmations[confirm_key] = parked
+                # Parking (incl. supersede-eviction + audit logging) is the
+                # ConfirmationManager's job; the kernel only decides *when*.
+                self.confirmations.park(ctx.user_identifier, ctx.persona_name, parked)
                 ephemeral_chunk_id = parked.token
-                # Phase 7: Log audit parking
-                self.memory_manager.log_audit_event(
-                    event_type="audit_parked",
-                    operator_id=ctx.user_identifier,
-                    new_state="pending",
-                    reason="Universal write-audit gate triggered",
-                    metadata=audit_info
-                )
                 # Surface the park to interactive consumers (the portal) so they
                 # can render an approve/deny affordance and resume via the token.
                 # Emitted before the terminal DoneEvent; non-interactive callers
@@ -1433,45 +1361,6 @@ class ChatSystem:
                     assistant_id = None
                     user_interaction_id = None
         return final_text, response_type, assistant_id, user_interaction_id
-
-    async def _apply_resume_decision(
-            self, resume: _ResumeState, ctx: RequestContext
-    ) -> None:
-        """Apply an approve/deny decision to the parked turn before continuation.
-
-        On approval the write calls execute and their results are appended to
-        the parked history (so they precede the model's continuation); denial
-        appends synthetic denial results instead. Either way the audit decision
-        is logged. Read-side taint is recomputed from the executed write calls
-        and folded into `ctx.turn_tainted` so the continuation loop inherits it.
-        """
-        pending = resume.pending
-        if resume.approved:
-            await self._execute_write_calls(pending.write_calls, ctx.conversation_history)
-            for wc in pending.write_calls:
-                wc_name = wc.get("name") or "unknown"
-                if get_tool_capabilities(wc_name).get("produces_untrusted"):
-                    ctx.turn_tainted = True
-            decision_state = "approved"
-            decision_reason = "Human approved tool execution"
-        else:
-            self._append_denied_tool_results(pending.write_calls, ctx.conversation_history)
-            decision_state = "denied"
-            decision_reason = "Human denied tool execution"
-
-        # Phase 7: Log audit decision
-        self.memory_manager.log_audit_event(
-            event_type="audit_decision",
-            operator_id=ctx.user_identifier,
-            prior_state="pending",
-            new_state=decision_state,
-            reason=decision_reason,
-            metadata={
-                "write_calls": pending.write_calls,
-                "audit_info": pending.audit_info,
-                "turn_tainted": ctx.turn_tainted,
-            },
-        )
 
     async def stream_resume_confirmation(
             self, user_identifier: str, persona_name: str, approved: bool,

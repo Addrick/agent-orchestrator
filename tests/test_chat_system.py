@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, AsyncMock, patch
 import json
 
 from src.bootstrap import create_chat_system
+from src.confirmations import ConfirmationManager
 from src.chat_system import (
     ChatSystem, ResponseType, RequestContext,
     DoneEvent, ErrorEvent, TokenEvent,
@@ -628,7 +629,7 @@ async def test_execute_write_calls(chat_system_with_mocks):
     write_calls = [{"id": "c1", "name": "update_ticket", "arguments": {"state": "closed"}}]
     history: list = []
 
-    await system._execute_write_calls(write_calls, history)
+    await system.confirmations.execute_write_calls(write_calls, history)
 
     tool_manager_mock.execute_tool.assert_called_once_with('update_ticket', state='closed')
     assert len(history) == 1
@@ -641,7 +642,7 @@ def test_append_denied_tool_results():
         {"id": "c2", "name": "create_ticket"},
     ]
     history: list = []
-    ChatSystem._append_denied_tool_results(write_calls, history)
+    ConfirmationManager.append_denied_tool_results(write_calls, history)
     assert len(history) == 2
     assert json.loads(history[0]['content'])['error'] == "Tool call denied by user"
     assert history[1]['name'] == "create_ticket"
