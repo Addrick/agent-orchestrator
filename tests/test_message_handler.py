@@ -106,23 +106,23 @@ def test_set_history_command_variations(bot_logic, mock_chat_system_with_state):
     persona = mock_chat_system_with_state.personas["derpr"]
 
     # Test 1: Set a new static history length
-    bot_logic._set_history(["history", "50"], persona)
+    bot_logic.set_handlers["history"](["history", "50"], persona)
     assert persona.get_current_effective_history_messages() == 50
     assert persona.is_in_dynamic_history() is False
 
     # Test 2: Switch to dynamic mode, inheriting the current value (50)
-    bot_logic._set_history(["history", "dynamic"], persona)
+    bot_logic.set_handlers["history"](["history", "dynamic"], persona)
     assert persona.is_in_dynamic_history() is True
     assert persona.get_history_messages() == 50, "It should start at the captured value of 50."
     assert persona.get_history_messages() == 52, "Then it should grow to 52."
 
     # Test 3: Set a new static history, which should disable dynamic mode
-    bot_logic._set_history(["history", "30"], persona)
+    bot_logic.set_handlers["history"](["history", "30"], persona)
     assert persona.is_in_dynamic_history() is False
     assert persona.get_current_effective_history_messages() == 30
 
     # Test 4: Switch to dynamic mode with a specific start value
-    bot_logic._set_history(["history", "dynamic", "8"], persona)
+    bot_logic.set_handlers["history"](["history", "dynamic", "8"], persona)
     assert persona.is_in_dynamic_history() is True
     assert persona.get_history_messages() == 8
     assert persona.get_history_messages() == 10
@@ -131,7 +131,7 @@ def test_set_history_command_variations(bot_logic, mock_chat_system_with_state):
     # The current history is 12 (from the previous step: 8 -> 10 -> 12)
     assert persona.get_current_effective_history_messages() == 12
     # Now, set dynamic again. It should capture 12.
-    bot_logic._set_history(["history", "dynamic"], persona)
+    bot_logic.set_handlers["history"](["history", "dynamic"], persona)
     assert persona.is_in_dynamic_history() is True
     assert persona.get_history_messages() == 12
     assert persona.get_history_messages() == 14

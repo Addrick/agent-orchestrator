@@ -39,6 +39,7 @@ from src.chat_system import (
 from src.interfaces.kobold_export import build_kobold_savefile, build_transcript, _parse_tool_context
 from src.interfaces.portal_render import render_portal_html
 from src.utils.save_utils import save_personas_to_file
+from src.persona_fields import apply_patch_fields
 from src.interfaces._persona_patch import (
     _KNOWN_PATCH_KEYS_ENGINE as _KNOWN_PATCH_KEYS,
     _apply_kobold_sampler_extras,
@@ -638,31 +639,13 @@ class KoboldEngineAdapter:
             # surface them instead of pretending the save was clean.
             rejected: List[str] = []
 
-            if "prompt" in data: p.set_prompt(data["prompt"])
-            if "model_name" in data: p.set_model_name(data["model_name"])
-            if "temperature" in data and p.set_temperature(data["temperature"]) is None and data["temperature"] is not None:
-                rejected.append("temperature")
-            if "top_p" in data and p.set_top_p(data["top_p"]) is None and data["top_p"] is not None:
-                rejected.append("top_p")
-            if "top_k" in data and p.set_top_k(data["top_k"]) is None and data["top_k"] is not None:
-                rejected.append("top_k")
-            if "max_tokens" in data:
-                p.set_response_token_limit(data["max_tokens"])
+            # Core persona fields apply via the shared registry — one source
+            # of truth with the dev-command surface (DP-200 slice D).
+            apply_patch_fields(p, data, rejected)
             if "history_messages" in data:
                 p.set_history_messages(data["history_messages"])
             elif "context_length" in data:
                 p.set_history_messages(data["context_length"])
-            if "memory_mode" in data:
-                before = p.get_memory_mode()
-                p.set_memory_mode(data["memory_mode"])
-                if p.get_memory_mode() == before and data["memory_mode"] not in (None, before.name):
-                    rejected.append("memory_mode")
-            if "max_context_tokens" in data:
-                p.set_max_context_tokens(data["max_context_tokens"])
-            if "long_term_memory" in data:
-                p.set_long_term_memory(bool(data["long_term_memory"]))
-            if "chat_template" in data:
-                p.set_chat_template(data["chat_template"])
             if "instruct_tags" in data:
                 tags = data["instruct_tags"]
                 if isinstance(tags, dict) and any(tags.values()):

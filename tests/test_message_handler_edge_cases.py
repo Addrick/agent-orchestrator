@@ -294,7 +294,7 @@ async def test_set_service_bindings_clear_keyword(bot):
 def test_set_service_bindings_csv_whitespace(bot):
     """Direct handler call preserves casing; verifies CSV+whitespace parsing."""
     persona = _persona(bot)
-    resp, mutated = bot._set_service_bindings(
+    resp, mutated = bot.set_handlers["service_bindings"](
         ["service_bindings", "zammad, agents , notifier"], persona
     )
     assert mutated is True
@@ -398,7 +398,7 @@ async def test_set_chat_template_clear_keyword(bot, keyword):
 def test_set_tool_policy_invalid_json(bot):
     """Direct call: malformed JSON returns error, no mutation."""
     persona = _persona(bot)
-    resp, mutated = bot._set_tool_policy(["tool_policy", "{not json"], persona)
+    resp, mutated = bot.set_handlers["tool_policy"](["tool_policy", "{not json"], persona)
     assert mutated is False
     assert "Invalid JSON" in resp
 
@@ -412,7 +412,7 @@ def test_set_tool_policy_from_dict_error(bot):
     """
     persona = _persona(bot)
     with patch.object(Persona, "set_tool_policy", side_effect=ValueError("bad policy")):
-        resp, mutated = bot._set_tool_policy(
+        resp, mutated = bot.set_handlers["tool_policy"](
             ["tool_policy", '{"default":"deny"}'], persona
         )
     assert mutated is False
