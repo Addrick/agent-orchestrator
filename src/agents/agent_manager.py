@@ -187,12 +187,13 @@ class AgentManager:
 
         # Convention-based dependency injection
         if "zammad_client" in params:
-            zammad_service = self._chat_system._services.get("zammad")
-            if zammad_service is None:
+            from src.clients.zammad_service import ZammadIntegration
+            zammad_service = self._chat_system.get_service("zammad")
+            if not isinstance(zammad_service, ZammadIntegration):
                 raise ValueError(
                     f"Agent '{name}' requires zammad_client but no Zammad service is registered."
                 )
-            kwargs["zammad_client"] = zammad_service._client
+            kwargs["zammad_client"] = zammad_service.client
 
         if "notification_router" in params:
             if self._notification_router is None:

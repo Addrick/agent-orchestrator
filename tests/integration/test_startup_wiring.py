@@ -93,6 +93,37 @@ def test_all_service_bindings_have_registered_services(wired_system):
     assert not missing, f"Service bindings without registered services: {missing}"
 
 
+def test_get_service_returns_registered_integration(wired_system):
+    """Public service lookup replaces reaching into ChatSystem._services."""
+    zammad = wired_system.get_service("zammad")
+    assert isinstance(zammad, ZammadIntegration)
+    assert wired_system.get_service("nonexistent") is None
+
+
+def test_agent_manager_injects_zammad_client_via_public_accessors(wired_system):
+    """Convention-based DI resolves zammad_client through get_service + .client,
+    not private attribute reaches."""
+    class _NeedsZammad:
+        agent_name = "needs_zammad"
+
+        def __init__(self, chat_system, zammad_client):
+            self.chat_system = chat_system
+            self.zammad_client = zammad_client
+
+    manager = AgentManager(chat_system=wired_system, memory_manager=wired_system.memory_manager)
+    instance = manager._build_agent_instance("needs_zammad", _NeedsZammad, {})
+    zammad = wired_system.get_service("zammad")
+    assert instance.zammad_client is zammad.client
+
+
+def test_embedding_service_property_exposes_injected_service(wired_system):
+    """ChatSystem.embedding_service is the public read path (None when not injected)."""
+    assert wired_system.embedding_service is None
+    mock_emb = MagicMock()
+    wired_system._embedding_service = mock_emb
+    assert wired_system.embedding_service is mock_emb
+
+
 def test_persona_with_all_bindings_sees_all_tools(wired_system):
     """A persona bound to all services gets every callable tool."""
     persona = wired_system.personas["test_persona"]

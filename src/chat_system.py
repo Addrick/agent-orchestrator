@@ -248,6 +248,21 @@ class ChatSystem:
         service.register_tools(self.tool_manager)
         logger.info(f"Registered service integration: {service.name}")
 
+    def get_service(self, name: str) -> Optional[ServiceIntegration]:
+        """Look up a registered service integration by name."""
+        return self._services.get(name)
+
+    @property
+    def embedding_service(self) -> Optional[EmbeddingService]:
+        """Shared embedding service injected at construction.
+
+        None only in minimal setups (e.g. unit tests) that build ChatSystem
+        without one; main.py always supplies it. Consumers that can fall back
+        to constructing their own (SqliteConsolidator) must not write back —
+        the backend only learns about the service at ChatSystem construction.
+        """
+        return self._embedding_service
+
     def _store_api_request(self, user_identifier: str, persona_name: str,
                            payload: Dict[str, Any],
                            tools_for_llm: Optional[List[Dict[str, Any]]] = None,
