@@ -8,7 +8,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from memory.memory_manager import MemoryManager
-from src.chat_system import ChatSystem
+from src.bootstrap import create_chat_system
 from src.engine import TextEngine
 from src.persona import Persona, MemoryMode
 from config.global_config import TEST_MEMORY_DATABASE_FILE
@@ -44,8 +44,8 @@ def mocked_chat_system():
         )
     }
 
-    with patch('src.chat_system.load_personas_from_file', return_value=test_personas):
-        chat_system = ChatSystem(
+    with patch('src.bootstrap.load_personas_from_file', return_value=test_personas):
+        chat_system = create_chat_system(
             memory_manager=memory_manager, text_engine=text_engine,
         )
 

@@ -82,11 +82,11 @@ def _log_haystack(mm: Any, question: Dict[str, Any]) -> int:
 def _build_chat_system(mm: Any) -> Any:
     """Minimal ChatSystem for agent wiring. No personas needed for ingest."""
     from src.engine import TextEngine
-    from src.chat_system import ChatSystem
+    from src.bootstrap import create_chat_system
     # Empty persona map is fine — consolidator loads its own summarizer
     # persona via the agent_config / global default.
-    with patch("src.chat_system.load_personas_from_file", return_value={}):
-        return ChatSystem(memory_manager=mm, text_engine=TextEngine())
+    with patch("src.bootstrap.load_personas_from_file", return_value={}):
+        return create_chat_system(memory_manager=mm, text_engine=TextEngine())
 
 
 async def _run_l0(chat_system: Any) -> None:

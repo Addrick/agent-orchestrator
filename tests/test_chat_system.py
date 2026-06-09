@@ -4,6 +4,7 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 import json
 
+from src.bootstrap import create_chat_system
 from src.chat_system import (
     ChatSystem, ResponseType, RequestContext,
     DoneEvent, ErrorEvent, TokenEvent,
@@ -41,9 +42,9 @@ def chat_system_with_mocks():
 
     mock_persona = Persona('test_persona', 'mock_model', 'prompt')
 
-    with patch('src.chat_system.load_personas_from_file', return_value={"test_persona": mock_persona}), \
-            patch('src.chat_system.ToolManager', return_value=mock_tool_manager):
-        system = ChatSystem(
+    with patch('src.bootstrap.load_personas_from_file', return_value={"test_persona": mock_persona}), \
+            patch('src.bootstrap.ToolManager', return_value=mock_tool_manager):
+        system = create_chat_system(
             memory_manager=mock_memory_manager,
             text_engine=text_engine,
         )

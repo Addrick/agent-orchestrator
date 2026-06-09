@@ -132,8 +132,10 @@ CONTRACTS: List[Tuple[str, Tuple[str, ...]]] = [
     ("src.generation_params", ("src.",)),
     ("src.generation_events", ("src.",)),
     ("src.embedding_service", ("src.",)),
-    # Nothing imports the entrypoint.
-    ("src.", ("src.main",)),
+    # Nothing imports the entrypoint, and only the entrypoint may use the
+    # composition root (src.bootstrap) — modules must receive their deps,
+    # not assemble them.
+    ("src.", ("src.main", "src.bootstrap")),
 ]
 
 # Grandfathered edges: real, current violations of the target rules that the

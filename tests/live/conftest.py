@@ -17,7 +17,7 @@ from src.clients.zammad_client import ZammadClient
 from src.clients.zammad_service import ZammadIntegration
 from memory.memory_manager import MemoryManager
 from src.engine import TextEngine
-from src.chat_system import ChatSystem
+from src.bootstrap import create_chat_system
 from src.persona import Persona, MemoryMode
 from config.global_config import (
     TEST_MEMORY_DATABASE_FILE,
@@ -226,8 +226,8 @@ def live_chat_system():
         )
     }
 
-    with patch('src.chat_system.load_personas_from_file', return_value=test_personas):
-        chat_system = ChatSystem(
+    with patch('src.bootstrap.load_personas_from_file', return_value=test_personas):
+        chat_system = create_chat_system(
             memory_manager=memory_manager, text_engine=text_engine,
         )
         chat_system.register_service(ZammadIntegration(zammad_client))

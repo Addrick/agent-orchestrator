@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 from src.agents.agent_manager import AgentManager
 from src.agents.agent_service import AgentServiceIntegration
-from src.chat_system import ChatSystem
+from src.bootstrap import create_chat_system
 from src.clients.zammad_service import ZammadIntegration
 from memory.memory_manager import MemoryManager
 from src.engine import TextEngine
@@ -45,8 +45,8 @@ def wired_system():
 
     mock_zammad = MagicMock()
 
-    with patch("src.chat_system.load_personas_from_file", return_value=test_personas):
-        chat_system = ChatSystem(memory_manager=memory_manager, text_engine=text_engine)
+    with patch("src.bootstrap.load_personas_from_file", return_value=test_personas):
+        chat_system = create_chat_system(memory_manager=memory_manager, text_engine=text_engine)
 
     # Mirror main.py wiring: register Zammad, then AgentManager + AgentService
     chat_system.register_service(ZammadIntegration(mock_zammad))

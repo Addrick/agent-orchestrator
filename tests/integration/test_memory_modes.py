@@ -6,7 +6,7 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 from datetime import datetime, timedelta
 
-from src.chat_system import ChatSystem
+from src.bootstrap import create_chat_system
 from memory.memory_manager import MemoryManager
 from src.persona import Persona, MemoryMode
 from src.engine import TextEngine
@@ -26,7 +26,7 @@ def mem_test_system():
         return_value=({'type': 'text', 'content': ''}, {}),
     )
 
-    chat_system = ChatSystem(
+    chat_system = create_chat_system(
         memory_manager=memory_manager,
         text_engine=mock_text_engine,
     )
@@ -47,7 +47,7 @@ def real_test_system(monkeypatch):
     memory_manager.create_schema()
     text_engine = TextEngine()
     zammad_client = ZammadClient()
-    chat_system = ChatSystem(
+    chat_system = create_chat_system(
         memory_manager=memory_manager,
         text_engine=text_engine,
     )
@@ -264,7 +264,7 @@ def memory_e2e_system():
     mock_text_engine.generate_response = AsyncMock(  # type: ignore[method-assign]
         return_value=({'type': 'text', 'content': ''}, {}),
     )
-    chat_system = ChatSystem(
+    chat_system = create_chat_system(
         memory_manager=memory_manager,
         text_engine=mock_text_engine,
     )

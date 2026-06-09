@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from memory.memory_manager import MemoryManager
+from src.bootstrap import create_chat_system
 from src.chat_system import ChatSystem, _relative_time
 from src.embedding_service import EmbeddingService
 from src.memory.backend.base import MemoryHit
@@ -186,9 +187,9 @@ def chat_system_with_memory():
     mm = MagicMock()
     mm.backend = MagicMock()  # spec= would block this; use plain MagicMock
     te = MagicMock()
-    with patch('src.chat_system.load_personas_from_file', return_value={}), \
+    with patch('src.bootstrap.load_personas_from_file', return_value={}), \
          patch('src.chat_system.get_model_list', return_value={}):
-        system = ChatSystem(memory_manager=mm, text_engine=te)
+        system = create_chat_system(memory_manager=mm, text_engine=te)
 
     emb_service = MagicMock(spec=EmbeddingService)
     emb_service.model_name = "test-model"
@@ -241,9 +242,9 @@ async def test_retrieve_memory_block_disabled(chat_system_with_memory, mock_pers
 @patch('src.chat_system.MEMORY_RETRIEVAL_ENABLED', True)
 async def test_retrieve_memory_block_no_embedding_service(mock_persona):
     """Returns None when embedding service is not initialized."""
-    with patch('src.chat_system.load_personas_from_file', return_value={}), \
+    with patch('src.bootstrap.load_personas_from_file', return_value={}), \
          patch('src.chat_system.get_model_list', return_value={}):
-        system = ChatSystem(memory_manager=MagicMock(), text_engine=MagicMock())
+        system = create_chat_system(memory_manager=MagicMock(), text_engine=MagicMock())
 
     result, is_untrusted = await system._retrieve_memory_block(
         mock_persona, "user1", "chan", None,

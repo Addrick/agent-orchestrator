@@ -6,6 +6,7 @@ import sys
 import logging
 from typing import Optional, Dict, Any
 
+from src.bootstrap import create_chat_system
 from src.chat_system import ChatSystem
 from src.engine import TextEngine
 from src.stream_engine import StreamEngine
@@ -180,7 +181,7 @@ async def main() -> None:
     embedding_service = EmbeddingService(GeminiEmbeddingProvider())
 
     # 5. Initialize ChatSystem core, injecting dependencies
-    bot = ChatSystem(
+    bot = create_chat_system(
         memory_manager=memory_manager,
         text_engine=text_engine,
         embedding_service=embedding_service,

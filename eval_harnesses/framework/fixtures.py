@@ -90,7 +90,7 @@ def build_fixture(
     # heavy deps when only listing scenarios/variants.
     from src.memory.memory_manager import MemoryManager
     from src.engine import TextEngine
-    from src.chat_system import ChatSystem
+    from src.bootstrap import create_chat_system
     from src.utils.save_utils import load_personas_from_file
 
     # Real-DB mode: variant points at an existing user DB. Don't reschema,
@@ -131,8 +131,8 @@ def build_fixture(
         personas[target_persona].prompt = prompt_variant.persona_prompt
 
     text_engine = TextEngine()
-    with patch("src.chat_system.load_personas_from_file", return_value=personas):
-        chat_system = ChatSystem(memory_manager=mm, text_engine=text_engine)
+    with patch("src.bootstrap.load_personas_from_file", return_value=personas):
+        chat_system = create_chat_system(memory_manager=mm, text_engine=text_engine)
 
     # TODO: install MockLLM hook into text_engine when live=False.
     # Concrete wire-in is engine-specific; leaving as a clear stub so each

@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi.testclient import TestClient
 
 from memory.memory_manager import MemoryManager
+from src.bootstrap import create_chat_system
 from src.chat_system import ChatSystem
 from src.engine import TextEngine
 from src.interfaces.kobold_engine_adapter import KoboldEngineAdapter as KoboldAdapter
@@ -139,8 +140,8 @@ def _make_real_adapter(persona_name: str = "test_persona",
     text_engine = TextEngine()
     text_engine.stream_messages = stream_messages  # type: ignore[method-assign]
 
-    with patch('src.chat_system.load_personas_from_file', return_value={persona_name: persona}):
-        chat_system = ChatSystem(memory_manager=mm, text_engine=text_engine)
+    with patch('src.bootstrap.load_personas_from_file', return_value={persona_name: persona}):
+        chat_system = create_chat_system(memory_manager=mm, text_engine=text_engine)
     chat_system.bot_logic.preprocess_message = AsyncMock(return_value=None)
     chat_system.system_persona_names = set()
 
@@ -1900,8 +1901,8 @@ def test_chat_completions_google_end_to_end_payload_structure(mock_google_client
     
     text_engine = TextEngine()
     
-    with patch('src.chat_system.load_personas_from_file', return_value={"test_google_persona": persona}):
-        chat_system = ChatSystem(memory_manager=mm, text_engine=text_engine)
+    with patch('src.bootstrap.load_personas_from_file', return_value={"test_google_persona": persona}):
+        chat_system = create_chat_system(memory_manager=mm, text_engine=text_engine)
     chat_system.bot_logic.preprocess_message = AsyncMock(return_value=None)
     
     adapter = KoboldAdapter(chat_system=chat_system)

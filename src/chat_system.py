@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, AsyncGenerator, AsyncIterator, Coroutine, Dict, List, Optional, Set, Tuple
 
-from config import global_config
 from config.global_config import MAX_CACHED_API_REQUESTS, \
     PENDING_CONFIRMATION_TIMEOUT, MEMORY_RETRIEVAL_ENABLED, MEMORY_MAX_SUMMARIES_IN_CONTEXT
 from src.memory.context_budget import truncate_messages_to_budget
@@ -37,10 +36,10 @@ from src.tools.definitions import MODEL_INCOMPATIBLE_TOOLS, get_tool_capabilitie
 from src.tools.tool_loop import (
     ToolLoop, _ApiPayloadEvent, _LoopFinishedEvent, build_wire_messages,
 )
-from src.tools.tool_manager import ToolManager, WebSearchHandler, MemoryRecallHandler
+from src.tools.tool_manager import ToolManager
 from src.tools.turn_context import TurnContext, turn_scope
 from src.utils.model_utils import get_model_list, get_model_prefix
-from src.utils.save_utils import load_personas_from_file, save_personas_to_file
+from src.utils.save_utils import save_personas_to_file
 from src.utils.message_utils import strip_vertex_links
 
 logger = logging.getLogger(__name__)
@@ -181,15 +180,15 @@ class AssembledRequest:
 
 class ChatSystem:
     def __init__(self, memory_manager: MemoryManager, text_engine: TextEngine,
-                 embedding_service: Optional[EmbeddingService] = None) -> None:
-        self.personas: Dict[str, Persona] = load_personas_from_file() or {}
-        # Ensure system personas are also loaded so they are callable by the engine
-        from src.utils.save_utils import load_system_personas_from_file
-        system_personas = load_system_personas_from_file()
-        self.system_persona_names: Set[str] = set()
-        if system_personas:
-            self.personas.update(system_personas)
-            self.system_persona_names.update(system_personas.keys())
+                 embedding_service: Optional[EmbeddingService] = None, *,
+                 personas: Dict[str, Persona],
+                 system_persona_names: Set[str],
+                 tool_manager: ToolManager) -> None:
+        # DP-200 slice B: persona loading and tool-handler registration live in
+        # src/bootstrap (the composition root). ChatSystem receives its real
+        # dependencies instead of locating them itself.
+        self.personas: Dict[str, Persona] = personas
+        self.system_persona_names: Set[str] = system_persona_names
 
         self.memory_manager: MemoryManager = memory_manager
         # DP-113: backend boundary for new-shape recall/retain_turn. The
@@ -200,19 +199,7 @@ class ChatSystem:
         if embedding_service is not None and hasattr(self.memory_backend, "set_embedding_service"):
             self.memory_backend.set_embedding_service(embedding_service)
         self.text_engine: TextEngine = text_engine
-        self.tool_manager: ToolManager = ToolManager()
-        WebSearchHandler().register(self.tool_manager)
-
-        from src.tools.tool_manager import MemoryToolHandler
-        MemoryToolHandler(self.memory_manager).register(self.tool_manager)
-        MemoryRecallHandler(self.memory_backend).register(self.tool_manager)
-
-        from src.tools.ingest_path import IngestPathHandler
-        IngestPathHandler(
-            self.memory_backend,
-            cache_dir=global_config.INGEST_CACHE_DIR,
-            persona_lookup=self.personas.get,
-        ).register(self.tool_manager)
+        self.tool_manager: ToolManager = tool_manager
 
         self.bot_logic: BotLogic = BotLogic(self)
         self.last_api_requests: Dict[str, Dict[str, Optional[Dict[str, Any]]]] = defaultdict(dict)
