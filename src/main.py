@@ -30,7 +30,6 @@ from src.clients.notification import (
 
 from src.interfaces.discord_bot import create_discord_bot
 from src.interfaces.gmail_bot import create_gmail_bot
-from src.interfaces.kobold_adapter import create_kobold_adapter
 from src.interfaces.kobold_engine_adapter import create_kobold_engine_adapter
 from config.global_config import (
     CHAT_LOG_LOCATION,
@@ -121,13 +120,9 @@ def _register_interfaces(
         app.register_task("gmail", gmail_bot.start())
 
     if WEB_INTERFACE:
-        logger.info(f"Initializing Kobold Web API on port {KOBOLD_PORT}...")
-        kobold_adapter = create_kobold_adapter(bot)
-        # Configure the adapter's port from the config
-        kobold_adapter.port = KOBOLD_PORT
-        app.register_task("kobold_api", kobold_adapter.start())
-
-        # Also start the engine-orchestrated version on a parallel port
+        # Engine-orchestrated Kobold adapter (bespoke DERPR portal at /derpr).
+        # The legacy :5002 passthrough adapter was retired in DP-200 (finding A);
+        # the engine adapter keeps its established :KOBOLD_PORT+1 (5003) port.
         engine_port = KOBOLD_PORT + 1
         logger.info(f"Initializing Kobold Engine API on port {engine_port}...")
         engine_adapter = create_kobold_engine_adapter(bot)

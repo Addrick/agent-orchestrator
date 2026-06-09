@@ -1,10 +1,10 @@
 # src/interfaces/_persona_patch.py
-"""Shared PATCH helpers for the kobold adapter pair.
+"""Shared PATCH helpers for the kobold engine adapter.
 
-Both `kobold_adapter.py` and `kobold_engine_adapter.py` accept persona PATCH
-requests with the same field set. Centralizing the kobold-extras mapping +
-known-key list here keeps the two adapter PATCH handlers in sync without
-introducing a circular import.
+`kobold_engine_adapter.py` accepts persona PATCH requests over a fixed field
+set. Centralizing the kobold-extras mapping + known-key list here keeps the
+PATCH handling reusable and isolated (the legacy :5002 `kobold_adapter.py`
+that also consumed these was retired in DP-200 finding A).
 """
 
 from typing import Any, Callable, Dict, List, Tuple
@@ -12,8 +12,8 @@ from typing import Any, Callable, Dict, List, Tuple
 from src.persona import Persona
 
 
-# Keys handled by the legacy adapter's PATCH route (kobold_adapter.py).
-_KNOWN_PATCH_KEYS_LEGACY = {
+# Base set of persona keys accepted by a kobold-adapter PATCH route.
+_KNOWN_PATCH_KEYS_BASE = {
     "prompt",
     "model_name",
     "temperature",
@@ -36,7 +36,7 @@ _KNOWN_PATCH_KEYS_LEGACY = {
 }
 
 # Engine adapter additionally accepts chat_template.
-_KNOWN_PATCH_KEYS_ENGINE = _KNOWN_PATCH_KEYS_LEGACY | {"chat_template"}
+_KNOWN_PATCH_KEYS_ENGINE = _KNOWN_PATCH_KEYS_BASE | {"chat_template"}
 
 
 # (key, coercer) pairs. Coercer raises ValueError/TypeError on bad input,
