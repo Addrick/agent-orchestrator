@@ -34,6 +34,13 @@ from google.genai.types import GenerateContentConfig, Tool, GoogleSearch, Candid
     FunctionDeclaration, Part, ThinkingConfig
 from src.utils.google_utils import process_grounding_metadata
 from src.generation_params import GenerationParams
+from src.text_tool_protocol import (
+    TOOL_CALL_OPEN,
+    TOOL_CALL_CLOSE,
+    decode_tool_call_payload,
+    extract_first_tool_call_block,
+    render_tool_descriptions,
+)
 
 AGY_CALL_TIMEOUT_SECONDS = 120.0
 
@@ -728,18 +735,14 @@ class TextEngine:
 
         protocol_desc = (
             "You may request a tool by emitting EXACTLY "
-            "<tool_call>{\"name\": \"<tool_name>\", \"arguments\": {<json args>}}</tool_call> "
+            f"{TOOL_CALL_OPEN}{{\"name\": \"<tool_name>\", \"arguments\": "
+            f"{{<json args>}}}}{TOOL_CALL_CLOSE} "
             "as the last thing. Answer in plain text otherwise, and use no other tools/files/shell/web."
         )
 
-        lines = [protocol_desc]
-        for t in tools:
-            func = t.get("function", {})
-            name = func.get("name", "")
-            description = func.get("description", "")
-            parameters = func.get("parameters", {})
-            lines.append(f"name: {name}, description: {description}, parameters: {parameters}")
-
+        # Shared renderer keeps the agy and streaming paths from drifting on
+        # how a tool's name/description/parameters are formatted.
+        lines = [protocol_desc, *render_tool_descriptions(tools)]
         return "\n".join(lines)
 
     @staticmethod
@@ -747,16 +750,13 @@ class TextEngine:
         if not text:
             return None
         cleaned = re.sub(r"<SYSTEM_MESSAGE>.*?</SYSTEM_MESSAGE>", "", text, flags=re.DOTALL)
-        match = re.search(r"<tool_call>(.*?)</tool_call>", cleaned, flags=re.DOTALL)
-        if not match:
+        inner = extract_first_tool_call_block(cleaned)
+        if inner is None:
             return None
-        inner = match.group(1).strip()
-        try:
-            parsed = json.loads(inner)
-        except json.JSONDecodeError:
+        parsed = decode_tool_call_payload(inner)
+        if parsed is None:
             return None
-        if not isinstance(parsed, dict):
-            return None
+        # agy policy: both keys must be present; id is a fresh uuid.
         if "name" not in parsed or "arguments" not in parsed:
             return None
         call_id = f"agy_{uuid.uuid4().hex}"
