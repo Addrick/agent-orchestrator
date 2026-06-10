@@ -229,9 +229,9 @@ async def test_channel_mode_in_non_server_context_integration(
     )
 
     # 5. ASSERTION
-    assert 'u1' in chat_system.last_api_requests
-    assert 'test_persona' in chat_system.last_api_requests['u1']
-    final_payload = chat_system.last_api_requests['u1']['test_persona']
+    assert 'u1' in chat_system.turn_persistence.last_api_requests
+    assert 'test_persona' in chat_system.turn_persistence.last_api_requests['u1']
+    final_payload = chat_system.turn_persistence.last_api_requests['u1']['test_persona']
     messages = final_payload.get('messages', [])
     history_string = " ".join([m.get('content', '') for m in messages])
 

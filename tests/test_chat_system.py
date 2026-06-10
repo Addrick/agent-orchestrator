@@ -133,9 +133,9 @@ async def test_generate_response_stores_payload_on_llm_error(chat_system_with_mo
     await system.generate_response("test_persona", "user123", "channel", "test message")
 
     # Assert that the payload from the exception was stored
-    assert "user123" in system.last_api_requests
-    assert "test_persona" in system.last_api_requests["user123"]
-    assert system.last_api_requests["user123"]["test_persona"] == failed_payload
+    assert "user123" in system.turn_persistence.last_api_requests
+    assert "test_persona" in system.turn_persistence.last_api_requests["user123"]
+    assert system.turn_persistence.last_api_requests["user123"]["test_persona"] == failed_payload
 
 
 def test_store_api_request_preserves_tools_across_iterations(chat_system_with_mocks):
@@ -145,18 +145,18 @@ def test_store_api_request_preserves_tools_across_iterations(chat_system_with_mo
 
     # Iteration 0: stores tools
     system.turn_persistence.store_api_request("user1", "persona1", {"model": "m1"}, tools_for_llm=tools)
-    assert system.last_api_requests["user1"]["persona1"]["_tools_for_llm"] is tools
+    assert system.turn_persistence.last_api_requests["user1"]["persona1"]["_tools_for_llm"] is tools
 
     # Iteration 1+: tools_for_llm=None, but should carry forward
     system.turn_persistence.store_api_request("user1", "persona1", {"model": "m1"}, tools_for_llm=None)
-    assert system.last_api_requests["user1"]["persona1"]["_tools_for_llm"] is tools
+    assert system.turn_persistence.last_api_requests["user1"]["persona1"]["_tools_for_llm"] is tools
 
 
 def test_store_api_request_no_tools_when_never_set(chat_system_with_mocks):
     """If tools were never stored, subsequent None calls should not invent them."""
     system, _, _, _, _ = chat_system_with_mocks
     system.turn_persistence.store_api_request("user1", "persona1", {"model": "m1"}, tools_for_llm=None)
-    assert "_tools_for_llm" not in system.last_api_requests["user1"]["persona1"]
+    assert "_tools_for_llm" not in system.turn_persistence.last_api_requests["user1"]["persona1"]
 
 
 @pytest.mark.asyncio

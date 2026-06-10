@@ -204,29 +204,6 @@ class ChatSystem:
             is_retry=is_retry, client_messages=client_messages,
         )
 
-    # ------------------------------------------------------------------
-    # TurnPersistence public surface. The turn write-paths and dump_history's
-    # request caches live in src/turn_persistence.py; message_handler still
-    # reads these caches through ChatSystem (DP-202 takes them to an explicit
-    # dependency).
-    # ------------------------------------------------------------------
-
-    @property
-    def last_api_requests(self) -> Dict[str, Dict[str, Optional[Dict[str, Any]]]]:
-        return self.turn_persistence.last_api_requests
-
-    @last_api_requests.setter
-    def last_api_requests(self, value: Dict[str, Dict[str, Optional[Dict[str, Any]]]]) -> None:
-        self.turn_persistence.last_api_requests = value
-
-    @property
-    def last_api_iterations(self) -> Dict[str, Dict[str, List[Dict[str, Any]]]]:
-        return self.turn_persistence.last_api_iterations
-
-    @last_api_iterations.setter
-    def last_api_iterations(self, value: Dict[str, Dict[str, List[Dict[str, Any]]]]) -> None:
-        self.turn_persistence.last_api_iterations = value
-
     async def _orchestrate(
             self,
             persona_name: str,

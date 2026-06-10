@@ -38,7 +38,7 @@ def test_store_api_request_eviction_is_lru(chat_system_with_mocks):
 
     for i in range(cap):
         system.turn_persistence.store_api_request(f"u{i}", "p", {"payload": i})
-    assert len(system.last_api_requests) == cap
+    assert len(system.turn_persistence.last_api_requests) == cap
 
     # Touch the earliest-inserted user — under LRU this must move it to MRU.
     system.turn_persistence.store_api_request("u0", "p", {"payload": "touched"})
@@ -46,9 +46,9 @@ def test_store_api_request_eviction_is_lru(chat_system_with_mocks):
     # One more distinct user tips us over capacity, forcing one eviction.
     system.turn_persistence.store_api_request(f"u{cap}", "p", {"payload": "new"})
 
-    assert len(system.last_api_requests) == cap
-    assert "u0" in system.last_api_requests, "touched user must survive (LRU)"
-    assert "u1" not in system.last_api_requests, "least-recently-used must be evicted"
+    assert len(system.turn_persistence.last_api_requests) == cap
+    assert "u0" in system.turn_persistence.last_api_requests, "touched user must survive (LRU)"
+    assert "u1" not in system.turn_persistence.last_api_requests, "least-recently-used must be evicted"
 
 
 def test_store_api_request_eviction_does_not_orphan_iterations(chat_system_with_mocks):
@@ -58,7 +58,7 @@ def test_store_api_request_eviction_does_not_orphan_iterations(chat_system_with_
     for i in range(cap + 1):
         system.turn_persistence.store_api_request(f"v{i}", "p", {"payload": i}, is_first_iteration=True)
     # Whatever set of users remain, the two caches must agree on membership.
-    assert set(system.last_api_requests) == set(system.last_api_iterations)
+    assert set(system.turn_persistence.last_api_requests) == set(system.turn_persistence.last_api_iterations)
 
 
 # --- #6: empty/whitespace user message must not reach the LLM prompt --------
