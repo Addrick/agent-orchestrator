@@ -18,6 +18,7 @@ from src.bootstrap import build_tool_manager
 from src.chat_system import ChatSystem
 from src.engine import TextEngine
 from src.memory.memory_manager import MemoryManager
+from src.message_handler import BotLogic
 from src.persona import Persona
 
 
@@ -56,4 +57,31 @@ def make_chat_system(
         system_persona_names=system_persona_names or set(),
         tool_manager=tool_manager,
         models_available=models_available,
+    )
+
+
+def make_bot_logic(state: Any) -> BotLogic:
+    """Build a BotLogic over a mutable state bucket (DP-202 explicit deps).
+
+    `state` is any object carrying the attributes BotLogic's deps read —
+    `personas` (dict), `models_available` (dict), `last_api_requests` /
+    `last_api_iterations` (dump caches; `state` itself stands in for
+    TurnPersistence), `text_engine`, `tool_manager`, `memory_manager`,
+    optionally `system_persona_names` (set, for visible_personas filtering).
+    A plain MagicMock works: tests mutate the attributes and the closures
+    dereference the live values, mirroring how ChatSystem wires production.
+    """
+    return BotLogic(
+        personas=lambda: state.personas,
+        visible_personas=lambda: {
+            name: persona
+            for name, persona in state.personas.items()
+            if name not in (getattr(state, "system_persona_names", None) or set())
+        },
+        text_engine=lambda: state.text_engine,
+        tool_manager=lambda: state.tool_manager,
+        turn_persistence=state,
+        memory_manager=state.memory_manager,
+        get_models_available=lambda: state.models_available,
+        set_models_available=lambda models: setattr(state, "models_available", models),
     )

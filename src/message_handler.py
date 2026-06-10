@@ -2,7 +2,7 @@
 
 import json
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from config.global_config import (
     DEFAULT_MODEL_NAME,
@@ -16,14 +16,49 @@ from src.utils import model_utils
 from src.utils.model_utils import get_model_list
 
 if TYPE_CHECKING:
-    from src.chat_system import ChatSystem
+    from src.engine import TextEngine
+    from src.memory.memory_manager import MemoryManager
+    from src.tools.tool_manager import ToolManager
+    from src.turn_persistence import TurnPersistence
 
 logger = logging.getLogger(__name__)
 
 
 class BotLogic:
-    def __init__(self, chat_system: "ChatSystem") -> None:
-        self.chat_system: "ChatSystem" = chat_system
+    """Dev-command layer. Takes its dependencies explicitly (DP-202) — it
+    must never import or receive the ChatSystem orchestrator.
+
+    Rebindable collaborators (`personas`, `visible_personas`, `text_engine`,
+    `tool_manager`, the model catalog) are injected as zero-arg providers
+    (the RequestBuilder `persona_lookup` / ConfirmationManager
+    `tool_manager_lookup` pattern) so post-init rebinds on the owner stay
+    visible. `turn_persistence` and `memory_manager` are stable instances.
+    """
+
+    def __init__(
+            self,
+            *,
+            personas: Callable[[], Dict[str, Persona]],
+            visible_personas: Callable[[], Dict[str, Persona]],
+            text_engine: Callable[[], "TextEngine"],
+            tool_manager: Callable[[], "ToolManager"],
+            turn_persistence: "TurnPersistence",
+            memory_manager: "MemoryManager",
+            get_models_available: Callable[[], Dict[str, Any]],
+            set_models_available: Callable[[Dict[str, Any]], None],
+    ) -> None:
+        # Providers returning the LIVE objects (call to dereference).
+        self.personas = personas
+        self.visible_personas = visible_personas
+        self.text_engine = text_engine
+        self.tool_manager = tool_manager
+        # Stable instances.
+        self.turn_persistence = turn_persistence
+        self.memory_manager = memory_manager
+        # Model catalog accessors — the catalog lives on (and is rebound by)
+        # the owner; `update_models` writes back through the setter.
+        self.get_models_available = get_models_available
+        self.set_models_available = set_models_available
         self.command_handlers = {
             'help': self._handle_help,
             'update_models': self._handle_update_models,
@@ -79,7 +114,7 @@ class BotLogic:
         if not handler:
             return None
 
-        current_persona: Optional[Persona] = self.chat_system.personas.get(persona_name)
+        current_persona: Optional[Persona] = self.personas().get(persona_name)
         if not current_persona:
             return {"response": "Error: Current persona not found.", "mutated": False}
 
@@ -106,7 +141,7 @@ class BotLogic:
         set_fields = '/'.join(self.set_handlers.keys())
         help_msg: str = ("Talk to a specific persona by starting your message with their name. \n \n"
                          "Currently active personas: \n" +
-                         ', '.join(self.chat_system.visible_personas().keys()) + "\n\n"
+                         ', '.join(self.visible_personas().keys()) + "\n\n"
                          "Bot commands: \n"
                          "hello (start new conversation), \n"
                          "goodbye (end conversation), \n"
@@ -139,7 +174,7 @@ class BotLogic:
         Bypasses ChatSystem (no history, memory, or channel side-effects).
         Returns the chosen string (verbatim from `choices`) or None for no-match.
         """
-        persona = self.chat_system.personas.get(persona_name)
+        persona = self.personas().get(persona_name)
         if not persona:
             logger.warning(f"Selector persona '{persona_name}' not found")
             return None
@@ -177,7 +212,7 @@ class BotLogic:
         )
 
         try:
-            response, _ = await self.chat_system.text_engine.generate_response(
+            response, _ = await self.text_engine().generate_response(
                 persona_config=persona.get_config_for_engine(),
                 history_object={
                     "persona_prompt": persona.get_prompt(),
@@ -235,7 +270,7 @@ class BotLogic:
         Returns model name if successful, None if persona unavailable or no match.
         """
         models_list: List[str] = []
-        for models in self.chat_system.models_available.values():
+        for models in self.get_models_available().values():
             if isinstance(models, list):
                 models_list.extend(models)
         if not models_list:
@@ -281,7 +316,7 @@ class BotLogic:
         # persona names are lowercase-keyed by convention (prompt text keeps case)
         new_persona_name: str = args[0].lower()
 
-        if new_persona_name in self.chat_system.personas:
+        if new_persona_name in self.personas():
             return f"Error: Persona '{new_persona_name}' already exists.", False
 
         prompt_args: List[str] = args[1:]
@@ -292,7 +327,7 @@ class BotLogic:
             model_name=DEFAULT_MODEL_NAME,
             prompt=prompt
         )
-        self.chat_system.personas[new_persona_name] = new_persona
+        self.personas()[new_persona_name] = new_persona
         return f"Added '{new_persona_name}' with prompt: '{prompt}'", True
 
     def _handle_delete(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[Optional[str], bool]:
@@ -300,10 +335,10 @@ class BotLogic:
             return None, False
         persona_to_delete: str = args[0].lower()
 
-        if persona_to_delete not in self.chat_system.personas:
+        if persona_to_delete not in self.personas():
             return f"Error: Persona '{persona_to_delete}' not found.", False
 
-        del self.chat_system.personas[persona_to_delete]
+        del self.personas()[persona_to_delete]
         return f"Deleted persona '{persona_to_delete}'.", True
 
     def _handle_detail(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[Optional[str], bool]:
@@ -371,7 +406,7 @@ class BotLogic:
         return f"{provider}.{key} for '{persona.get_name()}' is {value!r}.", False
 
     def _what_models(self, args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
-        all_models: Dict[str, Any] = self.chat_system.models_available
+        all_models: Dict[str, Any] = self.get_models_available()
         if len(args) == 1:
             return f"Available model options: {json.dumps(all_models, indent=2)}", False
 
@@ -384,10 +419,10 @@ class BotLogic:
         return None, False
 
     def _what_personas(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        return f"Available personas are: {list(self.chat_system.visible_personas().keys())}", False
+        return f"Available personas are: {list(self.visible_personas().keys())}", False
 
     def _what_tools(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        all_tool_defs = self.chat_system.tool_manager.get_tool_definitions()
+        all_tool_defs = self.tool_manager().get_tool_definitions()
         all_tool_names = {tool['function']['name'] for tool in all_tool_defs}
         enabled_tools = persona.get_enabled_tools()
 
@@ -531,7 +566,7 @@ class BotLogic:
         if len(args) < 2:
             return "Usage: set tools <all|none|tool_name_1> [tool_name_2]... (prefix with - to exclude)", False
 
-        all_tool_defs = self.chat_system.tool_manager.get_tool_definitions()
+        all_tool_defs = self.tool_manager().get_tool_definitions()
         available_tool_names = sorted(tool['function']['name'] for tool in all_tool_defs)
         available_set = set(available_tool_names)
 
@@ -623,7 +658,7 @@ class BotLogic:
             return "Usage: dump_last", False
 
         persona_name: str = persona.get_name()
-        last_request: Optional[Dict[str, Any]] = self.chat_system.last_api_requests.get(user_identifier, {}).get(
+        last_request: Optional[Dict[str, Any]] = self.turn_persistence.last_api_requests.get(user_identifier, {}).get(
             persona_name)
 
         if not last_request:
@@ -694,7 +729,7 @@ class BotLogic:
             return "Usage: dump_history", False
 
         persona_name = persona.get_name()
-        last_request = self.chat_system.last_api_requests.get(user_identifier, {}).get(persona_name)
+        last_request = self.turn_persistence.last_api_requests.get(user_identifier, {}).get(persona_name)
 
         if not last_request:
             return f"{persona_name}: No previous request to analyze.", False
@@ -703,7 +738,7 @@ class BotLogic:
         # grow as tool results accumulate). Falls back to the single last
         # payload if the per-turn list isn't populated.
         iterations = (
-            self.chat_system.last_api_iterations.get(user_identifier, {}).get(persona_name)
+            self.turn_persistence.last_api_iterations.get(user_identifier, {}).get(persona_name)
             or [last_request]
         )
 
@@ -883,8 +918,8 @@ class BotLogic:
     def _handle_update_models(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[str, bool]:
         if args:
             return "Usage: update_models", False
-        self.chat_system.models_available = get_model_list(update=True) or {}
-        return f"Model list updated. Currently available: {json.dumps(self.chat_system.models_available, indent=2)}", False
+        self.set_models_available(get_model_list(update=True) or {})
+        return f"Model list updated. Currently available: {json.dumps(self.get_models_available(), indent=2)}", False
 
     def _handle_trust(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[str, bool]:
         if not args:
@@ -896,7 +931,7 @@ class BotLogic:
         
         reason = " ".join(args[1:]) if len(args) > 1 else "No reason provided"
         
-        success = self.chat_system.memory_manager.mark_trusted(
+        success = self.memory_manager.mark_trusted(
             summary_id=summary_id,
             operator_id=user_identifier,
             reason=reason
@@ -917,7 +952,7 @@ class BotLogic:
         
         reason = " ".join(args[1:]) if len(args) > 1 else "No reason provided"
         
-        success = self.chat_system.memory_manager.mark_untrusted(
+        success = self.memory_manager.mark_untrusted(
             summary_id=summary_id,
             operator_id=user_identifier,
             reason=reason

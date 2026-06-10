@@ -5,28 +5,33 @@ from unittest.mock import MagicMock, AsyncMock, patch
 
 from src.message_handler import BotLogic
 from src.persona import Persona
-from src.chat_system import ChatSystem
+from tests.helpers import make_bot_logic
 
 
 @pytest.fixture
 def mock_chat_system_with_state():
-    """Creates a mock ChatSystem that has a real dictionary for personas.json."""
-    chat_system = MagicMock(spec=ChatSystem)
+    """Mutable state bucket BotLogic's explicit deps close over (DP-202).
+
+    A plain MagicMock with a real `personas` dict; tests mutate attributes
+    (models_available, last_api_requests, text_engine, ...) and the dep
+    closures see the live values.
+    """
+    chat_system = MagicMock()
     # Start with a real dictionary to track state changes
     chat_system.personas = {
         "derpr": Persona("derpr", "gpt-4", "You are derpr.", history_messages=20),
         "testbot": Persona("testbot", "gpt-3", "You are testbot.")
     }
-    # Instance attributes aren't part of the spec; tests that exercise the dump
-    # set last_api_requests explicitly and rely on the single-payload fallback.
+    # Tests that exercise the dump set last_api_requests explicitly and rely
+    # on the single-payload fallback.
     chat_system.last_api_iterations = {}
     return chat_system
 
 
 @pytest.fixture
 def bot_logic(mock_chat_system_with_state):
-    """Creates a BotLogic instance connected to the stateful mock ChatSystem."""
-    return BotLogic(mock_chat_system_with_state)
+    """Creates a BotLogic instance over the stateful mock."""
+    return make_bot_logic(mock_chat_system_with_state)
 
 
 # --- Test Cases for State Mutation (add/delete) ---
@@ -617,7 +622,7 @@ def bot_logic_with_tools(mock_chat_system_with_state):
         {"type": "function", "function": {"name": "search_tickets"}},
     ]
     mock_chat_system_with_state.tool_manager = mock_tool_manager
-    return BotLogic(mock_chat_system_with_state)
+    return make_bot_logic(mock_chat_system_with_state)
 
 
 @pytest.mark.asyncio
@@ -881,7 +886,7 @@ def bot_logic_with_selector(mock_chat_system_with_state):
     }
     mock_chat_system_with_state.text_engine = MagicMock()
     mock_chat_system_with_state.text_engine.generate_response = AsyncMock()
-    return BotLogic(mock_chat_system_with_state)
+    return make_bot_logic(mock_chat_system_with_state)
 
 
 @pytest.mark.asyncio

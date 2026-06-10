@@ -125,6 +125,14 @@ CONTRACTS: List[Tuple[str, Tuple[str, ...]]] = [
         "src.chat_system", "src.message_handler", "src.memory",
         "src.interfaces", "src.agents",
     )),
+    # Command layer (BotLogic) takes explicit deps (DP-202): it must never
+    # import the orchestrator, engines, transports, or agents at runtime —
+    # collaborators are injected by the composition site (ChatSystem.__init__).
+    ("src.message_handler", (
+        "src.chat_system", "src.engine", "src.stream_engine",
+        "src.interfaces", "src.agents", "src.turn_persistence",
+        "src.memory",
+    )),
     # Request assembly sits below the orchestrator: personas, tools, storage.
     ("src.request_builder", (
         "src.chat_system", "src.message_handler", "src.interfaces",

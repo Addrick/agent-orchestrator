@@ -75,13 +75,26 @@ class ChatSystem:
         self.text_engine: TextEngine = text_engine
         self.tool_manager: ToolManager = tool_manager
 
-        self.bot_logic: BotLogic = BotLogic(self)
         self.turn_persistence: TurnPersistence = TurnPersistence(
             memory_manager, self.memory_backend,
         )
         # Injected by the composition root (src/bootstrap) so construction
-        # stays filesystem-free; `update_models` rebinds it at runtime.
+        # stays filesystem-free; `update_models` (BotLogic) and main.py's
+        # refresh loop rebind it at runtime.
         self.models_available: Dict[str, Any] = models_available if models_available is not None else {}
+        # DP-202: BotLogic takes explicit deps instead of the whole ChatSystem.
+        # Rebindable collaborators go in as closures over self so post-init
+        # swaps (tests, admin paths) stay visible to the command layer.
+        self.bot_logic: BotLogic = BotLogic(
+            personas=lambda: self.personas,
+            visible_personas=self.visible_personas,
+            text_engine=lambda: self.text_engine,
+            tool_manager=lambda: self.tool_manager,
+            turn_persistence=self.turn_persistence,
+            memory_manager=memory_manager,
+            get_models_available=lambda: self.models_available,
+            set_models_available=lambda models: setattr(self, "models_available", models),
+        )
         self.background_tasks: Set[Coroutine[Any, Any, Any]] = set()
         # Lookup closure over self (like request_builder's persona_lookup) so
         # post-init rebinds of `self.tool_manager` stay visible to resumes.

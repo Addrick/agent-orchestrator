@@ -15,9 +15,9 @@ from __future__ import annotations
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from src.chat_system import ChatSystem
 from src.message_handler import BotLogic
 from src.persona import ExecutionMode, MemoryMode, Persona
+from tests.helpers import make_bot_logic
 
 
 # --- Fixtures ---
@@ -25,7 +25,8 @@ from src.persona import ExecutionMode, MemoryMode, Persona
 
 @pytest.fixture
 def chat_system():
-    cs = MagicMock(spec=ChatSystem)
+    """Mutable state bucket BotLogic's explicit deps close over (DP-202)."""
+    cs = MagicMock()
     cs.personas = {
         "derpr": Persona("derpr", "gpt-4", "You are derpr.", history_messages=20),
     }
@@ -34,7 +35,6 @@ def chat_system():
         "From Anthropic": ["claude-opus-4-7"],
     }
     cs.last_api_requests = {}
-    # Attach attributes not visible on the class spec (set in __init__).
     cs.memory_manager = MagicMock()
     cs.tool_manager = MagicMock()
     return cs
@@ -42,7 +42,7 @@ def chat_system():
 
 @pytest.fixture
 def bot(chat_system):
-    return BotLogic(chat_system)
+    return make_bot_logic(chat_system)
 
 
 @pytest.fixture
@@ -56,11 +56,11 @@ def bot_with_tools(chat_system):
         {"type": "function", "function": {"name": "google_grounding_search"}},
     ]
     chat_system.tool_manager = tm
-    return BotLogic(chat_system)
+    return make_bot_logic(chat_system)
 
 
 def _persona(bot: BotLogic) -> Persona:
-    return bot.chat_system.personas["derpr"]
+    return bot.personas()["derpr"]
 
 
 # =============================================================================

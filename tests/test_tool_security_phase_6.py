@@ -3,7 +3,7 @@
 import pytest
 from datetime import datetime
 from src.memory.memory_manager import MemoryManager
-from src.message_handler import BotLogic
+from tests.helpers import make_bot_logic
 from unittest.mock import MagicMock
 from config.global_config import EMBEDDING_MODEL
 import json
@@ -69,7 +69,7 @@ def test_mark_trusted_untrusted(mem_manager):
 def test_bot_logic_trust_commands(mem_manager):
     chat_system = MagicMock()
     chat_system.memory_manager = mem_manager
-    bot_logic = BotLogic(chat_system)
+    bot_logic = make_bot_logic(chat_system)
     
     persona = MagicMock()
     persona.get_name.return_value = "p1"
