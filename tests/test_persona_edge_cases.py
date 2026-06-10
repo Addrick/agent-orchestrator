@@ -19,7 +19,7 @@ from config import global_config
 from src.persona import Persona, ExecutionMode, MemoryMode
 from src.generation_params import GenerationParams
 from src.tools.policy import ToolPolicy
-from src.utils.save_utils import (
+from src.personas.store import (
     save_personas_to_file,
     load_personas_from_file,
 )

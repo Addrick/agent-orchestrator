@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple, cast
 
 from src.chat_system import ChatSystem
 from src.persona import Persona
-from src.utils.save_utils import load_system_personas_from_file
+from src.personas.store import load_system_personas_from_file
 from src.memory.memory_manager import MemoryManager
 
 logger = logging.getLogger(__name__)

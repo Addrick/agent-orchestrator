@@ -114,6 +114,15 @@ CONTRACTS: List[Tuple[str, Tuple[str, ...]]] = [
         "src.stream_engine", "src.memory", "src.interfaces", "src.agents",
         "src.tools", "src.persona", "src.clients",
     )),
+    # Persona persistence (DP-203: ex-utils/save_utils). May see the persona
+    # domain object and — until DP-204 inverts the validation seam — tools/
+    # (the loader runs DP-128 composition validation). Never orchestration,
+    # engines, transports, agents, or storage.
+    ("src.personas", (
+        "src.chat_system", "src.message_handler", "src.engine",
+        "src.stream_engine", "src.memory", "src.interfaces", "src.agents",
+        "src.clients",
+    )),
     # persona is a domain leaf.
     ("src.persona", (
         "src.chat_system", "src.message_handler", "src.engine",
@@ -173,11 +182,6 @@ KNOWN_DEBT: Set[Tuple[str, str]] = {
     ("src.tools.ingest_path", "src.memory.backend.hindsight"),
     # Legacy shim module re-exporting the agent implementation.
     ("src.interfaces.zammad_bot", "src.agents.zammad_bot"),
-    # save_utils is persona persistence in disguise (future personas/store —
-    # slice B extracts it out of utils/).
-    ("src.utils.save_utils", "src.persona"),
-    ("src.utils.save_utils", "src.tools.definitions"),
-    ("src.utils.save_utils", "src.tools.policy"),
     # persona validates tool composition at load; target inverts this so
     # tools/ depends on persona only.
     ("src.persona", "src.tools.definitions"),

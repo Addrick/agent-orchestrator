@@ -1,13 +1,13 @@
-# tests/test_save_utils_edge_cases.py
+# tests/personas/test_store_edge_cases.py
 """
-DP-199 Batch 7 — save_utils edge cases.
+Persona store edge cases (originally DP-199 Batch 7 for save_utils;
+relocated to src/personas/store.py by DP-203).
 
 Covers persona/model file save/load round-trip + auto-seed behavior, malformed
 input handling, and the legacy flat-key fallback path through _resolve_params_kwargs.
 
-NOTE: test_save_utils_no_tool_imports and test_save_utils_no_policy_import are
-deferred — they are slice-4 contract tests that will be added once the tool
-imports have been removed from save_utils.py.
+Import-boundary rules for the store are enforced mechanically by
+tests/test_module_boundaries.py (DP-204 inverts the persona↔tools edge).
 """
 
 import json
@@ -18,7 +18,7 @@ import pytest
 
 from config import global_config
 from src.persona import Persona, ExecutionMode, MemoryMode
-from src.utils.save_utils import (
+from src.personas.store import (
     _resolve_params_kwargs,
     to_dict,
     save_personas_to_file,
@@ -345,18 +345,3 @@ def test_load_models_missing_key(tmp_path):
     save_file.write_text(json.dumps({"personas": []}))
     assert load_models_from_file(file_path_override=str(save_file)) == {}
 
-
-# ---------------------------------------------------------------------------
-# Slice-4 contract (deferred)
-# ---------------------------------------------------------------------------
-
-@pytest.mark.skip(reason="DP-199 slice-4 contract — defer until save_utils tool imports removed")
-def test_save_utils_no_tool_imports():
-    """save_utils must not import src.tools.definitions (slice-4 contract)."""
-    pass
-
-
-@pytest.mark.skip(reason="DP-199 slice-4 contract — defer until save_utils policy import removed")
-def test_save_utils_no_policy_import():
-    """save_utils must not import src.tools.policy (slice-4 contract)."""
-    pass

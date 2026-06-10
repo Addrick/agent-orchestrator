@@ -11,7 +11,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from src.memory.memory_manager import MemoryManager
 from src.memory.backend.hindsight import HindsightBackend
-from src.utils.save_utils import load_system_personas_from_file
+from src.personas.store import load_system_personas_from_file
 from config.global_config import HINDSIGHT_URL, MEMORY_DATABASE_FILE
 
 logging.basicConfig(

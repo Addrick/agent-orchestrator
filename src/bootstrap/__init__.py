@@ -22,7 +22,7 @@ from src.tools.tool_manager import (
     MemoryRecallHandler, MemoryToolHandler, ToolManager, WebSearchHandler,
 )
 from src.utils.model_utils import get_model_list
-from src.utils.save_utils import (
+from src.personas.store import (
     load_personas_from_file, load_system_personas_from_file,
 )
 

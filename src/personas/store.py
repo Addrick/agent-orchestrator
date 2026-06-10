@@ -1,4 +1,16 @@
-# src/utils/save_utils.py
+# src/personas/store.py
+"""Persona + model-catalog persistence (formerly src/utils/save_utils.py).
+
+Owns the persona save file: user-persona load/save, system-persona loading
+(with DP-128 quarantine-on-load validation), and the model-catalog cache that
+lives under the same JSON file's `models` key.
+
+NOTE on the tools imports below: load-time tool-composition validation
+(DP-128) currently lives here and in src.persona. DP-204 inverts that so
+tools/ depends on persona only; until then the persona STORE is the layer
+allowed to see tools (the loader runs validation), per the module-boundary
+contract in tests/test_module_boundaries.py.
+"""
 
 import json
 import logging

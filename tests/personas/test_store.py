@@ -1,10 +1,10 @@
-# tests/utils/test_save_utils.py
+# tests/personas/test_store.py
 
 import pytest
 import os
 import json
 from pathlib import Path
-from src.utils import save_utils
+from src.personas import store as save_utils
 from src.persona import Persona, MemoryMode, ExecutionMode
 from config.global_config import TEST_PERSONA_SAVE_FILE, PERSONA_SAVE_FILE
 
@@ -82,7 +82,7 @@ def test_load_persona_attributes_integrity(tmp_path):
     Verifies that a known-good JSON structure is correctly parsed into
     a Persona object with all attributes preserved.
     """
-    from src.utils.save_utils import load_personas_from_file
+    from src.personas.store import load_personas_from_file
     from src.persona import ExecutionMode, MemoryMode
     import json
 

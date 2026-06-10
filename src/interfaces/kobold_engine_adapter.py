@@ -40,7 +40,7 @@ from src.chat_system import (
 )
 from src.interfaces.kobold_export import build_kobold_savefile, build_transcript, _parse_tool_context
 from src.interfaces.portal_render import render_portal_html
-from src.utils.save_utils import save_personas_to_file
+from src.personas.store import save_personas_to_file
 from src.persona_fields import apply_patch_fields
 from src.interfaces._persona_patch import (
     _KNOWN_PATCH_KEYS_ENGINE as _KNOWN_PATCH_KEYS,

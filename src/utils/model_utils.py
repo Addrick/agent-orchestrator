@@ -4,7 +4,7 @@ import logging
 import os
 from typing import List, Dict, Any, Optional
 
-from src.utils import save_utils
+from src.personas import store as persona_store
 
 logger = logging.getLogger(__name__)
 
@@ -137,10 +137,10 @@ def get_model_list(update: bool = False) -> Optional[Dict[str, Any]]:
             'From Anthropic': refresh_available_anthropic_models(),
             **STATIC_MODELS,
         }
-        save_utils.save_models_to_file(all_available_models)
+        persona_store.save_models_to_file(all_available_models)
         return all_available_models
 
-    cached = save_utils.load_models_from_file()
+    cached = persona_store.load_models_from_file()
     if cached is None:
         # No cache yet (fresh install / before first update): still expose the
         # static models so agy/local are selectable without an API round-trip.

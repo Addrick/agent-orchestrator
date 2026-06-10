@@ -70,7 +70,8 @@ src/
                          kobold_export
   clients/               ZammadClient + ZammadIntegration, NotificationRouter,
                          Notifier impls, ServiceIntegration ABC
-  utils/                 google_utils, message_utils, model_utils, save_utils
+  personas/              store.py — persona/model file persistence
+  utils/                 google_utils, message_utils, model_utils
   app_manager.py         Top-level lifecycle
   main.py                Startup wiring
 config/                  global_config.py, default_personas.json,

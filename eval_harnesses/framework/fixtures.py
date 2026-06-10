@@ -90,7 +90,7 @@ def build_fixture(
     from src.memory.memory_manager import MemoryManager
     from src.engine import TextEngine
     from src.bootstrap import create_chat_system
-    from src.utils.save_utils import load_personas_from_file
+    from src.personas.store import load_personas_from_file
 
     # Real-DB mode: variant points at an existing user DB. Don't reschema,
     # don't unlink on teardown — treat as read-only.

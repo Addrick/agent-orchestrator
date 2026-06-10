@@ -32,7 +32,7 @@ from src.tools.tool_loop import ToolLoop, _ApiPayloadEvent, _LoopFinishedEvent
 from src.turn_persistence import TurnPersistence
 from src.tools.tool_manager import ToolManager
 from src.tools.turn_context import TurnContext, turn_scope
-from src.utils.save_utils import save_personas_to_file
+from src.personas.store import save_personas_to_file
 
 logger = logging.getLogger(__name__)
 

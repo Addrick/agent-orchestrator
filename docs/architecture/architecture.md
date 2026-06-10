@@ -361,7 +361,9 @@ Top-level lifecycle coordinator. Starts agent_manager.auto_start(), launches int
 - `google_utils.py` -- `process_grounding_metadata()`: extracts citations and sources from Google grounding responses, inserts inline citation markers
 - `message_utils.py` -- `cleanse_message_for_history()`: strips citation markup and source blocks from messages before storing in history. `resolve_redirect_url()`: follows redirects with 429 retry for URL resolution
 - `model_utils.py` -- `get_model_prefix()`: maps model names to family prefixes for routing and rate limiting. Model list refresh functions for OpenAI/Google/Anthropic APIs. **Model list — single source of truth is `chat_system.models_available`** (a snapshot taken at startup via `get_model_list()`, refreshed by the `update_models` command). Both consumers read it: the `what models` command, and the web UI model dropdown (`GET /api/v1/models/list` in both kobold adapters → flattens `chat_system.models_available`). The dropdown used to re-read the cache file via `get_model_list()` per request — unified to `models_available` on 2026-06-02 (DP-127) so it can't drift from `what models`. Underlying cache: `data/personas.json` → `"models"`. `get_model_list(update=True)` is the only path that hits provider APIs (slow) and rewrites the cache. **`STATIC_MODELS`** (`agy-flash`, `local`) are code-known, non-API models merged in on *both* the update and cached-read paths so they're always selectable without an API refresh — fixed 2026-06-01 (DP-127); previously they only existed on the update path and a pre-agy cache hid them.
-- `save_utils.py` -- Persona JSON file I/O: load/save personas and models to disk. Handles default + system persona merging on startup
+
+### `src/personas/`
+- `store.py` -- Persona JSON file I/O (moved from `utils/save_utils.py`, DP-203): load/save personas and the model catalog to disk. Handles default-persona auto-seeding, system-persona loading, and DP-128 quarantine-on-load validation
 
 ### `src/main.py` -- Startup Sequence
 1. MemoryManager (SQLite) + schema migration
