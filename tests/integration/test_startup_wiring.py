@@ -93,6 +93,21 @@ def test_all_service_bindings_have_registered_services(wired_system):
     assert not missing, f"Service bindings without registered services: {missing}"
 
 
+def test_models_available_injected_by_bootstrap():
+    """create_chat_system populates models_available from the model cache
+    (DP-201): ChatSystem itself no longer reads the cache file at construction,
+    so the composition root must inject it."""
+    mm = MagicMock(spec=MemoryManager)
+    mm.backend = MagicMock()
+    with patch("src.bootstrap.load_personas_from_file", return_value={}), \
+            patch("src.bootstrap.load_system_personas_from_file", return_value={}), \
+            patch("src.bootstrap.get_model_list", return_value={"Local": ["local"]}):
+        system = create_chat_system(
+            memory_manager=mm, text_engine=MagicMock(spec=TextEngine),
+        )
+    assert system.models_available == {"Local": ["local"]}
+
+
 def test_get_service_returns_registered_integration(wired_system):
     """Public service lookup replaces reaching into ChatSystem._services."""
     zammad = wired_system.get_service("zammad")

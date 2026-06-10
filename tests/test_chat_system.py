@@ -4,8 +4,8 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 import json
 
-from src.bootstrap import create_chat_system
 from src.confirmations import ConfirmationManager
+from tests.helpers import make_chat_system
 from src.chat_system import (
     ChatSystem, ResponseType, RequestContext,
     DoneEvent, ErrorEvent, TokenEvent,
@@ -43,17 +43,17 @@ def chat_system_with_mocks():
 
     mock_persona = Persona('test_persona', 'mock_model', 'prompt')
 
-    with patch('src.bootstrap.load_personas_from_file', return_value={"test_persona": mock_persona}), \
-            patch('src.bootstrap.ToolManager', return_value=mock_tool_manager):
-        system = create_chat_system(
-            memory_manager=mock_memory_manager,
-            text_engine=text_engine,
-        )
-        # Mock bot_logic by default to isolate ChatSystem logic
-        system.bot_logic.preprocess_message = AsyncMock(return_value=None)
+    system = make_chat_system(
+        memory_manager=mock_memory_manager,
+        text_engine=text_engine,
+        personas={"test_persona": mock_persona},
+        tool_manager=mock_tool_manager,
+    )
+    # Mock bot_logic by default to isolate ChatSystem logic
+    system.bot_logic.preprocess_message = AsyncMock(return_value=None)
 
-        yield (system, mock_memory_manager, text_engine,
-               mock_persona, mock_tool_manager)
+    yield (system, mock_memory_manager, text_engine,
+           mock_persona, mock_tool_manager)
 
 
 # --- Tests for generate_response Core Logic ---
@@ -635,6 +635,23 @@ async def test_execute_write_calls(chat_system_with_mocks):
     assert len(history) == 1
 
 
+@pytest.mark.asyncio
+async def test_confirmations_see_post_init_tool_manager_swap(chat_system_with_mocks):
+    """ConfirmationManager resolves the tool manager per call (lookup closure,
+    like RequestBuilder.persona_lookup): a post-init rebind of
+    chat_system.tool_manager must be what approved writes execute against."""
+    system, _, _, _, original_tm = chat_system_with_mocks
+    swapped_tm = AsyncMock()
+    swapped_tm.execute_tool.return_value = {"ok": True}
+    system.tool_manager = swapped_tm
+
+    write_calls = [{"id": "c1", "name": "update_ticket", "arguments": {"state": "closed"}}]
+    await system.confirmations.execute_write_calls(write_calls, [])
+
+    swapped_tm.execute_tool.assert_called_once_with("update_ticket", state="closed")
+    original_tm.execute_tool.assert_not_called()
+
+
 def test_append_denied_tool_results():
     """Denied results are appended for each write call."""
     write_calls = [
@@ -649,22 +666,6 @@ def test_append_denied_tool_results():
 
 
 # --- Orchestration Method Tests ---
-
-@pytest.mark.asyncio
-async def test_execute_read_calls(chat_system_with_mocks):
-    """Read tool calls are executed and results appended to history."""
-    system, _, _, _, tool_manager_mock = chat_system_with_mocks
-    tool_manager_mock.execute_tool.return_value = {"result": [{"id": 1}]}
-
-    read_calls = [{"id": "c1", "name": "search_tickets", "arguments": {"query": "test"}}]
-    history: list = []
-    await system._execute_read_calls(read_calls, history)
-
-    tool_manager_mock.execute_tool.assert_called_once_with('search_tickets', query='test')
-    assert len(history) == 1
-    assert history[0]['role'] == 'tool'
-    assert history[0]['tool_call_id'] == 'c1'
-
 
 @pytest.mark.asyncio
 async def test_prepare_request_populates_context(chat_system_with_mocks):

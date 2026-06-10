@@ -33,7 +33,6 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from unittest.mock import patch
 
 from .lme_smoke import TIER_FILES, _to_iso, _pick_questions  # reuse helpers
 
@@ -83,10 +82,11 @@ def _build_chat_system(mm: Any) -> Any:
     """Minimal ChatSystem for agent wiring. No personas needed for ingest."""
     from src.engine import TextEngine
     from src.bootstrap import create_chat_system
-    # Empty persona map is fine — consolidator loads its own summarizer
-    # persona via the agent_config / global default.
-    with patch("src.bootstrap.load_personas_from_file", return_value={}):
-        return create_chat_system(memory_manager=mm, text_engine=TextEngine())
+    # Empty user-persona map is fine — the consolidator's summarizer is a
+    # system persona, which create_chat_system still loads.
+    return create_chat_system(
+        memory_manager=mm, text_engine=TextEngine(), user_personas={},
+    )
 
 
 async def _run_l0(chat_system: Any) -> None:

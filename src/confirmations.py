@@ -12,7 +12,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from src.memory.memory_manager import MemoryManager
 from src.tools.definitions import get_tool_capabilities
@@ -65,9 +65,13 @@ class ConfirmationManager:
     of) the old one.
     """
 
-    def __init__(self, tool_manager: ToolManager,
+    def __init__(self, tool_manager_lookup: Callable[[], ToolManager],
                  memory_manager: MemoryManager) -> None:
-        self.tool_manager = tool_manager
+        # A lookup closure (mirrors RequestBuilder.persona_lookup) rather than
+        # a bound reference: ToolLoop reads chat_system.tool_manager per call,
+        # so a post-init swap must be visible here too or approved writes
+        # would execute against the stale manager.
+        self._tool_manager_lookup = tool_manager_lookup
         self.memory_manager = memory_manager
         self.pending: Dict[Tuple[str, str], PendingConfirmation] = {}
 
@@ -110,7 +114,7 @@ class ConfirmationManager:
         for call_item in write_calls:
             tool_name: str = call_item.get("name", "")
             tool_args = call_item.get("arguments", {})
-            tool_result = await self.tool_manager.execute_tool(tool_name, **tool_args)
+            tool_result = await self._tool_manager_lookup().execute_tool(tool_name, **tool_args)
             conversation_history.append({
                 "role": "tool",
                 "tool_call_id": call_item.get("id"),

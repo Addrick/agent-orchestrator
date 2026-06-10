@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, AsyncMock, patch
 import pytest
 
 pytestmark = pytest.mark.integration
-from src.bootstrap import create_chat_system
+from tests.helpers import make_chat_system
 from src.chat_system import ResponseType
 from src.engine import TextEngine
 from src.persona import Persona, MemoryMode
@@ -31,7 +31,7 @@ def mock_text_engine():
 
 @pytest.fixture
 def chat_system(mock_memory_manager, mock_text_engine):
-    return create_chat_system(mock_memory_manager, mock_text_engine)
+    return make_chat_system(mock_memory_manager, mock_text_engine)
 
 
 @pytest.mark.asyncio

@@ -6,7 +6,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
-from unittest.mock import patch
 
 from .scenarios import Scenario, SeededInteraction
 from .variants import MemoryVariant, PromptVariant
@@ -131,8 +130,9 @@ def build_fixture(
         personas[target_persona].prompt = prompt_variant.persona_prompt
 
     text_engine = TextEngine()
-    with patch("src.bootstrap.load_personas_from_file", return_value=personas):
-        chat_system = create_chat_system(memory_manager=mm, text_engine=text_engine)
+    chat_system = create_chat_system(
+        memory_manager=mm, text_engine=text_engine, user_personas=personas,
+    )
 
     # TODO: install MockLLM hook into text_engine when live=False.
     # Concrete wire-in is engine-specific; leaving as a clear stub so each
