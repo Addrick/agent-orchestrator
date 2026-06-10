@@ -433,6 +433,22 @@ PERSONA_FIELDS: List[PersonaField] = [
         ),
     ),
     PersonaField(
+        name='inject_timestamp',
+        describe=lambda p: (
+            f"Timestamp injection for '{p.get_name()}' is "
+            f"{'enabled' if p.get_inject_timestamp() else 'disabled'}."
+        ),
+        set_cli=_bool_setter(
+            apply=lambda p, v: p.set_inject_timestamp(v),
+            missing_msg="Error: Please specify 'on' or 'off' for inject_timestamp.",
+            state_msg=lambda v, name: (
+                f"Timestamp injection {'enabled' if v else 'disabled'} for {name}."
+            ),
+        ),
+        patch_key='inject_timestamp',
+        patch_apply=_plain_patch(lambda p, v: p.set_inject_timestamp(bool(v))),
+    ),
+    PersonaField(
         name='ingest_bank',
         describe=lambda p: (
             f"Ingest target bank for '{p.get_name()}' is "

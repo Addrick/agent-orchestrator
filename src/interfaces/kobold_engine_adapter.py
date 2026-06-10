@@ -217,6 +217,7 @@ class KoboldEngineAdapter:
                 "memory_mode": p.get_memory_mode().name,
                 "max_context_tokens": p.get_max_context_tokens(),
                 "long_term_memory": p.get_long_term_memory(),
+                "inject_timestamp": p.get_inject_timestamp(),
                 "chat_template": p.get_chat_template(),
                 "instruct_tags": p.get_provider_extra("kobold", "instruct_tags"),
                 "kobold_extras": get_kobold_extras_for_get(p),
