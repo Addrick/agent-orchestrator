@@ -1,7 +1,6 @@
 # src/chat_system.py
 
 import asyncio
-import json
 import logging
 import time
 from contextlib import aclosing
@@ -335,23 +334,6 @@ class ChatSystem:
             retry_assistant_id=retry_assistant_id,
             tool_context_json=tool_context_json,
         )
-
-    async def _execute_read_calls(
-            self,
-            read_calls: List[Dict[str, Any]],
-            conversation_history: List[Dict[str, Any]]
-    ) -> None:
-        """Execute read-only tool calls and append results to history."""
-        for call_item in read_calls:
-            tool_name: str = call_item.get("name", "")
-            tool_args = call_item.get("arguments", {})
-            tool_result = await self.tool_manager.execute_tool(tool_name, **tool_args)
-            conversation_history.append({
-                "role": "tool",
-                "tool_call_id": call_item.get("id"),
-                "name": tool_name,
-                "content": json.dumps(tool_result)
-            })
 
     async def _orchestrate(
             self,

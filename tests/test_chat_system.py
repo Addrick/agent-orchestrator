@@ -651,22 +651,6 @@ def test_append_denied_tool_results():
 # --- Orchestration Method Tests ---
 
 @pytest.mark.asyncio
-async def test_execute_read_calls(chat_system_with_mocks):
-    """Read tool calls are executed and results appended to history."""
-    system, _, _, _, tool_manager_mock = chat_system_with_mocks
-    tool_manager_mock.execute_tool.return_value = {"result": [{"id": 1}]}
-
-    read_calls = [{"id": "c1", "name": "search_tickets", "arguments": {"query": "test"}}]
-    history: list = []
-    await system._execute_read_calls(read_calls, history)
-
-    tool_manager_mock.execute_tool.assert_called_once_with('search_tickets', query='test')
-    assert len(history) == 1
-    assert history[0]['role'] == 'tool'
-    assert history[0]['tool_call_id'] == 'c1'
-
-
-@pytest.mark.asyncio
 async def test_prepare_request_populates_context(chat_system_with_mocks):
     """_prepare_request resolves service contexts, builds history, filters tools, appends user message."""
     system, memory_mock, _, persona, tool_manager_mock = chat_system_with_mocks
