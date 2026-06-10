@@ -6,7 +6,7 @@ from typing import Optional, Dict, Any, List, Type, TypeVar, Union
 
 from config import global_config
 from src.generation_params import GenerationParams
-from src.tools.policy import ToolPolicy
+from src.tool_policy import ToolPolicy
 
 logger = logging.getLogger(__name__)
 

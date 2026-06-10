@@ -21,8 +21,8 @@ Persona itself stays a domain leaf: it stores the block reasons and exposes
 import logging
 from typing import TYPE_CHECKING, Any, Dict, List
 
+from src.tool_policy import ToolPolicy
 from src.tools.definitions import ALL_TOOL_DEFINITIONS
-from src.tools.policy import ToolPolicy
 
 if TYPE_CHECKING:
     from src.persona import Persona

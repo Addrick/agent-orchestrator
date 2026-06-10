@@ -1,7 +1,7 @@
-# tests/tools/test_policy.py
+# tests/test_tool_policy.py
 
 import pytest
-from src.tools.policy import ToolPolicy
+from src.tool_policy import ToolPolicy
 from src.tools.definitions import ALL_TOOL_DEFINITIONS
 from src.persona import Persona
 

@@ -1,4 +1,6 @@
-# src/tools/policy.py
+# src/tool_policy.py
+# Leaf value object (no src.* imports) — DP-204 moved it out of src/tools/
+# so personas can hold a ToolPolicy without depending on the tools layer.
 
 import logging
 from typing import List, Dict, Any, Optional, Set

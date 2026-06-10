@@ -21,8 +21,8 @@ from pathlib import Path
 from typing import Dict, Any, Iterable, Optional, List
 
 from config import global_config
+from src.tool_policy import ToolPolicy
 from src.tools.composition import validate_policy_composition
-from src.tools.policy import ToolPolicy
 
 logger = logging.getLogger(__name__)
 

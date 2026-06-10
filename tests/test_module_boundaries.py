@@ -161,6 +161,7 @@ CONTRACTS: List[Tuple[str, Tuple[str, ...]]] = [
     ("src.engine", ("src.chat_system", "src.message_handler", "src.memory", "src.interfaces", "src.agents")),
     ("src.stream_engine", ("src.chat_system", "src.message_handler", "src.memory", "src.interfaces", "src.agents")),
     ("src.text_tool_protocol", ("src.",)),
+    ("src.tool_policy", ("src.",)),
     ("src.generation_params", ("src.",)),
     ("src.generation_events", ("src.",)),
     ("src.embedding_service", ("src.",)),
@@ -173,11 +174,11 @@ CONTRACTS: List[Tuple[str, Tuple[str, ...]]] = [
 # Grandfathered edges: real, current violations of the target rules that the
 # remaining DP-200 slices are expected to remove. Removing the code edge
 # without deleting its entry here fails the staleness check below.
-KNOWN_DEBT: Set[Tuple[str, str]] = {
-    # persona holds a ToolPolicy instance; DP-204 commit 2 moves ToolPolicy
-    # to a leaf module so this last edge can be deleted.
-    ("src.persona", "src.tools.policy"),
-}
+# DP-204 emptied the list: the last persona->tools edges were removed by
+# inverting the validation seam (src/tools/composition.py) and moving
+# ToolPolicy to the src.tool_policy leaf. Keep the mechanism — any future
+# grandfathering must be added here deliberately, with a removal plan.
+KNOWN_DEBT: Set[Tuple[str, str]] = set()
 
 
 def _violations() -> Tuple[List[str], Set[Tuple[str, str]]]:
