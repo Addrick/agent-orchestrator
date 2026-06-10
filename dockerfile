@@ -1,3 +1,14 @@
+# --- Stage 1: Build the React UI ---
+FROM node:20-slim AS ui-builder
+WORKDIR /app/ui
+# Copy package files first to leverage Docker cache
+COPY src/interfaces/web_assets/derpr_ui/package*.json ./
+RUN npm ci
+# Copy source files and build to static assets
+COPY src/interfaces/web_assets/derpr_ui/ ./
+RUN npm run build
+
+# --- Stage 2: Final Production Runner ---
 # Use an official lightweight Python image
 FROM python:3.14-slim
 
@@ -23,6 +34,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the rest of the application code
 COPY . .
+
+# Copy the compiled static UI assets from Stage 1
+COPY --from=ui-builder /app/ui/dist ./src/interfaces/web_assets/derpr_ui/dist
 
 # Create a directory for persistent data (SQLite db)
 RUN mkdir -p /app/data
