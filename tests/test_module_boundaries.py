@@ -130,6 +130,11 @@ CONTRACTS: List[Tuple[str, Tuple[str, ...]]] = [
         "src.chat_system", "src.message_handler", "src.interfaces",
         "src.agents", "src.engine", "src.stream_engine",
     )),
+    # Turn persistence sits below the orchestrator: storage + shared leaves.
+    ("src.turn_persistence", (
+        "src.chat_system", "src.message_handler", "src.interfaces",
+        "src.agents", "src.engine", "src.stream_engine", "src.tools",
+    )),
     # Confirmation parking sits below the orchestrator: tools + storage only.
     ("src.confirmations", (
         "src.chat_system", "src.message_handler", "src.interfaces",

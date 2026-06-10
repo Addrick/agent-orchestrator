@@ -4,14 +4,13 @@ import asyncio
 import json
 import logging
 import time
-from collections import defaultdict
 from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, AsyncGenerator, AsyncIterator, Coroutine, Dict, List, Optional, Set, Tuple
 
-from config.global_config import MAX_CACHED_API_REQUESTS, \
-    PENDING_CONFIRMATION_TIMEOUT
+from config.global_config import PENDING_CONFIRMATION_TIMEOUT
+from config.global_config import MAX_CACHED_API_REQUESTS  # noqa: F401  (re-export for tests)
 from src.embedding_service import EmbeddingService
 from src.clients.service_integration import ServiceIntegration
 from src.confirmations import ConfirmationManager, PendingConfirmation as PendingConfirmation
@@ -34,13 +33,13 @@ from src.request_builder import (
     AssembledRequest as AssembledRequest,
     RequestBuilder,
     RequestContext as RequestContext,
-    build_scope_tags,
 )
 from src.request_builder import (  # noqa: F401  (re-exports for tests/back-compat)
     MAX_CONVERSATION_TAINTS as MAX_CONVERSATION_TAINTS,
     _relative_time as _relative_time,
 )
 from src.tools.tool_loop import ToolLoop, _ApiPayloadEvent, _LoopFinishedEvent
+from src.turn_persistence import TurnPersistence
 from src.tools.tool_manager import ToolManager
 from src.tools.turn_context import TurnContext, turn_scope
 from src.utils.model_utils import get_model_list
@@ -87,11 +86,9 @@ class ChatSystem:
         self.tool_manager: ToolManager = tool_manager
 
         self.bot_logic: BotLogic = BotLogic(self)
-        self.last_api_requests: Dict[str, Dict[str, Optional[Dict[str, Any]]]] = defaultdict(dict)
-        # Per-turn list of every LLM-call payload in the tool loop (reset at the
-        # first iteration of each turn). last_api_requests keeps only the final
-        # payload for back-compat; this preserves the whole loop for dump_history.
-        self.last_api_iterations: Dict[str, Dict[str, List[Dict[str, Any]]]] = defaultdict(dict)
+        self.turn_persistence: TurnPersistence = TurnPersistence(
+            memory_manager, self.memory_backend,
+        )
         self.models_available: Dict[str, Any] = get_model_list() or {}
         self.background_tasks: Set[Coroutine[Any, Any, Any]] = set()
         self.confirmations: ConfirmationManager = ConfirmationManager(
@@ -263,77 +260,79 @@ class ChatSystem:
             is_retry=is_retry, client_messages=client_messages,
         )
 
+    # ------------------------------------------------------------------
+    # TurnPersistence delegation (DP-200 slice B). The turn write-paths and
+    # dump_history's request caches live in src/turn_persistence.py; these
+    # seams keep the kernel call sites (and monkeypatching tests) stable.
+    # ------------------------------------------------------------------
+
+    @property
+    def last_api_requests(self) -> Dict[str, Dict[str, Optional[Dict[str, Any]]]]:
+        return self.turn_persistence.last_api_requests
+
+    @last_api_requests.setter
+    def last_api_requests(self, value: Dict[str, Dict[str, Optional[Dict[str, Any]]]]) -> None:
+        self.turn_persistence.last_api_requests = value
+
+    @property
+    def last_api_iterations(self) -> Dict[str, Dict[str, List[Dict[str, Any]]]]:
+        return self.turn_persistence.last_api_iterations
+
+    @last_api_iterations.setter
+    def last_api_iterations(self, value: Dict[str, Dict[str, List[Dict[str, Any]]]]) -> None:
+        self.turn_persistence.last_api_iterations = value
+
     def _store_api_request(self, user_identifier: str, persona_name: str,
                            payload: Dict[str, Any],
                            tools_for_llm: Optional[List[Dict[str, Any]]] = None,
                            is_first_iteration: bool = False) -> None:
-        """Stores the last API request payload, evicting the oldest user entry if over capacity.
+        self.turn_persistence.store_api_request(
+            user_identifier, persona_name, payload,
+            tools_for_llm=tools_for_llm, is_first_iteration=is_first_iteration,
+        )
 
-        `is_first_iteration` marks the opening LLM call of a turn; it resets the
-        per-turn iteration list so dump_history shows the whole tool loop (one
-        payload per LLM call) rather than only the final iteration.
-        """
-        if tools_for_llm is not None:
-            payload["_tools_for_llm"] = tools_for_llm
-        else:
-            existing = self.last_api_requests.get(user_identifier, {}).get(persona_name)
-            if existing and "_tools_for_llm" in existing:
-                payload["_tools_for_llm"] = existing["_tools_for_llm"]
+    def _log_user_turn(
+            self,
+            *,
+            is_retry: bool,
+            persona_name: str,
+            user_identifier: str,
+            channel: str,
+            user_display_name: Optional[str],
+            message: str,
+            server_id: Optional[str],
+            platform_message_id: Optional[str],
+            timestamp: datetime,
+    ) -> Tuple[Optional[int], Optional[int]]:
+        return self.turn_persistence.log_user_turn(
+            is_retry=is_retry, persona_name=persona_name,
+            user_identifier=user_identifier, channel=channel,
+            user_display_name=user_display_name, message=message,
+            server_id=server_id, platform_message_id=platform_message_id,
+            timestamp=timestamp,
+        )
 
-        # LRU touch: re-storing a user's payload moves them to the most-recent
-        # end so eviction drops a genuinely idle user, not whoever was seen
-        # first. dict preserves insertion order; pop+reinsert is the move.
-        if user_identifier in self.last_api_requests:
-            self.last_api_requests[user_identifier] = self.last_api_requests.pop(user_identifier)
-            if user_identifier in self.last_api_iterations:
-                self.last_api_iterations[user_identifier] = self.last_api_iterations.pop(user_identifier)
-        self.last_api_requests[user_identifier][persona_name] = payload
-
-        if is_first_iteration:
-            self.last_api_iterations[user_identifier][persona_name] = []
-        self.last_api_iterations[user_identifier].setdefault(persona_name, []).append(payload)
-
-        if len(self.last_api_requests) > MAX_CACHED_API_REQUESTS:
-            # Evict the least-recently-used user (front of insertion order).
-            oldest_key = next(iter(self.last_api_requests))
-            del self.last_api_requests[oldest_key]
-            self.last_api_iterations.pop(oldest_key, None)
-
-    async def _retain_turn_safe(
-        self,
-        *,
-        persona_name: str,
-        role: str,
-        content: str,
-        user_identifier: str,
-        channel: str,
-        server_id: Optional[str],
-        timestamp: datetime,
-        interaction_id: int,
-        untrusted: bool,
-    ) -> None:
-        """Fire-and-forget wrapper around backend.retain_turn.
-
-        The Hindsight backend's retain_turn enqueues into a per-bank
-        asyncio.Queue and returns immediately; sqlite_legacy is a noop. We
-        still wrap in try/except so a backend hiccup never derails the user
-        turn — alpha system, retain failures are logged + dropped.
-        """
-        try:
-            await self.memory_backend.retain_turn(
-                bank_id=persona_name,
-                role=role,
-                content=content,
-                timestamp=timestamp,
-                scope_tags=build_scope_tags(
-                    channel=channel, server_id=server_id, user_identifier=user_identifier,
-                ),
-                source_persona=persona_name,
-                untrusted=untrusted,
-                metadata={"interaction_id": str(interaction_id)},
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"retain_turn dropped ({role} turn): {e}")
+    def _commit_or_update_assistant(
+            self,
+            *,
+            persona_name: str,
+            user_identifier: str,
+            channel: str,
+            server_id: Optional[str],
+            final_text: str,
+            response_type: ResponseType,
+            user_interaction_id: Optional[int],
+            retry_assistant_id: Optional[int],
+            tool_context_json: Optional[str],
+    ) -> Optional[int]:
+        return self.turn_persistence.commit_or_update_assistant(
+            persona_name=persona_name, user_identifier=user_identifier,
+            channel=channel, server_id=server_id, final_text=final_text,
+            response_type=response_type,
+            user_interaction_id=user_interaction_id,
+            retry_assistant_id=retry_assistant_id,
+            tool_context_json=tool_context_json,
+        )
 
     async def _execute_read_calls(
             self,
@@ -351,109 +350,6 @@ class ChatSystem:
                 "name": tool_name,
                 "content": json.dumps(tool_result)
             })
-
-    def _log_user_turn(
-            self,
-            *,
-            is_retry: bool,
-            persona_name: str,
-            user_identifier: str,
-            channel: str,
-            user_display_name: Optional[str],
-            message: str,
-            server_id: Optional[str],
-            platform_message_id: Optional[str],
-            timestamp: datetime,
-    ) -> Tuple[Optional[int], Optional[int]]:
-        """Log the new user turn or archive prior assistant for retry.
-
-        Returns `(user_interaction_id, retry_assistant_id)`. Exactly one of
-        the two will be set on success: retries archive the prior assistant
-        and skip user-row insertion; non-retries log a fresh user row.
-        """
-        if is_retry:
-            try:
-                retry_assistant_id = self.memory_manager.handle_portal_retry(
-                    persona_name=persona_name,
-                    user_identifier=user_identifier,
-                    channel=channel,
-                )
-            except Exception as e:
-                logger.error(f"handle_portal_retry failed: {e}", exc_info=True)
-                retry_assistant_id = None
-            return None, retry_assistant_id
-
-        # Symmetric with the assistant-side guard in _commit_or_update_assistant:
-        # an empty / whitespace-only user message must never land a phantom row.
-        # kobold-lite continue/prefetch calls without a user message would
-        # otherwise leave zero-length user_interaction rows between turns,
-        # polluting context and confusing the model.
-        if not message or not message.strip():
-            return None, None
-
-        try:
-            user_interaction_id = self.memory_manager.log_message(
-                user_identifier=user_identifier, persona_name=persona_name,
-                channel=channel, author_role='user',
-                author_name=user_display_name, content=message,
-                timestamp=timestamp, server_id=server_id,
-                platform_message_id=platform_message_id,
-            )
-        except Exception as e:
-            logger.error(f"User log_message failed: {e}", exc_info=True)
-            user_interaction_id = None
-        return user_interaction_id, None
-
-    def _commit_or_update_assistant(
-            self,
-            *,
-            persona_name: str,
-            user_identifier: str,
-            channel: str,
-            server_id: Optional[str],
-            final_text: str,
-            response_type: ResponseType,
-            user_interaction_id: Optional[int],
-            retry_assistant_id: Optional[int],
-            tool_context_json: Optional[str],
-    ) -> Optional[int]:
-        """Persist the assistant turn (UPDATE on retry, INSERT otherwise).
-
-        Returns the canonical assistant interaction_id, or None when the
-        text is empty or the response_type isn't a normal LLM generation.
-        """
-        if (not final_text or not final_text.strip()) and not tool_context_json:
-            return None
-
-        if retry_assistant_id is not None:
-            try:
-                # Forward tool_context so the regenerated row's stored tool calls
-                # stay paired with its new content — a retried turn may use a
-                # different (or no) set of tools than the failed attempt.
-                self.memory_manager.update_interaction_content(
-                    retry_assistant_id, final_text, tool_context=tool_context_json,
-                )
-                return retry_assistant_id
-            except Exception as e:
-                logger.error(f"Retry update_interaction_content failed: {e}")
-                return None
-
-        if response_type != ResponseType.LLM_GENERATION:
-            return None
-
-        try:
-            assistant_id: Optional[int] = self.memory_manager.log_message(
-                user_identifier=user_identifier, persona_name=persona_name,
-                channel=channel, author_role='assistant',
-                author_name=persona_name, content=final_text,
-                timestamp=datetime.now(), server_id=server_id,
-                tool_context=tool_context_json,
-                reply_to_id=user_interaction_id,
-            )
-            return assistant_id
-        except Exception as e:
-            logger.error(f"Assistant log_message failed: {e}", exc_info=True)
-            return None
 
     async def _orchestrate(
             self,
@@ -583,7 +479,7 @@ class ChatSystem:
                 # enqueues fire-and-forget. Either way, retain_turn returns quickly
                 # and does not block the LLM call below.
                 if user_interaction_id is not None and message and message.strip():
-                    await self._retain_turn_safe(
+                    await self.turn_persistence.retain_turn_safe(
                         persona_name=persona_name, role="user", content=message,
                         user_identifier=user_identifier, channel=channel,
                         server_id=server_id, timestamp=user_ts,
@@ -741,7 +637,7 @@ class ChatSystem:
             # store when the LLM consumed attacker-influenced tool output.
             if assistant_id is not None and final_text and final_text.strip() \
                     and response_type == ResponseType.LLM_GENERATION:
-                await self._retain_turn_safe(
+                await self.turn_persistence.retain_turn_safe(
                     persona_name=persona_name, role="assistant", content=final_text,
                     user_identifier=user_identifier, channel=channel,
                     server_id=server_id, timestamp=datetime.now(),
