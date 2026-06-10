@@ -669,7 +669,7 @@ class RequestBuilder:
             if ctx.conversation_history and ctx.conversation_history[-1].get("role") == "assistant":
                 ctx.conversation_history.pop()
         elif ctx.message and ctx.message.strip():
-            # Symmetric with the DB-side guard in _log_user_turn: an empty /
+            # Symmetric with the DB-side guard in TurnPersistence.log_user_turn: an empty /
             # whitespace-only message (kobold-lite continue/prefetch) must not
             # land a phantom `{'role':'user','content':''}` turn in the prompt,
             # which would otherwise make the model generate off a blank turn.

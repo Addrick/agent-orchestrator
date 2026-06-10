@@ -653,7 +653,7 @@ class SqliteSemanticBackend(MemoryBackend):
     def _parse_scope_tags(tag_filter: Optional[List[str]]) -> Dict[str, Optional[str]]:
         # `exclude_after` carries the sliding-window cutoff so the legacy
         # summary index doesn't surface memories that are still in the
-        # visible history window (see ChatSystem._retrieve_memory_block).
+        # visible history window (see RequestBuilder.retrieve_memory_block).
         scope: Dict[str, Optional[str]] = {
             "channel": None, "server": None, "user": None,
             "interface": None, "exclude_after": None,

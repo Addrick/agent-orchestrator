@@ -179,7 +179,7 @@ async def test_client_fallback_log_reports_db_row_count(chat_system_with_mocks, 
 def test_conversation_taints_is_bounded(chat_system_with_mocks):
     """The sticky-taint map must not grow without bound across distinct
     (user, persona, channel, server) tuples."""
-    from src.chat_system import MAX_CONVERSATION_TAINTS
+    from src.request_builder import MAX_CONVERSATION_TAINTS
     system, *_ = chat_system_with_mocks
     for i in range(MAX_CONVERSATION_TAINTS + 50):
         system.request_builder.set_conversation_taint((f"u{i}", "p", "c", None), True)

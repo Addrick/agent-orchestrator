@@ -11,6 +11,8 @@ import logging
 import mimetypes
 import os
 
+from src.request_builder import AssembledRequest
+
 # On Windows, mimetypes seeds from the registry, where `.js` is frequently
 # mapped to `text/plain`. Starlette's StaticFiles uses mimetypes.guess_type, so
 # the bespoke UI bundle would be served as text/plain and browsers refuse to
@@ -32,7 +34,7 @@ import asyncio
 
 from config import global_config
 from src.chat_system import (
-    AssembledRequest, ChatSystem, DoneEvent, ErrorEvent, GenerationEvent,
+    ChatSystem, DoneEvent, ErrorEvent, GenerationEvent,
     PendingConfirmationEvent, ResponseType, TokenEvent, ToolCallResultEvent,
     ToolCallStartEvent,
 )
@@ -305,7 +307,7 @@ class KoboldEngineAdapter:
             resolution + system-prompt prepend) with inference OFF, and returns
             exactly what would be sent: {parity, route, model_name, params,
             messages[]} per API_CONTRACTS.md §9. Because `assemble_request`
-            shares `_prepare_request`, `_resolve_generation_params`, and
+            shares `prepare_request`, `resolve_generation_params`, and
             `build_wire_messages` with the live kernel, the messages/params it
             returns cannot drift from a live submit *with the same inputs*.
 
@@ -493,7 +495,7 @@ class KoboldEngineAdapter:
             # Surface a live parked confirmation (portal session) as a trailing
             # ephemeral chunk so a fresh load renders the awaiting-approval text.
             # Park key is (user_identifier, persona) — honor the requested user.
-            pending_map = getattr(self.chat_system, "_pending_confirmations", {})
+            pending_map = self.chat_system.confirmations.pending
             pending_obj = pending_map.get((user_identifier, persona))
             pending: Optional[Dict[str, Any]] = None
             if pending_obj is not None:

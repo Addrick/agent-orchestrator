@@ -9,11 +9,10 @@ from datetime import datetime
 from typing import Any, AsyncGenerator, AsyncIterator, Coroutine, Dict, List, Optional, Set, Tuple
 
 from config.global_config import PENDING_CONFIRMATION_TIMEOUT
-from config.global_config import MAX_CACHED_API_REQUESTS  # noqa: F401  (re-export for tests)
 from src.embedding_service import EmbeddingService
 from src.clients.service_integration import ServiceIntegration
-from src.confirmations import ConfirmationManager, PendingConfirmation as PendingConfirmation
-from src.memory.backend.base import MemoryBackend, MemoryHit
+from src.confirmations import ConfirmationManager, PendingConfirmation
+from src.memory.backend.base import MemoryBackend
 from src.memory.memory_manager import MemoryManager
 from src.engine import TextEngine
 from src.generation_events import (
@@ -28,15 +27,7 @@ from src.generation_events import (
 )
 from src.message_handler import BotLogic
 from src.persona import Persona
-from src.request_builder import (
-    AssembledRequest as AssembledRequest,
-    RequestBuilder,
-    RequestContext as RequestContext,
-)
-from src.request_builder import (  # noqa: F401  (re-exports for tests/back-compat)
-    MAX_CONVERSATION_TAINTS as MAX_CONVERSATION_TAINTS,
-    _relative_time as _relative_time,
-)
+from src.request_builder import AssembledRequest, RequestBuilder, RequestContext
 from src.tools.tool_loop import ToolLoop, _ApiPayloadEvent, _LoopFinishedEvent
 from src.turn_persistence import TurnPersistence
 from src.tools.tool_manager import ToolManager
@@ -109,16 +100,6 @@ class ChatSystem:
         self._services: Dict[str, ServiceIntegration] = {}
         self._embedding_service: Optional[EmbeddingService] = embedding_service
 
-    @property
-    def _pending_confirmations(self) -> Dict[Tuple[str, str], PendingConfirmation]:
-        """Back-compat view of the confirmation store.
-
-        The store itself lives on `self.confirmations` (DP-200 slice B);
-        existing tests and the portal's transcript projection still address
-        the map through this name.
-        """
-        return self.confirmations.pending
-
     def visible_personas(self) -> Dict[str, Persona]:
         """Personas safe to expose in user-facing listings (dropdowns, status text).
 
@@ -154,65 +135,12 @@ class ChatSystem:
         return self._embedding_service
 
     # ------------------------------------------------------------------
-    # RequestBuilder delegation (DP-200 slice B). Request assembly lives in
-    # src/request_builder.py; these thin seams keep the kernel's call sites
-    # (and the tests that monkeypatch/address them) going through ChatSystem,
-    # so live submits and the dry-run inspector share one code path.
+    # Public request-assembly API. Request assembly lives in
+    # src/request_builder.py; these delegates are the supported external
+    # surface (portal/transcript/dry-run inspector) so live submits and the
+    # inspector share one code path. Internal callers address
+    # `self.request_builder` directly (DP-201b removed the private seams).
     # ------------------------------------------------------------------
-
-    @property
-    def _conversation_taints(self) -> Dict[Tuple[str, str, str, Optional[str]], bool]:
-        """Back-compat view of the sticky taint map (owned by RequestBuilder)."""
-        return self.request_builder.conversation_taints
-
-    def _set_conversation_taint(
-            self, key: Tuple[str, str, str, Optional[str]], value: bool
-    ) -> None:
-        self.request_builder.set_conversation_taint(key, value)
-
-    def _format_raw_history_for_llm(self, raw_history: List[Dict[str, Any]], memory_mode: str,
-                                    persona_name: str, server_id: Optional[str]) -> List[Dict[str, Any]]:
-        return self.request_builder.format_raw_history_for_llm(
-            raw_history, memory_mode, persona_name, server_id,
-        )
-
-    def _build_conversation_history(
-            self,
-            persona: Persona,
-            user_identifier: str,
-            channel: str,
-            server_id: Optional[str],
-            history_limit: Optional[int]
-    ) -> Tuple[List[Dict[str, Any]], Optional[int]]:
-        return self.request_builder.build_conversation_history(
-            persona, user_identifier, channel, server_id, history_limit,
-        )
-
-    async def _retrieve_memory_block(
-            self,
-            persona: Persona,
-            user_identifier: str,
-            channel: str,
-            server_id: Optional[str],
-            conversation_history: List[Dict[str, Any]],
-            current_message: Optional[str] = None,
-            oldest_interaction_id: Optional[int] = None,
-    ) -> Tuple[Optional[str], bool]:
-        return await self.request_builder.retrieve_memory_block(
-            persona, user_identifier, channel, server_id, conversation_history,
-            current_message=current_message,
-            oldest_interaction_id=oldest_interaction_id,
-        )
-
-    @staticmethod
-    def _format_memory_block(hits: List[MemoryHit]) -> Optional[str]:
-        return RequestBuilder.format_memory_block(hits)
-
-    def _filter_tools_for_persona(self, persona: Persona) -> List[Dict[str, Any]]:
-        return self.request_builder.filter_tools_for_persona(persona)
-
-    async def _prepare_request(self, ctx: RequestContext, is_retry: bool = False) -> None:
-        await self.request_builder.prepare_request(ctx, is_retry=is_retry)
 
     def get_view_history(
             self,
@@ -264,9 +192,10 @@ class ChatSystem:
         )
 
     # ------------------------------------------------------------------
-    # TurnPersistence delegation (DP-200 slice B). The turn write-paths and
-    # dump_history's request caches live in src/turn_persistence.py; these
-    # seams keep the kernel call sites (and monkeypatching tests) stable.
+    # TurnPersistence public surface. The turn write-paths and dump_history's
+    # request caches live in src/turn_persistence.py; message_handler still
+    # reads these caches through ChatSystem (DP-202 takes them to an explicit
+    # dependency).
     # ------------------------------------------------------------------
 
     @property
@@ -284,58 +213,6 @@ class ChatSystem:
     @last_api_iterations.setter
     def last_api_iterations(self, value: Dict[str, Dict[str, List[Dict[str, Any]]]]) -> None:
         self.turn_persistence.last_api_iterations = value
-
-    def _store_api_request(self, user_identifier: str, persona_name: str,
-                           payload: Dict[str, Any],
-                           tools_for_llm: Optional[List[Dict[str, Any]]] = None,
-                           is_first_iteration: bool = False) -> None:
-        self.turn_persistence.store_api_request(
-            user_identifier, persona_name, payload,
-            tools_for_llm=tools_for_llm, is_first_iteration=is_first_iteration,
-        )
-
-    def _log_user_turn(
-            self,
-            *,
-            is_retry: bool,
-            persona_name: str,
-            user_identifier: str,
-            channel: str,
-            user_display_name: Optional[str],
-            message: str,
-            server_id: Optional[str],
-            platform_message_id: Optional[str],
-            timestamp: datetime,
-    ) -> Tuple[Optional[int], Optional[int]]:
-        return self.turn_persistence.log_user_turn(
-            is_retry=is_retry, persona_name=persona_name,
-            user_identifier=user_identifier, channel=channel,
-            user_display_name=user_display_name, message=message,
-            server_id=server_id, platform_message_id=platform_message_id,
-            timestamp=timestamp,
-        )
-
-    def _commit_or_update_assistant(
-            self,
-            *,
-            persona_name: str,
-            user_identifier: str,
-            channel: str,
-            server_id: Optional[str],
-            final_text: str,
-            response_type: ResponseType,
-            user_interaction_id: Optional[int],
-            retry_assistant_id: Optional[int],
-            tool_context_json: Optional[str],
-    ) -> Optional[int]:
-        return self.turn_persistence.commit_or_update_assistant(
-            persona_name=persona_name, user_identifier=user_identifier,
-            channel=channel, server_id=server_id, final_text=final_text,
-            response_type=response_type,
-            user_interaction_id=user_interaction_id,
-            retry_assistant_id=retry_assistant_id,
-            tool_context_json=tool_context_json,
-        )
 
     async def _orchestrate(
             self,
@@ -439,10 +316,10 @@ class ChatSystem:
         )):
             if resume is None:
                 try:
-                    await self._prepare_request(ctx, is_retry=is_retry)
+                    await self.request_builder.prepare_request(ctx, is_retry=is_retry)
                 except Exception as e:
                     logger.error(
-                        f"_prepare_request failed for {user_identifier}: {e}", exc_info=True,
+                        f"prepare_request failed for {user_identifier}: {e}", exc_info=True,
                     )
                     yield ErrorEvent(message="An internal error occurred while processing your request.")
                     return
@@ -452,7 +329,7 @@ class ChatSystem:
                 #    the LLM call so the user row is always pinned even if the model
                 #    errors mid-flight.
                 user_ts = timestamp or datetime.now()
-                user_interaction_id, retry_assistant_id = self._log_user_turn(
+                user_interaction_id, retry_assistant_id = self.turn_persistence.log_user_turn(
                     is_retry=is_retry, persona_name=persona_name,
                     user_identifier=user_identifier, channel=channel,
                     user_display_name=user_display_name, message=message,
@@ -530,7 +407,7 @@ class ChatSystem:
                     ),
                 ):
                     if isinstance(ev, _ApiPayloadEvent):
-                        self._store_api_request(
+                        self.turn_persistence.store_api_request(
                             user_identifier, persona_name, ev.payload,
                             tools_for_llm=ctx.tools_for_llm if params_first_iter else None,
                             is_first_iteration=params_first_iter,
@@ -554,14 +431,14 @@ class ChatSystem:
                         ctx.turn_tainted = ev.turn_tainted
                         # Persist back to the conversation cache for stickiness
                         taint_key = (ctx.user_identifier, ctx.persona_name, ctx.channel, ctx.server_id)
-                        self._set_conversation_taint(taint_key, ev.turn_tainted)
+                        self.request_builder.set_conversation_taint(taint_key, ev.turn_tainted)
             except asyncio.CancelledError:
                 # Client disconnect / abort. Flush whatever assistant text has
                 # accumulated so the row reflects what the user actually saw,
                 # then re-raise so the surrounding StreamingResponse aborts.
                 partial = "".join(accumulated_parts)
                 if partial.strip():
-                    self._commit_or_update_assistant(
+                    self.turn_persistence.commit_or_update_assistant(
                         persona_name=persona_name, user_identifier=user_identifier,
                         channel=channel, server_id=server_id,
                         final_text=partial,
@@ -609,7 +486,7 @@ class ChatSystem:
                 )
 
             # 4. Log/update assistant turn. Original text (including links) is preserved.
-            assistant_id = self._commit_or_update_assistant(
+            assistant_id = self.turn_persistence.commit_or_update_assistant(
                 persona_name=persona_name, user_identifier=user_identifier,
                 channel=channel, server_id=server_id,
                 final_text=final_text, response_type=response_type,
@@ -759,7 +636,7 @@ class ChatSystem:
         (user, persona) alone.
         """
         key = (user_identifier, persona_name)
-        pending = self._pending_confirmations.get(key)
+        pending = self.confirmations.pending.get(key)
 
         if not pending:
             yield DoneEvent(
@@ -777,7 +654,7 @@ class ChatSystem:
 
         # Commit to acting on this park: remove it so a duplicate approve/deny
         # (double-click, retried POST) can't execute the writes twice.
-        self._pending_confirmations.pop(key, None)
+        self.confirmations.pending.pop(key, None)
 
         if time.time() - pending.created_at > PENDING_CONFIRMATION_TIMEOUT:
             yield DoneEvent(

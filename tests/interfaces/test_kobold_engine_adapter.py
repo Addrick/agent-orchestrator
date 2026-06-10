@@ -63,6 +63,9 @@ def _make_adapter_with_seeded_db(persona_name: str = "test_persona",
         system_persona_names=set(),
         get_session_memory_block=retrieve_memory_block or AsyncMock(return_value=None),
         get_view_history=_get_view_history,
+        # The transcript projection reads the confirmation store directly
+        # (DP-201b removed the getattr fallback) — stub an empty park map.
+        confirmations=SimpleNamespace(pending={}),
     )
     adapter = KoboldAdapter(chat_system=chat_system)
     return adapter, mm, persona
