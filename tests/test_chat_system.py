@@ -4,8 +4,8 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 import json
 
-from src.bootstrap import create_chat_system
 from src.confirmations import ConfirmationManager
+from tests.helpers import make_chat_system
 from src.chat_system import (
     ChatSystem, ResponseType, RequestContext,
     DoneEvent, ErrorEvent, TokenEvent,
@@ -43,17 +43,17 @@ def chat_system_with_mocks():
 
     mock_persona = Persona('test_persona', 'mock_model', 'prompt')
 
-    with patch('src.bootstrap.load_personas_from_file', return_value={"test_persona": mock_persona}), \
-            patch('src.bootstrap.ToolManager', return_value=mock_tool_manager):
-        system = create_chat_system(
-            memory_manager=mock_memory_manager,
-            text_engine=text_engine,
-        )
-        # Mock bot_logic by default to isolate ChatSystem logic
-        system.bot_logic.preprocess_message = AsyncMock(return_value=None)
+    system = make_chat_system(
+        memory_manager=mock_memory_manager,
+        text_engine=text_engine,
+        personas={"test_persona": mock_persona},
+        tool_manager=mock_tool_manager,
+    )
+    # Mock bot_logic by default to isolate ChatSystem logic
+    system.bot_logic.preprocess_message = AsyncMock(return_value=None)
 
-        yield (system, mock_memory_manager, text_engine,
-               mock_persona, mock_tool_manager)
+    yield (system, mock_memory_manager, text_engine,
+           mock_persona, mock_tool_manager)
 
 
 # --- Tests for generate_response Core Logic ---

@@ -7,8 +7,8 @@ from datetime import datetime
 from unittest.mock import MagicMock, AsyncMock, patch
 
 from src.memory.memory_manager import MemoryManager
-from src.bootstrap import create_chat_system
 from src.chat_system import ResponseType, PendingConfirmation
+from tests.helpers import make_chat_system
 from src.persona import Persona, ExecutionMode
 from src.engine import TextEngine
 from src.tools.tool_manager import ToolManager
@@ -26,10 +26,10 @@ def chat_system(mem_manager):
     tool_manager = MagicMock(spec=ToolManager)
     tool_manager.get_tool_definitions.return_value = []
     
-    with patch('src.bootstrap.load_personas_from_file', return_value={}):
-        system = create_chat_system(memory_manager=mem_manager, text_engine=text_engine)
-        system.tool_manager = tool_manager
-        return system
+    return make_chat_system(
+        memory_manager=mem_manager, text_engine=text_engine,
+        tool_manager=tool_manager,
+    )
 
 def test_memory_manager_log_audit_event(mem_manager):
     metadata = {"key": "value"}

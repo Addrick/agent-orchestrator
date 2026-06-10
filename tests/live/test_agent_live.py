@@ -408,9 +408,9 @@ class TestTriageDispatchMockedLLM:
     @pytest.fixture
     def pipeline_env(self, zammad_client, discord_holder):
         """ChatSystem + agents wired to real Zammad and Discord."""
-        from src.bootstrap import create_chat_system
         from memory.memory_manager import MemoryManager
         from src.engine import TextEngine
+        from tests.helpers import make_chat_system
         from src.agents.zammad_bot import ZammadBot
         from src.agents.dispatch_agent import DispatchAgent
         from config.global_config import TEST_MEMORY_DATABASE_FILE
@@ -423,11 +423,10 @@ class TestTriageDispatchMockedLLM:
         memory_manager.create_schema()
         text_engine = TextEngine()
 
-        with patch('src.bootstrap.load_personas_from_file', return_value={}):
-            chat_system = create_chat_system(
-                memory_manager=memory_manager,
-                text_engine=text_engine,
-            )
+        chat_system = make_chat_system(
+            memory_manager=memory_manager,
+            text_engine=text_engine,
+        )
 
         notification_router = NotificationRouter()
         notification_router.register("discord_channel", DiscordChannelNotifier(discord_holder.client))

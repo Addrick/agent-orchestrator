@@ -27,9 +27,20 @@ from src.utils.save_utils import (
 )
 
 
-def load_all_personas() -> Tuple[Dict[str, Persona], Set[str]]:
-    """Load user personas plus system personas (callable but not listed)."""
-    personas: Dict[str, Persona] = load_personas_from_file() or {}
+def load_all_personas(
+    user_personas: Optional[Dict[str, Persona]] = None,
+) -> Tuple[Dict[str, Persona], Set[str]]:
+    """Load user personas plus system personas (callable but not listed).
+
+    `user_personas` replaces the user-persona file load (eval harnesses and
+    scripts pass an explicit map instead of patching the loader); system
+    personas are loaded and merged either way.
+    """
+    personas: Dict[str, Persona]
+    if user_personas is not None:
+        personas = dict(user_personas)
+    else:
+        personas = load_personas_from_file() or {}
     system_persona_names: Set[str] = set()
     system_personas = load_system_personas_from_file()
     if system_personas:
@@ -63,13 +74,18 @@ def create_chat_system(
     memory_manager: MemoryManager,
     text_engine: TextEngine,
     embedding_service: Optional[EmbeddingService] = None,
+    *,
+    user_personas: Optional[Dict[str, Persona]] = None,
 ) -> ChatSystem:
     """Standard ChatSystem assembly: file-loaded personas + core tool handlers.
 
     Mirrors the old ``ChatSystem(memory_manager, text_engine, embedding_service)``
     signature so call sites swap the constructor for this factory 1:1.
+    `user_personas` substitutes for the user-persona file (system personas
+    still load); unit tests should use `tests.helpers.make_chat_system`, which
+    skips the composition root entirely.
     """
-    personas, system_persona_names = load_all_personas()
+    personas, system_persona_names = load_all_personas(user_personas)
     tool_manager = build_tool_manager(memory_manager, personas)
     return ChatSystem(
         memory_manager=memory_manager,

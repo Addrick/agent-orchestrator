@@ -226,11 +226,11 @@ def live_chat_system():
         )
     }
 
-    with patch('src.bootstrap.load_personas_from_file', return_value=test_personas):
-        chat_system = create_chat_system(
-            memory_manager=memory_manager, text_engine=text_engine,
-        )
-        chat_system.register_service(ZammadIntegration(zammad_client))
+    chat_system = make_chat_system(
+        memory_manager=memory_manager, text_engine=text_engine,
+        personas=test_personas,
+    )
+    chat_system.register_service(ZammadIntegration(zammad_client))
 
     try:
         yield chat_system, memory_manager, zammad_client

@@ -5,11 +5,11 @@ import time
 import random
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 from memory.memory_manager import MemoryManager
-from src.bootstrap import create_chat_system
 from src.engine import TextEngine
+from tests.helpers import make_chat_system
 from src.persona import Persona, MemoryMode
 from config.global_config import TEST_MEMORY_DATABASE_FILE
 
@@ -44,10 +44,10 @@ def mocked_chat_system():
         )
     }
 
-    with patch('src.bootstrap.load_personas_from_file', return_value=test_personas):
-        chat_system = create_chat_system(
-            memory_manager=memory_manager, text_engine=text_engine,
-        )
+    chat_system = make_chat_system(
+        memory_manager=memory_manager, text_engine=text_engine,
+        personas=test_personas,
+    )
 
     try:
         yield chat_system, memory_manager

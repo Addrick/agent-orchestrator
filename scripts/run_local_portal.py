@@ -15,7 +15,7 @@ submitted turn returns "success" without a real model.
 
 import os
 import sys
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, _ROOT)
@@ -54,8 +54,10 @@ def main() -> int:
     text_engine = TextEngine()
     text_engine.stream_messages = _stub_stream  # type: ignore[method-assign]
 
-    with patch("src.bootstrap.load_personas_from_file", return_value={PERSONA: persona}):
-        chat_system = create_chat_system(memory_manager=mm, text_engine=text_engine)
+    chat_system = create_chat_system(
+        memory_manager=mm, text_engine=text_engine,
+        user_personas={PERSONA: persona},
+    )
     chat_system.bot_logic.preprocess_message = AsyncMock(return_value=None)
 
     adapter = KoboldEngineAdapter(chat_system=chat_system)
