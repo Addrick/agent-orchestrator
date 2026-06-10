@@ -5,14 +5,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
+# Default test run (parallel via pytest-xdist, skips LLM live tests)
+pytest -m "not llm_live" -n auto
+
 # Run all tests (live tests auto-skip if no credentials)
 pytest
 
 # Unit + integration only (no external services needed)
-pytest -m "not zammad_live and not llm_live and not discord_live"
+pytest -m "not zammad_live and not llm_live and not discord_live" -n auto
 
 # Unit tests only
-pytest -m "not integration and not zammad_live and not llm_live and not discord_live"
+pytest -m "not integration and not zammad_live and not llm_live and not discord_live" -n auto
 
 # Zammad live tests only
 pytest -m "zammad_live"

@@ -502,8 +502,13 @@ class TextEngine:
 
             if item['role'] == 'tool':
                 part_dict = {'function_response': {'name': item['name'], 'response': json.loads(item['content'])}}
-                history_for_api.append({'role': 'tool', 'parts': [Part(**part_dict)]})
-                serializable_item['parts'] = [part_dict]
+                if history_for_api and history_for_api[-1]['role'] == 'tool':
+                    history_for_api[-1]['parts'].append(Part(**part_dict))
+                    serializable_history[-1]['parts'].append(part_dict)
+                else:
+                    history_for_api.append({'role': 'tool', 'parts': [Part(**part_dict)]})
+                    serializable_item['parts'] = [part_dict]
+                    serializable_history.append(serializable_item)
             elif item.get('tool_calls'):
                 api_parts = []
                 serializable_parts = []
@@ -518,8 +523,13 @@ class TextEngine:
                         ser_part['thought_signature'] = '...present...'
                     api_parts.append(Part(**part_kwargs))
                     serializable_parts.append(ser_part)
-                history_for_api.append({'role': 'model', 'parts': api_parts})
-                serializable_item['parts'] = serializable_parts
+                if history_for_api and history_for_api[-1]['role'] == 'model':
+                    history_for_api[-1]['parts'].extend(api_parts)
+                    serializable_history[-1]['parts'].extend(serializable_parts)
+                else:
+                    history_for_api.append({'role': 'model', 'parts': api_parts})
+                    serializable_item['parts'] = serializable_parts
+                    serializable_history.append(serializable_item)
             else:
                 content_text = item['content']
                 parts_for_api = [Part(text=content_text)]
@@ -536,10 +546,13 @@ class TextEngine:
                     except aiohttp.ClientError as e:
                         logger.error(f"Failed to download image from {image_url}: {e}")
 
-                history_for_api.append({'role': role, 'parts': parts_for_api})
-                serializable_item['parts'] = serializable_parts
-            serializable_history.append(serializable_item)
-
+                if history_for_api and history_for_api[-1]['role'] == role:
+                    history_for_api[-1]['parts'].extend(parts_for_api)
+                    serializable_history[-1]['parts'].extend(serializable_parts)
+                else:
+                    history_for_api.append({'role': role, 'parts': parts_for_api})
+                    serializable_item['parts'] = serializable_parts
+                    serializable_history.append(serializable_item)
         return history_for_api, serializable_history
 
     def _build_google_tools(

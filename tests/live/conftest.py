@@ -18,6 +18,7 @@ from src.clients.zammad_service import ZammadIntegration
 from memory.memory_manager import MemoryManager
 from src.engine import TextEngine
 from src.bootstrap import create_chat_system
+from tests.helpers import make_chat_system
 from src.persona import Persona, MemoryMode
 from config.global_config import (
     TEST_MEMORY_DATABASE_FILE,
