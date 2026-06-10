@@ -725,3 +725,20 @@ async def test_retain_document_posts_one_item_with_replace(backend: HindsightBac
     assert item["timestamp"] == ts.isoformat()
     assert "ingest" in item["tags"] and "notes" in item["tags"]
     assert item["metadata"] == {"source_path": "notes/foo.md", "sha256": "abc"}
+
+
+# ----- DP-203: ABC-level error classification -----
+
+def test_hindsight_api_error_is_memory_backend_error():
+    """HindsightAPIError subclasses the ABC error with 5xx => transient."""
+    from src.memory.backend.base import MemoryBackendError
+
+    e5 = HindsightAPIError(503, "overlap window")
+    assert isinstance(e5, MemoryBackendError)
+    assert e5.transient is True
+    assert e5.status_code == 503
+
+    e4 = HindsightAPIError(422, "bad metadata")
+    assert isinstance(e4, MemoryBackendError)
+    assert e4.transient is False
+    assert str(e4) == "Hindsight API Error 422: bad metadata"

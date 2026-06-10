@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from config import global_config
-from src.memory.backend.base import MemoryBackend
+from src.memory.backend.base import MemoryBackend, MemoryBackendError
 from src.tools.tool_manager import ToolManager
 from src.tools.turn_context import get_turn_context
 
@@ -208,8 +208,6 @@ class IngestPathHandler:
         timestamp: datetime,
     ) -> Any:
         """Returns True on success, "noop" if sqlite returned None, False on exhausted retries."""
-        from src.memory.backend.hindsight import HindsightAPIError
-
         for attempt in range(_MAX_RETAIN_RETRIES):
             try:
                 await self.memory_backend.retain_document(
@@ -219,12 +217,15 @@ class IngestPathHandler:
                 # Both Hindsight + sqlite return None; differentiate by class
                 # so the tool can surface a "noop" note when sqlite is active.
                 return "noop" if _backend_is_noop(self.memory_backend) else True
-            except HindsightAPIError as e:
-                if 500 <= e.status_code < 600 and attempt + 1 < _MAX_RETAIN_RETRIES:
+            except MemoryBackendError as e:
+                # transient = retryable (HTTP 5xx on Hindsight) — classified by
+                # the ABC-level error so this tool never imports a concrete
+                # backend (DP-203).
+                if e.transient and attempt + 1 < _MAX_RETAIN_RETRIES:
                     wait = _RETRY_BACKOFF_S * (attempt + 1)
                     logger.warning(
-                        "ingest_path: hindsight %s on %s (attempt %d); retrying in %.1fs",
-                        e.status_code, document_id, attempt + 1, wait,
+                        "ingest_path: transient backend error on %s (attempt %d): %s; retrying in %.1fs",
+                        document_id, attempt + 1, e, wait,
                     )
                     await asyncio.sleep(wait)
                     continue

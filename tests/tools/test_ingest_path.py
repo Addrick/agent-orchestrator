@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -320,3 +321,94 @@ async def test_cache_file_written_per_bank(tmp_path: Path) -> None:
     data = json.loads(cache_file.read_text())
     assert "n.md" in data
     assert "sha256" in data["n.md"]
+
+
+# ----- retry classification via the backend ABC error (DP-203) -----
+
+@pytest.mark.asyncio
+async def test_retain_retries_transient_backend_error(tmp_path: Path, monkeypatch) -> None:
+    """A transient MemoryBackendError is retried (and can then succeed)."""
+    from src.memory.backend.base import MemoryBackendError
+
+    backend = _make_backend()
+    backend.retain_document = AsyncMock(
+        side_effect=[MemoryBackendError("503 overlap", transient=True), None]
+    )
+    handler = _make_handler(tmp_path, backend)
+    sleeps = AsyncMock()
+    monkeypatch.setattr("src.tools.ingest_path.asyncio.sleep", sleeps)
+
+    result = await handler._retain_with_retry(
+        bank_id="b", document_id="d", content="c", tags=[], metadata={},
+        timestamp=datetime.now(),
+    )
+
+    assert result is True
+    assert backend.retain_document.await_count == 2
+    sleeps.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_retain_does_not_retry_non_transient_error(tmp_path: Path, monkeypatch) -> None:
+    """A non-transient MemoryBackendError fails immediately (no retry)."""
+    from src.memory.backend.base import MemoryBackendError
+
+    backend = _make_backend()
+    backend.retain_document = AsyncMock(
+        side_effect=MemoryBackendError("422 bad metadata", transient=False)
+    )
+    handler = _make_handler(tmp_path, backend)
+    sleeps = AsyncMock()
+    monkeypatch.setattr("src.tools.ingest_path.asyncio.sleep", sleeps)
+
+    result = await handler._retain_with_retry(
+        bank_id="b", document_id="d", content="c", tags=[], metadata={},
+        timestamp=datetime.now(),
+    )
+
+    assert result is False
+    assert backend.retain_document.await_count == 1
+    sleeps.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_retain_exhausts_retries_on_persistent_transient(tmp_path: Path, monkeypatch) -> None:
+    """Persistent transient errors exhaust _MAX_RETAIN_RETRIES and return False."""
+    from src.memory.backend.base import MemoryBackendError
+    from src.tools.ingest_path import _MAX_RETAIN_RETRIES
+
+    backend = _make_backend()
+    backend.retain_document = AsyncMock(
+        side_effect=MemoryBackendError("500", transient=True)
+    )
+    handler = _make_handler(tmp_path, backend)
+    monkeypatch.setattr("src.tools.ingest_path.asyncio.sleep", AsyncMock())
+
+    result = await handler._retain_with_retry(
+        bank_id="b", document_id="d", content="c", tags=[], metadata={},
+        timestamp=datetime.now(),
+    )
+
+    assert result is False
+    assert backend.retain_document.await_count == _MAX_RETAIN_RETRIES
+
+
+@pytest.mark.asyncio
+async def test_retain_hindsight_error_still_classified(tmp_path: Path, monkeypatch) -> None:
+    """The concrete HindsightAPIError keeps working through the ABC catch."""
+    from src.memory.backend.hindsight import HindsightAPIError
+
+    backend = _make_backend()
+    backend.retain_document = AsyncMock(
+        side_effect=[HindsightAPIError(503, "bank busy"), None]
+    )
+    handler = _make_handler(tmp_path, backend)
+    monkeypatch.setattr("src.tools.ingest_path.asyncio.sleep", AsyncMock())
+
+    result = await handler._retain_with_retry(
+        bank_id="b", document_id="d", content="c", tags=[], metadata={},
+        timestamp=datetime.now(),
+    )
+
+    assert result is True
+    assert backend.retain_document.await_count == 2

@@ -24,6 +24,22 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 
+# ----------------------------- Errors ----------------------------- #
+
+
+class MemoryBackendError(Exception):
+    """Base error for backend API failures (DP-203).
+
+    ``transient`` marks retryable failures (e.g. HTTP 5xx during bank-overlap
+    windows) so callers like the ``ingest_path`` retry loop can classify
+    errors against the ABC instead of importing a concrete backend.
+    """
+
+    def __init__(self, message: str, *, transient: bool = False):
+        super().__init__(message)
+        self.transient = transient
+
+
 # ----------------------------- New-shape dataclasses ----------------------------- #
 
 

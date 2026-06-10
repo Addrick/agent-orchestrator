@@ -174,9 +174,6 @@ CONTRACTS: List[Tuple[str, Tuple[str, ...]]] = [
 # remaining DP-200 slices are expected to remove. Removing the code edge
 # without deleting its entry here fails the staleness check below.
 KNOWN_DEBT: Set[Tuple[str, str]] = {
-    # ingest_path constructs/asserts the concrete Hindsight backend instead of
-    # programming to the ABC alone.
-    ("src.tools.ingest_path", "src.memory.backend.hindsight"),
     # persona validates tool composition at load; target inverts this so
     # tools/ depends on persona only.
     ("src.persona", "src.tools.definitions"),
