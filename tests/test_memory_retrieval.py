@@ -198,7 +198,7 @@ def chat_system_with_memory():
 
 
 @pytest.mark.asyncio
-@patch('src.chat_system.MEMORY_RETRIEVAL_ENABLED', True)
+@patch('src.request_builder.MEMORY_RETRIEVAL_ENABLED', True)
 async def test_retrieve_memory_block_returns_formatted_block(chat_system_with_memory, mock_persona):
     """Memory block is returned with proper formatting."""
     system, mm, emb_service = chat_system_with_memory
@@ -225,7 +225,7 @@ async def test_retrieve_memory_block_returns_formatted_block(chat_system_with_me
 
 
 @pytest.mark.asyncio
-@patch('src.chat_system.MEMORY_RETRIEVAL_ENABLED', False)
+@patch('src.request_builder.MEMORY_RETRIEVAL_ENABLED', False)
 async def test_retrieve_memory_block_disabled(chat_system_with_memory, mock_persona):
     """Returns None when feature is disabled."""
     system, _, _ = chat_system_with_memory
@@ -239,7 +239,7 @@ async def test_retrieve_memory_block_disabled(chat_system_with_memory, mock_pers
 
 
 @pytest.mark.asyncio
-@patch('src.chat_system.MEMORY_RETRIEVAL_ENABLED', True)
+@patch('src.request_builder.MEMORY_RETRIEVAL_ENABLED', True)
 async def test_retrieve_memory_block_no_embedding_service(mock_persona):
     """Returns None when embedding service is not initialized."""
     with patch('src.bootstrap.load_personas_from_file', return_value={}), \
@@ -255,7 +255,7 @@ async def test_retrieve_memory_block_no_embedding_service(mock_persona):
 
 
 @pytest.mark.asyncio
-@patch('src.chat_system.MEMORY_RETRIEVAL_ENABLED', True)
+@patch('src.request_builder.MEMORY_RETRIEVAL_ENABLED', True)
 async def test_retrieve_memory_block_no_summaries(chat_system_with_memory, mock_persona):
     """Returns None when no summaries are found."""
     system, mm, _ = chat_system_with_memory
@@ -270,7 +270,7 @@ async def test_retrieve_memory_block_no_summaries(chat_system_with_memory, mock_
 
 
 @pytest.mark.asyncio
-@patch('src.chat_system.MEMORY_RETRIEVAL_ENABLED', True)
+@patch('src.request_builder.MEMORY_RETRIEVAL_ENABLED', True)
 async def test_retrieve_memory_block_empty_history(chat_system_with_memory, mock_persona):
     """Returns None when conversation history has no text content."""
     system, mm, _ = chat_system_with_memory
@@ -287,8 +287,8 @@ async def test_retrieve_memory_block_empty_history(chat_system_with_memory, mock
 
 
 @pytest.mark.asyncio
-@patch('src.chat_system.MEMORY_RETRIEVAL_ENABLED', True)
-@patch('src.chat_system.MEMORY_MAX_SUMMARIES_IN_CONTEXT', 2)
+@patch('src.request_builder.MEMORY_RETRIEVAL_ENABLED', True)
+@patch('src.request_builder.MEMORY_MAX_SUMMARIES_IN_CONTEXT', 2)
 async def test_retrieve_memory_block_top_k_limit(chat_system_with_memory, mock_persona):
     """Only top-K summaries are fetched from the database."""
     system, mm, emb_service = chat_system_with_memory
@@ -310,7 +310,7 @@ async def test_retrieve_memory_block_top_k_limit(chat_system_with_memory, mock_p
 
 
 @pytest.mark.asyncio
-@patch('src.chat_system.MEMORY_RETRIEVAL_ENABLED', True)
+@patch('src.request_builder.MEMORY_RETRIEVAL_ENABLED', True)
 async def test_retrieve_memory_block_ambient_tag(chat_system_with_memory, mock_persona):
     """Ambient summaries are tagged in the formatted block."""
     system, mm, emb_service = chat_system_with_memory
@@ -332,7 +332,7 @@ async def test_retrieve_memory_block_ambient_tag(chat_system_with_memory, mock_p
 
 
 @pytest.mark.asyncio
-@patch('src.chat_system.MEMORY_RETRIEVAL_ENABLED', True)
+@patch('src.request_builder.MEMORY_RETRIEVAL_ENABLED', True)
 async def test_retrieve_memory_block_untrusted_propagation(chat_system_with_memory, mock_persona):
     """Untrusted flag is propagated when an untrusted summary is retrieved."""
     system, mm, emb_service = chat_system_with_memory

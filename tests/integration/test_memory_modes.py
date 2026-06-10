@@ -275,7 +275,7 @@ def memory_e2e_system():
 
 
 @pytest.mark.asyncio
-@patch('src.chat_system.MEMORY_RETRIEVAL_ENABLED', True)
+@patch('src.request_builder.MEMORY_RETRIEVAL_ENABLED', True)
 async def test_e2e_memory_injection_in_prepare_request(memory_e2e_system):
     """End-to-end: store messages -> create segments/summaries -> verify memory
     block appears in _prepare_request conversation history."""
@@ -324,7 +324,7 @@ async def test_e2e_memory_injection_in_prepare_request(memory_e2e_system):
 
 
 @pytest.mark.asyncio
-@patch('src.chat_system.MEMORY_RETRIEVAL_ENABLED', True)
+@patch('src.request_builder.MEMORY_RETRIEVAL_ENABLED', True)
 async def test_e2e_recency_filter_no_information_gap(memory_e2e_system):
     """Recency filter integration: a segment straddling the sliding window boundary
     is included (not filtered), preventing information gaps for messages that are

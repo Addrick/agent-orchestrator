@@ -125,6 +125,11 @@ CONTRACTS: List[Tuple[str, Tuple[str, ...]]] = [
         "src.chat_system", "src.message_handler", "src.memory",
         "src.interfaces", "src.agents",
     )),
+    # Request assembly sits below the orchestrator: personas, tools, storage.
+    ("src.request_builder", (
+        "src.chat_system", "src.message_handler", "src.interfaces",
+        "src.agents", "src.engine", "src.stream_engine",
+    )),
     # Confirmation parking sits below the orchestrator: tools + storage only.
     ("src.confirmations", (
         "src.chat_system", "src.message_handler", "src.interfaces",
