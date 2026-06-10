@@ -1890,6 +1890,7 @@ def test_chat_completions_google_end_to_end_payload_structure(mock_google_client
         model_name="gemini-2.5-flash",
         prompt="Always speak like a pirate",
         context_length=10,
+        inject_timestamp=False,
     )
     
     # 2. Mock Google Client response
@@ -2130,6 +2131,7 @@ def test_assemble_matches_live_wire_messages():
         yield {"type": "done", "full_text": "ok"}
 
     adapter, mm, persona, chat_system = _make_real_adapter(stream_messages=stream_messages)
+    persona.set_inject_timestamp(False)
     base = datetime(2026, 4, 1, 12, 0, 0)
     mm.log_message(
         user_identifier="portal", persona_name="test_persona", channel="web_ui",
@@ -2179,6 +2181,7 @@ def test_assemble_endpoint_returns_parity_contract_shape():
     """The §9 wire shape: parity banner data, route, model, flattened params,
     and src-tagged messages with the composer's new turn last."""
     adapter, mm, persona, chat_system = _make_real_adapter()
+    persona.set_inject_timestamp(False)
     with TestClient(adapter.app) as client:
         r = client.get("/api/v1/session/test_persona/assemble?message=hello+world")
     assert r.status_code == 200

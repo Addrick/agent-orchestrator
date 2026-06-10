@@ -429,3 +429,81 @@ def test_insecure_persona_loads_quarantined_not_dropped(tmp_path):
     assert loaded["bad"].is_security_blocked() is True
     assert loaded["bad"].get_security_block_reasons()
     assert loaded["good"].is_security_blocked() is False
+
+
+# --- inject_timestamp tests ---
+
+def test_inject_timestamp_default_true(base_persona_args):
+    """inject_timestamp defaults to True for user/chat personas."""
+    p = Persona(**base_persona_args)
+    assert p.get_inject_timestamp() is True
+
+
+def test_inject_timestamp_explicit_false(base_persona_args):
+    """inject_timestamp can be explicitly initialized to False."""
+    p = Persona(**base_persona_args, inject_timestamp=False)
+    assert p.get_inject_timestamp() is False
+
+
+def test_inject_timestamp_setter(persona):
+    """inject_timestamp has a working setter."""
+    assert persona.get_inject_timestamp() is True
+    persona.set_inject_timestamp(False)
+    assert persona.get_inject_timestamp() is False
+    persona.set_inject_timestamp(True)
+    assert persona.get_inject_timestamp() is True
+
+
+def test_inject_timestamp_round_trip_save_load(base_persona_args, tmp_path):
+    """Round-trip inject_timestamp through save_personas_to_file → load_personas_from_file."""
+    from src.utils.save_utils import save_personas_to_file, load_personas_from_file
+
+    p_inject = Persona(**{**base_persona_args, "persona_name": "inject"}, inject_timestamp=True)
+    p_no_inject = Persona(**{**base_persona_args, "persona_name": "no_inject"}, inject_timestamp=False)
+    save_file = str(tmp_path / "personas.json")
+    save_personas_to_file({"inject": p_inject, "no_inject": p_no_inject}, set(), file_path_override=save_file)
+
+    loaded = load_personas_from_file(file_path_override=save_file)
+    assert loaded["inject"].get_inject_timestamp() is True
+    assert loaded["no_inject"].get_inject_timestamp() is False
+
+
+def test_inject_timestamp_absent_in_legacy_config_defaults_true(base_persona_args, tmp_path):
+    """A persona JSON without inject_timestamp (old config file) loads as True."""
+    import json
+    from src.utils.save_utils import load_personas_from_file
+
+    save_file = tmp_path / "personas.json"
+    save_file.write_text(json.dumps({
+        "personas": [{
+            "name": "legacy",
+            "model_name": "m",
+            "prompt": "p",
+        }],
+    }))
+    loaded = load_personas_from_file(file_path_override=str(save_file))
+    assert loaded["legacy"].get_inject_timestamp() is True
+
+
+def test_build_wire_messages_inject_timestamp(base_persona_args):
+    from src.tools.tool_loop import build_wire_messages
+    p = Persona(**base_persona_args, inject_timestamp=True)
+    history = [{"role": "user", "content": "hello"}]
+    messages = build_wire_messages(p, history)
+    assert len(messages) == 2
+    assert messages[0]["role"] == "system"
+    assert "[Current Time:" in messages[0]["content"]
+    assert "You are a test persona." in messages[0]["content"]
+
+
+def test_build_wire_messages_no_inject_timestamp(base_persona_args):
+    from src.tools.tool_loop import build_wire_messages
+    p = Persona(**base_persona_args, inject_timestamp=False)
+    history = [{"role": "user", "content": "hello"}]
+    messages = build_wire_messages(p, history)
+    assert len(messages) == 2
+    assert messages[0]["role"] == "system"
+    assert "[Current Time:" not in messages[0]["content"]
+    assert messages[0]["content"] == "You are a test persona."
+
+

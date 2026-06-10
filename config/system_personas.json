@@ -14,7 +14,8 @@
       "enabled_tools": [],
       "memory_mode": "global",
       "meta_visible": false,
-      "long_term_memory": false
+      "long_term_memory": false,
+      "inject_timestamp": false
     },
     {
       "name": "tool_selector",
@@ -30,7 +31,8 @@
       "enabled_tools": [],
       "memory_mode": "global",
       "meta_visible": false,
-      "long_term_memory": false
+      "long_term_memory": false,
+      "inject_timestamp": false
     },
     {
       "name": "triage_analyst",
@@ -46,7 +48,8 @@
       "enabled_tools": [],
       "memory_mode": "ticket_isolated",
       "meta_visible": false,
-      "long_term_memory": false
+      "long_term_memory": false,
+      "inject_timestamp": false
     },
     {
       "name": "triage_scout",
@@ -62,7 +65,8 @@
       "enabled_tools": [],
       "memory_mode": "global",
       "meta_visible": false,
-      "long_term_memory": false
+      "long_term_memory": false,
+      "inject_timestamp": false
     },
     {
       "name": "triage_filter",
@@ -78,7 +82,8 @@
       "enabled_tools": [],
       "memory_mode": "global",
       "meta_visible": false,
-      "long_term_memory": false
+      "long_term_memory": false,
+      "inject_timestamp": false
     },
     {
       "name": "triage_summarizer",
@@ -94,7 +99,8 @@
       "enabled_tools": [],
       "memory_mode": "global",
       "meta_visible": false,
-      "long_term_memory": false
+      "long_term_memory": false,
+      "inject_timestamp": false
     },
     {
       "name": "dispatch_analyst",
@@ -110,7 +116,8 @@
       "enabled_tools": [],
       "memory_mode": "global",
       "meta_visible": false,
-      "long_term_memory": false
+      "long_term_memory": false,
+      "inject_timestamp": false
     },
     {
       "name": "memory_summarizer",
@@ -127,7 +134,8 @@
       "enabled_tools": [],
       "memory_mode": "global",
       "meta_visible": false,
-      "long_term_memory": false
+      "long_term_memory": false,
+      "inject_timestamp": false
     }
   ]
 }

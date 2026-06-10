@@ -59,6 +59,7 @@ class Persona:
             meta_visible: bool = False,
             ingest_bank: Optional[str] = None,
             security_block_reasons: Optional[List[str]] = None,
+            inject_timestamp: bool = True,
             **kwargs: Any,
     ) -> None:
         self._name: str = persona_name
@@ -110,6 +111,7 @@ class Persona:
         self._chat_template: Optional[str] = chat_template if chat_template else None
         self._meta_visible: bool = bool(meta_visible)
         self._ingest_bank: Optional[str] = ingest_bank if ingest_bank else None
+        self._inject_timestamp: bool = bool(inject_timestamp)
 
         try:
             self._max_context_tokens: int = int(max_context_tokens) if max_context_tokens is not None else global_config.DEFAULT_MAX_CONTEXT_TOKENS
@@ -279,6 +281,10 @@ class Persona:
         recall (`MemoryRouter.list_visible_personas`). Default False — opt-in
         groundwork for the future Meta-Agent. See plans/memory_backend_abc.md."""
         return self._meta_visible
+
+    def get_inject_timestamp(self) -> bool:
+        """Whether to inject the current timestamp into the system prompt."""
+        return self._inject_timestamp
 
     def set_meta_visible(self, value: bool) -> None:
         self._meta_visible = bool(value)
@@ -451,6 +457,11 @@ class Persona:
         """Enables or disables long-term memory retrieval for this persona."""
         self._long_term_memory = value
         logger.info(f"Persona '{self._name}' long_term_memory set to {value}.")
+
+    def set_inject_timestamp(self, value: bool) -> None:
+        """Sets whether to inject the current timestamp into the system prompt."""
+        self._inject_timestamp = bool(value)
+        logger.info(f"Persona '{self._name}' inject_timestamp set to {self._inject_timestamp}.")
 
     def set_thinking_level(self, value: Optional[str]) -> None:
         """Sets the thinking level for extended thinking models (e.g. 'minimal', None to clear)."""
