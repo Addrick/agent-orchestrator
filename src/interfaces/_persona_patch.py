@@ -1,42 +1,16 @@
 # src/interfaces/_persona_patch.py
-"""Shared PATCH helpers for the kobold adapter pair.
+"""Shared PATCH helpers for the kobold engine adapter.
 
-Both `kobold_adapter.py` and `kobold_engine_adapter.py` accept persona PATCH
-requests with the same field set. Centralizing the kobold-extras mapping +
-known-key list here keeps the two adapter PATCH handlers in sync without
-introducing a circular import.
+`kobold_engine_adapter.py` accepts persona PATCH requests over a fixed field
+set. Centralizing the kobold-extras mapping + known-key list here keeps the
+PATCH handling reusable and isolated (the legacy :5002 `kobold_adapter.py`
+that also consumed these was retired in DP-200 finding A).
 """
 
 from typing import Any, Callable, Dict, List, Tuple
 
 from src.persona import Persona
-
-
-# Keys handled by the legacy adapter's PATCH route (kobold_adapter.py).
-_KNOWN_PATCH_KEYS_LEGACY = {
-    "prompt",
-    "model_name",
-    "temperature",
-    "top_p",
-    "top_k",
-    "max_tokens",
-    "history_messages",
-    "context_length",
-    "memory_mode",
-    "max_context_tokens",
-    "instruct_tags",
-    "long_term_memory",
-    # kobold provider extras
-    "rep_pen",
-    "rep_pen_range",
-    "rep_pen_slope",
-    "min_p",
-    "typical",
-    "tfs",
-}
-
-# Engine adapter additionally accepts chat_template.
-_KNOWN_PATCH_KEYS_ENGINE = _KNOWN_PATCH_KEYS_LEGACY | {"chat_template"}
+from src.persona_fields import registry_patch_keys
 
 
 # (key, coercer) pairs. Coercer raises ValueError/TypeError on bad input,
@@ -49,6 +23,17 @@ _KOBOLD_SAMPLER_EXTRAS: List[Tuple[str, Callable[[Any], Any]]] = [
     ("typical", float),
     ("tfs", float),
 ]
+
+# Persona keys accepted by the engine adapter's PATCH route. Core persona
+# fields come from the registry (src/persona_fields.py) so the PATCH surface
+# can never drift from the dev-command surface; the rest are route-specific:
+# the history_messages/context_length pair, instruct_tags, and the kobold
+# sampler extras above.
+_KNOWN_PATCH_KEYS_ENGINE = registry_patch_keys() | {
+    "history_messages",
+    "context_length",
+    "instruct_tags",
+} | {key for key, _ in _KOBOLD_SAMPLER_EXTRAS}
 
 
 def _apply_kobold_sampler_extras(

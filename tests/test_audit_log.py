@@ -7,7 +7,8 @@ from datetime import datetime
 from unittest.mock import MagicMock, AsyncMock, patch
 
 from src.memory.memory_manager import MemoryManager
-from src.chat_system import ChatSystem, ResponseType, PendingConfirmation
+from src.bootstrap import create_chat_system
+from src.chat_system import ResponseType, PendingConfirmation
 from src.persona import Persona, ExecutionMode
 from src.engine import TextEngine
 from src.tools.tool_manager import ToolManager
@@ -25,8 +26,8 @@ def chat_system(mem_manager):
     tool_manager = MagicMock(spec=ToolManager)
     tool_manager.get_tool_definitions.return_value = []
     
-    with patch('src.chat_system.load_personas_from_file', return_value={}):
-        system = ChatSystem(memory_manager=mem_manager, text_engine=text_engine)
+    with patch('src.bootstrap.load_personas_from_file', return_value={}):
+        system = create_chat_system(memory_manager=mem_manager, text_engine=text_engine)
         system.tool_manager = tool_manager
         return system
 
@@ -119,7 +120,7 @@ async def test_chat_system_audit_decision_approved(chat_system, mem_manager):
     chat_system.personas["test_p"] = Persona("test_p", "model", "prompt")
     
     # Mock dependencies for resume
-    chat_system._execute_write_calls = AsyncMock()
+    chat_system.confirmations.execute_write_calls = AsyncMock()
     chat_system.text_engine.generate_response = AsyncMock(return_value=({"content": "Done"}, {}))
     
     # Resume with approval
@@ -157,7 +158,7 @@ async def test_chat_system_audit_decision_denied(chat_system, mem_manager):
     chat_system.personas["test_p"] = Persona("test_p", "model", "prompt")
     
     # Mock dependencies for resume
-    chat_system._append_denied_tool_results = MagicMock()
+    chat_system.confirmations.append_denied_tool_results = MagicMock()
     chat_system.text_engine.generate_response = AsyncMock(return_value=({"content": "Denied"}, {}))
     
     # Resume with denial

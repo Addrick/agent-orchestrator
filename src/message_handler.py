@@ -6,12 +6,12 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from config.global_config import (
     DEFAULT_MODEL_NAME,
-    DEFAULT_PERSONA,
     MODEL_SELECTOR_PERSONA_NAME,
     TOOL_SELECTOR_PERSONA_NAME
 )
 
-from src.persona import Persona, ExecutionMode, MemoryMode
+from src.persona import Persona
+from src.persona_fields import cli_set_handlers, cli_what_handlers
 from src.utils import model_utils
 from src.utils.model_utils import get_model_list
 
@@ -40,50 +40,20 @@ class BotLogic:
             'trust': self._handle_trust,
             'untrust': self._handle_untrust,
         }
+        # Persona-field handlers come from the declarative registry
+        # (src/persona_fields.py — DP-200 slice D); only handlers that need
+        # ChatSystem state or an LLM call stay as bespoke methods here.
         self.what_handlers = {
-            'prompt': self._what_prompt,
-            'model': self._what_model,
+            **cli_what_handlers(),
             'models': self._what_models,
             'personas': self._what_personas,
-            'history': self._what_history,
-            'tokens': self._what_tokens,
-            'temp': self._what_temp,
-            'execution_mode': self._what_execution_mode,
             'tools': self._what_tools,
-            'memory_mode': self._what_memory_mode,
-            'service_bindings': self._what_service_bindings,
-            'top_p': self._what_top_p,
-            'top_k': self._what_top_k,
-            'display_name': self._what_display_name,
-            'long_term_memory': self._what_long_term_memory,
-            'include_ambient_memory': self._what_include_ambient_memory,
-            'ingest_bank': self._what_ingest_bank,
-            'thinking_level': self._what_thinking_level,
-            'max_context_tokens': self._what_max_context_tokens,
-            'chat_template': self._what_chat_template,
-            'tool_policy': self._what_tool_policy,
             'security': self._what_security,
         }
         self.set_handlers = {
-            'prompt': self._set_prompt,
-            'default_prompt': self._set_default_prompt,
+            **cli_set_handlers(),
             'model': self._set_model,
-            'tokens': self._set_tokens,
-            'history': self._set_history,
-            'temp': self._set_temp,
-            'top_p': self._set_top_p,
-            'top_k': self._set_top_k,
-            'display_name': self._set_display_name,
-            'execution_mode': self._set_execution_mode,
             'tools': self._set_tools,
-            'memory_mode': self._set_memory_mode,
-            'service_bindings': self._set_service_bindings,
-            'long_term_memory': self._set_long_term_memory,
-            'include_ambient_memory': self._set_include_ambient_memory,
-            'thinking_level': self._set_thinking_level,
-            'max_context_tokens': self._set_max_context_tokens,
-            'chat_template': self._set_chat_template,
-            'tool_policy': self._set_tool_policy,
         }
 
     async def preprocess_message(
@@ -130,24 +100,28 @@ class BotLogic:
     def _handle_help(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[Optional[str], bool]:
         if args:
             return None, False
+        # Field lists are generated from the dispatch tables (registry +
+        # bespoke) so help can never go stale against what's actually wired.
+        what_fields = '/'.join(self.what_handlers.keys())
+        set_fields = '/'.join(self.set_handlers.keys())
         help_msg: str = ("Talk to a specific persona by starting your message with their name. \n \n"
                          "Currently active personas: \n" +
                          ', '.join(self.chat_system.visible_personas().keys()) + "\n\n"
-                                                                       "Bot commands: \n"
-                                                                       "hello (start new conversation), \n"
-                                                                       "goodbye (end conversation), \n"
-                                                                       "remember <+prompt>, \n"
-                                                                       "what prompt/model/models/personas/history/tokens/temp/top_p/top_k/execution_mode/tools/memory_mode/service_bindings/display_name/long_term_memory/include_ambient_memory/thinking_level/chat_template, \n"
-                                                                       "set prompt/model/history/tokens/temp/top_p/top_k/display_name/execution_mode/tools/memory_mode/service_bindings/long_term_memory/include_ambient_memory/thinking_level/chat_template, \n"
-                                                                       "set <provider>.<key> <value> (e.g. 'set kobold.mirostat 2', 'set kobold.rep_pen none' to clear), \n"
-                                                                       "add <persona>, \n"
-                                                                       "delete <persona>, \n"
-                                                                       "detail, \n"
-                                                                       "update_models, \n"
-                                                                       "dump_last, \n"
-                                                                       "dump_history, \n"
-                                                                       "trust <id> <reason>, \n"
-                                                                       "untrust <id> <reason>")
+                         "Bot commands: \n"
+                         "hello (start new conversation), \n"
+                         "goodbye (end conversation), \n"
+                         "remember <+prompt>, \n"
+                         f"what {what_fields}, \n"
+                         f"set {set_fields}, \n"
+                         "set <provider>.<key> <value> (e.g. 'set kobold.mirostat 2', 'set kobold.rep_pen none' to clear), \n"
+                         "add <persona>, \n"
+                         "delete <persona>, \n"
+                         "detail, \n"
+                         "update_models, \n"
+                         "dump_last, \n"
+                         "dump_history, \n"
+                         "trust <id> <reason>, \n"
+                         "untrust <id> <reason>")
         return help_msg, False
 
     async def _query_llm_with_selection_tool(
@@ -396,12 +370,6 @@ class BotLogic:
             return f"{provider}.{key} for '{persona.get_name()}' is not set.", False
         return f"{provider}.{key} for '{persona.get_name()}' is {value!r}.", False
 
-    def _what_prompt(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        return f"Prompt for '{persona.get_name()}': {persona.get_prompt()}", False
-
-    def _what_model(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        return f"{persona.get_name()} is using {persona.get_model_name()}", False
-
     def _what_models(self, args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
         all_models: Dict[str, Any] = self.chat_system.models_available
         if len(args) == 1:
@@ -418,18 +386,6 @@ class BotLogic:
     def _what_personas(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
         return f"Available personas are: {list(self.chat_system.visible_personas().keys())}", False
 
-    def _what_history(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        return f"{persona.get_name()} default history message count is {persona.get_base_history_messages()}.", False
-
-    def _what_tokens(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        return f"{persona.get_name()} is limited to {persona.get_response_token_limit()} response tokens.", False
-
-    def _what_temp(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        return f"Temperature for {persona.get_name()} is set to {persona.get_temperature() or 'default'}.", False
-
-    def _what_execution_mode(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        return f"Execution mode for '{persona.get_name()}' is set to {persona.get_execution_mode().name}.", False
-
     def _what_tools(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
         all_tool_defs = self.chat_system.tool_manager.get_tool_definitions()
         all_tool_names = {tool['function']['name'] for tool in all_tool_defs}
@@ -445,55 +401,6 @@ class BotLogic:
 
         return "\n".join(response_lines), False
 
-    def _what_memory_mode(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        valid_modes = ", ".join([e.name.lower() for e in MemoryMode])
-        return f"Memory mode for '{persona.get_name()}' is {persona.get_memory_mode().name.lower()}.\nValid modes are: {valid_modes}.", False
-
-    def _what_service_bindings(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        bindings = persona.get_service_bindings()
-        display = ', '.join(bindings) if bindings else 'none'
-        return f"Service bindings for '{persona.get_name()}': {display}.", False
-
-    def _what_top_p(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        return f"Top P for {persona.get_name()} is set to {persona.get_top_p() or 'default'}.", False
-
-    def _what_top_k(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        return f"Top K for {persona.get_name()} is set to {persona.get_top_k() or 'default'}.", False
-
-    def _what_display_name(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        status = "enabled" if persona.should_display_name_in_chat() else "disabled"
-        return f"Display name in chat for '{persona.get_name()}' is {status}.", False
-
-    def _what_long_term_memory(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        status = "enabled" if persona.get_long_term_memory() else "disabled"
-        return f"Long-term memory retrieval for '{persona.get_name()}' is {status}.", False
-
-    def _what_include_ambient_memory(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        status = "enabled" if persona.get_include_ambient_memory() else "disabled"
-        return f"Ambient memory inclusion for '{persona.get_name()}' is {status}.", False
-
-    def _what_ingest_bank(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        bank = persona.get_ingest_bank()
-        display = f"'{bank}'" if bank else f"default ('{persona.get_name()}')"
-        return f"Ingest target bank for '{persona.get_name()}' is {display}.", False
-
-    def _what_thinking_level(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        level = persona.get_thinking_level()
-        display = f"'{level}'" if level else "not set (default)"
-        return f"Thinking level for '{persona.get_name()}' is {display}.", False
-
-    def _what_max_context_tokens(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        return f"Max context tokens for '{persona.get_name()}' is {persona.get_max_context_tokens()}.", False
-    
-    def _what_chat_template(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        template = persona.get_chat_template()
-        display = f"'{template}'" if template else "not set (default)"
-        return f"Chat template for '{persona.get_name()}' is {display}.", False
-
-    def _what_tool_policy(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        policy = persona.get_tool_policy()
-        return f"Tool policy for '{persona.get_name()}': {json.dumps(policy.to_dict(), indent=2)}", False
-
     def _what_security(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
         """Report whether the persona is quarantined for an insecure tool
         composition, and why. See DP-128."""
@@ -507,7 +414,6 @@ class BotLogic:
             "Fix with `set tools <safe list>` or `set tool_policy <json>`.",
             False,
         )
-
 
     async def _handle_set(
             self,
@@ -590,17 +496,6 @@ class BotLogic:
             return False
         return raw
 
-    def _set_prompt(self, args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
-        prompt: str = ' '.join(args[1:])
-        if not prompt:
-            return None, False
-        persona.set_prompt(prompt)
-        return 'Prompt saved.', True
-
-    def _set_default_prompt(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        persona.set_prompt(DEFAULT_PERSONA)
-        return f"Prompt for {persona.get_name()} reset to default.", True
-
     async def _set_model(self, args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
         model_name: str
         try:
@@ -631,125 +526,6 @@ class BotLogic:
         # Fallback to default
         persona.set_model_name(DEFAULT_MODEL_NAME)
         return f"Could not find a match for '{model_query}'. Falling back to default: '{DEFAULT_MODEL_NAME}'.", True
-
-    def _set_tokens(self, args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
-        limit_str: str
-        try:
-            limit_str = args[1]
-            token_limit: int = int(limit_str)
-            persona.set_response_token_limit(token_limit)
-            return f"Set token limit to '{token_limit}' for {persona.get_name()}.", True
-        except IndexError:
-            return None, False
-        except ValueError:
-            limit_str = args[1]
-            persona.set_response_token_limit(None)
-            return f"Non-numeric token limit '{limit_str}' provided. The default token limit will be used for {persona.get_name()}.", True
-
-    def _set_history(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        if len(args) < 2:
-            return "Usage: set history <number|dynamic> [start_value]", False
-
-        mode = args[1].lower()
-        if mode == 'dynamic':
-            start_value: int
-            if len(args) > 2:
-                try:
-                    start_value = int(args[2])
-                except ValueError:
-                    return f"Error: Invalid start value '{args[2]}'. Must be an integer.", False
-            else:
-                start_value = persona.get_current_effective_history_messages()
-
-            persona.start_new_conversation(start_value)
-            return f"Dynamic history mode enabled for {persona.get_name()}, starting at size {start_value}.", True
-        else:
-            try:
-                history_messages = int(mode)
-                persona.set_history_messages(history_messages)
-                return f"Set static history limit for {persona.get_name()} to '{history_messages}' messages.", True
-            except ValueError:
-                return f"Error: Invalid history command '{mode}'. Use a number or 'dynamic'.", False
-
-    def _set_temp(self, args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
-        temp_str: str
-        try:
-            temp_str = args[1]
-            new_temp: float = float(temp_str)
-            if not 0 <= new_temp <= 2:
-                return "Error: Temperature must be between 0 and 2.", False
-            persona.set_temperature(new_temp)
-            return f"Set temperature to {new_temp} for {persona.get_name()}.", True
-        except IndexError:
-            return None, False
-        except ValueError:
-            temp_str = args[1]
-            persona.set_temperature(None)
-            return f"Non-numeric temperature '{temp_str}' provided. The default temperature will be used for {persona.get_name()}.", True
-
-    def _set_top_p(self, args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
-        top_p_str: str
-        try:
-            top_p_str = args[1]
-            new_top_p: float = float(top_p_str)
-            if not 0 <= new_top_p <= 1:
-                return "Error: Top P must be between 0 and 1.", False
-            persona.set_top_p(new_top_p)
-            return f"Set top_p to {new_top_p} for {persona.get_name()}.", True
-        except IndexError:
-            return None, False
-        except ValueError:
-            top_p_str = args[1]
-            persona.set_top_p(None)
-            return f"Non-numeric Top P '{top_p_str}' provided. The default Top P will be used for {persona.get_name()}.", True
-
-    def _set_top_k(self, args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
-        top_k_str: str
-        try:
-            top_k_str = args[1]
-            new_top_k: int = int(top_k_str)
-            persona.set_top_k(new_top_k)
-            return f"Set top_k to {new_top_k} for {persona.get_name()}.", True
-        except IndexError:
-            return None, False
-        except ValueError:
-            top_k_str = args[1]
-            persona.set_top_k(None)
-            return f"Non-numeric Top K '{top_k_str}' provided. The default Top K will be used for {persona.get_name()}.", True
-
-    def _set_display_name(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        value_str: str
-        try:
-            value_str = args[1].lower()
-        except IndexError:
-            return "Error: Please specify 'on' or 'off' for the display name.", False
-
-        new_value: bool
-        if value_str in ['true', 'on', 'yes', '1']:
-            new_value = True
-        elif value_str in ['false', 'off', 'no', '0']:
-            new_value = False
-        else:
-            return f"Error: Invalid value '{value_str}'. Please use 'on' or 'off'.", False
-
-        persona.set_display_name_in_chat(new_value)
-        status: str = "enabled" if new_value else "disabled"
-        return f"Displaying name in chat for {persona.get_name()} is now {status}.", True
-
-    def _set_execution_mode(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        try:
-            mode_str = args[1].upper()
-        except IndexError:
-            valid_modes = ", ".join([e.name.lower() for e in ExecutionMode])
-            return f"Error: Please specify an execution mode. Valid modes are: {valid_modes}.", False
-
-        try:
-            ExecutionMode[mode_str]
-            persona.set_execution_mode(mode_str)
-            return f"Execution mode for {persona.get_name()} set to '{mode_str}'.", True
-        except KeyError:
-            valid_modes = ", ".join([e.name.lower() for e in ExecutionMode])
-            return f"Error: Invalid execution mode '{args[1]}'. Valid modes are: {valid_modes}.", False
 
     async def _set_tools(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
         if len(args) < 2:
@@ -827,103 +603,6 @@ class BotLogic:
             fuzzy_note = f" (fuzzy: {', '.join(fuzzy_matches)})" if fuzzy_matches else ""
             return (f"Enabled tools for {persona.get_name()} set to: "
                     f"{', '.join(resolved_includes)}.{fuzzy_note}"), True
-
-    def _set_memory_mode(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        try:
-            mode_str = args[1].upper()
-        except IndexError:
-            valid_modes = ", ".join([e.name.lower() for e in MemoryMode])
-            return f"Error: Please specify a memory mode. Valid modes are: {valid_modes}.", False
-
-        try:
-            MemoryMode[mode_str]
-            persona.set_memory_mode(mode_str)
-            return f"Memory mode for {persona.get_name()} set to '{mode_str}'.", True
-        except KeyError:
-            valid_modes = ", ".join([e.name.lower() for e in MemoryMode])
-            return f"Error: Invalid memory mode '{args[1]}'. Valid modes are: {valid_modes}.", False
-
-    def _set_service_bindings(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        if len(args) < 2:
-            return "Error: Please specify service bindings (comma-separated, or 'none' to clear).", False
-        value_str = args[1].lower().strip()
-        if value_str in ['none', 'clear', '[]']:
-            persona.set_service_bindings([])
-            return f"Service bindings for {persona.get_name()} cleared.", True
-        bindings = [b.strip() for b in value_str.split(',') if b.strip()]
-        persona.set_service_bindings(bindings)
-        return f"Service bindings for {persona.get_name()} set to: {', '.join(bindings)}.", True
-
-    def _set_long_term_memory(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        try:
-            value_str = args[1].lower()
-        except IndexError:
-            return "Error: Please specify 'on' or 'off' for long_term_memory.", False
-
-        if value_str in ('on', 'true', 'yes', '1'):
-            persona.set_long_term_memory(True)
-            return f"Long-term memory retrieval enabled for {persona.get_name()}.", True
-        elif value_str in ('off', 'false', 'no', '0'):
-            persona.set_long_term_memory(False)
-            return f"Long-term memory retrieval disabled for {persona.get_name()}.", True
-        return f"Error: Invalid value '{value_str}'. Please use 'on' or 'off'.", False
-
-    def _set_chat_template(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        if len(args) < 2:
-            return "Error: Please specify a chat template (e.g. 'chatml', 'llama3') or 'none' to clear.", False
-        value_str = args[1].lower().strip()
-        if value_str in ('none', 'null', 'clear'):
-            persona.set_chat_template(None)
-            return f"Chat template for {persona.get_name()} cleared (reverting to global default).", True
-        persona.set_chat_template(value_str)
-        return f"Chat template for {persona.get_name()} set to '{value_str}'.", True
-
-    def _set_include_ambient_memory(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        try:
-            value_str = args[1].lower()
-        except IndexError:
-            return "Error: Please specify 'on' or 'off' for include_ambient_memory.", False
-
-        if value_str in ('on', 'true', 'yes', '1'):
-            persona.set_include_ambient_memory(True)
-            return f"Ambient memory inclusion enabled for {persona.get_name()}.", True
-        elif value_str in ('off', 'false', 'no', '0'):
-            persona.set_include_ambient_memory(False)
-            return f"Ambient memory inclusion disabled for {persona.get_name()}.", True
-        return f"Error: Invalid value '{value_str}'. Please use 'on' or 'off'.", False
-
-    def _set_max_context_tokens(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        try:
-            value = args[1]
-        except IndexError:
-            return "Error: Please specify an integer max_context_tokens value.", False
-        new_val = persona.set_max_context_tokens(value)
-        return f"Max context tokens for {persona.get_name()} set to {new_val}.", True
-
-    def _set_thinking_level(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        try:
-            value = args[1].lower()
-        except IndexError:
-            return "Error: Please specify a thinking level (e.g. 'minimal') or 'none' to clear.", False
-
-        if value == 'none':
-            persona.set_thinking_level(None)
-            return f"Thinking level cleared for {persona.get_name()} (will use model default).", True
-        persona.set_thinking_level(value)
-        return f"Thinking level for {persona.get_name()} set to '{value}'.", True
-
-    def _set_tool_policy(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
-        if len(args) < 2:
-            return "Usage: set tool_policy <json_string>", False
-        json_str = " ".join(args[1:])
-        try:
-            policy_dict = json.loads(json_str)
-            persona.set_tool_policy(policy_dict)
-            return f"Tool policy for {persona.get_name()} updated.", True
-        except json.JSONDecodeError:
-            return "Error: Invalid JSON string for tool policy.", False
-        except ValueError as e:
-            return f"Error: {e}", False
 
     def _handle_start_conversation(self, args: List[str], persona: Persona, user_identifier: str) -> Tuple[
         Optional[str], bool]:

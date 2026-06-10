@@ -29,6 +29,11 @@ class ZammadIntegration(ServiceIntegration):
     def name(self) -> str:
         return "zammad"
 
+    @property
+    def client(self) -> ZammadClient:
+        """The underlying Zammad API client, for dependency injection into agents."""
+        return self._client
+
     def register_tools(self, tool_manager: "ToolManager") -> None:
         """Register all Zammad CRUD tools with the ToolManager."""
         from src.tools.tool_manager import ZammadToolHandler

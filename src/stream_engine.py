@@ -12,6 +12,12 @@ import httpx
 from config import global_config
 from src.engine import LLMCommunicationError
 from src.generation_params import GenerationParams
+from src.text_tool_protocol import (
+    TOOL_CALL_OPEN,
+    TOOL_CALL_CLOSE,
+    TOOL_CALL_SYNTAX,
+    decode_tool_call_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +158,7 @@ def _format_tools_instruction(tools: List[Dict[str, Any]]) -> str:
         "",
         "# Tool Use",
         "You have access to the tools listed below. To call a tool, emit exactly:",
-        '<tool_call>{"name": "TOOL_NAME", "arguments": {"arg1": "value", ...}}</tool_call>',
+        TOOL_CALL_SYNTAX,
         "Emit one `<tool_call>` block per call. Emit them verbatim with no",
         "surrounding code fences. After a tool returns, continue the conversation",
         "normally. If no tool is needed, just answer the user.",
@@ -527,8 +533,10 @@ def _parse_sse_event(raw: str) -> Optional[Tuple[str, Dict[str, Any]]]:
     return etype_m.group(1).strip(), data
 
 
-_TOOL_OPEN = "<tool_call>"
-_TOOL_CLOSE = "</tool_call>"
+# Aliased to the shared protocol constants so the streaming parser and the
+# agy complete-response path can never disagree on the wire tags.
+_TOOL_OPEN = TOOL_CALL_OPEN
+_TOOL_CLOSE = TOOL_CALL_CLOSE
 _HARMONY_OPEN = "<|"
 _HARMONY_CLOSE = "|>"
 
@@ -624,9 +632,8 @@ class _ToolCallStreamParser:
         return list(self.calls)
 
     def _commit_call(self, raw_json: str) -> None:
-        try:
-            parsed = json.loads(raw_json.strip())
-        except json.JSONDecodeError:
+        parsed = decode_tool_call_payload(raw_json)
+        if parsed is None:
             logger.warning("Discarding malformed <tool_call> block: %r", raw_json[:200])
             return
         name = parsed.get("name")

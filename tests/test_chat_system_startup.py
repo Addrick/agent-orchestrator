@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from memory.memory_manager import MemoryManager
+from src.bootstrap import create_chat_system
 from src.chat_system import ChatSystem
 from src.engine import TextEngine
 from src.memory.backend.hindsight import HindsightBackend
@@ -23,9 +24,9 @@ def _make_system(backend: object, personas: dict[str, Persona]) -> ChatSystem:
     mm = MagicMock(spec=MemoryManager)
     mm.backend = backend
     text_engine = MagicMock(spec=TextEngine)
-    with patch("src.chat_system.load_personas_from_file", return_value=personas), \
-         patch("src.utils.save_utils.load_system_personas_from_file", return_value={}):
-        return ChatSystem(memory_manager=mm, text_engine=text_engine)
+    with patch("src.bootstrap.load_personas_from_file", return_value=personas), \
+         patch("src.bootstrap.load_system_personas_from_file", return_value={}):
+        return create_chat_system(memory_manager=mm, text_engine=text_engine)
 
 
 def _persona(name: str) -> Persona:

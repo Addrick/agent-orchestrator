@@ -6,6 +6,7 @@ import sys
 import logging
 from typing import Optional, Dict, Any
 
+from src.bootstrap import create_chat_system
 from src.chat_system import ChatSystem
 from src.engine import TextEngine
 from src.stream_engine import StreamEngine
@@ -30,7 +31,6 @@ from src.clients.notification import (
 
 from src.interfaces.discord_bot import create_discord_bot
 from src.interfaces.gmail_bot import create_gmail_bot
-from src.interfaces.kobold_adapter import create_kobold_adapter
 from src.interfaces.kobold_engine_adapter import create_kobold_engine_adapter
 from config.global_config import (
     CHAT_LOG_LOCATION,
@@ -121,13 +121,9 @@ def _register_interfaces(
         app.register_task("gmail", gmail_bot.start())
 
     if WEB_INTERFACE:
-        logger.info(f"Initializing Kobold Web API on port {KOBOLD_PORT}...")
-        kobold_adapter = create_kobold_adapter(bot)
-        # Configure the adapter's port from the config
-        kobold_adapter.port = KOBOLD_PORT
-        app.register_task("kobold_api", kobold_adapter.start())
-
-        # Also start the engine-orchestrated version on a parallel port
+        # Engine-orchestrated Kobold adapter (bespoke DERPR portal at /derpr).
+        # The legacy :5002 passthrough adapter was retired in DP-200 (finding A);
+        # the engine adapter keeps its established :KOBOLD_PORT+1 (5003) port.
         engine_port = KOBOLD_PORT + 1
         logger.info(f"Initializing Kobold Engine API on port {engine_port}...")
         engine_adapter = create_kobold_engine_adapter(bot)
@@ -185,11 +181,10 @@ async def main() -> None:
     embedding_service = EmbeddingService(GeminiEmbeddingProvider())
 
     # 5. Initialize ChatSystem core, injecting dependencies
-    bot = ChatSystem(
+    bot = create_chat_system(
         memory_manager=memory_manager,
         text_engine=text_engine,
         embedding_service=embedding_service,
-        stream_engine=stream_engine,
     )
 
     # 5. Register service integrations

@@ -88,12 +88,15 @@ class SqliteConsolidator(Agent):
 
     def _get_embedding_service(self) -> EmbeddingService:
         if self._embedding_service is None:
-            # First, check if the ChatSystem already has a service initialized (e.g. from main.py)
-            if self.chat_system._embedding_service is not None:
-                self._embedding_service = self.chat_system._embedding_service
+            # Prefer the shared service main.py injected into the ChatSystem.
+            if self.chat_system.embedding_service is not None:
+                self._embedding_service = self.chat_system.embedding_service
                 logger.info("SqliteConsolidator: using existing EmbeddingService from ChatSystem.")
             else:
-                # Initialize new service
+                # Standalone fallback (tests / ChatSystem built without one).
+                # Kept local: pushing it back into the ChatSystem would not
+                # reach the memory backend, which binds its embedding service
+                # at ChatSystem construction only.
                 from src.embedding_service import GeminiEmbeddingProvider
                 provider_name = self.agent_config.get("embedding_provider", "gemini")
                 if provider_name == "gemini":
@@ -108,8 +111,6 @@ class SqliteConsolidator(Agent):
                     logger.debug(f"Overriding EmbeddingService model to: {EMBEDDING_MODEL}")
                     self._embedding_service.model_name = EMBEDDING_MODEL
 
-                # Shared service with the bot
-                self.chat_system._embedding_service = self._embedding_service
                 logger.info(
                     f"SqliteConsolidator: initialized new EmbeddingService ({provider_name}) (model: {EMBEDDING_MODEL})"
                 )

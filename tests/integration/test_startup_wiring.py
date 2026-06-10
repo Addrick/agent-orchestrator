@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 from src.agents.agent_manager import AgentManager
 from src.agents.agent_service import AgentServiceIntegration
-from src.chat_system import ChatSystem
+from src.bootstrap import create_chat_system
 from src.clients.zammad_service import ZammadIntegration
 from memory.memory_manager import MemoryManager
 from src.engine import TextEngine
@@ -45,8 +45,8 @@ def wired_system():
 
     mock_zammad = MagicMock()
 
-    with patch("src.chat_system.load_personas_from_file", return_value=test_personas):
-        chat_system = ChatSystem(memory_manager=memory_manager, text_engine=text_engine)
+    with patch("src.bootstrap.load_personas_from_file", return_value=test_personas):
+        chat_system = create_chat_system(memory_manager=memory_manager, text_engine=text_engine)
 
     # Mirror main.py wiring: register Zammad, then AgentManager + AgentService
     chat_system.register_service(ZammadIntegration(mock_zammad))
@@ -91,6 +91,37 @@ def test_all_service_bindings_have_registered_services(wired_system):
     registered_services = set(wired_system._services.keys())
     missing = bindings_in_defs - registered_services
     assert not missing, f"Service bindings without registered services: {missing}"
+
+
+def test_get_service_returns_registered_integration(wired_system):
+    """Public service lookup replaces reaching into ChatSystem._services."""
+    zammad = wired_system.get_service("zammad")
+    assert isinstance(zammad, ZammadIntegration)
+    assert wired_system.get_service("nonexistent") is None
+
+
+def test_agent_manager_injects_zammad_client_via_public_accessors(wired_system):
+    """Convention-based DI resolves zammad_client through get_service + .client,
+    not private attribute reaches."""
+    class _NeedsZammad:
+        agent_name = "needs_zammad"
+
+        def __init__(self, chat_system, zammad_client):
+            self.chat_system = chat_system
+            self.zammad_client = zammad_client
+
+    manager = AgentManager(chat_system=wired_system, memory_manager=wired_system.memory_manager)
+    instance = manager._build_agent_instance("needs_zammad", _NeedsZammad, {})
+    zammad = wired_system.get_service("zammad")
+    assert instance.zammad_client is zammad.client
+
+
+def test_embedding_service_property_exposes_injected_service(wired_system):
+    """ChatSystem.embedding_service is the public read path (None when not injected)."""
+    assert wired_system.embedding_service is None
+    mock_emb = MagicMock()
+    wired_system._embedding_service = mock_emb
+    assert wired_system.embedding_service is mock_emb
 
 
 def test_persona_with_all_bindings_sees_all_tools(wired_system):
