@@ -1,14 +1,20 @@
+from __future__ import annotations
+
 import logging
 import numpy as np
 from datetime import datetime, timezone
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, TYPE_CHECKING
 
 from src.memory.memory_manager import (
     MemoryManager, LEVEL_EPISODIC, LEVEL_CORE
 )
 from src.embedding_service import EmbeddingService
-from src.engine import TextEngine
 from src.persona import Persona
+
+if TYPE_CHECKING:
+    # Annotation-only: the TextEngine instance is injected by main.py, so the
+    # memory layer carries no runtime dependency on the engine layer (DP-203).
+    from src.engine import TextEngine
 
 # The system persona used for LLM-based cluster compression
 SUMMARIZER_MODEL = 'gemma-4-31b-it'

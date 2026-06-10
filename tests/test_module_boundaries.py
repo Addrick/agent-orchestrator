@@ -174,9 +174,6 @@ CONTRACTS: List[Tuple[str, Tuple[str, ...]]] = [
 # remaining DP-200 slices are expected to remove. Removing the code edge
 # without deleting its entry here fails the staleness check below.
 KNOWN_DEBT: Set[Tuple[str, str]] = {
-    # L1→L2 summarizer drives TextEngine directly; target moves this under
-    # an agent / Retrieval seam (slice B follow-on).
-    ("src.memory.memory_consolidation", "src.engine"),
     # ingest_path constructs/asserts the concrete Hindsight backend instead of
     # programming to the ABC alone.
     ("src.tools.ingest_path", "src.memory.backend.hindsight"),
