@@ -754,6 +754,10 @@ _SETTER_EXCEPTIONS = {
     # meta_visible is Sprint-4 groundwork (DP-111); no production caller flips
     # it yet. Sprint 5 (metabank) will wire a command if/when it ships.
     'set_meta_visible',
+    # Quarantine state is not operator-settable directly: it is written by
+    # tools.composition.revalidate_persona_security after `set tools` /
+    # `set tool_policy` edits (DP-128 / DP-204 inversion).
+    'set_security_block_reasons',
 }
 
 # Maps Persona getter method names → expected command name in what_handlers.

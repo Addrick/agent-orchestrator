@@ -223,30 +223,14 @@ class Persona:
         """The composition-validation errors that quarantined this persona (or [])."""
         return list(self._security_block_reasons)
 
-    def revalidate_security(self) -> bool:
-        """Re-run tool composition validation against the current policy and
-        update the quarantine state. Called after any live tool edit so the
-        operator can clear (or trip) the block without a restart. Returns the
-        new ``is_security_blocked()`` value.
+    def set_security_block_reasons(self, reasons: List[str]) -> None:
+        """Set (or clear, with ``[]``) the quarantine state. Pure mutator —
+        the validation that produces the reasons lives in
+        ``src.tools.composition`` (DP-204 inversion); operator-edit paths call
+        ``tools.composition.revalidate_persona_security(persona)`` which
+        writes the result back through here. See DP-128.
         """
-        # Lazy import: definitions.py does not import persona, but keeping this
-        # local avoids any import-order fragility at module load.
-        from src.tools.definitions import ALL_TOOL_DEFINITIONS
-        if self._tool_policy.default == "allow" and "*" in self._tool_policy.allow:
-            persona_tools = ALL_TOOL_DEFINITIONS
-        else:
-            allowed = set(self._tool_policy.allow + self._tool_policy.ask)
-            persona_tools = [
-                t for t in ALL_TOOL_DEFINITIONS
-                if t.get("function", {}).get("name") in allowed
-            ]
-        self._security_block_reasons = self._tool_policy.validate_composition(persona_tools)
-        if self._security_block_reasons:
-            logger.warning(
-                f"Persona '{self._name}' remains quarantined after edit: "
-                f"{self._security_block_reasons}"
-            )
-        return self.is_security_blocked()
+        self._security_block_reasons = list(reasons)
 
     def get_include_ambient_memory(self) -> bool:
         """Whether to include ambient channel memories in long-term memory retrieval."""
@@ -487,8 +471,8 @@ class Persona:
 
         Pure mutator — does NOT re-run security validation. Operator-facing edit
         paths (`set tools` / `set tool_policy` dev commands, web tools modal) call
-        ``revalidate_security()`` afterwards so a live edit can clear or trip the
-        quarantine; see BotLogic._handle_set (DP-128).
+        ``tools.composition.revalidate_persona_security()`` afterwards so a live
+        edit can clear or trip the quarantine; see BotLogic._handle_set (DP-128).
         """
         self._enabled_tools = new_tools
         self._tool_policy = ToolPolicy.from_legacy_list(new_tools)

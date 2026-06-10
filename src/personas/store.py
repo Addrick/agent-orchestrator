@@ -5,11 +5,12 @@ Owns the persona save file: user-persona load/save, system-persona loading
 (with DP-128 quarantine-on-load validation), and the model-catalog cache that
 lives under the same JSON file's `models` key.
 
-NOTE on the tools imports below: load-time tool-composition validation
-(DP-128) currently lives here and in src.persona. DP-204 inverts that so
-tools/ depends on persona only; until then the persona STORE is the layer
-allowed to see tools (the loader runs validation), per the module-boundary
-contract in tests/test_module_boundaries.py.
+NOTE on the tools imports below: per the DP-204 inversion, src.persona is a
+domain leaf that never imports tools/; the persona STORE is the layer that
+runs DP-128 load-time composition validation (via
+``src.tools.composition.validate_policy_composition``) and constructs
+quarantined personas on errors — see the module-boundary contract in
+tests/test_module_boundaries.py.
 """
 
 import json
@@ -20,7 +21,7 @@ from pathlib import Path
 from typing import Dict, Any, Iterable, Optional, List
 
 from config import global_config
-from src.tools.definitions import ALL_TOOL_DEFINITIONS
+from src.tools.composition import validate_policy_composition
 from src.tools.policy import ToolPolicy
 
 logger = logging.getLogger(__name__)
@@ -204,20 +205,13 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
             # --- Composition Validation ---
             policy_data = new_persona.get("tool_policy")
             temp_policy = ToolPolicy.from_dict(policy_data) if policy_data else ToolPolicy.from_legacy_list(new_persona.get("enabled_tools", []))
-            
-            # Get definitions for the tools this persona wants to use
-            if temp_policy.default == "allow" and "*" in temp_policy.allow:
-                persona_tools = ALL_TOOL_DEFINITIONS
-            else:
-                allowed_set = set(temp_policy.allow + temp_policy.ask)
-                persona_tools = [t for t in ALL_TOOL_DEFINITIONS if t.get("function", {}).get("name") in allowed_set]
-            
+
             # DP-128: a persona that fails composition validation is no longer
             # dropped — it loads *quarantined* (security_block_reasons set) so it
             # stays selectable/editable and the operator can fix its tools live
             # (`set tools` / web tools modal). Generation is refused downstream
             # until a live edit re-validates clean.
-            validation_errors = temp_policy.validate_composition(persona_tools)
+            validation_errors = validate_policy_composition(temp_policy)
             if validation_errors:
                 for err in validation_errors:
                     logger.critical(f"Persona '{name}' security violation: {err}")
@@ -286,15 +280,9 @@ def load_system_personas_from_file() -> Dict[str, Any]:
             # --- Composition Validation ---
             policy_data = new_persona.get("tool_policy")
             temp_policy = ToolPolicy.from_dict(policy_data) if policy_data else ToolPolicy.from_legacy_list(new_persona.get("enabled_tools", []))
-            
-            if temp_policy.default == "allow" and "*" in temp_policy.allow:
-                persona_tools = ALL_TOOL_DEFINITIONS
-            else:
-                allowed_set = set(temp_policy.allow + temp_policy.ask)
-                persona_tools = [t for t in ALL_TOOL_DEFINITIONS if t.get("function", {}).get("name") in allowed_set]
-            
+
             # DP-128: quarantine instead of drop (see the user-persona path above).
-            validation_errors = temp_policy.validate_composition(persona_tools)
+            validation_errors = validate_policy_composition(temp_policy)
             if validation_errors:
                 for err in validation_errors:
                     logger.critical(f"System Persona '{name}' security violation: {err}")

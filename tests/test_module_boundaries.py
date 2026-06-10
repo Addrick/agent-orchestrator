@@ -115,9 +115,9 @@ CONTRACTS: List[Tuple[str, Tuple[str, ...]]] = [
         "src.tools", "src.persona", "src.clients",
     )),
     # Persona persistence (DP-203: ex-utils/save_utils). May see the persona
-    # domain object and — until DP-204 inverts the validation seam — tools/
-    # (the loader runs DP-128 composition validation). Never orchestration,
-    # engines, transports, agents, or storage.
+    # domain object and tools/ — per the DP-204 inversion the LOADER (not
+    # persona) runs DP-128 composition validation via tools.composition.
+    # Never orchestration, engines, transports, agents, or storage.
     ("src.personas", (
         "src.chat_system", "src.message_handler", "src.engine",
         "src.stream_engine", "src.memory", "src.interfaces", "src.agents",
@@ -174,9 +174,8 @@ CONTRACTS: List[Tuple[str, Tuple[str, ...]]] = [
 # remaining DP-200 slices are expected to remove. Removing the code edge
 # without deleting its entry here fails the staleness check below.
 KNOWN_DEBT: Set[Tuple[str, str]] = {
-    # persona validates tool composition at load; target inverts this so
-    # tools/ depends on persona only.
-    ("src.persona", "src.tools.definitions"),
+    # persona holds a ToolPolicy instance; DP-204 commit 2 moves ToolPolicy
+    # to a leaf module so this last edge can be deleted.
     ("src.persona", "src.tools.policy"),
 }
 

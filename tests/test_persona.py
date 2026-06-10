@@ -371,11 +371,12 @@ def test_persona_security_blocked_via_constructor(base_persona_args):
 
 
 def test_revalidate_security_trips_block_on_insecure_policy(base_persona_args):
-    """revalidate_security flags an insecure composition even if loaded clean."""
+    """revalidate_persona_security flags an insecure composition even if loaded clean."""
+    from src.tools.composition import revalidate_persona_security
     p = Persona(**base_persona_args, service_bindings=["zammad", "agents"],
                 tool_policy=_INSECURE_POLICY)
     assert p.is_security_blocked() is False  # constructor does not auto-validate
-    assert p.revalidate_security() is True
+    assert revalidate_persona_security(p) is True
     assert p.is_security_blocked() is True
     assert p.get_security_block_reasons()
 
@@ -394,9 +395,10 @@ def test_revalidate_clears_quarantine_after_scoping_tools(base_persona_args):
     p = Persona(**base_persona_args, service_bindings=["zammad", "agents"],
                 tool_policy=_INSECURE_POLICY,
                 security_block_reasons=["Insecure composition: network:read + local:write"])
+    from src.tools.composition import revalidate_persona_security
     assert p.is_security_blocked() is True
     p.set_enabled_tools(_SECURE_ZAMMAD_TOOLS)
-    assert p.revalidate_security() is False
+    assert revalidate_persona_security(p) is False
     assert p.is_security_blocked() is False
     assert p.get_security_block_reasons() == []
 
@@ -404,11 +406,12 @@ def test_revalidate_clears_quarantine_after_scoping_tools(base_persona_args):
 def test_revalidate_trips_block_on_insecure_edit(base_persona_args):
     """Editing a clean persona into an insecure policy then re-validating
     quarantines it."""
+    from src.tools.composition import revalidate_persona_security
     p = Persona(**base_persona_args, service_bindings=["zammad"],
                 enabled_tools=_SECURE_ZAMMAD_TOOLS)
     assert p.is_security_blocked() is False
     p.set_tool_policy(_INSECURE_POLICY)
-    assert p.revalidate_security() is True
+    assert revalidate_persona_security(p) is True
     assert p.is_security_blocked() is True
 
 

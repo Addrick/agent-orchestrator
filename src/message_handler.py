@@ -12,6 +12,7 @@ from config.global_config import (
 
 from src.persona import Persona
 from src.persona_fields import cli_set_handlers, cli_what_handlers
+from src.tools.composition import revalidate_persona_security
 from src.utils import model_utils
 from src.utils.model_utils import get_model_list
 
@@ -475,7 +476,7 @@ class BotLogic:
             # which internal callers use for many non-policy reasons.
             message, mutated = result
             if mutated and sub_command in ('tools', 'tool_policy'):
-                if persona.revalidate_security():
+                if revalidate_persona_security(persona):
                     reasons = "; ".join(persona.get_security_block_reasons())
                     message = (
                         f"{message}\n⚠️ Persona '{persona.get_name()}' is now QUARANTINED "
