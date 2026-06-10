@@ -92,8 +92,10 @@ class ChatSystem:
         # stays filesystem-free; `update_models` rebinds it at runtime.
         self.models_available: Dict[str, Any] = models_available if models_available is not None else {}
         self.background_tasks: Set[Coroutine[Any, Any, Any]] = set()
+        # Lookup closure over self (like request_builder's persona_lookup) so
+        # post-init rebinds of `self.tool_manager` stay visible to resumes.
         self.confirmations: ConfirmationManager = ConfirmationManager(
-            tool_manager, memory_manager,
+            lambda: self.tool_manager, memory_manager,
         )
         # persona_lookup is a closure over self (not a dict reference) so
         # tests/admin paths that rebind `self.personas` stay visible.
