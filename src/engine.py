@@ -181,6 +181,7 @@ class TextEngine:
         if "gemini" in model_name:
             return self._generate_google_response, [self._gemini_25_rpm_limiter, self._gemini_25_rpd_limiter]
         if model_name.startswith("agy"):
+            self._ensure_agy_supported()
             return self._generate_agy_response, [self._agy_limiter]
         if model_name == 'local':
             return self._generate_local_response, []
