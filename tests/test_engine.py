@@ -1034,13 +1034,26 @@ class TestAgyHandler:
         for forbidden in ["secret", "token", "oauth", "api_key"]:
             assert forbidden not in payload_str
 
-    def test_route_resolves_to_agy_handler(self, text_engine):
+    def test_route_resolves_to_agy_handler(self, text_engine, monkeypatch):
+        # route resolution now calls the POSIX-only guard; no-op it so the
+        # route-table assertion itself runs on any host
+        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
         handler, limiters = text_engine._get_provider_route("agy-flash")
         assert handler == text_engine._generate_agy_response
         assert limiters == [text_engine._agy_limiter]
 
+    def test_route_refuses_agy_on_windows(self, text_engine, monkeypatch):
+        """Selecting an agy model on native Windows fails at route resolution —
+        before any temp dir or subprocess is created."""
+        import src.engine as engine_mod
+
+        monkeypatch.setattr(engine_mod.os, "name", "nt")
+        with pytest.raises(LLMCommunicationError, match="native Windows"):
+            text_engine._get_provider_route("agy-flash")
+
     @pytest.mark.asyncio
     async def test_generate_response_end_to_end_text(self, text_engine, base_context, monkeypatch):
+        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
         mock_cli = AsyncMock(return_value="end-to-end text answer")
         monkeypatch.setattr(text_engine, "_run_agy_cli", mock_cli)
 
