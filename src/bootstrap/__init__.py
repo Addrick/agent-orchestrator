@@ -21,6 +21,7 @@ from src.tools.ingest_path import IngestPathHandler
 from src.tools.tool_manager import (
     MemoryRecallHandler, MemoryToolHandler, ToolManager, WebSearchHandler,
 )
+from src.utils.model_utils import get_model_list
 from src.utils.save_utils import (
     load_personas_from_file, load_system_personas_from_file,
 )
@@ -77,4 +78,5 @@ def create_chat_system(
         personas=personas,
         system_persona_names=system_persona_names,
         tool_manager=tool_manager,
+        models_available=get_model_list() or {},
     )

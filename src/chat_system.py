@@ -42,7 +42,6 @@ from src.tools.tool_loop import ToolLoop, _ApiPayloadEvent, _LoopFinishedEvent
 from src.turn_persistence import TurnPersistence
 from src.tools.tool_manager import ToolManager
 from src.tools.turn_context import TurnContext, turn_scope
-from src.utils.model_utils import get_model_list
 from src.utils.save_utils import save_personas_to_file
 
 logger = logging.getLogger(__name__)
@@ -67,7 +66,8 @@ class ChatSystem:
                  embedding_service: Optional[EmbeddingService] = None, *,
                  personas: Dict[str, Persona],
                  system_persona_names: Set[str],
-                 tool_manager: ToolManager) -> None:
+                 tool_manager: ToolManager,
+                 models_available: Optional[Dict[str, Any]] = None) -> None:
         # DP-200 slice B: persona loading and tool-handler registration live in
         # src/bootstrap (the composition root). ChatSystem receives its real
         # dependencies instead of locating them itself.
@@ -89,7 +89,9 @@ class ChatSystem:
         self.turn_persistence: TurnPersistence = TurnPersistence(
             memory_manager, self.memory_backend,
         )
-        self.models_available: Dict[str, Any] = get_model_list() or {}
+        # Injected by the composition root (src/bootstrap) so construction
+        # stays filesystem-free; `update_models` rebinds it at runtime.
+        self.models_available: Dict[str, Any] = models_available if models_available is not None else {}
         self.background_tasks: Set[Coroutine[Any, Any, Any]] = set()
         self.confirmations: ConfirmationManager = ConfirmationManager(
             tool_manager, memory_manager,

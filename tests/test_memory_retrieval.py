@@ -188,7 +188,7 @@ def chat_system_with_memory():
     mm.backend = MagicMock()  # spec= would block this; use plain MagicMock
     te = MagicMock()
     with patch('src.bootstrap.load_personas_from_file', return_value={}), \
-         patch('src.chat_system.get_model_list', return_value={}):
+         patch('src.bootstrap.get_model_list', return_value={}):
         system = create_chat_system(memory_manager=mm, text_engine=te)
 
     emb_service = MagicMock(spec=EmbeddingService)
@@ -243,7 +243,7 @@ async def test_retrieve_memory_block_disabled(chat_system_with_memory, mock_pers
 async def test_retrieve_memory_block_no_embedding_service(mock_persona):
     """Returns None when embedding service is not initialized."""
     with patch('src.bootstrap.load_personas_from_file', return_value={}), \
-         patch('src.chat_system.get_model_list', return_value={}):
+         patch('src.bootstrap.get_model_list', return_value={}):
         system = create_chat_system(memory_manager=MagicMock(), text_engine=MagicMock())
 
     result, is_untrusted = await system._retrieve_memory_block(
