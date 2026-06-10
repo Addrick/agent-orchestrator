@@ -180,8 +180,6 @@ KNOWN_DEBT: Set[Tuple[str, str]] = {
     # ingest_path constructs/asserts the concrete Hindsight backend instead of
     # programming to the ABC alone.
     ("src.tools.ingest_path", "src.memory.backend.hindsight"),
-    # Legacy shim module re-exporting the agent implementation.
-    ("src.interfaces.zammad_bot", "src.agents.zammad_bot"),
     # persona validates tool composition at load; target inverts this so
     # tools/ depends on persona only.
     ("src.persona", "src.tools.definitions"),
