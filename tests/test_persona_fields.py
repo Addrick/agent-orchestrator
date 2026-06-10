@@ -101,3 +101,31 @@ def test_apply_patch_fields_rejection_semantics(persona):
     apply_patch_fields(persona, {"memory_mode": "not_a_mode"}, rejected)
     assert rejected == ["memory_mode"]
     assert persona.get_memory_mode() == before
+
+
+def test_inject_timestamp_field(persona):
+    set_table = cli_set_handlers()
+    what_table = cli_what_handlers()
+
+    # Default is True
+    assert "enabled" in what_table['inject_timestamp']([], persona)[0]
+
+    # Turn off via CLI setter
+    msg, mutated = set_table['inject_timestamp'](['inject_timestamp', 'off'], persona)
+    assert mutated
+    assert "disabled" in msg
+    assert persona.get_inject_timestamp() is False
+    assert "disabled" in what_table['inject_timestamp']([], persona)[0]
+
+    # Turn on via CLI setter
+    msg, mutated = set_table['inject_timestamp'](['inject_timestamp', 'on'], persona)
+    assert mutated
+    assert "enabled" in msg
+    assert persona.get_inject_timestamp() is True
+
+    # Check PATCH apply
+    rejected = []
+    apply_patch_fields(persona, {"inject_timestamp": False}, rejected)
+    assert not rejected
+    assert persona.get_inject_timestamp() is False
+

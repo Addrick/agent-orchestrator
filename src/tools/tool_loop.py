@@ -24,7 +24,7 @@ from src.generation_events import (
     ErrorEvent, ResponseType, TokenEvent,
     ToolCallResultEvent, ToolCallStartEvent,
 )
-from src.persona import ExecutionMode, Persona
+from src.persona import Persona
 from src.tools.definitions import (
     WRITE_TOOLS, ALWAYS_CONFIRM_TOOLS,
     get_tool_capabilities, is_irreversible, get_tool_definition
@@ -78,7 +78,18 @@ def build_wire_messages(
     (`ChatSystem.assemble_request`) call this, so the wire messages the inspector
     shows cannot drift from what a live submit actually sends.
     """
-    return [{"role": "system", "content": persona.get_prompt()}] + list(conversation_history)
+    from datetime import datetime
+    system_prompt = persona.get_prompt()
+    inject = True
+    if hasattr(persona, "get_inject_timestamp"):
+        inject = persona.get_inject_timestamp()
+
+    if inject:
+        # Wednesday, June 10, 2026, 01:01 AM EDT
+        now_str = datetime.now().astimezone().strftime("%A, %B %d, %Y, %I:%M %p %Z")
+        system_prompt = f"[Current Time: {now_str}]\n\n{system_prompt}"
+
+    return [{"role": "system", "content": system_prompt}] + list(conversation_history)
 
 
 class ToolLoop:

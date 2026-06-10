@@ -119,6 +119,7 @@ def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
             "max_context_tokens": persona.get_max_context_tokens(),
             "tool_policy": persona.get_tool_policy().to_dict(),
             "meta_visible": persona.get_meta_visible(),
+            "inject_timestamp": persona.get_inject_timestamp(),
         }
         persona_list.append(persona_json)
     return persona_list
@@ -228,6 +229,7 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
                 meta_visible=new_persona.get("meta_visible", False),
                 ingest_bank=new_persona.get("ingest_bank"),
                 security_block_reasons=validation_errors,
+                inject_timestamp=new_persona.get("inject_timestamp", True),
                 **_resolve_params_kwargs(new_persona),
             )
 
@@ -309,6 +311,7 @@ def load_system_personas_from_file() -> Dict[str, Any]:
                 meta_visible=new_persona.get("meta_visible", False),
                 ingest_bank=new_persona.get("ingest_bank"),
                 security_block_reasons=validation_errors,
+                inject_timestamp=new_persona.get("inject_timestamp", False),
                 **params_kwargs,
             )
 

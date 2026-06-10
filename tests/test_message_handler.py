@@ -736,6 +736,7 @@ _SETTER_TO_COMMAND = {
     'set_max_context_tokens': 'max_context_tokens',
     'set_chat_template': 'chat_template',
     'set_tool_policy': 'tool_policy',
+    'set_inject_timestamp': 'inject_timestamp',
 }
 
 # Legacy aliases that should not have commands (as they are being deprecated).
@@ -773,6 +774,7 @@ _GETTER_TO_COMMAND = {
     'get_chat_template': 'chat_template',
     'get_tool_policy': 'tool_policy',
     'get_security_block_reasons': 'security',
+    'get_inject_timestamp': 'inject_timestamp',
 }
 
 # Getters that intentionally have no what command (internal/derived values).
