@@ -129,7 +129,7 @@ async def test_confirm_mode_auto_executes_read_only_tools(mocked_chat_system):
         )
         assert response_type == ResponseType.LLM_GENERATION
         assert response == 'Found some tickets.'
-        assert ("user1", "test_persona") not in chat_system._pending_confirmations
+        assert ("user1", "test_persona") not in chat_system.confirmations.pending
 
 
 # =============================================================================

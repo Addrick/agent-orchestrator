@@ -7,10 +7,11 @@ import json
 from src.confirmations import ConfirmationManager
 from tests.helpers import make_chat_system
 from src.chat_system import (
-    ChatSystem, ResponseType, RequestContext,
+    ChatSystem, ResponseType,
     DoneEvent, ErrorEvent, TokenEvent,
     ToolCallResultEvent, ToolCallStartEvent,
 )
+from src.request_builder import RequestContext
 from src.utils.model_utils import get_model_prefix
 from memory.memory_manager import MemoryManager
 from src.engine import TextEngine, LLMCommunicationError
@@ -143,18 +144,18 @@ def test_store_api_request_preserves_tools_across_iterations(chat_system_with_mo
     tools = [{"type": "function", "function": {"name": "web_search"}}]
 
     # Iteration 0: stores tools
-    system._store_api_request("user1", "persona1", {"model": "m1"}, tools_for_llm=tools)
+    system.turn_persistence.store_api_request("user1", "persona1", {"model": "m1"}, tools_for_llm=tools)
     assert system.last_api_requests["user1"]["persona1"]["_tools_for_llm"] is tools
 
     # Iteration 1+: tools_for_llm=None, but should carry forward
-    system._store_api_request("user1", "persona1", {"model": "m1"}, tools_for_llm=None)
+    system.turn_persistence.store_api_request("user1", "persona1", {"model": "m1"}, tools_for_llm=None)
     assert system.last_api_requests["user1"]["persona1"]["_tools_for_llm"] is tools
 
 
 def test_store_api_request_no_tools_when_never_set(chat_system_with_mocks):
     """If tools were never stored, subsequent None calls should not invent them."""
     system, _, _, _, _ = chat_system_with_mocks
-    system._store_api_request("user1", "persona1", {"model": "m1"}, tools_for_llm=None)
+    system.turn_persistence.store_api_request("user1", "persona1", {"model": "m1"}, tools_for_llm=None)
     assert "_tools_for_llm" not in system.last_api_requests["user1"]["persona1"]
 
 
@@ -217,7 +218,7 @@ async def test_tool_use_in_autonomous_mode(chat_system_with_mocks):
 def test_format_raw_history_for_llm(chat_system_with_mocks, history, mode, server_id, persona, expected_role,
                                     expected_content):
     system, _, _, _, _ = chat_system_with_mocks
-    formatted = system._format_raw_history_for_llm(history, mode, persona, server_id)
+    formatted = system.request_builder.format_raw_history_for_llm(history, mode, persona, server_id)
     assert len(formatted) == 1
     assert formatted[0]['role'] == expected_role
     assert formatted[0]['content'] == expected_content
@@ -493,7 +494,7 @@ def test_build_conversation_history_channel_mode(chat_system_with_mocks):
         {'interaction_id': 1, 'author_role': 'user', 'author_name': 'Alice', 'content': 'Hello'}
     ]
 
-    history, oldest_id = system._build_conversation_history(persona, 'user', 'general', 'srv1', None)
+    history, oldest_id = system.request_builder.build_conversation_history(persona, 'user', 'general', 'srv1', None)
 
     memory_mock.get_channel_history.assert_called_once()
     assert len(history) == 1
@@ -506,7 +507,7 @@ def test_build_conversation_history_ticket_mode_returns_empty(chat_system_with_m
     system, _, _, persona, _ = chat_system_with_mocks
     persona.set_memory_mode(MemoryMode.TICKET_ISOLATED)
 
-    history, oldest_id = system._build_conversation_history(persona, 'user', 'ch', None, None)
+    history, oldest_id = system.request_builder.build_conversation_history(persona, 'user', 'ch', None, None)
 
     assert history == []
     assert oldest_id is None
@@ -518,7 +519,7 @@ def test_build_conversation_history_personal_mode(chat_system_with_mocks):
     persona.set_memory_mode(MemoryMode.PERSONAL)
     memory_mock.get_personal_history.return_value = []
 
-    system._build_conversation_history(persona, 'user123', 'ch', None, None)
+    system.request_builder.build_conversation_history(persona, 'user123', 'ch', None, None)
 
     memory_mock.get_personal_history.assert_called_once_with('user123', 'test_persona', persona.get_context_length())
 
@@ -533,7 +534,7 @@ def test_filter_tools_wildcard(chat_system_with_mocks):
     tool_b = {"type": "function", "function": {"name": "tool_b", "parameters": {}}}
     tool_manager_mock.get_tool_definitions.return_value = [tool_a, tool_b]
 
-    result = system._filter_tools_for_persona(persona)
+    result = system.request_builder.filter_tools_for_persona(persona)
     assert len(result) == 2
 
 
@@ -545,7 +546,7 @@ def test_filter_tools_specific_names(chat_system_with_mocks):
     tool_b = {"type": "function", "function": {"name": "tool_b", "parameters": {}}}
     tool_manager_mock.get_tool_definitions.return_value = [tool_a, tool_b]
 
-    result = system._filter_tools_for_persona(persona)
+    result = system.request_builder.filter_tools_for_persona(persona)
     assert len(result) == 1
     assert result[0]['function']['name'] == 'tool_a'
 
@@ -560,7 +561,7 @@ def test_filter_tools_removes_unbound_service_tools(chat_system_with_mocks):
     other_tool = {"type": "function", "function": {"name": "web_search", "parameters": {}}}
     tool_manager_mock.get_tool_definitions.return_value = [zammad_tool, other_tool]
 
-    result = system._filter_tools_for_persona(persona)
+    result = system.request_builder.filter_tools_for_persona(persona)
     tool_names = [t['function']['name'] for t in result]
     assert 'search_tickets' not in tool_names
     assert 'web_search' in tool_names
@@ -576,7 +577,7 @@ def test_filter_tools_includes_bound_service_tools(chat_system_with_mocks):
     other_tool = {"type": "function", "function": {"name": "web_search", "parameters": {}}}
     tool_manager_mock.get_tool_definitions.return_value = [zammad_tool, other_tool]
 
-    result = system._filter_tools_for_persona(persona)
+    result = system.request_builder.filter_tools_for_persona(persona)
     tool_names = [t['function']['name'] for t in result]
     assert 'search_tickets' in tool_names
     assert 'web_search' in tool_names
@@ -594,7 +595,7 @@ def test_filter_tools_includes_agent_tools_with_agents_binding(chat_system_with_
     universal_tool = {"type": "function", "function": {"name": "web_search", "parameters": {}}}
     tool_manager_mock.get_tool_definitions.return_value = [agent_tool, zammad_tool, universal_tool]
 
-    result = system._filter_tools_for_persona(persona)
+    result = system.request_builder.filter_tools_for_persona(persona)
     tool_names = [t['function']['name'] for t in result]
     assert 'get_agent_status' in tool_names
     assert 'web_search' in tool_names
@@ -612,7 +613,7 @@ def test_filter_tools_excludes_agent_tools_without_binding(chat_system_with_mock
                    "function": {"name": "search_tickets", "parameters": {}}}
     tool_manager_mock.get_tool_definitions.return_value = [agent_tool, zammad_tool]
 
-    result = system._filter_tools_for_persona(persona)
+    result = system.request_builder.filter_tools_for_persona(persona)
     tool_names = [t['function']['name'] for t in result]
     assert 'get_agent_status' not in tool_names
     assert 'search_tickets' in tool_names
@@ -677,7 +678,7 @@ async def test_prepare_request_populates_context(chat_system_with_mocks):
         channel='general', message='hello', server_id='srv1',
     )
 
-    await system._prepare_request(ctx)
+    await system.request_builder.prepare_request(ctx)
 
     assert ctx.conversation_history[-1] == {"role": "user", "content": "hello"}
 
@@ -701,7 +702,7 @@ async def test_prepare_request_prunes_to_max_context_tokens(chat_system_with_moc
         channel='general', message='latest user msg', server_id='srv1',
     )
 
-    await system._prepare_request(ctx)
+    await system.request_builder.prepare_request(ctx)
 
     assert ctx.conversation_history[-1]["content"] == "latest user msg"
     assert len(ctx.conversation_history) < 5  # at least one drop
@@ -805,7 +806,7 @@ def test_format_raw_history_injects_tool_context(chat_system_with_mocks):
          'tool_context': tool_ctx},
     ]
 
-    formatted = system._format_raw_history_for_llm(raw_history, "channel", "test_persona", None)
+    formatted = system.request_builder.format_raw_history_for_llm(raw_history, "channel", "test_persona", None)
 
     # user + tool_call assistant + tool result + final assistant = 4 messages
     assert len(formatted) == 4
@@ -823,7 +824,7 @@ def test_format_raw_history_no_tool_context(chat_system_with_mocks):
          'tool_context': None},
     ]
 
-    formatted = system._format_raw_history_for_llm(raw_history, "channel", "test_persona", None)
+    formatted = system.request_builder.format_raw_history_for_llm(raw_history, "channel", "test_persona", None)
 
     assert len(formatted) == 1
     assert formatted[0] == {'role': 'assistant', 'content': 'Hi'}

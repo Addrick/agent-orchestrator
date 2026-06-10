@@ -32,7 +32,7 @@ async def test_confirm_mode_pends_write_tools(live_chat_system, managed_zammad_u
         )
         assert response_type == ResponseType.PENDING_CONFIRMATION
         assert "create_ticket" in response
-        assert (user_info["identifier"], "test_persona") in chat_system._pending_confirmations
+        assert (user_info["identifier"], "test_persona") in chat_system.confirmations.pending
         results = zammad_client.search_tickets(query="title:\"Pending Ticket\"")
         assert len(results) == 0
 

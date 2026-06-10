@@ -577,7 +577,7 @@ def test_chat_completions_stream_emits_derpr_confirm_frame():
     assert text.index("derpr-confirm") < text.index("[DONE]")
 
     chat_system.tool_manager.execute_tool.assert_not_called()
-    assert ("portal", "test_persona") in chat_system._pending_confirmations
+    assert ("portal", "test_persona") in chat_system.confirmations.pending
     mm.close()
 
 
@@ -617,7 +617,7 @@ def test_confirm_route_approves_and_streams_continuation():
     assert "create_ticket" in executed, "approved write was not executed"
     assert "Ticket opened." in resume_text, "continuation text not streamed"
     assert "[DONE]" in resume_text
-    assert ("portal", "test_persona") not in chat_system._pending_confirmations
+    assert ("portal", "test_persona") not in chat_system.confirmations.pending
     mm.close()
 
 
@@ -882,7 +882,7 @@ def test_parked_write_emits_id_frame_with_ephemeral_chunk_id():
     user_row = next(r for r in rows if r["author_role"] == "user")
     assert payload["user_id"] == user_row["interaction_id"]
     # And the parked confirmation lives in the pending map under that token.
-    parked = chat_system._pending_confirmations[("portal", "test_persona")]
+    parked = chat_system.confirmations.pending[("portal", "test_persona")]
     assert parked.token == payload["ephemeral_chunk_id"]
     mm.close()
 
@@ -930,7 +930,7 @@ def test_transcript_excludes_suppressed_rows():
 def test_transcript_appends_live_pending_confirmation_as_ephemeral():
     # C3 (projection side): a live parked confirmation surfaces as a trailing
     # ephemeral chunk so a fresh load renders the awaiting-approval text.
-    from src.chat_system import PendingConfirmation
+    from src.confirmations import PendingConfirmation
 
     adapter, mm, persona, chat_system = _make_real_adapter()
     _seed_history(mm, "test_persona", turns=1)
@@ -940,7 +940,7 @@ def test_transcript_appends_live_pending_confirmation_as_ephemeral():
         tools_for_llm=[], image_url=None, channel="web_ui",
         confirmation_text="I'll create that ticket.",
     )
-    chat_system._pending_confirmations[("portal", "test_persona")] = parked
+    chat_system.confirmations.pending[("portal", "test_persona")] = parked
 
     with TestClient(adapter.app) as client:
         r = client.get("/api/v1/session/test_persona/transcript")
@@ -957,7 +957,7 @@ def test_transcript_pending_confirmation_surfaces_tool_context():
     # The parked chunk renders the tool call awaiting approval by slicing the
     # in-flight conversation_history from tool_context_start and parsing those
     # raw OpenAI messages into the structured ToolContext shape.
-    from src.chat_system import PendingConfirmation
+    from src.confirmations import PendingConfirmation
 
     adapter, mm, persona, chat_system = _make_real_adapter()
     _seed_history(mm, "test_persona", turns=1)
@@ -975,7 +975,7 @@ def test_transcript_pending_confirmation_surfaces_tool_context():
         confirmation_text="I'll create that ticket.",
         tool_context_start=1,  # slice from the assistant tool-call message
     )
-    chat_system._pending_confirmations[("portal", "test_persona")] = parked
+    chat_system.confirmations.pending[("portal", "test_persona")] = parked
 
     with TestClient(adapter.app) as client:
         r = client.get("/api/v1/session/test_persona/transcript")

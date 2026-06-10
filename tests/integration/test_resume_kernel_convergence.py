@@ -19,8 +19,9 @@ import time
 import pytest
 
 from src.chat_system import (
-    ResponseType, PendingConfirmation, PendingConfirmationEvent, DoneEvent,
+    ResponseType, PendingConfirmationEvent, DoneEvent,
 )
+from src.confirmations import PendingConfirmation
 from src.persona import ExecutionMode
 from src.tools.turn_context import get_turn_context
 from config.global_config import PENDING_CONFIRMATION_TIMEOUT
@@ -48,7 +49,7 @@ async def _park_write(chat_system, *, user, channel, write_call):
         ({"type": "tool_calls", "calls": [write_call]}, {}),
     ])
     await _drain(chat_system.stream_response("test_persona", user, channel, "do the thing"))
-    assert (user, "test_persona") in chat_system._pending_confirmations
+    assert (user, "test_persona") in chat_system.confirmations.pending
     assert get_turn_context() is None
 
 
@@ -92,7 +93,7 @@ async def test_resume_approved_runs_further_tool_loop(mocked_chat_system):
     assert "get_agent_status" in executed, "continuation did not run a further tool loop"
     assert assistant_id is not None
     assert uid is None
-    assert ("u1", "test_persona") not in chat_system._pending_confirmations
+    assert ("u1", "test_persona") not in chat_system.confirmations.pending
     assert get_turn_context() is None, "turn scope leaked after resume"
 
 
@@ -129,7 +130,7 @@ async def test_resume_denied_closes_cleanly(mocked_chat_system):
     assert rtype == ResponseType.LLM_GENERATION
     assert "won't create" in text
     assert "create_ticket" not in executed, "denied write must not execute"
-    assert ("u2", "test_persona") not in chat_system._pending_confirmations
+    assert ("u2", "test_persona") not in chat_system.confirmations.pending
     assert get_turn_context() is None
 
 
@@ -218,7 +219,7 @@ async def test_resume_persists_write_into_tool_context(mocked_chat_system):
     ), "approved write result missing from replayed tool_context"
 
     # And it actually replays into the next turn's formatted history.
-    replayed = chat_system._format_raw_history_for_llm(
+    replayed = chat_system.request_builder.format_raw_history_for_llm(
         [{"author_role": "assistant", "author_name": "test_persona",
           "content": "Ticket created.", "tool_context": row["tool_context"]}],
         memory_mode="channel", persona_name="test_persona", server_id=None,
@@ -268,7 +269,7 @@ async def test_resume_expired_confirmation(mocked_chat_system):
     """An expired parked confirmation closes out without re-entering the kernel."""
     chat_system, _ = mocked_chat_system
 
-    chat_system._pending_confirmations[("u5", "test_persona")] = PendingConfirmation(
+    chat_system.confirmations.pending[("u5", "test_persona")] = PendingConfirmation(
         write_calls=[{"id": "w1", "name": "create_ticket", "arguments": {}}],
         conversation_history=[],
         persona_name="test_persona",
@@ -285,7 +286,7 @@ async def test_resume_expired_confirmation(mocked_chat_system):
     assert rtype == ResponseType.DEV_COMMAND
     assert "expired" in text.lower()
     assert assistant_id is None
-    assert ("u5", "test_persona") not in chat_system._pending_confirmations
+    assert ("u5", "test_persona") not in chat_system.confirmations.pending
     assert get_turn_context() is None
 
 
@@ -330,7 +331,7 @@ async def test_park_yields_pending_confirmation_event(mocked_chat_system):
     assert ev.write_calls[0]["name"] == "create_ticket"
     assert ev.token, "park event must carry a resume token"
 
-    parked = chat_system._pending_confirmations[("u6", "test_persona")]
+    parked = chat_system.confirmations.pending[("u6", "test_persona")]
     assert ev.token == parked.token, "event token must match the stored park"
 
     pce_idx = next(i for i, e in enumerate(events)
@@ -368,7 +369,7 @@ async def test_stream_resume_token_mismatch_preserves_park(mocked_chat_system):
     assert done.response_type == ResponseType.DEV_COMMAND
     assert "no longer valid" in done.text.lower()
     assert "create_ticket" not in executed, "stale resume must not execute the write"
-    assert ("u7", "test_persona") in chat_system._pending_confirmations, \
+    assert ("u7", "test_persona") in chat_system.confirmations.pending, \
         "stale token must leave the park intact"
 
 
@@ -393,7 +394,7 @@ async def test_stream_resume_valid_token_executes_write(mocked_chat_system):
         write_call={"id": "w1", "name": "create_ticket",
                     "arguments": {"title": "t", "body": "b"}},
     )
-    token = chat_system._pending_confirmations[("u8", "test_persona")].token
+    token = chat_system.confirmations.pending[("u8", "test_persona")].token
 
     _set_engine(chat_system, [
         ({"type": "text", "content": "Ticket opened."}, {}),
@@ -405,5 +406,5 @@ async def test_stream_resume_valid_token_executes_write(mocked_chat_system):
     assert done.response_type == ResponseType.LLM_GENERATION
     assert done.text == "Ticket opened."
     assert "create_ticket" in executed
-    assert ("u8", "test_persona") not in chat_system._pending_confirmations
+    assert ("u8", "test_persona") not in chat_system.confirmations.pending
     assert get_turn_context() is None

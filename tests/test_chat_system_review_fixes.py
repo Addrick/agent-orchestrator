@@ -18,9 +18,9 @@ import logging
 
 import pytest
 
-from src.chat_system import (
-    ChatSystem, ResponseType, RequestContext, MAX_CACHED_API_REQUESTS,
-)
+from config.global_config import MAX_CACHED_API_REQUESTS
+from src.chat_system import ResponseType
+from src.request_builder import RequestContext
 from src.persona import Persona, ExecutionMode
 
 
@@ -37,14 +37,14 @@ def test_store_api_request_eviction_is_lru(chat_system_with_mocks):
     cap = MAX_CACHED_API_REQUESTS
 
     for i in range(cap):
-        system._store_api_request(f"u{i}", "p", {"payload": i})
+        system.turn_persistence.store_api_request(f"u{i}", "p", {"payload": i})
     assert len(system.last_api_requests) == cap
 
     # Touch the earliest-inserted user — under LRU this must move it to MRU.
-    system._store_api_request("u0", "p", {"payload": "touched"})
+    system.turn_persistence.store_api_request("u0", "p", {"payload": "touched"})
 
     # One more distinct user tips us over capacity, forcing one eviction.
-    system._store_api_request(f"u{cap}", "p", {"payload": "new"})
+    system.turn_persistence.store_api_request(f"u{cap}", "p", {"payload": "new"})
 
     assert len(system.last_api_requests) == cap
     assert "u0" in system.last_api_requests, "touched user must survive (LRU)"
@@ -56,7 +56,7 @@ def test_store_api_request_eviction_does_not_orphan_iterations(chat_system_with_
     system, *_ = chat_system_with_mocks
     cap = MAX_CACHED_API_REQUESTS
     for i in range(cap + 1):
-        system._store_api_request(f"v{i}", "p", {"payload": i}, is_first_iteration=True)
+        system.turn_persistence.store_api_request(f"v{i}", "p", {"payload": i}, is_first_iteration=True)
     # Whatever set of users remain, the two caches must agree on membership.
     assert set(system.last_api_requests) == set(system.last_api_iterations)
 
@@ -75,7 +75,7 @@ async def test_prepare_request_skips_empty_user_message(chat_system_with_mocks):
         persona=persona, persona_name="test_persona",
         user_identifier="u", channel="c", message="   ",
     )
-    await system._prepare_request(ctx, is_retry=False)
+    await system.request_builder.prepare_request(ctx, is_retry=False)
 
     empties = [m for m in ctx.conversation_history
                if m.get("role") == "user" and not (m.get("content") or "").strip()]
@@ -92,7 +92,7 @@ async def test_prepare_request_keeps_real_user_message(chat_system_with_mocks):
         persona=persona, persona_name="test_persona",
         user_identifier="u", channel="c", message="hello there",
     )
-    await system._prepare_request(ctx, is_retry=False)
+    await system.request_builder.prepare_request(ctx, is_retry=False)
     assert ctx.conversation_history[-1] == {"role": "user", "content": "hello there"}
 
 
@@ -104,7 +104,7 @@ def test_retry_update_persists_tool_context(chat_system_with_mocks):
     system, mm, _, _, _ = chat_system_with_mocks
     mm.update_interaction_content.return_value = True
 
-    rid = system._commit_or_update_assistant(
+    rid = system.turn_persistence.commit_or_update_assistant(
         persona_name="test_persona", user_identifier="u", channel="c",
         server_id=None, final_text="regenerated answer",
         response_type=ResponseType.LLM_GENERATION,
@@ -132,7 +132,7 @@ async def test_overwriting_pending_confirmation_is_audited(chat_system_with_mock
                          "arguments": {"ticket_id": 1, "state": "closed"}}]}
     text_engine_mock.generate_response.return_value = (call_a, {})
     await system.generate_response("test_persona", "user", "channel", "close 1")
-    assert ("user", "test_persona") in system._pending_confirmations
+    assert ("user", "test_persona") in system.confirmations.pending
 
     mm.log_audit_event.reset_mock()
 
@@ -167,7 +167,7 @@ async def test_client_fallback_log_reports_db_row_count(chat_system_with_mocks, 
         client_messages=[{"role": "user", "content": "client only"}],
     )
     with caplog.at_level(logging.INFO):
-        await system._prepare_request(ctx, is_retry=False)
+        await system.request_builder.prepare_request(ctx, is_retry=False)
 
     msgs = [r.getMessage() for r in caplog.records]
     assert any("DB result (3 rows) discarded" in m for m in msgs), (
@@ -182,5 +182,5 @@ def test_conversation_taints_is_bounded(chat_system_with_mocks):
     from src.chat_system import MAX_CONVERSATION_TAINTS
     system, *_ = chat_system_with_mocks
     for i in range(MAX_CONVERSATION_TAINTS + 50):
-        system._set_conversation_taint((f"u{i}", "p", "c", None), True)
-    assert len(system._conversation_taints) <= MAX_CONVERSATION_TAINTS
+        system.request_builder.set_conversation_taint((f"u{i}", "p", "c", None), True)
+    assert len(system.request_builder.conversation_taints) <= MAX_CONVERSATION_TAINTS

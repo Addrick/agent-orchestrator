@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from memory.memory_manager import MemoryManager
-from src.chat_system import ChatSystem, _relative_time
+from src.request_builder import RequestBuilder, _relative_time
 from src.embedding_service import EmbeddingService
 from src.memory.backend.base import MemoryHit
 from src.persona import MemoryMode
@@ -166,7 +166,7 @@ def test_retrieve_model_name_filter(mem_manager):
     )) == 0
 
 
-# --- ChatSystem._retrieve_memory_block Tests ---
+# --- RequestBuilder.retrieve_memory_block Tests ---
 
 @pytest.fixture
 def mock_persona():
@@ -210,7 +210,7 @@ async def test_retrieve_memory_block_returns_formatted_block(chat_system_with_me
         ),
     ])
 
-    result, is_untrusted = await system._retrieve_memory_block(
+    result, is_untrusted = await system.request_builder.retrieve_memory_block(
         mock_persona, "user1", "chan", None,
         [{"role": "user", "content": "What about the security issue?"}],
     )
@@ -228,7 +228,7 @@ async def test_retrieve_memory_block_disabled(chat_system_with_memory, mock_pers
     """Returns None when feature is disabled."""
     system, _, _ = chat_system_with_memory
 
-    result, is_untrusted = await system._retrieve_memory_block(
+    result, is_untrusted = await system.request_builder.retrieve_memory_block(
         mock_persona, "user1", "chan", None,
         [{"role": "user", "content": "Hello"}],
     )
@@ -242,7 +242,7 @@ async def test_retrieve_memory_block_no_embedding_service(mock_persona):
     """Returns None when embedding service is not initialized."""
     system = make_chat_system(memory_manager=MagicMock(), text_engine=MagicMock())
 
-    result, is_untrusted = await system._retrieve_memory_block(
+    result, is_untrusted = await system.request_builder.retrieve_memory_block(
         mock_persona, "user1", "chan", None,
         [{"role": "user", "content": "Hello"}],
     )
@@ -257,7 +257,7 @@ async def test_retrieve_memory_block_no_summaries(chat_system_with_memory, mock_
     system, mm, _ = chat_system_with_memory
     system.memory_backend.recall = AsyncMock(return_value=[])
 
-    result, is_untrusted = await system._retrieve_memory_block(
+    result, is_untrusted = await system.request_builder.retrieve_memory_block(
         mock_persona, "user1", "chan", None,
         [{"role": "user", "content": "Hello"}],
     )
@@ -274,7 +274,7 @@ async def test_retrieve_memory_block_empty_history(chat_system_with_memory, mock
         MemoryHit(id="1", content="facts", score=0.5, tags=["channel:chan", "persona:p1"]),
     ])
 
-    result, is_untrusted = await system._retrieve_memory_block(
+    result, is_untrusted = await system.request_builder.retrieve_memory_block(
         mock_persona, "user1", "chan", None,
         [],  # empty history
     )
@@ -295,7 +295,7 @@ async def test_retrieve_memory_block_top_k_limit(chat_system_with_memory, mock_p
         for i in range(2)
     ])
 
-    result, is_untrusted = await system._retrieve_memory_block(
+    result, is_untrusted = await system.request_builder.retrieve_memory_block(
         mock_persona, "user1", "chan", None,
         [{"role": "user", "content": "Hello"}],
     )
@@ -317,7 +317,7 @@ async def test_retrieve_memory_block_ambient_tag(chat_system_with_memory, mock_p
                   timestamp=datetime.now()),
     ])
 
-    result, is_untrusted = await system._retrieve_memory_block(
+    result, is_untrusted = await system.request_builder.retrieve_memory_block(
         mock_persona, "user1", "chan", None,
         [{"role": "user", "content": "What happened?"}],
     )
@@ -338,7 +338,7 @@ async def test_retrieve_memory_block_untrusted_propagation(chat_system_with_memo
                   untrusted=True, tags=["channel:web", "persona:p1"]),
     ])
 
-    result, is_untrusted = await system._retrieve_memory_block(
+    result, is_untrusted = await system.request_builder.retrieve_memory_block(
         mock_persona, "user1", "chan", None,
         [{"role": "user", "content": "Hello"}],
     )
@@ -372,7 +372,7 @@ def test_format_memory_block_score_ordered():
         MemoryHit(id="2", content="- Low relevance", score=0.3,
                   tags=["channel:chan-b", "persona:p1"], timestamp=datetime.now()),
     ]
-    result = ChatSystem._format_memory_block(hits)
+    result = RequestBuilder.format_memory_block(hits)
     assert result is not None
     high_idx = result.index("High relevance")
     low_idx = result.index("Low relevance")
@@ -381,4 +381,4 @@ def test_format_memory_block_score_ordered():
 
 def test_format_memory_block_empty():
     """Returns None for empty input."""
-    assert ChatSystem._format_memory_block([]) is None
+    assert RequestBuilder.format_memory_block([]) is None

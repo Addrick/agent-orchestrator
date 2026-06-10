@@ -7,7 +7,8 @@ from datetime import datetime
 from unittest.mock import MagicMock, AsyncMock, patch
 
 from src.memory.memory_manager import MemoryManager
-from src.chat_system import ResponseType, PendingConfirmation
+from src.chat_system import ResponseType
+from src.confirmations import PendingConfirmation
 from tests.helpers import make_chat_system
 from src.persona import Persona, ExecutionMode
 from src.engine import TextEngine
@@ -116,7 +117,7 @@ async def test_chat_system_audit_decision_approved(chat_system, mem_manager):
         turn_tainted=False,
         audit_info=audit_info
     )
-    chat_system._pending_confirmations[("user_id", "test_p")] = pending
+    chat_system.confirmations.pending[("user_id", "test_p")] = pending
     chat_system.personas["test_p"] = Persona("test_p", "model", "prompt")
     
     # Mock dependencies for resume
@@ -154,7 +155,7 @@ async def test_chat_system_audit_decision_denied(chat_system, mem_manager):
         turn_tainted=True,
         audit_info=audit_info
     )
-    chat_system._pending_confirmations[("user_id", "test_p")] = pending
+    chat_system.confirmations.pending[("user_id", "test_p")] = pending
     chat_system.personas["test_p"] = Persona("test_p", "model", "prompt")
     
     # Mock dependencies for resume

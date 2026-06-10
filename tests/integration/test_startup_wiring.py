@@ -142,7 +142,7 @@ def test_embedding_service_property_exposes_injected_service(wired_system):
 def test_persona_with_all_bindings_sees_all_tools(wired_system):
     """A persona bound to all services gets every callable tool."""
     persona = wired_system.personas["test_persona"]
-    filtered = wired_system._filter_tools_for_persona(persona)
+    filtered = wired_system.request_builder.filter_tools_for_persona(persona)
     filtered_names = {t["function"]["name"] for t in filtered if t.get("type") == "function"}
 
     all_defined = {
