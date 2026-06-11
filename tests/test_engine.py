@@ -98,6 +98,26 @@ class TestGenerateResponseLogic:
         assert exc_info.value.rate_limited is True
         assert mock_provider_call.call_count == 1
 
+    @pytest.mark.asyncio
+    @patch('src.engine.TextEngine._stream_google_response')
+    async def test_rate_limit_falls_back_to_mapped_model(self, mock_provider_call, text_engine, base_context):
+        """429 on a model with a _FALLBACK_MODELS entry reroutes to the
+        fallback instead of aborting (DP-206b: policy lives in the driver)."""
+        calls = []
+
+        def _route(config, history_object, tools=None):
+            calls.append(config["model_name"])
+            if len(calls) == 1:
+                raise LLMCommunicationError("429", rate_limited=True)
+            return _one_shot_stream({"type": "text", "content": "fell back"}, {"p": 1})
+
+        mock_provider_call.side_effect = _route
+        response, _ = await text_engine.generate_response(
+            {"model_name": "gemma-4-31b-it"}, base_context
+        )
+        assert response == {"type": "text", "content": "fell back"}
+        assert calls == ["gemma-4-31b-it", "gemma-4-26b-a4b-it"]
+
 
 @patch('src.engine.AsyncOpenAI')
 class TestOpenAI:
