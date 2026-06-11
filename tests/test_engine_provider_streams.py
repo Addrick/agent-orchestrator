@@ -12,6 +12,7 @@ from src.engine import TextEngine, LLMCommunicationError
 from tests.provider_stream_mocks import (
     AsyncIterList,
     anthropic_stream,
+    google_stream,
     openai_chunk,
     openai_text_stream,
     openai_tool_call_delta,
@@ -247,3 +248,95 @@ class TestAnthropicStream:
         )
         assert result == {"type": "text", "content": "hi"}
         assert payload["tools"] == ["t"]
+
+
+# ---------------------------------------------------------------------------
+# Google
+# ---------------------------------------------------------------------------
+
+
+def _google_text_chunk(text):
+    from unittest.mock import MagicMock
+    part = MagicMock(text=text, function_call=None)
+    part.thought_signature = None
+    cand = MagicMock(content=MagicMock(parts=[part]), grounding_metadata=None)
+    return MagicMock(prompt_feedback=None, candidates=[cand])
+
+
+@patch("src.engine.genai.client.AsyncClient")
+class TestGoogleStream:
+    @pytest.mark.asyncio
+    async def test_event_order_payload_deltas_done(self, mock_cls, text_engine,
+                                                   base_context, monkeypatch):
+        """Text split across chunks streams as deltas; done joins them — the
+        same full text the pre-DP-206 one-shot produced from a single
+        response whose parts carried the complete text."""
+        monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy")
+        inst = mock_cls.return_value
+        inst.models.generate_content_stream = AsyncMock(return_value=google_stream(
+            _google_text_chunk("Hel"), _google_text_chunk("lo"),
+        ))
+        events = await _drain(text_engine._stream_google_response(
+            {"model_name": "gemini-pro"}, base_context, None
+        ))
+        assert [e["type"] for e in events] == [
+            "api_payload", "text_delta", "text_delta", "done"
+        ]
+        assert events[1]["text"] == "Hel" and events[2]["text"] == "lo"
+        assert events[-1]["full_text"] == "Hello"
+
+    @pytest.mark.asyncio
+    async def test_function_call_chunk_yields_tool_calls(self, mock_cls, text_engine,
+                                                         base_context, monkeypatch):
+        monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy")
+        from unittest.mock import MagicMock
+        inst = mock_cls.return_value
+        fcall = MagicMock()
+        fcall.name = "search_web"
+        fcall.args = {"query": "x"}
+        part = MagicMock(text=None, function_call=fcall)
+        part.thought_signature = None
+        cand = MagicMock(content=MagicMock(parts=[part]), grounding_metadata=None)
+        inst.models.generate_content_stream = AsyncMock(return_value=google_stream(
+            MagicMock(prompt_feedback=None, candidates=[cand])
+        ))
+        events = await _drain(text_engine._stream_google_response(
+            {"model_name": "gemini-pro"}, base_context,
+            [{"type": "function", "function": {"name": "search_web"}}],
+        ))
+        tool_ev = next(e for e in events if e["type"] == "tool_calls")
+        assert tool_ev["calls"][0]["name"] == "search_web"
+        assert tool_ev["calls"][0]["arguments"] == {"query": "x"}
+        assert events[-1] == {"type": "done", "full_text": ""}
+
+    @pytest.mark.asyncio
+    async def test_transport_error_carries_api_payload_and_rate_limit(
+        self, mock_cls, text_engine, base_context, monkeypatch
+    ):
+        monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy")
+        inst = mock_cls.return_value
+        inst.models.generate_content_stream = AsyncMock(
+            side_effect=Exception("429 quota exceeded")
+        )
+        with pytest.raises(LLMCommunicationError) as ei:
+            await _drain(text_engine._stream_google_response(
+                {"model_name": "gemini-pro"}, base_context, None
+            ))
+        assert ei.value.rate_limited is True
+        assert ei.value.api_payload["model"] == "gemini-pro"
+
+    @pytest.mark.asyncio
+    async def test_one_shot_is_collect_of_stream(self, mock_cls, text_engine,
+                                                 base_context, monkeypatch):
+        """generate_response('gemini-*') drains the canonical stream — same
+        result tuple and serializable dump payload."""
+        monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy")
+        inst = mock_cls.return_value
+        inst.models.generate_content_stream = AsyncMock(return_value=google_stream(
+            _google_text_chunk("hi")
+        ))
+        result, payload = await text_engine.generate_response(
+            {"model_name": "gemini-pro"}, base_context
+        )
+        assert result == {"type": "text", "content": "hi"}
+        assert payload["model"] == "gemini-pro"

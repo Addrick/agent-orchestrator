@@ -26,6 +26,7 @@ from src.engine import TextEngine
 from src.interfaces.kobold_engine_adapter import KoboldEngineAdapter as KoboldAdapter
 from src.persona import Persona, ExecutionMode
 from tests.helpers import make_chat_system
+from tests.provider_stream_mocks import google_stream
 
 
 def _make_adapter_with_seeded_db(persona_name: str = "test_persona",
@@ -1900,8 +1901,8 @@ def test_chat_completions_google_end_to_end_payload_structure(mock_google_client
     mock_instance = mock_google_client_class.return_value
     mock_part = MagicMock(text="Ahoy matey! I am ready.", function_call=None)
     mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
-    mock_instance.models.generate_content = AsyncMock(
-        return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+    mock_instance.models.generate_content_stream = AsyncMock(
+        return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
     )
     
     text_engine = TextEngine()
@@ -1936,8 +1937,8 @@ def test_chat_completions_google_end_to_end_payload_structure(mock_google_client
     assert res_data["choices"][0]["message"]["content"] == "Ahoy matey! I am ready."
     
     # 5. Assert constructed payload structure for Gemini AsyncClient
-    mock_instance.models.generate_content.assert_called_once()
-    call_kwargs = mock_instance.models.generate_content.call_args.kwargs
+    mock_instance.models.generate_content_stream.assert_called_once()
+    call_kwargs = mock_instance.models.generate_content_stream.call_args.kwargs
     
     # Assert system prompt is NOT in contents
     contents = call_kwargs["contents"]

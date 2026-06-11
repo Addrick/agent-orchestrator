@@ -9,7 +9,11 @@ import anthropic
 from openai import APIStatusError
 
 from src.engine import TextEngine, LLMCommunicationError
-from tests.provider_stream_mocks import anthropic_stream, openai_text_stream
+from tests.provider_stream_mocks import (
+    anthropic_stream,
+    google_stream,
+    openai_text_stream,
+)
 
 
 @pytest.fixture
@@ -212,8 +216,8 @@ class TestGoogleEdgeCases:
         mock_candidate = MagicMock(
             content=MagicMock(parts=[mock_part]), grounding_metadata=None
         )
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
         base_context["history"] = [
             {"role": "user", "content": "u1"},
@@ -221,7 +225,7 @@ class TestGoogleEdgeCases:
             {"role": "user", "content": "u2"},
         ]
         await text_engine.generate_response({"model_name": "gemini-pro"}, base_context)
-        contents = mock_instance.models.generate_content.call_args[1]["contents"]
+        contents = mock_instance.models.generate_content_stream.call_args[1]["contents"]
         # The Google handler combines the system prompt into the first user turn.
         # So we expect alternating: user, model, user.
         roles = [c.get("role") for c in contents]
@@ -239,8 +243,8 @@ class TestGoogleEdgeCases:
         mock_candidate = MagicMock(
             content=MagicMock(parts=[mock_part]), grounding_metadata=None
         )
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
         base_context["history"] = [
             {"role": "user", "content": "ask"},
@@ -258,7 +262,7 @@ class TestGoogleEdgeCases:
             },
         ]
         await text_engine.generate_response({"model_name": "gemini-pro"}, base_context)
-        contents = mock_instance.models.generate_content.call_args[1]["contents"]
+        contents = mock_instance.models.generate_content_stream.call_args[1]["contents"]
         # Find the tool turn
         tool_turns = [c for c in contents if c.get("role") == "tool"]
         assert len(tool_turns) == 1
@@ -282,8 +286,8 @@ class TestGoogleEdgeCases:
             content=MagicMock(parts=[text_part, fcall_part]),
             grounding_metadata=None,
         )
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
         response, _ = await text_engine.generate_response(
             {"model_name": "gemini-pro"},
@@ -305,8 +309,8 @@ class TestGoogleEdgeCases:
         mock_candidate = MagicMock(
             content=MagicMock(parts=[mock_part]), grounding_metadata=None
         )
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
         response, _ = await text_engine.generate_response(
             {"model_name": "gemini-pro"}, base_context
@@ -340,8 +344,8 @@ class TestGoogleEdgeCases:
             content=MagicMock(parts=[mock_part]),
             grounding_metadata=grounding_metadata,
         )
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
         response, _ = await text_engine.generate_response(
             {"model_name": "gemini-pro"}, base_context
@@ -376,8 +380,8 @@ class TestGoogleEdgeCases:
             content=MagicMock(parts=[mock_part]),
             grounding_metadata=grounding_metadata,
         )
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
         response, _ = await text_engine.generate_response(
             {"model_name": "gemini-pro"}, base_context
@@ -409,8 +413,8 @@ class TestGoogleEdgeCases:
             content=MagicMock(parts=[mock_part]),
             grounding_metadata=grounding_metadata,
         )
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
         response, _ = await text_engine.generate_response(
             {"model_name": "gemini-pro"}, base_context
@@ -426,7 +430,7 @@ class TestGoogleEdgeCases:
         """Google RESOURCE_EXHAUSTED → rate_limited=True, no retry."""
         monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy")
         mock_instance = mock_google_class.return_value
-        mock_instance.models.generate_content.side_effect = Exception(
+        mock_instance.models.generate_content_stream.side_effect = Exception(
             "google.api_core.exceptions.ResourceExhausted: 429 RESOURCE_EXHAUSTED"
         )
         with pytest.raises(LLMCommunicationError) as ei:
@@ -434,7 +438,7 @@ class TestGoogleEdgeCases:
                 {"model_name": "gemini-pro"}, base_context
             )
         assert ei.value.rate_limited is True
-        assert mock_instance.models.generate_content.call_count == 1
+        assert mock_instance.models.generate_content_stream.call_count == 1
 
 
 # ------------------------------------------------------------------

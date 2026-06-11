@@ -761,16 +761,13 @@ class TextEngine:
             dump_config['tools'] = tool_names
         return {'model': model_name, 'contents': serializable_history, 'config': dump_config}
 
-    async def _generate_google_response(self, config: Dict[str, Any], history_object: Dict[str, Any],
-                                        tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
-        Dict[str, Any], Dict[str, Any]]:
-        """Generates a response using the Google Gemini API."""
-        try:
-            self._initialize_google_client()
-            assert self.google_client is not None and self.google_search_tool is not None
-        except (ValueError, AssertionError) as e:
-            raise LLMCommunicationError(f"Error: Google not configured: {e}") from e
-
+    async def _build_google_params(self, config: Dict[str, Any], history_object: Dict[str, Any],
+                                   tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
+        List[Dict[str, Any]], Dict[str, Any], Dict[str, Any]]:
+        """Builds the generate_content request pieces. Single source of truth
+        for the canonical streaming driver (pinned by
+        tests/test_engine_payload_parity.py). Returns
+        (history_for_api, content_config_for_api, api_params_for_dumping)."""
         system_prompt, history_to_process = self._extract_system_prompt(history_object)
         image_url = history_object["current_message"].get("image_url")
         history_for_api, serializable_history = await self._build_google_history(
@@ -804,13 +801,73 @@ class TextEngine:
         api_params_for_dumping = self._build_google_dump_params(
             config["model_name"], content_config_for_api, serializable_history
         )
+        return history_for_api, content_config_for_api, api_params_for_dumping
 
+    @staticmethod
+    def _accumulate_google_chunks(chunks: List[Any]) -> Any:
+        """Recombine streamed GenerateContentResponse chunks into one
+        response-shaped object that `_parse_google_response` understands:
+        parts concatenate in arrival order (text may be split across chunks;
+        joining them reproduces the non-streamed text), prompt_feedback comes
+        from the first chunk that carries one, and grounding_metadata from the
+        last chunk that carries one (the SDK attaches it to the final chunk)."""
+        prompt_feedback = next(
+            (c.prompt_feedback for c in chunks if getattr(c, "prompt_feedback", None)), None
+        )
+        parts: List[Any] = []
+        grounding_metadata: Any = None
+        for chunk in chunks:
+            candidate = chunk.candidates[0] if getattr(chunk, "candidates", None) else None
+            if candidate is None:
+                continue
+            if candidate.content and candidate.content.parts:
+                parts.extend(candidate.content.parts)
+            if getattr(candidate, "grounding_metadata", None) is not None:
+                grounding_metadata = candidate.grounding_metadata
+        candidates: List[Any] = []
+        if parts:
+            candidates = [SimpleNamespace(
+                content=SimpleNamespace(parts=parts),
+                grounding_metadata=grounding_metadata,
+            )]
+        return SimpleNamespace(prompt_feedback=prompt_feedback, candidates=candidates)
+
+    async def _stream_google_response(
+        self, config: Dict[str, Any], history_object: Dict[str, Any],
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Canonical Google driver (DP-206): `generate_content_stream` chunks,
+        emitting the unified event shape. Text parts stream as raw deltas; the
+        terminal `done` carries the grounding-processed full text (citations /
+        search queries appended), so collect_stream reproduces the pre-DP-206
+        one-shot result exactly."""
         try:
-            response_obj = await self.google_client.models.generate_content(
+            self._initialize_google_client()
+            assert self.google_client is not None and self.google_search_tool is not None
+        except (ValueError, AssertionError) as e:
+            raise LLMCommunicationError(f"Error: Google not configured: {e}") from e
+
+        history_for_api, content_config_for_api, api_params_for_dumping = \
+            await self._build_google_params(config, history_object, tools)
+        yield {"type": "api_payload", "payload": api_params_for_dumping}
+
+        chunks: List[Any] = []
+        try:
+            stream = await self.google_client.models.generate_content_stream(
                 model=config["model_name"],
                 contents=history_for_api,
                 config=GenerateContentConfig(**content_config_for_api)
             )
+            async for chunk in stream:
+                chunks.append(chunk)
+                candidate = chunk.candidates[0] if getattr(chunk, "candidates", None) else None
+                if candidate is None or not candidate.content or not candidate.content.parts:
+                    continue
+                for part in candidate.content.parts:
+                    if part.function_call:
+                        continue
+                    if hasattr(part, 'text') and part.text:
+                        yield {"type": "text_delta", "text": part.text}
         except Exception as e:
             err_str = str(e)
             rate_limited = '429' in err_str or 'RESOURCE_EXHAUSTED' in err_str
@@ -825,7 +882,22 @@ class TextEngine:
             raise LLMCommunicationError(f"An error occurred with Google API: {e}",
                                         api_payload=api_params_for_dumping, rate_limited=rate_limited) from e
 
-        return self._parse_google_response(response_obj, api_params_for_dumping)
+        result, _ = self._parse_google_response(
+            self._accumulate_google_chunks(chunks), api_params_for_dumping
+        )
+        if result.get("type") == "tool_calls":
+            yield {"type": "tool_calls", "calls": result["calls"]}
+            yield {"type": "done", "full_text": ""}
+        else:
+            yield {"type": "done", "full_text": result.get("content", "")}
+
+    async def _generate_google_response(self, config: Dict[str, Any], history_object: Dict[str, Any],
+                                        tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
+        Dict[str, Any], Optional[Dict[str, Any]]]:
+        """One-shot Google path = drain of the canonical stream (DP-206)."""
+        return await self.collect_stream(
+            self._stream_google_response(config, history_object, tools)
+        )
 
     async def _get_local_client(self) -> AsyncOpenAI:
         """

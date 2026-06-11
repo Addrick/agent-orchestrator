@@ -13,6 +13,7 @@ from config.global_config import EMPTY_RESPONSE_RETRIES
 from google.genai.types import Tool, GoogleSearch
 from tests.provider_stream_mocks import (
     anthropic_stream,
+    google_stream,
     openai_text_stream,
     openai_tool_call_stream,
 )
@@ -264,8 +265,8 @@ class TestGoogle:
         mock_instance = mock_google_client_class.return_value
         mock_part = MagicMock(text="Google success", function_call=None)
         mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
         response, _ = await text_engine.generate_response(google_config, base_context)
         assert response == {"type": "text", "content": "Google success"}
@@ -284,8 +285,8 @@ class TestGoogle:
 
         mock_part = MagicMock(text=None, function_call=mock_function_call)
         mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
 
         # Pass a non-empty 'tools' list to trigger the tool-call logic path
@@ -301,7 +302,7 @@ class TestGoogle:
     async def test_api_error_raises_llm_error(self, mock_google_client_class, text_engine, google_config, base_context, monkeypatch):
         monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_google_client_class.return_value
-        mock_instance.models.generate_content.side_effect = Exception("API failure")
+        mock_instance.models.generate_content_stream.side_effect = Exception("API failure")
         with pytest.raises(LLMCommunicationError, match="An error occurred with Google API"):
             await text_engine.generate_response(google_config, base_context)
 
@@ -309,21 +310,21 @@ class TestGoogle:
     async def test_429_sets_rate_limited_flag(self, mock_google_client_class, text_engine, google_config, base_context, monkeypatch):
         monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_google_client_class.return_value
-        mock_instance.models.generate_content.side_effect = Exception("429 quota exceeded")
+        mock_instance.models.generate_content_stream.side_effect = Exception("429 quota exceeded")
         with pytest.raises(LLMCommunicationError) as exc_info:
             await text_engine.generate_response(google_config, base_context)
         assert exc_info.value.rate_limited is True
-        assert mock_instance.models.generate_content.call_count == 1
+        assert mock_instance.models.generate_content_stream.call_count == 1
 
     @pytest.mark.asyncio
     async def test_resource_exhausted_sets_rate_limited_flag(self, mock_google_client_class, text_engine, google_config, base_context, monkeypatch):
         monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_google_client_class.return_value
-        mock_instance.models.generate_content.side_effect = Exception("RESOURCE_EXHAUSTED: daily limit reached")
+        mock_instance.models.generate_content_stream.side_effect = Exception("RESOURCE_EXHAUSTED: daily limit reached")
         with pytest.raises(LLMCommunicationError) as exc_info:
             await text_engine.generate_response(google_config, base_context)
         assert exc_info.value.rate_limited is True
-        assert mock_instance.models.generate_content.call_count == 1
+        assert mock_instance.models.generate_content_stream.call_count == 1
 
 
     @pytest.mark.asyncio
@@ -333,11 +334,11 @@ class TestGoogle:
         mock_instance = mock_google_client_class.return_value
         mock_part = MagicMock(text="ok", function_call=None)
         mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
         await text_engine.generate_response(google_config, base_context, tools=[])
-        config = mock_instance.models.generate_content.call_args.kwargs['config']
+        config = mock_instance.models.generate_content_stream.call_args.kwargs['config']
         assert not config.tools
 
     @pytest.mark.asyncio
@@ -347,12 +348,12 @@ class TestGoogle:
         mock_instance = mock_google_client_class.return_value
         mock_part = MagicMock(text="ok", function_call=None)
         mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
         grounding_tools = [{"type": "google_grounding", "function": {"name": "google_grounding_search"}}]
         await text_engine.generate_response(google_config, base_context, tools=grounding_tools)
-        config = mock_instance.models.generate_content.call_args.kwargs['config']
+        config = mock_instance.models.generate_content_stream.call_args.kwargs['config']
         assert config.tools
         assert any(hasattr(t, 'google_search') and t.google_search is not None for t in config.tools)
 
@@ -364,12 +365,12 @@ class TestGoogle:
         mock_function_call = MagicMock(name="do_thing", args={})
         mock_part = MagicMock(text=None, function_call=mock_function_call)
         mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
         function_tools = [{"type": "function", "function": {"name": "do_thing", "description": "does a thing", "parameters": {"type": "object", "properties": {}}}}]
         await text_engine.generate_response(google_config, base_context, tools=function_tools)
-        config = mock_instance.models.generate_content.call_args.kwargs['config']
+        config = mock_instance.models.generate_content_stream.call_args.kwargs['config']
         assert config.tools
         assert not any(hasattr(t, 'google_search') and t.google_search is not None for t in config.tools)
         assert any(hasattr(t, 'function_declarations') and t.function_declarations for t in config.tools)
@@ -388,8 +389,8 @@ class TestGoogle:
         mock_part = MagicMock(text=None, function_call=mock_function_call)
         mock_part.thought_signature = b'sig_abc123'
         mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
 
         response, _ = await text_engine.generate_response(google_config, base_context, tools=[
@@ -407,8 +408,8 @@ class TestGoogle:
 
         mock_part = MagicMock(text="Done", function_call=None)
         mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
 
         # Simulate history with a tool call that has a thought_signature
@@ -424,7 +425,7 @@ class TestGoogle:
 
         await text_engine.generate_response(google_config, base_context)
 
-        call_args = mock_instance.models.generate_content.call_args[1]
+        call_args = mock_instance.models.generate_content_stream.call_args[1]
         # The model turn (index 1: user, model, tool, ...) should have thought_signature
         model_turn = call_args['contents'][1]
         assert model_turn['role'] == 'model'
@@ -444,8 +445,8 @@ class TestGoogle:
         mock_part = MagicMock(text=None, function_call=mock_function_call)
         mock_part.thought_signature = None
         mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
 
         response, _ = await text_engine.generate_response(google_config, base_context, tools=[
@@ -462,15 +463,15 @@ class TestGoogle:
         mock_function_call = MagicMock(name="do_thing", args={})
         mock_part = MagicMock(text=None, function_call=mock_function_call)
         mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
         mixed_tools = [
             {"type": "google_grounding", "function": {"name": "google_grounding_search"}},
             {"type": "function", "function": {"name": "do_thing", "description": "does a thing", "parameters": {"type": "object", "properties": {}}}},
         ]
         await text_engine.generate_response(google_config, base_context, tools=mixed_tools)
-        config = mock_instance.models.generate_content.call_args.kwargs['config']
+        config = mock_instance.models.generate_content_stream.call_args.kwargs['config']
         assert config.tools
         assert any(hasattr(t, 'google_search') and t.google_search is not None for t in config.tools)
         assert any(hasattr(t, 'function_declarations') and t.function_declarations for t in config.tools)
@@ -495,8 +496,8 @@ class TestGoogle:
         mock_part.text = "Image received"
         mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]))
         mock_candidate.grounding_metadata = None
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
 
         base_context["current_message"]["image_url"] = "http://example.com/image.jpg"
@@ -505,7 +506,7 @@ class TestGoogle:
         await text_engine.generate_response(google_config, base_context)
 
         # Verify that the image was included in the API call
-        call_args = mock_instance.models.generate_content.call_args[1]
+        call_args = mock_instance.models.generate_content_stream.call_args[1]
         assert len(call_args['contents'][-1]['parts']) == 2
         assert call_args['contents'][-1]['parts'][-1].inline_data.data == b'imagedata'
 
@@ -637,8 +638,10 @@ class TestGoogleEdgeCases:
         mock_block_reason.name = "SAFETY"
         mock_prompt_feedback = MagicMock(block_reason=mock_block_reason)
 
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=mock_prompt_feedback, candidates=[])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(
+                MagicMock(prompt_feedback=mock_prompt_feedback, candidates=[])
+            )
         )
 
         with pytest.raises(LLMCommunicationError, match="blocked by Google.*SAFETY"):
@@ -651,8 +654,8 @@ class TestGoogleEdgeCases:
         """Response with no candidates returns {} which triggers retry logic."""
         monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_google_client_class.return_value
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[]))
         )
 
         with pytest.raises(LLMCommunicationError, match="empty or invalid response after all retries"):
@@ -671,8 +674,8 @@ class TestGoogleEdgeCases:
         mock_instance = mock_google_client_class.return_value
         mock_part = MagicMock(text="Response without image", function_call=None)
         mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
 
         base_context["current_message"]["image_url"] = "http://example.com/broken.png"
@@ -698,8 +701,8 @@ class TestGoogleEdgeCases:
         mock_instance = mock_google_client_class.return_value
         mock_part = MagicMock(text="No image seen", function_call=None)
         mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
 
         base_context["current_message"]["image_url"] = "http://example.com/image.bmp"
@@ -707,7 +710,7 @@ class TestGoogleEdgeCases:
 
         await text_engine.generate_response(google_config, base_context)
 
-        call_args = mock_instance.models.generate_content.call_args[1]
+        call_args = mock_instance.models.generate_content_stream.call_args[1]
         user_turn = call_args['contents'][-1]
         assert len(user_turn['parts']) == 1  # text only, no image
 

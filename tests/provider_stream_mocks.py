@@ -74,6 +74,18 @@ def anthropic_stream(final_message: Any,
     return manager
 
 
+# ---------------------------------------------------------------------------
+# Google generate_content_stream chunks
+# ---------------------------------------------------------------------------
+
+def google_stream(*responses: Any) -> AsyncIterList:
+    """Mock return value for `models.generate_content_stream(...)`: an async
+    iterator of GenerateContentResponse-shaped chunks. A single complete
+    response object is a valid one-chunk stream — tests reuse the same mock
+    object they used to hand to `generate_content`."""
+    return AsyncIterList(responses)
+
+
 def openai_tool_call_stream(calls: Sequence[Tuple[Optional[str], str, str]]) -> AsyncIterList:
     """A stream emitting one complete tool-call delta per (id, name, args_json)."""
     deltas = [

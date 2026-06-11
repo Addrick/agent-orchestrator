@@ -20,7 +20,11 @@ import pytest
 from unittest.mock import patch, AsyncMock, MagicMock
 
 from src.engine import TextEngine
-from tests.provider_stream_mocks import anthropic_stream, openai_text_stream
+from tests.provider_stream_mocks import (
+    anthropic_stream,
+    google_stream,
+    openai_text_stream,
+)
 
 
 @pytest.fixture
@@ -331,13 +335,13 @@ async def test_google_wire_payload_matches_golden(text_engine, monkeypatch):
         part = MagicMock(text="parity ok", function_call=None)
         part.thought_signature = None
         cand = MagicMock(content=MagicMock(parts=[part]), grounding_metadata=None)
-        inst.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[cand])
+        inst.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[cand]))
         )
         result, payload = await text_engine.generate_response(
             dict(GOOGLE_CONFIG), _ctx(GOOGLE_HISTORY), tools=copy.deepcopy(GOOGLE_TOOLS)
         )
-        captured = _normalize_google_call(inst.models.generate_content.call_args.kwargs)
+        captured = _normalize_google_call(inst.models.generate_content_stream.call_args.kwargs)
 
     assert captured == GOOGLE_GOLDEN_WIRE
     # The api_payload dump lists tools by name and carries the serializable
