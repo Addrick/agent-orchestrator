@@ -2335,3 +2335,75 @@ def test_chat_completions_logs_turn_under_requested_channel():
     channels = {row[0] for row in cur.fetchall()}
     assert channels == {"web_ui_newchan"}, channels
     mm.close()
+
+
+# -------- DP-205: engine dependency surface enforcement --------
+#
+# The adapter's dependency on the engine is the enumerated seam set below —
+# the DP-130 contract made literal. Routes must address the named `_seam`
+# accessors, never `self.chat_system.<attr>` directly; reaching for a new
+# ChatSystem attribute requires adding an accessor AND updating this map,
+# which is the review tripwire.
+
+def test_adapter_engine_surface_is_enumerated():
+    import ast
+    import inspect
+
+    import src.interfaces.kobold_engine_adapter as mod
+
+    # ChatSystem attribute -> the adapter accessor allowed to read it.
+    allowed = {
+        "personas": "_personas",
+        "visible_personas": "_visible_personas",
+        "system_persona_names": "_system_persona_names",
+        "models_available": "_models_available",
+        "memory_manager": "_memory_manager",
+        "tool_manager": "_tool_manager",
+        "bot_logic": "_bot_logic",
+        "confirmations": "_confirmations",
+        "stream_response": "_stream_response",
+        "stream_resume_confirmation": "_stream_resume_confirmation",
+        "assemble_request": "_assemble_request",
+        "get_view_history": "_get_view_history",
+        "get_session_memory_block": "_get_session_memory_block",
+    }
+
+    accesses = []  # (enclosing function name, ChatSystem attr touched)
+
+    class _Visitor(ast.NodeVisitor):
+        def __init__(self):
+            self.func_stack = []
+
+        def _visit_func(self, node):
+            self.func_stack.append(node.name)
+            self.generic_visit(node)
+            self.func_stack.pop()
+
+        visit_FunctionDef = _visit_func
+        visit_AsyncFunctionDef = _visit_func
+
+        def visit_Attribute(self, node):
+            v = node.value
+            if (
+                isinstance(v, ast.Attribute)
+                and v.attr == "chat_system"
+                and isinstance(v.value, ast.Name)
+                and v.value.id == "self"
+            ):
+                enclosing = self.func_stack[-1] if self.func_stack else "<module>"
+                accesses.append((enclosing, node.attr))
+            self.generic_visit(node)
+
+    _Visitor().visit(ast.parse(inspect.getsource(mod)))
+
+    touched = {attr for _, attr in accesses}
+    assert touched == set(allowed), (
+        "Adapter's ChatSystem surface drifted from the enumerated seams.\n"
+        f"unexpected: {sorted(touched - set(allowed))}\n"
+        f"unused (delete the accessor + this entry): {sorted(set(allowed) - touched)}"
+    )
+    for func, attr in accesses:
+        assert func == allowed[attr], (
+            f"`self.chat_system.{attr}` reached from {func!r} — routes must go "
+            f"through the {allowed[attr]!r} seam, not ChatSystem directly."
+        )

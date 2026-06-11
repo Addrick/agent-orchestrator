@@ -21,7 +21,10 @@ from src.request_builder import AssembledRequest
 mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("application/javascript", ".mjs")
 mimetypes.add_type("text/css", ".css")
-from typing import Any, AsyncIterator, Dict, Optional, List, Tuple
+from typing import (
+    TYPE_CHECKING, Any, AsyncGenerator, AsyncIterator, Awaitable, Callable,
+    Dict, Optional, List, Set, Tuple,
+)
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request
@@ -47,6 +50,13 @@ from src.interfaces._persona_patch import (
     _apply_kobold_sampler_extras,
     get_kobold_extras_for_get,
 )
+
+if TYPE_CHECKING:
+    from src.confirmations import ConfirmationManager
+    from src.memory.memory_manager import MemoryManager
+    from src.message_handler import BotLogic
+    from src.persona import Persona
+    from src.tools.tool_manager import ToolManager
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +122,86 @@ class KoboldEngineAdapter:
         self._setup_routes()
         self._setup_portal()
 
+    # ------------------------------------------------------------------
+    # Engine dependency surface (DP-205).
+    #
+    # Everything the adapter uses from the engine, enumerated in one place —
+    # the routes below address these named seams, never `self.chat_system.*`
+    # directly (pinned by test_adapter_engine_surface_is_enumerated). These
+    # are read-through properties rather than eager destructuring because the
+    # engine REBINDS several of them after construction (`models_available`
+    # on every `update_models`, `personas`/`tool_manager` in admin and test
+    # paths) — a copy bound at __init__ would go stale. memory_manager's
+    # DP-130 transcript/version methods stay direct per the standing decision
+    # (no facade over storage).
+    # ------------------------------------------------------------------
+
+    @property
+    def _personas(self) -> Dict[str, "Persona"]:
+        """All routable personas (system personas included) — name → Persona."""
+        return self.chat_system.personas
+
+    def _visible_personas(self) -> Dict[str, "Persona"]:
+        """User-selectable personas (system personas excluded) for listings."""
+        return self.chat_system.visible_personas()
+
+    @property
+    def _system_persona_names(self) -> Set[str]:
+        """Names persisted as system personas (save_personas_to_file split)."""
+        return self.chat_system.system_persona_names
+
+    @property
+    def _models_available(self) -> Dict[str, Any]:
+        """Live LLM catalog (`what models` source) — rebound by update_models."""
+        return self.chat_system.models_available
+
+    @property
+    def _memory_manager(self) -> "MemoryManager":
+        """Storage: DP-130 transcript, version, suppression + logging methods."""
+        return self.chat_system.memory_manager
+
+    @property
+    def _tool_manager(self) -> "ToolManager":
+        """Tool registry — drives the /tools/catalog route."""
+        return self.chat_system.tool_manager
+
+    @property
+    def _bot_logic(self) -> "BotLogic":
+        """Command layer — dev_command preprocessing (`set`/`what` commands)."""
+        return self.chat_system.bot_logic
+
+    @property
+    def _confirmations(self) -> "ConfirmationManager":
+        """CONFIRM-mode park store — pending map keyed by (user, persona)."""
+        return self.chat_system.confirmations
+
+    @property
+    def _stream_response(self) -> Callable[..., AsyncIterator[GenerationEvent]]:
+        """Live generation kernel — the /v1/chat/completions event source."""
+        return self.chat_system.stream_response
+
+    @property
+    def _stream_resume_confirmation(
+        self,
+    ) -> Callable[..., AsyncGenerator[GenerationEvent, None]]:
+        """Approve/deny continuation stream for a parked CONFIRM write."""
+        return self.chat_system.stream_resume_confirmation
+
+    @property
+    def _assemble_request(self) -> Callable[..., Awaitable[Optional[AssembledRequest]]]:
+        """S5 dry-run assembler (parity inspector) — shares the live builder."""
+        return self.chat_system.assemble_request
+
+    @property
+    def _get_view_history(self) -> Callable[..., Tuple[List[Dict[str, Any]], str]]:
+        """History exactly as the engine would see it (DP-136 transcript seam)."""
+        return self.chat_system.get_view_history
+
+    @property
+    def _get_session_memory_block(self) -> Callable[..., Awaitable[Optional[str]]]:
+        """Public LTM seam for the client-side ltm_block route."""
+        return self.chat_system.get_session_memory_block
+
     def _setup_portal(self) -> None:
         @self.app.get("/portal")
         async def get_portal() -> HTMLResponse:
@@ -164,23 +254,23 @@ class KoboldEngineAdapter:
         async def set_model(request: Request) -> Any:
             data = await request.json()
             new_persona = data.get("model") or data.get("result")
-            if new_persona in self.chat_system.personas:
+            if new_persona in self._personas:
                 self.active_persona = new_persona
                 logger.info(f"Switched active persona to: {new_persona}")
                 return {"result": self.active_persona}
-            return {"error": f"Persona '{new_persona}' not found", "available": list(self.chat_system.visible_personas().keys())}
+            return {"error": f"Persona '{new_persona}' not found", "available": list(self._visible_personas().keys())}
 
         @self.app.get("/v1/models")
         async def list_models() -> Any:
             models = [
                 {"id": name, "object": "model", "owned_by": "derpr", "permission": []}
-                for name in self.chat_system.visible_personas().keys()
+                for name in self._visible_personas().keys()
             ]
             return {"object": "list", "data": models}
 
         @self.app.get("/api/v1/tools/catalog")
         async def get_tools_catalog() -> Any:
-            defs = self.chat_system.tool_manager.get_tool_definitions()
+            defs = self._tool_manager.get_tool_definitions()
             tools = []
             for t in defs:
                 func = t.get("function", {})
@@ -202,9 +292,9 @@ class KoboldEngineAdapter:
 
         @self.app.get("/api/v1/persona/{name}")
         async def get_persona(name: str) -> Any:
-            if name not in self.chat_system.personas:
+            if name not in self._personas:
                 return JSONResponse(status_code=404, content={"error": f"Persona '{name}' not found"})
-            p = self.chat_system.personas[name]
+            p = self._personas[name]
             return {
                 "name": p.get_name(),
                 "display_name": p.get_name().title(),
@@ -243,7 +333,7 @@ class KoboldEngineAdapter:
             still offers a default channel to talk in.
             """
             rows = await asyncio.to_thread(
-                self.chat_system.memory_manager.get_distinct_channels, persona
+                self._memory_manager.get_distinct_channels, persona
             )
             channels = [
                 {
@@ -282,9 +372,9 @@ class KoboldEngineAdapter:
             recalled block is scoped to the active channel (defaults preserve the
             single web_ui/portal behavior).
             """
-            if persona not in self.chat_system.personas:
+            if persona not in self._personas:
                 return JSONResponse(status_code=404, content={"error": f"Persona '{persona}' not found"})
-            block = await self.chat_system.get_session_memory_block(
+            block = await self._get_session_memory_block(
                 persona_name=persona,
                 user_identifier=user_identifier,
                 channel=channel,
@@ -325,9 +415,9 @@ class KoboldEngineAdapter:
             persona's own `long_term_memory` setting (the engine path has no
             client LTM toggle), so the dry-run mirrors true engine behavior.
             """
-            if persona not in self.chat_system.personas:
+            if persona not in self._personas:
                 return JSONResponse(status_code=404, content={"error": f"Persona '{persona}' not found"})
-            assembled = await self.chat_system.assemble_request(
+            assembled = await self._assemble_request(
                 persona_name=persona,
                 user_identifier="portal",
                 channel=channel,
@@ -343,7 +433,7 @@ class KoboldEngineAdapter:
             # Source from the same in-memory list the `what models` command
             # reads (chat_system.models_available), so the dropdown and the
             # command never diverge. update_models refreshes both.
-            avail = self.chat_system.models_available or {}
+            avail = self._models_available or {}
             all_m = []
             for sub in avail.values():
                 if isinstance(sub, list):
@@ -354,21 +444,21 @@ class KoboldEngineAdapter:
 
         @self.app.post("/api/v1/persona/{name}/reset")
         async def reset_persona_history(name: str) -> Any:
-            if name not in self.chat_system.personas:
+            if name not in self._personas:
                 return {"error": "Persona not found"}
-            p = self.chat_system.personas[name]
+            p = self._personas[name]
             p.start_new_conversation()
             return {"result": f"History for {name} reset successfully"}
 
         @self.app.post("/api/v1/persona/{name}/dev_command")
         async def dev_command(name: str, request: Request) -> Any:
-            if name not in self.chat_system.personas:
+            if name not in self._personas:
                 return JSONResponse(status_code=404,
                                     content={"error": f"Persona '{name}' not found"})
             body = await request.json()
             command = body.get("command", "")
             try:
-                result = await self.chat_system.bot_logic.preprocess_message(name, "portal", command)
+                result = await self._bot_logic.preprocess_message(name, "portal", command)
             except Exception as e:
                 return {"response": str(e), "mutated": False}
             if result is None:
@@ -377,7 +467,7 @@ class KoboldEngineAdapter:
                     content={"response": "Not a dev command", "mutated": False},
                 )
             if result.get("mutated"):
-                save_personas_to_file(self.chat_system.personas, self.chat_system.system_persona_names)
+                save_personas_to_file(self._personas, self._system_persona_names)
             return {"response": result.get("response", ""), "mutated": bool(result.get("mutated"))}
 
         @self.app.post("/api/v1/persona/{name}/confirm")
@@ -395,7 +485,7 @@ class KoboldEngineAdapter:
             writes since); omit or send empty to skip the check. The portal user
             is always "portal", matching the park key (user, persona).
             """
-            if name not in self.chat_system.personas:
+            if name not in self._personas:
                 return JSONResponse(status_code=404,
                                     content={"error": f"Persona '{name}' not found"})
             body = await request.json()
@@ -403,7 +493,7 @@ class KoboldEngineAdapter:
             token = body.get("token") or None
 
             async def relay() -> AsyncIterator[bytes]:
-                async for ev in self.chat_system.stream_resume_confirmation(
+                async for ev in self._stream_resume_confirmation(
                     user_identifier="portal",
                     persona_name=name,
                     approved=approved,
@@ -432,13 +522,13 @@ class KoboldEngineAdapter:
             no channel concept. max_turns defaults to the persona's configured
             sliding-window size (`get_base_history_messages`); no new config key.
             """
-            if persona not in self.chat_system.personas:
+            if persona not in self._personas:
                 return JSONResponse(status_code=404, content={"error": f"Persona '{persona}' not found"})
 
-            p = self.chat_system.personas[persona]
+            p = self._personas[persona]
             limit = max_turns if isinstance(max_turns, int) and max_turns > 0 else p.get_base_history_messages()
             raw_history = await asyncio.to_thread(
-                self.chat_system.memory_manager.get_global_history, persona, limit
+                self._memory_manager.get_global_history, persona, limit
             )
             savefile, skipped = build_kobold_savefile(raw_history)
             logger.warning(
@@ -477,13 +567,13 @@ class KoboldEngineAdapter:
             legacy global-history behavior is preserved (back-compat for the
             single-channel Lite/DP-132 callers).
             """
-            if persona not in self.chat_system.personas:
+            if persona not in self._personas:
                 return JSONResponse(status_code=404, content={"error": f"Persona '{persona}' not found"})
 
-            p = self.chat_system.personas[persona]
+            p = self._personas[persona]
             limit = max_turns if isinstance(max_turns, int) and max_turns > 0 else p.get_base_history_messages()
             raw_history, mode_used = await asyncio.to_thread(
-                self.chat_system.get_view_history,
+                self._get_view_history,
                 persona, user_identifier, channel, server_id, limit,
             )
             ids = [
@@ -491,12 +581,12 @@ class KoboldEngineAdapter:
                 if isinstance(m.get("interaction_id"), int)
             ]
             ids_with_versions = await asyncio.to_thread(
-                self.chat_system.memory_manager.get_ids_with_versions, ids
+                self._memory_manager.get_ids_with_versions, ids
             )
             # Surface a live parked confirmation (portal session) as a trailing
             # ephemeral chunk so a fresh load renders the awaiting-approval text.
             # Park key is (user_identifier, persona) — honor the requested user.
-            pending_map = self.chat_system.confirmations.pending
+            pending_map = self._confirmations.pending
             pending_obj = pending_map.get((user_identifier, persona))
             pending: Optional[Dict[str, Any]] = None
             if pending_obj is not None:
@@ -528,7 +618,7 @@ class KoboldEngineAdapter:
             """
             try:
                 versions = await asyncio.to_thread(
-                    self.chat_system.memory_manager.list_interaction_versions,
+                    self._memory_manager.list_interaction_versions,
                     interaction_id,
                 )
             except Exception as e:
@@ -556,7 +646,7 @@ class KoboldEngineAdapter:
             """
             try:
                 result = await asyncio.to_thread(
-                    self.chat_system.memory_manager.swap_interaction_version,
+                    self._memory_manager.swap_interaction_version,
                     interaction_id,
                     k,
                 )
@@ -574,7 +664,7 @@ class KoboldEngineAdapter:
                 interaction_id, k, result.get("total_versions"),
             )
             versions = await asyncio.to_thread(
-                self.chat_system.memory_manager.list_interaction_versions,
+                self._memory_manager.list_interaction_versions,
                 interaction_id,
             )
             for v in versions:
@@ -596,7 +686,7 @@ class KoboldEngineAdapter:
                 return JSONResponse(status_code=400, content={"error": "missing 'content' field"})
             try:
                 await asyncio.to_thread(
-                    self.chat_system.memory_manager.update_interaction_content,
+                    self._memory_manager.update_interaction_content,
                     interaction_id,
                     content,
                 )
@@ -615,7 +705,7 @@ class KoboldEngineAdapter:
             """
             try:
                 inserted = await asyncio.to_thread(
-                    self.chat_system.memory_manager.suppress_interaction,
+                    self._memory_manager.suppress_interaction,
                     interaction_id,
                 )
             except Exception as e:
@@ -629,13 +719,13 @@ class KoboldEngineAdapter:
 
         @self.app.patch("/api/v1/persona/{name}")
         async def patch_persona(name: str, request: Request) -> Any:
-            if name not in self.chat_system.personas:
+            if name not in self._personas:
                 return JSONResponse(status_code=404, content={"error": "Persona not found"})
             try:
                 data = await request.json()
             except Exception as e:
                 return JSONResponse(status_code=400, content={"error": f"invalid JSON: {e}"})
-            p = self.chat_system.personas[name]
+            p = self._personas[name]
 
             # Numeric setters silently coerce bad input to None / defaults and
             # return the resolved value. Capture rejections so the portal can
@@ -663,7 +753,7 @@ class KoboldEngineAdapter:
                 logger.warning(f"PATCH /persona/{name}: unknown fields ignored: {unknown}")
 
             try:
-                save_personas_to_file(self.chat_system.personas, self.chat_system.system_persona_names)
+                save_personas_to_file(self._personas, self._system_persona_names)
             except Exception as e:
                 logger.error(f"Persona save failed for {name}: {e}")
                 return JSONResponse(
@@ -901,7 +991,7 @@ class KoboldEngineAdapter:
             if not is_stream:
                 full_text = ""
                 assistant_id: Optional[int] = None
-                async for ev in self.chat_system.stream_response(
+                async for ev in self._stream_response(
                     persona_name=persona_name,
                     user_identifier=user_identifier,
                     channel=channel,
@@ -984,7 +1074,7 @@ class KoboldEngineAdapter:
                     # (msgs_in) to ensure the engine's DB is the source of truth for
                     # history. This prevents the 'hollow history' issue where the
                     # UI might be empty but the DB has rich context.
-                    async for ev in self.chat_system.stream_response(
+                    async for ev in self._stream_response(
                         persona_name=persona_name,
                         user_identifier=user_identifier,
                         channel=channel,
@@ -1243,7 +1333,7 @@ class KoboldEngineAdapter:
         if not content or not content.strip():
             return None
         try:
-            res = self.chat_system.memory_manager.log_message(
+            res = self._memory_manager.log_message(
                 user_identifier="portal",
                 persona_name=persona_name,
                 channel="web_ui",
@@ -1262,7 +1352,7 @@ class KoboldEngineAdapter:
         """Helper to append the full assistant stream into history."""
         if retry_assistant_id is not None:
             try:
-                self.chat_system.memory_manager.update_interaction_content(
+                self._memory_manager.update_interaction_content(
                     retry_assistant_id, content, reasoning_content=reasoning_content
                 )
                 return retry_assistant_id
@@ -1271,7 +1361,7 @@ class KoboldEngineAdapter:
                 return None
         else:
             try:
-                res = self.chat_system.memory_manager.log_message(
+                res = self._memory_manager.log_message(
                     user_identifier="portal", persona_name=persona_name,
                     channel="web_ui", author_role='assistant',
                     author_name=persona_name, content=content,
@@ -1347,12 +1437,12 @@ class KoboldEngineAdapter:
         }
 
     def _get_current_persona_name(self) -> str:
-        if self.active_persona and self.active_persona in self.chat_system.personas:
+        if self.active_persona and self.active_persona in self._personas:
             return self.active_persona
         default = getattr(global_config, "KOBOLD_DEFAULT_PERSONA", None)
-        if default and default in self.chat_system.personas:
+        if default and default in self._personas:
             return str(default)
-        return str(next(iter(self.chat_system.personas.keys()), "assistant"))
+        return str(next(iter(self._personas.keys()), "assistant"))
 
     async def start(self) -> None:
         logger.info(f"Starting Kobold Engine Adapter on http://{self.host}:{self.port}")
