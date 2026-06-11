@@ -58,6 +58,22 @@ def openai_text_stream(text: str) -> AsyncIterList:
     return AsyncIterList(chunks)
 
 
+# ---------------------------------------------------------------------------
+# Anthropic messages.stream context manager
+# ---------------------------------------------------------------------------
+
+def anthropic_stream(final_message: Any,
+                     text_chunks: Iterable[str] = ()) -> MagicMock:
+    """Mock for `client.messages.stream(...)`: a context manager whose body
+    exposes `text_stream` (delta iteration) and `get_final_message()` (the
+    SDK-accumulated complete message the engine parses)."""
+    manager = MagicMock()
+    body = manager.__enter__.return_value
+    body.text_stream = list(text_chunks)
+    body.get_final_message.return_value = final_message
+    return manager
+
+
 def openai_tool_call_stream(calls: Sequence[Tuple[Optional[str], str, str]]) -> AsyncIterList:
     """A stream emitting one complete tool-call delta per (id, name, args_json)."""
     deltas = [

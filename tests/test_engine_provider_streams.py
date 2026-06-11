@@ -11,6 +11,7 @@ from unittest.mock import patch, AsyncMock
 from src.engine import TextEngine, LLMCommunicationError
 from tests.provider_stream_mocks import (
     AsyncIterList,
+    anthropic_stream,
     openai_chunk,
     openai_text_stream,
     openai_tool_call_delta,
@@ -160,3 +161,89 @@ class TestOpenAIStream:
         assert result == {"type": "text", "content": "hi"}
         assert payload["tools"] == ["t"]
         assert inst.chat.completions.create.call_args.kwargs["stream"] is True
+
+
+# ---------------------------------------------------------------------------
+# Anthropic
+# ---------------------------------------------------------------------------
+
+
+@patch("src.engine.anthropic.Anthropic")
+class TestAnthropicStream:
+    @pytest.mark.asyncio
+    async def test_event_order_payload_deltas_done(self, mock_cls, text_engine,
+                                                   base_context, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy")
+        from unittest.mock import MagicMock
+        inst = mock_cls.return_value
+        inst.messages.stream.return_value = anthropic_stream(MagicMock(
+            content=[MagicMock(text="Hello")], stop_reason="end_turn"
+        ), ["Hel", "lo"])
+        events = await _drain(text_engine._stream_anthropic_response(
+            {"model_name": "claude-3-opus-20240229"}, base_context, None
+        ))
+        assert [e["type"] for e in events] == [
+            "api_payload", "text_delta", "text_delta", "done"
+        ]
+        assert events[1]["text"] == "Hel" and events[2]["text"] == "lo"
+        assert events[-1]["full_text"] == "Hello"
+
+    @pytest.mark.asyncio
+    async def test_tool_use_yields_tool_calls_then_empty_done(
+        self, mock_cls, text_engine, base_context, monkeypatch
+    ):
+        """tool_use stop reason: the accumulated final message carries the
+        complete tool_use blocks; deltas streamed before it stay text_delta."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy")
+        from unittest.mock import MagicMock
+        inst = mock_cls.return_value
+        tool_block = MagicMock(type="tool_use", id="tu_1", input={"q": "x"})
+        tool_block.name = "search"
+        inst.messages.stream.return_value = anthropic_stream(MagicMock(
+            content=[tool_block], stop_reason="tool_use"
+        ), ["thinking..."])
+        events = await _drain(text_engine._stream_anthropic_response(
+            {"model_name": "claude-3-opus-20240229"}, base_context,
+            [{"type": "function", "function": {"name": "search", "parameters": {}}}],
+        ))
+        tool_ev = next(e for e in events if e["type"] == "tool_calls")
+        assert tool_ev["calls"] == [
+            {"id": "tu_1", "name": "search", "arguments": {"q": "x"}}
+        ]
+        assert events[-1] == {"type": "done", "full_text": ""}
+
+    @pytest.mark.asyncio
+    async def test_transport_error_carries_full_api_payload(self, mock_cls, text_engine,
+                                                            base_context, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy")
+        import anthropic as anthropic_sdk
+        from unittest.mock import MagicMock
+        inst = mock_cls.return_value
+        inst.messages.stream.side_effect = anthropic_sdk.APIStatusError(
+            "boom", response=MagicMock(status_code=500), body=None
+        )
+        with pytest.raises(LLMCommunicationError) as ei:
+            await _drain(text_engine._stream_anthropic_response(
+                {"model_name": "claude-3-opus-20240229"}, base_context,
+                [{"type": "function", "function": {"name": "t", "parameters": {}}}],
+            ))
+        # Error payloads keep the full tool definitions (pre-DP-206 contract).
+        assert ei.value.api_payload["tools"][0]["name"] == "t"
+
+    @pytest.mark.asyncio
+    async def test_one_shot_is_collect_of_stream(self, mock_cls, text_engine,
+                                                 base_context, monkeypatch):
+        """generate_response('claude-*') drains the canonical stream — same
+        result tuple, with the dump payload (tools by name)."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy")
+        from unittest.mock import MagicMock
+        inst = mock_cls.return_value
+        inst.messages.stream.return_value = anthropic_stream(MagicMock(
+            content=[MagicMock(text="hi")], stop_reason="end_turn"
+        ), ["hi"])
+        result, payload = await text_engine.generate_response(
+            {"model_name": "claude-3-opus-20240229"}, base_context,
+            tools=[{"type": "function", "function": {"name": "t", "parameters": {}}}],
+        )
+        assert result == {"type": "text", "content": "hi"}
+        assert payload["tools"] == ["t"]

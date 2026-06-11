@@ -9,7 +9,7 @@ import anthropic
 from openai import APIStatusError
 
 from src.engine import TextEngine, LLMCommunicationError
-from tests.provider_stream_mocks import openai_text_stream
+from tests.provider_stream_mocks import anthropic_stream, openai_text_stream
 
 
 @pytest.fixture
@@ -111,9 +111,9 @@ class TestAnthropicEdgeCases:
         persona_prompt with it via the '\\n\\n' separator."""
         monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy")
         mock_instance = mock_anthropic_class.return_value
-        mock_instance.messages.create.return_value = MagicMock(
+        mock_instance.messages.stream.return_value = anthropic_stream(MagicMock(
             content=[MagicMock(text="ok")], stop_reason="end_turn"
-        )
+        ), ["ok"])
         base_context["persona_prompt"] = "Base persona"
         base_context["history"] = [
             {"role": "system", "content": "Extra system"},
@@ -122,7 +122,7 @@ class TestAnthropicEdgeCases:
         await text_engine.generate_response(
             {"model_name": "claude-3-opus-20240229"}, base_context
         )
-        call_args = mock_instance.messages.create.call_args[1]
+        call_args = mock_instance.messages.stream.call_args[1]
         assert call_args["system"] == "Base persona\n\nExtra system"
         # The system msg is consumed; history should only have the user msg.
         assert all(m["role"] != "system" for m in call_args["messages"])
@@ -140,9 +140,9 @@ class TestAnthropicEdgeCases:
             type="tool_use", id="tu_1", input={"q": "x"}
         )
         tool_block.name = "search"
-        mock_instance.messages.create.return_value = MagicMock(
+        mock_instance.messages.stream.return_value = anthropic_stream(MagicMock(
             content=[text_block, tool_block], stop_reason="tool_use"
-        )
+        ), ["thinking..."])
         response, _ = await text_engine.generate_response(
             {"model_name": "claude-3-opus-20240229"},
             base_context,
@@ -161,9 +161,9 @@ class TestAnthropicEdgeCases:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy")
         mock_instance = mock_anthropic_class.return_value
         # Always return whitespace — all retries exhaust.
-        mock_instance.messages.create.return_value = MagicMock(
+        mock_instance.messages.stream.return_value = anthropic_stream(MagicMock(
             content=[MagicMock(text="   ")], stop_reason="end_turn"
-        )
+        ), ["   "])
         with patch("src.engine.asyncio.sleep", new_callable=AsyncMock):
             with pytest.raises(
                 LLMCommunicationError, match="empty or invalid response"
@@ -172,7 +172,7 @@ class TestAnthropicEdgeCases:
                     {"model_name": "claude-3-opus-20240229"}, base_context
                 )
         # Should have retried (>1 call)
-        assert mock_instance.messages.create.call_count > 1
+        assert mock_instance.messages.stream.call_count > 1
 
     @pytest.mark.asyncio
     async def test_anthropic_429_rate_limited_flag(
@@ -184,13 +184,13 @@ class TestAnthropicEdgeCases:
         err = anthropic.APIStatusError(
             "Rate limit", response=MagicMock(status_code=429), body=None
         )
-        mock_instance.messages.create.side_effect = err
+        mock_instance.messages.stream.side_effect = err
         with pytest.raises(LLMCommunicationError) as ei:
             await text_engine.generate_response(
                 {"model_name": "claude-3-opus-20240229"}, base_context
             )
         assert ei.value.rate_limited is True
-        assert mock_instance.messages.create.call_count == 1
+        assert mock_instance.messages.stream.call_count == 1
 
 
 # ------------------------------------------------------------------

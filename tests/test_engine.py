@@ -11,7 +11,11 @@ import json
 from src.engine import TextEngine, LLMCommunicationError
 from config.global_config import EMPTY_RESPONSE_RETRIES
 from google.genai.types import Tool, GoogleSearch
-from tests.provider_stream_mocks import openai_text_stream, openai_tool_call_stream
+from tests.provider_stream_mocks import (
+    anthropic_stream,
+    openai_text_stream,
+    openai_tool_call_stream,
+)
 
 
 @pytest.fixture
@@ -158,9 +162,9 @@ class TestAnthropic:
     async def test_success_text_response(self, mock_anthropic_class, text_engine, anthropic_config, base_context, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_anthropic_class.return_value
-        mock_instance.messages.create.return_value = MagicMock(
+        mock_instance.messages.stream.return_value = anthropic_stream(MagicMock(
             content=[MagicMock(text="Claude success")], stop_reason="end_turn"
-        )
+        ), ["Claude success"])
         response, _ = await text_engine.generate_response(anthropic_config, base_context)
         assert response == {"type": "text", "content": "Claude success"}
 
@@ -170,7 +174,9 @@ class TestAnthropic:
         mock_instance = mock_anthropic_class.return_value
         mock_tool_use = MagicMock(type='tool_use', id='tool_123', input={'ticker': 'GOOG'})
         mock_tool_use.name = 'get_stock_price'
-        mock_instance.messages.create.return_value = MagicMock(content=[mock_tool_use], stop_reason="tool_use")
+        mock_instance.messages.stream.return_value = anthropic_stream(
+            MagicMock(content=[mock_tool_use], stop_reason="tool_use")
+        )
         response, _ = await text_engine.generate_response(
             anthropic_config, base_context,
             tools=[{"type": "function", "function": {"name": "get_stock_price", "parameters": {}}}]
@@ -183,7 +189,7 @@ class TestAnthropic:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_anthropic_class.return_value
         error = anthropic.APIStatusError("Server error", response=MagicMock(status_code=500), body=None)
-        mock_instance.messages.create.side_effect = error
+        mock_instance.messages.stream.side_effect = error
         with pytest.raises(LLMCommunicationError, match="Anthropic API returned an error"):
             await text_engine.generate_response(anthropic_config, base_context)
 
@@ -192,11 +198,11 @@ class TestAnthropic:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_anthropic_class.return_value
         error = anthropic.APIStatusError("Rate limit exceeded", response=MagicMock(status_code=429), body=None)
-        mock_instance.messages.create.side_effect = error
+        mock_instance.messages.stream.side_effect = error
         with pytest.raises(LLMCommunicationError) as exc_info:
             await text_engine.generate_response(anthropic_config, base_context)
         assert exc_info.value.rate_limited is True
-        assert mock_instance.messages.create.call_count == 1
+        assert mock_instance.messages.stream.call_count == 1
 
     @pytest.mark.asyncio
     async def test_tool_metadata_stripped_from_api_call(self, mock_anthropic_class, text_engine, anthropic_config,
@@ -204,16 +210,16 @@ class TestAnthropic:
         """Custom metadata fields must be stripped and tools converted to Anthropic format."""
         monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_anthropic_class.return_value
-        mock_instance.messages.create.return_value = MagicMock(
+        mock_instance.messages.stream.return_value = anthropic_stream(MagicMock(
             content=[MagicMock(text="ok")], stop_reason="end_turn"
-        )
+        ), ["ok"])
         tools = [{
             "type": "function", "is_write": True, "service_binding": "zammad",
             "function": {"name": "create_ticket", "description": "Creates a ticket",
                          "parameters": {"type": "object", "properties": {}}}
         }]
         await text_engine.generate_response(anthropic_config, base_context, tools=tools)
-        call_kwargs = mock_instance.messages.create.call_args[1]
+        call_kwargs = mock_instance.messages.stream.call_args[1]
         for tool in call_kwargs["tools"]:
             assert "is_write" not in tool, "is_write leaked into Anthropic API call"
             assert "service_binding" not in tool, "service_binding leaked into Anthropic API call"
@@ -235,9 +241,9 @@ class TestAnthropic:
 
         # Mock the Claude API response
         mock_instance = mock_anthropic_class.return_value
-        mock_instance.messages.create.return_value = MagicMock(
+        mock_instance.messages.stream.return_value = anthropic_stream(MagicMock(
             content=[MagicMock(text="Image received")], stop_reason="end_turn"
-        )
+        ), ["Image received"])
 
         base_context["current_message"]["image_url"] = "http://example.com/image.png"
         base_context["history"] = [{"role": "user", "content": "Check this out"}]
@@ -245,7 +251,7 @@ class TestAnthropic:
         await text_engine.generate_response(anthropic_config, base_context)
 
         # Verify that the image was included in the API call
-        call_args = mock_instance.messages.create.call_args[1]
+        call_args = mock_instance.messages.stream.call_args[1]
         assert call_args['messages'][-1]['content'][-1]['type'] == 'image'
         assert call_args['messages'][-1]['content'][-1]['source']['data'] == base64.b64encode(b'imagedata').decode('utf-8')
 
@@ -720,9 +726,9 @@ class TestAnthropicEdgeCases:
         mock_get.return_value.__aenter__.side_effect = aiohttp.ClientError("Timeout")
 
         mock_instance = mock_anthropic_class.return_value
-        mock_instance.messages.create.return_value = MagicMock(
+        mock_instance.messages.stream.return_value = anthropic_stream(MagicMock(
             content=[MagicMock(text="Response without image")], stop_reason="end_turn"
-        )
+        ), ["Response without image"])
 
         base_context["current_message"]["image_url"] = "http://example.com/broken.png"
         base_context["history"] = [{"role": "user", "content": "Look at this"}]
@@ -746,9 +752,9 @@ class TestAnthropicEdgeCases:
         mock_get.return_value.__aenter__.return_value = mock_response
 
         mock_instance = mock_anthropic_class.return_value
-        mock_instance.messages.create.return_value = MagicMock(
+        mock_instance.messages.stream.return_value = anthropic_stream(MagicMock(
             content=[MagicMock(text="No image seen")], stop_reason="end_turn"
-        )
+        ), ["No image seen"])
 
         base_context["current_message"]["image_url"] = "http://example.com/image.tiff"
         base_context["history"] = [{"role": "user", "content": "Check this TIFF"}]
@@ -757,7 +763,7 @@ class TestAnthropicEdgeCases:
         assert response == {"type": "text", "content": "No image seen"}
 
         # Verify no image block was sent
-        call_args = mock_instance.messages.create.call_args[1]
+        call_args = mock_instance.messages.stream.call_args[1]
         last_msg = call_args['messages'][-1]
         # content was converted to list (text part) but no image part added
         assert isinstance(last_msg['content'], list)

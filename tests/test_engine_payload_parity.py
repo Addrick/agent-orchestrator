@@ -20,7 +20,7 @@ import pytest
 from unittest.mock import patch, AsyncMock, MagicMock
 
 from src.engine import TextEngine
-from tests.provider_stream_mocks import openai_text_stream
+from tests.provider_stream_mocks import anthropic_stream, openai_text_stream
 
 
 @pytest.fixture
@@ -217,13 +217,16 @@ async def test_anthropic_wire_payload_matches_golden(text_engine, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy")
     with patch("src.engine.anthropic.Anthropic") as cls:
         inst = cls.return_value
-        inst.messages.create.return_value = MagicMock(
+        # DP-206 cutover: the transport moved from `messages.create` to
+        # `messages.stream` (same kwargs — the SDK adds the wire-level
+        # `stream: true` itself). Capture point change only; goldens frozen.
+        inst.messages.stream.return_value = anthropic_stream(MagicMock(
             content=[MagicMock(text="parity ok")], stop_reason="end_turn"
-        )
+        ), ["parity ok"])
         result, payload = await text_engine.generate_response(
             dict(ANTHROPIC_CONFIG), _ctx(ANTHROPIC_HISTORY), tools=copy.deepcopy(PARITY_TOOLS)
         )
-        captured = dict(inst.messages.create.call_args.kwargs)
+        captured = dict(inst.messages.stream.call_args.kwargs)
 
     assert {k: v for k, v in captured.items() if k != "tools"} == \
         {k: v for k, v in ANTHROPIC_GOLDEN_WIRE.items() if k != "tools"}

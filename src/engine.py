@@ -465,11 +465,11 @@ class TextEngine:
         except aiohttp.ClientError as e:
             logger.error(f"Failed to download image from {image_url}: {e}")
 
-    async def _generate_anthropic_response(self, config: Dict[str, Any], history_object: Dict[str, Any],
-                                           tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
-        Dict[str, Any], Dict[str, Any]]:
-        client = self._get_anthropic_client()
-
+    async def _build_anthropic_params(self, config: Dict[str, Any], history_object: Dict[str, Any],
+                                      tools: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+        """Builds the messages request kwargs for Anthropic. Single source of
+        truth for the canonical streaming driver (pinned by
+        tests/test_engine_payload_parity.py)."""
         system_prompt, history = self._extract_system_prompt(history_object)
 
         if history_object["current_message"].get("image_url"):
@@ -492,16 +492,43 @@ class TextEngine:
                 for t in tools if "function" in t
             ]
 
-        api_params = {k: v for k, v in api_params.items() if v is not None}
+        return {k: v for k, v in api_params.items() if v is not None}
 
+    @staticmethod
+    def _anthropic_dump_params(api_params: Dict[str, Any]) -> Dict[str, Any]:
+        """Log-safe copy of the request kwargs: tools listed by name."""
+        dump = dict(api_params)
+        if "tools" in dump:
+            dump["tools"] = [tool.get("name", "unknown") for tool in dump["tools"]]
+        return dump
+
+    async def _stream_anthropic_response(
+        self, config: Dict[str, Any], history_object: Dict[str, Any],
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Canonical Anthropic driver (DP-206): `messages.stream(...)` with the
+        SDK's accumulator, emitting the unified event shape. The one-shot path
+        is `collect_stream` over this generator.
+
+        Note: the engine keeps the synchronous Anthropic client (pre-DP-206
+        behavior), so iteration blocks the event loop the same way
+        `messages.create` did — switching to AsyncAnthropic is a separate,
+        deliberate change."""
+        client = self._get_anthropic_client()
+        api_params = await self._build_anthropic_params(config, history_object, tools)
+        yield {"type": "api_payload", "payload": self._anthropic_dump_params(api_params)}
+
+        tool_calls: Optional[List[Dict[str, Any]]] = None
+        response_content = ""
         try:
-            response = client.messages.create(**api_params)
-
-            if "tools" in api_params:
-                api_params["tools"] = [tool.get("name", "unknown") for tool in api_params.get("tools", [])]
+            with client.messages.stream(**api_params) as stream:
+                for text_chunk in stream.text_stream:
+                    if text_chunk:
+                        yield {"type": "text_delta", "text": text_chunk}
+                response = stream.get_final_message()
 
             if response.stop_reason == "tool_use":
-                tool_calls: List[Dict[str, Any]] = []
+                tool_calls = []
                 for content_block in response.content:
                     if content_block.type == 'tool_use':
                         tool_calls.append({
@@ -509,10 +536,8 @@ class TextEngine:
                             "name": content_block.name,
                             "arguments": content_block.input
                         })
-                return {"type": "tool_calls", "calls": tool_calls}, api_params
             else:
-                response_content: str = response.content[0].text or ""
-                return {"type": "text", "content": response_content}, api_params
+                response_content = response.content[0].text or ""
 
         except anthropic.APIError as e:
             rate_limited = hasattr(e, 'status_code') and e.status_code == 429
@@ -524,6 +549,20 @@ class TextEngine:
             logger.error(f"An unexpected Anthropic error occurred: {e}", exc_info=True)
             raise LLMCommunicationError("An unexpected error occurred with the Anthropic API.",
                                         api_payload=api_params) from e
+
+        if tool_calls is not None:
+            yield {"type": "tool_calls", "calls": tool_calls}
+            yield {"type": "done", "full_text": ""}
+        else:
+            yield {"type": "done", "full_text": response_content}
+
+    async def _generate_anthropic_response(self, config: Dict[str, Any], history_object: Dict[str, Any],
+                                           tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
+        Dict[str, Any], Optional[Dict[str, Any]]]:
+        """One-shot Anthropic path = drain of the canonical stream (DP-206)."""
+        return await self.collect_stream(
+            self._stream_anthropic_response(config, history_object, tools)
+        )
 
     @staticmethod
     def _extract_system_prompt(history_object: Dict[str, Any]) -> Tuple[str, List[Dict[str, Any]]]:
