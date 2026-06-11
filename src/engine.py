@@ -1060,6 +1060,11 @@ class TextEngine:
     async def _generate_agy_response(
         self, config: Dict[str, Any], history_object: Dict[str, Any], tools: Optional[List[Dict[str, Any]]] = None
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """One-shot agy path. DP-206 decision: agy stays one-shot-only — it is
+        a TUI CLI invoked as a subprocess (POSIX-only, see
+        `_ensure_agy_supported`) whose entire response arrives at process exit;
+        there is no token stream to make canonical. Streaming consumers get it
+        via `stream_messages`' generate_response wrap (single text_delta)."""
         system_prompt, history = self._extract_system_prompt(history_object)
 
         prompt_parts = []
@@ -1106,17 +1111,22 @@ class TextEngine:
             return {"type": "text", "content": cleaned_content}, api_payload
 
     # ------------------------------------------------------------------
-    # Phase B — provider streaming surface
+    # Provider streaming surface
     #
     # `stream_messages(persona, messages, params)` and
     # `stream_prompt(persona, prompt, params)` are the unified entries.
-    # Local routes to the StreamEngine for real token-by-token SSE; the
-    # SDK-backed providers (OpenAI/Anthropic/Google) currently wrap
-    # generate_response and emit a single `text_delta` so the surface is
-    # uniform without forcing per-provider streaming SDK work in this
-    # phase. Phase C flips ownership: generate_response will become the
-    # collect-stream wrapper around stream_messages.
-    # See memory/project/plans/portal_engine_reintegration.md.
+    # Local routes to the StreamEngine for real token-by-token SSE.
+    #
+    # DP-206a state: the SDK-backed providers (OpenAI/Anthropic/Google)
+    # each have ONE canonical streaming driver (`_stream_<provider>_response`)
+    # and their one-shot handlers are collect_stream wrappers over it —
+    # generate_response is already stream-driven internally. However,
+    # `stream_messages` still wraps generate_response for non-local models,
+    # so its consumers see a single `text_delta`; routing it through the
+    # canonical per-provider streams for true token deltas is DP-206b
+    # cutover work, along with the local one-shot path
+    # (`_complete_openai_response`) and the facade collapse.
+    # agy stays one-shot-only (subprocess CLI — no token stream).
     # ------------------------------------------------------------------
 
     @staticmethod
