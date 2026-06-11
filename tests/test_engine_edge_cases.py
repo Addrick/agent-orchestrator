@@ -9,6 +9,7 @@ import anthropic
 from openai import APIStatusError
 
 from src.engine import TextEngine, LLMCommunicationError
+from tests.provider_stream_mocks import openai_text_stream
 
 
 @pytest.fixture
@@ -41,9 +42,7 @@ class TestOpenAIHistoryEdgeCases:
         monkeypatch.setenv("OPENAI_API_KEY", "dummy")
         mock_instance = mock_openai_class.return_value
         mock_instance.chat.completions.create = AsyncMock(
-            return_value=MagicMock(
-                choices=[MagicMock(message=MagicMock(content="ok", tool_calls=None))]
-            )
+            return_value=openai_text_stream("ok")
         )
         base_context["history"] = [
             {"role": "system", "content": "Explicit system message"},
@@ -66,9 +65,7 @@ class TestOpenAIHistoryEdgeCases:
         mock_instance = mock_openai_class.return_value
         # Direct call to _generate_openai_response to inspect raw shape.
         mock_instance.chat.completions.create = AsyncMock(
-            return_value=MagicMock(
-                choices=[MagicMock(message=MagicMock(content=None, tool_calls=None))]
-            )
+            return_value=openai_text_stream("")
         )
         history_obj = {
             "persona_prompt": "test",
@@ -88,9 +85,7 @@ class TestOpenAIHistoryEdgeCases:
         monkeypatch.setenv("OPENAI_API_KEY", "dummy")
         mock_instance = mock_openai_class.return_value
         mock_instance.chat.completions.create = AsyncMock(
-            return_value=MagicMock(
-                choices=[MagicMock(message=MagicMock(content="ok", tool_calls=None))]
-            )
+            return_value=openai_text_stream("ok")
         )
         base_context["persona_prompt"] = "Persona system prompt here"
         base_context["history"] = []

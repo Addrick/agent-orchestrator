@@ -20,6 +20,7 @@ import pytest
 from unittest.mock import patch, AsyncMock, MagicMock
 
 from src.engine import TextEngine
+from tests.provider_stream_mocks import openai_text_stream
 
 
 @pytest.fixture
@@ -134,14 +135,16 @@ async def test_openai_wire_payload_matches_golden(text_engine, monkeypatch):
     with patch("src.engine.AsyncOpenAI") as cls:
         inst = cls.return_value
         inst.chat.completions.create = AsyncMock(
-            return_value=MagicMock(
-                choices=[MagicMock(message=MagicMock(content="parity ok", tool_calls=None))]
-            )
+            return_value=openai_text_stream("parity ok")
         )
         result, payload = await text_engine.generate_response(
             dict(OPENAI_CONFIG), _ctx(OPENAI_HISTORY), tools=copy.deepcopy(PARITY_TOOLS)
         )
         captured = dict(inst.chat.completions.create.call_args.kwargs)
+
+    # DP-206 cutover: the one-shot path drains the canonical stream, so the
+    # transport gains `stream=True` — everything else must stay byte-equal.
+    assert captured.pop("stream") is True
 
     # The payload dump rewrites `tools` to a name list on the SAME dict object
     # that was sent over the wire, so reconstruct the wire view from the dump

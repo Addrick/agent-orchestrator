@@ -1,0 +1,162 @@
+# tests/test_engine_provider_streams.py
+#
+# DP-206 — unit coverage for the canonical per-provider streaming drivers
+# (`_stream_<provider>_response`). The one-shot handlers are collect_stream
+# wrappers over these generators; this file tests the streaming semantics the
+# wrappers rely on (event ordering, delta accumulation, error payloads).
+
+import pytest
+from unittest.mock import patch, AsyncMock
+
+from src.engine import TextEngine, LLMCommunicationError
+from tests.provider_stream_mocks import (
+    AsyncIterList,
+    openai_chunk,
+    openai_text_stream,
+    openai_tool_call_delta,
+)
+
+
+@pytest.fixture
+def text_engine():
+    return TextEngine()
+
+
+@pytest.fixture
+def base_context():
+    return {
+        "persona_prompt": "You are a test bot.",
+        "history": [],
+        "current_message": {"text": "Hello"},
+    }
+
+
+async def _drain(stream):
+    return [ev async for ev in stream]
+
+
+# ---------------------------------------------------------------------------
+# OpenAI
+# ---------------------------------------------------------------------------
+
+
+@patch("src.engine.AsyncOpenAI")
+class TestOpenAIStream:
+    @pytest.mark.asyncio
+    async def test_event_order_payload_deltas_done(self, mock_cls, text_engine,
+                                                   base_context, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "dummy")
+        inst = mock_cls.return_value
+        inst.chat.completions.create = AsyncMock(return_value=AsyncIterList([
+            openai_chunk(content="Hel"),
+            openai_chunk(content="lo"),
+            openai_chunk(finish_reason="stop"),
+        ]))
+        events = await _drain(text_engine._stream_openai_response(
+            {"model_name": "gpt-4"}, base_context, None
+        ))
+        assert [e["type"] for e in events] == [
+            "api_payload", "text_delta", "text_delta", "done"
+        ]
+        assert events[1]["text"] == "Hel" and events[2]["text"] == "lo"
+        assert events[-1]["full_text"] == "Hello"
+
+    @pytest.mark.asyncio
+    async def test_tool_call_arguments_accumulate_across_chunks(
+        self, mock_cls, text_engine, base_context, monkeypatch
+    ):
+        """OpenAI fragments tool-call arguments across deltas; the driver must
+        reassemble them by index before parsing."""
+        monkeypatch.setenv("OPENAI_API_KEY", "dummy")
+        inst = mock_cls.return_value
+        inst.chat.completions.create = AsyncMock(return_value=AsyncIterList([
+            openai_chunk(tool_call_deltas=[
+                openai_tool_call_delta(index=0, id="call_1", name="get_weather",
+                                       arguments='{"loc'),
+            ]),
+            openai_chunk(tool_call_deltas=[
+                openai_tool_call_delta(index=0, arguments='ation": "NYC"}'),
+            ]),
+            openai_chunk(finish_reason="tool_calls"),
+        ]))
+        events = await _drain(text_engine._stream_openai_response(
+            {"model_name": "gpt-4"}, base_context,
+            [{"type": "function", "function": {"name": "get_weather"}}],
+        ))
+        tool_ev = next(e for e in events if e["type"] == "tool_calls")
+        assert tool_ev["calls"] == [
+            {"id": "call_1", "name": "get_weather", "arguments": {"location": "NYC"}}
+        ]
+        assert events[-1] == {"type": "done", "full_text": ""}
+
+    @pytest.mark.asyncio
+    async def test_parallel_tool_calls_keep_index_order(self, mock_cls, text_engine,
+                                                        base_context, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "dummy")
+        inst = mock_cls.return_value
+        inst.chat.completions.create = AsyncMock(return_value=AsyncIterList([
+            openai_chunk(tool_call_deltas=[
+                openai_tool_call_delta(index=1, id="call_b", name="tool_b", arguments="{}"),
+                openai_tool_call_delta(index=0, id="call_a", name="tool_a", arguments="{}"),
+            ]),
+            openai_chunk(finish_reason="tool_calls"),
+        ]))
+        events = await _drain(text_engine._stream_openai_response(
+            {"model_name": "gpt-4"}, base_context, None
+        ))
+        tool_ev = next(e for e in events if e["type"] == "tool_calls")
+        assert [c["name"] for c in tool_ev["calls"]] == ["tool_a", "tool_b"]
+
+    @pytest.mark.asyncio
+    async def test_all_malformed_calls_yield_empty_tool_event_for_retry(
+        self, mock_cls, text_engine, base_context, monkeypatch
+    ):
+        """Tool path with only unparseable calls must stay a tool_calls event
+        (empty list) so collect_stream → generate_response retries, mirroring
+        the pre-DP-206 one-shot behavior."""
+        monkeypatch.setenv("OPENAI_API_KEY", "dummy")
+        inst = mock_cls.return_value
+        inst.chat.completions.create = AsyncMock(return_value=AsyncIterList([
+            openai_chunk(tool_call_deltas=[
+                openai_tool_call_delta(index=0, id="c1", name="broken", arguments="{nope"),
+            ]),
+            openai_chunk(finish_reason="tool_calls"),
+        ]))
+        result, _ = await TextEngine.collect_stream(text_engine._stream_openai_response(
+            {"model_name": "gpt-4"}, base_context, None
+        ))
+        assert result == {"type": "tool_calls", "calls": []}
+
+    @pytest.mark.asyncio
+    async def test_transport_error_carries_full_api_payload(self, mock_cls, text_engine,
+                                                            base_context, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "dummy")
+        from openai import APIStatusError
+        from unittest.mock import MagicMock
+        inst = mock_cls.return_value
+        inst.chat.completions.create = AsyncMock(
+            side_effect=APIStatusError("boom", response=MagicMock(status_code=500), body=None)
+        )
+        with pytest.raises(LLMCommunicationError) as ei:
+            await _drain(text_engine._stream_openai_response(
+                {"model_name": "gpt-4"}, base_context,
+                [{"type": "function", "function": {"name": "t"}}],
+            ))
+        # Error payloads keep the full tool definitions (pre-DP-206 contract).
+        assert ei.value.api_payload["tools"][0]["function"]["name"] == "t"
+
+    @pytest.mark.asyncio
+    async def test_one_shot_is_collect_of_stream(self, mock_cls, text_engine,
+                                                 base_context, monkeypatch):
+        """generate_response('gpt-*') drains the canonical stream — same
+        result tuple, with the dump payload (tools by name)."""
+        monkeypatch.setenv("OPENAI_API_KEY", "dummy")
+        inst = mock_cls.return_value
+        inst.chat.completions.create = AsyncMock(return_value=openai_text_stream("hi"))
+        result, payload = await text_engine.generate_response(
+            {"model_name": "gpt-4"}, base_context,
+            tools=[{"type": "function", "function": {"name": "t", "parameters": {}}}],
+        )
+        assert result == {"type": "text", "content": "hi"}
+        assert payload["tools"] == ["t"]
+        assert inst.chat.completions.create.call_args.kwargs["stream"] is True

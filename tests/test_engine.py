@@ -11,6 +11,7 @@ import json
 from src.engine import TextEngine, LLMCommunicationError
 from config.global_config import EMPTY_RESPONSE_RETRIES
 from google.genai.types import Tool, GoogleSearch
+from tests.provider_stream_mocks import openai_text_stream, openai_tool_call_stream
 
 
 @pytest.fixture
@@ -90,7 +91,7 @@ class TestOpenAI:
         monkeypatch.setenv("OPENAI_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_openai_class.return_value
         mock_instance.chat.completions.create = AsyncMock(
-            return_value=MagicMock(choices=[MagicMock(message=MagicMock(content="Success", tool_calls=None))])
+            return_value=openai_text_stream("Success")
         )
         response, _ = await text_engine.generate_response(openai_config, base_context)
         assert response == {"type": "text", "content": "Success"}
@@ -99,12 +100,10 @@ class TestOpenAI:
     async def test_success_tool_call_response(self, mock_openai_class, text_engine, openai_config, base_context, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_openai_class.return_value
-        mock_function = MagicMock()
-        mock_function.name = "get_weather"
-        mock_function.arguments = '{"location": "Boston"}'
-        mock_tool_call = MagicMock(id="call_123", function=mock_function)
         mock_instance.chat.completions.create = AsyncMock(
-            return_value=MagicMock(choices=[MagicMock(message=MagicMock(content=None, tool_calls=[mock_tool_call]))])
+            return_value=openai_tool_call_stream(
+                [("call_123", "get_weather", '{"location": "Boston"}')]
+            )
         )
         # FIX: Pass a non-empty 'tools' list to trigger the tool-call logic path.
         response, _ = await text_engine.generate_response(openai_config, base_context, tools=[{"type": "function", "function": {"name": "get_weather"}}])
@@ -138,7 +137,7 @@ class TestOpenAI:
         monkeypatch.setenv("OPENAI_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_openai_class.return_value
         mock_instance.chat.completions.create = AsyncMock(
-            return_value=MagicMock(choices=[MagicMock(message=MagicMock(content="ok", tool_calls=None))])
+            return_value=openai_text_stream("ok")
         )
         tools = [{
             "type": "function", "is_write": True, "service_binding": "zammad",
@@ -584,7 +583,7 @@ class TestOpenAIImage:
         monkeypatch.setenv("OPENAI_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_openai_class.return_value
         mock_instance.chat.completions.create = AsyncMock(
-            return_value=MagicMock(choices=[MagicMock(message=MagicMock(content="I see the image", tool_calls=None))])
+            return_value=openai_text_stream("I see the image")
         )
 
         base_context["current_message"]["image_url"] = "http://example.com/photo.png"
@@ -604,19 +603,11 @@ class TestOpenAIImage:
         """Tool calls with unparseable JSON arguments are skipped, not fatal."""
         monkeypatch.setenv("OPENAI_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_openai_class.return_value
-
-        good_fn = MagicMock()
-        good_fn.name = "get_weather"
-        good_fn.arguments = '{"city": "NYC"}'
-        good_call = MagicMock(id="call_1", function=good_fn)
-
-        bad_fn = MagicMock()
-        bad_fn.name = "broken_tool"
-        bad_fn.arguments = '{not valid json'
-        bad_call = MagicMock(id="call_2", function=bad_fn)
-
         mock_instance.chat.completions.create = AsyncMock(
-            return_value=MagicMock(choices=[MagicMock(message=MagicMock(content=None, tool_calls=[good_call, bad_call]))])
+            return_value=openai_tool_call_stream([
+                ("call_1", "get_weather", '{"city": "NYC"}'),
+                ("call_2", "broken_tool", '{not valid json'),
+            ])
         )
 
         response, _ = await text_engine.generate_response(

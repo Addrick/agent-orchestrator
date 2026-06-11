@@ -8,6 +8,7 @@ import re
 import shutil
 import tempfile
 import uuid
+from types import SimpleNamespace
 from typing import Dict, Any, Optional, Tuple, List, Callable, AsyncIterator
 from contextlib import asynccontextmanager, AsyncExitStack
 
@@ -286,10 +287,12 @@ class TextEngine:
             last_message['content'] = [{"type": "text", "text": last_message['content']}]
         last_message['content'].append({"type": "image_url", "image_url": {"url": image_url}})
 
-    async def _generate_openai_response(self, config: Dict[str, Any], history_object: Dict[str, Any],
-                                        tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
-        Dict[str, Any], Dict[str, Any]]:
-        client = await self._get_openai_client()
+    def _build_openai_params(self, config: Dict[str, Any], history_object: Dict[str, Any],
+                             tools: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+        """Builds the chat.completions request kwargs. Single source of truth
+        shared by the canonical streaming driver and the local one-shot path
+        — wire-payload parity between them holds by construction
+        (pinned by tests/test_engine_payload_parity.py)."""
         messages: List[Dict[str, Any]] = []
         message_history = history_object.get("message_history", history_object.get("history", []))
         if message_history and message_history[0]["role"] == "system":
@@ -323,14 +326,103 @@ class TextEngine:
             api_params["tool_choice"] = "auto"
 
         api_params = {k: v for k, v in api_params.items() if v is not None}
+        return api_params
+
+    @staticmethod
+    def _openai_dump_params(api_params: Dict[str, Any]) -> Dict[str, Any]:
+        """Log-safe copy of the request kwargs: tools listed by name."""
+        dump = dict(api_params)
+        if "tools" in dump:
+            dump["tools"] = [tool.get("function", {}).get("name", "unknown")
+                             for tool in dump["tools"]]
+        return dump
+
+    async def _stream_openai_response(
+        self, config: Dict[str, Any], history_object: Dict[str, Any],
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Canonical OpenAI driver (DP-206): a true SDK token stream emitting
+        the unified event shape (api_payload → text_delta* → [tool_calls] →
+        done). The one-shot path is `collect_stream` over this generator."""
+        client = await self._get_openai_client()
+        api_params = self._build_openai_params(config, history_object, tools)
+        yield {"type": "api_payload", "payload": self._openai_dump_params(api_params)}
+
+        text_parts: List[str] = []
+        # index → {"id", "name", "arguments"} accumulated across delta chunks
+        raw_calls: Dict[int, Dict[str, Any]] = {}
+        try:
+            stream = await client.chat.completions.create(**api_params, stream=True)
+            async for chunk in stream:
+                choices = getattr(chunk, "choices", None)
+                if not choices:
+                    continue
+                delta = choices[0].delta
+                content = getattr(delta, "content", None)
+                if content:
+                    text_parts.append(content)
+                    yield {"type": "text_delta", "text": content}
+                for tc in (getattr(delta, "tool_calls", None) or []):
+                    idx = getattr(tc, "index", 0) or 0
+                    slot = raw_calls.setdefault(idx, {"id": None, "name": "", "arguments": ""})
+                    if getattr(tc, "id", None):
+                        slot["id"] = tc.id
+                    fn = getattr(tc, "function", None)
+                    if fn is not None:
+                        if getattr(fn, "name", None):
+                            slot["name"] = fn.name
+                        slot["arguments"] += getattr(fn, "arguments", None) or ""
+        except (APIStatusError, APITimeoutError) as e:
+            rate_limited = isinstance(e, APIStatusError) and e.status_code == 429
+            is_server_error = isinstance(e, APIStatusError) and e.status_code >= 500
+            logger.error(f"OpenAI API error: {e}", exc_info=not is_server_error)
+            raise LLMCommunicationError(f"OpenAI API returned an error: {e}", api_payload=api_params,
+                                        rate_limited=rate_limited) from e
+        except Exception as e:
+            logger.error(f"An unexpected OpenAI error occurred: {e}", exc_info=True)
+            raise LLMCommunicationError("An unexpected error occurred with the OpenAI API.",
+                                        api_payload=api_params) from e
+
+        if raw_calls:
+            # Reuse the one parser: wrap accumulated fragments in the same
+            # attribute shape the SDK's non-streaming message objects expose.
+            wrapped = [
+                SimpleNamespace(
+                    id=slot["id"],
+                    function=SimpleNamespace(name=slot["name"], arguments=slot["arguments"]),
+                )
+                for _, slot in sorted(raw_calls.items())
+            ]
+            tool_calls = self._parse_openai_tool_calls(wrapped)
+            yield {"type": "tool_calls", "calls": tool_calls}
+            yield {"type": "done", "full_text": ""}
+        else:
+            yield {"type": "done", "full_text": "".join(text_parts)}
+
+    async def _generate_openai_response(self, config: Dict[str, Any], history_object: Dict[str, Any],
+                                        tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
+        Dict[str, Any], Optional[Dict[str, Any]]]:
+        """One-shot OpenAI path = drain of the canonical stream (DP-206)."""
+        return await self.collect_stream(
+            self._stream_openai_response(config, history_object, tools)
+        )
+
+    async def _complete_openai_response(self, config: Dict[str, Any], history_object: Dict[str, Any],
+                                        tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
+        Dict[str, Any], Dict[str, Any]]:
+        """Non-streaming OpenAI-compatible one-shot. Retained ONLY for the
+        `local` route: local's canonical stream is StreamEngine's kobold-native
+        path, and cutting the local ONE-SHOT over to a stream is DP-206b's job
+        ("the awkward ones"). gpt-* traffic goes through
+        `_stream_openai_response`."""
+        client = await self._get_openai_client()
+        api_params = self._build_openai_params(config, history_object, tools)
 
         try:
             completion = await client.chat.completions.create(**api_params)
             response_message = completion.choices[0].message
 
-            if "tools" in api_params:
-                api_params["tools"] = [tool.get("function", {}).get("name", "unknown") for tool in
-                                       api_params.get("tools", [])]
+            api_params = self._openai_dump_params(api_params)
 
             if response_message.tool_calls:
                 tool_calls = self._parse_openai_tool_calls(response_message.tool_calls)
@@ -728,7 +820,7 @@ class TextEngine:
             # We provide a placeholder for consistency.
             config['model_name'] = 'local-model'
             # We can now call our standard, well-tested OpenAI method!
-            return await self._generate_openai_response(config, history_object, tools)
+            return await self._complete_openai_response(config, history_object, tools)
         except LLMCommunicationError as e:
             logger.error(f"Local OpenAI-compatible API error: {e}", exc_info=True)
             # Re-raise with a more specific "Local API" message, but preserving the original payload.
@@ -1052,7 +1144,12 @@ class TextEngine:
                 calls = list(ev.get("calls", []))
             elif etype == "done":
                 full_text = ev.get("full_text")
-        if calls:
+        if calls is not None:
+            # A tool_calls event — even with an empty list (e.g. every call
+            # failed to parse) — means the model chose the tool path; mirror
+            # the pre-DP-206 one-shot handlers, which returned
+            # {"type": "tool_calls", "calls": []} so the empty-response retry
+            # logic fires rather than treating it as a text turn.
             return {"type": "tool_calls", "calls": calls}, api_payload
         text = full_text if full_text is not None else "".join(text_parts)
         return {"type": "text", "content": text}, api_payload
