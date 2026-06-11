@@ -60,6 +60,49 @@ def make_chat_system(
     )
 
 
+def engine_stream_events(result: Dict[str, Any],
+                         payload: Optional[Dict[str, Any]] = None) -> list:
+    """Unified-event list equivalent to a one-shot (result, api_payload) pair
+    — the same synthesis `TextEngine._events_from_one_shot` performs."""
+    events: list = [{"type": "api_payload", "payload": {} if payload is None else payload}]
+    if result.get("type") == "tool_calls":
+        events.append({"type": "tool_calls", "calls": list(result.get("calls", []))})
+        events.append({"type": "done", "full_text": ""})
+    else:
+        text = result.get("content", "") or ""
+        if text:
+            events.append({"type": "text_delta", "text": text})
+        events.append({"type": "done", "full_text": text})
+    return events
+
+
+def route_stream_through_generate_response(text_engine: Any) -> None:
+    """DP-206b test bridge: make the engine's streaming pipeline consume a
+    *mocked* ``generate_response``.
+
+    Pre-cutover, ``stream_messages`` wrapped ``generate_response``, so dozens
+    of tests scripted the LLM by replacing ``text_engine.generate_response``
+    with an AsyncMock. The cutover routed the pipeline through the
+    ``_stream_response`` policy driver instead. This bridge re-points the
+    driver at ``generate_response`` (same ``(persona_config, history_object,
+    tools, local_inference_config)`` argument shape), so those tests keep
+    scripting — and asserting on — ``text_engine.generate_response``.
+
+    Only install this on engines whose ``generate_response`` is replaced by a
+    mock: the real ``generate_response`` drains ``_stream_response``, so
+    bridging an unmocked engine would recurse.
+    """
+    async def _bridged_stream(persona_config, history_object, tools=None,
+                              local_inference_config=None):
+        result, payload = await text_engine.generate_response(
+            persona_config, history_object, tools, local_inference_config,
+        )
+        for ev in engine_stream_events(result, payload):
+            yield ev
+
+    text_engine._stream_response = _bridged_stream
+
+
 def make_bot_logic(state: Any) -> BotLogic:
     """Build a BotLogic over a mutable state bucket (DP-202 explicit deps).
 

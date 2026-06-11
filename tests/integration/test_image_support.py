@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, AsyncMock, patch
 import pytest
 
 pytestmark = pytest.mark.integration
-from tests.helpers import make_chat_system
+from tests.helpers import make_chat_system, route_stream_through_generate_response
 from src.chat_system import ResponseType
 from src.engine import TextEngine
 from src.persona import Persona, MemoryMode
@@ -18,14 +18,15 @@ def mock_memory_manager():
 
 @pytest.fixture
 def mock_text_engine():
-    """Real TextEngine with `generate_response` mocked. ChatSystem now
-    routes through `stream_messages`, which wraps generate_response for
-    non-local models — keeping the real wrapper preserves test contracts
-    that read `call_args[0][1]` (history_object)."""
+    """Real TextEngine with `generate_response` mocked. DP-206b: the test
+    bridge routes the streaming pipeline back through the mock — same
+    `(persona_config, history_object, ...)` shape, so contracts that read
+    `call_args[0][1]` (history_object) are preserved."""
     engine = TextEngine()
     engine.generate_response = AsyncMock(  # type: ignore[method-assign]
         return_value=({"type": "text", "content": "Test response"}, {}),
     )
+    route_stream_through_generate_response(engine)
     return engine
 
 
@@ -75,12 +76,19 @@ async def test_prompt_modified_for_unsupported_models(chat_system, mock_text_eng
     )
     chat_system.personas["test_persona"] = persona
 
-    # Since the logic is now in the engine, we need to use a real engine and mock its internal call
+    # Since the logic is now in the engine, we need to use a real engine and
+    # mock the canonical provider stream beneath the policy driver (DP-206b).
+    from tests.helpers import engine_stream_events
+
+    async def _fake_stream(*args, **kwargs):
+        for ev in engine_stream_events({"type": "text", "content": "Test response"}, {}):
+            yield ev
+
     real_engine = TextEngine()
-    with patch.object(real_engine, '_generate_openai_response', new_callable=AsyncMock) as mock_openai_call, \
+    with patch.object(real_engine, '_stream_openai_response',
+                      MagicMock(side_effect=_fake_stream)) as mock_openai_call, \
             patch.object(real_engine, 'model_supports_images', return_value=False):
 
-        mock_openai_call.return_value = ({"type": "text", "content": "Test response"}, {})
         chat_system.text_engine = real_engine
 
         await chat_system.generate_response(

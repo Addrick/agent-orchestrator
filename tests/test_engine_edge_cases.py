@@ -67,7 +67,7 @@ class TestOpenAIHistoryEdgeCases:
         That empty result will trigger retry path inside generate_response."""
         monkeypatch.setenv("OPENAI_API_KEY", "dummy")
         mock_instance = mock_openai_class.return_value
-        # Direct call to _generate_openai_response to inspect raw shape.
+        # Drain the canonical stream directly to inspect the raw result shape.
         mock_instance.chat.completions.create = AsyncMock(
             return_value=openai_text_stream("")
         )
@@ -76,9 +76,9 @@ class TestOpenAIHistoryEdgeCases:
             "history": [],
             "current_message": {"text": "hi"},
         }
-        result, _ = await text_engine._generate_openai_response(
+        result, _ = await TextEngine.collect_stream(text_engine._stream_openai_response(
             {"model_name": "gpt-4"}, history_obj, None
-        )
+        ))
         assert result == {"type": "text", "content": ""}
 
     @pytest.mark.asyncio

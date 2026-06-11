@@ -11,12 +11,22 @@ import json
 from src.engine import TextEngine, LLMCommunicationError
 from config.global_config import EMPTY_RESPONSE_RETRIES
 from google.genai.types import Tool, GoogleSearch
+from tests.helpers import engine_stream_events
 from tests.provider_stream_mocks import (
     anthropic_stream,
     google_stream,
     openai_text_stream,
     openai_tool_call_stream,
 )
+
+
+def _one_shot_stream(result, payload=None):
+    """An already-instantiated unified-event async generator for scripting
+    `_stream_<provider>_response` mocks with one-shot (result, payload)."""
+    async def _gen():
+        for ev in engine_stream_events(result, payload):
+            yield ev
+    return _gen()
 
 
 @pytest.fixture
@@ -59,11 +69,11 @@ def local_config():
 class TestGenerateResponseLogic:
     @pytest.mark.asyncio
     @patch('src.engine.asyncio.sleep', new_callable=AsyncMock)
-    @patch('src.engine.TextEngine._generate_openai_response', new_callable=AsyncMock)
+    @patch('src.engine.TextEngine._stream_openai_response')
     async def test_retry_on_empty_response_succeeds(self, mock_provider_call, mock_sleep, text_engine, openai_config, base_context):
         mock_provider_call.side_effect = [
-            ({}, {"payload": 1}),
-            ({"type": "text", "content": "Valid response"}, {"payload": 2})
+            _one_shot_stream({}, {"payload": 1}),
+            _one_shot_stream({"type": "text", "content": "Valid response"}, {"payload": 2}),
         ]
         response, _ = await text_engine.generate_response(openai_config, base_context)
         assert response == {"type": "text", "content": "Valid response"}
@@ -71,15 +81,15 @@ class TestGenerateResponseLogic:
 
     @pytest.mark.asyncio
     @patch('src.engine.asyncio.sleep', new_callable=AsyncMock)
-    @patch('src.engine.TextEngine._generate_openai_response', new_callable=AsyncMock)
+    @patch('src.engine.TextEngine._stream_openai_response')
     async def test_retry_on_empty_response_fails(self, mock_provider_call, mock_sleep, text_engine, openai_config, base_context):
-        mock_provider_call.return_value = ({}, {"payload": 1})
+        mock_provider_call.side_effect = lambda *a, **k: _one_shot_stream({}, {"payload": 1})
         with pytest.raises(LLMCommunicationError, match="LLM provider returned an empty or invalid response after all retries."):
             await text_engine.generate_response(openai_config, base_context)
         assert mock_provider_call.call_count == EMPTY_RESPONSE_RETRIES + 1
 
     @pytest.mark.asyncio
-    @patch('src.engine.TextEngine._generate_openai_response', new_callable=AsyncMock)
+    @patch('src.engine.TextEngine._stream_openai_response')
     async def test_no_retry_on_rate_limit_error(self, mock_provider_call, text_engine, openai_config, base_context):
         """429 errors must abort immediately without consuming retry budget."""
         mock_provider_call.side_effect = LLMCommunicationError("Rate limited", rate_limited=True)
@@ -567,14 +577,14 @@ class TestProviderRouting:
             text_engine._get_provider_route("unknown-model-v1")
 
     @pytest.mark.asyncio
-    @patch('src.engine.TextEngine._generate_openai_response', new_callable=AsyncMock)
+    @patch('src.engine.TextEngine._stream_openai_response')
     async def test_image_unsupported_model_modifies_prompt(self, mock_provider, text_engine, base_context):
         """Models that don't support images get a system note appended and image_url cleared."""
         base_context["current_message"]["image_url"] = "http://example.com/photo.png"
         # gpt-3.5-turbo matches routing (starts with "gpt") but fails model_supports_images
         config = {"model_name": "gpt-3.5-turbo"}
 
-        mock_provider.return_value = ({"type": "text", "content": "ok"}, {})
+        mock_provider.side_effect = lambda *a, **k: _one_shot_stream({"type": "text", "content": "ok"}, {})
         await text_engine.generate_response(config, base_context)
 
         assert base_context["current_message"]["image_url"] is None
@@ -1039,7 +1049,7 @@ class TestAgyHandler:
         # route-table assertion itself runs on any host
         monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
         handler, limiters = text_engine._get_provider_route("agy-flash")
-        assert handler == text_engine._generate_agy_response
+        assert handler == text_engine._stream_agy_response
         assert limiters == [text_engine._agy_limiter]
 
     def test_route_refuses_agy_on_windows(self, text_engine, monkeypatch):

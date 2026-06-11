@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, AsyncMock, patch
 import json
 
 from src.confirmations import ConfirmationManager
-from tests.helpers import make_chat_system
+from tests.helpers import make_chat_system, route_stream_through_generate_response
 from src.chat_system import (
     ChatSystem, ResponseType,
     DoneEvent, ErrorEvent, TokenEvent,
@@ -25,11 +25,10 @@ def chat_system_with_mocks():
     Provides a ChatSystem instance with its primary dependencies mocked.
     Helper methods on the ChatSystem itself are NOT mocked here.
 
-    Uses a real TextEngine with `generate_response` mocked: ChatSystem now
-    routes through `text_engine.stream_messages`, which for non-local models
-    internally calls `generate_response` and emits the unified event stream.
-    Keeping the real `stream_messages` wiring lets every existing assertion
-    on `text_engine.generate_response.*` keep working unchanged.
+    Uses a real TextEngine with `generate_response` mocked. DP-206b: the
+    pipeline streams through the `_stream_response` policy driver; the test
+    bridge routes that driver back through the mocked `generate_response`, so
+    every assertion on `text_engine.generate_response.*` works unchanged.
     """
     mock_memory_manager = MagicMock(spec=MemoryManager)
     # DP-113: ChatSystem reads memory_manager.backend at construction. spec=
@@ -39,6 +38,7 @@ def chat_system_with_mocks():
     text_engine.generate_response = AsyncMock(  # type: ignore[method-assign]
         return_value=({'type': 'text', 'content': 'LLM Reply'}, {}),
     )
+    route_stream_through_generate_response(text_engine)
     mock_tool_manager = AsyncMock()
     mock_tool_manager.get_tool_definitions = MagicMock(return_value=[])
 

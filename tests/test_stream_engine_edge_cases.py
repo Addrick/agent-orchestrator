@@ -137,22 +137,26 @@ async def test_kobold_empty_stream_yields_empty():
 
 @pytest.mark.asyncio
 async def test_non_local_stream_messages_no_upstream_abort():
-    """When TextEngine.stream_messages routes a non-local model through
-    generate_response, no kobold abort POST should ever be issued —
-    there is no upstream stream to abort. Asserts the StreamEngine is
+    """When TextEngine.stream_messages routes a non-local model through the
+    canonical provider streams, no kobold abort POST should ever be issued —
+    there is no upstream kobold stream to abort. Asserts the StreamEngine is
     not involved at all."""
-    from unittest.mock import patch, AsyncMock, MagicMock
+    from unittest.mock import patch, MagicMock
 
     from src.engine import TextEngine
     from src.generation_params import GenerationParams
+    from tests.helpers import engine_stream_events
 
     fake_stream_engine = MagicMock()
     fake_stream_engine.stream_messages = MagicMock()
     engine = TextEngine(stream_engine=fake_stream_engine)
 
+    async def _fake_openai_stream(*a, **k):
+        for ev in engine_stream_events({"type": "text", "content": "ok"}, {"p": 1}):
+            yield ev
+
     with patch.object(
-        engine, "generate_response", new_callable=AsyncMock,
-        return_value=({"type": "text", "content": "ok"}, {"p": 1}),
+        engine, "_stream_openai_response", new=_fake_openai_stream,
     ):
         events = []
         async for ev in engine.stream_messages(
