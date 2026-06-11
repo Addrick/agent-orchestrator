@@ -57,7 +57,10 @@ Full component diagram (every class, every edge) → [`docs/architecture.mmd`](d
 ```
 src/
   chat_system.py         DI hub + orchestration kernel
-  engine.py              Provider-agnostic TextEngine
+  engine.py              Provider-agnostic TextEngine — one streaming driver
+                         per provider; one-shot = collect(stream) (DP-206)
+  stream_engine.py       Kobold-native local transport (engine-owned)
+  llm_errors.py          LLMCommunicationError leaf
   message_handler.py     BotLogic — dev commands (set/what/dump_*/help/…)
   persona.py             Persona dataclass + modes
   generation_events.py   Streaming event surface (TokenEvent, DoneEvent, …)
