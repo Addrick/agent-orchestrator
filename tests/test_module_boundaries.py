@@ -160,6 +160,7 @@ CONTRACTS: List[Tuple[str, Tuple[str, ...]]] = [
     # Engine layer never reaches up into orchestration/storage/transports.
     ("src.engine", ("src.chat_system", "src.message_handler", "src.memory", "src.interfaces", "src.agents")),
     ("src.stream_engine", ("src.chat_system", "src.message_handler", "src.memory", "src.interfaces", "src.agents")),
+    ("src.llm_errors", ("src.",)),
     ("src.text_tool_protocol", ("src.",)),
     ("src.tool_policy", ("src.",)),
     ("src.generation_params", ("src.",)),

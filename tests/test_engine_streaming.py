@@ -190,8 +190,8 @@ async def test_stream_messages_overlays_params_onto_persona_config(
 
 
 # --------------------------------------------------------------------------
-# Local model dispatch — when StreamEngine is wired, stream_messages
-# delegates to it; without one, it falls back to the one-shot local route.
+# Local model dispatch — stream_messages delegates to the engine-owned
+# kobold-native StreamEngine (params, incl. provider_extras, pass through).
 # --------------------------------------------------------------------------
 
 
@@ -221,19 +221,30 @@ async def test_stream_messages_local_delegates_to_stream_engine(
 
 
 @pytest.mark.asyncio
-async def test_stream_messages_local_without_stream_engine_falls_back(
-    text_engine, local_config, messages, drain
+async def test_stream_messages_local_always_streams_kobold_native(
+    local_config, messages, drain
 ):
-    # No stream_engine wired: dispatch falls through to the policy driver's
-    # local route (still the one-shot OpenAI-compat transport).
-    with patch.object(
-        text_engine, "_generate_local_response", new_callable=AsyncMock,
-        return_value=({"type": "text", "content": "fallback"}, {"p": 1}),
-    ):
-        events = await drain(text_engine.stream_messages(
-            local_config, messages, GenerationParams(),
-        ))
-    assert events[-1]["full_text"] == "fallback"
+    """Facade collapse (DP-206b): there is no 'unwired' state — a default
+    TextEngine owns a StreamEngine, so local always streams kobold-native."""
+    fake_events = [
+        {"type": "api_payload", "payload": {"prompt": "<10 chars>"}},
+        {"type": "text_delta", "text": "native"},
+        {"type": "done", "full_text": "native"},
+    ]
+
+    async def _gen(*a, **kw):
+        for e in fake_events:
+            yield e
+
+    engine = TextEngine()
+    engine.stream_engine = MagicMock()
+    engine.stream_engine.stream_messages = MagicMock(side_effect=_gen)
+
+    events = await drain(engine.stream_messages(
+        local_config, messages, GenerationParams(),
+    ))
+    assert events == fake_events
+    engine.stream_engine.stream_messages.assert_called_once()
 
 
 # --------------------------------------------------------------------------
@@ -270,17 +281,9 @@ async def test_stream_prompt_delegates_to_stream_engine(local_config, drain):
 @pytest.mark.asyncio
 async def test_stream_prompt_rejects_non_local_models(text_engine, openai_config):
     with pytest.raises(LLMCommunicationError, match="only supports local"):
-        # Note: stream_prompt returns the iterator; raise happens at call site
-        # because there is no stream_engine on the test fixture either way.
+        # Note: stream_prompt returns the iterator; the model check raises at
+        # the call site, before any kobold transport is touched.
         text_engine.stream_prompt(openai_config, "anything", GenerationParams())
-
-
-@pytest.mark.asyncio
-async def test_stream_prompt_requires_stream_engine_for_local(
-    text_engine, local_config
-):
-    with pytest.raises(LLMCommunicationError, match="StreamEngine not configured"):
-        text_engine.stream_prompt(local_config, "anything", GenerationParams())
 
 
 # --------------------------------------------------------------------------

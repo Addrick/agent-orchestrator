@@ -186,18 +186,23 @@ async def test_personal_mode_isolates_by_user_and_persona(mem_test_system):
 @patch('src.clients.zammad_client.requests.request')
 @patch('src.engine.AsyncOpenAI')
 async def test_channel_mode_in_non_server_context_integration(
-        mock_async_openai, mock_requests_request, real_test_system
+        mock_async_openai, mock_requests_request, real_test_system, monkeypatch
 ):
     """
     An integration test to verify that CHANNEL_ISOLATED mode works correctly in a
     non-server context (e.g., DMs, Gmail) by using real system components and
     patching only the outgoing network calls.
+
+    Uses a gpt-* model so the dump payload carries `messages` for assertion
+    (DP-206b moved `local` to the kobold-native transport, whose log-safe
+    payload summarizes the prompt instead of listing messages).
     """
     # 1. SETUP: Use real components from the fixture
+    monkeypatch.setenv("OPENAI_API_KEY", "dummy_key_for_testing")
     chat_system, memory_manager = real_test_system
     persona = chat_system.personas['test_persona']
     persona.set_memory_mode(MemoryMode.CHANNEL_ISOLATED)
-    persona.set_model_name('local')
+    persona.set_model_name('gpt-4')
 
     # 2. CONFIGURE PATCHES for external network calls
     # Mock the Zammad client's HTTP requests
@@ -212,10 +217,11 @@ async def test_channel_mode_in_non_server_context_integration(
         return mock_response
     mock_requests_request.side_effect = zammad_side_effect
 
-    # Configure the mock AsyncOpenAI class
+    # Configure the mock AsyncOpenAI class (canonical streaming transport)
+    from tests.provider_stream_mocks import openai_text_stream
     mock_client_instance = mock_async_openai.return_value
     mock_client_instance.chat.completions.create = AsyncMock(
-        return_value=MagicMock(choices=[MagicMock(message=MagicMock(content="mocked llm response", tool_calls=None))])
+        side_effect=lambda **kw: openai_text_stream("mocked llm response")
     )
 
     # 3. SEED DATABASE

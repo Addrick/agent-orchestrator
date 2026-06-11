@@ -9,7 +9,6 @@ from typing import Optional, Dict, Any
 from src.bootstrap import create_chat_system
 from src.chat_system import ChatSystem
 from src.engine import TextEngine
-from src.stream_engine import StreamEngine
 from src.memory.memory_manager import MemoryManager
 from src.memory.memory_consolidation import MemoryConsolidator
 from src.embedding_service import EmbeddingService, GeminiEmbeddingProvider
@@ -170,9 +169,9 @@ async def main() -> None:
     memory_manager.create_schema()
     logger.info("User memory database setup complete.")
 
-    # 2. Initialize the centralized text generation engine
-    stream_engine = StreamEngine()
-    text_engine = TextEngine(stream_engine=stream_engine)
+    # 2. Initialize the centralized text generation engine (it owns its
+    #    kobold-native local transport — DP-206b facade collapse)
+    text_engine = TextEngine()
 
     # 3. Initialize the Zammad client for ticketing (optional)
     zammad_client = _init_zammad_client()
@@ -225,7 +224,7 @@ async def main() -> None:
     try:
         await app.start()
     finally:
-        await stream_engine.aclose()
+        await text_engine.aclose()
 
 
 if __name__ == "__main__":

@@ -35,6 +35,8 @@ from google.genai.types import GenerateContentConfig, Tool, GoogleSearch, Candid
     FunctionDeclaration, Part, ThinkingConfig
 from src.utils.google_utils import process_grounding_metadata
 from src.generation_params import GenerationParams
+from src.llm_errors import LLMCommunicationError
+from src.stream_engine import StreamEngine
 from src.text_tool_protocol import (
     TOOL_CALL_OPEN,
     TOOL_CALL_CLOSE,
@@ -47,15 +49,7 @@ AGY_CALL_TIMEOUT_SECONDS = 120.0
 
 logger = logging.getLogger(__name__)
 
-
-class LLMCommunicationError(Exception):
-    """Custom exception for when the TextEngine cannot communicate with an LLM provider."""
-
-    def __init__(self, message: str, api_payload: Optional[Dict[str, Any]] = None,
-                 rate_limited: bool = False):
-        super().__init__(message)
-        self.api_payload = api_payload
-        self.rate_limited = rate_limited
+__all__ = ["TextEngine", "LLMCommunicationError", "AGY_CALL_TIMEOUT_SECONDS"]
 
 
 class TextEngine:
@@ -72,9 +66,10 @@ class TextEngine:
         # --- Lazy-loaded clients ---
         self.openai_client: Optional[AsyncOpenAI] = None
         self.anthropic_client: Optional[anthropic.Anthropic] = None
-        # Local-streaming delegate. Optional — non-local streaming wraps
-        # generate_response so unit tests need not wire one up. Phase B.
-        self.stream_engine: Optional[Any] = stream_engine
+        # Kobold-native local provider (DP-206b: engine-owned — the engine is
+        # the single entry; StreamEngine is its `local` transport component).
+        # The parameter exists for tests to inject fakes.
+        self.stream_engine: Any = stream_engine if stream_engine is not None else StreamEngine()
 
         # --- Google Client (matching original implementation) ---
         self.google_client: Optional[genai.client.AsyncClient] = None
@@ -107,6 +102,10 @@ class TextEngine:
         )
 
         self._initialize_env()
+
+    async def aclose(self) -> None:
+        """Release transport resources (the kobold-native HTTP client)."""
+        await self.stream_engine.aclose()
 
     def _initialize_env(self) -> None:
         """Load API keys from .env file."""
@@ -475,41 +474,6 @@ class TextEngine:
             yield {"type": "done", "full_text": ""}
         else:
             yield {"type": "done", "full_text": "".join(text_parts)}
-
-    async def _complete_openai_response(self, config: Dict[str, Any], history_object: Dict[str, Any],
-                                        tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
-        Dict[str, Any], Dict[str, Any]]:
-        """Non-streaming OpenAI-compatible one-shot. Retained ONLY for the
-        `local` route: local's canonical stream is StreamEngine's kobold-native
-        path, and cutting the local ONE-SHOT over to a stream is DP-206b's job
-        ("the awkward ones"). gpt-* traffic goes through
-        `_stream_openai_response`."""
-        client = await self._get_openai_client()
-        api_params = self._build_openai_params(config, history_object, tools)
-
-        try:
-            completion = await client.chat.completions.create(**api_params)
-            response_message = completion.choices[0].message
-
-            api_params = self._openai_dump_params(api_params)
-
-            if response_message.tool_calls:
-                tool_calls = self._parse_openai_tool_calls(response_message.tool_calls)
-                return {"type": "tool_calls", "calls": tool_calls}, api_params
-            else:
-                response_content: str = response_message.content or ""
-                return {"type": "text", "content": response_content}, api_params
-
-        except (APIStatusError, APITimeoutError) as e:
-            rate_limited = isinstance(e, APIStatusError) and e.status_code == 429
-            is_server_error = isinstance(e, APIStatusError) and e.status_code >= 500
-            logger.error(f"OpenAI API error: {e}", exc_info=not is_server_error)
-            raise LLMCommunicationError(f"OpenAI API returned an error: {e}", api_payload=api_params,
-                                        rate_limited=rate_limited) from e
-        except Exception as e:
-            logger.error(f"An unexpected OpenAI error occurred: {e}", exc_info=True)
-            raise LLMCommunicationError("An unexpected error occurred with the OpenAI API.",
-                                        api_payload=api_params) from e
 
     async def _attach_anthropic_image(self, messages: List[Dict[str, Any]], image_url: str) -> None:
         """Downloads and attaches an image to the last user message for Anthropic."""
@@ -952,65 +916,21 @@ class TextEngine:
         else:
             yield {"type": "done", "full_text": result.get("content", "")}
 
-    async def _get_local_client(self) -> AsyncOpenAI:
-        """
-        Creates a new AsyncOpenAI client configured to point to a local,
-        OpenAI-compatible API endpoint (like KoboldCPP or Ollama).
-        """
-        # Use the configured URL from global_config or env
-        local_api_url = os.environ.get("LOCAL_LLM_URL", global_config.LOCAL_LLM_URL)
-        return AsyncOpenAI(base_url=local_api_url, api_key="not-required")
-
-    async def _generate_local_response(self, config: Dict[str, Any], history_object: Dict[str, Any],
-                                       tools: Optional[List[Dict[str, Any]]] = None,
-                                       local_inference_config: Optional[Dict[str, Any]] = None) -> Tuple[
-        Dict[str, Any], Dict[str, Any]]:
-        """
-        Generates a response from a local model by reusing the standard OpenAI
-        API format. This standardizes local model integration.
-        """
-        local_client = await self._get_local_client()
-
-        # Temporarily swap the main OpenAI client with our special local client
-        original_openai_client = self.openai_client
-        self.openai_client = local_client
-
-        # Merge local_inference_config into config (Exact Parity)
-        if local_inference_config:
-            config = {**config, **{k: v for k, v in local_inference_config.items() if v is not None}}
-
-        try:
-            # Most local servers ignore the model name in the payload and use whatever is loaded.
-            # We provide a placeholder for consistency.
-            config['model_name'] = 'local-model'
-            # We can now call our standard, well-tested OpenAI method!
-            return await self._complete_openai_response(config, history_object, tools)
-        except LLMCommunicationError as e:
-            logger.error(f"Local OpenAI-compatible API error: {e}", exc_info=True)
-            # Re-raise with a more specific "Local API" message, but preserving the original payload.
-            raise LLMCommunicationError(f"Local API returned an error: {e}", api_payload=e.api_payload) from e
-        except Exception as e:
-            logger.error(f"An unexpected local API error occurred: {e}", exc_info=True)
-            # This will catch errors before the API call is made (e.g., client init)
-            raise LLMCommunicationError("An unexpected error occurred with the Local API.") from e
-        finally:
-            # CRITICAL: Always restore the original client to avoid breaking
-            # subsequent calls to the actual OpenAI API.
-            self.openai_client = original_openai_client
-
     async def _stream_local_response(
         self, config: Dict[str, Any], history_object: Dict[str, Any],
         tools: Optional[List[Dict[str, Any]]] = None,
         local_inference_config: Optional[Dict[str, Any]] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
-        """Local adapter into the unified event shape. Still synthesized from
-        the OpenAI-compatible one-shot transport; cutting it over to the
-        kobold-native token stream (StreamEngine) is the remaining DP-206b
-        slice."""
-        result, api_payload = await self._generate_local_response(
+        """Canonical local driver (DP-206b): the kobold-native token stream.
+        StreamEngine renders the chat template, folds the tool list into the
+        system prompt as the `<tool_call>` protocol, and parses tool-call
+        blocks out of the token stream — so the local one-shot path
+        (collect over this) uses the exact same transport and tool protocol
+        as the streaming portal path. This replaced the OpenAI-compat
+        `/v1/chat/completions` one-shot transport."""
+        async for ev in self.stream_engine.stream_local(
             config, history_object, tools, local_inference_config
-        )
-        async for ev in self._events_from_one_shot(result, api_payload):
+        ):
             yield ev
 
     @staticmethod
@@ -1220,9 +1140,9 @@ class TextEngine:
     # driver `_stream_response` wraps it (routing, rate limiting, retries,
     # 429 fallback), `stream_messages` dispatches through the driver for
     # true token deltas, and `generate_response` is collect_stream over the
-    # driver. Local (`model_name == "local"`) streams via the wired
-    # kobold-native StreamEngine; its one-shot path still uses the
-    # OpenAI-compat transport (remaining DP-206b slice).
+    # driver. Local (`model_name == "local"`) is the engine-owned
+    # kobold-native StreamEngine for streaming AND one-shot (collect) —
+    # the OpenAI-compat local transport is gone.
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -1281,18 +1201,17 @@ class TextEngine:
           - optional `{"type": "tool_calls", "calls": [...]}`
           - terminal `{"type": "done", "full_text": ...}`
 
-        For `model_name == "local"` and a configured StreamEngine this routes
-        straight to the kobold-native SSE stream (GenerationParams —
-        including kobold provider_extras — pass through unchanged, and no
-        retry policy applies, matching the pre-cutover portal path). All
-        other models dispatch through the `_stream_response` policy driver:
-        true token deltas from the canonical per-provider streams, with the
-        same rate limiting / retry / fallback policy as `generate_response`
-        (DP-206b cutover)."""
+        For `model_name == "local"` this routes straight to the kobold-native
+        SSE stream (GenerationParams — including kobold provider_extras —
+        pass through unchanged, and no retry policy applies, matching the
+        pre-cutover portal path). All other models dispatch through the
+        `_stream_response` policy driver: true token deltas from the
+        canonical per-provider streams, with the same rate limiting / retry /
+        fallback policy as `generate_response` (DP-206b cutover)."""
         merged_config = self._persona_config_with_params(persona_config, params)
         model_name: str = merged_config.get("model_name", "")
 
-        if model_name == "local" and self.stream_engine is not None:
+        if model_name == "local":
             async for ev in self.stream_engine.stream_messages(
                 merged_config, messages, params, tools
             ):
@@ -1320,10 +1239,6 @@ class TextEngine:
         if model_name != "local":
             raise LLMCommunicationError(
                 f"stream_prompt only supports local models, got '{model_name}'"
-            )
-        if self.stream_engine is None:
-            raise LLMCommunicationError(
-                "StreamEngine not configured — cannot stream pre-rendered prompts."
             )
         return self.stream_engine.stream_prompt(
             persona_config, rendered_prompt, params,

@@ -1,4 +1,9 @@
 # src/stream_engine.py
+#
+# Kobold-native local transport: chat-template rendering, the `<tool_call>`
+# text protocol, and per-token SSE streaming. The single driving layer lives
+# in src/engine.py (TextEngine); this module is the `local` provider beneath
+# it, exactly as the SDK clients are for openai/anthropic/google.
 
 import json
 import logging
@@ -10,7 +15,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 import httpx
 
 from config import global_config
-from src.engine import LLMCommunicationError
+from src.llm_errors import LLMCommunicationError
 from src.generation_params import GenerationParams
 from src.text_tool_protocol import (
     TOOL_CALL_OPEN,
@@ -182,7 +187,9 @@ def _format_tools_instruction(tools: List[Dict[str, Any]]) -> str:
 
 
 class StreamEngine:
-    """Streaming counterpart to TextEngine.
+    """Kobold-native local provider (DP-206b: an engine-owned component, not
+    a peer engine — TextEngine constructs one and routes every
+    `model_name == "local"` request here, streaming and one-shot alike).
 
     Targets KoboldCPP's native `/api/extra/generate/stream` endpoint so that
     tokens arrive one at a time. The OpenAI-compat endpoint on koboldcpp
