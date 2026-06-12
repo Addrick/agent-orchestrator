@@ -92,6 +92,8 @@ A React UI served at `GET /derpr` on the same adapter, driving the OpenAI-style 
 
 Personas with `history_messages: 0` always render an empty transcript — the portal mirrors exactly what the engine would feed the model, and a zero-window persona feeds it nothing.
 
+**Follow scroll + drafting (DP-218):** the transcript auto-follows new content (sent messages, stream frames, completed turns) while you're at the bottom; scrolling up to read history releases the follow, and returning to the bottom re-arms it. The composer stays editable during a response so you can draft your next message mid-stream — Enter won't send until the turn finishes (the SEND button is replaced by ■ stop while streaming).
+
 ## Commands
 
 All commands are entered as the message body when addressing a persona. Commands are case-insensitive.

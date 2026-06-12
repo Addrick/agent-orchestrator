@@ -57,13 +57,14 @@ export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming }: Pro
         <span style={{ fontSize: 10, color: 'var(--ink-faint)' }}>newline</span>
       </div>
       <div className="cbox">
+        {/* Stays editable while streaming — drafting the next message during a
+            response is fine; send() guards against submitting mid-stream. */}
         <textarea
           ref={ref}
           value={text}
           onChange={grow}
           onKeyDown={onKeyDown}
-          placeholder={streaming ? 'streaming…' : 'message the engine, or / for a dev command'}
-          readOnly={streaming}
+          placeholder={streaming ? 'streaming… (draft your next message)' : 'message the engine, or / for a dev command'}
         />
         {streaming ? (
           <button className="send" style={{ borderColor: 'rgba(229,114,114,.4)', color: 'var(--danger)', background: 'var(--danger-bg)' }} onClick={onAbort}>
