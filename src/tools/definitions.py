@@ -710,7 +710,7 @@ for _tool in ALL_TOOL_DEFINITIONS:
 # Model prefixes that do NOT support each tool.
 # Uses the same prefix logic as engine.py routing.
 # Tools not listed here are compatible with all providers.
-GROUNDING_INCOMPATIBLE_PREFIXES = {'gpt', 'claude', 'gemma', 'gemini-3.1', 'local', 'unknown'}
+GROUNDING_INCOMPATIBLE_PREFIXES = {'gpt', 'claude', 'gemma', 'local', 'unknown'}
 
 MODEL_INCOMPATIBLE_TOOLS = {
     'google_grounding_search': GROUNDING_INCOMPATIBLE_PREFIXES,
