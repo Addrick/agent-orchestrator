@@ -65,7 +65,7 @@ class TextEngine:
     def __init__(self, stream_engine: Optional[Any] = None) -> None:
         # --- Lazy-loaded clients ---
         self.openai_client: Optional[AsyncOpenAI] = None
-        self.anthropic_client: Optional[anthropic.Anthropic] = None
+        self.anthropic_client: Optional[anthropic.AsyncAnthropic] = None
         # Kobold-native local provider (DP-206b: engine-owned — the engine is
         # the single entry; StreamEngine is its `local` transport component).
         # The parameter exists for tests to inject fakes.
@@ -138,13 +138,13 @@ class TextEngine:
             self.openai_client = AsyncOpenAI(api_key=api_key)
         return self.openai_client
 
-    def _get_anthropic_client(self) -> anthropic.Anthropic:
-        """Initializes and returns the Anthropic client."""
+    def _get_anthropic_client(self) -> anthropic.AsyncAnthropic:
+        """Initializes and returns the async Anthropic client."""
         if self.anthropic_client is None:
             api_key = os.environ.get("ANTHROPIC_API_KEY")
             if not api_key:
                 raise LLMCommunicationError("ANTHROPIC_API_KEY not set — skipping Anthropic provider.")
-            self.anthropic_client = anthropic.Anthropic(api_key=api_key)
+            self.anthropic_client = anthropic.AsyncAnthropic(api_key=api_key)
         return self.anthropic_client
 
     def _initialize_google_client(self) -> None:
@@ -579,12 +579,9 @@ class TextEngine:
     ) -> AsyncIterator[Dict[str, Any]]:
         """Canonical Anthropic driver (DP-206): `messages.stream(...)` with the
         SDK's accumulator, emitting the unified event shape. The one-shot path
-        is `collect_stream` over this generator.
-
-        Note: the engine keeps the synchronous Anthropic client (pre-DP-206
-        behavior), so iteration blocks the event loop the same way
-        `messages.create` did — switching to AsyncAnthropic is a separate,
-        deliberate change."""
+        is `collect_stream` over this generator. Uses `AsyncAnthropic`
+        (DP-211) so token iteration never blocks the event loop; the request
+        kwargs are identical to the sync client's (frozen payload goldens)."""
         client = self._get_anthropic_client()
         api_params = await self._build_anthropic_params(config, history_object, tools)
         yield {"type": "api_payload", "payload": self._anthropic_dump_params(api_params)}
@@ -592,11 +589,11 @@ class TextEngine:
         tool_calls: Optional[List[Dict[str, Any]]] = None
         response_content = ""
         try:
-            with client.messages.stream(**api_params) as stream:
-                for text_chunk in stream.text_stream:
+            async with client.messages.stream(**api_params) as stream:
+                async for text_chunk in stream.text_stream:
                     if text_chunk:
                         yield {"type": "text_delta", "text": text_chunk}
-                response = stream.get_final_message()
+                response = await stream.get_final_message()
 
             if response.stop_reason == "tool_use":
                 tool_calls = []

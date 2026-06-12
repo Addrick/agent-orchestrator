@@ -219,7 +219,7 @@ ANTHROPIC_GOLDEN_PAYLOAD = {
 @pytest.mark.asyncio
 async def test_anthropic_wire_payload_matches_golden(text_engine, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy")
-    with patch("src.engine.anthropic.Anthropic") as cls:
+    with patch("src.engine.anthropic.AsyncAnthropic") as cls:
         inst = cls.return_value
         # DP-206 cutover: the transport moved from `messages.create` to
         # `messages.stream` (same kwargs — the SDK adds the wire-level

@@ -6,7 +6,7 @@
 # the streaming call returning an (async) iterator of chunk objects.
 
 from typing import Any, Iterable, List, Optional, Sequence, Tuple
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 
 class AsyncIterList:
@@ -64,13 +64,16 @@ def openai_text_stream(text: str) -> AsyncIterList:
 
 def anthropic_stream(final_message: Any,
                      text_chunks: Iterable[str] = ()) -> MagicMock:
-    """Mock for `client.messages.stream(...)`: a context manager whose body
-    exposes `text_stream` (delta iteration) and `get_final_message()` (the
-    SDK-accumulated complete message the engine parses)."""
+    """Mock for `AsyncAnthropic().messages.stream(...)` (DP-211): an async
+    context manager whose body exposes `text_stream` (async delta iteration)
+    and awaitable `get_final_message()` (the SDK-accumulated complete message
+    the engine parses)."""
+    body = MagicMock()
+    body.text_stream = AsyncIterList(text_chunks)
+    body.get_final_message = AsyncMock(return_value=final_message)
     manager = MagicMock()
-    body = manager.__enter__.return_value
-    body.text_stream = list(text_chunks)
-    body.get_final_message.return_value = final_message
+    manager.__aenter__ = AsyncMock(return_value=body)
+    manager.__aexit__ = AsyncMock(return_value=False)
     return manager
 
 

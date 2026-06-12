@@ -187,7 +187,7 @@ class TestOpenAI:
             assert set(tool.keys()) == {"type", "function"}
 
 
-@patch('src.engine.anthropic.Anthropic')
+@patch('src.engine.anthropic.AsyncAnthropic')
 class TestAnthropic:
     @pytest.mark.asyncio
     async def test_success_text_response(self, mock_anthropic_class, text_engine, anthropic_config, base_context, monkeypatch):
@@ -770,7 +770,7 @@ class TestGoogleEdgeCases:
         assert len(user_turn['parts']) == 1  # text only, no image
 
 
-@patch('src.engine.anthropic.Anthropic')
+@patch('src.engine.anthropic.AsyncAnthropic')
 class TestAnthropicEdgeCases:
     @pytest.mark.asyncio
     @patch('aiohttp.ClientSession.get')

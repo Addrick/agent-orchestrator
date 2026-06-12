@@ -105,7 +105,7 @@ class TestOpenAIHistoryEdgeCases:
 # ------------------------------------------------------------------
 
 
-@patch("src.engine.anthropic.Anthropic")
+@patch("src.engine.anthropic.AsyncAnthropic")
 class TestAnthropicEdgeCases:
     @pytest.mark.asyncio
     async def test_anthropic_system_merge_with_separator(
