@@ -19,6 +19,7 @@ from src.engine import TextEngine
 from src.persona import Persona, MemoryMode
 from src.tools.definitions import ALL_TOOL_DEFINITIONS
 from config.global_config import TEST_MEMORY_DATABASE_FILE
+from tests.helpers import make_chat_system
 
 pytestmark = pytest.mark.integration
 
@@ -88,8 +89,7 @@ def test_all_service_bindings_have_registered_services(wired_system):
         for t in ALL_TOOL_DEFINITIONS
         if t.get("service_binding")
     }
-    registered_services = set(wired_system._services.keys())
-    missing = bindings_in_defs - registered_services
+    missing = {b for b in bindings_in_defs if wired_system.get_service(b) is None}
     assert not missing, f"Service bindings without registered services: {missing}"
 
 
@@ -132,11 +132,12 @@ def test_agent_manager_injects_zammad_client_via_public_accessors(wired_system):
 
 
 def test_embedding_service_property_exposes_injected_service(wired_system):
-    """ChatSystem.embedding_service is the public read path (None when not injected)."""
+    """ChatSystem.embedding_service is the public read path (None when not
+    injected; construction-time injection is the only write path)."""
     assert wired_system.embedding_service is None
     mock_emb = MagicMock()
-    wired_system._embedding_service = mock_emb
-    assert wired_system.embedding_service is mock_emb
+    system = make_chat_system(embedding_service=mock_emb)
+    assert system.embedding_service is mock_emb
 
 
 def test_persona_with_all_bindings_sees_all_tools(wired_system):

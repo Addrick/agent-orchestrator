@@ -496,7 +496,7 @@ def test_register_service(chat_system_with_mocks):
     mock_service = MagicMock(spec=ServiceIntegration)
     mock_service.name = "test_service"
     system.register_service(mock_service)
-    assert "test_service" in system._services
+    assert system.get_service("test_service") is mock_service
     mock_service.register_tools.assert_called_once_with(system.tool_manager)
 
 

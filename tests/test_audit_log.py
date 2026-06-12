@@ -86,9 +86,9 @@ async def test_chat_system_audit_parked(chat_system, mem_manager):
         chat_system.personas["test_p"] = persona
         chat_system.bot_logic.preprocess_message = AsyncMock(return_value=None)
         
-        # Drive orchestrate
+        # Drive the kernel through its public streaming entry
         events = []
-        async for ev in chat_system._orchestrate("test_p", "user_id", "chan", "msg"):
+        async for ev in chat_system.stream_response("test_p", "user_id", "chan", "msg"):
             events.append(ev)
             
         # Verify audit log has 'audit_parked'

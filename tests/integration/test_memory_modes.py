@@ -272,9 +272,15 @@ def memory_e2e_system():
         return_value=({'type': 'text', 'content': ''}, {}),
     )
     route_stream_through_generate_response(mock_text_engine)
+    # Injected at construction (the public path) — ChatSystem.__init__ also
+    # wires it into the memory backend via set_embedding_service.
+    mock_emb_service = MagicMock()
+    mock_emb_service.model_name = "test-model"
+    mock_emb_service.encode = AsyncMock(return_value=[_unit_blob(1.0, 0.0)])
     chat_system = make_chat_system(
         memory_manager=memory_manager,
         text_engine=mock_text_engine,
+        embedding_service=mock_emb_service,
     )
     chat_system.personas = {
         'test_persona': Persona('test_persona', 'mock_model', 'prompt', context_length=5),
@@ -302,16 +308,8 @@ async def test_e2e_memory_injection_in_prepare_request(memory_e2e_system):
     mm.store_summary(seg_id, "- Alice discussed Python 3.13 JIT compiler improvements",
                      summary_emb, "test-model", now)
 
-    # 3. Set up a mock embedding service on ChatSystem
-    mock_emb_service = MagicMock()
-    mock_emb_service.model_name = "test-model"
-    mock_emb_service.encode = AsyncMock(return_value=[_unit_blob(1.0, 0.0)])
-    system._embedding_service = mock_emb_service
-    # DP-113: backend.recall translates query → embedding via the backend's
-    # injected EmbeddingService, not ChatSystem._embedding_service directly.
-    system.memory_backend.set_embedding_service(mock_emb_service)
-
-    # 4. Trigger generate_response which calls _prepare_request internally
+    # 3. Trigger generate_response which calls _prepare_request internally
+    # (the fixture injected the embedding service at construction)
     persona = system.personas['test_persona']
     persona.set_memory_mode(MemoryMode.CHANNEL_ISOLATED)
 
@@ -364,15 +362,7 @@ async def test_e2e_recency_filter_no_information_gap(memory_e2e_system):
     mm.store_summary(seg_c, "- Recent topic: deployment checklist",
                      _unit_blob(0.8, 0.2), "test-model", now)
 
-    # Mock embedding service
-    mock_emb_service = MagicMock()
-    mock_emb_service.model_name = "test-model"
-    mock_emb_service.encode = AsyncMock(return_value=[_unit_blob(1.0, 0.0)])
-    system._embedding_service = mock_emb_service
-    # DP-113: backend.recall translates query → embedding via the backend's
-    # injected EmbeddingService, not ChatSystem._embedding_service directly.
-    system.memory_backend.set_embedding_service(mock_emb_service)
-
+    # Embedding service injected at construction by the fixture
     persona = system.personas['test_persona']
     persona.set_memory_mode(MemoryMode.CHANNEL_ISOLATED)
 

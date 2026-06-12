@@ -187,11 +187,10 @@ def chat_system_with_memory():
     mm = MagicMock()
     mm.backend = MagicMock()  # spec= would block this; use plain MagicMock
     te = MagicMock()
-    system = make_chat_system(memory_manager=mm, text_engine=te)
-
     emb_service = MagicMock(spec=EmbeddingService)
     emb_service.model_name = "test-model"
-    system._embedding_service = emb_service
+    system = make_chat_system(memory_manager=mm, text_engine=te,
+                              embedding_service=emb_service)
     return system, mm, emb_service
 
 
