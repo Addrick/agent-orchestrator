@@ -102,7 +102,7 @@ class ChatSystem:
         self.request_builder: RequestBuilder = RequestBuilder(
             memory_manager=memory_manager,
             memory_backend=self.memory_backend,
-            tool_manager=tool_manager,
+            tool_manager_lookup=lambda: self.tool_manager,
             persona_lookup=lambda name: self.personas.get(name),
             embedding_service=embedding_service,
         )

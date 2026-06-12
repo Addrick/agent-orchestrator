@@ -111,10 +111,13 @@ class ConfirmationManager:
             conversation_history: List[Dict[str, Any]]
     ) -> None:
         """Execute write tool calls and append results to history."""
+        # Resolve once per batch — all calls in one decision execute against
+        # the same manager, even if it is swapped mid-batch.
+        tool_manager = self._tool_manager_lookup()
         for call_item in write_calls:
             tool_name: str = call_item.get("name", "")
             tool_args = call_item.get("arguments", {})
-            tool_result = await self._tool_manager_lookup().execute_tool(tool_name, **tool_args)
+            tool_result = await tool_manager.execute_tool(tool_name, **tool_args)
             conversation_history.append({
                 "role": "tool",
                 "tool_call_id": call_item.get("id"),
