@@ -33,6 +33,10 @@ RUN useradd -u 1000 -m botuser
 # Install Antigravity CLI (agy) as the botuser
 USER botuser
 RUN curl -fsSL https://antigravity.google/cli/install.sh | bash
+# Pre-create agy's state dir with botuser ownership: deploy mounts a named
+# volume here, and Docker's copy-on-first-use propagates this ownership so
+# OAuth/cache state survives container recreation.
+RUN mkdir -p /home/botuser/.gemini
 USER root
 
 # Copy requirements first to leverage Docker cache layers
