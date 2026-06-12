@@ -215,13 +215,14 @@ class TextEngine:
         Raises: LLMCommunicationError if all retries fail or produce empty/invalid responses.
         """
         result, api_payload = await self.collect_stream(
-            self._stream_response(persona_config, history_object, tools, local_inference_config)
+            self._stream_response(persona_config, history_object, tools, local_inference_config,
+                                  one_shot=True)
         )
-        # The policy driver already retried invalid attempts while nothing had
-        # been emitted. A drained stream can still be invalid in one rare case
-        # (content committed, then the tool path produced zero parseable
-        # calls); enforce the historical contract that generate_response never
-        # returns an empty/invalid result.
+        # one_shot mode validates each complete attempt before emitting, so
+        # every invalid shape — including content-then-zero-parseable-calls —
+        # was retried inside the driver. This check is the final guard for
+        # the historical contract that generate_response never returns an
+        # empty/invalid result.
         if result.get('type') == 'text' and result.get('content', '').strip():
             return result, api_payload
         if result.get('type') == 'tool_calls' and result.get('calls'):
@@ -232,6 +233,7 @@ class TextEngine:
         self, persona_config: Dict[str, Any], history_object: Dict[str, Any],
         tools: Optional[List[Dict[str, Any]]] = None,
         local_inference_config: Optional[Dict[str, Any]] = None,
+        *, one_shot: bool = False,
     ) -> AsyncIterator[Dict[str, Any]]:
         """Single driving layer for every provider (DP-206b).
 
@@ -249,6 +251,15 @@ class TextEngine:
         the old `{"type": "tool_calls", "calls": []}` one-shot result). Once
         content has been emitted ("committed"), errors propagate instead of
         retrying: streamed output cannot be retracted.
+
+        With ``one_shot=True`` (the generate_response = collect(stream) path,
+        DP-210), no output ever reaches a user mid-attempt, so retraction is a
+        non-issue: the whole attempt is buffered and validated complete before
+        anything is emitted. This restores the pre-cutover one-shot retry for
+        the shape where the model streams text and then produces zero
+        parseable tool calls (e.g. a local model emitting prose followed by a
+        malformed ``<tool_call>`` block), and retries mid-stream errors that
+        the true-streaming path must propagate.
         """
         model_name: str = persona_config.get("model_name", "")
 
@@ -266,6 +277,11 @@ class TextEngine:
             committed = False
             pending: List[Dict[str, Any]] = []
             pending_text: List[str] = []
+            # one_shot validation state: mirrors collect_stream's result
+            # shaping (a tool_calls event means the model chose the tool
+            # path; last event wins; done full_text beats concatenation).
+            attempt_calls: Optional[List[Dict[str, Any]]] = None
+            attempt_done_text: Optional[str] = None
 
             try:
                 async with self._rate_limited(limiters):
@@ -278,6 +294,17 @@ class TextEngine:
                             yield ev
                             continue
                         etype = ev.get("type")
+                        if one_shot:
+                            # Buffer the entire attempt; validity is judged
+                            # on the complete result after the stream ends.
+                            pending.append(ev)
+                            if etype == "text_delta":
+                                pending_text.append(ev.get("text", "") or "")
+                            elif etype == "tool_calls":
+                                attempt_calls = list(ev.get("calls", []))
+                            elif etype == "done":
+                                attempt_done_text = ev.get("full_text")
+                            continue
                         if etype == "text_delta":
                             pending.append(ev)
                             pending_text.append(ev.get("text", "") or "")
@@ -309,7 +336,18 @@ class TextEngine:
                             # until the attempt proves valid.
                             pending.append(ev)
 
-                if committed:
+                if one_shot:
+                    if attempt_calls is not None:
+                        attempt_valid = bool(attempt_calls)
+                    else:
+                        full = (attempt_done_text if attempt_done_text is not None
+                                else "".join(pending_text))
+                        attempt_valid = bool((full or "").strip())
+                    if attempt_valid:
+                        for held in pending:
+                            yield held
+                        return
+                elif committed:
                     return
                 # Attempt completed without real content → retry below.
 

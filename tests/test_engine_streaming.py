@@ -393,3 +393,136 @@ async def test_collect_round_trip_tool_calls(text_engine, openai_config, message
     assert (result, payload) == (
         {"type": "tool_calls", "calls": calls}, {"payload": "y"}
     )
+
+
+# --------------------------------------------------------------------------
+# DP-210 — retry divergence pinned on both paths. One-shot
+# (generate_response = collect(stream)): nothing reaches a user mid-attempt,
+# so an attempt that streams text and then yields zero parseable tool calls
+# is retried, matching the pre-cutover one-shot engine. True streaming
+# (stream_messages): committed tokens cannot be retracted, so the same shape
+# passes through and mid-stream errors after commit propagate.
+# --------------------------------------------------------------------------
+
+
+def _history_object():
+    return {"current_message": {}, "persona_prompt": "p", "message_history": []}
+
+
+def _events_then_error(events: List[Dict], err: Exception):
+    async def _gen():
+        for ev in events:
+            yield ev
+        raise err
+    return _gen()
+
+
+_TEXT_THEN_NO_CALLS = [
+    {"type": "api_payload", "payload": {"attempt": "bad"}},
+    {"type": "text_delta", "text": "let me use a tool"},
+    {"type": "tool_calls", "calls": []},
+    {"type": "done", "full_text": "let me use a tool"},
+]
+
+
+@pytest.mark.asyncio
+async def test_generate_response_retries_text_then_zero_parseable_calls(
+    text_engine, openai_config
+):
+    good_calls = [{"id": "c1", "name": "get_x", "arguments": {}}]
+    good = [
+        {"type": "api_payload", "payload": {"attempt": "good"}},
+        {"type": "tool_calls", "calls": good_calls},
+        {"type": "done", "full_text": ""},
+    ]
+    provider = MagicMock(side_effect=[
+        _events_stream(list(_TEXT_THEN_NO_CALLS)), _events_stream(good),
+    ])
+    with patch.object(text_engine, "_stream_openai_response", provider), \
+            patch("src.engine.asyncio.sleep", new_callable=AsyncMock):
+        result, payload = await text_engine.generate_response(
+            openai_config, _history_object())
+    assert provider.call_count == 2
+    assert result == {"type": "tool_calls", "calls": good_calls}
+    assert payload == {"attempt": "good"}
+
+
+@pytest.mark.asyncio
+async def test_generate_response_retries_error_after_streamed_text(
+    text_engine, openai_config
+):
+    """One-shot: a mid-stream error after text deltas retries (the text never
+    reached a user), where the streaming path must propagate it."""
+    bad = _events_then_error(
+        [
+            {"type": "api_payload", "payload": {"attempt": "bad"}},
+            {"type": "text_delta", "text": "partial"},
+        ],
+        LLMCommunicationError("connection dropped"),
+    )
+    good = _events_stream([
+        {"type": "api_payload", "payload": {"attempt": "good"}},
+        {"type": "text_delta", "text": "full answer"},
+        {"type": "done", "full_text": "full answer"},
+    ])
+    provider = MagicMock(side_effect=[bad, good])
+    with patch.object(text_engine, "_stream_openai_response", provider), \
+            patch("src.engine.asyncio.sleep", new_callable=AsyncMock):
+        result, payload = await text_engine.generate_response(
+            openai_config, _history_object())
+    assert provider.call_count == 2
+    assert result == {"type": "text", "content": "full answer"}
+    assert payload == {"attempt": "good"}
+
+
+@pytest.mark.asyncio
+async def test_generate_response_text_then_zero_calls_exhausts_retries(
+    text_engine, openai_config
+):
+    provider = MagicMock(
+        side_effect=lambda *a, **k: _events_stream(list(_TEXT_THEN_NO_CALLS)))
+    with patch.object(text_engine, "_stream_openai_response", provider), \
+            patch("src.engine.asyncio.sleep", new_callable=AsyncMock):
+        with pytest.raises(LLMCommunicationError, match="empty or invalid response"):
+            await text_engine.generate_response(openai_config, _history_object())
+    assert provider.call_count > 1
+
+
+@pytest.mark.asyncio
+async def test_stream_messages_text_then_zero_calls_passes_through_no_retry(
+    text_engine, openai_config, messages, drain
+):
+    """Streaming path: once text is committed it cannot be retracted — the
+    empty tool_calls event passes through and no second attempt is made."""
+    provider = MagicMock(
+        side_effect=lambda *a, **k: _events_stream(list(_TEXT_THEN_NO_CALLS)))
+    with patch.object(text_engine, "_stream_openai_response", provider):
+        events = await drain(text_engine.stream_messages(
+            openai_config, messages, GenerationParams(),
+        ))
+    assert provider.call_count == 1
+    types = [e["type"] for e in events]
+    assert types == ["api_payload", "text_delta", "tool_calls", "done"]
+    assert events[2]["calls"] == []
+
+
+@pytest.mark.asyncio
+async def test_stream_messages_error_after_commit_propagates(
+    text_engine, openai_config, messages
+):
+    provider = MagicMock(side_effect=lambda *a, **k: _events_then_error(
+        [
+            {"type": "api_payload", "payload": {"p": 1}},
+            {"type": "text_delta", "text": "partial"},
+        ],
+        LLMCommunicationError("connection dropped"),
+    ))
+    seen: List[Dict] = []
+    with patch.object(text_engine, "_stream_openai_response", provider):
+        with pytest.raises(LLMCommunicationError, match="connection dropped"):
+            async for ev in text_engine.stream_messages(
+                openai_config, messages, GenerationParams(),
+            ):
+                seen.append(ev)
+    assert provider.call_count == 1
+    assert [e["type"] for e in seen] == ["api_payload", "text_delta"]
