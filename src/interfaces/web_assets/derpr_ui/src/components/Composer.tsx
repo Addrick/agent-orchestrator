@@ -63,7 +63,7 @@ export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming }: Pro
           onChange={grow}
           onKeyDown={onKeyDown}
           placeholder={streaming ? 'streaming…' : 'message the engine, or / for a dev command'}
-          disabled={streaming}
+          readOnly={streaming}
         />
         {streaming ? (
           <button className="send" style={{ borderColor: 'rgba(229,114,114,.4)', color: 'var(--danger)', background: 'var(--danger-bg)' }} onClick={onAbort}>
