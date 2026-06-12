@@ -150,13 +150,17 @@ class RequestBuilder:
         self,
         memory_manager: MemoryManager,
         memory_backend: MemoryBackend,
-        tool_manager: ToolManager,
+        tool_manager_lookup: Callable[[], ToolManager],
         persona_lookup: Callable[[str], Optional[Persona]],
         embedding_service: Optional[EmbeddingService] = None,
     ) -> None:
         self.memory_manager = memory_manager
         self.memory_backend = memory_backend
-        self.tool_manager = tool_manager
+        # Lookup closure (mirrors ConfirmationManager): ToolLoop reads
+        # chat_system.tool_manager per call, so a post-init swap must be
+        # visible to tool filtering too or the request would offer the model
+        # tools from the stale manager.
+        self._tool_manager_lookup = tool_manager_lookup
         # Callable (not a dict reference) so callers that rebind their persona
         # map post-construction (tests, live persona reloads) stay visible.
         self.persona_lookup = persona_lookup
@@ -558,7 +562,7 @@ class RequestBuilder:
 
     def filter_tools_for_persona(self, persona: Persona) -> List[Dict[str, Any]]:
         """Filters available tools by persona policy, service bindings, and model compatibility."""
-        all_tools = self.tool_manager.get_tool_definitions()
+        all_tools = self._tool_manager_lookup().get_tool_definitions()
 
         # 1. Primary filtering via ToolPolicy
         tools_for_llm = persona.get_tool_policy().filter_tools(all_tools)
@@ -632,9 +636,10 @@ class RequestBuilder:
             # Strip trailing user message — engine will re-append from ctx.message.
             if fallback and fallback[-1].get("role") == "user":
                 # Ensure the fallback's last user matches current message to avoid double-appending
-                # if the client already included it in the array.
-                last_content = fallback[-1].get("content", "").strip()
-                if last_content == ctx.message.strip():
+                # if the client already included it in the array. Content may be
+                # None or an OAI multimodal list — only a plain string can match.
+                last_content = fallback[-1].get("content")
+                if isinstance(last_content, str) and last_content.strip() == ctx.message.strip():
                     fallback.pop()
 
             # Capture the discarded DB row count *before* reassigning, so the

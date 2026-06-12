@@ -145,6 +145,12 @@ class TurnPersistence:
             return None
 
         if retry_assistant_id is not None:
+            if response_type == ResponseType.PENDING_CONFIRMATION:
+                # A retried turn that parked for confirmation must not overwrite
+                # the archived assistant row with the ephemeral confirmation text
+                # (DP-130: the park renders as an unpersisted chunk; the resumed
+                # continuation commits the real text).
+                return None
             try:
                 # Forward tool_context so the regenerated row's stored tool calls
                 # stay paired with its new content — a retried turn may use a

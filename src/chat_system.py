@@ -102,7 +102,7 @@ class ChatSystem:
         self.request_builder: RequestBuilder = RequestBuilder(
             memory_manager=memory_manager,
             memory_backend=self.memory_backend,
-            tool_manager=tool_manager,
+            tool_manager_lookup=lambda: self.tool_manager,
             persona_lookup=lambda name: self.personas.get(name),
             embedding_service=embedding_service,
         )
@@ -478,7 +478,10 @@ class ChatSystem:
                 #     decision. Runs inside turn_scope so write-tool execution
                 #     inherits the persona/channel/user scope.
                 user_interaction_id = None
-                retry_assistant_id = None
+                # Carry the park's retry linkage so a retried turn's resumed
+                # continuation UPDATEs the archived assistant row instead of
+                # INSERTing a fresh one beside it.
+                retry_assistant_id = resume.pending.retry_assistant_id
                 try:
                     ctx.turn_tainted = await self.confirmations.apply_resume_decision(
                         resume.pending, resume.approved, ctx.conversation_history,
@@ -590,6 +593,7 @@ class ChatSystem:
                     audit_info=audit_info,
                     tool_context_start=tool_context_start,
                     confirmation_text=final_text if final_text else "",
+                    retry_assistant_id=retry_assistant_id,
                 )
                 # Parking (incl. supersede-eviction + audit logging) is the
                 # ConfirmationManager's job; the kernel only decides *when*.
