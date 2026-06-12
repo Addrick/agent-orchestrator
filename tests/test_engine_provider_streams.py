@@ -6,7 +6,7 @@
 # wrappers rely on (event ordering, delta accumulation, error payloads).
 
 import pytest
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch, AsyncMock, MagicMock
 
 from src.engine import TextEngine, LLMCommunicationError
 from tests.provider_stream_mocks import (
@@ -256,8 +256,17 @@ class TestAnthropicStream:
 
 
 def _google_text_chunk(text):
-    from unittest.mock import MagicMock
     part = MagicMock(text=text, function_call=None)
+    part.thought_signature = None
+    cand = MagicMock(content=MagicMock(parts=[part]), grounding_metadata=None)
+    return MagicMock(prompt_feedback=None, candidates=[cand])
+
+
+def _google_fc_chunk(name, args):
+    fcall = MagicMock()
+    fcall.name = name
+    fcall.args = args
+    part = MagicMock(text=None, function_call=fcall)
     part.thought_signature = None
     cand = MagicMock(content=MagicMock(parts=[part]), grounding_metadata=None)
     return MagicMock(prompt_feedback=None, candidates=[cand])
@@ -340,3 +349,41 @@ class TestGoogleStream:
         )
         assert result == {"type": "text", "content": "hi"}
         assert payload["model"] == "gemini-pro"
+
+    @pytest.mark.asyncio
+    async def test_interleaved_text_between_function_calls_ids_self_consistent(
+        self, mock_cls, text_engine, base_context, monkeypatch
+    ):
+        """DP-213: a stream that interleaves text parts between function-call
+        parts synthesizes the same per-turn ids on the streaming path and the
+        one-shot collect path, and the ids stay distinct — ids are per-turn
+        correlation only, so self-consistency is the contract that matters."""
+        monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy")
+        inst = mock_cls.return_value
+        tools = [{"type": "function", "function": {"name": "get_a"}},
+                 {"type": "function", "function": {"name": "get_b"}}]
+
+        def chunks():
+            return google_stream(
+                _google_text_chunk("checking a "),
+                _google_fc_chunk("get_a", {"x": 1}),
+                _google_text_chunk("and then b "),
+                _google_fc_chunk("get_b", {"y": 2}),
+            )
+
+        inst.models.generate_content_stream = AsyncMock(return_value=chunks())
+        events = await _drain(text_engine._stream_google_response(
+            {"model_name": "gemini-pro"}, base_context, tools
+        ))
+        stream_calls = next(e for e in events if e["type"] == "tool_calls")["calls"]
+
+        inst.models.generate_content_stream = AsyncMock(return_value=chunks())
+        result, _ = await text_engine.generate_response(
+            {"model_name": "gemini-pro"}, base_context, tools=tools
+        )
+
+        assert result["type"] == "tool_calls"
+        assert [c["name"] for c in stream_calls] == ["get_a", "get_b"]
+        stream_ids = [c["id"] for c in stream_calls]
+        assert [c["id"] for c in result["calls"]] == stream_ids
+        assert len(set(stream_ids)) == len(stream_ids)
