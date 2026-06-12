@@ -162,8 +162,12 @@ All commands are entered as the message body when addressing a persona. Commands
 local `agy` CLI instead of an API. This runs on the user's authenticated
 **OAuth tier** (currently Gemini 3.5 Flash) rather than a metered API key, at the
 cost of a subprocess spawn per call (a few seconds of latency) and no image
-support. Each call is fully isolated (fresh prompt, throwaway working directory,
-`stdin` closed so it never blocks on a permission prompt).
+support.
+
+Each call is executed inside a persistent workspace directory (by default, persona-specific under `data/workspaces/agy_{persona_name}` or fallback to `data/workspaces/agy_global`), preserving `agy` indexing/auth state caches. Persona names are sanitized to a filesystem-safe slug for the directory name, and concurrent calls sharing a workspace are serialized so they can't clobber each other's CLI state. You can configure this behavior in `.env` or `config/global_config.py`:
+- `AGY_PERSISTENT_WORKSPACES` (default `True`): Set to `False` to revert to stateless throwaway temporary directories.
+- `AGY_WORKSPACE_MODE` (default `"persona"`): Set to `"global"` to share a single derpr-wide workspace.
+- `AGY_SANDBOX` (default `True`): Run `agy` under its built-in OS-level sandbox (`--sandbox`; nsjail on Linux, sandbox-exec on macOS). Set to `False` if the sandbox is unavailable in your environment (e.g. a container without the needed privileges).
 
 > **Platform: POSIX only.** The `agy` provider works on Linux/macOS (and WSL or
 > Docker). It does **not** work on **native Windows**: `agy` is a TUI that only

@@ -95,6 +95,9 @@ class TextEngine:
         self._openai_limiter        = AsyncLimiter(max_rate=RATE_LIMIT_OPENAI_RPM,    time_period=60)
         self._anthropic_limiter     = AsyncLimiter(max_rate=RATE_LIMIT_ANTHROPIC_RPM, time_period=60)
         self._agy_limiter           = AsyncLimiter(max_rate=RATE_LIMIT_AGY_RPM,       time_period=60)
+        # Persistent agy workspaces are shared across calls; a per-workspace
+        # lock serializes them so one call's CLI state can't clobber another's.
+        self._agy_workspace_locks: Dict[str, asyncio.Lock] = {}
         logger.info(
             f"Rate limiters initialised — "
             f"Gemini 2.5: {RATE_LIMIT_GEMINI_25_RPM} RPM / {RATE_LIMIT_GEMINI_25_RPD} RPD | "
@@ -797,7 +800,30 @@ class TextEngine:
                 "See docs/user_guide.md (Antigravity / agy provider)."
             )
 
-    async def _run_agy_cli(self, prompt: str, timeout: float = AGY_CALL_TIMEOUT_SECONDS) -> str:
+    @staticmethod
+    def _sanitize_agy_workspace_name(persona_name: Optional[str]) -> Optional[str]:
+        """Persona names come from config and may contain path separators or
+        other filesystem-hostile characters; reduce to a safe slug. Returns
+        None when nothing usable remains (caller falls back to global)."""
+        if not persona_name:
+            return None
+        slug = re.sub(r"[^A-Za-z0-9._-]+", "_", persona_name).strip("._")
+        return slug or None
+
+    @staticmethod
+    def _resolve_agy_workspace(persona_name: Optional[str]) -> Optional[str]:
+        """Returns the persistent workspace dir for this call, or None when
+        persistence is disabled (caller uses a throwaway temp dir). Does not
+        create the directory."""
+        if not global_config.AGY_PERSISTENT_WORKSPACES:
+            return None
+        workspaces_dir = global_config.AGY_WORKSPACES_DIR
+        slug = TextEngine._sanitize_agy_workspace_name(persona_name)
+        if global_config.AGY_WORKSPACE_MODE == "persona" and slug:
+            return os.path.abspath(workspaces_dir / f"agy_{slug}")
+        return os.path.abspath(workspaces_dir / "agy_global")
+
+    async def _run_agy_cli(self, prompt: str, timeout: float = AGY_CALL_TIMEOUT_SECONDS, persona_name: Optional[str] = None) -> str:
         self._ensure_agy_supported()
 
         binary = os.environ.get("ANTIGRAVITY_HARNESS_PATH") or shutil.which("agy")
@@ -806,8 +832,44 @@ class TextEngine:
 
         timeout_sec_str = f"{int(timeout) + 30}s"
         args = ["--print-timeout", timeout_sec_str, "-p", prompt]
+        if global_config.AGY_SANDBOX:
+            args = ["--sandbox", *args]
 
-        temp_dir = tempfile.mkdtemp()
+        workspace_dir = self._resolve_agy_workspace(persona_name)
+        if workspace_dir is None:
+            temp_dir = tempfile.mkdtemp()
+            try:
+                return await self._exec_agy(binary, args, temp_dir, timeout)
+            finally:
+                # The CLI leaves symlinks under .antigravitycli pointing at
+                # files outside the temp dir; remove the targets so rmtree
+                # doesn't strand them. Persistent workspaces keep this state
+                # on purpose — that cache is the point of persistence.
+                self._remove_agy_cli_link_targets(temp_dir)
+                shutil.rmtree(temp_dir, ignore_errors=True)
+
+        os.makedirs(workspace_dir, exist_ok=True)
+        lock = self._agy_workspace_locks.setdefault(workspace_dir, asyncio.Lock())
+        async with lock:
+            return await self._exec_agy(binary, args, workspace_dir, timeout)
+
+    @staticmethod
+    def _remove_agy_cli_link_targets(workspace_dir: str) -> None:
+        cli_dir = os.path.join(workspace_dir, ".antigravitycli")
+        if not os.path.isdir(cli_dir):
+            return
+        for f in os.listdir(cli_dir):
+            p = os.path.join(cli_dir, f)
+            if os.path.islink(p):
+                try:
+                    target = os.readlink(p)
+                    if os.path.exists(target):
+                        os.remove(target)
+                except Exception:
+                    pass
+
+    @staticmethod
+    async def _exec_agy(binary: str, args: List[str], workspace_dir: str, timeout: float) -> str:
         proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -816,7 +878,7 @@ class TextEngine:
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=temp_dir,
+                cwd=workspace_dir,
                 start_new_session=True
             )
             try:
@@ -839,20 +901,6 @@ class TextEngine:
                     os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                 except Exception:
                     pass
-
-            cli_dir = os.path.join(temp_dir, ".antigravitycli")
-            if os.path.isdir(cli_dir):
-                for f in os.listdir(cli_dir):
-                    p = os.path.join(cli_dir, f)
-                    if os.path.islink(p):
-                        try:
-                            target = os.readlink(p)
-                            if os.path.exists(target):
-                                os.remove(target)
-                        except Exception:
-                            pass
-
-            shutil.rmtree(temp_dir, ignore_errors=True)
 
     async def _generate_agy_response(
         self, config: Dict[str, Any], history_object: Dict[str, Any], tools: Optional[List[Dict[str, Any]]] = None
@@ -878,18 +926,21 @@ class TextEngine:
         if tools:
             tool_names = [t["function"]["name"] for t in tools if "function" in t and "name" in t["function"]]
 
+        persona_name = config.get("persona_name")
+        workspace_dir = self._resolve_agy_workspace(persona_name)
         api_payload = {
             "model": config.get("model_name"),
             "prompt_chars": len(prompt),
             "tools": tool_names,
             "isolation": {
                 "stdin": "devnull",
-                "skip_permissions": False
+                "skip_permissions": False,
+                "workspace": workspace_dir if workspace_dir else "temp-dir-per-call",
             }
         }
 
         try:
-            raw = await self._run_agy_cli(prompt)
+            raw = await self._run_agy_cli(prompt, persona_name=persona_name)
         except LLMCommunicationError as e:
             if e.api_payload is None:
                 e.api_payload = api_payload

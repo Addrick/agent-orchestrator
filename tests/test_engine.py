@@ -1,5 +1,6 @@
 # tests/test_engine.py
 
+import os
 import pytest
 from unittest.mock import patch, AsyncMock, MagicMock
 import base64
@@ -1087,10 +1088,14 @@ class TestAgyCliInvocation:
             return self._stdout, self._stderr
 
     @pytest.mark.asyncio
-    async def test_run_agy_cli_args_match_working_posix_behavior(self, text_engine, monkeypatch):
+    async def test_run_agy_cli_args_match_working_posix_behavior(self, text_engine, monkeypatch, tmp_path):
         """Regression guard: the spawn args stay exactly the known-good POSIX set
         — no --dangerously-skip-permissions (would un-gate agy's own tools)."""
         import src.engine as engine_mod
+        from config import global_config
+
+        # keep the default persistent workspace out of the real data dir
+        monkeypatch.setattr(global_config, "AGY_WORKSPACES_DIR", tmp_path / "workspaces")
 
         captured = {}
 
@@ -1111,8 +1116,31 @@ class TestAgyCliInvocation:
         assert captured["args"][0] == "/usr/bin/agy"
         assert "--dangerously-skip-permissions" not in captured["args"]
         assert "-p" in captured["args"] and "--print-timeout" in captured["args"]
+        # OS-level sandbox on by default (defense-in-depth)
+        assert "--sandbox" in captured["args"]
         # agy is isolated in its own POSIX session for cleanup
         assert captured["kwargs"].get("start_new_session") is True
+
+    @pytest.mark.asyncio
+    async def test_sandbox_flag_omitted_when_disabled(self, text_engine, monkeypatch, tmp_path):
+        import src.engine as engine_mod
+        from config import global_config
+
+        monkeypatch.setattr(global_config, "AGY_WORKSPACES_DIR", tmp_path / "workspaces")
+        monkeypatch.setattr(global_config, "AGY_SANDBOX", False)
+
+        captured = {}
+
+        async def fake_exec(*args, **kwargs):
+            captured["args"] = args
+            return self._FakeProc(stdout=b"ok")
+
+        monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/agy")
+        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
+
+        await text_engine._run_agy_cli("hi", timeout=5)
+        assert "--sandbox" not in captured["args"]
 
     def test_agy_unsupported_on_windows_raises_clear_error(self, text_engine, monkeypatch):
         import src.engine as engine_mod
@@ -1146,3 +1174,175 @@ class TestAgyCliInvocation:
         with pytest.raises(LLMCommunicationError, match="native Windows"):
             await text_engine._run_agy_cli("hi", timeout=5)
         assert spawned == [] and made_dirs == []
+
+    @pytest.mark.asyncio
+    async def test_run_agy_cli_persistent_workspaces_persona(self, text_engine, monkeypatch, tmp_path):
+        import src.engine as engine_mod
+        from config import global_config
+        
+        captured_cwd = []
+        async def fake_exec(*args, **kwargs):
+            captured_cwd.append(kwargs.get("cwd"))
+            return self._FakeProc(stdout=b"hello persistent persona")
+
+        monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/agy")
+        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
+        
+        monkeypatch.setattr(global_config, "AGY_PERSISTENT_WORKSPACES", True)
+        monkeypatch.setattr(global_config, "AGY_WORKSPACE_MODE", "persona")
+        monkeypatch.setattr(global_config, "AGY_WORKSPACES_DIR", tmp_path / "workspaces")
+        
+        # Test 1: Persona-specific workspace
+        out = await text_engine._run_agy_cli("hi", persona_name="alice")
+        assert out == "hello persistent persona"
+        expected_dir = os.path.abspath(tmp_path / "workspaces" / "agy_alice")
+        assert captured_cwd == [expected_dir]
+        assert os.path.exists(expected_dir)
+
+    @pytest.mark.asyncio
+    async def test_run_agy_cli_persistent_workspaces_global(self, text_engine, monkeypatch, tmp_path):
+        import src.engine as engine_mod
+        from config import global_config
+        
+        captured_cwd = []
+        async def fake_exec(*args, **kwargs):
+            captured_cwd.append(kwargs.get("cwd"))
+            return self._FakeProc(stdout=b"hello persistent global")
+
+        monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/agy")
+        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
+        
+        monkeypatch.setattr(global_config, "AGY_PERSISTENT_WORKSPACES", True)
+        monkeypatch.setattr(global_config, "AGY_WORKSPACE_MODE", "global")
+        monkeypatch.setattr(global_config, "AGY_WORKSPACES_DIR", tmp_path / "workspaces")
+        
+        # Test 2: Global mode (uses global workspace even if persona_name is passed)
+        out = await text_engine._run_agy_cli("hi", persona_name="alice")
+        assert out == "hello persistent global"
+        expected_dir = os.path.abspath(tmp_path / "workspaces" / "agy_global")
+        assert captured_cwd == [expected_dir]
+        assert os.path.exists(expected_dir)
+
+    @pytest.mark.asyncio
+    async def test_run_agy_cli_stateless_fallback(self, text_engine, monkeypatch, tmp_path):
+        import src.engine as engine_mod
+        from config import global_config
+        
+        captured_cwd = []
+        async def fake_exec(*args, **kwargs):
+            captured_cwd.append(kwargs.get("cwd"))
+            return self._FakeProc(stdout=b"hello stateless")
+
+        monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/agy")
+        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
+        
+        monkeypatch.setattr(global_config, "AGY_PERSISTENT_WORKSPACES", False)
+        
+        # Test 3: Stateless temp dir is created and removed
+        out = await text_engine._run_agy_cli("hi")
+        assert out == "hello stateless"
+        assert len(captured_cwd) == 1
+        # The temporary directory path should be deleted now
+        assert not os.path.exists(captured_cwd[0])
+
+    def _persistent_workspace_env(self, text_engine, monkeypatch, tmp_path, stdout=b"ok"):
+        import src.engine as engine_mod
+        from config import global_config
+
+        captured_cwd = []
+
+        async def fake_exec(*args, **kwargs):
+            captured_cwd.append(kwargs.get("cwd"))
+            return self._FakeProc(stdout=stdout)
+
+        monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/agy")
+        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
+        monkeypatch.setattr(global_config, "AGY_PERSISTENT_WORKSPACES", True)
+        monkeypatch.setattr(global_config, "AGY_WORKSPACE_MODE", "persona")
+        monkeypatch.setattr(global_config, "AGY_WORKSPACES_DIR", tmp_path / "workspaces")
+        return captured_cwd
+
+    @pytest.mark.asyncio
+    async def test_persona_name_is_sanitized_for_workspace_path(self, text_engine, monkeypatch, tmp_path):
+        """Path separators and traversal in a persona name must not escape
+        the workspaces dir."""
+        captured_cwd = self._persistent_workspace_env(text_engine, monkeypatch, tmp_path)
+
+        await text_engine._run_agy_cli("hi", persona_name="../evil/name")
+
+        workspaces_root = os.path.abspath(tmp_path / "workspaces")
+        assert len(captured_cwd) == 1
+        assert captured_cwd[0] == os.path.join(workspaces_root, "agy_evil_name")
+        assert os.path.dirname(captured_cwd[0]) == workspaces_root
+
+    @pytest.mark.asyncio
+    async def test_persona_mode_without_persona_name_falls_back_to_global(self, text_engine, monkeypatch, tmp_path):
+        captured_cwd = self._persistent_workspace_env(text_engine, monkeypatch, tmp_path)
+
+        await text_engine._run_agy_cli("hi")  # no persona_name
+
+        expected = os.path.abspath(tmp_path / "workspaces" / "agy_global")
+        assert captured_cwd == [expected]
+
+    @pytest.mark.asyncio
+    async def test_concurrent_calls_to_same_workspace_are_serialized(self, text_engine, monkeypatch, tmp_path):
+        """Two in-flight calls sharing a persistent workspace must not overlap —
+        the per-workspace lock serializes them."""
+        import asyncio
+        import src.engine as engine_mod
+        from config import global_config
+
+        in_flight = 0
+        max_in_flight = 0
+
+        class _SlowProc(self._FakeProc):
+            async def communicate(inner):
+                nonlocal in_flight, max_in_flight
+                in_flight += 1
+                max_in_flight = max(max_in_flight, in_flight)
+                await asyncio.sleep(0.01)
+                in_flight -= 1
+                return inner._stdout, inner._stderr
+
+        async def fake_exec(*args, **kwargs):
+            return _SlowProc(stdout=b"ok")
+
+        monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/agy")
+        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
+        monkeypatch.setattr(global_config, "AGY_PERSISTENT_WORKSPACES", True)
+        monkeypatch.setattr(global_config, "AGY_WORKSPACE_MODE", "persona")
+        monkeypatch.setattr(global_config, "AGY_WORKSPACES_DIR", tmp_path / "workspaces")
+
+        await asyncio.gather(
+            text_engine._run_agy_cli("a", persona_name="alice"),
+            text_engine._run_agy_cli("b", persona_name="alice"),
+        )
+        assert max_in_flight == 1
+
+    @pytest.mark.asyncio
+    async def test_persistent_workspace_keeps_antigravitycli_state(self, text_engine, monkeypatch, tmp_path):
+        """The symlink-target cleanup is temp-dir-only: persistent workspaces
+        keep .antigravitycli state — that cache is the point of persistence."""
+        captured_cwd = self._persistent_workspace_env(text_engine, monkeypatch, tmp_path)
+
+        workspace = tmp_path / "workspaces" / "agy_alice"
+        cli_dir = workspace / ".antigravitycli"
+        cli_dir.mkdir(parents=True)
+        cache_target = tmp_path / "cache_blob"
+        cache_target.write_text("cached state")
+        link = cli_dir / "cache_link"
+        try:
+            os.symlink(cache_target, link)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks unavailable on this host")
+
+        await text_engine._run_agy_cli("hi", persona_name="alice")
+
+        assert captured_cwd == [os.path.abspath(workspace)]
+        assert cache_target.exists()
+        assert link.exists()

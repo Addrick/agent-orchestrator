@@ -578,6 +578,7 @@ class Persona:
     def get_config_for_engine(self) -> Dict[str, Any]:
         """Returns a dictionary of the current generation parameters for the TextEngine."""
         config: Dict[str, Any] = {
+            "persona_name": self._name,
             "model_name": self._model_name,
             "max_output_tokens": self._params.max_tokens,
             "temperature": self._params.temperature,

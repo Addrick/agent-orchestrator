@@ -178,6 +178,7 @@ def test_get_config_for_engine(base_persona_args):
         top_k=40
     )
     expected_config = {
+        "persona_name": "tester",
         "model_name": "test_model",
         "max_output_tokens": 1024,
         "temperature": 0.8,
