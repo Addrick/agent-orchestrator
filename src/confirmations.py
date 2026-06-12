@@ -55,6 +55,11 @@ class PendingConfirmation:
     # chunk's content so a fresh page load (transcript) can render the pending
     # approval without a DB row.
     confirmation_text: str = ""
+    # Retry linkage: when the parked turn was itself a portal retry, this is
+    # the archived assistant row the resumed continuation must UPDATE in
+    # place. Without it the resume would INSERT a fresh assistant row and
+    # strand the archived one with its pre-retry content.
+    retry_assistant_id: Optional[int] = None
 
 
 class ConfirmationManager:

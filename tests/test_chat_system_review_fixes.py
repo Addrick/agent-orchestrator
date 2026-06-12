@@ -221,6 +221,49 @@ def test_retry_park_does_not_overwrite_archived_row(chat_system_with_mocks):
     mm.update_interaction_content.assert_not_called()
 
 
+# --- DP-200 review: retry linkage must survive the park/resume cycle --------
+
+@pytest.mark.asyncio
+async def test_resume_after_retry_updates_archived_row(chat_system_with_mocks):
+    """A retried turn that parks for confirmation must carry its
+    retry_assistant_id through the park, so the resumed continuation UPDATEs
+    the archived assistant row instead of INSERTing a fresh one beside it."""
+    system, mm, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
+    persona.set_execution_mode(ExecutionMode.CONFIRM)
+    persona.set_enabled_tools(["*"])
+    mm.handle_portal_retry.return_value = 42
+    mm.get_channel_history.return_value = []
+
+    # Retry turn proposes a write → parks.
+    tool_call = {"type": "tool_calls",
+                 "calls": [{"id": "c1", "name": "update_ticket",
+                            "arguments": {"state": "closed"}}]}
+    text_engine_mock.generate_response.return_value = (tool_call, {})
+    async for _ in system.stream_response(
+            "test_persona", "user", "channel", "regenerate", is_retry=True):
+        pass
+
+    pending = system._pending_confirmations[("user", "test_persona")]
+    assert pending.retry_assistant_id == 42
+    mm.update_interaction_content.assert_not_called()  # the park persists nothing
+
+    # Approve: the continuation must land on the archived row.
+    tool_manager_mock.execute_tool.return_value = {"ok": True}
+    text_engine_mock.generate_response.return_value = (
+        {"type": "text", "content": "Done, ticket closed."}, {})
+    _, rtype, assistant_id, _ = await system.resume_pending_confirmation(
+        "user", "test_persona", approved=True)
+
+    assert rtype == ResponseType.LLM_GENERATION
+    assert assistant_id == 42
+    mm.update_interaction_content.assert_called_once()
+    assert mm.update_interaction_content.call_args.args[0] == 42
+    # No fresh assistant row inserted beside the archived one.
+    assistant_inserts = [c for c in mm.log_message.call_args_list
+                         if c.kwargs.get("author_role") == "assistant"]
+    assert assistant_inserts == []
+
+
 # --- DP-200 review: RequestBuilder must see a post-init tool_manager swap ---
 
 def test_request_builder_sees_post_init_tool_manager_swap(chat_system_with_mocks):
