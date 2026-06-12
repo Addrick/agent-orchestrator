@@ -84,6 +84,14 @@ Saving from the Inference Matrix persists the `memory_mode` to the backend. The 
 
 **Tool-enabled personas in the portal (tool revamp v1):** A persona with `enabled_tools` set can run over the portal SSE stream — token deltas and tool calls interleave in a single linear stream with no drain-and-restart. While the model is invoking a tool, the portal renders an inline collapsible block (using kobold-lite's existing `<think>` Reflective-Process pipeline) showing the tool name, JSON arguments, and the result/error. The block is streaming-only — the database stores the resolved assistant text without it, so reload / version-chevron / retry flows stay clean. CONFIRM-mode write-tool gating is unchanged; the portal currently runs autonomous, so write tools execute immediately. The adapter also emits structured `event: derpr-tool-start` / `event: derpr-tool-result` SSE frames carrying `{tool_name, arguments, call_id}` and `{call_id, result, error}` for portal-aware listeners (`window.derprOnToolStart` / `derprOnToolResult` hooks; latest payloads accumulate in `window.derpr_tool_calls[call_id]`).
 
+### Bespoke DERPR portal (`/derpr`)
+
+A React UI served at `GET /derpr` on the same adapter, driving the OpenAI-style `/chat/completions` SSE route with identity-addressed transcript re-syncs (`GET /api/v1/session/{persona}/transcript`).
+
+**Send feedback (DP-214):** your message appears in the transcript immediately on send, tagged `sending…`, and the assistant row shows an animated typing indicator until the model produces its first token or tool call. When the turn completes, both transient rows are replaced by the authoritative transcript rows. On a failed turn the dismissed error re-syncs the transcript, so the user turn (persisted before generation) stays visible. Note: personas on non-local models currently deliver their response in one piece — true token streaming for cloud providers is tracked as DP-215–217.
+
+Personas with `history_messages: 0` always render an empty transcript — the portal mirrors exactly what the engine would feed the model, and a zero-window persona feeds it nothing.
+
 ## Commands
 
 All commands are entered as the message body when addressing a persona. Commands are case-insensitive.

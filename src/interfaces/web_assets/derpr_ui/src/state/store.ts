@@ -33,6 +33,11 @@ export interface StreamState {
   errored: boolean
   errorMsg: string | null
   responseType: string | null
+  // Optimistic echo of the just-sent user turn. Rendered as a transient row
+  // until an authoritative /transcript re-sync surfaces the persisted one —
+  // must be null whenever a re-sync has run (else the row duplicates) and on
+  // retry/regen (no new user turn exists).
+  userText: string | null
 }
 
 const EMPTY_STREAM: StreamState = {
@@ -44,6 +49,7 @@ const EMPTY_STREAM: StreamState = {
   errored: false,
   errorMsg: null,
   responseType: null,
+  userText: null,
 }
 
 export interface DevRow {
@@ -277,8 +283,11 @@ export function usePortalStore() {
         // the channel list so it appears in the rail.
         await refreshChannels(personaName)
         setStream((s) => {
-          if (s.errored) return { ...s, active: false }
-          if (s.aborted) return { ...s, active: false }
+          // The re-fetch above already surfaced the persisted user row, so the
+          // optimistic echo must clear even on the kept-visible error/abort
+          // treatments — otherwise the turn renders twice.
+          if (s.errored) return { ...s, active: false, userText: null }
+          if (s.aborted) return { ...s, active: false, userText: null }
           return { ...EMPTY_STREAM }
         })
         setResolvingConfirm(false)
@@ -310,7 +319,9 @@ export function usePortalStore() {
 
       setBanner(null)
       idFrameRef.current = null
-      setStream({ ...EMPTY_STREAM, active: true })
+      // Echo the user turn immediately; a retry replays the last persisted
+      // user turn, so it gets no new echo.
+      setStream({ ...EMPTY_STREAM, active: true, userText: retry ? null : trimmed })
 
       const handle = streamChat(
         {
@@ -364,11 +375,17 @@ export function usePortalStore() {
     await api.abort()
     abortRef.current?.abort()
     abortRef.current = null
-    setStream((s) => ({ ...s, aborted: true }))
+    // The re-fetch below surfaces the persisted user row — drop the echo.
+    setStream((s) => ({ ...s, aborted: true, userText: null }))
     if (persona) await refreshTranscript(persona.name)
   }, [persona, refreshTranscript])
 
-  const dismissStream = useCallback(() => setStream(EMPTY_STREAM), [])
+  // Dismiss re-syncs: an errored turn skips the onDone re-fetch, so the user
+  // turn (persisted before generation) is only in the DB — surface it.
+  const dismissStream = useCallback(() => {
+    setStream(EMPTY_STREAM)
+    if (persona) void refreshTranscript(persona.name)
+  }, [persona, refreshTranscript])
   const dismissDevRow = useCallback(() => setDevRow(null), [])
 
   // ---- regenerate ----------------------------------------------------

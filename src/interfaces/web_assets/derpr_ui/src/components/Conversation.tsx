@@ -157,6 +157,26 @@ export function Conversation({ store }: { store: PortalStore }) {
                 ))
               })()}
 
+              {/* optimistic echo of the just-sent user turn — replaced by the
+                  persisted row on the [DONE] /transcript re-sync. Not a Chunk:
+                  it has no interaction_id, so it must never get MessageRow's
+                  edit/del/retry affordances or count toward chevron gating. */}
+              {stream.userText != null && (
+                <div className="msg">
+                  <div className="gut">
+                    <div className="av user">U</div>
+                  </div>
+                  <div className="bd">
+                    <div className="meta">
+                      <span className="who user">portal</span>
+                      <span className="ts" />
+                      <span className="idtag">sending…</span>
+                    </div>
+                    <div className="text">{stream.userText}</div>
+                  </div>
+                </div>
+              )}
+
               <StreamRow
                 stream={stream}
                 tools={tools}
