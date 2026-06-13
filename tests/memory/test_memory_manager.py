@@ -1933,6 +1933,70 @@ def test_update_interaction_content_tool_context_sentinel(mem_manager):
     assert stored_tool_context() is None
 
 
+def test_update_interaction_content_preserves_reasoning_when_omitted(mem_manager):
+    """DP-141 (DATA LOSS regression): a manual edit sends only the new body and
+    omits reasoning_content, so the stored `<think>` reasoning MUST survive.
+
+    Before the fix reasoning_content defaulted to None and was written
+    unconditionally, so editing an assistant turn permanently erased its
+    reasoning from the DB."""
+    iid = mem_manager.log_message(
+        "web_ui", "persona_a", "portal", "assistant", "persona_a",
+        "the answer", datetime.now(),
+        reasoning_content="the chain of thought",
+    )
+
+    assert mem_manager.update_interaction_content(iid, "the edited answer") is True
+
+    conn = mem_manager._get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT content, reasoning_content FROM User_Interactions WHERE interaction_id = ?",
+        (iid,),
+    )
+    row = cur.fetchone()
+    assert row['content'] == "the edited answer"
+    assert row['reasoning_content'] == "the chain of thought"
+
+
+def test_update_interaction_content_reasoning_sentinel(mem_manager):
+    """DP-141: reasoning_content follows the same `_UNSET` sentinel contract as
+    tool_context — omitted = leave, None = clear, value = set.
+
+      - arg omitted (manual text edit) → reasoning left UNTOUCHED;
+      - reasoning_content="..." (regen produced fresh thinking) → REWRITTEN;
+      - reasoning_content=None (regen / non-thinking model) → CLEARED.
+    """
+    iid = mem_manager.log_message(
+        "web_ui", "persona_a", "portal", "assistant", "persona_a",
+        "v1", datetime.now(), reasoning_content="thought v1",
+    )
+
+    conn = mem_manager._get_connection()
+    cur = conn.cursor()
+
+    def stored_reasoning():
+        cur.execute(
+            "SELECT reasoning_content FROM User_Interactions WHERE interaction_id = ?",
+            (iid,),
+        )
+        return cur.fetchone()['reasoning_content']
+
+    # 1. Manual edit (arg omitted) leaves reasoning untouched.
+    assert mem_manager.update_interaction_content(iid, "edited body") is True
+    assert stored_reasoning() == "thought v1"
+
+    # 2. Regen with fresh thinking rewrites it.
+    assert mem_manager.update_interaction_content(
+        iid, "v2", reasoning_content="thought v2"
+    ) is True
+    assert stored_reasoning() == "thought v2"
+
+    # 3. Explicit None clears it (regen by a non-thinking model).
+    assert mem_manager.update_interaction_content(iid, "v3", reasoning_content=None) is True
+    assert stored_reasoning() is None
+
+
 def test_handle_portal_retry_dedupes_identical_content(mem_manager):
     """DP-132 #7: archiving identical content twice must not create duplicate
     archive rows, which would flag multiple versions canonical and desync the

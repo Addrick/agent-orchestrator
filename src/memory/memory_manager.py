@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 
 # Sentinel for optional column updates: distinguishes "caller omitted this
 # argument" (leave the column untouched) from "caller explicitly passed None"
-# (write NULL). Used by update_interaction_content for tool_context.
+# (write NULL). Used by update_interaction_content for tool_context and
+# reasoning_content.
 _UNSET: Any = object()
 
 # --- Universal Summary Levels ---
@@ -608,7 +609,7 @@ class MemoryManager:
                 return None
 
     def update_interaction_content(self, interaction_id: int, new_content: str,
-                                   reasoning_content: Optional[str] = None,
+                                   reasoning_content: Any = _UNSET,
                                    tool_context: Any = _UNSET) -> bool:
         """Overwrite the content of an existing interaction row in place.
 
@@ -617,28 +618,34 @@ class MemoryManager:
         drops the stale L0 embedding (`Message_Embeddings` + `vec_*`) so
         `MemoryAgent._embed_unembedded` re-encodes against the new content.
 
-        `tool_context` is left untouched unless explicitly passed: a regenerated
-        (retry) assistant turn may have produced a *different* set of tool calls,
-        so the row's tool_context must be rewritten to stay paired with the new
-        content. Manual edits that don't change tools omit it (sentinel default)
-        so the existing tool_context is preserved.
+        `reasoning_content` and `tool_context` both follow the `_UNSET` sentinel
+        contract: omitted = leave the column untouched, explicit ``None`` =
+        clear it (write NULL), an explicit value = set it. A manual edit
+        (DP-141) sends only the new body and must NOT erase the row's stored
+        `<think>` reasoning, so it omits the arg. A regenerated (retry) turn
+        passes the column explicitly — fresh reasoning, or ``None`` to clear the
+        stale reasoning that no longer matches the new content. Likewise a retry
+        rewrites `tool_context` to stay paired with its (possibly different) set
+        of tool calls.
         """
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
             try:
-                if tool_context is _UNSET:
-                    cursor.execute(
-                        "UPDATE User_Interactions SET content = ?, reasoning_content = ?, parent_summary_id = NULL"
-                        " WHERE interaction_id = ?",
-                        (new_content, reasoning_content, interaction_id),
-                    )
-                else:
-                    cursor.execute(
-                        "UPDATE User_Interactions SET content = ?, reasoning_content = ?, tool_context = ?,"
-                        " parent_summary_id = NULL WHERE interaction_id = ?",
-                        (new_content, reasoning_content, tool_context, interaction_id),
-                    )
+                set_clauses = ["content = ?"]
+                params: List[Any] = [new_content]
+                if reasoning_content is not _UNSET:
+                    set_clauses.append("reasoning_content = ?")
+                    params.append(reasoning_content)
+                if tool_context is not _UNSET:
+                    set_clauses.append("tool_context = ?")
+                    params.append(tool_context)
+                set_clauses.append("parent_summary_id = NULL")
+                params.append(interaction_id)
+                cursor.execute(
+                    f"UPDATE User_Interactions SET {', '.join(set_clauses)} WHERE interaction_id = ?",
+                    params,
+                )
                 updated = cursor.rowcount > 0
                 cursor.execute("DELETE FROM Message_Embeddings WHERE interaction_id = ?", (interaction_id,))
                 cursor.execute("DELETE FROM vec_Message_Embeddings WHERE interaction_id = ?", (interaction_id,))
