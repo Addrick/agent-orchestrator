@@ -155,16 +155,22 @@ class Persona:
         for Section B providers (stream_messages / stream_prompt)."""
         return self._params
 
-    def get_history_messages(self) -> int:
+    def get_history_messages(self, advance: bool = True) -> int:
         """
         Returns the effective history message count.
         If a temporary override is active (from a 'hello' command), it returns
-        the override value and increments it for the next turn.
+        the override value and (when ``advance`` is True) increments it for the
+        next turn.
+
+        DP-142: read-only / dry-run callers (transcript view, /assemble) must
+        pass ``advance=False`` so merely viewing or re-syncing does not inflate
+        the hello window. Only the LIVE generation path advances the override.
         """
         if self._temp_history_override is not None:
             current_limit = self._temp_history_override
-            # Increment by 2 for the user message and the assistant's reply.
-            self._temp_history_override += 2
+            if advance:
+                # Increment by 2 for the user message and the assistant's reply.
+                self._temp_history_override += 2
             return current_limit
 
         return self._history_messages
