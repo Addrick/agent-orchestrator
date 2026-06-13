@@ -95,10 +95,9 @@ def save_personas_to_file(
 def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Convert a dictionary of Persona objects to a list of dictionaries for JSON serialization.
 
-    Phase A (portal_engine_reintegration): generation params now live under a
-    nested `params` block — see src/generation_params.py. The flat
-    temperature/top_p/top_k/token_limit keys are no longer written. Load path
-    still reads them for back-compat with un-migrated personas.json files.
+    Generation params live under a nested `params` block — see
+    src/generation_params.py. The flat temperature/top_p/top_k/token_limit keys
+    are neither written nor read (DP-221 retired the flat-key load fallback).
     """
     persona_list: List[Dict[str, Any]] = []
     for persona_name, persona in personas.items():
@@ -126,23 +125,13 @@ def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _resolve_params_kwargs(entry: Dict[str, Any]) -> Dict[str, Any]:
-    """Map a persona JSON entry to the kwargs Persona() expects for params.
+    """Map a persona JSON entry's nested `params` block to Persona() kwargs.
 
-    Prefers the nested `params` block (new shape). Falls back to legacy flat
-    keys (`temperature`, `top_p`, `top_k`, `token_limit`) when absent so old
-    personas.json files keep loading until the deployment migration runs.
+    `max_tokens` inside the block carries the response token limit. A file with
+    no `params` block loads with default generation params.
     """
-    if isinstance(entry.get("params"), dict):
-        return {
-            "params": entry["params"],
-            "token_limit": entry.get("token_limit"),  # legacy override still wins if present
-        }
-    return {
-        "temperature": entry.get("temperature"),
-        "top_p": entry.get("top_p"),
-        "top_k": entry.get("top_k"),
-        "token_limit": entry.get("token_limit"),
-    }
+    params = entry.get("params")
+    return {"params": params if isinstance(params, dict) else None}
 
 
 def load_personas_from_file(file_path_override: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -289,10 +278,6 @@ def load_system_personas_from_file() -> Dict[str, Any]:
                 logger.warning(f"Quarantining system persona '{name}' (loaded but generation blocked until fixed).")
 
             params_kwargs = _resolve_params_kwargs(new_persona)
-            # System personas use `response_token_limit` rather than `token_limit`
-            # for the legacy flat path. Honor it when params block isn't present.
-            if "params" not in params_kwargs and params_kwargs.get("token_limit") is None:
-                params_kwargs["token_limit"] = new_persona.get("response_token_limit")
             personas[name] = Persona(
                 persona_name=name,
                 model_name=new_persona.get("model_name", "local"),

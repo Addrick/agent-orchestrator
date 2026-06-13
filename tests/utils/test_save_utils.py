@@ -95,9 +95,7 @@ def test_load_persona_attributes_integrity(tmp_path):
                 "model_name": "gpt-4-test-variant",
                 "prompt": "You are a test.",
                 "history_messages": 99,
-                "token_limit": 500,
-                "temperature": 0.1,
-                "top_p": 0.9,
+                "params": {"temperature": 0.1, "top_p": 0.9, "max_tokens": 500},
                 "execution_mode": "CONFIRM",
                 "memory_mode": "TICKET_ISOLATED",
                 "enabled_tools": ["create_ticket"]
@@ -208,8 +206,9 @@ def test_save_round_trip_preserves_provider_extras(temp_save_file: Path):
     assert gp.provider_extras == {"kobold": {"rep_pen": 1.05, "min_p": 0.05}}
 
 
-def test_load_legacy_flat_shape_still_works(tmp_path: Path):
-    """Un-migrated personas.json files (legacy flat sampler keys) still load."""
+def test_load_legacy_flat_shape_ignored(tmp_path: Path):
+    """DP-221: flat sampler keys are no longer honored on load — a file that
+    only sets them yields default generation params, not the flat values."""
     test_file = tmp_path / "legacy.json"
     test_file.write_text(json.dumps({
         "personas": [{
@@ -224,10 +223,10 @@ def test_load_legacy_flat_shape_still_works(tmp_path: Path):
     }))
     loaded = save_utils.load_personas_from_file(str(test_file))
     p = loaded["legacy_bot"]
-    assert p.get_temperature() == 0.3
-    assert p.get_top_p() == 0.8
-    assert p.get_top_k() == 25
-    assert p.get_response_token_limit() == 777
+    assert p.get_temperature() is None
+    assert p.get_top_p() is None
+    assert p.get_top_k() is None
+    assert p.get_response_token_limit() != 777
 
 
 def test_save_personas_excludes_system_personas(temp_save_file: Path):
