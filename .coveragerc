@@ -2,7 +2,6 @@
 branch = True
 source = src
 omit =
-    src/interfaces/zammad_bot.py
     src/database/*
     src/__main__.py
     src/main.py

@@ -3,7 +3,7 @@ from unittest.mock import patch
 from src.utils import model_utils
 
 
-@patch('src.utils.model_utils.save_utils.load_models_from_file')
+@patch('src.utils.model_utils.persona_store.load_models_from_file')
 def test_get_model_list_no_update(mock_load_models):
     """update=False reads the cache and merges the static (non-API) models in."""
     mock_load_models.return_value = {"From OpenAI": ["gpt-4"]}
@@ -18,7 +18,7 @@ def test_get_model_list_no_update(mock_load_models):
     assert result["Local"] == ["local"]
 
 
-@patch('src.utils.model_utils.save_utils.load_models_from_file')
+@patch('src.utils.model_utils.persona_store.load_models_from_file')
 def test_get_model_list_no_update_stale_cache_gets_static_models(mock_load_models):
     """A cache written before agy existed still exposes agy/local on read.
 
@@ -41,7 +41,7 @@ def test_get_model_list_no_update_stale_cache_gets_static_models(mock_load_model
     assert result["From OpenAI"] == ["gpt-4"]
 
 
-@patch('src.utils.model_utils.save_utils.load_models_from_file')
+@patch('src.utils.model_utils.persona_store.load_models_from_file')
 def test_get_model_list_no_update_empty_cache(mock_load_models):
     """No cache at all (fresh install) still surfaces the static models."""
     mock_load_models.return_value = None
@@ -53,7 +53,7 @@ def test_get_model_list_no_update_empty_cache(mock_load_models):
     assert result["Local"] == ["local"]
 
 
-@patch('src.utils.model_utils.save_utils.save_models_to_file')
+@patch('src.utils.model_utils.persona_store.save_models_to_file')
 @patch('src.utils.model_utils.refresh_available_anthropic_models')
 @patch('src.utils.model_utils.refresh_available_google_models')
 @patch('src.utils.model_utils.refresh_available_openai_models')

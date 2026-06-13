@@ -6,7 +6,7 @@ from typing import Optional, Dict, Any, List, Type, TypeVar, Union
 
 from config import global_config
 from src.generation_params import GenerationParams
-from src.tools.policy import ToolPolicy
+from src.tool_policy import ToolPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ class Persona:
             meta_visible: bool = False,
             ingest_bank: Optional[str] = None,
             security_block_reasons: Optional[List[str]] = None,
-            **kwargs: Any,
+            inject_timestamp: bool = True,
     ) -> None:
         self._name: str = persona_name
         self._model_name: str = model_name
@@ -87,13 +87,10 @@ class Persona:
             token_limit if token_limit is not None else self._params.max_tokens
         )
 
-        # Handle legacy context_length from tests or old configs
-        effective_history = history_messages
-        if effective_history is None:
-            effective_history = kwargs.get("context_length")
-        if effective_history is None:
-            effective_history = global_config.DEFAULT_HISTORY_MESSAGES
-
+        effective_history = (
+            history_messages if history_messages is not None
+            else global_config.DEFAULT_HISTORY_MESSAGES
+        )
         self._history_messages: int = int(effective_history)
         self._execution_mode: ExecutionMode = self._resolve_enum(
             ExecutionMode, execution_mode, ExecutionMode.AUTONOMOUS)
@@ -110,6 +107,7 @@ class Persona:
         self._chat_template: Optional[str] = chat_template if chat_template else None
         self._meta_visible: bool = bool(meta_visible)
         self._ingest_bank: Optional[str] = ingest_bank if ingest_bank else None
+        self._inject_timestamp: bool = bool(inject_timestamp)
 
         try:
             self._max_context_tokens: int = int(max_context_tokens) if max_context_tokens is not None else global_config.DEFAULT_MAX_CONTEXT_TOKENS
@@ -153,31 +151,29 @@ class Persona:
         for Section B providers (stream_messages / stream_prompt)."""
         return self._params
 
-    def get_history_messages(self) -> int:
+    def get_history_messages(self, advance: bool = True) -> int:
         """
         Returns the effective history message count.
         If a temporary override is active (from a 'hello' command), it returns
-        the override value and increments it for the next turn.
+        the override value and (when ``advance`` is True) increments it for the
+        next turn.
+
+        DP-142: read-only / dry-run callers (transcript view, /assemble) must
+        pass ``advance=False`` so merely viewing or re-syncing does not inflate
+        the hello window. Only the LIVE generation path advances the override.
         """
         if self._temp_history_override is not None:
             current_limit = self._temp_history_override
-            # Increment by 2 for the user message and the assistant's reply.
-            self._temp_history_override += 2
+            if advance:
+                # Increment by 2 for the user message and the assistant's reply.
+                self._temp_history_override += 2
             return current_limit
 
         return self._history_messages
 
-    def get_context_length(self) -> int:
-        """Legacy alias for get_history_messages."""
-        return self.get_history_messages()
-
     def get_base_history_messages(self) -> int:
         """Returns the persona's static, default history message count."""
         return self._history_messages
-
-    def get_base_context_length(self) -> int:
-        """Legacy alias for get_base_history_messages."""
-        return self.get_base_history_messages()
 
     def get_temperature(self) -> Optional[float]:
         return self._params.temperature
@@ -221,30 +217,14 @@ class Persona:
         """The composition-validation errors that quarantined this persona (or [])."""
         return list(self._security_block_reasons)
 
-    def revalidate_security(self) -> bool:
-        """Re-run tool composition validation against the current policy and
-        update the quarantine state. Called after any live tool edit so the
-        operator can clear (or trip) the block without a restart. Returns the
-        new ``is_security_blocked()`` value.
+    def set_security_block_reasons(self, reasons: List[str]) -> None:
+        """Set (or clear, with ``[]``) the quarantine state. Pure mutator —
+        the validation that produces the reasons lives in
+        ``src.tools.composition`` (DP-204 inversion); operator-edit paths call
+        ``tools.composition.revalidate_persona_security(persona)`` which
+        writes the result back through here. See DP-128.
         """
-        # Lazy import: definitions.py does not import persona, but keeping this
-        # local avoids any import-order fragility at module load.
-        from src.tools.definitions import ALL_TOOL_DEFINITIONS
-        if self._tool_policy.default == "allow" and "*" in self._tool_policy.allow:
-            persona_tools = ALL_TOOL_DEFINITIONS
-        else:
-            allowed = set(self._tool_policy.allow + self._tool_policy.ask)
-            persona_tools = [
-                t for t in ALL_TOOL_DEFINITIONS
-                if t.get("function", {}).get("name") in allowed
-            ]
-        self._security_block_reasons = self._tool_policy.validate_composition(persona_tools)
-        if self._security_block_reasons:
-            logger.warning(
-                f"Persona '{self._name}' remains quarantined after edit: "
-                f"{self._security_block_reasons}"
-            )
-        return self.is_security_blocked()
+        self._security_block_reasons = list(reasons)
 
     def get_include_ambient_memory(self) -> bool:
         """Whether to include ambient channel memories in long-term memory retrieval."""
@@ -279,6 +259,10 @@ class Persona:
         recall (`MemoryRouter.list_visible_personas`). Default False — opt-in
         groundwork for the future Meta-Agent. See plans/memory_backend_abc.md."""
         return self._meta_visible
+
+    def get_inject_timestamp(self) -> bool:
+        """Whether to inject the current timestamp into the system prompt."""
+        return self._inject_timestamp
 
     def set_meta_visible(self, value: bool) -> None:
         self._meta_visible = bool(value)
@@ -379,10 +363,6 @@ class Persona:
                 f"Invalid history length provided: '{new_length}'. Setting to default value: {self._history_messages}.")
         return self._history_messages
 
-    def set_context_length(self, new_length: Any) -> int:
-        """Legacy alias for set_history_messages."""
-        return self.set_history_messages(new_length)
-
     def set_temperature(self, new_temp: Any) -> Optional[float]:
         """
         Sets the temperature. Returns the float value if successful,
@@ -452,6 +432,11 @@ class Persona:
         self._long_term_memory = value
         logger.info(f"Persona '{self._name}' long_term_memory set to {value}.")
 
+    def set_inject_timestamp(self, value: bool) -> None:
+        """Sets whether to inject the current timestamp into the system prompt."""
+        self._inject_timestamp = bool(value)
+        logger.info(f"Persona '{self._name}' inject_timestamp set to {self._inject_timestamp}.")
+
     def set_thinking_level(self, value: Optional[str]) -> None:
         """Sets the thinking level for extended thinking models (e.g. 'minimal', None to clear)."""
         self._thinking_level = value
@@ -476,8 +461,8 @@ class Persona:
 
         Pure mutator — does NOT re-run security validation. Operator-facing edit
         paths (`set tools` / `set tool_policy` dev commands, web tools modal) call
-        ``revalidate_security()`` afterwards so a live edit can clear or trip the
-        quarantine; see BotLogic._handle_set (DP-128).
+        ``tools.composition.revalidate_persona_security()`` afterwards so a live
+        edit can clear or trip the quarantine; see BotLogic._handle_set (DP-128).
         """
         self._enabled_tools = new_tools
         self._tool_policy = ToolPolicy.from_legacy_list(new_tools)
@@ -541,10 +526,6 @@ class Persona:
         """Returns True if the persona is in a temporary, dynamic history conversation."""
         return self._temp_history_override is not None
 
-    def is_in_dynamic_context(self) -> bool:
-        """Legacy alias for is_in_dynamic_history."""
-        return self.is_in_dynamic_history()
-
     def get_current_effective_history_messages(self) -> int:
         """
         Returns the next history value that will be used, without incrementing the counter.
@@ -553,10 +534,6 @@ class Persona:
         if self._temp_history_override is not None:
             return self._temp_history_override
         return self._history_messages
-
-    def get_current_effective_context_length(self) -> int:
-        """Legacy alias for get_current_effective_history_messages."""
-        return self.get_current_effective_history_messages()
 
     # --- Utility Methods ---
 
@@ -567,6 +544,7 @@ class Persona:
     def get_config_for_engine(self) -> Dict[str, Any]:
         """Returns a dictionary of the current generation parameters for the TextEngine."""
         config: Dict[str, Any] = {
+            "persona_name": self._name,
             "model_name": self._model_name,
             "max_output_tokens": self._params.max_tokens,
             "temperature": self._params.temperature,

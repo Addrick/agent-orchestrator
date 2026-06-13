@@ -90,6 +90,9 @@ jobs:
       DOCKER_CONFIG: C:\Server\derpr\.docker
       ENV_FILE: C:\Server\derpr\.env
       DATA_VOLUME: derpr_data
+      # agy keeps OAuth tokens + workspace cache under ~/.gemini; without this
+      # volume every deploy wipes them and the agy route needs a re-login.
+      AGY_HOME_VOLUME: derpr_agy_home
       CONTAINER_NAME: chatbot
 
     steps:
@@ -125,6 +128,7 @@ jobs:
             --restart unless-stopped `
             --env-file $env:ENV_FILE `
             -v "${env:DATA_VOLUME}:/app/data" `
+            -v "${env:AGY_HOME_VOLUME}:/home/botuser/.gemini" `
             -p 5003:5003 `
             ${{ env.IMAGE_NAME }}:latest
 

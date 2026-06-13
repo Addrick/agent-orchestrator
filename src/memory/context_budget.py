@@ -1,5 +1,5 @@
 # src/memory/context_budget.py
-"""Token-budget enforcement shared between chat_system and kobold_adapter.
+"""Token-budget enforcement shared between chat_system and the kobold engine adapter.
 
 `max_context_tokens` is a persona setting that caps the *total* context
 (prompt + reserved response), matching kobold-lite's

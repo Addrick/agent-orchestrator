@@ -5,14 +5,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
+# Default test run (parallel via pytest-xdist, skips LLM live tests)
+pytest -m "not llm_live" -n auto
+
 # Run all tests (live tests auto-skip if no credentials)
 pytest
 
 # Unit + integration only (no external services needed)
-pytest -m "not zammad_live and not llm_live and not discord_live"
+pytest -m "not zammad_live and not llm_live and not discord_live" -n auto
 
 # Unit tests only
-pytest -m "not integration and not zammad_live and not llm_live and not discord_live"
+pytest -m "not integration and not zammad_live and not llm_live and not discord_live" -n auto
 
 # Zammad live tests only
 pytest -m "zammad_live"
@@ -92,7 +95,22 @@ To support multiple agents working concurrently, the following rules are mandato
 - **Every** task must have a corresponding file in `memory/project/tasks/DP-XXX.md`.
 
 ### 2. Workspace Isolation
-- Parallel work **MUST** use Git Worktrees.
+- **MUST** use Git Worktrees — for *all* DP-XXX work, including solo single-task
+  sessions, not just when agents run concurrently. The main repo directory is a
+  shared mutable surface and may already hold another task's uncommitted edits.
+- **Start every DP-XXX by creating its worktree off a clean `master`:**
+  `git worktree add worktrees/DP-XXX -b bugfix/DP-XXX-slug master`. Do all
+  editing, testing, and committing inside that worktree.
+- **Never stage or commit from the main repo directory.** Before any
+  `git add`/`git commit`, confirm you are inside `worktrees/DP-XXX/` and that
+  `git status` shows only files *you* changed. If `git status` lists another
+  DP's uncommitted changes (the main tree was left dirty), **STOP** — do not
+  `git add` (a path-broad add will sweep up that WIP into your commit, which is
+  exactly how DP-142's first commit was contaminated).
+- **Run `pytest` from inside the worktree**, not from the main repo against
+  worktree paths. Worktrees share `.venv` via a junction, so a top-level
+  `pytest worktrees/DP-XXX/tests/...` imports `src` from the *main* tree, not
+  the worktree — silently masking real pass/fail.
 - Worktree root: `worktrees/DP-XXX/`.
 - Never run `git checkout` or `git pull` in the main repository directory while a parallel agent is working, as this can corrupt their local file state.
 
@@ -100,7 +118,29 @@ To support multiple agents working concurrently, the following rules are mandato
 - No task is considered "QA_READY" until `pytest` passes within its dedicated worktree.
 - Verify all CI/CD checks (including `pytest`, `flake8` lint, and `mypy` type check as defined in `.github/workflows/deploy.yml`) after finishing any commit-ready change.
 - Human approval is required for all merges to `main` or `develop`.
-- After merge, the worktree directory `worktrees/DP-XXX/` should be removed via `git worktree remove`.
+- After merge, remove the worktree following the teardown sequence below.
+- **⚠️ DROP THE `.venv` JUNCTION FIRST — every teardown, no exceptions.** Each
+  worktree's `.venv` is a Windows **junction** to the main repo's `.venv`. ANY
+  removal that recurses the directory — `rm -rf`, `Remove-Item -Recurse`, **and
+  `git worktree remove --force` even on a clean happy-path remove** — follows the
+  junction and **destroys the real shared venv** (DP-142 cleanup, DP-214
+  teardown, DP-221 finalize all rebuilt it from scratch). `git worktree remove`
+  is NOT safe on its own. Mandatory sequence, in order:
+  1. Move every shell's cwd out of the worktree (a cwd inside it holds a Windows
+     lock → "Device or resource busy").
+  2. Drop the junction link (removes only the link, never the target) via the
+     **PowerShell tool**: `(Get-Item "worktrees\DP-XXX\.venv").Delete()`, then
+     **verify it's gone** (`ls worktrees/DP-XXX/.venv` must fail).
+     - ❌ Do NOT use `cmd /c rmdir ...` from the Bash tool — git-bash/MSYS
+       mangles `/c` and launches an interactive `cmd` without running the
+       command, so the junction is NOT dropped (this silently wiped the venv
+       during DP-221c).
+     - ❌ Do NOT use `Remove-Item -Recurse` — it follows the junction into the
+       shared venv and deletes the target.
+  3. `git worktree remove worktrees/DP-XXX` (add `--force` only for uncommitted
+     changes — by this point the junction is already gone, so `--force` is safe).
+  4. `git worktree prune`.
+  After any teardown, confirm the shared venv survived: `ls .venv/Scripts/python.exe`.
 
 ## Documentation
 

@@ -15,7 +15,7 @@ submitted turn returns "success" without a real model.
 
 import os
 import sys
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, _ROOT)
@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.join(_ROOT, "src"))
 PORT = int(os.environ.get("LOCAL_PORTAL_PORT", "5055"))
 
 from memory.memory_manager import MemoryManager  # noqa: E402
-from src.chat_system import ChatSystem  # noqa: E402
+from src.bootstrap import create_chat_system  # noqa: E402
 from src.engine import TextEngine  # noqa: E402
 from src.interfaces.kobold_engine_adapter import KoboldEngineAdapter  # noqa: E402
 from src.persona import Persona  # noqa: E402
@@ -54,8 +54,10 @@ def main() -> int:
     text_engine = TextEngine()
     text_engine.stream_messages = _stub_stream  # type: ignore[method-assign]
 
-    with patch("src.chat_system.load_personas_from_file", return_value={PERSONA: persona}):
-        chat_system = ChatSystem(memory_manager=mm, text_engine=text_engine)
+    chat_system = create_chat_system(
+        memory_manager=mm, text_engine=text_engine,
+        user_personas={PERSONA: persona},
+    )
     chat_system.bot_logic.preprocess_message = AsyncMock(return_value=None)
 
     adapter = KoboldEngineAdapter(chat_system=chat_system)

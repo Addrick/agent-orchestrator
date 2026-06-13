@@ -9,7 +9,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, NoReturn, Optional, Tuple, TYPE_CHECKING, cast
 import httpx
-from .base import MemoryBackend, MemoryHit, Experience, ReflectResult, MentalModel
+from .base import (
+    MemoryBackend, MemoryBackendError, MemoryHit, Experience, ReflectResult,
+    MentalModel,
+)
 
 if TYPE_CHECKING:
     from src.memory.memory_manager import MemoryManager
@@ -27,12 +30,19 @@ HINDSIGHT_API_PREFIX = "/v1/default"
 SESSION_GAP_SECONDS = 24 * 3600
 
 
-class HindsightAPIError(Exception):
-    """Raised for non-2xx responses from the Hindsight API."""
+class HindsightAPIError(MemoryBackendError):
+    """Raised for non-2xx responses from the Hindsight API.
+
+    Subclasses the ABC-level ``MemoryBackendError`` so callers can classify
+    retryability (``transient`` = HTTP 5xx) without importing this module.
+    """
     def __init__(self, status_code: int, message: str):
         self.status_code = status_code
         self.message = message
-        super().__init__(f"Hindsight API Error {status_code}: {message}")
+        super().__init__(
+            f"Hindsight API Error {status_code}: {message}",
+            transient=500 <= status_code < 600,
+        )
 
 
 class HindsightRESTClient:

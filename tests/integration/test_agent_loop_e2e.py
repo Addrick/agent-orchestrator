@@ -65,6 +65,7 @@ async def test_tool_loop_context_flow_memory_and_clean_close(mocked_chat_system)
     and clean turn closure."""
     chat_system, memory_manager = mocked_chat_system
     persona = chat_system.personas["test_persona"]
+    persona.set_inject_timestamp(False)
     persona.set_enabled_tools(["*"])
 
     user_id, channel = "user-e2e", "chan-e2e"

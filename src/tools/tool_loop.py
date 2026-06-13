@@ -24,7 +24,7 @@ from src.generation_events import (
     ErrorEvent, ResponseType, TokenEvent,
     ToolCallResultEvent, ToolCallStartEvent,
 )
-from src.persona import ExecutionMode, Persona
+from src.persona import Persona
 from src.tools.definitions import (
     WRITE_TOOLS, ALWAYS_CONFIRM_TOOLS,
     get_tool_capabilities, is_irreversible, get_tool_definition
@@ -65,6 +65,31 @@ LoopEvent = Union[
     ToolCallStartEvent, ToolCallResultEvent,
     _ApiPayloadEvent, _LoopFinishedEvent,
 ]
+
+
+def build_wire_messages(
+    persona: Persona, conversation_history: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Prepend the persona system prompt to the conversation history to form
+    the exact message array sent to the provider.
+
+    Single source of truth for the system-prompt prepend: both the live tool
+    loop's first iteration (`ToolLoop.run`) and the `/assemble` dry-run
+    (`ChatSystem.assemble_request`) call this, so the wire messages the inspector
+    shows cannot drift from what a live submit actually sends.
+    """
+    from datetime import datetime
+    system_prompt = persona.get_prompt()
+    inject = True
+    if hasattr(persona, "get_inject_timestamp"):
+        inject = persona.get_inject_timestamp()
+
+    if inject:
+        # Wednesday, June 10, 2026, 01:01 AM EDT
+        now_str = datetime.now().astimezone().strftime("%A, %B %d, %Y, %I:%M %p %Z")
+        system_prompt = f"[Current Time: {now_str}]\n\n{system_prompt}"
+
+    return [{"role": "system", "content": system_prompt}] + list(conversation_history)
 
 
 class ToolLoop:
@@ -116,9 +141,8 @@ class ToolLoop:
             tool_calls_collected: Optional[List[Dict[str, Any]]] = None
             accumulated_parts: List[str] = []
 
-            messages_for_llm: List[Dict[str, Any]] = (
-                [{"role": "system", "content": persona.get_prompt()}]
-                + list(conversation_history)
+            messages_for_llm: List[Dict[str, Any]] = build_wire_messages(
+                persona, conversation_history,
             )
 
             try:

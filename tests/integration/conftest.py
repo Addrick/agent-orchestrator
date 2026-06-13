@@ -5,11 +5,11 @@ import time
 import random
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 from memory.memory_manager import MemoryManager
-from src.chat_system import ChatSystem
 from src.engine import TextEngine
+from tests.helpers import make_chat_system, route_stream_through_generate_response
 from src.persona import Persona, MemoryMode
 from config.global_config import TEST_MEMORY_DATABASE_FILE
 
@@ -18,9 +18,9 @@ from config.global_config import TEST_MEMORY_DATABASE_FILE
 def mocked_chat_system():
     """
     Sets up a ChatSystem with real MemoryManager and TextEngine.
-    No external service credentials required. Phase C routes through
-    `text_engine.stream_messages`, which wraps the mocked
-    `generate_response` for non-local models.
+    No external service credentials required. DP-206b: the pipeline streams
+    through `_stream_response`; the test bridge routes it back through the
+    mocked `generate_response` so tests keep scripting one-shot tuples.
     """
     db_path = f"{TEST_MEMORY_DATABASE_FILE}.{random.randint(1000, 9999)}"
     if os.path.exists(db_path):
@@ -33,21 +33,22 @@ def mocked_chat_system():
     text_engine.generate_response = AsyncMock(  # type: ignore[method-assign]
         return_value=({'type': 'text', 'content': ''}, {}),
     )
+    route_stream_through_generate_response(text_engine)
 
     test_personas = {
         "test_persona": Persona(
             persona_name="test_persona", model_name="mock_model", prompt="You are a test persona.",
-            enabled_tools=['*'], memory_mode=MemoryMode.CHANNEL_ISOLATED, context_length=10
+            enabled_tools=['*'], memory_mode=MemoryMode.CHANNEL_ISOLATED, history_messages=10
         ),
         "capped_persona": Persona(
-            persona_name='capped_persona', model_name='mock', prompt='talk', context_length=100
+            persona_name='capped_persona', model_name='mock', prompt='talk', history_messages=100
         )
     }
 
-    with patch('src.chat_system.load_personas_from_file', return_value=test_personas):
-        chat_system = ChatSystem(
-            memory_manager=memory_manager, text_engine=text_engine,
-        )
+    chat_system = make_chat_system(
+        memory_manager=memory_manager, text_engine=text_engine,
+        personas=test_personas,
+    )
 
     try:
         yield chat_system, memory_manager

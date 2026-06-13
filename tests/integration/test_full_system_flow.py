@@ -22,9 +22,9 @@ async def test_dynamic_context_ignores_dev_commands(mocked_chat_system):
                       return_value=({'type': 'text', 'content': '...'}, {})):
         await chat_system.generate_response("test_persona", "user1", "channel", "hello")
         await chat_system.generate_response("test_persona", "user1", "channel", "first message")
-        assert persona.get_current_effective_context_length() == 2
+        assert persona.get_current_effective_history_messages() == 2
         await chat_system.generate_response("test_persona", "user1", "channel", "what model")
-        assert persona.get_current_effective_context_length() == 2
+        assert persona.get_current_effective_history_messages() == 2
         with patch.object(memory_manager, 'get_channel_history',
                           wraps=memory_manager.get_channel_history) as mock_get_history:
             await chat_system.generate_response("test_persona", "user1", "channel", "second message")
@@ -129,7 +129,7 @@ async def test_confirm_mode_auto_executes_read_only_tools(mocked_chat_system):
         )
         assert response_type == ResponseType.LLM_GENERATION
         assert response == 'Found some tickets.'
-        assert ("user1", "test_persona") not in chat_system._pending_confirmations
+        assert ("user1", "test_persona") not in chat_system.confirmations.pending
 
 
 # =============================================================================

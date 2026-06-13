@@ -5,28 +5,33 @@ from unittest.mock import MagicMock, AsyncMock, patch
 
 from src.message_handler import BotLogic
 from src.persona import Persona
-from src.chat_system import ChatSystem
+from tests.helpers import make_bot_logic
 
 
 @pytest.fixture
 def mock_chat_system_with_state():
-    """Creates a mock ChatSystem that has a real dictionary for personas.json."""
-    chat_system = MagicMock(spec=ChatSystem)
+    """Mutable state bucket BotLogic's explicit deps close over (DP-202).
+
+    A plain MagicMock with a real `personas` dict; tests mutate attributes
+    (models_available, last_api_requests, text_engine, ...) and the dep
+    closures see the live values.
+    """
+    chat_system = MagicMock()
     # Start with a real dictionary to track state changes
     chat_system.personas = {
         "derpr": Persona("derpr", "gpt-4", "You are derpr.", history_messages=20),
         "testbot": Persona("testbot", "gpt-3", "You are testbot.")
     }
-    # Instance attributes aren't part of the spec; tests that exercise the dump
-    # set last_api_requests explicitly and rely on the single-payload fallback.
+    # Tests that exercise the dump set last_api_requests explicitly and rely
+    # on the single-payload fallback.
     chat_system.last_api_iterations = {}
     return chat_system
 
 
 @pytest.fixture
 def bot_logic(mock_chat_system_with_state):
-    """Creates a BotLogic instance connected to the stateful mock ChatSystem."""
-    return BotLogic(mock_chat_system_with_state)
+    """Creates a BotLogic instance over the stateful mock."""
+    return make_bot_logic(mock_chat_system_with_state)
 
 
 # --- Test Cases for State Mutation (add/delete) ---
@@ -106,23 +111,23 @@ def test_set_history_command_variations(bot_logic, mock_chat_system_with_state):
     persona = mock_chat_system_with_state.personas["derpr"]
 
     # Test 1: Set a new static history length
-    bot_logic._set_history(["history", "50"], persona)
+    bot_logic.set_handlers["history"](["history", "50"], persona)
     assert persona.get_current_effective_history_messages() == 50
     assert persona.is_in_dynamic_history() is False
 
     # Test 2: Switch to dynamic mode, inheriting the current value (50)
-    bot_logic._set_history(["history", "dynamic"], persona)
+    bot_logic.set_handlers["history"](["history", "dynamic"], persona)
     assert persona.is_in_dynamic_history() is True
     assert persona.get_history_messages() == 50, "It should start at the captured value of 50."
     assert persona.get_history_messages() == 52, "Then it should grow to 52."
 
     # Test 3: Set a new static history, which should disable dynamic mode
-    bot_logic._set_history(["history", "30"], persona)
+    bot_logic.set_handlers["history"](["history", "30"], persona)
     assert persona.is_in_dynamic_history() is False
     assert persona.get_current_effective_history_messages() == 30
 
     # Test 4: Switch to dynamic mode with a specific start value
-    bot_logic._set_history(["history", "dynamic", "8"], persona)
+    bot_logic.set_handlers["history"](["history", "dynamic", "8"], persona)
     assert persona.is_in_dynamic_history() is True
     assert persona.get_history_messages() == 8
     assert persona.get_history_messages() == 10
@@ -131,7 +136,7 @@ def test_set_history_command_variations(bot_logic, mock_chat_system_with_state):
     # The current history is 12 (from the previous step: 8 -> 10 -> 12)
     assert persona.get_current_effective_history_messages() == 12
     # Now, set dynamic again. It should capture 12.
-    bot_logic._set_history(["history", "dynamic"], persona)
+    bot_logic.set_handlers["history"](["history", "dynamic"], persona)
     assert persona.is_in_dynamic_history() is True
     assert persona.get_history_messages() == 12
     assert persona.get_history_messages() == 14
@@ -617,7 +622,7 @@ def bot_logic_with_tools(mock_chat_system_with_state):
         {"type": "function", "function": {"name": "search_tickets"}},
     ]
     mock_chat_system_with_state.tool_manager = mock_tool_manager
-    return BotLogic(mock_chat_system_with_state)
+    return make_bot_logic(mock_chat_system_with_state)
 
 
 @pytest.mark.asyncio
@@ -736,11 +741,10 @@ _SETTER_TO_COMMAND = {
     'set_max_context_tokens': 'max_context_tokens',
     'set_chat_template': 'chat_template',
     'set_tool_policy': 'tool_policy',
+    'set_inject_timestamp': 'inject_timestamp',
 }
 
-# Legacy aliases that should not have commands (as they are being deprecated).
 _SETTER_EXCEPTIONS = {
-    'set_context_length',
     # provider_extras is reached via the dotted-path fallback in _handle_set,
     # not a dedicated set_<name> command. See Phase E in
     # plans/portal_engine_reintegration.md.
@@ -748,6 +752,10 @@ _SETTER_EXCEPTIONS = {
     # meta_visible is Sprint-4 groundwork (DP-111); no production caller flips
     # it yet. Sprint 5 (metabank) will wire a command if/when it ships.
     'set_meta_visible',
+    # Quarantine state is not operator-settable directly: it is written by
+    # tools.composition.revalidate_persona_security after `set tools` /
+    # `set tool_policy` edits (DP-128 / DP-204 inversion).
+    'set_security_block_reasons',
 }
 
 # Maps Persona getter method names → expected command name in what_handlers.
@@ -773,6 +781,7 @@ _GETTER_TO_COMMAND = {
     'get_chat_template': 'chat_template',
     'get_tool_policy': 'tool_policy',
     'get_security_block_reasons': 'security',
+    'get_inject_timestamp': 'inject_timestamp',
 }
 
 # Getters that intentionally have no what command (internal/derived values).
@@ -786,10 +795,6 @@ _GETTER_EXCEPTIONS = {
     # not a dedicated what_<name> command. See Phase E in
     # plans/portal_engine_reintegration.md.
     'get_provider_extra',
-    # Legacy aliases
-    'get_base_context_length',
-    'get_current_effective_context_length',
-    'get_context_length',
     # meta_visible is Sprint-4 groundwork (DP-111); no production caller reads
     # it yet. Sprint 5 (metabank) will wire a command if/when it ships.
     'get_meta_visible',
@@ -879,7 +884,7 @@ def bot_logic_with_selector(mock_chat_system_with_state):
     }
     mock_chat_system_with_state.text_engine = MagicMock()
     mock_chat_system_with_state.text_engine.generate_response = AsyncMock()
-    return BotLogic(mock_chat_system_with_state)
+    return make_bot_logic(mock_chat_system_with_state)
 
 
 @pytest.mark.asyncio
@@ -1103,3 +1108,47 @@ async def test_what_dotted_path_unset(bot_logic):
     result = await bot_logic.preprocess_message("derpr", "user1", "what kobold.mirostat")
     assert result is not None and result["mutated"] is False
     assert "not set" in result["response"]
+
+
+# --- Dev-command case handling: dispatch keys fold case, VALUES keep it -----
+# Regression guard for the blanket `message.lower()` removal: free-text/JSON
+# values must round-trip verbatim while command/sub-command matching stays
+# case-insensitive and enumerated values self-normalize.
+
+
+@pytest.mark.asyncio
+async def test_set_prompt_preserves_value_case(bot_logic, mock_chat_system_with_state):
+    res = await bot_logic.preprocess_message("derpr", "u", "set prompt You are a HELPFUL Bot.")
+    assert res["mutated"] is True
+    assert mock_chat_system_with_state.personas["derpr"].get_prompt() == "You are a HELPFUL Bot."
+
+
+@pytest.mark.asyncio
+async def test_uppercase_command_and_subcommand_still_dispatch(bot_logic, mock_chat_system_with_state):
+    res = await bot_logic.preprocess_message("derpr", "u", "SET PROMPT Mixed Case Value")
+    assert res is not None and res["mutated"] is True
+    assert mock_chat_system_with_state.personas["derpr"].get_prompt() == "Mixed Case Value"
+
+
+@pytest.mark.asyncio
+async def test_set_tool_policy_json_preserves_case(bot_logic, mock_chat_system_with_state):
+    # the JSON (incl. a mixed-case tool name) must not be lowercased in transit
+    cmd = 'set tool_policy {"default":"deny","allow":["Foo_Bar"],"ask":[]}'
+    res = await bot_logic.preprocess_message("derpr", "u", cmd)
+    assert res["mutated"] is True
+    assert mock_chat_system_with_state.personas["derpr"].get_tool_policy().allow == ["Foo_Bar"]
+
+
+@pytest.mark.asyncio
+async def test_set_memory_mode_remains_case_insensitive(bot_logic, mock_chat_system_with_state):
+    for val in ("global", "GLOBAL", "GloBal"):
+        res = await bot_logic.preprocess_message("derpr", "u", f"set memory_mode {val}")
+        assert res["mutated"] is True
+        assert mock_chat_system_with_state.personas["derpr"].get_memory_mode().name == "GLOBAL"
+
+
+@pytest.mark.asyncio
+async def test_add_persona_lowercases_name_but_keeps_prompt_case(bot_logic, mock_chat_system_with_state):
+    await bot_logic.preprocess_message("derpr", "u", "add NewBot You are New")
+    assert "newbot" in mock_chat_system_with_state.personas
+    assert mock_chat_system_with_state.personas["newbot"].get_prompt() == "You are New"

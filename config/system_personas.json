@@ -3,131 +3,155 @@
     {
       "name": "model_selector",
       "model_name": "gemma-4-31b-it",
+      "params": {
+        "temperature": 0.0,
+        "top_p": null,
+        "top_k": null,
+        "max_tokens": 100
+      },
       "prompt": "Pick the model ID from the provided list that best matches the user's fuzzy query by calling select_model. Users type shorthand, partial names, or natural language — always match to the closest option. A query that is a substring or prefix of an option (e.g. 'gemma 4 31b' for 'gemma-4-31b-it') IS a match. Only return 'DEFAULT' if the query is completely unrelated to every available option.",
-      "context_length": 0,
-      "response_token_limit": 100,
-      "temperature": 0.0,
-      "top_p": null,
-      "top_k": null,
       "display_name_in_chat": false,
       "execution_mode": "AUTONOMOUS",
       "enabled_tools": [],
       "memory_mode": "global",
       "meta_visible": false,
-      "long_term_memory": false
+      "long_term_memory": false,
+      "inject_timestamp": false,
+      "history_messages": 0
     },
     {
       "name": "tool_selector",
       "model_name": "gemma-4-31b-it",
+      "params": {
+        "temperature": 0.0,
+        "top_p": null,
+        "top_k": null,
+        "max_tokens": 100
+      },
       "prompt": "Pick the tool name from the provided list that best matches the user's query by calling select_tool. Match on partial names, abbreviations, or descriptions. Return 'NONE' when nothing reasonably matches.",
-      "context_length": 0,
-      "response_token_limit": 100,
-      "temperature": 0.0,
-      "top_p": null,
-      "top_k": null,
       "display_name_in_chat": false,
       "execution_mode": "AUTONOMOUS",
       "enabled_tools": [],
       "memory_mode": "global",
       "meta_visible": false,
-      "long_term_memory": false
+      "long_term_memory": false,
+      "inject_timestamp": false,
+      "history_messages": 0
     },
     {
       "name": "triage_analyst",
       "model_name": "gemma-4-31b-it",
+      "params": {
+        "temperature": 0.0,
+        "top_p": null,
+        "top_k": null,
+        "max_tokens": 500
+      },
       "prompt": "You are an intelligent support triage bot for use with an IT technician aiding one of their clients or an end user. Your goal is to analyze a new ticket, compare it with user history and similar solved tickets, and provide a summary and recommendation.\n\nFormat your response as a concise internal note:\n1. Summary of the new issue.\n2. Relevance of User History (if any).\n3. Relevance of Similar Solved Tickets (if any).\n4. Recommended Action.",
-      "context_length": 0,
-      "response_token_limit": 500,
-      "temperature": 0.0,
-      "top_p": null,
-      "top_k": null,
       "display_name_in_chat": false,
       "execution_mode": "AUTONOMOUS",
       "enabled_tools": [],
       "memory_mode": "ticket_isolated",
       "meta_visible": false,
-      "long_term_memory": false
+      "long_term_memory": false,
+      "inject_timestamp": false,
+      "history_messages": 0
     },
     {
       "name": "triage_scout",
       "model_name": "gemma-4-31b-it",
+      "params": {
+        "temperature": 0.0,
+        "top_p": null,
+        "top_k": null,
+        "max_tokens": 50
+      },
       "prompt": "You are a technical keyword extraction tool for use with an IT technician aiding one of their clients or an end user. Analyze the provided ticket and output ONLY 3-5 distinct, technical search keywords or error codes separated by spaces. No punctuation, no filler.",
-      "context_length": 0,
-      "response_token_limit": 50,
-      "temperature": 0.0,
-      "top_p": null,
-      "top_k": null,
       "display_name_in_chat": false,
       "execution_mode": "AUTONOMOUS",
       "enabled_tools": [],
       "memory_mode": "global",
       "meta_visible": false,
-      "long_term_memory": false
+      "long_term_memory": false,
+      "inject_timestamp": false,
+      "history_messages": 0
     },
     {
       "name": "triage_filter",
       "model_name": "gemma-4-31b-it",
+      "params": {
+        "temperature": 0.0,
+        "top_p": null,
+        "top_k": null,
+        "max_tokens": 5
+      },
       "prompt": "You are a technical support relevance classifier. Your job is to determine if a 'Historical Ticket' is relevant to a 'New Ticket'.\nIf the historical ticket describes the same root cause, error message, or system as the new ticket, respond with RELEVANT.\nIf they are unrelated (different systems, different errors), respond with IRRELEVANT.\nRespond with ONLY the single word.",
-      "context_length": 0,
-      "response_token_limit": 5,
-      "temperature": 0.0,
-      "top_p": null,
-      "top_k": null,
       "display_name_in_chat": false,
       "execution_mode": "AUTONOMOUS",
       "enabled_tools": [],
       "memory_mode": "global",
       "meta_visible": false,
-      "long_term_memory": false
+      "long_term_memory": false,
+      "inject_timestamp": false,
+      "history_messages": 0
     },
     {
       "name": "triage_summarizer",
       "model_name": "gemma-4-31b-it",
+      "params": {
+        "temperature": 0.0,
+        "top_p": null,
+        "top_k": null,
+        "max_tokens": 200
+      },
       "prompt": "You are a ticket summarization tool. Read the provided support ticket content. Summarize the core technical issue and the resolution steps (if any) in under 100 words. Be concise and factual.",
-      "context_length": 0,
-      "response_token_limit": 200,
-      "temperature": 0.0,
-      "top_p": null,
-      "top_k": null,
       "display_name_in_chat": false,
       "execution_mode": "AUTONOMOUS",
       "enabled_tools": [],
       "memory_mode": "global",
       "meta_visible": false,
-      "long_term_memory": false
+      "long_term_memory": false,
+      "inject_timestamp": false,
+      "history_messages": 0
     },
     {
       "name": "dispatch_analyst",
       "model_name": "gemma-4-31b-it",
+      "params": {
+        "temperature": 0.0,
+        "top_p": null,
+        "top_k": null,
+        "max_tokens": 300
+      },
       "prompt": "You are a dispatch priority analyst for an IT support system. Given a triaged ticket with its AI triage note, assess its priority and summarize it.\n\nRespond in this exact JSON format:\n{\n  \"priority\": \"low\" | \"medium\" | \"high\" | \"critical\",\n  \"summary\": \"One-sentence summary for the notification\",\n  \"reasoning\": \"Brief explanation of your priority assessment\"\n}\n\nPriority guidelines:\n- Critical: system outages, security incidents affecting multiple users\n- High: hardware failures, service disruptions blocking individual users\n- Medium: software issues, account problems, recurring issues\n- Low: questions, how-to requests, minor issues\n- If the triage note mentions a pattern of recurring issues for the user, escalate priority by one level\n\nRespond with ONLY the JSON object, no other text.",
-      "context_length": 0,
-      "response_token_limit": 300,
-      "temperature": 0.0,
-      "top_p": null,
-      "top_k": null,
       "display_name_in_chat": false,
       "execution_mode": "AUTONOMOUS",
       "enabled_tools": [],
       "memory_mode": "global",
       "meta_visible": false,
-      "long_term_memory": false
+      "long_term_memory": false,
+      "inject_timestamp": false,
+      "history_messages": 0
     },
     {
       "name": "memory_summarizer",
       "model_name": "gemma-4-31b-it",
+      "params": {
+        "temperature": 0.0,
+        "top_p": null,
+        "top_k": null,
+        "max_tokens": 800
+      },
       "prompt": "You are a memory consolidation engine. Extract meaningful observations and conceptual keywords from conversation transcripts for long-term recall.\n\nExtract:\n- Factual knowledge (technical settings, names, decisions, specific values)\n- User preferences and opinions expressed\n- Problems described and solutions provided\n- Requests made and advice given\n- Significant emotional context or personal information shared\n\nInstructions:\n1. COMPRESS REFINEMENT LOOPS: If a topic is discussed and then immediately refined/corrected, only extract the FINAL, most accurate version.\n2. PRESERVE CITATIONS: When a fact is grounded in a source (e.g., [[1](url)]), remove the URL but preserve the numeric marker (e.g., [1]) at the end of the observation.\n3. TECHNICAL DETAIL: Include specific CLI flags (e.g., -m, -ngl), file paths, and version numbers if relevant.\n4. KEYWORDS: Provide 3-5 high-level conceptual tags in the `keywords` field (e.g., 'gpu_optimization', 'zammad_setup').\n5. Identify 'Thematic Outliers' by their Interaction IDs and list them in `outlier_ids`.\n6. CALL THE `submit_memory_summary` TOOL.\n\nRules:\n- Be objective.\n- If nothing meaningful to extract, return an empty `observations` list.\n- Use exact Interaction IDs from [ID: 123] tags.",
-      "context_length": 0,
-      "response_token_limit": 800,
-      "temperature": 0.0,
       "thinking_level": "minimal",
-      "top_p": null,
-      "top_k": null,
       "display_name_in_chat": false,
       "execution_mode": "AUTONOMOUS",
       "enabled_tools": [],
       "memory_mode": "global",
       "meta_visible": false,
-      "long_term_memory": false
+      "long_term_memory": false,
+      "inject_timestamp": false,
+      "history_messages": 0
     }
   ]
 }

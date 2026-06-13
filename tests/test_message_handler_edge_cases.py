@@ -15,9 +15,9 @@ from __future__ import annotations
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from src.chat_system import ChatSystem
 from src.message_handler import BotLogic
 from src.persona import ExecutionMode, MemoryMode, Persona
+from tests.helpers import make_bot_logic
 
 
 # --- Fixtures ---
@@ -25,7 +25,8 @@ from src.persona import ExecutionMode, MemoryMode, Persona
 
 @pytest.fixture
 def chat_system():
-    cs = MagicMock(spec=ChatSystem)
+    """Mutable state bucket BotLogic's explicit deps close over (DP-202)."""
+    cs = MagicMock()
     cs.personas = {
         "derpr": Persona("derpr", "gpt-4", "You are derpr.", history_messages=20),
     }
@@ -34,7 +35,6 @@ def chat_system():
         "From Anthropic": ["claude-opus-4-7"],
     }
     cs.last_api_requests = {}
-    # Attach attributes not visible on the class spec (set in __init__).
     cs.memory_manager = MagicMock()
     cs.tool_manager = MagicMock()
     return cs
@@ -42,7 +42,7 @@ def chat_system():
 
 @pytest.fixture
 def bot(chat_system):
-    return BotLogic(chat_system)
+    return make_bot_logic(chat_system)
 
 
 @pytest.fixture
@@ -56,11 +56,11 @@ def bot_with_tools(chat_system):
         {"type": "function", "function": {"name": "google_grounding_search"}},
     ]
     chat_system.tool_manager = tm
-    return BotLogic(chat_system)
+    return make_bot_logic(chat_system)
 
 
 def _persona(bot: BotLogic) -> Persona:
-    return bot.chat_system.personas["derpr"]
+    return bot.personas()["derpr"]
 
 
 # =============================================================================
@@ -294,7 +294,7 @@ async def test_set_service_bindings_clear_keyword(bot):
 def test_set_service_bindings_csv_whitespace(bot):
     """Direct handler call preserves casing; verifies CSV+whitespace parsing."""
     persona = _persona(bot)
-    resp, mutated = bot._set_service_bindings(
+    resp, mutated = bot.set_handlers["service_bindings"](
         ["service_bindings", "zammad, agents , notifier"], persona
     )
     assert mutated is True
@@ -398,7 +398,7 @@ async def test_set_chat_template_clear_keyword(bot, keyword):
 def test_set_tool_policy_invalid_json(bot):
     """Direct call: malformed JSON returns error, no mutation."""
     persona = _persona(bot)
-    resp, mutated = bot._set_tool_policy(["tool_policy", "{not json"], persona)
+    resp, mutated = bot.set_handlers["tool_policy"](["tool_policy", "{not json"], persona)
     assert mutated is False
     assert "Invalid JSON" in resp
 
@@ -412,7 +412,7 @@ def test_set_tool_policy_from_dict_error(bot):
     """
     persona = _persona(bot)
     with patch.object(Persona, "set_tool_policy", side_effect=ValueError("bad policy")):
-        resp, mutated = bot._set_tool_policy(
+        resp, mutated = bot.set_handlers["tool_policy"](
             ["tool_policy", '{"default":"deny"}'], persona
         )
     assert mutated is False

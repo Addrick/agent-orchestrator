@@ -11,7 +11,7 @@ from typing import Any, AsyncIterator, Optional, List
 from config.global_config import DISCORD_CHAR_LIMIT, DISCORD_STATUS_LIMIT, DISCORD_DEBUG_CHANNEL, \
     AMBIENT_LOGGING_CHANNELS, GLOBAL_HISTORY_MESSAGES, PENDING_CONFIRMATION_TIMEOUT
 from src.utils.message_utils import split_string_by_limit
-from src.utils.save_utils import save_personas_to_file
+from src.personas.store import save_personas_to_file
 from src.chat_system import ChatSystem, ResponseType
 from src.persona import Persona
 

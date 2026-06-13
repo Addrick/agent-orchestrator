@@ -6,7 +6,7 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 from datetime import datetime, timedelta
 
-from src.chat_system import ChatSystem
+from tests.helpers import make_chat_system, route_stream_through_generate_response
 from memory.memory_manager import MemoryManager
 from src.persona import Persona, MemoryMode
 from src.engine import TextEngine
@@ -25,14 +25,15 @@ def mem_test_system():
     mock_text_engine.generate_response = AsyncMock(  # type: ignore[method-assign]
         return_value=({'type': 'text', 'content': ''}, {}),
     )
+    route_stream_through_generate_response(mock_text_engine)
 
-    chat_system = ChatSystem(
+    chat_system = make_chat_system(
         memory_manager=memory_manager,
         text_engine=mock_text_engine,
     )
     chat_system.personas = {
-        'test_persona': Persona('test_persona', 'mock_model', 'prompt', context_length=10),
-        'persona_2': Persona('persona_2', 'mock_model', 'prompt', context_length=10)
+        'test_persona': Persona('test_persona', 'mock_model', 'prompt', history_messages=10),
+        'persona_2': Persona('persona_2', 'mock_model', 'prompt', history_messages=10)
     }
     yield chat_system, memory_manager, mock_text_engine
 
@@ -47,13 +48,13 @@ def real_test_system(monkeypatch):
     memory_manager.create_schema()
     text_engine = TextEngine()
     zammad_client = ZammadClient()
-    chat_system = ChatSystem(
+    chat_system = make_chat_system(
         memory_manager=memory_manager,
         text_engine=text_engine,
     )
     chat_system.register_service(ZammadIntegration(zammad_client))
     chat_system.personas = {
-        'test_persona': Persona('test_persona', 'mock_model', 'prompt', context_length=10),
+        'test_persona': Persona('test_persona', 'mock_model', 'prompt', history_messages=10),
     }
     yield chat_system, memory_manager
 
@@ -185,18 +186,23 @@ async def test_personal_mode_isolates_by_user_and_persona(mem_test_system):
 @patch('src.clients.zammad_client.requests.request')
 @patch('src.engine.AsyncOpenAI')
 async def test_channel_mode_in_non_server_context_integration(
-        mock_async_openai, mock_requests_request, real_test_system
+        mock_async_openai, mock_requests_request, real_test_system, monkeypatch
 ):
     """
     An integration test to verify that CHANNEL_ISOLATED mode works correctly in a
     non-server context (e.g., DMs, Gmail) by using real system components and
     patching only the outgoing network calls.
+
+    Uses a gpt-* model so the dump payload carries `messages` for assertion
+    (DP-206b moved `local` to the kobold-native transport, whose log-safe
+    payload summarizes the prompt instead of listing messages).
     """
     # 1. SETUP: Use real components from the fixture
+    monkeypatch.setenv("OPENAI_API_KEY", "dummy_key_for_testing")
     chat_system, memory_manager = real_test_system
     persona = chat_system.personas['test_persona']
     persona.set_memory_mode(MemoryMode.CHANNEL_ISOLATED)
-    persona.set_model_name('local')
+    persona.set_model_name('gpt-4')
 
     # 2. CONFIGURE PATCHES for external network calls
     # Mock the Zammad client's HTTP requests
@@ -211,10 +217,11 @@ async def test_channel_mode_in_non_server_context_integration(
         return mock_response
     mock_requests_request.side_effect = zammad_side_effect
 
-    # Configure the mock AsyncOpenAI class
+    # Configure the mock AsyncOpenAI class (canonical streaming transport)
+    from tests.provider_stream_mocks import openai_text_stream
     mock_client_instance = mock_async_openai.return_value
     mock_client_instance.chat.completions.create = AsyncMock(
-        return_value=MagicMock(choices=[MagicMock(message=MagicMock(content="mocked llm response", tool_calls=None))])
+        side_effect=lambda **kw: openai_text_stream("mocked llm response")
     )
 
     # 3. SEED DATABASE
@@ -229,9 +236,9 @@ async def test_channel_mode_in_non_server_context_integration(
     )
 
     # 5. ASSERTION
-    assert 'u1' in chat_system.last_api_requests
-    assert 'test_persona' in chat_system.last_api_requests['u1']
-    final_payload = chat_system.last_api_requests['u1']['test_persona']
+    assert 'u1' in chat_system.turn_persistence.last_api_requests
+    assert 'test_persona' in chat_system.turn_persistence.last_api_requests['u1']
+    final_payload = chat_system.turn_persistence.last_api_requests['u1']['test_persona']
     messages = final_payload.get('messages', [])
     history_string = " ".join([m.get('content', '') for m in messages])
 
@@ -264,24 +271,31 @@ def memory_e2e_system():
     mock_text_engine.generate_response = AsyncMock(  # type: ignore[method-assign]
         return_value=({'type': 'text', 'content': ''}, {}),
     )
-    chat_system = ChatSystem(
+    route_stream_through_generate_response(mock_text_engine)
+    # Injected at construction (the public path) — ChatSystem.__init__ also
+    # wires it into the memory backend via set_embedding_service.
+    mock_emb_service = MagicMock()
+    mock_emb_service.model_name = "test-model"
+    mock_emb_service.encode = AsyncMock(return_value=[_unit_blob(1.0, 0.0)])
+    chat_system = make_chat_system(
         memory_manager=memory_manager,
         text_engine=mock_text_engine,
+        embedding_service=mock_emb_service,
     )
     chat_system.personas = {
-        'test_persona': Persona('test_persona', 'mock_model', 'prompt', context_length=5),
+        'test_persona': Persona('test_persona', 'mock_model', 'prompt', history_messages=5),
     }
     yield chat_system, memory_manager, mock_text_engine
 
 
 @pytest.mark.asyncio
-@patch('src.chat_system.MEMORY_RETRIEVAL_ENABLED', True)
+@patch('src.request_builder.MEMORY_RETRIEVAL_ENABLED', True)
 async def test_e2e_memory_injection_in_prepare_request(memory_e2e_system):
     """End-to-end: store messages -> create segments/summaries -> verify memory
     block appears in _prepare_request conversation history."""
     system, mm, mock_engine = memory_e2e_system
 
-    # 1. Seed older messages (outside the sliding window of context_length=5)
+    # 1. Seed older messages (outside the sliding window of history_messages=5)
     now = datetime.now()
     for i in range(1, 8):
         mm.log_message("u1", "test_persona", "general", "user", "Alice",
@@ -294,16 +308,8 @@ async def test_e2e_memory_injection_in_prepare_request(memory_e2e_system):
     mm.store_summary(seg_id, "- Alice discussed Python 3.13 JIT compiler improvements",
                      summary_emb, "test-model", now)
 
-    # 3. Set up a mock embedding service on ChatSystem
-    mock_emb_service = MagicMock()
-    mock_emb_service.model_name = "test-model"
-    mock_emb_service.encode = AsyncMock(return_value=[_unit_blob(1.0, 0.0)])
-    system._embedding_service = mock_emb_service
-    # DP-113: backend.recall translates query → embedding via the backend's
-    # injected EmbeddingService, not ChatSystem._embedding_service directly.
-    system.memory_backend.set_embedding_service(mock_emb_service)
-
-    # 4. Trigger generate_response which calls _prepare_request internally
+    # 3. Trigger generate_response which calls _prepare_request internally
+    # (the fixture injected the embedding service at construction)
     persona = system.personas['test_persona']
     persona.set_memory_mode(MemoryMode.CHANNEL_ISOLATED)
 
@@ -324,7 +330,7 @@ async def test_e2e_memory_injection_in_prepare_request(memory_e2e_system):
 
 
 @pytest.mark.asyncio
-@patch('src.chat_system.MEMORY_RETRIEVAL_ENABLED', True)
+@patch('src.request_builder.MEMORY_RETRIEVAL_ENABLED', True)
 async def test_e2e_recency_filter_no_information_gap(memory_e2e_system):
     """Recency filter integration: a segment straddling the sliding window boundary
     is included (not filtered), preventing information gaps for messages that are
@@ -356,15 +362,7 @@ async def test_e2e_recency_filter_no_information_gap(memory_e2e_system):
     mm.store_summary(seg_c, "- Recent topic: deployment checklist",
                      _unit_blob(0.8, 0.2), "test-model", now)
 
-    # Mock embedding service
-    mock_emb_service = MagicMock()
-    mock_emb_service.model_name = "test-model"
-    mock_emb_service.encode = AsyncMock(return_value=[_unit_blob(1.0, 0.0)])
-    system._embedding_service = mock_emb_service
-    # DP-113: backend.recall translates query → embedding via the backend's
-    # injected EmbeddingService, not ChatSystem._embedding_service directly.
-    system.memory_backend.set_embedding_service(mock_emb_service)
-
+    # Embedding service injected at construction by the fixture
     persona = system.personas['test_persona']
     persona.set_memory_mode(MemoryMode.CHANNEL_ISOLATED)
 

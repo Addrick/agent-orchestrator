@@ -70,7 +70,7 @@ async def test_ctx_reset_when_postloop_persistence_raises(mocked_chat_system):
 
     def boom(*a, **k):
         raise RuntimeError("simulated DB failure in post-loop persistence")
-    chat_system._commit_or_update_assistant = boom  # type: ignore[assignment]
+    chat_system.turn_persistence.commit_or_update_assistant = boom  # type: ignore[assignment]
 
     assert get_turn_context() is None
     with pytest.raises(RuntimeError):
@@ -132,7 +132,7 @@ async def test_ctx_reset_when_user_turn_logging_raises(mocked_chat_system):
 
     def boom(*a, **k):
         raise RuntimeError("simulated user-turn log failure")
-    chat_system._log_user_turn = boom  # type: ignore[assignment]
+    chat_system.turn_persistence.log_user_turn = boom  # type: ignore[assignment]
 
     assert get_turn_context() is None
     with pytest.raises(RuntimeError):
@@ -199,7 +199,7 @@ async def test_resume_sets_and_resets_turn_context(mocked_chat_system):
     chat_system, _ = mocked_chat_system
     chat_system.personas["test_persona"].set_enabled_tools(["*"])
     chat_system.tool_manager.enrich_audit_action = AsyncMock(return_value=None)  # type: ignore[assignment]
-    chat_system._execute_write_calls = AsyncMock()  # type: ignore[assignment]
+    chat_system.confirmations.execute_write_calls = AsyncMock()  # type: ignore[assignment]
 
     # Turn 1: drive a write tool to park a PendingConfirmation, drained clean.
     _script_engine(chat_system, [
@@ -210,7 +210,7 @@ async def test_resume_sets_and_resets_turn_context(mocked_chat_system):
     await _drain(chat_system.stream_response(
         "test_persona", "u6", "c6", "open a ticket",
     ))
-    assert ("u6", "test_persona") in chat_system._pending_confirmations
+    assert ("u6", "test_persona") in chat_system.confirmations.pending
     assert get_turn_context() is None  # clean after turn 1
 
     # Resume: record live ctx during the continuation.

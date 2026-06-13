@@ -1459,6 +1459,78 @@ def test_handle_portal_retry_moves_embedding_to_edit_history(mem_manager):
     assert rows[0]['embedding'] == emb
 
 
+def test_handle_portal_retry_noop_when_trailing_turn_is_user(mem_manager):
+    """Retry on a trailing user turn must NOT archive the earlier assistant row.
+
+    Conversation ends `assistant -> user` (a user turn with no reply yet). The
+    portal's "retry" on that user turn means "generate a reply", not "regenerate
+    the previous assistant". handle_portal_retry must return None so the caller
+    INSERTs a fresh assistant row after the user turn instead of overwriting the
+    earlier assistant turn in place (which would misroute the response and make
+    the streamed block vanish on re-sync).
+    """
+    iid = _seed_portal_assistant(mem_manager, "prior reply", emb=_make_fake_embedding())
+    # A newer user turn now terminates the conversation.
+    mem_manager.log_message(
+        "web_ui", "persona_a", "portal", "user", "Adam",
+        "follow-up question", datetime.now(),
+    )
+
+    returned = mem_manager.handle_portal_retry("persona_a", "web_ui", "portal")
+    assert returned is None
+
+    conn = mem_manager._get_connection()
+    cur = conn.cursor()
+    # The earlier assistant row was left untouched: no archive, embedding intact.
+    cur.execute("SELECT COUNT(*) FROM Interaction_Edit_History WHERE interaction_id = ?", (iid,))
+    assert cur.fetchone()[0] == 0
+    cur.execute("SELECT COUNT(*) FROM Message_Embeddings WHERE interaction_id = ?", (iid,))
+    assert cur.fetchone()[0] == 1
+
+
+def test_handle_portal_retry_noop_when_trailing_assistant_is_suppressed(mem_manager):
+    """Retry must ignore a soft-deleted trailing assistant row.
+
+    Reproduces the bespoke-UI "retry poof": the user deletes an assistant reply
+    (which suppresses it but leaves the row newest in the DB), so the user turn
+    becomes the trailing *visible* row. Clicking retry on that user turn must
+    behave like "generate a reply" — handle_portal_retry returns None so the
+    caller INSERTs a fresh *visible* assistant row. Before the suppression
+    filter it would archive + overwrite the still-suppressed assistant row,
+    landing the regenerated response in an invisible row (it streamed, then
+    vanished on re-sync because the transcript projection filters suppressed
+    rows).
+    """
+    # user -> assistant, then the assistant reply is deleted (suppressed).
+    mem_manager.log_message(
+        "web_ui", "persona_a", "portal", "user", "Adam",
+        "list joy's tickets", datetime.now(),
+    )
+    assistant_iid = _seed_portal_assistant(
+        mem_manager, "here are joy's tickets", emb=_make_fake_embedding(),
+    )
+    assert mem_manager.suppress_interaction(assistant_iid) is True
+
+    # The suppressed assistant is still the newest row in the DB, but the
+    # trailing *visible* row is the user turn -> retry is a no-op.
+    returned = mem_manager.handle_portal_retry("persona_a", "web_ui", "portal")
+    assert returned is None
+
+    conn = mem_manager._get_connection()
+    cur = conn.cursor()
+    # The suppressed assistant row was left untouched: not archived, embedding intact.
+    cur.execute(
+        "SELECT COUNT(*) FROM Interaction_Edit_History WHERE interaction_id = ?",
+        (assistant_iid,),
+    )
+    assert cur.fetchone()[0] == 0
+    cur.execute(
+        "SELECT COUNT(*) FROM Message_Embeddings WHERE interaction_id = ?",
+        (assistant_iid,),
+    )
+    assert cur.fetchone()[0] == 1
+
+
 def test_handle_portal_retry_without_embedding_is_noop_for_archive_embedding(mem_manager):
     """Retry with no prior embedding still archives content but no Edit_History_Embeddings row is inserted."""
     iid = _seed_portal_assistant(mem_manager, "no-embed content", emb=None)
@@ -1532,17 +1604,17 @@ def test_swap_interaction_version_round_trip_preserves_embedding(mem_manager):
     cur.execute("SELECT embedding FROM vec_Message_Embeddings WHERE interaction_id = ?", (iid,))
     assert cur.fetchone()['embedding'] == emb_v1
 
-    # v2 now lives in archive with its embedding intact.
+    # Stable design keeps the target archive row, so both versions live in the
+    # archive with their embeddings intact: v2 (the just-archived canonical) and
+    # v1 (the kept source archive, now duplicated by canonical).
     cur.execute(
         "SELECT e.old_content, eh.embedding FROM Interaction_Edit_History e"
         " LEFT JOIN Edit_History_Embeddings eh ON e.edit_id = eh.edit_id"
         " WHERE e.interaction_id = ?",
         (iid,),
     )
-    archived = cur.fetchall()
-    assert len(archived) == 1
-    assert archived[0]['old_content'] == "v2"
-    assert archived[0]['embedding'] == emb_v2
+    archived = {r['old_content']: r['embedding'] for r in cur.fetchall()}
+    assert archived == {"v1": emb_v1, "v2": emb_v2}
 
 
 def test_swap_interaction_version_out_of_bounds_raises_no_mutation(mem_manager):
@@ -1593,6 +1665,64 @@ def test_swap_total_versions_stable_across_multiple_swaps(mem_manager):
 
     versions_after = mem_manager.list_interaction_versions(iid)
     assert len(versions_after) == total_before
+
+
+def test_chevron_navigation_round_trip_matches_displayed_content(mem_manager):
+    """Drive the bespoke-UI VersionChevrons pointer math against the backend and
+    assert the displayed version matches at every step.
+
+    Encodes the frontend navigation contract (VersionChevrons.tsx):
+      - on load, `cur` (1-based) = position of the canonical-flagged entry;
+      - clicking a chevron posts swap with k = target1 - 1 (0-indexed archive
+        position pre-swap), refetches versions, and sets `cur = target1`;
+      - the rendered content is `versions[cur - 1]`.
+
+    The stable-array design must keep `total` constant, the counter tracking the
+    true position, every version reachable, and rendered content == backend
+    canonical at each step. This is the regression that the abandoned
+    delete-on-promote redesign broke (counter froze at N/N; '>' permanently
+    disabled; oldest versions unreachable).
+    """
+    iid = _seed_portal_assistant(mem_manager, "v1", _make_fake_embedding())
+    for content in ("v2", "v3", "v4"):
+        mem_manager.handle_portal_retry("persona_a", "web_ui", "portal")
+        mem_manager.update_interaction_content(iid, content)
+        mem_manager.store_message_embedding(iid, _make_fake_embedding(), EMBEDDING_MODEL, datetime.now())
+
+    def load():
+        versions = mem_manager.list_interaction_versions(iid)
+        cidx = next((i for i, v in enumerate(versions) if v.get("canonical")), None)
+        cur = (cidx + 1) if cidx is not None else len(versions)
+        return versions, cur
+
+    versions, cur = load()
+    total = len(versions)
+    assert total == 4
+    assert cur == 4
+    assert versions[cur - 1]["content"] == "v4"
+
+    def click(direction):
+        nonlocal versions, cur, total
+        target1 = cur - 1 if direction == "<" else cur + 1
+        result = mem_manager.swap_interaction_version(iid, target1 - 1)
+        versions = mem_manager.list_interaction_versions(iid)
+        cur = target1
+        assert len(versions) == total, "total versions must stay constant"
+        rendered = versions[cur - 1]["content"]
+        assert rendered == result["current_content"], (
+            f"rendered version ({rendered!r}) must match backend canonical "
+            f"({result['current_content']!r})"
+        )
+        return rendered
+
+    # Walk back to the oldest version, then forward, then back again.
+    assert click("<") == "v3"   # 3/4
+    assert click("<") == "v2"   # 2/4
+    assert click("<") == "v1"   # 1/4 — oldest reachable
+    assert cur == 1
+    assert click(">") == "v2"   # 3/4 forward
+    assert click(">") == "v3"
+    assert click("<") == "v2"
 
 
 # --- Phase 2.4: portal edit/delete round-trip ---
@@ -1719,8 +1849,14 @@ def test_update_interaction_content_can_clear_tool_context(mem_manager):
 
 
 def test_swap_dedupe_does_not_grow_archive_count(mem_manager):
-    """Toggling between two contents repeatedly leaves Interaction_Edit_History at
-    one row — the dup-content check skips redundant archive inserts."""
+    """Toggling between two contents repeatedly keeps Interaction_Edit_History
+    bounded at one row per distinct version (2) — the dup-content check skips
+    redundant archive inserts so churn never grows the table.
+
+    Stable design keeps the target archive row (so the numbered version list is
+    fixed), so the bound is the distinct-version count, not 1. Index 0 is v1 and
+    index 1 is v2 by archival order, so a real toggle alternates swap(1)/swap(0).
+    """
     iid = _seed_portal_assistant(mem_manager, "v1", _make_fake_embedding())
     mem_manager.handle_portal_retry("persona_a", "web_ui", "portal")
     mem_manager.update_interaction_content(iid, "v2")
@@ -1729,19 +1865,26 @@ def test_swap_dedupe_does_not_grow_archive_count(mem_manager):
     conn = mem_manager._get_connection()
     cur = conn.cursor()
 
+    def canonical():
+        cur.execute("SELECT content FROM User_Interactions WHERE interaction_id = ?", (iid,))
+        return cur.fetchone()['content']
+
+    def archive_count():
+        cur.execute("SELECT count(*) FROM Interaction_Edit_History WHERE interaction_id = ?", (iid,))
+        return cur.fetchone()[0]
+
     for _ in range(5):
-        # Swap 0 -> v1 canonical, v2 archived.
-        mem_manager.swap_interaction_version(iid, 0)
-        cur.execute("SELECT count(*) FROM Interaction_Edit_History WHERE interaction_id = ?", (iid,))
-        assert cur.fetchone()[0] == 1
-        # Swap 0 -> v2 canonical, v1 archived (dedupe hits — v1 archive already exists).
-        mem_manager.swap_interaction_version(iid, 0)
-        cur.execute("SELECT count(*) FROM Interaction_Edit_History WHERE interaction_id = ?", (iid,))
-        assert cur.fetchone()[0] == 1
+        mem_manager.swap_interaction_version(iid, 0)  # -> v1 canonical
+        assert canonical() == "v1"
+        assert archive_count() == 2  # both distinct versions retained, no growth
+        mem_manager.swap_interaction_version(iid, 1)  # -> v2 canonical
+        assert canonical() == "v2"
+        assert archive_count() == 2
 
 
 def test_swap_dedupe_total_versions_stable_across_churn(mem_manager):
-    """Across N back-and-forth swaps total_versions stays at 2 (canonical + 1 archive)."""
+    """Across N back-and-forth swaps total_versions stays at 2 (the distinct
+    version count = displayed, content-deduped list length)."""
     iid = _seed_portal_assistant(mem_manager, "v1", _make_fake_embedding())
     mem_manager.handle_portal_retry("persona_a", "web_ui", "portal")
     mem_manager.update_interaction_content(iid, "v2")
@@ -1750,6 +1893,89 @@ def test_swap_dedupe_total_versions_stable_across_churn(mem_manager):
     for _ in range(6):
         result = mem_manager.swap_interaction_version(iid, 0)
         assert result['total_versions'] == 2
+
+
+def test_update_interaction_content_tool_context_sentinel(mem_manager):
+    """DP-132 #3: tool_context uses a sentinel so the three intents are distinct.
+
+      - arg omitted (manual text edit) → tool_context left UNTOUCHED;
+      - tool_context=None (regen produced no tool calls) → CLEARED;
+      - tool_context="..." (regen produced tool calls) → REWRITTEN.
+
+    The None-clears branch is the bug fix: before, None meant "leave", so a regen
+    from a tool-call answer to a plain-text answer kept stale tool_context and the
+    transcript rendered phantom tool cards.
+    """
+    tool_ctx = json.dumps([{"role": "assistant", "tool_calls": [{"id": "c1"}]}])
+    iid = mem_manager.log_message(
+        "web_ui", "persona_a", "portal", "assistant", "persona_a",
+        "ran a tool", datetime.now(), tool_context=tool_ctx,
+    )
+
+    conn = mem_manager._get_connection()
+    cur = conn.cursor()
+
+    def stored_tool_context():
+        cur.execute("SELECT tool_context FROM User_Interactions WHERE interaction_id = ?", (iid,))
+        return cur.fetchone()['tool_context']
+
+    # 1. Manual edit (arg omitted) leaves tool_context untouched.
+    assert mem_manager.update_interaction_content(iid, "edited text") is True
+    assert stored_tool_context() == tool_ctx
+
+    # 2. Regen with tool calls rewrites it.
+    new_ctx = json.dumps([{"role": "assistant", "tool_calls": [{"id": "c2"}]}])
+    assert mem_manager.update_interaction_content(iid, "ran another tool", tool_context=new_ctx) is True
+    assert stored_tool_context() == new_ctx
+
+    # 3. Regen to a plain-text answer (tool_context=None) CLEARS it.
+    assert mem_manager.update_interaction_content(iid, "just text", tool_context=None) is True
+    assert stored_tool_context() is None
+
+
+def test_handle_portal_retry_dedupes_identical_content(mem_manager):
+    """DP-132 #7: archiving identical content twice must not create duplicate
+    archive rows, which would flag multiple versions canonical and desync the
+    chevron's findIndex(canonical) counter from the rendered version."""
+    iid = _seed_portal_assistant(mem_manager, "dup", emb=_make_fake_embedding())
+
+    # First retry archives "dup".
+    mem_manager.handle_portal_retry("persona_a", "web_ui", "portal")
+    # Regen reproduces identical text, then retry again — the duplicate-content
+    # archive insert must be skipped.
+    mem_manager.update_interaction_content(iid, "dup")
+    mem_manager.handle_portal_retry("persona_a", "web_ui", "portal")
+
+    conn = mem_manager._get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COUNT(*) FROM Interaction_Edit_History"
+        " WHERE interaction_id = ? AND old_content = ?",
+        (iid, "dup"),
+    )
+    assert cur.fetchone()[0] == 1  # not 2 — dedupe held
+
+    # Exactly one version is flagged canonical, so the chevron points correctly.
+    versions = mem_manager.list_interaction_versions(iid)
+    assert sum(1 for v in versions if v.get('canonical')) == 1
+
+
+def test_get_distinct_channels_groups_by_channel_only(mem_manager):
+    """DP-132 #8: one logical channel logged under both a NULL and a non-NULL
+    server_id must collapse to a single rail entry with the combined count, not
+    render twice with split counts."""
+    ts = datetime.now()
+    mem_manager.log_message("u1", "persona_a", "general", "user", "Adam", "m1", ts, server_id="123")
+    mem_manager.log_message("u2", "persona_a", "general", "user", "Joy", "m2", ts, server_id=None)
+    mem_manager.log_message("u1", "persona_a", "general", "user", "Adam", "m3", ts, server_id="123")
+    mem_manager.log_message("u1", "persona_a", "random", "user", "Adam", "m4", ts, server_id="123")
+
+    rows = mem_manager.get_distinct_channels("persona_a")
+    by_channel = {r['channel']: r for r in rows}
+
+    assert sorted(by_channel) == ["general", "random"]  # 'general' appears once
+    assert by_channel["general"]["count"] == 3  # 2 server + 1 NULL, combined
+    assert by_channel["random"]["count"] == 1
 
 
 # --- Phase 5: Memory Taint (untrusted column) Tests ---

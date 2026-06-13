@@ -15,9 +15,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.chat_system import (
-    ChatSystem, ResponseType, PendingConfirmation,
-)
+from src.chat_system import ResponseType
+from src.confirmations import PendingConfirmation
 from src.persona import Persona, ExecutionMode
 from src.tools.turn_context import get_turn_context
 from memory.memory_manager import MemoryManager
@@ -43,14 +42,14 @@ async def test_confirm_deny_then_retry_creates_new_pending(chat_system_with_mock
                             'arguments': {'ticket_id': 1, 'state': 'closed'}}]}
     text_engine_mock.generate_response.return_value = (tool_call, {})
     await system.generate_response('test_persona', 'user', 'channel', 'close it')
-    assert ('user', 'test_persona') in system._pending_confirmations
+    assert ('user', 'test_persona') in system.confirmations.pending
 
     # Deny the pending
     final_response = {'type': 'text', 'content': 'OK, not closing.'}
     text_engine_mock.generate_response.return_value = (final_response, {})
     await system.resume_pending_confirmation('user', 'test_persona', approved=False)
     # Resume must have cleared the slot
-    assert ('user', 'test_persona') not in system._pending_confirmations
+    assert ('user', 'test_persona') not in system.confirmations.pending
 
     # Now ask again → fresh tool call → fresh pending
     tool_call2 = {'type': 'tool_calls',
@@ -60,7 +59,7 @@ async def test_confirm_deny_then_retry_creates_new_pending(chat_system_with_mock
     _, response_type, _, _ = await system.generate_response(
         'test_persona', 'user', 'channel', 'really close it')
     assert response_type == ResponseType.PENDING_CONFIRMATION
-    new_pending = system._pending_confirmations.get(('user', 'test_persona'))
+    new_pending = system.confirmations.pending.get(('user', 'test_persona'))
     assert new_pending is not None
     assert new_pending.write_calls[0]['id'] == 'call_2'
 
@@ -92,7 +91,7 @@ async def test_confirm_deny_resume_max_iterations(chat_system_with_mocks):
     assert response_type == ResponseType.LLM_GENERATION
     tool_manager_mock.execute_tool.assert_not_called()
     # No new pending was parked by resume
-    assert ('user', 'test_persona') not in system._pending_confirmations
+    assert ('user', 'test_persona') not in system.confirmations.pending
 
 
 @pytest.mark.asyncio
@@ -123,7 +122,7 @@ async def test_resume_minimal_conversation_history(chat_system_with_mocks):
         audit_info={'actions': [], 'tainted': False, 'taint_sources': [],
                     'model_reasoning': None, 'execution_mode': 'CONFIRM'},
     )
-    system._pending_confirmations[('user', 'test_persona')] = pending
+    system.confirmations.pending[('user', 'test_persona')] = pending
 
     tool_manager_mock.execute_tool.return_value = {'result': 'closed'}
     text_engine_mock.generate_response.return_value = (
@@ -154,7 +153,7 @@ async def test_confirmation_timeout_boundary(chat_system_with_mocks):
     text_engine_mock.generate_response.return_value = (tool_call, {})
     await system.generate_response('test_persona', 'user', 'channel', 'close it')
 
-    pending = system._pending_confirmations[('user', 'test_persona')]
+    pending = system.confirmations.pending[('user', 'test_persona')]
     # Backdate the parked timestamp far enough that any reasonable
     # PENDING_CONFIRMATION_TIMEOUT is exceeded.
     pending.created_at = time.time() - (60 * 60 * 24 * 365)  # 1 year ago
@@ -186,7 +185,7 @@ async def test_concurrent_turns_context_isolation(chat_system_with_mocks):
 
     # Hook _prepare_request (called AFTER set_turn_context in _orchestrate)
     # so we can observe each task's TurnContext from inside the active turn.
-    real_prepare = system._prepare_request
+    real_prepare = system.request_builder.prepare_request
 
     async def capture_in_prepare(ctx, is_retry=False):
         captured[ctx.persona_name] = get_turn_context()
@@ -202,7 +201,7 @@ async def test_concurrent_turns_context_isolation(chat_system_with_mocks):
     # _prepare_request, then raise to short-circuit before the LLM call.
     system.bot_logic.preprocess_message = AsyncMock(return_value=None)
 
-    with patch.object(system, '_prepare_request', side_effect=capture_in_prepare):
+    with patch.object(system.request_builder, 'prepare_request', side_effect=capture_in_prepare):
         # _prepare_request returns None; orchestrate continues into the
         # ToolLoop. Stub the ToolLoop's engine call to short-circuit cheaply.
         with patch('src.chat_system.ToolLoop') as MockLoop:

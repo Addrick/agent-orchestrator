@@ -710,7 +710,7 @@ for _tool in ALL_TOOL_DEFINITIONS:
 # Model prefixes that do NOT support each tool.
 # Uses the same prefix logic as engine.py routing.
 # Tools not listed here are compatible with all providers.
-GROUNDING_INCOMPATIBLE_PREFIXES = {'gpt', 'claude', 'gemma', 'gemini-3.1', 'local', 'unknown'}
+GROUNDING_INCOMPATIBLE_PREFIXES = {'gpt', 'claude', 'gemma', 'local', 'unknown'}
 
 MODEL_INCOMPATIBLE_TOOLS = {
     'google_grounding_search': GROUNDING_INCOMPATIBLE_PREFIXES,
@@ -723,27 +723,31 @@ WRITE_TOOLS = {t['function']['name'] for t in ALL_TOOL_DEFINITIONS if t.get('is_
 # These are typically high-impact or destructive operations.
 ALWAYS_CONFIRM_TOOLS = {"merge_tickets", "delete_user"}
 
+# Name → definition index. ALL_TOOL_DEFINITIONS is static after import, and
+# the lookups below run per tool call inside the tool loop — a linear scan
+# per call adds up with batched calls over a 50+ tool catalog.
+_TOOL_DEFINITION_INDEX: Dict[str, Dict[str, Any]] = {
+    t.get("function", {}).get("name", ""): t for t in ALL_TOOL_DEFINITIONS
+}
+
+_DEFAULT_CAPABILITIES: Dict[str, Any] = {
+    "produces_untrusted": False,
+    "irreversible": False,
+    "locality": "unknown",
+    "sensitivity": "unknown",
+}
+
 
 def get_tool_capabilities(tool_name: str) -> Dict[str, Any]:
     """
     Retrieves the security capabilities block for a given tool name.
     Returns a default block (all False) if the tool is not found.
     """
-    for tool in ALL_TOOL_DEFINITIONS:
-        if tool.get("function", {}).get("name") == tool_name:
-            from typing import cast
-            return cast(Dict[str, Any], tool.get("capabilities", {
-                "produces_untrusted": False,
-                "irreversible": False,
-                "locality": "unknown",
-                "sensitivity": "unknown",
-            }))
-    return {
-        "produces_untrusted": False,
-        "irreversible": False,
-        "locality": "unknown",
-        "sensitivity": "unknown",
-    }
+    tool = _TOOL_DEFINITION_INDEX.get(tool_name)
+    if tool is not None:
+        from typing import cast
+        return cast(Dict[str, Any], tool.get("capabilities", dict(_DEFAULT_CAPABILITIES)))
+    return dict(_DEFAULT_CAPABILITIES)
 
 
 def get_tool_definition(tool_name: str) -> Optional[Dict[str, Any]]:
@@ -751,10 +755,7 @@ def get_tool_definition(tool_name: str) -> Optional[Dict[str, Any]]:
     Retrieves the full JSON definition for a given tool name.
     Returns None if the tool is not found.
     """
-    for tool in ALL_TOOL_DEFINITIONS:
-        if tool.get("function", {}).get("name") == tool_name:
-            return tool
-    return None
+    return _TOOL_DEFINITION_INDEX.get(tool_name)
 
 
 def is_irreversible(tool_name: str, args: Dict[str, Any]) -> bool:

@@ -57,7 +57,10 @@ Full component diagram (every class, every edge) → [`docs/architecture.mmd`](d
 ```
 src/
   chat_system.py         DI hub + orchestration kernel
-  engine.py              Provider-agnostic TextEngine
+  engine.py              Provider-agnostic TextEngine — one streaming driver
+                         per provider; one-shot = collect(stream) (DP-206)
+  stream_engine.py       Kobold-native local transport (engine-owned)
+  llm_errors.py          LLMCommunicationError leaf
   message_handler.py     BotLogic — dev commands (set/what/dump_*/help/…)
   persona.py             Persona dataclass + modes
   generation_events.py   Streaming event surface (TokenEvent, DoneEvent, …)
@@ -70,7 +73,8 @@ src/
                          kobold_export
   clients/               ZammadClient + ZammadIntegration, NotificationRouter,
                          Notifier impls, ServiceIntegration ABC
-  utils/                 google_utils, message_utils, model_utils, save_utils
+  personas/              store.py — persona/model file persistence
+  utils/                 google_utils, message_utils, model_utils
   app_manager.py         Top-level lifecycle
   main.py                Startup wiring
 config/                  global_config.py, default_personas.json,

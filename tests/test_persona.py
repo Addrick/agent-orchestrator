@@ -38,11 +38,11 @@ def test_persona_initialization_with_all_values(base_persona_args):
     """Tests that a Persona is created correctly when all values are provided."""
     p = Persona(
         **base_persona_args,
-        context_length=10,
+        history_messages=10,
         display_name_in_chat=True
     )
     assert p.get_name() == "tester"
-    assert p.get_context_length() == 10
+    assert p.get_history_messages() == 10
     assert p.should_display_name_in_chat() is True
 
 
@@ -51,14 +51,14 @@ def test_persona_initialization_defaults_context_length(base_persona_args):
     Tests that context_length defaults to the global config if the argument is None.
     This is a critical test for our new logic.
     """
-    p = Persona(**base_persona_args, context_length=None)
-    assert p.get_context_length() == TEST_DEFAULT_HISTORY_MESSAGES
+    p = Persona(**base_persona_args, history_messages=None)
+    assert p.get_history_messages() == TEST_DEFAULT_HISTORY_MESSAGES
 
 
 def test_persona_initialization_uses_provided_zero_context(base_persona_args):
     """Tests that an explicit context_length of 0 is respected during initialization."""
-    p = Persona(**base_persona_args, context_length=0)
-    assert p.get_context_length() == 0
+    p = Persona(**base_persona_args, history_messages=0)
+    assert p.get_history_messages() == 0
 
 
 def test_persona_initialization_sanitizes_token_limit(base_persona_args):
@@ -76,16 +76,16 @@ def test_persona_initialization_sanitizes_token_limit(base_persona_args):
 
 def test_set_context_length_valid(persona):
     """Tests setting a valid, non-zero context length."""
-    result = persona.set_context_length(5)
+    result = persona.set_history_messages(5)
     assert result == 5
-    assert persona.get_context_length() == 5
+    assert persona.get_history_messages() == 5
 
 
 def test_set_context_length_zero(persona):
     """Tests that setting context length to 0 is a valid operation."""
-    result = persona.set_context_length(0)
+    result = persona.set_history_messages(0)
     assert result == 0
-    assert persona.get_context_length() == 0
+    assert persona.get_history_messages() == 0
 
 
 def test_set_context_length_invalid(persona):
@@ -93,10 +93,10 @@ def test_set_context_length_invalid(persona):
     Tests that setting an invalid context length (e.g., a string) causes it to
     revert to the global default.
     """
-    persona.set_context_length(99)  # Start with a known value
-    result = persona.set_context_length("invalid_string")
+    persona.set_history_messages(99)  # Start with a known value
+    result = persona.set_history_messages("invalid_string")
     assert result == TEST_DEFAULT_HISTORY_MESSAGES
-    assert persona.get_context_length() == TEST_DEFAULT_HISTORY_MESSAGES
+    assert persona.get_history_messages() == TEST_DEFAULT_HISTORY_MESSAGES
 
 
 # --- Setter Tests for Other Attributes ---
@@ -178,6 +178,7 @@ def test_get_config_for_engine(base_persona_args):
         top_k=40
     )
     expected_config = {
+        "persona_name": "tester",
         "model_name": "test_model",
         "max_output_tokens": 1024,
         "temperature": 0.8,
@@ -311,7 +312,7 @@ def test_meta_visible_setter(persona):
 
 def test_meta_visible_round_trip_save_load(base_persona_args, tmp_path):
     """Round-trip meta_visible through save_personas_to_file → load_personas_from_file."""
-    from src.utils.save_utils import save_personas_to_file, load_personas_from_file
+    from src.personas.store import save_personas_to_file, load_personas_from_file
 
     p_visible = Persona(**{**base_persona_args, "persona_name": "visible"}, meta_visible=True)
     p_hidden = Persona(**{**base_persona_args, "persona_name": "hidden"}, meta_visible=False)
@@ -326,7 +327,7 @@ def test_meta_visible_round_trip_save_load(base_persona_args, tmp_path):
 def test_meta_visible_absent_in_legacy_config_defaults_false(base_persona_args, tmp_path):
     """A persona JSON without meta_visible (old config file) loads as False."""
     import json
-    from src.utils.save_utils import load_personas_from_file
+    from src.personas.store import load_personas_from_file
 
     save_file = tmp_path / "personas.json"
     save_file.write_text(json.dumps({
@@ -371,11 +372,12 @@ def test_persona_security_blocked_via_constructor(base_persona_args):
 
 
 def test_revalidate_security_trips_block_on_insecure_policy(base_persona_args):
-    """revalidate_security flags an insecure composition even if loaded clean."""
+    """revalidate_persona_security flags an insecure composition even if loaded clean."""
+    from src.tools.composition import revalidate_persona_security
     p = Persona(**base_persona_args, service_bindings=["zammad", "agents"],
                 tool_policy=_INSECURE_POLICY)
     assert p.is_security_blocked() is False  # constructor does not auto-validate
-    assert p.revalidate_security() is True
+    assert revalidate_persona_security(p) is True
     assert p.is_security_blocked() is True
     assert p.get_security_block_reasons()
 
@@ -394,9 +396,10 @@ def test_revalidate_clears_quarantine_after_scoping_tools(base_persona_args):
     p = Persona(**base_persona_args, service_bindings=["zammad", "agents"],
                 tool_policy=_INSECURE_POLICY,
                 security_block_reasons=["Insecure composition: network:read + local:write"])
+    from src.tools.composition import revalidate_persona_security
     assert p.is_security_blocked() is True
     p.set_enabled_tools(_SECURE_ZAMMAD_TOOLS)
-    assert p.revalidate_security() is False
+    assert revalidate_persona_security(p) is False
     assert p.is_security_blocked() is False
     assert p.get_security_block_reasons() == []
 
@@ -404,18 +407,19 @@ def test_revalidate_clears_quarantine_after_scoping_tools(base_persona_args):
 def test_revalidate_trips_block_on_insecure_edit(base_persona_args):
     """Editing a clean persona into an insecure policy then re-validating
     quarantines it."""
+    from src.tools.composition import revalidate_persona_security
     p = Persona(**base_persona_args, service_bindings=["zammad"],
                 enabled_tools=_SECURE_ZAMMAD_TOOLS)
     assert p.is_security_blocked() is False
     p.set_tool_policy(_INSECURE_POLICY)
-    assert p.revalidate_security() is True
+    assert revalidate_persona_security(p) is True
     assert p.is_security_blocked() is True
 
 
 def test_insecure_persona_loads_quarantined_not_dropped(tmp_path):
     """DP-128: an insecure persona LOADS (quarantined) instead of being dropped."""
     import json
-    from src.utils.save_utils import load_personas_from_file
+    from src.personas.store import load_personas_from_file
 
     save_file = tmp_path / "personas.json"
     save_file.write_text(json.dumps({"personas": [
@@ -429,3 +433,81 @@ def test_insecure_persona_loads_quarantined_not_dropped(tmp_path):
     assert loaded["bad"].is_security_blocked() is True
     assert loaded["bad"].get_security_block_reasons()
     assert loaded["good"].is_security_blocked() is False
+
+
+# --- inject_timestamp tests ---
+
+def test_inject_timestamp_default_true(base_persona_args):
+    """inject_timestamp defaults to True for user/chat personas."""
+    p = Persona(**base_persona_args)
+    assert p.get_inject_timestamp() is True
+
+
+def test_inject_timestamp_explicit_false(base_persona_args):
+    """inject_timestamp can be explicitly initialized to False."""
+    p = Persona(**base_persona_args, inject_timestamp=False)
+    assert p.get_inject_timestamp() is False
+
+
+def test_inject_timestamp_setter(persona):
+    """inject_timestamp has a working setter."""
+    assert persona.get_inject_timestamp() is True
+    persona.set_inject_timestamp(False)
+    assert persona.get_inject_timestamp() is False
+    persona.set_inject_timestamp(True)
+    assert persona.get_inject_timestamp() is True
+
+
+def test_inject_timestamp_round_trip_save_load(base_persona_args, tmp_path):
+    """Round-trip inject_timestamp through save_personas_to_file → load_personas_from_file."""
+    from src.personas.store import save_personas_to_file, load_personas_from_file
+
+    p_inject = Persona(**{**base_persona_args, "persona_name": "inject"}, inject_timestamp=True)
+    p_no_inject = Persona(**{**base_persona_args, "persona_name": "no_inject"}, inject_timestamp=False)
+    save_file = str(tmp_path / "personas.json")
+    save_personas_to_file({"inject": p_inject, "no_inject": p_no_inject}, set(), file_path_override=save_file)
+
+    loaded = load_personas_from_file(file_path_override=save_file)
+    assert loaded["inject"].get_inject_timestamp() is True
+    assert loaded["no_inject"].get_inject_timestamp() is False
+
+
+def test_inject_timestamp_absent_in_legacy_config_defaults_true(base_persona_args, tmp_path):
+    """A persona JSON without inject_timestamp (old config file) loads as True."""
+    import json
+    from src.personas.store import load_personas_from_file
+
+    save_file = tmp_path / "personas.json"
+    save_file.write_text(json.dumps({
+        "personas": [{
+            "name": "legacy",
+            "model_name": "m",
+            "prompt": "p",
+        }],
+    }))
+    loaded = load_personas_from_file(file_path_override=str(save_file))
+    assert loaded["legacy"].get_inject_timestamp() is True
+
+
+def test_build_wire_messages_inject_timestamp(base_persona_args):
+    from src.tools.tool_loop import build_wire_messages
+    p = Persona(**base_persona_args, inject_timestamp=True)
+    history = [{"role": "user", "content": "hello"}]
+    messages = build_wire_messages(p, history)
+    assert len(messages) == 2
+    assert messages[0]["role"] == "system"
+    assert "[Current Time:" in messages[0]["content"]
+    assert "You are a test persona." in messages[0]["content"]
+
+
+def test_build_wire_messages_no_inject_timestamp(base_persona_args):
+    from src.tools.tool_loop import build_wire_messages
+    p = Persona(**base_persona_args, inject_timestamp=False)
+    history = [{"role": "user", "content": "hello"}]
+    messages = build_wire_messages(p, history)
+    assert len(messages) == 2
+    assert messages[0]["role"] == "system"
+    assert "[Current Time:" not in messages[0]["content"]
+    assert messages[0]["content"] == "You are a test persona."
+
+

@@ -18,8 +18,8 @@ import pytest
 from config import global_config
 from src.persona import Persona, ExecutionMode, MemoryMode
 from src.generation_params import GenerationParams
-from src.tools.policy import ToolPolicy
-from src.utils.save_utils import (
+from src.tool_policy import ToolPolicy
+from src.personas.store import (
     save_personas_to_file,
     load_personas_from_file,
 )
@@ -299,6 +299,18 @@ def test_get_history_messages_dynamic_increment(persona):
     assert persona.get_history_messages() == 0
     assert persona.get_history_messages() == 2
     assert persona.get_history_messages() == 4
+
+
+def test_get_history_messages_advance_false_does_not_increment(persona):
+    """DP-142: advance=False peeks the override without advancing it."""
+    persona.start_new_conversation(0)
+    assert persona.get_history_messages(advance=False) == 0
+    assert persona.get_history_messages(advance=False) == 0
+    # A live (advancing) call still moves the window, and a subsequent peek
+    # reflects the new value without moving it further.
+    assert persona.get_history_messages() == 0
+    assert persona.get_history_messages(advance=False) == 2
+    assert persona.get_history_messages(advance=False) == 2
 
 
 def test_end_new_conversation_clear(persona):

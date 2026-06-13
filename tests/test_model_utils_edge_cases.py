@@ -113,9 +113,9 @@ def test_refresh_anthropic_error(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_get_model_list_no_update_missing_file():
-    """When update=False and the underlying file is missing, returns None."""
-    with patch("src.utils.model_utils.save_utils.load_models_from_file", return_value=None):
-        assert model_utils.get_model_list(update=False) is None
+    """When update=False and the underlying file is missing, returns the default models fallback."""
+    with patch("src.utils.model_utils.persona_store.load_models_from_file", return_value=None):
+        assert model_utils.get_model_list(update=False) == {"Antigravity (OAuth tier)": ["agy-flash"], "Local": ["local"]}
 
 
 def test_get_model_list_update_saves():
@@ -123,7 +123,7 @@ def test_get_model_list_update_saves():
     with patch("src.utils.model_utils.refresh_available_openai_models", return_value=["gpt-4"]) as m_o, \
          patch("src.utils.model_utils.refresh_available_google_models", return_value=["gemini-2.5"]) as m_g, \
          patch("src.utils.model_utils.refresh_available_anthropic_models", return_value=["claude-3"]) as m_a, \
-         patch("src.utils.model_utils.save_utils.save_models_to_file") as m_save:
+         patch("src.utils.model_utils.persona_store.save_models_to_file") as m_save:
         result = model_utils.get_model_list(update=True)
     m_o.assert_called_once()
     m_g.assert_called_once()
@@ -132,6 +132,7 @@ def test_get_model_list_update_saves():
         "From OpenAI": ["gpt-4"],
         "From Google": ["gemini-2.5"],
         "From Anthropic": ["claude-3"],
+        "Antigravity (OAuth tier)": ["agy-flash"],
         "Local": ["local"],
     }
     m_save.assert_called_once_with(expected)

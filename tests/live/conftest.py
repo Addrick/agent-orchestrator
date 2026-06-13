@@ -17,7 +17,8 @@ from src.clients.zammad_client import ZammadClient
 from src.clients.zammad_service import ZammadIntegration
 from memory.memory_manager import MemoryManager
 from src.engine import TextEngine
-from src.chat_system import ChatSystem
+from src.bootstrap import create_chat_system
+from tests.helpers import make_chat_system
 from src.persona import Persona, MemoryMode
 from config.global_config import (
     TEST_MEMORY_DATABASE_FILE,
@@ -219,18 +220,18 @@ def live_chat_system():
     test_personas = {
         "test_persona": Persona(
             persona_name="test_persona", model_name="mock_model", prompt="You are a test persona.",
-            enabled_tools=['*'], memory_mode=MemoryMode.CHANNEL_ISOLATED, context_length=10
+            enabled_tools=['*'], memory_mode=MemoryMode.CHANNEL_ISOLATED, history_messages=10
         ),
         "capped_persona": Persona(
-            persona_name='capped_persona', model_name='mock', prompt='talk', context_length=100
+            persona_name='capped_persona', model_name='mock', prompt='talk', history_messages=100
         )
     }
 
-    with patch('src.chat_system.load_personas_from_file', return_value=test_personas):
-        chat_system = ChatSystem(
-            memory_manager=memory_manager, text_engine=text_engine,
-        )
-        chat_system.register_service(ZammadIntegration(zammad_client))
+    chat_system = make_chat_system(
+        memory_manager=memory_manager, text_engine=text_engine,
+        personas=test_personas,
+    )
+    chat_system.register_service(ZammadIntegration(zammad_client))
 
     try:
         yield chat_system, memory_manager, zammad_client

@@ -62,7 +62,6 @@ def test_memory_manager_semantic_backend_override():
         new_backend = SqliteSemanticBackend(mm, embedding_service=_StubEmbeddingService())
         mm.backend = new_backend
         assert mm.backend is new_backend
-        assert mm.backend._embedding_service is not None
     finally:
         mm.close()
 

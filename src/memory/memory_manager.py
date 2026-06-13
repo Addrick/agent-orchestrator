@@ -532,20 +532,37 @@ class MemoryManager:
         embedding. Returns the interaction_id so the caller can UPDATE the
         canonical row in place with the new response.
 
-        Returns None if no prior assistant row exists (first-turn retry is a no-op).
+        Returns None if no prior assistant row exists (first-turn retry is a
+        no-op). Also returns None when the latest *visible* interaction is a
+        *user* turn with no response yet: that is a "generate a reply to this
+        turn" action, not a regen, so the caller must INSERT a fresh assistant
+        row rather than archive + overwrite the earlier assistant turn that
+        sits before it.
+
+        Suppressed (soft-deleted) rows are excluded from the "most recent"
+        lookup so it matches the transcript projection the UI renders. Without
+        this, deleting an assistant reply (which leaves its user turn trailing
+        in the UI) and then retrying that user turn would archive + overwrite
+        the still-suppressed assistant row — landing the regenerated response
+        in an invisible row, so it appears to vanish after streaming.
         """
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
+            # Inspect the single most recent *visible* interaction (any role).
+            # Only a trailing assistant turn is eligible for archive-in-place;
+            # if a user turn is newer (or the trailing assistant was deleted),
+            # there is nothing to regenerate in place.
             cursor.execute(
-                "SELECT interaction_id, content, reasoning_content FROM User_Interactions"
+                "SELECT interaction_id, content, reasoning_content, author_role"
+                " FROM User_Interactions"
                 " WHERE persona_name = ? AND user_identifier = ? AND channel = ?"
-                "   AND author_role = 'assistant'"
+                + self._SUPPRESSION_SUBQUERY +
                 " ORDER BY timestamp DESC, interaction_id DESC LIMIT 1",
                 (persona_name, user_identifier, channel),
             )
             row = cursor.fetchone()
-            if not row:
+            if not row or row['author_role'] != 'assistant':
                 return None
 
             interaction_id = row['interaction_id']
@@ -553,23 +570,34 @@ class MemoryManager:
             old_reasoning = row['reasoning_content']
             now = datetime.now()
             try:
+                # Content-hash dedupe (mirrors swap_interaction_version): if an
+                # archive row with the same (interaction_id, old_content) already
+                # exists, skip the insert. Duplicate-content archives would make
+                # list_interaction_versions flag multiple rows canonical, so the
+                # chevron's findIndex(canonical) picks the wrong index (DP-132 #7).
                 cursor.execute(
-                    "INSERT INTO Interaction_Edit_History (interaction_id, old_content, old_reasoning_content, edited_at) VALUES (?, ?, ?, ?)",
-                    (interaction_id, old_content, old_reasoning, now),
+                    "SELECT 1 FROM Interaction_Edit_History"
+                    " WHERE interaction_id = ? AND old_content = ? LIMIT 1",
+                    (interaction_id, old_content),
                 )
-                new_edit_id = cursor.lastrowid
-                # Move L0 embedding to Edit_History_Embeddings so chevron restore can bring it back.
-                # vec_Message_Embeddings is dropped — archives don't participate in retrieval k-NN.
-                cursor.execute(
-                    "SELECT embedding, model_name, created_at FROM Message_Embeddings WHERE interaction_id = ?",
-                    (interaction_id,),
-                )
-                emb = cursor.fetchone()
-                if emb is not None:
+                if cursor.fetchone() is None:
                     cursor.execute(
-                        "INSERT INTO Edit_History_Embeddings (edit_id, embedding, model_name, created_at) VALUES (?, ?, ?, ?)",
-                        (new_edit_id, emb['embedding'], emb['model_name'], emb['created_at']),
+                        "INSERT INTO Interaction_Edit_History (interaction_id, old_content, old_reasoning_content, edited_at) VALUES (?, ?, ?, ?)",
+                        (interaction_id, old_content, old_reasoning, now),
                     )
+                    new_edit_id = cursor.lastrowid
+                    # Move L0 embedding to Edit_History_Embeddings so chevron restore can bring it back.
+                    # vec_Message_Embeddings is dropped — archives don't participate in retrieval k-NN.
+                    cursor.execute(
+                        "SELECT embedding, model_name, created_at FROM Message_Embeddings WHERE interaction_id = ?",
+                        (interaction_id,),
+                    )
+                    emb = cursor.fetchone()
+                    if emb is not None:
+                        cursor.execute(
+                            "INSERT INTO Edit_History_Embeddings (edit_id, embedding, model_name, created_at) VALUES (?, ?, ?, ?)",
+                            (new_edit_id, emb['embedding'], emb['model_name'], emb['created_at']),
+                        )
                 cursor.execute("DELETE FROM Message_Embeddings WHERE interaction_id = ?", (interaction_id,))
                 cursor.execute("DELETE FROM vec_Message_Embeddings WHERE interaction_id = ?", (interaction_id,))
                 conn.commit()
@@ -651,12 +679,20 @@ class MemoryManager:
             )
             canonical = cursor.fetchone()
             if canonical is not None:
-                results.append({
-                    "edit_id": None,
-                    "content": canonical['content'],
-                    "reasoning_content": canonical['reasoning_content'],
-                    "created_at": canonical['timestamp'],
-                })
+                # Only append canonical if it's not already in the archives
+                canonical_in_archives = any(r['content'] == canonical['content'] for r in results)
+                if not canonical_in_archives:
+                    results.append({
+                        "edit_id": None,
+                        "content": canonical['content'],
+                        "reasoning_content": canonical['reasoning_content'],
+                        "created_at": canonical['timestamp'],
+                    })
+                
+                # Flag the active canonical entry
+                for r in results:
+                    r['canonical'] = (r['content'] == canonical['content'])
+
             return results
 
     def get_ids_with_versions(self, interaction_ids: List[int]) -> Set[int]:
@@ -688,10 +724,15 @@ class MemoryManager:
              move Message_Embeddings row (if any) into Edit_History_Embeddings keyed
              by the new edit_id; delete from vec_Message_Embeddings.
           2. Restore target archive k — copy old_content into User_Interactions.content;
-             move Edit_History_Embeddings(target) back into Message_Embeddings +
-             vec_Message_Embeddings if present; delete the target archive row.
+             copy Edit_History_Embeddings(target) into Message_Embeddings +
+             vec_Message_Embeddings if present. The target archive row is KEPT so the
+             numbered version list stays stable across navigation (the chevron `k/n`
+             counter addresses a fixed list; deleting on promote would make it a
+             rotating MRU and strand older versions). list_interaction_versions
+             content-dedupes the now-duplicate canonical against its source archive.
 
-        Returns `{"current_content": str, "interaction_id": int, "total_versions": int}`.
+        Returns `{"current_content": str, "interaction_id": int, "total_versions": int}`
+        where total_versions matches the displayed (content-deduped) version count.
 
         Raises IndexError if k is out of bounds (no state mutation).
         Raises ValueError if interaction_id does not exist.
@@ -725,11 +766,9 @@ class MemoryManager:
             now = datetime.now()
 
             try:
-                # 1. Archive current canonical (with content-hash dedupe — option B).
+                # 1. Archive current canonical (with content-hash dedupe).
                 #    If an archive row with the same (interaction_id, old_content) already
-                #    exists, skip the insert; the chevron toggled back to a content we
-                #    already have on file. Drop stale L0 rows either way — the target
-                #    restore step below overwrites canonical content.
+                #    exists, skip the insert.
                 cursor.execute(
                     "SELECT 1 FROM Interaction_Edit_History"
                     " WHERE interaction_id = ? AND old_content = ? LIMIT 1",
@@ -753,6 +792,7 @@ class MemoryManager:
                             "INSERT INTO Edit_History_Embeddings (edit_id, embedding, model_name, created_at) VALUES (?, ?, ?, ?)",
                             (new_edit_id, canonical_emb['embedding'], canonical_emb['model_name'], canonical_emb['created_at']),
                         )
+                
                 cursor.execute("DELETE FROM Message_Embeddings WHERE interaction_id = ?", (interaction_id,))
                 cursor.execute("DELETE FROM vec_Message_Embeddings WHERE interaction_id = ?", (interaction_id,))
 
@@ -777,12 +817,8 @@ class MemoryManager:
                         (interaction_id, target_emb['embedding']),
                     )
 
-                # Delete the target archive (its content is now canonical). Cascades to
-                # Edit_History_Embeddings(target_edit_id).
-                cursor.execute(
-                    "DELETE FROM Interaction_Edit_History WHERE edit_id = ?",
-                    (target_edit_id,),
-                )
+                # We DO NOT delete the target archive. It remains in Interaction_Edit_History
+                # so that the list of versions remains perfectly stable.
 
                 conn.commit()
             except sqlite3.Error as e:
@@ -790,16 +826,26 @@ class MemoryManager:
                 conn.rollback()
                 raise
 
+            # total_versions must match what list_interaction_versions DISPLAYS:
+            # all archive rows, plus canonical only if its content isn't already an
+            # archive row (content-dedupe). After a swap the restored canonical
+            # always duplicates its source archive row, so it is not double-counted.
             cursor.execute(
                 "SELECT COUNT(*) FROM Interaction_Edit_History WHERE interaction_id = ?",
                 (interaction_id,),
             )
-            total_archives = cursor.fetchone()[0]
+            total_archives = int(cursor.fetchone()[0])
+            cursor.execute(
+                "SELECT 1 FROM Interaction_Edit_History"
+                " WHERE interaction_id = ? AND old_content = ? LIMIT 1",
+                (interaction_id, target_content),
+            )
+            canonical_in_archives = cursor.fetchone() is not None
             return {
                 "current_content": target_content,
                 "reasoning_content": target_reasoning,
                 "interaction_id": interaction_id,
-                "total_versions": int(total_archives) + 1,
+                "total_versions": total_archives + (0 if canonical_in_archives else 1),
             }
 
     def suppress_interaction(self, interaction_id: int) -> bool:
@@ -941,6 +987,37 @@ class MemoryManager:
                 params.append(limit)
             cursor.execute(query, params)
             return [dict(row) for row in reversed(cursor.fetchall())]
+
+    def get_distinct_channels(self, persona_name: Optional[str] = None) -> List[Dict[str, Any]]:
+        """List the distinct (channel, server_id) pairs seen in history.
+
+        Drives the bespoke portal's channel list (DP-136 / handoff §10): the UI
+        groups these by the channel's source prefix (`web_ui`, `discord`,
+        `zammad`, `gmail`). Scoped to `persona_name` when given so the list
+        reflects the channels the active persona has actually been used in.
+        Each entry carries a `last_ts` (most recent activity) so the UI can sort
+        and a `count` of non-suppressed rows. Suppressed rows are excluded.
+        """
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            # Group by channel ONLY (not channel+server_id): one logical channel
+            # logged under both a NULL and a non-NULL server_id would otherwise
+            # return two rows and render the same channel twice with split counts
+            # (DP-132 #8). MAX(server_id) picks a representative for the rare
+            # multi-server case; the UI switches by channel name regardless.
+            query = (
+                "SELECT channel, MAX(server_id) AS server_id, COUNT(*) AS count,"
+                " MAX(timestamp) AS last_ts FROM User_Interactions"
+                " WHERE channel IS NOT NULL" + self._SUPPRESSION_SUBQUERY
+            )
+            params: List[Any] = []
+            if persona_name is not None:
+                query += " AND persona_name = ?"
+                params.append(persona_name)
+            query += " GROUP BY channel ORDER BY last_ts DESC"
+            cursor.execute(query, params)
+            return [dict(row) for row in cursor.fetchall()]
 
     def log_agent_action(self, agent_name: str, action_type: str, trigger_context: Optional[str] = None,
                          action_payload: Optional[str] = None, outcome: Optional[str] = None,

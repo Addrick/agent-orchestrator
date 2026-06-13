@@ -12,13 +12,14 @@ from unittest.mock import MagicMock, patch
 
 from src.agents.agent_manager import AgentManager
 from src.agents.agent_service import AgentServiceIntegration
-from src.chat_system import ChatSystem
+from src.bootstrap import create_chat_system
 from src.clients.zammad_service import ZammadIntegration
 from memory.memory_manager import MemoryManager
 from src.engine import TextEngine
 from src.persona import Persona, MemoryMode
 from src.tools.definitions import ALL_TOOL_DEFINITIONS
 from config.global_config import TEST_MEMORY_DATABASE_FILE
+from tests.helpers import make_chat_system
 
 pytestmark = pytest.mark.integration
 
@@ -38,15 +39,15 @@ def wired_system():
         "test_persona": Persona(
             persona_name="test_persona", model_name="gemini-2.5-flash",
             prompt="test", enabled_tools=["*"],
-            memory_mode=MemoryMode.CHANNEL_ISOLATED, context_length=10,
+            memory_mode=MemoryMode.CHANNEL_ISOLATED, history_messages=10,
             service_bindings=["zammad", "agents"],
         ),
     }
 
     mock_zammad = MagicMock()
 
-    with patch("src.chat_system.load_personas_from_file", return_value=test_personas):
-        chat_system = ChatSystem(memory_manager=memory_manager, text_engine=text_engine)
+    with patch("src.bootstrap.load_personas_from_file", return_value=test_personas):
+        chat_system = create_chat_system(memory_manager=memory_manager, text_engine=text_engine)
 
     # Mirror main.py wiring: register Zammad, then AgentManager + AgentService
     chat_system.register_service(ZammadIntegration(mock_zammad))
@@ -88,15 +89,61 @@ def test_all_service_bindings_have_registered_services(wired_system):
         for t in ALL_TOOL_DEFINITIONS
         if t.get("service_binding")
     }
-    registered_services = set(wired_system._services.keys())
-    missing = bindings_in_defs - registered_services
+    missing = {b for b in bindings_in_defs if wired_system.get_service(b) is None}
     assert not missing, f"Service bindings without registered services: {missing}"
+
+
+def test_models_available_injected_by_bootstrap():
+    """create_chat_system populates models_available from the model cache
+    (DP-201): ChatSystem itself no longer reads the cache file at construction,
+    so the composition root must inject it."""
+    mm = MagicMock(spec=MemoryManager)
+    mm.backend = MagicMock()
+    with patch("src.bootstrap.load_personas_from_file", return_value={}), \
+            patch("src.bootstrap.load_system_personas_from_file", return_value={}), \
+            patch("src.bootstrap.get_model_list", return_value={"Local": ["local"]}):
+        system = create_chat_system(
+            memory_manager=mm, text_engine=MagicMock(spec=TextEngine),
+        )
+    assert system.models_available == {"Local": ["local"]}
+
+
+def test_get_service_returns_registered_integration(wired_system):
+    """Public service lookup replaces reaching into ChatSystem._services."""
+    zammad = wired_system.get_service("zammad")
+    assert isinstance(zammad, ZammadIntegration)
+    assert wired_system.get_service("nonexistent") is None
+
+
+def test_agent_manager_injects_zammad_client_via_public_accessors(wired_system):
+    """Convention-based DI resolves zammad_client through get_service + .client,
+    not private attribute reaches."""
+    class _NeedsZammad:
+        agent_name = "needs_zammad"
+
+        def __init__(self, chat_system, zammad_client):
+            self.chat_system = chat_system
+            self.zammad_client = zammad_client
+
+    manager = AgentManager(chat_system=wired_system, memory_manager=wired_system.memory_manager)
+    instance = manager._build_agent_instance("needs_zammad", _NeedsZammad, {})
+    zammad = wired_system.get_service("zammad")
+    assert instance.zammad_client is zammad.client
+
+
+def test_embedding_service_property_exposes_injected_service(wired_system):
+    """ChatSystem.embedding_service is the public read path (None when not
+    injected; construction-time injection is the only write path)."""
+    assert wired_system.embedding_service is None
+    mock_emb = MagicMock()
+    system = make_chat_system(embedding_service=mock_emb)
+    assert system.embedding_service is mock_emb
 
 
 def test_persona_with_all_bindings_sees_all_tools(wired_system):
     """A persona bound to all services gets every callable tool."""
     persona = wired_system.personas["test_persona"]
-    filtered = wired_system._filter_tools_for_persona(persona)
+    filtered = wired_system.request_builder.filter_tools_for_persona(persona)
     filtered_names = {t["function"]["name"] for t in filtered if t.get("type") == "function"}
 
     all_defined = {

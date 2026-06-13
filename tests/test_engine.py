@@ -1,9 +1,10 @@
 # tests/test_engine.py
 
+import os
 import pytest
 from unittest.mock import patch, AsyncMock, MagicMock
 import base64
-from openai import APIStatusError, APIConnectionError
+from openai import APIStatusError
 import anthropic
 import aiohttp
 import json
@@ -11,6 +12,22 @@ import json
 from src.engine import TextEngine, LLMCommunicationError
 from config.global_config import EMPTY_RESPONSE_RETRIES
 from google.genai.types import Tool, GoogleSearch
+from tests.helpers import engine_stream_events
+from tests.provider_stream_mocks import (
+    anthropic_stream,
+    google_stream,
+    openai_text_stream,
+    openai_tool_call_stream,
+)
+
+
+def _one_shot_stream(result, payload=None):
+    """An already-instantiated unified-event async generator for scripting
+    `_stream_<provider>_response` mocks with one-shot (result, payload)."""
+    async def _gen():
+        for ev in engine_stream_events(result, payload):
+            yield ev
+    return _gen()
 
 
 @pytest.fixture
@@ -53,11 +70,11 @@ def local_config():
 class TestGenerateResponseLogic:
     @pytest.mark.asyncio
     @patch('src.engine.asyncio.sleep', new_callable=AsyncMock)
-    @patch('src.engine.TextEngine._generate_openai_response', new_callable=AsyncMock)
+    @patch('src.engine.TextEngine._stream_openai_response')
     async def test_retry_on_empty_response_succeeds(self, mock_provider_call, mock_sleep, text_engine, openai_config, base_context):
         mock_provider_call.side_effect = [
-            ({}, {"payload": 1}),
-            ({"type": "text", "content": "Valid response"}, {"payload": 2})
+            _one_shot_stream({}, {"payload": 1}),
+            _one_shot_stream({"type": "text", "content": "Valid response"}, {"payload": 2}),
         ]
         response, _ = await text_engine.generate_response(openai_config, base_context)
         assert response == {"type": "text", "content": "Valid response"}
@@ -65,15 +82,15 @@ class TestGenerateResponseLogic:
 
     @pytest.mark.asyncio
     @patch('src.engine.asyncio.sleep', new_callable=AsyncMock)
-    @patch('src.engine.TextEngine._generate_openai_response', new_callable=AsyncMock)
+    @patch('src.engine.TextEngine._stream_openai_response')
     async def test_retry_on_empty_response_fails(self, mock_provider_call, mock_sleep, text_engine, openai_config, base_context):
-        mock_provider_call.return_value = ({}, {"payload": 1})
+        mock_provider_call.side_effect = lambda *a, **k: _one_shot_stream({}, {"payload": 1})
         with pytest.raises(LLMCommunicationError, match="LLM provider returned an empty or invalid response after all retries."):
             await text_engine.generate_response(openai_config, base_context)
         assert mock_provider_call.call_count == EMPTY_RESPONSE_RETRIES + 1
 
     @pytest.mark.asyncio
-    @patch('src.engine.TextEngine._generate_openai_response', new_callable=AsyncMock)
+    @patch('src.engine.TextEngine._stream_openai_response')
     async def test_no_retry_on_rate_limit_error(self, mock_provider_call, text_engine, openai_config, base_context):
         """429 errors must abort immediately without consuming retry budget."""
         mock_provider_call.side_effect = LLMCommunicationError("Rate limited", rate_limited=True)
@@ -81,6 +98,26 @@ class TestGenerateResponseLogic:
             await text_engine.generate_response(openai_config, base_context)
         assert exc_info.value.rate_limited is True
         assert mock_provider_call.call_count == 1
+
+    @pytest.mark.asyncio
+    @patch('src.engine.TextEngine._stream_google_response')
+    async def test_rate_limit_falls_back_to_mapped_model(self, mock_provider_call, text_engine, base_context):
+        """429 on a model with a _FALLBACK_MODELS entry reroutes to the
+        fallback instead of aborting (DP-206b: policy lives in the driver)."""
+        calls = []
+
+        def _route(config, history_object, tools=None):
+            calls.append(config["model_name"])
+            if len(calls) == 1:
+                raise LLMCommunicationError("429", rate_limited=True)
+            return _one_shot_stream({"type": "text", "content": "fell back"}, {"p": 1})
+
+        mock_provider_call.side_effect = _route
+        response, _ = await text_engine.generate_response(
+            {"model_name": "gemma-4-31b-it"}, base_context
+        )
+        assert response == {"type": "text", "content": "fell back"}
+        assert calls == ["gemma-4-31b-it", "gemma-4-26b-a4b-it"]
 
 
 @patch('src.engine.AsyncOpenAI')
@@ -90,7 +127,7 @@ class TestOpenAI:
         monkeypatch.setenv("OPENAI_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_openai_class.return_value
         mock_instance.chat.completions.create = AsyncMock(
-            return_value=MagicMock(choices=[MagicMock(message=MagicMock(content="Success", tool_calls=None))])
+            return_value=openai_text_stream("Success")
         )
         response, _ = await text_engine.generate_response(openai_config, base_context)
         assert response == {"type": "text", "content": "Success"}
@@ -99,12 +136,10 @@ class TestOpenAI:
     async def test_success_tool_call_response(self, mock_openai_class, text_engine, openai_config, base_context, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_openai_class.return_value
-        mock_function = MagicMock()
-        mock_function.name = "get_weather"
-        mock_function.arguments = '{"location": "Boston"}'
-        mock_tool_call = MagicMock(id="call_123", function=mock_function)
         mock_instance.chat.completions.create = AsyncMock(
-            return_value=MagicMock(choices=[MagicMock(message=MagicMock(content=None, tool_calls=[mock_tool_call]))])
+            return_value=openai_tool_call_stream(
+                [("call_123", "get_weather", '{"location": "Boston"}')]
+            )
         )
         # FIX: Pass a non-empty 'tools' list to trigger the tool-call logic path.
         response, _ = await text_engine.generate_response(openai_config, base_context, tools=[{"type": "function", "function": {"name": "get_weather"}}])
@@ -138,7 +173,7 @@ class TestOpenAI:
         monkeypatch.setenv("OPENAI_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_openai_class.return_value
         mock_instance.chat.completions.create = AsyncMock(
-            return_value=MagicMock(choices=[MagicMock(message=MagicMock(content="ok", tool_calls=None))])
+            return_value=openai_text_stream("ok")
         )
         tools = [{
             "type": "function", "is_write": True, "service_binding": "zammad",
@@ -153,15 +188,15 @@ class TestOpenAI:
             assert set(tool.keys()) == {"type", "function"}
 
 
-@patch('src.engine.anthropic.Anthropic')
+@patch('src.engine.anthropic.AsyncAnthropic')
 class TestAnthropic:
     @pytest.mark.asyncio
     async def test_success_text_response(self, mock_anthropic_class, text_engine, anthropic_config, base_context, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_anthropic_class.return_value
-        mock_instance.messages.create.return_value = MagicMock(
+        mock_instance.messages.stream.return_value = anthropic_stream(MagicMock(
             content=[MagicMock(text="Claude success")], stop_reason="end_turn"
-        )
+        ), ["Claude success"])
         response, _ = await text_engine.generate_response(anthropic_config, base_context)
         assert response == {"type": "text", "content": "Claude success"}
 
@@ -171,7 +206,9 @@ class TestAnthropic:
         mock_instance = mock_anthropic_class.return_value
         mock_tool_use = MagicMock(type='tool_use', id='tool_123', input={'ticker': 'GOOG'})
         mock_tool_use.name = 'get_stock_price'
-        mock_instance.messages.create.return_value = MagicMock(content=[mock_tool_use], stop_reason="tool_use")
+        mock_instance.messages.stream.return_value = anthropic_stream(
+            MagicMock(content=[mock_tool_use], stop_reason="tool_use")
+        )
         response, _ = await text_engine.generate_response(
             anthropic_config, base_context,
             tools=[{"type": "function", "function": {"name": "get_stock_price", "parameters": {}}}]
@@ -184,7 +221,7 @@ class TestAnthropic:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_anthropic_class.return_value
         error = anthropic.APIStatusError("Server error", response=MagicMock(status_code=500), body=None)
-        mock_instance.messages.create.side_effect = error
+        mock_instance.messages.stream.side_effect = error
         with pytest.raises(LLMCommunicationError, match="Anthropic API returned an error"):
             await text_engine.generate_response(anthropic_config, base_context)
 
@@ -193,11 +230,11 @@ class TestAnthropic:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_anthropic_class.return_value
         error = anthropic.APIStatusError("Rate limit exceeded", response=MagicMock(status_code=429), body=None)
-        mock_instance.messages.create.side_effect = error
+        mock_instance.messages.stream.side_effect = error
         with pytest.raises(LLMCommunicationError) as exc_info:
             await text_engine.generate_response(anthropic_config, base_context)
         assert exc_info.value.rate_limited is True
-        assert mock_instance.messages.create.call_count == 1
+        assert mock_instance.messages.stream.call_count == 1
 
     @pytest.mark.asyncio
     async def test_tool_metadata_stripped_from_api_call(self, mock_anthropic_class, text_engine, anthropic_config,
@@ -205,16 +242,16 @@ class TestAnthropic:
         """Custom metadata fields must be stripped and tools converted to Anthropic format."""
         monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_anthropic_class.return_value
-        mock_instance.messages.create.return_value = MagicMock(
+        mock_instance.messages.stream.return_value = anthropic_stream(MagicMock(
             content=[MagicMock(text="ok")], stop_reason="end_turn"
-        )
+        ), ["ok"])
         tools = [{
             "type": "function", "is_write": True, "service_binding": "zammad",
             "function": {"name": "create_ticket", "description": "Creates a ticket",
                          "parameters": {"type": "object", "properties": {}}}
         }]
         await text_engine.generate_response(anthropic_config, base_context, tools=tools)
-        call_kwargs = mock_instance.messages.create.call_args[1]
+        call_kwargs = mock_instance.messages.stream.call_args[1]
         for tool in call_kwargs["tools"]:
             assert "is_write" not in tool, "is_write leaked into Anthropic API call"
             assert "service_binding" not in tool, "service_binding leaked into Anthropic API call"
@@ -236,9 +273,9 @@ class TestAnthropic:
 
         # Mock the Claude API response
         mock_instance = mock_anthropic_class.return_value
-        mock_instance.messages.create.return_value = MagicMock(
+        mock_instance.messages.stream.return_value = anthropic_stream(MagicMock(
             content=[MagicMock(text="Image received")], stop_reason="end_turn"
-        )
+        ), ["Image received"])
 
         base_context["current_message"]["image_url"] = "http://example.com/image.png"
         base_context["history"] = [{"role": "user", "content": "Check this out"}]
@@ -246,7 +283,7 @@ class TestAnthropic:
         await text_engine.generate_response(anthropic_config, base_context)
 
         # Verify that the image was included in the API call
-        call_args = mock_instance.messages.create.call_args[1]
+        call_args = mock_instance.messages.stream.call_args[1]
         assert call_args['messages'][-1]['content'][-1]['type'] == 'image'
         assert call_args['messages'][-1]['content'][-1]['source']['data'] == base64.b64encode(b'imagedata').decode('utf-8')
 
@@ -259,8 +296,8 @@ class TestGoogle:
         mock_instance = mock_google_client_class.return_value
         mock_part = MagicMock(text="Google success", function_call=None)
         mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
         response, _ = await text_engine.generate_response(google_config, base_context)
         assert response == {"type": "text", "content": "Google success"}
@@ -279,8 +316,8 @@ class TestGoogle:
 
         mock_part = MagicMock(text=None, function_call=mock_function_call)
         mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
 
         # Pass a non-empty 'tools' list to trigger the tool-call logic path
@@ -296,7 +333,7 @@ class TestGoogle:
     async def test_api_error_raises_llm_error(self, mock_google_client_class, text_engine, google_config, base_context, monkeypatch):
         monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_google_client_class.return_value
-        mock_instance.models.generate_content.side_effect = Exception("API failure")
+        mock_instance.models.generate_content_stream.side_effect = Exception("API failure")
         with pytest.raises(LLMCommunicationError, match="An error occurred with Google API"):
             await text_engine.generate_response(google_config, base_context)
 
@@ -304,21 +341,21 @@ class TestGoogle:
     async def test_429_sets_rate_limited_flag(self, mock_google_client_class, text_engine, google_config, base_context, monkeypatch):
         monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_google_client_class.return_value
-        mock_instance.models.generate_content.side_effect = Exception("429 quota exceeded")
+        mock_instance.models.generate_content_stream.side_effect = Exception("429 quota exceeded")
         with pytest.raises(LLMCommunicationError) as exc_info:
             await text_engine.generate_response(google_config, base_context)
         assert exc_info.value.rate_limited is True
-        assert mock_instance.models.generate_content.call_count == 1
+        assert mock_instance.models.generate_content_stream.call_count == 1
 
     @pytest.mark.asyncio
     async def test_resource_exhausted_sets_rate_limited_flag(self, mock_google_client_class, text_engine, google_config, base_context, monkeypatch):
         monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_google_client_class.return_value
-        mock_instance.models.generate_content.side_effect = Exception("RESOURCE_EXHAUSTED: daily limit reached")
+        mock_instance.models.generate_content_stream.side_effect = Exception("RESOURCE_EXHAUSTED: daily limit reached")
         with pytest.raises(LLMCommunicationError) as exc_info:
             await text_engine.generate_response(google_config, base_context)
         assert exc_info.value.rate_limited is True
-        assert mock_instance.models.generate_content.call_count == 1
+        assert mock_instance.models.generate_content_stream.call_count == 1
 
 
     @pytest.mark.asyncio
@@ -328,11 +365,11 @@ class TestGoogle:
         mock_instance = mock_google_client_class.return_value
         mock_part = MagicMock(text="ok", function_call=None)
         mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
         await text_engine.generate_response(google_config, base_context, tools=[])
-        config = mock_instance.models.generate_content.call_args.kwargs['config']
+        config = mock_instance.models.generate_content_stream.call_args.kwargs['config']
         assert not config.tools
 
     @pytest.mark.asyncio
@@ -342,12 +379,12 @@ class TestGoogle:
         mock_instance = mock_google_client_class.return_value
         mock_part = MagicMock(text="ok", function_call=None)
         mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
         grounding_tools = [{"type": "google_grounding", "function": {"name": "google_grounding_search"}}]
         await text_engine.generate_response(google_config, base_context, tools=grounding_tools)
-        config = mock_instance.models.generate_content.call_args.kwargs['config']
+        config = mock_instance.models.generate_content_stream.call_args.kwargs['config']
         assert config.tools
         assert any(hasattr(t, 'google_search') and t.google_search is not None for t in config.tools)
 
@@ -359,12 +396,12 @@ class TestGoogle:
         mock_function_call = MagicMock(name="do_thing", args={})
         mock_part = MagicMock(text=None, function_call=mock_function_call)
         mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
         function_tools = [{"type": "function", "function": {"name": "do_thing", "description": "does a thing", "parameters": {"type": "object", "properties": {}}}}]
         await text_engine.generate_response(google_config, base_context, tools=function_tools)
-        config = mock_instance.models.generate_content.call_args.kwargs['config']
+        config = mock_instance.models.generate_content_stream.call_args.kwargs['config']
         assert config.tools
         assert not any(hasattr(t, 'google_search') and t.google_search is not None for t in config.tools)
         assert any(hasattr(t, 'function_declarations') and t.function_declarations for t in config.tools)
@@ -383,8 +420,8 @@ class TestGoogle:
         mock_part = MagicMock(text=None, function_call=mock_function_call)
         mock_part.thought_signature = b'sig_abc123'
         mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
 
         response, _ = await text_engine.generate_response(google_config, base_context, tools=[
@@ -402,8 +439,8 @@ class TestGoogle:
 
         mock_part = MagicMock(text="Done", function_call=None)
         mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
 
         # Simulate history with a tool call that has a thought_signature
@@ -419,7 +456,7 @@ class TestGoogle:
 
         await text_engine.generate_response(google_config, base_context)
 
-        call_args = mock_instance.models.generate_content.call_args[1]
+        call_args = mock_instance.models.generate_content_stream.call_args[1]
         # The model turn (index 1: user, model, tool, ...) should have thought_signature
         model_turn = call_args['contents'][1]
         assert model_turn['role'] == 'model'
@@ -439,8 +476,8 @@ class TestGoogle:
         mock_part = MagicMock(text=None, function_call=mock_function_call)
         mock_part.thought_signature = None
         mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
 
         response, _ = await text_engine.generate_response(google_config, base_context, tools=[
@@ -457,15 +494,15 @@ class TestGoogle:
         mock_function_call = MagicMock(name="do_thing", args={})
         mock_part = MagicMock(text=None, function_call=mock_function_call)
         mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
         mixed_tools = [
             {"type": "google_grounding", "function": {"name": "google_grounding_search"}},
             {"type": "function", "function": {"name": "do_thing", "description": "does a thing", "parameters": {"type": "object", "properties": {}}}},
         ]
         await text_engine.generate_response(google_config, base_context, tools=mixed_tools)
-        config = mock_instance.models.generate_content.call_args.kwargs['config']
+        config = mock_instance.models.generate_content_stream.call_args.kwargs['config']
         assert config.tools
         assert any(hasattr(t, 'google_search') and t.google_search is not None for t in config.tools)
         assert any(hasattr(t, 'function_declarations') and t.function_declarations for t in config.tools)
@@ -490,8 +527,8 @@ class TestGoogle:
         mock_part.text = "Image received"
         mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]))
         mock_candidate.grounding_metadata = None
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
 
         base_context["current_message"]["image_url"] = "http://example.com/image.jpg"
@@ -500,57 +537,82 @@ class TestGoogle:
         await text_engine.generate_response(google_config, base_context)
 
         # Verify that the image was included in the API call
-        call_args = mock_instance.models.generate_content.call_args[1]
+        call_args = mock_instance.models.generate_content_stream.call_args[1]
         assert len(call_args['contents'][-1]['parts']) == 2
         assert call_args['contents'][-1]['parts'][-1].inline_data.data == b'imagedata'
 
 
 class TestLocalModel:
+    """DP-206b: `local` one-shot rides the engine-owned kobold-native
+    StreamEngine — generate_response = collect over `stream_local`, the same
+    transport and `<tool_call>` protocol as the streaming portal path. The
+    OpenAI-compat local transport is gone."""
+
+    @staticmethod
+    def _fake_local_engine(events):
+        async def _gen(*a, **k):
+            for ev in events:
+                yield ev
+        fake = MagicMock()
+        fake.stream_local = MagicMock(side_effect=_gen)
+        return fake
+
     @pytest.mark.asyncio
-    @patch('src.engine.AsyncOpenAI')
-    async def test_success_text_response(self, mock_async_openai, text_engine, local_config, base_context):
-        mock_client_instance = mock_async_openai.return_value
-        mock_client_instance.chat.completions.create = AsyncMock(
-            return_value=MagicMock(choices=[MagicMock(message=MagicMock(content="Local success", tool_calls=None))])
+    async def test_success_text_response(self, local_config, base_context):
+        fake = self._fake_local_engine([
+            {"type": "api_payload", "payload": {"prompt": "<13 chars>", "genkey": "KCPP1234"}},
+            {"type": "text_delta", "text": "Local success"},
+            {"type": "done", "full_text": "Local success"},
+        ])
+        engine = TextEngine(stream_engine=fake)
+        response, payload = await engine.generate_response(
+            local_config, base_context, None, {"temperature": 0.5},
         )
-        response, _ = await text_engine.generate_response(local_config, base_context)
         assert response == {"type": "text", "content": "Local success"}
-        mock_client_instance.chat.completions.create.assert_awaited_once()
+        assert payload == {"prompt": "<13 chars>", "genkey": "KCPP1234"}
+        fake.stream_local.assert_called_once()
+        # The driver forwards (config, history_object, tools, local_inference_config).
+        args = fake.stream_local.call_args[0]
+        assert args[1] is base_context
+        assert args[3] == {"temperature": 0.5}
 
     @pytest.mark.asyncio
-    @patch('src.engine.AsyncOpenAI')
-    async def test_success_tool_call_response(self, mock_async_openai, text_engine, local_config, base_context):
-        """
-        Tests that a successful local model tool call is parsed correctly.
-        """
-        mock_client_instance = mock_async_openai.return_value
-
-        # Mock the OpenAI-compatible response for a tool call
-        mock_function = MagicMock()
-        mock_function.name = "run_code"
-        mock_function.arguments = '{"code": "print(\'hello from local\')"}'
-
-        mock_tool_call = MagicMock(id="call_local_123", function=mock_function)
-        mock_client_instance.chat.completions.create = AsyncMock(
-            return_value=MagicMock(choices=[MagicMock(message=MagicMock(content=None, tool_calls=[mock_tool_call]))])
-        )
-
-        # Pass a non-empty 'tools' list to trigger the tool-call logic path
-        response, _ = await text_engine.generate_response(local_config, base_context, tools=[
+    async def test_success_tool_call_response(self, local_config, base_context):
+        """A `<tool_call>` block parsed out of the kobold token stream surfaces
+        as a standard tool_calls result from the one-shot path."""
+        calls = [{"id": "call_run_code_0", "name": "run_code",
+                  "arguments": {"code": "print('hello from local')"}}]
+        fake = self._fake_local_engine([
+            {"type": "api_payload", "payload": {"prompt": "<10 chars>"}},
+            {"type": "tool_calls", "calls": calls},
+            {"type": "done", "full_text": ""},
+        ])
+        engine = TextEngine(stream_engine=fake)
+        response, _ = await engine.generate_response(local_config, base_context, tools=[
             {"type": "function", "function": {"name": "run_code"}}])
 
         assert response['type'] == 'tool_calls'
-        assert len(response['calls']) == 1
-        assert response['calls'][0]['name'] == 'run_code'
-        assert response['calls'][0]['arguments'] == {'code': "print('hello from local')"}
+        assert response['calls'] == calls
 
     @pytest.mark.asyncio
-    @patch('src.engine.AsyncOpenAI')
-    async def test_connection_error_raises_llm_error(self, mock_async_openai, text_engine, local_config, base_context):
-        mock_client_instance = mock_async_openai.return_value
-        mock_client_instance.chat.completions.create.side_effect = APIConnectionError(request=MagicMock())
-        with pytest.raises(LLMCommunicationError, match="Local API returned an error"):
-            await text_engine.generate_response(local_config, base_context)
+    async def test_transport_error_raises_llm_error(self, local_config, base_context):
+        fake = MagicMock()
+        fake.stream_local = MagicMock(side_effect=LLMCommunicationError(
+            "Kobold native stream transport error: connection refused"
+        ))
+        engine = TextEngine(stream_engine=fake)
+        with patch('src.engine.asyncio.sleep', new_callable=AsyncMock):
+            with pytest.raises(LLMCommunicationError, match="Kobold native stream"):
+                await engine.generate_response(local_config, base_context)
+        # Transport errors are retried like any provider before surfacing.
+        assert fake.stream_local.call_count == EMPTY_RESPONSE_RETRIES + 1
+
+    def test_default_engine_owns_a_real_stream_engine(self):
+        """Facade collapse: TextEngine() constructs its kobold-native local
+        provider itself — no separate wiring at the composition root."""
+        from src.stream_engine import StreamEngine
+        engine = TextEngine()
+        assert isinstance(engine.stream_engine, StreamEngine)
 
 
 class TestProviderRouting:
@@ -561,14 +623,14 @@ class TestProviderRouting:
             text_engine._get_provider_route("unknown-model-v1")
 
     @pytest.mark.asyncio
-    @patch('src.engine.TextEngine._generate_openai_response', new_callable=AsyncMock)
+    @patch('src.engine.TextEngine._stream_openai_response')
     async def test_image_unsupported_model_modifies_prompt(self, mock_provider, text_engine, base_context):
         """Models that don't support images get a system note appended and image_url cleared."""
         base_context["current_message"]["image_url"] = "http://example.com/photo.png"
         # gpt-3.5-turbo matches routing (starts with "gpt") but fails model_supports_images
         config = {"model_name": "gpt-3.5-turbo"}
 
-        mock_provider.return_value = ({"type": "text", "content": "ok"}, {})
+        mock_provider.side_effect = lambda *a, **k: _one_shot_stream({"type": "text", "content": "ok"}, {})
         await text_engine.generate_response(config, base_context)
 
         assert base_context["current_message"]["image_url"] is None
@@ -584,7 +646,7 @@ class TestOpenAIImage:
         monkeypatch.setenv("OPENAI_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_openai_class.return_value
         mock_instance.chat.completions.create = AsyncMock(
-            return_value=MagicMock(choices=[MagicMock(message=MagicMock(content="I see the image", tool_calls=None))])
+            return_value=openai_text_stream("I see the image")
         )
 
         base_context["current_message"]["image_url"] = "http://example.com/photo.png"
@@ -604,19 +666,11 @@ class TestOpenAIImage:
         """Tool calls with unparseable JSON arguments are skipped, not fatal."""
         monkeypatch.setenv("OPENAI_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_openai_class.return_value
-
-        good_fn = MagicMock()
-        good_fn.name = "get_weather"
-        good_fn.arguments = '{"city": "NYC"}'
-        good_call = MagicMock(id="call_1", function=good_fn)
-
-        bad_fn = MagicMock()
-        bad_fn.name = "broken_tool"
-        bad_fn.arguments = '{not valid json'
-        bad_call = MagicMock(id="call_2", function=bad_fn)
-
         mock_instance.chat.completions.create = AsyncMock(
-            return_value=MagicMock(choices=[MagicMock(message=MagicMock(content=None, tool_calls=[good_call, bad_call]))])
+            return_value=openai_tool_call_stream([
+                ("call_1", "get_weather", '{"city": "NYC"}'),
+                ("call_2", "broken_tool", '{not valid json'),
+            ])
         )
 
         response, _ = await text_engine.generate_response(
@@ -640,8 +694,10 @@ class TestGoogleEdgeCases:
         mock_block_reason.name = "SAFETY"
         mock_prompt_feedback = MagicMock(block_reason=mock_block_reason)
 
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=mock_prompt_feedback, candidates=[])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(
+                MagicMock(prompt_feedback=mock_prompt_feedback, candidates=[])
+            )
         )
 
         with pytest.raises(LLMCommunicationError, match="blocked by Google.*SAFETY"):
@@ -654,8 +710,8 @@ class TestGoogleEdgeCases:
         """Response with no candidates returns {} which triggers retry logic."""
         monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "dummy_key_for_testing")
         mock_instance = mock_google_client_class.return_value
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[]))
         )
 
         with pytest.raises(LLMCommunicationError, match="empty or invalid response after all retries"):
@@ -674,8 +730,8 @@ class TestGoogleEdgeCases:
         mock_instance = mock_google_client_class.return_value
         mock_part = MagicMock(text="Response without image", function_call=None)
         mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
 
         base_context["current_message"]["image_url"] = "http://example.com/broken.png"
@@ -701,8 +757,8 @@ class TestGoogleEdgeCases:
         mock_instance = mock_google_client_class.return_value
         mock_part = MagicMock(text="No image seen", function_call=None)
         mock_candidate = MagicMock(content=MagicMock(parts=[mock_part]), grounding_metadata=None)
-        mock_instance.models.generate_content = AsyncMock(
-            return_value=MagicMock(prompt_feedback=None, candidates=[mock_candidate])
+        mock_instance.models.generate_content_stream = AsyncMock(
+            return_value=google_stream(MagicMock(prompt_feedback=None, candidates=[mock_candidate]))
         )
 
         base_context["current_message"]["image_url"] = "http://example.com/image.bmp"
@@ -710,12 +766,12 @@ class TestGoogleEdgeCases:
 
         await text_engine.generate_response(google_config, base_context)
 
-        call_args = mock_instance.models.generate_content.call_args[1]
+        call_args = mock_instance.models.generate_content_stream.call_args[1]
         user_turn = call_args['contents'][-1]
         assert len(user_turn['parts']) == 1  # text only, no image
 
 
-@patch('src.engine.anthropic.Anthropic')
+@patch('src.engine.anthropic.AsyncAnthropic')
 class TestAnthropicEdgeCases:
     @pytest.mark.asyncio
     @patch('aiohttp.ClientSession.get')
@@ -729,9 +785,9 @@ class TestAnthropicEdgeCases:
         mock_get.return_value.__aenter__.side_effect = aiohttp.ClientError("Timeout")
 
         mock_instance = mock_anthropic_class.return_value
-        mock_instance.messages.create.return_value = MagicMock(
+        mock_instance.messages.stream.return_value = anthropic_stream(MagicMock(
             content=[MagicMock(text="Response without image")], stop_reason="end_turn"
-        )
+        ), ["Response without image"])
 
         base_context["current_message"]["image_url"] = "http://example.com/broken.png"
         base_context["history"] = [{"role": "user", "content": "Look at this"}]
@@ -755,9 +811,9 @@ class TestAnthropicEdgeCases:
         mock_get.return_value.__aenter__.return_value = mock_response
 
         mock_instance = mock_anthropic_class.return_value
-        mock_instance.messages.create.return_value = MagicMock(
+        mock_instance.messages.stream.return_value = anthropic_stream(MagicMock(
             content=[MagicMock(text="No image seen")], stop_reason="end_turn"
-        )
+        ), ["No image seen"])
 
         base_context["current_message"]["image_url"] = "http://example.com/image.tiff"
         base_context["history"] = [{"role": "user", "content": "Check this TIFF"}]
@@ -766,7 +822,7 @@ class TestAnthropicEdgeCases:
         assert response == {"type": "text", "content": "No image seen"}
 
         # Verify no image block was sent
-        call_args = mock_instance.messages.create.call_args[1]
+        call_args = mock_instance.messages.stream.call_args[1]
         last_msg = call_args['messages'][-1]
         # content was converted to list (text part) but no image part added
         assert isinstance(last_msg['content'], list)
@@ -1034,13 +1090,26 @@ class TestAgyHandler:
         for forbidden in ["secret", "token", "oauth", "api_key"]:
             assert forbidden not in payload_str
 
-    def test_route_resolves_to_agy_handler(self, text_engine):
+    def test_route_resolves_to_agy_handler(self, text_engine, monkeypatch):
+        # route resolution now calls the POSIX-only guard; no-op it so the
+        # route-table assertion itself runs on any host
+        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
         handler, limiters = text_engine._get_provider_route("agy-flash")
-        assert handler == text_engine._generate_agy_response
+        assert handler == text_engine._stream_agy_response
         assert limiters == [text_engine._agy_limiter]
+
+    def test_route_refuses_agy_on_windows(self, text_engine, monkeypatch):
+        """Selecting an agy model on native Windows fails at route resolution —
+        before any temp dir or subprocess is created."""
+        import src.engine as engine_mod
+
+        monkeypatch.setattr(engine_mod.os, "name", "nt")
+        with pytest.raises(LLMCommunicationError, match="native Windows"):
+            text_engine._get_provider_route("agy-flash")
 
     @pytest.mark.asyncio
     async def test_generate_response_end_to_end_text(self, text_engine, base_context, monkeypatch):
+        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
         mock_cli = AsyncMock(return_value="end-to-end text answer")
         monkeypatch.setattr(text_engine, "_run_agy_cli", mock_cli)
 
@@ -1074,10 +1143,14 @@ class TestAgyCliInvocation:
             return self._stdout, self._stderr
 
     @pytest.mark.asyncio
-    async def test_run_agy_cli_args_match_working_posix_behavior(self, text_engine, monkeypatch):
+    async def test_run_agy_cli_args_match_working_posix_behavior(self, text_engine, monkeypatch, tmp_path):
         """Regression guard: the spawn args stay exactly the known-good POSIX set
         — no --dangerously-skip-permissions (would un-gate agy's own tools)."""
         import src.engine as engine_mod
+        from config import global_config
+
+        # keep the default persistent workspace out of the real data dir
+        monkeypatch.setattr(global_config, "AGY_WORKSPACES_DIR", tmp_path / "workspaces")
 
         captured = {}
 
@@ -1098,8 +1171,31 @@ class TestAgyCliInvocation:
         assert captured["args"][0] == "/usr/bin/agy"
         assert "--dangerously-skip-permissions" not in captured["args"]
         assert "-p" in captured["args"] and "--print-timeout" in captured["args"]
+        # OS-level sandbox on by default (defense-in-depth)
+        assert "--sandbox" in captured["args"]
         # agy is isolated in its own POSIX session for cleanup
         assert captured["kwargs"].get("start_new_session") is True
+
+    @pytest.mark.asyncio
+    async def test_sandbox_flag_omitted_when_disabled(self, text_engine, monkeypatch, tmp_path):
+        import src.engine as engine_mod
+        from config import global_config
+
+        monkeypatch.setattr(global_config, "AGY_WORKSPACES_DIR", tmp_path / "workspaces")
+        monkeypatch.setattr(global_config, "AGY_SANDBOX", False)
+
+        captured = {}
+
+        async def fake_exec(*args, **kwargs):
+            captured["args"] = args
+            return self._FakeProc(stdout=b"ok")
+
+        monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/agy")
+        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
+
+        await text_engine._run_agy_cli("hi", timeout=5)
+        assert "--sandbox" not in captured["args"]
 
     def test_agy_unsupported_on_windows_raises_clear_error(self, text_engine, monkeypatch):
         import src.engine as engine_mod
@@ -1133,3 +1229,175 @@ class TestAgyCliInvocation:
         with pytest.raises(LLMCommunicationError, match="native Windows"):
             await text_engine._run_agy_cli("hi", timeout=5)
         assert spawned == [] and made_dirs == []
+
+    @pytest.mark.asyncio
+    async def test_run_agy_cli_persistent_workspaces_persona(self, text_engine, monkeypatch, tmp_path):
+        import src.engine as engine_mod
+        from config import global_config
+        
+        captured_cwd = []
+        async def fake_exec(*args, **kwargs):
+            captured_cwd.append(kwargs.get("cwd"))
+            return self._FakeProc(stdout=b"hello persistent persona")
+
+        monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/agy")
+        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
+        
+        monkeypatch.setattr(global_config, "AGY_PERSISTENT_WORKSPACES", True)
+        monkeypatch.setattr(global_config, "AGY_WORKSPACE_MODE", "persona")
+        monkeypatch.setattr(global_config, "AGY_WORKSPACES_DIR", tmp_path / "workspaces")
+        
+        # Test 1: Persona-specific workspace
+        out = await text_engine._run_agy_cli("hi", persona_name="alice")
+        assert out == "hello persistent persona"
+        expected_dir = os.path.abspath(tmp_path / "workspaces" / "agy_alice")
+        assert captured_cwd == [expected_dir]
+        assert os.path.exists(expected_dir)
+
+    @pytest.mark.asyncio
+    async def test_run_agy_cli_persistent_workspaces_global(self, text_engine, monkeypatch, tmp_path):
+        import src.engine as engine_mod
+        from config import global_config
+        
+        captured_cwd = []
+        async def fake_exec(*args, **kwargs):
+            captured_cwd.append(kwargs.get("cwd"))
+            return self._FakeProc(stdout=b"hello persistent global")
+
+        monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/agy")
+        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
+        
+        monkeypatch.setattr(global_config, "AGY_PERSISTENT_WORKSPACES", True)
+        monkeypatch.setattr(global_config, "AGY_WORKSPACE_MODE", "global")
+        monkeypatch.setattr(global_config, "AGY_WORKSPACES_DIR", tmp_path / "workspaces")
+        
+        # Test 2: Global mode (uses global workspace even if persona_name is passed)
+        out = await text_engine._run_agy_cli("hi", persona_name="alice")
+        assert out == "hello persistent global"
+        expected_dir = os.path.abspath(tmp_path / "workspaces" / "agy_global")
+        assert captured_cwd == [expected_dir]
+        assert os.path.exists(expected_dir)
+
+    @pytest.mark.asyncio
+    async def test_run_agy_cli_stateless_fallback(self, text_engine, monkeypatch, tmp_path):
+        import src.engine as engine_mod
+        from config import global_config
+        
+        captured_cwd = []
+        async def fake_exec(*args, **kwargs):
+            captured_cwd.append(kwargs.get("cwd"))
+            return self._FakeProc(stdout=b"hello stateless")
+
+        monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/agy")
+        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
+        
+        monkeypatch.setattr(global_config, "AGY_PERSISTENT_WORKSPACES", False)
+        
+        # Test 3: Stateless temp dir is created and removed
+        out = await text_engine._run_agy_cli("hi")
+        assert out == "hello stateless"
+        assert len(captured_cwd) == 1
+        # The temporary directory path should be deleted now
+        assert not os.path.exists(captured_cwd[0])
+
+    def _persistent_workspace_env(self, text_engine, monkeypatch, tmp_path, stdout=b"ok"):
+        import src.engine as engine_mod
+        from config import global_config
+
+        captured_cwd = []
+
+        async def fake_exec(*args, **kwargs):
+            captured_cwd.append(kwargs.get("cwd"))
+            return self._FakeProc(stdout=stdout)
+
+        monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/agy")
+        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
+        monkeypatch.setattr(global_config, "AGY_PERSISTENT_WORKSPACES", True)
+        monkeypatch.setattr(global_config, "AGY_WORKSPACE_MODE", "persona")
+        monkeypatch.setattr(global_config, "AGY_WORKSPACES_DIR", tmp_path / "workspaces")
+        return captured_cwd
+
+    @pytest.mark.asyncio
+    async def test_persona_name_is_sanitized_for_workspace_path(self, text_engine, monkeypatch, tmp_path):
+        """Path separators and traversal in a persona name must not escape
+        the workspaces dir."""
+        captured_cwd = self._persistent_workspace_env(text_engine, monkeypatch, tmp_path)
+
+        await text_engine._run_agy_cli("hi", persona_name="../evil/name")
+
+        workspaces_root = os.path.abspath(tmp_path / "workspaces")
+        assert len(captured_cwd) == 1
+        assert captured_cwd[0] == os.path.join(workspaces_root, "agy_evil_name")
+        assert os.path.dirname(captured_cwd[0]) == workspaces_root
+
+    @pytest.mark.asyncio
+    async def test_persona_mode_without_persona_name_falls_back_to_global(self, text_engine, monkeypatch, tmp_path):
+        captured_cwd = self._persistent_workspace_env(text_engine, monkeypatch, tmp_path)
+
+        await text_engine._run_agy_cli("hi")  # no persona_name
+
+        expected = os.path.abspath(tmp_path / "workspaces" / "agy_global")
+        assert captured_cwd == [expected]
+
+    @pytest.mark.asyncio
+    async def test_concurrent_calls_to_same_workspace_are_serialized(self, text_engine, monkeypatch, tmp_path):
+        """Two in-flight calls sharing a persistent workspace must not overlap —
+        the per-workspace lock serializes them."""
+        import asyncio
+        import src.engine as engine_mod
+        from config import global_config
+
+        in_flight = 0
+        max_in_flight = 0
+
+        class _SlowProc(self._FakeProc):
+            async def communicate(inner):
+                nonlocal in_flight, max_in_flight
+                in_flight += 1
+                max_in_flight = max(max_in_flight, in_flight)
+                await asyncio.sleep(0.01)
+                in_flight -= 1
+                return inner._stdout, inner._stderr
+
+        async def fake_exec(*args, **kwargs):
+            return _SlowProc(stdout=b"ok")
+
+        monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/agy")
+        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
+        monkeypatch.setattr(global_config, "AGY_PERSISTENT_WORKSPACES", True)
+        monkeypatch.setattr(global_config, "AGY_WORKSPACE_MODE", "persona")
+        monkeypatch.setattr(global_config, "AGY_WORKSPACES_DIR", tmp_path / "workspaces")
+
+        await asyncio.gather(
+            text_engine._run_agy_cli("a", persona_name="alice"),
+            text_engine._run_agy_cli("b", persona_name="alice"),
+        )
+        assert max_in_flight == 1
+
+    @pytest.mark.asyncio
+    async def test_persistent_workspace_keeps_antigravitycli_state(self, text_engine, monkeypatch, tmp_path):
+        """The symlink-target cleanup is temp-dir-only: persistent workspaces
+        keep .antigravitycli state — that cache is the point of persistence."""
+        captured_cwd = self._persistent_workspace_env(text_engine, monkeypatch, tmp_path)
+
+        workspace = tmp_path / "workspaces" / "agy_alice"
+        cli_dir = workspace / ".antigravitycli"
+        cli_dir.mkdir(parents=True)
+        cache_target = tmp_path / "cache_blob"
+        cache_target.write_text("cached state")
+        link = cli_dir / "cache_link"
+        try:
+            os.symlink(cache_target, link)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks unavailable on this host")
+
+        await text_engine._run_agy_cli("hi", persona_name="alice")
+
+        assert captured_cwd == [os.path.abspath(workspace)]
+        assert cache_target.exists()
+        assert link.exists()

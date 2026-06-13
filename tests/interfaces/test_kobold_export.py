@@ -15,7 +15,11 @@ from datetime import datetime, timedelta
 import pytest
 
 from memory.memory_manager import MemoryManager
-from src.interfaces.kobold_export import build_kobold_savefile, build_transcript
+from src.interfaces.kobold_export import (
+    build_kobold_savefile,
+    build_transcript,
+    _parse_tool_context,
+)
 
 
 REQUIRED_SAVEFILE_KEYS = {
@@ -285,10 +289,17 @@ def test_transcript_folds_reasoning_into_think_block():
 def test_transcript_parses_tool_context_json():
     rows = [
         {"author_role": "assistant", "content": "done", "interaction_id": 5,
-         "tool_context": json.dumps([{"role": "tool", "content": "x"}])},
+         "tool_context": json.dumps([
+             {"role": "assistant", "tool_calls": [
+                 {"id": "c1", "name": "lookup", "arguments": {"q": "x"}}]},
+             {"role": "tool", "tool_call_id": "c1", "content": "x"},
+         ])},
     ]
     chunks = build_transcript(rows)["chunks"]
-    assert chunks[0]["tool_context"] == [{"role": "tool", "content": "x"}]
+    assert chunks[0]["tool_context"] == [{
+        "call_id": "c1", "group_id": None, "tool_name": "lookup",
+        "arguments": {"q": "x"}, "result": "x", "error": None,
+    }]
 
 def test_transcript_skips_non_renderable_rows():
     rows = [
@@ -311,3 +322,115 @@ def test_transcript_appends_pending_ephemeral_chunk():
     assert last["interaction_id"] is None
     assert last["ephemeral_chunk_id"] == "tok123"
     assert last["content"] == "awaiting approval"
+
+
+# -------- _parse_tool_context: raw-OpenAI-message -> frontend ToolContext --------
+# The parked-CONFIRM path slices the still-in-flight conversation_history (raw
+# OpenAI messages) into _parse_tool_context so the pending chunk can render the
+# tool call that is awaiting approval. Persisted rows already store the structured
+# shape and must pass through untouched.
+
+def test_parse_tool_context_transforms_openai_tool_call_and_result():
+    raw = [
+        {"role": "assistant", "tool_calls": [
+            {"id": "call_1", "name": "search_tickets", "group_id": "g1",
+             "arguments": {"query": "vpn"}},
+        ]},
+        {"role": "tool", "tool_call_id": "call_1", "content": '{"result": []}'},
+    ]
+    out = _parse_tool_context(raw)
+    assert out == [{
+        "call_id": "call_1",
+        "group_id": "g1",
+        "tool_name": "search_tickets",
+        "arguments": {"query": "vpn"},
+        "result": '{"result": []}',
+        "error": None,
+    }]
+
+
+def test_parse_tool_context_function_shape_and_stringified_args():
+    # OpenAI's nested `function` envelope with arguments as a JSON string.
+    raw = [
+        {"role": "assistant", "tool_calls": [
+            {"id": "call_9", "function": {"name": "create_ticket"},
+             "arguments": '{"title": "x"}'},
+        ]},
+    ]
+    out = _parse_tool_context(raw)
+    assert len(out) == 1
+    assert out[0]["tool_name"] == "create_ticket"
+    assert out[0]["arguments"] == {"title": "x"}
+    assert out[0]["result"] is None
+
+
+def test_parse_tool_context_surfaces_tool_error():
+    raw = [
+        {"role": "assistant", "tool_calls": [{"id": "c", "name": "t"}]},
+        {"role": "tool", "tool_call_id": "c",
+         "content": '{"error": "boom"}'},
+    ]
+    out = _parse_tool_context(raw)
+    assert out[0]["result"] == '{"error": "boom"}'
+    assert out[0]["error"] == "boom"
+
+
+def test_parse_tool_context_accepts_json_string():
+    raw = json.dumps([
+        {"role": "assistant", "tool_calls": [{"id": "c", "name": "t"}]},
+    ])
+    out = _parse_tool_context(raw)
+    assert out == [{
+        "call_id": "c", "group_id": None, "tool_name": "t",
+        "arguments": {}, "result": None, "error": None,
+    }]
+
+
+def test_parse_tool_context_passthrough_already_structured():
+    # Persisted rows store the structured shape (no `role` keys) — must be
+    # returned unchanged so existing transcript rendering keeps working.
+    structured = [{"call_id": "c", "tool_name": "t", "arguments": {},
+                   "result": "ok", "error": None}]
+    assert _parse_tool_context(structured) == structured
+
+
+def test_parse_tool_context_none_and_unparseable():
+    assert _parse_tool_context(None) is None
+    assert _parse_tool_context("") is None
+    assert _parse_tool_context("not json{") is None
+
+
+def test_parse_tool_context_non_list_returned_as_is():
+    assert _parse_tool_context({"a": 1}) == {"a": 1}
+
+
+def test_parse_tool_context_malformed_elements_do_not_raise():
+    # A corrupted tool_context (non-dict list element, or a non-dict tool_call)
+    # must not raise AttributeError — that would escape the (TypeError, ValueError)
+    # guard and 500 the entire /transcript endpoint rather than one row.
+    assert _parse_tool_context(["x"]) == ["x"]
+    # role-bearing message that resolves nothing → None (DP-143), but the point
+    # here is that the non-dict tool_call doesn't raise.
+    assert _parse_tool_context(
+        [{"role": "assistant", "tool_calls": ["bad"]}]
+    ) is None
+
+
+def test_parse_tool_context_orphaned_call_id_returns_none():
+    # Truncated/orphaned history: a tool row references a call_id with no
+    # matching assistant tool_calls in the slice → nothing resolves. Must NOT
+    # leak the raw {role, content} OpenAI messages (they lack call_id/tool_name/
+    # arguments → garbled ToolCard). Return None so no tool panel renders. DP-143.
+    raw = [
+        {"role": "assistant", "content": "let me check"},
+        {"role": "tool", "tool_call_id": "orphan", "content": "{}"},
+    ]
+    assert _parse_tool_context(raw) is None
+
+
+def test_parse_tool_context_structured_without_role_still_passes_through():
+    # Already-structured ToolContext[] carries no `role` key → passthrough
+    # unchanged even though nothing "resolves". DP-143 must not break this.
+    structured = [{"call_id": "c", "tool_name": "t", "arguments": {},
+                   "result": None, "error": None}]
+    assert _parse_tool_context(structured) == structured

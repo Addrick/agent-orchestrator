@@ -18,9 +18,9 @@ import logging
 
 import pytest
 
-from src.chat_system import (
-    ChatSystem, ResponseType, RequestContext, MAX_CACHED_API_REQUESTS,
-)
+from config.global_config import MAX_CACHED_API_REQUESTS
+from src.chat_system import ResponseType
+from src.request_builder import RequestContext
 from src.persona import Persona, ExecutionMode
 
 
@@ -37,18 +37,18 @@ def test_store_api_request_eviction_is_lru(chat_system_with_mocks):
     cap = MAX_CACHED_API_REQUESTS
 
     for i in range(cap):
-        system._store_api_request(f"u{i}", "p", {"payload": i})
-    assert len(system.last_api_requests) == cap
+        system.turn_persistence.store_api_request(f"u{i}", "p", {"payload": i})
+    assert len(system.turn_persistence.last_api_requests) == cap
 
     # Touch the earliest-inserted user — under LRU this must move it to MRU.
-    system._store_api_request("u0", "p", {"payload": "touched"})
+    system.turn_persistence.store_api_request("u0", "p", {"payload": "touched"})
 
     # One more distinct user tips us over capacity, forcing one eviction.
-    system._store_api_request(f"u{cap}", "p", {"payload": "new"})
+    system.turn_persistence.store_api_request(f"u{cap}", "p", {"payload": "new"})
 
-    assert len(system.last_api_requests) == cap
-    assert "u0" in system.last_api_requests, "touched user must survive (LRU)"
-    assert "u1" not in system.last_api_requests, "least-recently-used must be evicted"
+    assert len(system.turn_persistence.last_api_requests) == cap
+    assert "u0" in system.turn_persistence.last_api_requests, "touched user must survive (LRU)"
+    assert "u1" not in system.turn_persistence.last_api_requests, "least-recently-used must be evicted"
 
 
 def test_store_api_request_eviction_does_not_orphan_iterations(chat_system_with_mocks):
@@ -56,9 +56,9 @@ def test_store_api_request_eviction_does_not_orphan_iterations(chat_system_with_
     system, *_ = chat_system_with_mocks
     cap = MAX_CACHED_API_REQUESTS
     for i in range(cap + 1):
-        system._store_api_request(f"v{i}", "p", {"payload": i}, is_first_iteration=True)
+        system.turn_persistence.store_api_request(f"v{i}", "p", {"payload": i}, is_first_iteration=True)
     # Whatever set of users remain, the two caches must agree on membership.
-    assert set(system.last_api_requests) == set(system.last_api_iterations)
+    assert set(system.turn_persistence.last_api_requests) == set(system.turn_persistence.last_api_iterations)
 
 
 # --- #6: empty/whitespace user message must not reach the LLM prompt --------
@@ -75,7 +75,7 @@ async def test_prepare_request_skips_empty_user_message(chat_system_with_mocks):
         persona=persona, persona_name="test_persona",
         user_identifier="u", channel="c", message="   ",
     )
-    await system._prepare_request(ctx, is_retry=False)
+    await system.request_builder.prepare_request(ctx, is_retry=False)
 
     empties = [m for m in ctx.conversation_history
                if m.get("role") == "user" and not (m.get("content") or "").strip()]
@@ -92,7 +92,7 @@ async def test_prepare_request_keeps_real_user_message(chat_system_with_mocks):
         persona=persona, persona_name="test_persona",
         user_identifier="u", channel="c", message="hello there",
     )
-    await system._prepare_request(ctx, is_retry=False)
+    await system.request_builder.prepare_request(ctx, is_retry=False)
     assert ctx.conversation_history[-1] == {"role": "user", "content": "hello there"}
 
 
@@ -104,7 +104,7 @@ def test_retry_update_persists_tool_context(chat_system_with_mocks):
     system, mm, _, _, _ = chat_system_with_mocks
     mm.update_interaction_content.return_value = True
 
-    rid = system._commit_or_update_assistant(
+    rid = system.turn_persistence.commit_or_update_assistant(
         persona_name="test_persona", user_identifier="u", channel="c",
         server_id=None, final_text="regenerated answer",
         response_type=ResponseType.LLM_GENERATION,
@@ -132,7 +132,7 @@ async def test_overwriting_pending_confirmation_is_audited(chat_system_with_mock
                          "arguments": {"ticket_id": 1, "state": "closed"}}]}
     text_engine_mock.generate_response.return_value = (call_a, {})
     await system.generate_response("test_persona", "user", "channel", "close 1")
-    assert ("user", "test_persona") in system._pending_confirmations
+    assert ("user", "test_persona") in system.confirmations.pending
 
     mm.log_audit_event.reset_mock()
 
@@ -167,11 +167,122 @@ async def test_client_fallback_log_reports_db_row_count(chat_system_with_mocks, 
         client_messages=[{"role": "user", "content": "client only"}],
     )
     with caplog.at_level(logging.INFO):
-        await system._prepare_request(ctx, is_retry=False)
+        await system.request_builder.prepare_request(ctx, is_retry=False)
 
     msgs = [r.getMessage() for r in caplog.records]
     assert any("DB result (3 rows) discarded" in m for m in msgs), (
         f"DB row count mis-reported in fallback log; messages={msgs}")
+
+
+# --- DP-200 review: non-string content in client_messages must not crash ----
+
+@pytest.mark.asyncio
+async def test_prepare_request_tolerates_non_string_trailing_client_content(
+        chat_system_with_mocks):
+    """The trailing-user dedupe compares client content to ctx.message; a
+    client-supplied turn with content=None or an OAI multimodal list must be
+    kept as-is, not crash on .strip()."""
+    system, mm, _, persona, _ = chat_system_with_mocks
+    mm.get_channel_history.return_value = []
+
+    for weird_content in (None, [{"type": "text", "text": "hi"}]):
+        ctx = RequestContext(
+            persona=persona, persona_name="test_persona",
+            user_identifier="u", channel="c", message="hi",
+            client_messages=[
+                {"role": "user", "content": "earlier turn"},
+                {"role": "assistant", "content": "earlier reply"},
+                {"role": "user", "content": weird_content},
+            ],
+        )
+        await system.request_builder.prepare_request(ctx, is_retry=False)
+        # The non-string turn can't match ctx.message, so it stays and the
+        # fresh user message is appended after it.
+        assert ctx.conversation_history[-1] == {"role": "user", "content": "hi"}
+
+
+# --- DP-200 review: retry + park must not overwrite the archived row --------
+
+def test_retry_park_does_not_overwrite_archived_row(chat_system_with_mocks):
+    """A retried turn that ends PENDING_CONFIRMATION must not UPDATE the
+    archived assistant row with the ephemeral confirmation text — the park
+    renders unpersisted (DP-130) and the resumed continuation commits the
+    real text."""
+    system, mm, _, _, _ = chat_system_with_mocks
+
+    rid = system.turn_persistence.commit_or_update_assistant(
+        persona_name="test_persona", user_identifier="u", channel="c",
+        server_id=None, final_text="I'd like to perform the following actions:",
+        response_type=ResponseType.PENDING_CONFIRMATION,
+        user_interaction_id=None, retry_assistant_id=42,
+        tool_context_json=None,
+    )
+    assert rid is None
+    mm.update_interaction_content.assert_not_called()
+
+
+# --- DP-200 review: retry linkage must survive the park/resume cycle --------
+
+@pytest.mark.asyncio
+async def test_resume_after_retry_updates_archived_row(chat_system_with_mocks):
+    """A retried turn that parks for confirmation must carry its
+    retry_assistant_id through the park, so the resumed continuation UPDATEs
+    the archived assistant row instead of INSERTing a fresh one beside it."""
+    system, mm, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
+    persona.set_execution_mode(ExecutionMode.CONFIRM)
+    persona.set_enabled_tools(["*"])
+    mm.handle_portal_retry.return_value = 42
+    mm.get_channel_history.return_value = []
+
+    # Retry turn proposes a write → parks.
+    tool_call = {"type": "tool_calls",
+                 "calls": [{"id": "c1", "name": "update_ticket",
+                            "arguments": {"state": "closed"}}]}
+    text_engine_mock.generate_response.return_value = (tool_call, {})
+    async for _ in system.stream_response(
+            "test_persona", "user", "channel", "regenerate", is_retry=True):
+        pass
+
+    pending = system.confirmations.pending[("user", "test_persona")]
+    assert pending.retry_assistant_id == 42
+    mm.update_interaction_content.assert_not_called()  # the park persists nothing
+
+    # Approve: the continuation must land on the archived row.
+    tool_manager_mock.execute_tool.return_value = {"ok": True}
+    text_engine_mock.generate_response.return_value = (
+        {"type": "text", "content": "Done, ticket closed."}, {})
+    _, rtype, assistant_id, _ = await system.resume_pending_confirmation(
+        "user", "test_persona", approved=True)
+
+    assert rtype == ResponseType.LLM_GENERATION
+    assert assistant_id == 42
+    mm.update_interaction_content.assert_called_once()
+    assert mm.update_interaction_content.call_args.args[0] == 42
+    # No fresh assistant row inserted beside the archived one.
+    assistant_inserts = [c for c in mm.log_message.call_args_list
+                         if c.kwargs.get("author_role") == "assistant"]
+    assert assistant_inserts == []
+
+
+# --- DP-200 review: RequestBuilder must see a post-init tool_manager swap ---
+
+def test_request_builder_sees_post_init_tool_manager_swap(chat_system_with_mocks):
+    """Tool filtering resolves the tool manager per call (lookup closure, like
+    ConfirmationManager): after a post-init rebind of chat_system.tool_manager,
+    the request must offer the model the new manager's tools."""
+    from unittest.mock import MagicMock
+
+    system, _, _, persona, original_tm = chat_system_with_mocks
+    persona.set_enabled_tools(["*"])
+
+    swapped_tm = MagicMock()
+    swapped_tm.get_tool_definitions.return_value = []
+    system.tool_manager = swapped_tm
+
+    system.request_builder.filter_tools_for_persona(persona)
+
+    swapped_tm.get_tool_definitions.assert_called_once()
+    original_tm.get_tool_definitions.assert_not_called()
 
 
 # --- #15: _conversation_taints must be bounded ------------------------------
@@ -179,8 +290,8 @@ async def test_client_fallback_log_reports_db_row_count(chat_system_with_mocks, 
 def test_conversation_taints_is_bounded(chat_system_with_mocks):
     """The sticky-taint map must not grow without bound across distinct
     (user, persona, channel, server) tuples."""
-    from src.chat_system import MAX_CONVERSATION_TAINTS
+    from src.request_builder import MAX_CONVERSATION_TAINTS
     system, *_ = chat_system_with_mocks
     for i in range(MAX_CONVERSATION_TAINTS + 50):
-        system._set_conversation_taint((f"u{i}", "p", "c", None), True)
-    assert len(system._conversation_taints) <= MAX_CONVERSATION_TAINTS
+        system.request_builder.set_conversation_taint((f"u{i}", "p", "c", None), True)
+    assert len(system.request_builder.conversation_taints) <= MAX_CONVERSATION_TAINTS

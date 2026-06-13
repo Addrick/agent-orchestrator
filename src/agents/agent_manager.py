@@ -154,9 +154,6 @@ class AgentManager:
         # Apply runtime config to instance attributes
         if "schedule" in merged:
             instance.schedule = merged["schedule"]
-        elif "poll_interval" in merged:
-            # Backward compat: convert old format
-            instance.schedule = {"interval": float(merged["poll_interval"])}
         if "action_history_limit" in merged:
             instance.action_history_limit = int(merged["action_history_limit"])
 
@@ -187,12 +184,13 @@ class AgentManager:
 
         # Convention-based dependency injection
         if "zammad_client" in params:
-            zammad_service = self._chat_system._services.get("zammad")
-            if zammad_service is None:
+            from src.clients.zammad_service import ZammadIntegration
+            zammad_service = self._chat_system.get_service("zammad")
+            if not isinstance(zammad_service, ZammadIntegration):
                 raise ValueError(
                     f"Agent '{name}' requires zammad_client but no Zammad service is registered."
                 )
-            kwargs["zammad_client"] = zammad_service._client
+            kwargs["zammad_client"] = zammad_service.client
 
         if "notification_router" in params:
             if self._notification_router is None:

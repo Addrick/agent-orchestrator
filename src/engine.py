@@ -8,6 +8,7 @@ import re
 import shutil
 import tempfile
 import uuid
+from types import SimpleNamespace
 from typing import Dict, Any, Optional, Tuple, List, Callable, AsyncIterator
 from contextlib import asynccontextmanager, AsyncExitStack
 
@@ -34,20 +35,21 @@ from google.genai.types import GenerateContentConfig, Tool, GoogleSearch, Candid
     FunctionDeclaration, Part, ThinkingConfig
 from src.utils.google_utils import process_grounding_metadata
 from src.generation_params import GenerationParams
+from src.llm_errors import LLMCommunicationError
+from src.stream_engine import StreamEngine
+from src.text_tool_protocol import (
+    TOOL_CALL_OPEN,
+    TOOL_CALL_CLOSE,
+    decode_tool_call_payload,
+    extract_first_tool_call_block,
+    render_tool_descriptions,
+)
 
 AGY_CALL_TIMEOUT_SECONDS = 120.0
 
 logger = logging.getLogger(__name__)
 
-
-class LLMCommunicationError(Exception):
-    """Custom exception for when the TextEngine cannot communicate with an LLM provider."""
-
-    def __init__(self, message: str, api_payload: Optional[Dict[str, Any]] = None,
-                 rate_limited: bool = False):
-        super().__init__(message)
-        self.api_payload = api_payload
-        self.rate_limited = rate_limited
+__all__ = ["TextEngine", "LLMCommunicationError", "AGY_CALL_TIMEOUT_SECONDS"]
 
 
 class TextEngine:
@@ -63,10 +65,11 @@ class TextEngine:
     def __init__(self, stream_engine: Optional[Any] = None) -> None:
         # --- Lazy-loaded clients ---
         self.openai_client: Optional[AsyncOpenAI] = None
-        self.anthropic_client: Optional[anthropic.Anthropic] = None
-        # Local-streaming delegate. Optional — non-local streaming wraps
-        # generate_response so unit tests need not wire one up. Phase B.
-        self.stream_engine: Optional[Any] = stream_engine
+        self.anthropic_client: Optional[anthropic.AsyncAnthropic] = None
+        # Kobold-native local provider (DP-206b: engine-owned — the engine is
+        # the single entry; StreamEngine is its `local` transport component).
+        # The parameter exists for tests to inject fakes.
+        self.stream_engine: Any = stream_engine if stream_engine is not None else StreamEngine()
 
         # --- Google Client (matching original implementation) ---
         self.google_client: Optional[genai.client.AsyncClient] = None
@@ -88,6 +91,9 @@ class TextEngine:
         self._openai_limiter        = AsyncLimiter(max_rate=RATE_LIMIT_OPENAI_RPM,    time_period=60)
         self._anthropic_limiter     = AsyncLimiter(max_rate=RATE_LIMIT_ANTHROPIC_RPM, time_period=60)
         self._agy_limiter           = AsyncLimiter(max_rate=RATE_LIMIT_AGY_RPM,       time_period=60)
+        # Persistent agy workspaces are shared across calls; a per-workspace
+        # lock serializes them so one call's CLI state can't clobber another's.
+        self._agy_workspace_locks: Dict[str, asyncio.Lock] = {}
         logger.info(
             f"Rate limiters initialised — "
             f"Gemini 2.5: {RATE_LIMIT_GEMINI_25_RPM} RPM / {RATE_LIMIT_GEMINI_25_RPD} RPD | "
@@ -99,6 +105,10 @@ class TextEngine:
         )
 
         self._initialize_env()
+
+    async def aclose(self) -> None:
+        """Release transport resources (the kobold-native HTTP client)."""
+        await self.stream_engine.aclose()
 
     def _initialize_env(self) -> None:
         """Load API keys from .env file."""
@@ -131,13 +141,13 @@ class TextEngine:
             self.openai_client = AsyncOpenAI(api_key=api_key)
         return self.openai_client
 
-    def _get_anthropic_client(self) -> anthropic.Anthropic:
-        """Initializes and returns the Anthropic client."""
+    def _get_anthropic_client(self) -> anthropic.AsyncAnthropic:
+        """Initializes and returns the async Anthropic client."""
         if self.anthropic_client is None:
             api_key = os.environ.get("ANTHROPIC_API_KEY")
             if not api_key:
                 raise LLMCommunicationError("ANTHROPIC_API_KEY not set — skipping Anthropic provider.")
-            self.anthropic_client = anthropic.Anthropic(api_key=api_key)
+            self.anthropic_client = anthropic.AsyncAnthropic(api_key=api_key)
         return self.anthropic_client
 
     def _initialize_google_client(self) -> None:
@@ -159,24 +169,28 @@ class TextEngine:
         return cls._FALLBACK_MODELS.get(model_name)
 
     def _get_provider_route(self, model_name: str) -> Tuple[Callable, List[AsyncLimiter]]:
-        """Returns (handler_method, [limiters]) for the model name.
+        """Returns (stream_factory, [limiters]) for the model name (DP-206b).
+        Every factory is an async generator emitting the unified event shape
+        (api_payload → text_delta* → [tool_calls] → done); the `local` factory
+        additionally accepts `local_inference_config`.
         Raises LLMCommunicationError for unsupported models."""
         if model_name.startswith("gpt"):
-            return self._generate_openai_response, [self._openai_limiter]
+            return self._stream_openai_response, [self._openai_limiter]
         if "claude" in model_name:
-            return self._generate_anthropic_response, [self._anthropic_limiter]
+            return self._stream_anthropic_response, [self._anthropic_limiter]
         if "gemma-4" in model_name:
-            return self._generate_google_response, [self._gemma_4_rpm_limiter]
+            return self._stream_google_response, [self._gemma_4_rpm_limiter]
         if "gemma" in model_name:
-            return self._generate_google_response, [self._gemma_4_rpm_limiter]
+            return self._stream_google_response, [self._gemma_4_rpm_limiter]
         if "gemini-3.1" in model_name:
-            return self._generate_google_response, [self._gemini_3_rpm_limiter]
+            return self._stream_google_response, [self._gemini_3_rpm_limiter]
         if "gemini" in model_name:
-            return self._generate_google_response, [self._gemini_25_rpm_limiter, self._gemini_25_rpd_limiter]
+            return self._stream_google_response, [self._gemini_25_rpm_limiter, self._gemini_25_rpd_limiter]
         if model_name.startswith("agy"):
-            return self._generate_agy_response, [self._agy_limiter]
+            self._ensure_agy_supported()
+            return self._stream_agy_response, [self._agy_limiter]
         if model_name == 'local':
-            return self._generate_local_response, []
+            return self._stream_local_response, []
         raise LLMCommunicationError(f"Error: Model '{model_name}' is not supported.")
 
     @staticmethod
@@ -193,13 +207,62 @@ class TextEngine:
                                 local_inference_config: Optional[Dict[str, Any]] = None) -> Tuple[
         Dict[str, Any], Optional[Dict[str, Any]]]:
         """
-        Routes the generation request and retries on empty responses.
+        One-shot entry: drains the policy-driven stream (DP-206b cutover —
+        one-shot = collect(stream); `_stream_response` owns routing, rate
+        limiting, the empty-response retry loop, and 429 fallback).
         Returns: A tuple containing:
                  1. A structured dictionary:
                     - {'type': 'text', 'content': '...'} for a text response.
                     - {'type': 'tool_calls', 'calls': [{'id': '...', 'name': '...', 'arguments': {...}}]} for a tool call.
                  2. The API payload dictionary for debugging, or None.
         Raises: LLMCommunicationError if all retries fail or produce empty/invalid responses.
+        """
+        result, api_payload = await self.collect_stream(
+            self._stream_response(persona_config, history_object, tools, local_inference_config,
+                                  one_shot=True)
+        )
+        # one_shot mode validates each complete attempt before emitting, so
+        # every invalid shape — including content-then-zero-parseable-calls —
+        # was retried inside the driver. This check is the final guard for
+        # the historical contract that generate_response never returns an
+        # empty/invalid result.
+        if result.get('type') == 'text' and result.get('content', '').strip():
+            return result, api_payload
+        if result.get('type') == 'tool_calls' and result.get('calls'):
+            return result, api_payload
+        raise LLMCommunicationError("LLM provider returned an empty or invalid response after all retries.")
+
+    async def _stream_response(
+        self, persona_config: Dict[str, Any], history_object: Dict[str, Any],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        local_inference_config: Optional[Dict[str, Any]] = None,
+        *, one_shot: bool = False,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Single driving layer for every provider (DP-206b).
+
+        Owns the request *policy* around the canonical per-provider streams:
+        image-support handling, provider routing, rate limiting, the
+        empty-response retry loop, and 429 model fallback — emitting the
+        unified event shape (api_payload → text_delta* → [tool_calls] → done).
+
+        Events pass through as true token deltas with one safeguard: nothing
+        is emitted for an attempt until it produces real content (cumulative
+        non-whitespace text, a non-empty tool_calls, or a non-empty done), so
+        an empty/invalid attempt can be retried invisibly — mirroring the
+        pre-cutover generate_response validation. A tool_calls event with zero
+        parseable calls is dropped (the attempt stays invalid, exactly like
+        the old `{"type": "tool_calls", "calls": []}` one-shot result). Once
+        content has been emitted ("committed"), errors propagate instead of
+        retrying: streamed output cannot be retracted.
+
+        With ``one_shot=True`` (the generate_response = collect(stream) path,
+        DP-210), no output ever reaches a user mid-attempt, so retraction is a
+        non-issue: the whole attempt is buffered and validated complete before
+        anything is emitted. This restores the pre-cutover one-shot retry for
+        the shape where the model streams text and then produces zero
+        parseable tool calls (e.g. a local model emitting prose followed by a
+        malformed ``<tool_call>`` block), and retries mid-stream errors that
+        the true-streaming path must propagate.
         """
         model_name: str = persona_config.get("model_name", "")
 
@@ -211,26 +274,89 @@ class TextEngine:
             )
             history_object["current_message"]["image_url"] = None
 
-        handler, limiters = self._get_provider_route(model_name)
+        stream_factory, limiters = self._get_provider_route(model_name)
 
         for attempt in range(EMPTY_RESPONSE_RETRIES + 1):
-            result: Dict[str, Any] = {}
-            api_payload: Optional[Dict[str, Any]] = None
+            committed = False
+            pending: List[Dict[str, Any]] = []
+            pending_text: List[str] = []
+            # one_shot validation state: mirrors collect_stream's result
+            # shaping (a tool_calls event means the model chose the tool
+            # path; last event wins; done full_text beats concatenation).
+            attempt_calls: Optional[List[Dict[str, Any]]] = None
+            attempt_done_text: Optional[str] = None
 
             try:
                 async with self._rate_limited(limiters):
                     if model_name == 'local':
-                        result, api_payload = await handler(persona_config, history_object, tools, local_inference_config)
+                        stream = stream_factory(persona_config, history_object, tools, local_inference_config)
                     else:
-                        result, api_payload = await handler(persona_config, history_object, tools)
+                        stream = stream_factory(persona_config, history_object, tools)
+                    async for ev in stream:
+                        if committed:
+                            yield ev
+                            continue
+                        etype = ev.get("type")
+                        if one_shot:
+                            # Buffer the entire attempt; validity is judged
+                            # on the complete result after the stream ends.
+                            pending.append(ev)
+                            if etype == "text_delta":
+                                pending_text.append(ev.get("text", "") or "")
+                            elif etype == "tool_calls":
+                                attempt_calls = list(ev.get("calls", []))
+                            elif etype == "done":
+                                attempt_done_text = ev.get("full_text")
+                            continue
+                        if etype == "text_delta":
+                            pending.append(ev)
+                            pending_text.append(ev.get("text", "") or "")
+                            if "".join(pending_text).strip():
+                                committed = True
+                                for held in pending:
+                                    yield held
+                                pending = []
+                        elif etype == "tool_calls":
+                            if ev.get("calls"):
+                                committed = True
+                                for held in pending:
+                                    yield held
+                                pending = []
+                                yield ev
+                            # else: zero parseable calls — drop the event and
+                            # leave the attempt invalid so it gets retried.
+                        elif etype == "done":
+                            if (ev.get("full_text") or "").strip():
+                                committed = True
+                                for held in pending:
+                                    yield held
+                                pending = []
+                                yield ev
+                            else:
+                                pending.append(ev)
+                        else:
+                            # api_payload (and any future event types) are held
+                            # until the attempt proves valid.
+                            pending.append(ev)
 
-                # Validate the response structure and content
-                if result.get('type') == 'text' and result.get('content', '').strip():
-                    return result, api_payload
-                if result.get('type') == 'tool_calls' and result.get('calls'):
-                    return result, api_payload
+                if one_shot:
+                    if attempt_calls is not None:
+                        attempt_valid = bool(attempt_calls)
+                    else:
+                        full = (attempt_done_text if attempt_done_text is not None
+                                else "".join(pending_text))
+                        attempt_valid = bool((full or "").strip())
+                    if attempt_valid:
+                        for held in pending:
+                            yield held
+                        return
+                elif committed:
+                    return
+                # Attempt completed without real content → retry below.
 
             except LLMCommunicationError as e:
+                if committed:
+                    raise
                 if e.rate_limited:
                     fallback = self._get_fallback_model(model_name)
                     if fallback:
@@ -240,7 +366,7 @@ class TextEngine:
                         )
                         persona_config = {**persona_config, "model_name": fallback}
                         model_name = fallback
-                        handler, limiters = self._get_provider_route(model_name)
+                        stream_factory, limiters = self._get_provider_route(model_name)
                         continue
                     logger.warning(f"Rate limit (429) hit for model '{model_name}'. Aborting retries.")
                     raise
@@ -278,10 +404,12 @@ class TextEngine:
             last_message['content'] = [{"type": "text", "text": last_message['content']}]
         last_message['content'].append({"type": "image_url", "image_url": {"url": image_url}})
 
-    async def _generate_openai_response(self, config: Dict[str, Any], history_object: Dict[str, Any],
-                                        tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
-        Dict[str, Any], Dict[str, Any]]:
-        client = await self._get_openai_client()
+    def _build_openai_params(self, config: Dict[str, Any], history_object: Dict[str, Any],
+                             tools: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+        """Builds the chat.completions request kwargs. Single source of truth
+        shared by the canonical streaming driver and the local one-shot path
+        — wire-payload parity between them holds by construction
+        (pinned by tests/test_engine_payload_parity.py)."""
         messages: List[Dict[str, Any]] = []
         message_history = history_object.get("message_history", history_object.get("history", []))
         if message_history and message_history[0]["role"] == "system":
@@ -315,22 +443,52 @@ class TextEngine:
             api_params["tool_choice"] = "auto"
 
         api_params = {k: v for k, v in api_params.items() if v is not None}
+        return api_params
 
+    @staticmethod
+    def _openai_dump_params(api_params: Dict[str, Any]) -> Dict[str, Any]:
+        """Log-safe copy of the request kwargs: tools listed by name."""
+        dump = dict(api_params)
+        if "tools" in dump:
+            dump["tools"] = [tool.get("function", {}).get("name", "unknown")
+                             for tool in dump["tools"]]
+        return dump
+
+    async def _stream_openai_response(
+        self, config: Dict[str, Any], history_object: Dict[str, Any],
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Canonical OpenAI driver (DP-206): a true SDK token stream emitting
+        the unified event shape (api_payload → text_delta* → [tool_calls] →
+        done). The one-shot path is `collect_stream` over this generator."""
+        client = await self._get_openai_client()
+        api_params = self._build_openai_params(config, history_object, tools)
+        yield {"type": "api_payload", "payload": self._openai_dump_params(api_params)}
+
+        text_parts: List[str] = []
+        # index → {"id", "name", "arguments"} accumulated across delta chunks
+        raw_calls: Dict[int, Dict[str, Any]] = {}
         try:
-            completion = await client.chat.completions.create(**api_params)
-            response_message = completion.choices[0].message
-
-            if "tools" in api_params:
-                api_params["tools"] = [tool.get("function", {}).get("name", "unknown") for tool in
-                                       api_params.get("tools", [])]
-
-            if response_message.tool_calls:
-                tool_calls = self._parse_openai_tool_calls(response_message.tool_calls)
-                return {"type": "tool_calls", "calls": tool_calls}, api_params
-            else:
-                response_content: str = response_message.content or ""
-                return {"type": "text", "content": response_content}, api_params
-
+            stream = await client.chat.completions.create(**api_params, stream=True)
+            async for chunk in stream:
+                choices = getattr(chunk, "choices", None)
+                if not choices:
+                    continue
+                delta = choices[0].delta
+                content = getattr(delta, "content", None)
+                if content:
+                    text_parts.append(content)
+                    yield {"type": "text_delta", "text": content}
+                for tc in (getattr(delta, "tool_calls", None) or []):
+                    idx = getattr(tc, "index", 0) or 0
+                    slot = raw_calls.setdefault(idx, {"id": None, "name": "", "arguments": ""})
+                    if getattr(tc, "id", None):
+                        slot["id"] = tc.id
+                    fn = getattr(tc, "function", None)
+                    if fn is not None:
+                        if getattr(fn, "name", None):
+                            slot["name"] = fn.name
+                        slot["arguments"] += getattr(fn, "arguments", None) or ""
         except (APIStatusError, APITimeoutError) as e:
             rate_limited = isinstance(e, APIStatusError) and e.status_code == 429
             is_server_error = isinstance(e, APIStatusError) and e.status_code >= 500
@@ -341,6 +499,22 @@ class TextEngine:
             logger.error(f"An unexpected OpenAI error occurred: {e}", exc_info=True)
             raise LLMCommunicationError("An unexpected error occurred with the OpenAI API.",
                                         api_payload=api_params) from e
+
+        if raw_calls:
+            # Reuse the one parser: wrap accumulated fragments in the same
+            # attribute shape the SDK's non-streaming message objects expose.
+            wrapped = [
+                SimpleNamespace(
+                    id=slot["id"],
+                    function=SimpleNamespace(name=slot["name"], arguments=slot["arguments"]),
+                )
+                for _, slot in sorted(raw_calls.items())
+            ]
+            tool_calls = self._parse_openai_tool_calls(wrapped)
+            yield {"type": "tool_calls", "calls": tool_calls}
+            yield {"type": "done", "full_text": ""}
+        else:
+            yield {"type": "done", "full_text": "".join(text_parts)}
 
     async def _attach_anthropic_image(self, messages: List[Dict[str, Any]], image_url: str) -> None:
         """Downloads and attaches an image to the last user message for Anthropic."""
@@ -365,11 +539,11 @@ class TextEngine:
         except aiohttp.ClientError as e:
             logger.error(f"Failed to download image from {image_url}: {e}")
 
-    async def _generate_anthropic_response(self, config: Dict[str, Any], history_object: Dict[str, Any],
-                                           tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
-        Dict[str, Any], Dict[str, Any]]:
-        client = self._get_anthropic_client()
-
+    async def _build_anthropic_params(self, config: Dict[str, Any], history_object: Dict[str, Any],
+                                      tools: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+        """Builds the messages request kwargs for Anthropic. Single source of
+        truth for the canonical streaming driver (pinned by
+        tests/test_engine_payload_parity.py)."""
         system_prompt, history = self._extract_system_prompt(history_object)
 
         if history_object["current_message"].get("image_url"):
@@ -392,16 +566,40 @@ class TextEngine:
                 for t in tools if "function" in t
             ]
 
-        api_params = {k: v for k, v in api_params.items() if v is not None}
+        return {k: v for k, v in api_params.items() if v is not None}
 
+    @staticmethod
+    def _anthropic_dump_params(api_params: Dict[str, Any]) -> Dict[str, Any]:
+        """Log-safe copy of the request kwargs: tools listed by name."""
+        dump = dict(api_params)
+        if "tools" in dump:
+            dump["tools"] = [tool.get("name", "unknown") for tool in dump["tools"]]
+        return dump
+
+    async def _stream_anthropic_response(
+        self, config: Dict[str, Any], history_object: Dict[str, Any],
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Canonical Anthropic driver (DP-206): `messages.stream(...)` with the
+        SDK's accumulator, emitting the unified event shape. The one-shot path
+        is `collect_stream` over this generator. Uses `AsyncAnthropic`
+        (DP-211) so token iteration never blocks the event loop; the request
+        kwargs are identical to the sync client's (frozen payload goldens)."""
+        client = self._get_anthropic_client()
+        api_params = await self._build_anthropic_params(config, history_object, tools)
+        yield {"type": "api_payload", "payload": self._anthropic_dump_params(api_params)}
+
+        tool_calls: Optional[List[Dict[str, Any]]] = None
+        response_content = ""
         try:
-            response = client.messages.create(**api_params)
-
-            if "tools" in api_params:
-                api_params["tools"] = [tool.get("name", "unknown") for tool in api_params.get("tools", [])]
+            async with client.messages.stream(**api_params) as stream:
+                async for text_chunk in stream.text_stream:
+                    if text_chunk:
+                        yield {"type": "text_delta", "text": text_chunk}
+                response = await stream.get_final_message()
 
             if response.stop_reason == "tool_use":
-                tool_calls: List[Dict[str, Any]] = []
+                tool_calls = []
                 for content_block in response.content:
                     if content_block.type == 'tool_use':
                         tool_calls.append({
@@ -409,10 +607,8 @@ class TextEngine:
                             "name": content_block.name,
                             "arguments": content_block.input
                         })
-                return {"type": "tool_calls", "calls": tool_calls}, api_params
             else:
-                response_content: str = response.content[0].text or ""
-                return {"type": "text", "content": response_content}, api_params
+                response_content = response.content[0].text or ""
 
         except anthropic.APIError as e:
             rate_limited = hasattr(e, 'status_code') and e.status_code == 429
@@ -424,6 +620,12 @@ class TextEngine:
             logger.error(f"An unexpected Anthropic error occurred: {e}", exc_info=True)
             raise LLMCommunicationError("An unexpected error occurred with the Anthropic API.",
                                         api_payload=api_params) from e
+
+        if tool_calls is not None:
+            yield {"type": "tool_calls", "calls": tool_calls}
+            yield {"type": "done", "full_text": ""}
+        else:
+            yield {"type": "done", "full_text": response_content}
 
     @staticmethod
     def _extract_system_prompt(history_object: Dict[str, Any]) -> Tuple[str, List[Dict[str, Any]]]:
@@ -494,8 +696,13 @@ class TextEngine:
 
             if item['role'] == 'tool':
                 part_dict = {'function_response': {'name': item['name'], 'response': json.loads(item['content'])}}
-                history_for_api.append({'role': 'tool', 'parts': [Part(**part_dict)]})
-                serializable_item['parts'] = [part_dict]
+                if history_for_api and history_for_api[-1]['role'] == 'tool':
+                    history_for_api[-1]['parts'].append(Part(**part_dict))
+                    serializable_history[-1]['parts'].append(part_dict)
+                else:
+                    history_for_api.append({'role': 'tool', 'parts': [Part(**part_dict)]})
+                    serializable_item['parts'] = [part_dict]
+                    serializable_history.append(serializable_item)
             elif item.get('tool_calls'):
                 api_parts = []
                 serializable_parts = []
@@ -510,8 +717,13 @@ class TextEngine:
                         ser_part['thought_signature'] = '...present...'
                     api_parts.append(Part(**part_kwargs))
                     serializable_parts.append(ser_part)
-                history_for_api.append({'role': 'model', 'parts': api_parts})
-                serializable_item['parts'] = serializable_parts
+                if history_for_api and history_for_api[-1]['role'] == 'model':
+                    history_for_api[-1]['parts'].extend(api_parts)
+                    serializable_history[-1]['parts'].extend(serializable_parts)
+                else:
+                    history_for_api.append({'role': 'model', 'parts': api_parts})
+                    serializable_item['parts'] = serializable_parts
+                    serializable_history.append(serializable_item)
             else:
                 content_text = item['content']
                 parts_for_api = [Part(text=content_text)]
@@ -528,10 +740,13 @@ class TextEngine:
                     except aiohttp.ClientError as e:
                         logger.error(f"Failed to download image from {image_url}: {e}")
 
-                history_for_api.append({'role': role, 'parts': parts_for_api})
-                serializable_item['parts'] = serializable_parts
-            serializable_history.append(serializable_item)
-
+                if history_for_api and history_for_api[-1]['role'] == role:
+                    history_for_api[-1]['parts'].extend(parts_for_api)
+                    serializable_history[-1]['parts'].extend(serializable_parts)
+                else:
+                    history_for_api.append({'role': role, 'parts': parts_for_api})
+                    serializable_item['parts'] = serializable_parts
+                    serializable_history.append(serializable_item)
         return history_for_api, serializable_history
 
     def _build_google_tools(
@@ -609,16 +824,13 @@ class TextEngine:
             dump_config['tools'] = tool_names
         return {'model': model_name, 'contents': serializable_history, 'config': dump_config}
 
-    async def _generate_google_response(self, config: Dict[str, Any], history_object: Dict[str, Any],
-                                        tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
-        Dict[str, Any], Dict[str, Any]]:
-        """Generates a response using the Google Gemini API."""
-        try:
-            self._initialize_google_client()
-            assert self.google_client is not None and self.google_search_tool is not None
-        except (ValueError, AssertionError) as e:
-            raise LLMCommunicationError(f"Error: Google not configured: {e}") from e
-
+    async def _build_google_params(self, config: Dict[str, Any], history_object: Dict[str, Any],
+                                   tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
+        List[Dict[str, Any]], Dict[str, Any], Dict[str, Any]]:
+        """Builds the generate_content request pieces. Single source of truth
+        for the canonical streaming driver (pinned by
+        tests/test_engine_payload_parity.py). Returns
+        (history_for_api, content_config_for_api, api_params_for_dumping)."""
         system_prompt, history_to_process = self._extract_system_prompt(history_object)
         image_url = history_object["current_message"].get("image_url")
         history_for_api, serializable_history = await self._build_google_history(
@@ -652,13 +864,73 @@ class TextEngine:
         api_params_for_dumping = self._build_google_dump_params(
             config["model_name"], content_config_for_api, serializable_history
         )
+        return history_for_api, content_config_for_api, api_params_for_dumping
 
+    @staticmethod
+    def _accumulate_google_chunks(chunks: List[Any]) -> Any:
+        """Recombine streamed GenerateContentResponse chunks into one
+        response-shaped object that `_parse_google_response` understands:
+        parts concatenate in arrival order (text may be split across chunks;
+        joining them reproduces the non-streamed text), prompt_feedback comes
+        from the first chunk that carries one, and grounding_metadata from the
+        last chunk that carries one (the SDK attaches it to the final chunk)."""
+        prompt_feedback = next(
+            (c.prompt_feedback for c in chunks if getattr(c, "prompt_feedback", None)), None
+        )
+        parts: List[Any] = []
+        grounding_metadata: Any = None
+        for chunk in chunks:
+            candidate = chunk.candidates[0] if getattr(chunk, "candidates", None) else None
+            if candidate is None:
+                continue
+            if candidate.content and candidate.content.parts:
+                parts.extend(candidate.content.parts)
+            if getattr(candidate, "grounding_metadata", None) is not None:
+                grounding_metadata = candidate.grounding_metadata
+        candidates: List[Any] = []
+        if parts:
+            candidates = [SimpleNamespace(
+                content=SimpleNamespace(parts=parts),
+                grounding_metadata=grounding_metadata,
+            )]
+        return SimpleNamespace(prompt_feedback=prompt_feedback, candidates=candidates)
+
+    async def _stream_google_response(
+        self, config: Dict[str, Any], history_object: Dict[str, Any],
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Canonical Google driver (DP-206): `generate_content_stream` chunks,
+        emitting the unified event shape. Text parts stream as raw deltas; the
+        terminal `done` carries the grounding-processed full text (citations /
+        search queries appended), so collect_stream reproduces the pre-DP-206
+        one-shot result exactly."""
         try:
-            response_obj = await self.google_client.models.generate_content(
+            self._initialize_google_client()
+            assert self.google_client is not None and self.google_search_tool is not None
+        except (ValueError, AssertionError) as e:
+            raise LLMCommunicationError(f"Error: Google not configured: {e}") from e
+
+        history_for_api, content_config_for_api, api_params_for_dumping = \
+            await self._build_google_params(config, history_object, tools)
+        yield {"type": "api_payload", "payload": api_params_for_dumping}
+
+        chunks: List[Any] = []
+        try:
+            stream = await self.google_client.models.generate_content_stream(
                 model=config["model_name"],
                 contents=history_for_api,
                 config=GenerateContentConfig(**content_config_for_api)
             )
+            async for chunk in stream:
+                chunks.append(chunk)
+                candidate = chunk.candidates[0] if getattr(chunk, "candidates", None) else None
+                if candidate is None or not candidate.content or not candidate.content.parts:
+                    continue
+                for part in candidate.content.parts:
+                    if part.function_call:
+                        continue
+                    if hasattr(part, 'text') and part.text:
+                        yield {"type": "text_delta", "text": part.text}
         except Exception as e:
             err_str = str(e)
             rate_limited = '429' in err_str or 'RESOURCE_EXHAUSTED' in err_str
@@ -673,53 +945,47 @@ class TextEngine:
             raise LLMCommunicationError(f"An error occurred with Google API: {e}",
                                         api_payload=api_params_for_dumping, rate_limited=rate_limited) from e
 
-        return self._parse_google_response(response_obj, api_params_for_dumping)
+        result, _ = self._parse_google_response(
+            self._accumulate_google_chunks(chunks), api_params_for_dumping
+        )
+        if result.get("type") == "tool_calls":
+            yield {"type": "tool_calls", "calls": result["calls"]}
+            yield {"type": "done", "full_text": ""}
+        else:
+            yield {"type": "done", "full_text": result.get("content", "")}
 
-    async def _get_local_client(self) -> AsyncOpenAI:
-        """
-        Creates a new AsyncOpenAI client configured to point to a local,
-        OpenAI-compatible API endpoint (like KoboldCPP or Ollama).
-        """
-        # Use the configured URL from global_config or env
-        local_api_url = os.environ.get("LOCAL_LLM_URL", global_config.LOCAL_LLM_URL)
-        return AsyncOpenAI(base_url=local_api_url, api_key="not-required")
+    async def _stream_local_response(
+        self, config: Dict[str, Any], history_object: Dict[str, Any],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        local_inference_config: Optional[Dict[str, Any]] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Canonical local driver (DP-206b): the kobold-native token stream.
+        StreamEngine renders the chat template, folds the tool list into the
+        system prompt as the `<tool_call>` protocol, and parses tool-call
+        blocks out of the token stream — so the local one-shot path
+        (collect over this) uses the exact same transport and tool protocol
+        as the streaming portal path. This replaced the OpenAI-compat
+        `/v1/chat/completions` one-shot transport."""
+        async for ev in self.stream_engine.stream_local(
+            config, history_object, tools, local_inference_config
+        ):
+            yield ev
 
-    async def _generate_local_response(self, config: Dict[str, Any], history_object: Dict[str, Any],
-                                       tools: Optional[List[Dict[str, Any]]] = None,
-                                       local_inference_config: Optional[Dict[str, Any]] = None) -> Tuple[
-        Dict[str, Any], Dict[str, Any]]:
-        """
-        Generates a response from a local model by reusing the standard OpenAI
-        API format. This standardizes local model integration.
-        """
-        local_client = await self._get_local_client()
-
-        # Temporarily swap the main OpenAI client with our special local client
-        original_openai_client = self.openai_client
-        self.openai_client = local_client
-
-        # Merge local_inference_config into config (Exact Parity)
-        if local_inference_config:
-            config = {**config, **{k: v for k, v in local_inference_config.items() if v is not None}}
-
-        try:
-            # Most local servers ignore the model name in the payload and use whatever is loaded.
-            # We provide a placeholder for consistency.
-            config['model_name'] = 'local-model'
-            # We can now call our standard, well-tested OpenAI method!
-            return await self._generate_openai_response(config, history_object, tools)
-        except LLMCommunicationError as e:
-            logger.error(f"Local OpenAI-compatible API error: {e}", exc_info=True)
-            # Re-raise with a more specific "Local API" message, but preserving the original payload.
-            raise LLMCommunicationError(f"Local API returned an error: {e}", api_payload=e.api_payload) from e
-        except Exception as e:
-            logger.error(f"An unexpected local API error occurred: {e}", exc_info=True)
-            # This will catch errors before the API call is made (e.g., client init)
-            raise LLMCommunicationError("An unexpected error occurred with the Local API.") from e
-        finally:
-            # CRITICAL: Always restore the original client to avoid breaking
-            # subsequent calls to the actual OpenAI API.
-            self.openai_client = original_openai_client
+    @staticmethod
+    async def _events_from_one_shot(
+        result: Dict[str, Any], api_payload: Optional[Dict[str, Any]],
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Synthesize the unified event shape from a one-shot
+        (result, api_payload) pair — the inverse of `collect_stream`."""
+        yield {"type": "api_payload", "payload": api_payload or {}}
+        if result.get("type") == "tool_calls":
+            yield {"type": "tool_calls", "calls": list(result.get("calls", []))}
+            yield {"type": "done", "full_text": ""}
+        else:
+            text = result.get("content", "") or ""
+            if text:
+                yield {"type": "text_delta", "text": text}
+            yield {"type": "done", "full_text": text}
 
     @staticmethod
     def _render_agy_tool_protocol(tools: Optional[List[Dict[str, Any]]]) -> str:
@@ -728,18 +994,14 @@ class TextEngine:
 
         protocol_desc = (
             "You may request a tool by emitting EXACTLY "
-            "<tool_call>{\"name\": \"<tool_name>\", \"arguments\": {<json args>}}</tool_call> "
+            f"{TOOL_CALL_OPEN}{{\"name\": \"<tool_name>\", \"arguments\": "
+            f"{{<json args>}}}}{TOOL_CALL_CLOSE} "
             "as the last thing. Answer in plain text otherwise, and use no other tools/files/shell/web."
         )
 
-        lines = [protocol_desc]
-        for t in tools:
-            func = t.get("function", {})
-            name = func.get("name", "")
-            description = func.get("description", "")
-            parameters = func.get("parameters", {})
-            lines.append(f"name: {name}, description: {description}, parameters: {parameters}")
-
+        # Shared renderer keeps the agy and streaming paths from drifting on
+        # how a tool's name/description/parameters are formatted.
+        lines = [protocol_desc, *render_tool_descriptions(tools)]
         return "\n".join(lines)
 
     @staticmethod
@@ -747,16 +1009,13 @@ class TextEngine:
         if not text:
             return None
         cleaned = re.sub(r"<SYSTEM_MESSAGE>.*?</SYSTEM_MESSAGE>", "", text, flags=re.DOTALL)
-        match = re.search(r"<tool_call>(.*?)</tool_call>", cleaned, flags=re.DOTALL)
-        if not match:
+        inner = extract_first_tool_call_block(cleaned)
+        if inner is None:
             return None
-        inner = match.group(1).strip()
-        try:
-            parsed = json.loads(inner)
-        except json.JSONDecodeError:
+        parsed = decode_tool_call_payload(inner)
+        if parsed is None:
             return None
-        if not isinstance(parsed, dict):
-            return None
+        # agy policy: both keys must be present; id is a fresh uuid.
         if "name" not in parsed or "arguments" not in parsed:
             return None
         call_id = f"agy_{uuid.uuid4().hex}"
@@ -783,7 +1042,30 @@ class TextEngine:
                 "See docs/user_guide.md (Antigravity / agy provider)."
             )
 
-    async def _run_agy_cli(self, prompt: str, timeout: float = AGY_CALL_TIMEOUT_SECONDS) -> str:
+    @staticmethod
+    def _sanitize_agy_workspace_name(persona_name: Optional[str]) -> Optional[str]:
+        """Persona names come from config and may contain path separators or
+        other filesystem-hostile characters; reduce to a safe slug. Returns
+        None when nothing usable remains (caller falls back to global)."""
+        if not persona_name:
+            return None
+        slug = re.sub(r"[^A-Za-z0-9._-]+", "_", persona_name).strip("._")
+        return slug or None
+
+    @staticmethod
+    def _resolve_agy_workspace(persona_name: Optional[str]) -> Optional[str]:
+        """Returns the persistent workspace dir for this call, or None when
+        persistence is disabled (caller uses a throwaway temp dir). Does not
+        create the directory."""
+        if not global_config.AGY_PERSISTENT_WORKSPACES:
+            return None
+        workspaces_dir = global_config.AGY_WORKSPACES_DIR
+        slug = TextEngine._sanitize_agy_workspace_name(persona_name)
+        if global_config.AGY_WORKSPACE_MODE == "persona" and slug:
+            return os.path.abspath(workspaces_dir / f"agy_{slug}")
+        return os.path.abspath(workspaces_dir / "agy_global")
+
+    async def _run_agy_cli(self, prompt: str, timeout: float = AGY_CALL_TIMEOUT_SECONDS, persona_name: Optional[str] = None) -> str:
         self._ensure_agy_supported()
 
         binary = os.environ.get("ANTIGRAVITY_HARNESS_PATH") or shutil.which("agy")
@@ -792,8 +1074,44 @@ class TextEngine:
 
         timeout_sec_str = f"{int(timeout) + 30}s"
         args = ["--print-timeout", timeout_sec_str, "-p", prompt]
+        if global_config.AGY_SANDBOX:
+            args = ["--sandbox", *args]
 
-        temp_dir = tempfile.mkdtemp()
+        workspace_dir = self._resolve_agy_workspace(persona_name)
+        if workspace_dir is None:
+            temp_dir = tempfile.mkdtemp()
+            try:
+                return await self._exec_agy(binary, args, temp_dir, timeout)
+            finally:
+                # The CLI leaves symlinks under .antigravitycli pointing at
+                # files outside the temp dir; remove the targets so rmtree
+                # doesn't strand them. Persistent workspaces keep this state
+                # on purpose — that cache is the point of persistence.
+                self._remove_agy_cli_link_targets(temp_dir)
+                shutil.rmtree(temp_dir, ignore_errors=True)
+
+        os.makedirs(workspace_dir, exist_ok=True)
+        lock = self._agy_workspace_locks.setdefault(workspace_dir, asyncio.Lock())
+        async with lock:
+            return await self._exec_agy(binary, args, workspace_dir, timeout)
+
+    @staticmethod
+    def _remove_agy_cli_link_targets(workspace_dir: str) -> None:
+        cli_dir = os.path.join(workspace_dir, ".antigravitycli")
+        if not os.path.isdir(cli_dir):
+            return
+        for f in os.listdir(cli_dir):
+            p = os.path.join(cli_dir, f)
+            if os.path.islink(p):
+                try:
+                    target = os.readlink(p)
+                    if os.path.exists(target):
+                        os.remove(target)
+                except Exception:
+                    pass
+
+    @staticmethod
+    async def _exec_agy(binary: str, args: List[str], workspace_dir: str, timeout: float) -> str:
         proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -802,7 +1120,7 @@ class TextEngine:
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=temp_dir,
+                cwd=workspace_dir,
                 start_new_session=True
             )
             try:
@@ -826,23 +1144,14 @@ class TextEngine:
                 except Exception:
                     pass
 
-            cli_dir = os.path.join(temp_dir, ".antigravitycli")
-            if os.path.isdir(cli_dir):
-                for f in os.listdir(cli_dir):
-                    p = os.path.join(cli_dir, f)
-                    if os.path.islink(p):
-                        try:
-                            target = os.readlink(p)
-                            if os.path.exists(target):
-                                os.remove(target)
-                        except Exception:
-                            pass
-
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
     async def _generate_agy_response(
         self, config: Dict[str, Any], history_object: Dict[str, Any], tools: Optional[List[Dict[str, Any]]] = None
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """One-shot agy path. DP-206 decision: agy stays one-shot-only — it is
+        a TUI CLI invoked as a subprocess (POSIX-only, see
+        `_ensure_agy_supported`) whose entire response arrives at process exit;
+        there is no token stream to make canonical. Streaming consumers get it
+        via `stream_messages`' generate_response wrap (single text_delta)."""
         system_prompt, history = self._extract_system_prompt(history_object)
 
         prompt_parts = []
@@ -864,18 +1173,21 @@ class TextEngine:
         if tools:
             tool_names = [t["function"]["name"] for t in tools if "function" in t and "name" in t["function"]]
 
+        persona_name = config.get("persona_name")
+        workspace_dir = self._resolve_agy_workspace(persona_name)
         api_payload = {
             "model": config.get("model_name"),
             "prompt_chars": len(prompt),
             "tools": tool_names,
             "isolation": {
                 "stdin": "devnull",
-                "skip_permissions": False
+                "skip_permissions": False,
+                "workspace": workspace_dir if workspace_dir else "temp-dir-per-call",
             }
         }
 
         try:
-            raw = await self._run_agy_cli(prompt)
+            raw = await self._run_agy_cli(prompt, persona_name=persona_name)
         except LLMCommunicationError as e:
             if e.api_payload is None:
                 e.api_payload = api_payload
@@ -888,18 +1200,35 @@ class TextEngine:
             cleaned_content = re.sub(r"<SYSTEM_MESSAGE>.*?</SYSTEM_MESSAGE>", "", raw, flags=re.DOTALL).strip()
             return {"type": "text", "content": cleaned_content}, api_payload
 
+    async def _stream_agy_response(
+        self, config: Dict[str, Any], history_object: Dict[str, Any],
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """agy adapter into the unified event shape. agy stays one-shot by
+        decision (subprocess TUI CLI — the entire response arrives at process
+        exit, there is no token stream to make canonical); streaming consumers
+        get the full text as a single text_delta."""
+        result, api_payload = await self._generate_agy_response(
+            config, history_object, tools
+        )
+        async for ev in self._events_from_one_shot(result, api_payload):
+            yield ev
+
     # ------------------------------------------------------------------
-    # Phase B — provider streaming surface
+    # Provider streaming surface
     #
     # `stream_messages(persona, messages, params)` and
     # `stream_prompt(persona, prompt, params)` are the unified entries.
-    # Local routes to the StreamEngine for real token-by-token SSE; the
-    # SDK-backed providers (OpenAI/Anthropic/Google) currently wrap
-    # generate_response and emit a single `text_delta` so the surface is
-    # uniform without forcing per-provider streaming SDK work in this
-    # phase. Phase C flips ownership: generate_response will become the
-    # collect-stream wrapper around stream_messages.
-    # See memory/project/plans/portal_engine_reintegration.md.
+    #
+    # DP-206b state: there is ONE driving layer. Each provider has a single
+    # canonical streaming generator (`_stream_<provider>_response`; agy is a
+    # one-shot subprocess adapted into the same event shape), the policy
+    # driver `_stream_response` wraps it (routing, rate limiting, retries,
+    # 429 fallback), `stream_messages` dispatches through the driver for
+    # true token deltas, and `generate_response` is collect_stream over the
+    # driver. Local (`model_name == "local"`) is the engine-owned
+    # kobold-native StreamEngine for streaming AND one-shot (collect) —
+    # the OpenAI-compat local transport is gone.
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -907,7 +1236,7 @@ class TextEngine:
         persona_config: Dict[str, Any], params: GenerationParams
     ) -> Dict[str, Any]:
         """Overlay the structured params onto the legacy persona_config dict
-        so existing _generate_*_response handlers keep working."""
+        so the per-provider stream drivers keep working."""
         merged = dict(persona_config)
         if params.temperature is not None:
             merged["temperature"] = params.temperature
@@ -958,12 +1287,17 @@ class TextEngine:
           - optional `{"type": "tool_calls", "calls": [...]}`
           - terminal `{"type": "done", "full_text": ...}`
 
-        For `model_name == "local"` and a configured StreamEngine, this is a
-        true SSE token stream. Other providers wrap `generate_response`."""
+        For `model_name == "local"` this routes straight to the kobold-native
+        SSE stream (GenerationParams — including kobold provider_extras —
+        pass through unchanged, and no retry policy applies, matching the
+        pre-cutover portal path). All other models dispatch through the
+        `_stream_response` policy driver: true token deltas from the
+        canonical per-provider streams, with the same rate limiting / retry /
+        fallback policy as `generate_response` (DP-206b cutover)."""
         merged_config = self._persona_config_with_params(persona_config, params)
         model_name: str = merged_config.get("model_name", "")
 
-        if model_name == "local" and self.stream_engine is not None:
+        if model_name == "local":
             async for ev in self.stream_engine.stream_messages(
                 merged_config, messages, params, tools
             ):
@@ -971,24 +1305,10 @@ class TextEngine:
             return
 
         history_object = self._messages_to_history_object(messages, image_url)
-        try:
-            result, api_payload = await self.generate_response(
-                merged_config, history_object, tools, local_inference_config,
-            )
-        except LLMCommunicationError as e:
-            if e.api_payload is not None:
-                yield {"type": "api_payload", "payload": e.api_payload}
-            raise
-
-        yield {"type": "api_payload", "payload": api_payload or {}}
-        if result.get("type") == "tool_calls":
-            yield {"type": "tool_calls", "calls": list(result.get("calls", []))}
-            yield {"type": "done", "full_text": ""}
-        else:
-            text = result.get("content", "") or ""
-            if text:
-                yield {"type": "text_delta", "text": text}
-            yield {"type": "done", "full_text": text}
+        async for ev in self._stream_response(
+            merged_config, history_object, tools, local_inference_config,
+        ):
+            yield ev
 
     def stream_prompt(
         self,
@@ -1005,10 +1325,6 @@ class TextEngine:
         if model_name != "local":
             raise LLMCommunicationError(
                 f"stream_prompt only supports local models, got '{model_name}'"
-            )
-        if self.stream_engine is None:
-            raise LLMCommunicationError(
-                "StreamEngine not configured — cannot stream pre-rendered prompts."
             )
         return self.stream_engine.stream_prompt(
             persona_config, rendered_prompt, params,
@@ -1038,7 +1354,12 @@ class TextEngine:
                 calls = list(ev.get("calls", []))
             elif etype == "done":
                 full_text = ev.get("full_text")
-        if calls:
+        if calls is not None:
+            # A tool_calls event — even with an empty list (e.g. every call
+            # failed to parse) — means the model chose the tool path; mirror
+            # the pre-DP-206 one-shot handlers, which returned
+            # {"type": "tool_calls", "calls": []} so the empty-response retry
+            # logic fires rather than treating it as a text turn.
             return {"type": "tool_calls", "calls": calls}, api_payload
         text = full_text if full_text is not None else "".join(text_parts)
         return {"type": "text", "content": text}, api_payload

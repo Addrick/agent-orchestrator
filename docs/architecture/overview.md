@@ -28,6 +28,6 @@ Async, provider-agnostic LLM orchestration engine for chatbot automation (IT sup
 
 **Docs:** `docs/user_guide.md` — user-facing behavior spec (commands, personas, tools, interfaces). Also serves as spec-before-implement target for new features.
 
-**Dead code:** `interfaces/zammad_bot.py` (deprecated stub re-exporting from agents/). Candidate for removal.
+**Dead code:** none known (the deprecated `interfaces/zammad_bot.py` stub was removed by DP-203).
 
 For full detail on any component: read `architecture.md`. For project roadmap: read `roadmap.md`.

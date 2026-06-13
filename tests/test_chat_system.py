@@ -4,11 +4,14 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 import json
 
+from src.confirmations import ConfirmationManager
+from tests.helpers import make_chat_system, route_stream_through_generate_response
 from src.chat_system import (
-    ChatSystem, ResponseType, RequestContext,
+    ChatSystem, ResponseType,
     DoneEvent, ErrorEvent, TokenEvent,
     ToolCallResultEvent, ToolCallStartEvent,
 )
+from src.request_builder import RequestContext
 from src.utils.model_utils import get_model_prefix
 from memory.memory_manager import MemoryManager
 from src.engine import TextEngine, LLMCommunicationError
@@ -22,11 +25,10 @@ def chat_system_with_mocks():
     Provides a ChatSystem instance with its primary dependencies mocked.
     Helper methods on the ChatSystem itself are NOT mocked here.
 
-    Uses a real TextEngine with `generate_response` mocked: ChatSystem now
-    routes through `text_engine.stream_messages`, which for non-local models
-    internally calls `generate_response` and emits the unified event stream.
-    Keeping the real `stream_messages` wiring lets every existing assertion
-    on `text_engine.generate_response.*` keep working unchanged.
+    Uses a real TextEngine with `generate_response` mocked. DP-206b: the
+    pipeline streams through the `_stream_response` policy driver; the test
+    bridge routes that driver back through the mocked `generate_response`, so
+    every assertion on `text_engine.generate_response.*` works unchanged.
     """
     mock_memory_manager = MagicMock(spec=MemoryManager)
     # DP-113: ChatSystem reads memory_manager.backend at construction. spec=
@@ -36,22 +38,23 @@ def chat_system_with_mocks():
     text_engine.generate_response = AsyncMock(  # type: ignore[method-assign]
         return_value=({'type': 'text', 'content': 'LLM Reply'}, {}),
     )
+    route_stream_through_generate_response(text_engine)
     mock_tool_manager = AsyncMock()
     mock_tool_manager.get_tool_definitions = MagicMock(return_value=[])
 
     mock_persona = Persona('test_persona', 'mock_model', 'prompt')
 
-    with patch('src.chat_system.load_personas_from_file', return_value={"test_persona": mock_persona}), \
-            patch('src.chat_system.ToolManager', return_value=mock_tool_manager):
-        system = ChatSystem(
-            memory_manager=mock_memory_manager,
-            text_engine=text_engine,
-        )
-        # Mock bot_logic by default to isolate ChatSystem logic
-        system.bot_logic.preprocess_message = AsyncMock(return_value=None)
+    system = make_chat_system(
+        memory_manager=mock_memory_manager,
+        text_engine=text_engine,
+        personas={"test_persona": mock_persona},
+        tool_manager=mock_tool_manager,
+    )
+    # Mock bot_logic by default to isolate ChatSystem logic
+    system.bot_logic.preprocess_message = AsyncMock(return_value=None)
 
-        yield (system, mock_memory_manager, text_engine,
-               mock_persona, mock_tool_manager)
+    yield (system, mock_memory_manager, text_engine,
+           mock_persona, mock_tool_manager)
 
 
 # --- Tests for generate_response Core Logic ---
@@ -130,9 +133,9 @@ async def test_generate_response_stores_payload_on_llm_error(chat_system_with_mo
     await system.generate_response("test_persona", "user123", "channel", "test message")
 
     # Assert that the payload from the exception was stored
-    assert "user123" in system.last_api_requests
-    assert "test_persona" in system.last_api_requests["user123"]
-    assert system.last_api_requests["user123"]["test_persona"] == failed_payload
+    assert "user123" in system.turn_persistence.last_api_requests
+    assert "test_persona" in system.turn_persistence.last_api_requests["user123"]
+    assert system.turn_persistence.last_api_requests["user123"]["test_persona"] == failed_payload
 
 
 def test_store_api_request_preserves_tools_across_iterations(chat_system_with_mocks):
@@ -141,19 +144,19 @@ def test_store_api_request_preserves_tools_across_iterations(chat_system_with_mo
     tools = [{"type": "function", "function": {"name": "web_search"}}]
 
     # Iteration 0: stores tools
-    system._store_api_request("user1", "persona1", {"model": "m1"}, tools_for_llm=tools)
-    assert system.last_api_requests["user1"]["persona1"]["_tools_for_llm"] is tools
+    system.turn_persistence.store_api_request("user1", "persona1", {"model": "m1"}, tools_for_llm=tools)
+    assert system.turn_persistence.last_api_requests["user1"]["persona1"]["_tools_for_llm"] is tools
 
     # Iteration 1+: tools_for_llm=None, but should carry forward
-    system._store_api_request("user1", "persona1", {"model": "m1"}, tools_for_llm=None)
-    assert system.last_api_requests["user1"]["persona1"]["_tools_for_llm"] is tools
+    system.turn_persistence.store_api_request("user1", "persona1", {"model": "m1"}, tools_for_llm=None)
+    assert system.turn_persistence.last_api_requests["user1"]["persona1"]["_tools_for_llm"] is tools
 
 
 def test_store_api_request_no_tools_when_never_set(chat_system_with_mocks):
     """If tools were never stored, subsequent None calls should not invent them."""
     system, _, _, _, _ = chat_system_with_mocks
-    system._store_api_request("user1", "persona1", {"model": "m1"}, tools_for_llm=None)
-    assert "_tools_for_llm" not in system.last_api_requests["user1"]["persona1"]
+    system.turn_persistence.store_api_request("user1", "persona1", {"model": "m1"}, tools_for_llm=None)
+    assert "_tools_for_llm" not in system.turn_persistence.last_api_requests["user1"]["persona1"]
 
 
 @pytest.mark.asyncio
@@ -215,7 +218,7 @@ async def test_tool_use_in_autonomous_mode(chat_system_with_mocks):
 def test_format_raw_history_for_llm(chat_system_with_mocks, history, mode, server_id, persona, expected_role,
                                     expected_content):
     system, _, _, _, _ = chat_system_with_mocks
-    formatted = system._format_raw_history_for_llm(history, mode, persona, server_id)
+    formatted = system.request_builder.format_raw_history_for_llm(history, mode, persona, server_id)
     assert len(formatted) == 1
     assert formatted[0]['role'] == expected_role
     assert formatted[0]['content'] == expected_content
@@ -397,8 +400,8 @@ def test_get_model_prefix(model_name, expected_prefix):
 # --- Model Compatibility Filter Tests ---
 
 @pytest.mark.asyncio
-async def test_grounding_filtered_for_non_gemini_25_models(chat_system_with_mocks):
-    """google_grounding_search should be filtered out for non-Gemini-2.5 models."""
+async def test_grounding_filtered_for_non_grounding_models(chat_system_with_mocks):
+    """google_grounding_search should be filtered out for non-grounding-compatible models."""
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_enabled_tools(['*'])
 
@@ -423,8 +426,11 @@ async def test_grounding_filtered_for_non_gemini_25_models(chat_system_with_mock
 
 
 @pytest.mark.asyncio
-async def test_grounding_kept_for_gemini_25_models(chat_system_with_mocks):
-    """google_grounding_search should be kept for Gemini 2.5 models."""
+@pytest.mark.parametrize("model_name", [
+    "gemini-2.5-flash", "gemini-3.1-flash"
+])
+async def test_grounding_kept_for_compatible_gemini_models(chat_system_with_mocks, model_name):
+    """google_grounding_search should be kept for grounding-compatible Gemini models."""
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_enabled_tools(['*'])
 
@@ -438,7 +444,7 @@ async def test_grounding_kept_for_gemini_25_models(chat_system_with_mocks):
     }
     tool_manager_mock.get_tool_definitions.return_value = [grounding_tool, web_search_tool]
 
-    persona.set_model_name("gemini-2.5-flash")
+    persona.set_model_name(model_name)
     await system.generate_response("test_persona", "user", "channel", "test")
     call_args = text_engine_mock.generate_response.call_args
     tools_sent = call_args[1].get('tools', call_args[0][2] if len(call_args[0]) > 2 else [])
@@ -449,7 +455,7 @@ async def test_grounding_kept_for_gemini_25_models(chat_system_with_mocks):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [
-    "gpt-4o", "claude-3-opus-20240229", "gemma-4-31b-it", "gemini-3.1-flash", "local",
+    "gpt-4o", "claude-3-opus-20240229", "gemma-4-31b-it", "local",
 ])
 async def test_grounding_filtered_for_incompatible_models(chat_system_with_mocks, model_name):
     """Grounding should be filtered for all incompatible model prefixes."""
@@ -462,6 +468,22 @@ async def test_grounding_filtered_for_incompatible_models(chat_system_with_mocks
         "function": {"name": "google_grounding_search", "description": "Grounding"}
     }
     tool_manager_mock.get_tool_definitions.return_value = [grounding_tool]
+
+    if model_name == "local":
+        # DP-206b: local bypasses generate_response entirely — it streams via
+        # the engine-owned kobold StreamEngine. Capture tools at that seam.
+        captured = {}
+
+        async def _fake_local(config, messages, params, tools=None):
+            captured["tools"] = tools
+            yield {"type": "api_payload", "payload": {}}
+            yield {"type": "done", "full_text": "ok"}
+
+        text_engine_mock.stream_engine = MagicMock()
+        text_engine_mock.stream_engine.stream_messages = MagicMock(side_effect=_fake_local)
+        await system.generate_response("test_persona", "user", "channel", "test")
+        assert len(captured["tools"] or []) == 0
+        return
 
     await system.generate_response("test_persona", "user", "channel", "test")
     call_args = text_engine_mock.generate_response.call_args
@@ -477,7 +499,7 @@ def test_register_service(chat_system_with_mocks):
     mock_service = MagicMock(spec=ServiceIntegration)
     mock_service.name = "test_service"
     system.register_service(mock_service)
-    assert "test_service" in system._services
+    assert system.get_service("test_service") is mock_service
     mock_service.register_tools.assert_called_once_with(system.tool_manager)
 
 
@@ -491,7 +513,7 @@ def test_build_conversation_history_channel_mode(chat_system_with_mocks):
         {'interaction_id': 1, 'author_role': 'user', 'author_name': 'Alice', 'content': 'Hello'}
     ]
 
-    history, oldest_id = system._build_conversation_history(persona, 'user', 'general', 'srv1', None)
+    history, oldest_id = system.request_builder.build_conversation_history(persona, 'user', 'general', 'srv1', None)
 
     memory_mock.get_channel_history.assert_called_once()
     assert len(history) == 1
@@ -504,7 +526,7 @@ def test_build_conversation_history_ticket_mode_returns_empty(chat_system_with_m
     system, _, _, persona, _ = chat_system_with_mocks
     persona.set_memory_mode(MemoryMode.TICKET_ISOLATED)
 
-    history, oldest_id = system._build_conversation_history(persona, 'user', 'ch', None, None)
+    history, oldest_id = system.request_builder.build_conversation_history(persona, 'user', 'ch', None, None)
 
     assert history == []
     assert oldest_id is None
@@ -516,9 +538,51 @@ def test_build_conversation_history_personal_mode(chat_system_with_mocks):
     persona.set_memory_mode(MemoryMode.PERSONAL)
     memory_mock.get_personal_history.return_value = []
 
-    system._build_conversation_history(persona, 'user123', 'ch', None, None)
+    system.request_builder.build_conversation_history(persona, 'user123', 'ch', None, None)
 
-    memory_mock.get_personal_history.assert_called_once_with('user123', 'test_persona', persona.get_context_length())
+    memory_mock.get_personal_history.assert_called_once_with('user123', 'test_persona', persona.get_history_messages())
+
+
+# --- DP-142: read-only paths must not advance the hello override ---
+
+def test_get_view_history_does_not_advance_override(chat_system_with_mocks):
+    """A transcript fetch must not inflate the hello window (DP-142)."""
+    system, memory_mock, _, persona, _ = chat_system_with_mocks
+    persona.set_memory_mode(MemoryMode.CHANNEL_ISOLATED)
+    persona.start_new_conversation(0)
+    memory_mock.get_channel_history.return_value = []
+
+    system.get_view_history('test_persona', 'user', 'general', 'srv1')
+    system.get_view_history('test_persona', 'user', 'general', 'srv1')
+
+    assert persona.get_current_effective_history_messages() == 0
+
+
+@pytest.mark.asyncio
+async def test_assemble_request_does_not_advance_override(chat_system_with_mocks):
+    """The /assemble dry-run must not inflate the hello window (DP-142)."""
+    system, memory_mock, _, persona, _ = chat_system_with_mocks
+    persona.set_memory_mode(MemoryMode.CHANNEL_ISOLATED)
+    persona.start_new_conversation(0)
+    memory_mock.get_channel_history.return_value = []
+
+    await system.assemble_request('test_persona', 'user', 'general', 'hi', server_id='srv1')
+    await system.assemble_request('test_persona', 'user', 'general', 'hi', server_id='srv1')
+
+    assert persona.get_current_effective_history_messages() == 0
+
+
+def test_build_conversation_history_live_advances_override(chat_system_with_mocks):
+    """The live generation path still advances the hello window (DP-142)."""
+    system, memory_mock, _, persona, _ = chat_system_with_mocks
+    persona.set_memory_mode(MemoryMode.CHANNEL_ISOLATED)
+    persona.start_new_conversation(0)
+    memory_mock.get_channel_history.return_value = []
+
+    system.request_builder.build_conversation_history(persona, 'user', 'general', 'srv1', None)
+    assert persona.get_current_effective_history_messages() == 2
+    system.request_builder.build_conversation_history(persona, 'user', 'general', 'srv1', None)
+    assert persona.get_current_effective_history_messages() == 4
 
 
 # --- Tool Filtering Tests ---
@@ -531,7 +595,7 @@ def test_filter_tools_wildcard(chat_system_with_mocks):
     tool_b = {"type": "function", "function": {"name": "tool_b", "parameters": {}}}
     tool_manager_mock.get_tool_definitions.return_value = [tool_a, tool_b]
 
-    result = system._filter_tools_for_persona(persona)
+    result = system.request_builder.filter_tools_for_persona(persona)
     assert len(result) == 2
 
 
@@ -543,7 +607,7 @@ def test_filter_tools_specific_names(chat_system_with_mocks):
     tool_b = {"type": "function", "function": {"name": "tool_b", "parameters": {}}}
     tool_manager_mock.get_tool_definitions.return_value = [tool_a, tool_b]
 
-    result = system._filter_tools_for_persona(persona)
+    result = system.request_builder.filter_tools_for_persona(persona)
     assert len(result) == 1
     assert result[0]['function']['name'] == 'tool_a'
 
@@ -558,7 +622,7 @@ def test_filter_tools_removes_unbound_service_tools(chat_system_with_mocks):
     other_tool = {"type": "function", "function": {"name": "web_search", "parameters": {}}}
     tool_manager_mock.get_tool_definitions.return_value = [zammad_tool, other_tool]
 
-    result = system._filter_tools_for_persona(persona)
+    result = system.request_builder.filter_tools_for_persona(persona)
     tool_names = [t['function']['name'] for t in result]
     assert 'search_tickets' not in tool_names
     assert 'web_search' in tool_names
@@ -574,7 +638,7 @@ def test_filter_tools_includes_bound_service_tools(chat_system_with_mocks):
     other_tool = {"type": "function", "function": {"name": "web_search", "parameters": {}}}
     tool_manager_mock.get_tool_definitions.return_value = [zammad_tool, other_tool]
 
-    result = system._filter_tools_for_persona(persona)
+    result = system.request_builder.filter_tools_for_persona(persona)
     tool_names = [t['function']['name'] for t in result]
     assert 'search_tickets' in tool_names
     assert 'web_search' in tool_names
@@ -592,7 +656,7 @@ def test_filter_tools_includes_agent_tools_with_agents_binding(chat_system_with_
     universal_tool = {"type": "function", "function": {"name": "web_search", "parameters": {}}}
     tool_manager_mock.get_tool_definitions.return_value = [agent_tool, zammad_tool, universal_tool]
 
-    result = system._filter_tools_for_persona(persona)
+    result = system.request_builder.filter_tools_for_persona(persona)
     tool_names = [t['function']['name'] for t in result]
     assert 'get_agent_status' in tool_names
     assert 'web_search' in tool_names
@@ -610,7 +674,7 @@ def test_filter_tools_excludes_agent_tools_without_binding(chat_system_with_mock
                    "function": {"name": "search_tickets", "parameters": {}}}
     tool_manager_mock.get_tool_definitions.return_value = [agent_tool, zammad_tool]
 
-    result = system._filter_tools_for_persona(persona)
+    result = system.request_builder.filter_tools_for_persona(persona)
     tool_names = [t['function']['name'] for t in result]
     assert 'get_agent_status' not in tool_names
     assert 'search_tickets' in tool_names
@@ -627,10 +691,27 @@ async def test_execute_write_calls(chat_system_with_mocks):
     write_calls = [{"id": "c1", "name": "update_ticket", "arguments": {"state": "closed"}}]
     history: list = []
 
-    await system._execute_write_calls(write_calls, history)
+    await system.confirmations.execute_write_calls(write_calls, history)
 
     tool_manager_mock.execute_tool.assert_called_once_with('update_ticket', state='closed')
     assert len(history) == 1
+
+
+@pytest.mark.asyncio
+async def test_confirmations_see_post_init_tool_manager_swap(chat_system_with_mocks):
+    """ConfirmationManager resolves the tool manager per call (lookup closure,
+    like RequestBuilder.persona_lookup): a post-init rebind of
+    chat_system.tool_manager must be what approved writes execute against."""
+    system, _, _, _, original_tm = chat_system_with_mocks
+    swapped_tm = AsyncMock()
+    swapped_tm.execute_tool.return_value = {"ok": True}
+    system.tool_manager = swapped_tm
+
+    write_calls = [{"id": "c1", "name": "update_ticket", "arguments": {"state": "closed"}}]
+    await system.confirmations.execute_write_calls(write_calls, [])
+
+    swapped_tm.execute_tool.assert_called_once_with("update_ticket", state="closed")
+    original_tm.execute_tool.assert_not_called()
 
 
 def test_append_denied_tool_results():
@@ -640,29 +721,13 @@ def test_append_denied_tool_results():
         {"id": "c2", "name": "create_ticket"},
     ]
     history: list = []
-    ChatSystem._append_denied_tool_results(write_calls, history)
+    ConfirmationManager.append_denied_tool_results(write_calls, history)
     assert len(history) == 2
     assert json.loads(history[0]['content'])['error'] == "Tool call denied by user"
     assert history[1]['name'] == "create_ticket"
 
 
 # --- Orchestration Method Tests ---
-
-@pytest.mark.asyncio
-async def test_execute_read_calls(chat_system_with_mocks):
-    """Read tool calls are executed and results appended to history."""
-    system, _, _, _, tool_manager_mock = chat_system_with_mocks
-    tool_manager_mock.execute_tool.return_value = {"result": [{"id": 1}]}
-
-    read_calls = [{"id": "c1", "name": "search_tickets", "arguments": {"query": "test"}}]
-    history: list = []
-    await system._execute_read_calls(read_calls, history)
-
-    tool_manager_mock.execute_tool.assert_called_once_with('search_tickets', query='test')
-    assert len(history) == 1
-    assert history[0]['role'] == 'tool'
-    assert history[0]['tool_call_id'] == 'c1'
-
 
 @pytest.mark.asyncio
 async def test_prepare_request_populates_context(chat_system_with_mocks):
@@ -674,7 +739,7 @@ async def test_prepare_request_populates_context(chat_system_with_mocks):
         channel='general', message='hello', server_id='srv1',
     )
 
-    await system._prepare_request(ctx)
+    await system.request_builder.prepare_request(ctx)
 
     assert ctx.conversation_history[-1] == {"role": "user", "content": "hello"}
 
@@ -698,7 +763,7 @@ async def test_prepare_request_prunes_to_max_context_tokens(chat_system_with_moc
         channel='general', message='latest user msg', server_id='srv1',
     )
 
-    await system._prepare_request(ctx)
+    await system.request_builder.prepare_request(ctx)
 
     assert ctx.conversation_history[-1]["content"] == "latest user msg"
     assert len(ctx.conversation_history) < 5  # at least one drop
@@ -802,7 +867,7 @@ def test_format_raw_history_injects_tool_context(chat_system_with_mocks):
          'tool_context': tool_ctx},
     ]
 
-    formatted = system._format_raw_history_for_llm(raw_history, "channel", "test_persona", None)
+    formatted = system.request_builder.format_raw_history_for_llm(raw_history, "channel", "test_persona", None)
 
     # user + tool_call assistant + tool result + final assistant = 4 messages
     assert len(formatted) == 4
@@ -820,7 +885,7 @@ def test_format_raw_history_no_tool_context(chat_system_with_mocks):
          'tool_context': None},
     ]
 
-    formatted = system._format_raw_history_for_llm(raw_history, "channel", "test_persona", None)
+    formatted = system.request_builder.format_raw_history_for_llm(raw_history, "channel", "test_persona", None)
 
     assert len(formatted) == 1
     assert formatted[0] == {'role': 'assistant', 'content': 'Hi'}

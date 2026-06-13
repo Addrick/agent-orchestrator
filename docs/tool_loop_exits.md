@@ -52,12 +52,12 @@ flowchart TD
 |------------------|----------------|-----------|-------|
 | dev-command short-circuit (770) | DoneEvent | n/a | returns before ctx is set |
 | persona not found (783) | DoneEvent | n/a | returns before ctx is set |
-| `_prepare_request` raises (811) | ErrorEvent | ✅ explicit reset | guarded |
+| `request_builder.prepare_request` raises (811) | ErrorEvent | ✅ explicit reset | guarded |
 | loop emits ErrorEvent (885) | ErrorEvent | ✅ explicit reset | covers `LLMCommunicationError` |
 | `CancelledError` (899) | re-raises | ✅ explicit reset | flushes partial assistant text |
 | normal LLM_GENERATION | DoneEvent | ✅ `turn_scope` | guaranteed on full drain *and* early break |
 | PENDING_CONFIRMATION | DoneEvent | ✅ `turn_scope` | `log_audit_event` raise no longer leaks |
-| `_log_user_turn` raises | propagates | ✅ `turn_scope` | now inside the scope |
+| `turn_persistence.log_user_turn` raises | propagates | ✅ `turn_scope` | now inside the scope |
 | max-iter DEV_COMMAND | DoneEvent | ✅ `turn_scope` | |
 | `resume` re-entry (DP-124) | DoneEvent / ErrorEvent | ✅ `turn_scope` | shares the kernel; parked history + applied decision drive the loop |
 

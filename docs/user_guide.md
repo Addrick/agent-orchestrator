@@ -57,7 +57,7 @@ Switching personas while a session has content — or while either persona is in
 
 The toggle state is remembered per persona in `localStorage`. Switching back to **Kobold Native** prompts for confirmation and clears the visible session (it does **not** delete anything from the DB).
 
-The export pulls global history for that persona name (across all channels) up to the persona's configured `context_length` message count. User turns are wrapped with kobold's `{{[INPUT]}}` / `{{[OUTPUT]}}` placeholders so the portal renders them with the active instruct template at submit time. System rows, empty-content rows, and tool-call-only assistant rows are skipped (the count is logged server-side).
+The export pulls global history for that persona name (across all channels) up to the persona's configured `history_messages` count. User turns are wrapped with kobold's `{{[INPUT]}}` / `{{[OUTPUT]}}` placeholders so the portal renders them with the active instruct template at submit time. System rows, empty-content rows, and tool-call-only assistant rows are skipped (the count is logged server-side).
 
 **LTM Generation (Phase 2.2):** A sub-checkbox under the toggle, enabled only when **DERPR Database** is active. When checked, DERPR runs semantic LTM retrieval against your query before each submit and writes the result into kobold-lite's **Author's Note** field; kobold then places the block near the end of the prompt at its normal author's-note position. The author's note textarea is greyed out and labelled "Managed by DERPR LTM" while this is active. Your prior author's note is backed up to `localStorage` and restored when you uncheck.
 
@@ -83,6 +83,18 @@ Saving from the Inference Matrix persists the `memory_mode` to the backend. The 
 > The portal's normal generation path is the OpenAI-style `/chat/completions` route (KoboldCPP jinja mode). The kobold-native `/api/v1/generate` and `/api/extra/generate/stream` routes are still served by the adapter for clients that prefer per-token SSE; both proxy to KoboldCPP and log user/assistant turns under `channel="web_ui"` the same way the OAI route does. Token-by-token portal usage falls on the native streaming route.
 
 **Tool-enabled personas in the portal (tool revamp v1):** A persona with `enabled_tools` set can run over the portal SSE stream — token deltas and tool calls interleave in a single linear stream with no drain-and-restart. While the model is invoking a tool, the portal renders an inline collapsible block (using kobold-lite's existing `<think>` Reflective-Process pipeline) showing the tool name, JSON arguments, and the result/error. The block is streaming-only — the database stores the resolved assistant text without it, so reload / version-chevron / retry flows stay clean. CONFIRM-mode write-tool gating is unchanged; the portal currently runs autonomous, so write tools execute immediately. The adapter also emits structured `event: derpr-tool-start` / `event: derpr-tool-result` SSE frames carrying `{tool_name, arguments, call_id}` and `{call_id, result, error}` for portal-aware listeners (`window.derprOnToolStart` / `derprOnToolResult` hooks; latest payloads accumulate in `window.derpr_tool_calls[call_id]`).
+
+### Bespoke DERPR portal (`/derpr`)
+
+A React UI served at `GET /derpr` on the same adapter, driving the OpenAI-style `/chat/completions` SSE route with identity-addressed transcript re-syncs (`GET /api/v1/session/{persona}/transcript`).
+
+**Send feedback (DP-214):** your message appears in the transcript immediately on send, tagged `sending…`, and the assistant row shows an animated typing indicator until the model produces its first token or tool call. When the turn completes, both transient rows are replaced by the authoritative transcript rows. On a failed turn the dismissed error re-syncs the transcript, so the user turn (persisted before generation) stays visible. Note: personas on non-local models currently deliver their response in one piece — true token streaming for cloud providers is tracked as DP-215–217.
+
+Personas with `history_messages: 0` always render an empty transcript — the portal mirrors exactly what the engine would feed the model, and a zero-window persona feeds it nothing.
+
+**Follow scroll + drafting (DP-218):** the transcript auto-follows new content (sent messages, stream frames, completed turns) while you're at the bottom; scrolling up to read history releases the follow, and returning to the bottom re-arms it. The composer stays editable during a response so you can draft your next message mid-stream — Enter won't send until the turn finishes (the SEND button is replaced by ■ stop while streaming).
+
+**Persona selection persistence (DP-219):** your last-selected persona is remembered client-side (browser `localStorage`) and restored on page load, surviving engine restarts. The engine's own active-persona slot (`PUT /api/v1/model`) remains runtime routing state only — it is not persisted server-side; on boot the portal pushes the saved selection back to the engine so kobold-native passthrough routes agree. If the saved persona no longer exists, the portal falls back to the engine's default.
 
 ## Commands
 
@@ -162,8 +174,12 @@ All commands are entered as the message body when addressing a persona. Commands
 local `agy` CLI instead of an API. This runs on the user's authenticated
 **OAuth tier** (currently Gemini 3.5 Flash) rather than a metered API key, at the
 cost of a subprocess spawn per call (a few seconds of latency) and no image
-support. Each call is fully isolated (fresh prompt, throwaway working directory,
-`stdin` closed so it never blocks on a permission prompt).
+support.
+
+Each call is executed inside a persistent workspace directory (by default, persona-specific under `data/workspaces/agy_{persona_name}` or fallback to `data/workspaces/agy_global`), preserving `agy` indexing/auth state caches. Persona names are sanitized to a filesystem-safe slug for the directory name, and concurrent calls sharing a workspace are serialized so they can't clobber each other's CLI state. You can configure this behavior in `.env` or `config/global_config.py`:
+- `AGY_PERSISTENT_WORKSPACES` (default `True`): Set to `False` to revert to stateless throwaway temporary directories.
+- `AGY_WORKSPACE_MODE` (default `"persona"`): Set to `"global"` to share a single derpr-wide workspace.
+- `AGY_SANDBOX` (default `True`): Run `agy` under its built-in OS-level sandbox (`--sandbox`; nsjail on Linux, sandbox-exec on macOS). Set to `False` if the sandbox is unavailable in your environment (e.g. a container without the needed privileges).
 
 > **Platform: POSIX only.** The `agy` provider works on Linux/macOS (and WSL or
 > Docker). It does **not** work on **native Windows**: `agy` is a TUI that only

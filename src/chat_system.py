@@ -1,23 +1,18 @@
 # src/chat_system.py
 
 import asyncio
-import json
 import logging
 import time
-import uuid
-from collections import defaultdict, OrderedDict
 from contextlib import aclosing
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, AsyncGenerator, AsyncIterator, Coroutine, Dict, List, Optional, Set, Tuple
 
-from config import global_config
-from config.global_config import MAX_CACHED_API_REQUESTS, \
-    PENDING_CONFIRMATION_TIMEOUT, MEMORY_RETRIEVAL_ENABLED, MEMORY_MAX_SUMMARIES_IN_CONTEXT
-from src.memory.context_budget import truncate_messages_to_budget
+from config.global_config import PENDING_CONFIRMATION_TIMEOUT
 from src.embedding_service import EmbeddingService
 from src.clients.service_integration import ServiceIntegration
-from src.memory.backend.base import MemoryBackend, MemoryHit
+from src.confirmations import ConfirmationManager, PendingConfirmation
+from src.memory.backend.base import MemoryBackend
 from src.memory.memory_manager import MemoryManager
 from src.engine import TextEngine
 from src.generation_events import (
@@ -30,89 +25,16 @@ from src.generation_events import (
     ToolCallResultEvent as ToolCallResultEvent,
     ToolCallStartEvent as ToolCallStartEvent,
 )
-from src.stream_engine import StreamEngine
 from src.message_handler import BotLogic
-from src.persona import Persona, MemoryMode
-from src.tools.definitions import MODEL_INCOMPATIBLE_TOOLS, get_tool_capabilities
+from src.persona import Persona
+from src.request_builder import AssembledRequest, RequestBuilder, RequestContext
 from src.tools.tool_loop import ToolLoop, _ApiPayloadEvent, _LoopFinishedEvent
-from src.tools.tool_manager import ToolManager, WebSearchHandler, MemoryRecallHandler
+from src.turn_persistence import TurnPersistence
+from src.tools.tool_manager import ToolManager
 from src.tools.turn_context import TurnContext, turn_scope
-from src.utils.model_utils import get_model_list, get_model_prefix
-from src.utils.save_utils import load_personas_from_file, save_personas_to_file
-from src.utils.message_utils import strip_vertex_links
+from src.personas.store import save_personas_to_file
 
 logger = logging.getLogger(__name__)
-
-# Upper bound on the sticky per-conversation taint map. The taint bit is keyed
-# by (user, persona, channel, server); a long-running deployment serving many
-# distinct conversations would otherwise grow this map without bound. We evict
-# the least-recently-touched entry once over capacity (taint is a soft cache —
-# a re-derived False on a cold key is safe, and recall re-taints if needed).
-MAX_CONVERSATION_TAINTS = 10000
-
-
-def _relative_time(dt: datetime) -> str:
-    """Format a datetime as a relative time string (e.g., '2 days ago')."""
-    now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
-    delta = now - dt
-    seconds = int(delta.total_seconds())
-    if seconds < 0:
-        return "just now"
-    if seconds < 60:
-        return "just now"
-    minutes = seconds // 60
-    if minutes < 60:
-        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
-    hours = minutes // 60
-    if hours < 24:
-        return f"{hours} hour{'s' if hours != 1 else ''} ago"
-    days = hours // 24
-    if days < 7:
-        return f"{days} day{'s' if days != 1 else ''} ago"
-    weeks = days // 7
-    if weeks < 5:
-        return f"{weeks} week{'s' if weeks != 1 else ''} ago"
-    months = days // 30
-    if months < 12:
-        return f"{months} month{'s' if months != 1 else ''} ago"
-    years = days // 365
-    return f"{years} year{'s' if years != 1 else ''} ago"
-
-
-@dataclass
-class PendingConfirmation:
-    """Stores state for a tool call awaiting user approval.
-
-    All write-tool calls are parked here for audit before execution,
-    regardless of execution mode. The audit_info dict carries structured
-    metadata (irreversibility flags, taint sources, model reasoning) so
-    the approval surface can present an informed review.
-    """
-    write_calls: List[Dict[str, Any]]
-    conversation_history: List[Dict[str, Any]]
-    persona_name: str
-    tools_for_llm: List[Dict[str, Any]]
-    image_url: Optional[str]
-    channel: str = ""
-    server_id: Optional[str] = None
-    turn_tainted: bool = False
-    audit_info: Optional[Dict[str, Any]] = None
-    created_at: float = field(default_factory=time.time)
-    # Index into conversation_history where this turn's tool messages start.
-    # Passed to the resumed tool loop as history_start_override so the approved
-    # write and its result are captured into tool_context_json (and thus
-    # replayed on later turns) instead of being dropped.
-    tool_context_start: int = 0
-    # DP-130 history contract: stable handle for the rendered-but-unpersisted
-    # confirmation chunk. Surfaced as `ephemeral_chunk_id` in the SSE id-frame
-    # and the transcript projection, and as the correlation token an interactive
-    # surface (portal) sends back on approve/deny so a resume can be matched to
-    # *this* park. (Reconciles with the DP-127-engine confirm-modal `token`.)
-    token: str = field(default_factory=lambda: uuid.uuid4().hex)
-    # The parked confirmation's rendered text — projected as the ephemeral
-    # chunk's content so a fresh page load (transcript) can render the pending
-    # approval without a DB row.
-    confirmation_text: str = ""
 
 
 @dataclass
@@ -129,42 +51,18 @@ class _ResumeState:
     approved: bool
 
 
-@dataclass
-class RequestContext:
-    """Bundles resolved pipeline state flowing through generate_response phases."""
-    persona: Persona
-    persona_name: str
-    user_identifier: str
-    channel: str
-    message: str
-    server_id: Optional[str] = None
-    image_url: Optional[str] = None
-    history_limit: Optional[int] = None
-    user_display_name: Optional[str] = None
-    # Populated during _prepare_request
-    conversation_history: List[Dict[str, Any]] = field(default_factory=list)
-    tools_for_llm: List[Dict[str, Any]] = field(default_factory=list)
-    oldest_interaction_id: Optional[int] = None
-    local_inference_config: Optional[Dict[str, Any]] = None
-    turn_tainted: bool = False
-    taint_sources: List[str] = field(default_factory=list)
-    # Optional: OAI-format messages from the client (e.g. kobold-lite jinja history).
-    # Used as a fallback when the DB returns no history for this channel.
-    client_messages: Optional[List[Dict[str, Any]]] = None
-
-
 class ChatSystem:
     def __init__(self, memory_manager: MemoryManager, text_engine: TextEngine,
-                 embedding_service: Optional[EmbeddingService] = None,
-                 stream_engine: Optional[StreamEngine] = None) -> None:
-        self.personas: Dict[str, Persona] = load_personas_from_file() or {}
-        # Ensure system personas are also loaded so they are callable by the engine
-        from src.utils.save_utils import load_system_personas_from_file
-        system_personas = load_system_personas_from_file()
-        self.system_persona_names: Set[str] = set()
-        if system_personas:
-            self.personas.update(system_personas)
-            self.system_persona_names.update(system_personas.keys())
+                 embedding_service: Optional[EmbeddingService] = None, *,
+                 personas: Dict[str, Persona],
+                 system_persona_names: Set[str],
+                 tool_manager: ToolManager,
+                 models_available: Optional[Dict[str, Any]] = None) -> None:
+        # DP-200 slice B: persona loading and tool-handler registration live in
+        # src/bootstrap (the composition root). ChatSystem receives its real
+        # dependencies instead of locating them itself.
+        self.personas: Dict[str, Persona] = personas
+        self.system_persona_names: Set[str] = system_persona_names
 
         self.memory_manager: MemoryManager = memory_manager
         # DP-113: backend boundary for new-shape recall/retain_turn. The
@@ -175,33 +73,43 @@ class ChatSystem:
         if embedding_service is not None and hasattr(self.memory_backend, "set_embedding_service"):
             self.memory_backend.set_embedding_service(embedding_service)
         self.text_engine: TextEngine = text_engine
-        self.stream_engine: Optional[StreamEngine] = stream_engine
-        self.tool_manager: ToolManager = ToolManager()
-        WebSearchHandler().register(self.tool_manager)
+        self.tool_manager: ToolManager = tool_manager
 
-        from src.tools.tool_manager import MemoryToolHandler
-        MemoryToolHandler(self.memory_manager).register(self.tool_manager)
-        MemoryRecallHandler(self.memory_backend).register(self.tool_manager)
-
-        from src.tools.ingest_path import IngestPathHandler
-        IngestPathHandler(
-            self.memory_backend,
-            cache_dir=global_config.INGEST_CACHE_DIR,
-            persona_lookup=self.personas.get,
-        ).register(self.tool_manager)
-
-        self.bot_logic: BotLogic = BotLogic(self)
-        self.last_api_requests: Dict[str, Dict[str, Optional[Dict[str, Any]]]] = defaultdict(dict)
-        # Per-turn list of every LLM-call payload in the tool loop (reset at the
-        # first iteration of each turn). last_api_requests keeps only the final
-        # payload for back-compat; this preserves the whole loop for dump_history.
-        self.last_api_iterations: Dict[str, Dict[str, List[Dict[str, Any]]]] = defaultdict(dict)
-        self.models_available: Dict[str, Any] = get_model_list() or {}
+        self.turn_persistence: TurnPersistence = TurnPersistence(
+            memory_manager, self.memory_backend,
+        )
+        # Injected by the composition root (src/bootstrap) so construction
+        # stays filesystem-free; `update_models` (BotLogic) and main.py's
+        # refresh loop rebind it at runtime.
+        self.models_available: Dict[str, Any] = models_available if models_available is not None else {}
+        # DP-202: BotLogic takes explicit deps instead of the whole ChatSystem.
+        # Rebindable collaborators go in as closures over self so post-init
+        # swaps (tests, admin paths) stay visible to the command layer.
+        self.bot_logic: BotLogic = BotLogic(
+            personas=lambda: self.personas,
+            visible_personas=self.visible_personas,
+            text_engine=lambda: self.text_engine,
+            tool_manager=lambda: self.tool_manager,
+            turn_persistence=self.turn_persistence,
+            memory_manager=memory_manager,
+            get_models_available=lambda: self.models_available,
+            set_models_available=lambda models: setattr(self, "models_available", models),
+        )
         self.background_tasks: Set[Coroutine[Any, Any, Any]] = set()
-        self._pending_confirmations: Dict[Tuple[str, str], PendingConfirmation] = {}
-        # OrderedDict (not defaultdict) so eviction order is well-defined and
-        # the map stays bounded — see _set_conversation_taint.
-        self._conversation_taints: "OrderedDict[Tuple[str, str, str, Optional[str]], bool]" = OrderedDict()
+        # Lookup closure over self (like request_builder's persona_lookup) so
+        # post-init rebinds of `self.tool_manager` stay visible to resumes.
+        self.confirmations: ConfirmationManager = ConfirmationManager(
+            lambda: self.tool_manager, memory_manager,
+        )
+        # persona_lookup is a closure over self (not a dict reference) so
+        # tests/admin paths that rebind `self.personas` stay visible.
+        self.request_builder: RequestBuilder = RequestBuilder(
+            memory_manager=memory_manager,
+            memory_backend=self.memory_backend,
+            tool_manager_lookup=lambda: self.tool_manager,
+            persona_lookup=lambda name: self.personas.get(name),
+            embedding_service=embedding_service,
+        )
         self._services: Dict[str, ServiceIntegration] = {}
         self._embedding_service: Optional[EmbeddingService] = embedding_service
 
@@ -224,301 +132,41 @@ class ChatSystem:
         service.register_tools(self.tool_manager)
         logger.info(f"Registered service integration: {service.name}")
 
-    def _store_api_request(self, user_identifier: str, persona_name: str,
-                           payload: Dict[str, Any],
-                           tools_for_llm: Optional[List[Dict[str, Any]]] = None,
-                           is_first_iteration: bool = False) -> None:
-        """Stores the last API request payload, evicting the oldest user entry if over capacity.
+    def get_service(self, name: str) -> Optional[ServiceIntegration]:
+        """Look up a registered service integration by name."""
+        return self._services.get(name)
 
-        `is_first_iteration` marks the opening LLM call of a turn; it resets the
-        per-turn iteration list so dump_history shows the whole tool loop (one
-        payload per LLM call) rather than only the final iteration.
+    @property
+    def embedding_service(self) -> Optional[EmbeddingService]:
+        """Shared embedding service injected at construction.
+
+        None only in minimal setups (e.g. unit tests) that build ChatSystem
+        without one; main.py always supplies it. Consumers that can fall back
+        to constructing their own (SqliteConsolidator) must not write back —
+        the backend only learns about the service at ChatSystem construction.
         """
-        if tools_for_llm is not None:
-            payload["_tools_for_llm"] = tools_for_llm
-        else:
-            existing = self.last_api_requests.get(user_identifier, {}).get(persona_name)
-            if existing and "_tools_for_llm" in existing:
-                payload["_tools_for_llm"] = existing["_tools_for_llm"]
+        return self._embedding_service
 
-        # LRU touch: re-storing a user's payload moves them to the most-recent
-        # end so eviction drops a genuinely idle user, not whoever was seen
-        # first. dict preserves insertion order; pop+reinsert is the move.
-        if user_identifier in self.last_api_requests:
-            self.last_api_requests[user_identifier] = self.last_api_requests.pop(user_identifier)
-            if user_identifier in self.last_api_iterations:
-                self.last_api_iterations[user_identifier] = self.last_api_iterations.pop(user_identifier)
-        self.last_api_requests[user_identifier][persona_name] = payload
+    # ------------------------------------------------------------------
+    # Public request-assembly API. Request assembly lives in
+    # src/request_builder.py; these delegates are the supported external
+    # surface (portal/transcript/dry-run inspector) so live submits and the
+    # inspector share one code path. Internal callers address
+    # `self.request_builder` directly (DP-201b removed the private seams).
+    # ------------------------------------------------------------------
 
-        if is_first_iteration:
-            self.last_api_iterations[user_identifier][persona_name] = []
-        self.last_api_iterations[user_identifier].setdefault(persona_name, []).append(payload)
-
-        if len(self.last_api_requests) > MAX_CACHED_API_REQUESTS:
-            # Evict the least-recently-used user (front of insertion order).
-            oldest_key = next(iter(self.last_api_requests))
-            del self.last_api_requests[oldest_key]
-            self.last_api_iterations.pop(oldest_key, None)
-
-    def _set_conversation_taint(
-            self, key: Tuple[str, str, str, Optional[str]], value: bool
-    ) -> None:
-        """Set the sticky taint bit for a conversation, bounding the map.
-
-        The newest key moves to the MRU end; once over MAX_CONVERSATION_TAINTS
-        the least-recently-touched entry is evicted. Taint is a soft cache — a
-        cold key re-derives as False and memory recall re-taints if warranted —
-        so eviction is safe and keeps the map from growing without bound.
-        """
-        if key in self._conversation_taints:
-            self._conversation_taints.move_to_end(key)
-        self._conversation_taints[key] = value
-        while len(self._conversation_taints) > MAX_CONVERSATION_TAINTS:
-            self._conversation_taints.popitem(last=False)
-
-    def _format_raw_history_for_llm(self, raw_history: List[Dict[str, Any]], memory_mode: str,
-                                    persona_name: str, server_id: Optional[str]) -> List[Dict[str, Any]]:
-        """Formats database history records into a list of messages for the LLM."""
-        final_history: List[Dict[str, Any]] = []
-        is_group_chat = memory_mode in ("server", "global", "ticket") or (
-                    memory_mode == "channel" and server_id is not None)
-
-        for msg in raw_history:
-            author_role = msg.get('author_role')
-            author_name = msg.get('author_name')
-            content = msg.get('content', '')
-            # Noise reduction: Strip vertexai grounding redirect URLs from history before sending to LLM.
-            content_clean = strip_vertex_links(content) if content else content
-
-            if author_role == 'user':
-                if is_group_chat and author_name:
-                    formatted_content = f"{author_name}: {content_clean}"
-                    final_history.append({'role': 'user', 'content': formatted_content})
-                else:
-                    final_history.append({'role': 'user', 'content': content_clean})
-            elif author_role == 'assistant':
-                if author_name == persona_name:
-                    tool_context_json = msg.get('tool_context')
-                    if tool_context_json:
-                        final_history.extend(json.loads(tool_context_json))
-                    final_history.append({'role': 'assistant', 'content': content_clean})
-                else:
-                    # In a group chat, messages from other personas are treated as user messages
-                    formatted_content = f"{author_name}: {content_clean}"
-                    final_history.append({'role': 'user', 'content': formatted_content})
-        return final_history
-
-    async def _execute_write_calls(
+    def get_view_history(
             self,
-            write_calls: List[Dict[str, Any]],
-            conversation_history: List[Dict[str, Any]]
-    ) -> None:
-        """Execute write tool calls and append results to history."""
-        for call_item in write_calls:
-            tool_name: str = call_item.get("name", "")
-            tool_args = call_item.get("arguments", {})
-            tool_result = await self.tool_manager.execute_tool(tool_name, **tool_args)
-            conversation_history.append({
-                "role": "tool",
-                "tool_call_id": call_item.get("id"),
-                "name": tool_name,
-                "content": json.dumps(tool_result)
-            })
-
-    @staticmethod
-    def _append_denied_tool_results(
-            write_calls: List[Dict[str, Any]],
-            conversation_history: List[Dict[str, Any]]
-    ) -> None:
-        """Appends denial results for write tools the user rejected."""
-        for call_item in write_calls:
-            conversation_history.append({
-                "role": "tool",
-                "tool_call_id": call_item.get("id"),
-                "name": call_item.get("name"),
-                "content": json.dumps({"error": "Tool call denied by user"})
-            })
-
-    def _fetch_raw_history(
-            self,
-            mode: MemoryMode,
             persona_name: str,
             user_identifier: str,
-            channel: str,
-            server_id: Optional[str],
-            effective_limit: int
+            channel: Optional[str],
+            server_id: Optional[str] = None,
+            limit: Optional[int] = None,
     ) -> Tuple[List[Dict[str, Any]], str]:
-        """Dispatches history retrieval based on memory mode. Returns (raw_history, mode_label)."""
-        if mode == MemoryMode.TICKET_ISOLATED:
-            return [], "ticket"
-        elif mode == MemoryMode.SERVER_WIDE:
-            # SERVER_WIDE returns history for the specific server.
-            # If server_id is None (Web UI/local), we still query, as the DB
-            # stores these rows with server_id=NULL. MemoryManager handles
-            # the NULL check via IS NULL in its queries.
-            return self.memory_manager.get_server_history(server_id, persona_name, effective_limit), "server"
-        elif mode == MemoryMode.PERSONAL:
-            return self.memory_manager.get_personal_history(user_identifier, persona_name, effective_limit), "personal"
-        elif mode == MemoryMode.GLOBAL:
-            return self.memory_manager.get_global_history(persona_name, effective_limit), "global"
-        else:
-            return self.memory_manager.get_channel_history(channel, persona_name, server_id, effective_limit), "channel"
-
-    def _build_conversation_history(
-            self,
-            persona: Persona,
-            user_identifier: str,
-            channel: str,
-            server_id: Optional[str],
-            history_limit: Optional[int]
-    ) -> Tuple[List[Dict[str, Any]], Optional[int]]:
-        """Retrieves and formats conversation history based on the persona's memory mode.
-
-        Returns (formatted_history, oldest_interaction_id).
-        oldest_interaction_id is the interaction_id of the oldest message in the
-        sliding window, used for the memory recency filter.
-        """
-        persona_name = persona.get_name()
-
-        effective_limit: int = persona.get_history_messages()
-        if history_limit is not None:
-            effective_limit = min(effective_limit, history_limit)
-
-        raw_history, memory_mode_used = self._fetch_raw_history(
-            persona.get_memory_mode(), persona_name,
-            user_identifier, channel, server_id, effective_limit
+        """Raw history the way the engine would see it (DP-136 transcript seam)."""
+        return self.request_builder.get_view_history(
+            persona_name, user_identifier, channel, server_id=server_id, limit=limit,
         )
-
-        oldest_interaction_id = None
-        if raw_history:
-            oldest_interaction_id = raw_history[0].get('interaction_id')
-
-        formatted = self._format_raw_history_for_llm(raw_history, memory_mode_used, persona_name, server_id)
-        return formatted, oldest_interaction_id
-
-    async def _retrieve_memory_block(
-            self,
-            persona: Persona,
-            user_identifier: str,
-             channel: str,
-            server_id: Optional[str],
-            conversation_history: List[Dict[str, Any]],
-            current_message: Optional[str] = None,
-            oldest_interaction_id: Optional[int] = None,
-    ) -> Tuple[Optional[str], bool]:
-        """Retrieve and format relevant long-term memory summaries for injection.
-
-        Returns (formatted_block, has_untrusted) where has_untrusted is True
-        when any retrieved summary carried the untrusted flag (Phase 5 taint).
-        """
-        logger.warning(f"### RETRIEVAL_DIAGNOSTIC: Entering _retrieve_memory_block for {persona.get_name()} (Enabled: {MEMORY_RETRIEVAL_ENABLED}, Service: {'YES' if self._embedding_service else 'NO'})")
-
-        if not MEMORY_RETRIEVAL_ENABLED or not persona.get_long_term_memory():
-            return None, False
-
-        # Build the recall query string: prefer the current user message;
-        # fall back to the most recent user turn in the formatted history.
-        query_text: Optional[str] = None
-        if current_message and current_message.strip():
-            query_text = strip_vertex_links(current_message)
-        if not query_text and conversation_history:
-            for msg in reversed(conversation_history):
-                if msg.get('role') == 'user':
-                    content = msg.get('content', '')
-                    if isinstance(content, str) and content.strip():
-                        query_text = strip_vertex_links(content)
-                        break
-        if not query_text:
-            logger.warning(f"### ChatSystem: Skipping retrieval for {persona.get_name()} (no text content to embed)")
-            return None, False
-
-        tag_filter = self._build_scope_tags(
-            channel=channel, server_id=server_id, user_identifier=user_identifier,
-        )
-        # Carry the sliding-window cutoff through the backend boundary as a
-        # tag predicate. SqliteSemanticBackend.recall translates this back into
-        # `exclude_after_interaction_id` so the legacy summary index doesn't
-        # surface memories that are still in the visible window. Hindsight
-        # ignores unknown tag prefixes — no-op there.
-        if oldest_interaction_id is not None:
-            tag_filter.append(f"exclude_after:{oldest_interaction_id}")
-
-        try:
-            hits = await self.memory_backend.recall(
-                bank_id=persona.get_name(),
-                query=query_text,
-                k=MEMORY_MAX_SUMMARIES_IN_CONTEXT,
-                tag_filter=tag_filter,
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"Memory recall failed: {e}")
-            return None, False
-
-        if not hits:
-            logger.warning(f"### ChatSystem: No relevant memories returned from backend for {persona.get_name()}")
-            return None, False
-
-        has_untrusted = any(h.untrusted for h in hits)
-        memory_block = self._format_memory_block(hits)
-        if memory_block:
-            logger.warning(f"### ChatSystem: Injected memory block for {persona.get_name()} ({len(hits)} hits, untrusted={has_untrusted})")
-        return memory_block, has_untrusted
-
-    async def _retain_turn_safe(
-        self,
-        *,
-        persona_name: str,
-        role: str,
-        content: str,
-        user_identifier: str,
-        channel: str,
-        server_id: Optional[str],
-        timestamp: datetime,
-        interaction_id: int,
-        untrusted: bool,
-    ) -> None:
-        """Fire-and-forget wrapper around backend.retain_turn.
-
-        The Hindsight backend's retain_turn enqueues into a per-bank
-        asyncio.Queue and returns immediately; sqlite_legacy is a noop. We
-        still wrap in try/except so a backend hiccup never derails the user
-        turn — alpha system, retain failures are logged + dropped.
-        """
-        try:
-            await self.memory_backend.retain_turn(
-                bank_id=persona_name,
-                role=role,
-                content=content,
-                timestamp=timestamp,
-                scope_tags=self._build_scope_tags(
-                    channel=channel, server_id=server_id, user_identifier=user_identifier,
-                ),
-                source_persona=persona_name,
-                untrusted=untrusted,
-                metadata={"interaction_id": str(interaction_id)},
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"retain_turn dropped ({role} turn): {e}")
-
-    @staticmethod
-    def _build_scope_tags(
-        *,
-        channel: Optional[str],
-        server_id: Optional[str],
-        user_identifier: Optional[str],
-        interface: Optional[str] = None,
-    ) -> List[str]:
-        """Plan §1.4 scope tags. Used for retain + recall tag predicates."""
-        tags: List[str] = []
-        if channel:
-            tags.append(f"channel:{channel}")
-        if user_identifier:
-            tags.append(f"user:{user_identifier}")
-        if server_id:
-            tags.append(f"server:{server_id}")
-        if interface:
-            tags.append(f"interface:{interface}")
-        return tags
 
     async def get_session_memory_block(
             self,
@@ -528,315 +176,33 @@ class ChatSystem:
             server_id: Optional[str],
             query: Optional[str] = None,
     ) -> Optional[str]:
-        """Public LTM seam for interfaces that bypass generate_response (portal).
-
-        Builds the persona's sliding-window history, then returns a formatted
-        memory block or None when retrieval is disabled / yields no matches.
-        Wraps the two private helpers so callers do not depend on private API.
-        """
-        persona = self.personas.get(persona_name)
-        if persona is None:
-            return None
-        history, oldest_id = self._build_conversation_history(
-            persona, user_identifier, channel, server_id, persona.get_history_messages(),
+        """Public LTM seam for interfaces that bypass generate_response (portal)."""
+        return await self.request_builder.get_session_memory_block(
+            persona_name, user_identifier, channel, server_id, query=query,
         )
-        block, _has_untrusted = await self._retrieve_memory_block(
-            persona=persona,
-            user_identifier=user_identifier,
-            channel=channel,
-            server_id=server_id,
-            conversation_history=history,
-            current_message=query or None,
-            oldest_interaction_id=oldest_id,
-        )
-        return block
 
-    @staticmethod
-    def _format_memory_block(hits: List[MemoryHit]) -> Optional[str]:
-        """Format MemoryHit list into a <memory> block for injection."""
-        if not hits:
-            return None
-
-        lines = ["<memory>", "The following are relevant facts from previous conversations:", ""]
-
-        for hit in hits:
-            tag_map: Dict[str, str] = {}
-            for tag in hit.tags or []:
-                if ":" in tag:
-                    k, v = tag.split(":", 1)
-                    tag_map[k] = v
-            channel = tag_map.get("channel", "unknown")
-            persona = tag_map.get("persona", "")
-
-            label_parts = [f"#{channel}"]
-            if hit.id:
-                label_parts.append(f"ID:{hit.id}")
-            if persona == "ambient":
-                label_parts.append("ambient")
-            if hit.timestamp:
-                label_parts.append(_relative_time(hit.timestamp))
-
-            lines.append(f"[{', '.join(label_parts)}]")
-            for fact_line in hit.content.strip().split('\n'):
-                if fact_line.strip():
-                    lines.append(fact_line)
-            lines.append("")
-
-        lines.append("</memory>")
-        return "\n".join(lines)
-
-    def _filter_tools_for_persona(self, persona: Persona) -> List[Dict[str, Any]]:
-        """Filters available tools by persona policy, service bindings, and model compatibility."""
-        all_tools = self.tool_manager.get_tool_definitions()
-        
-        # 1. Primary filtering via ToolPolicy
-        tools_for_llm = persona.get_tool_policy().filter_tools(all_tools)
-
-        # 2. Filter out tools whose service_binding isn't in the persona's bindings
-        bindings = set(persona.get_service_bindings())
-        tools_for_llm = [t for t in tools_for_llm
-                         if not t.get('service_binding') or t.get('service_binding') in bindings]
-
-        # 3. Model compatibility check
-        model_prefix = get_model_prefix(persona.get_model_name())
-        tools_for_llm = [t for t in tools_for_llm
-                         if model_prefix not in MODEL_INCOMPATIBLE_TOOLS.get(
-                             t.get('function', {}).get('name'), set())]
-
-        return tools_for_llm
-
-    async def _execute_read_calls(
+    async def assemble_request(
             self,
-            read_calls: List[Dict[str, Any]],
-            conversation_history: List[Dict[str, Any]]
-    ) -> None:
-        """Execute read-only tool calls and append results to history."""
-        for call_item in read_calls:
-            tool_name: str = call_item.get("name", "")
-            tool_args = call_item.get("arguments", {})
-            tool_result = await self.tool_manager.execute_tool(tool_name, **tool_args)
-            conversation_history.append({
-                "role": "tool",
-                "tool_call_id": call_item.get("id"),
-                "name": tool_name,
-                "content": json.dumps(tool_result)
-            })
-
-    async def _prepare_request(self, ctx: RequestContext, is_retry: bool = False) -> None:
-        """Build history, inject long-term memory, filter tools, append user message.
-
-        On `is_retry=True`: the prior user turn is already in DB, and the
-        prior assistant turn is the row we are about to UPDATE in place.
-        Pop the trailing assistant so the model regenerates from the user
-        instead of continuing its own discarded response, and skip appending
-        a fresh user turn (DB already terminates with the matching user row).
-
-        When `ctx.client_messages` is provided and the DB returns no history,
-        the client-side message array (e.g. kobold-lite jinja history) is used
-        as a fallback so sessions with rich UI state are not hollow on the
-        first engine-routed turn.  System/trailing-assistant/trailing-user
-        messages are stripped — the engine re-injects them from persona config
-        and ctx.message.
-        """
-        ctx.conversation_history, ctx.oldest_interaction_id = self._build_conversation_history(
-            ctx.persona, ctx.user_identifier, ctx.channel,
-            ctx.server_id, ctx.history_limit
-        )
-
-        # Load sticky taint bit for this conversation (touch for LRU recency)
-        taint_key = (ctx.user_identifier, ctx.persona_name, ctx.channel, ctx.server_id)
-        ctx.turn_tainted = self._conversation_taints.get(taint_key, False)
-        if taint_key in self._conversation_taints:
-            self._conversation_taints.move_to_end(taint_key)
-
-        # If the client supplied its own message array (kobold-lite jinja mode),
-        # prefer it over the DB result. The portal export already uses global
-        # history (all channels), so kobold-lite's in-memory state is the
-        # correct, authoritative window — re-querying a narrower channel filter
-        # here would miss cross-channel turns. DB history is still used when no
-        # client messages are present (Discord, Gmail, other bot callers).
-        if ctx.client_messages:
-            fallback = []
-            for m in ctx.client_messages:
-                m_copy = dict(m)
-                content = m_copy.get("content", "")
-                if isinstance(content, str):
-                    # Strip kobold-lite internal placeholders used for dynamic templating.
-                    # These are injected by kobold_export.py but redundant for engine-side templating.
-                    content = content.replace("{{[INPUT]}}", "").replace("{{[OUTPUT]}}", "").strip()
-                    # Noise reduction for client-supplied history
-                    content = strip_vertex_links(content)
-                    m_copy["content"] = content
-                fallback.append(m_copy)
-
-            # Strip leading system message — engine re-injects from persona.
-            if fallback and fallback[0].get("role") == "system":
-                fallback.pop(0)
-            # Strip trailing assistant continuation prefix (continue_assistant_turn).
-            if fallback and fallback[-1].get("role") == "assistant" and not fallback[-1].get("content"):
-                fallback.pop()
-            # Strip trailing user message — engine will re-append from ctx.message.
-            if fallback and fallback[-1].get("role") == "user":
-                # Ensure the fallback's last user matches current message to avoid double-appending
-                # if the client already included it in the array.
-                last_content = fallback[-1].get("content", "").strip()
-                if last_content == ctx.message.strip():
-                    fallback.pop()
-            
-            # Capture the discarded DB row count *before* reassigning, so the
-            # diagnostic distinguishes "DB returned N rows we ignored" from
-            # "DB returned 0 rows" — the fallback size is a different number.
-            db_row_count = len(ctx.conversation_history)
-            ctx.conversation_history = fallback
-            logger.info(
-                "_prepare_request: using %d client messages (cleaned kobold-lite history) "
-                "for %s / %s — DB result (%d rows) discarded",
-                len(ctx.conversation_history), ctx.persona_name, ctx.channel,
-                db_row_count,
-            )
-
-        # Inject long-term memory block before the sliding window
-        memory_block, has_untrusted = await self._retrieve_memory_block(
-            ctx.persona, ctx.user_identifier, ctx.channel,
-            ctx.server_id, ctx.conversation_history,
-            current_message=ctx.message,
-            oldest_interaction_id=ctx.oldest_interaction_id,
-        )
-        if memory_block:
-            ctx.conversation_history.insert(0, {"role": "user", "content": memory_block})
-        if has_untrusted:
-            ctx.turn_tainted = True
-            if "memory_recall" not in ctx.taint_sources:
-                ctx.taint_sources.append("memory_recall")
-
-        ctx.tools_for_llm = self._filter_tools_for_persona(ctx.persona)
-
-        if is_retry:
-            if ctx.conversation_history and ctx.conversation_history[-1].get("role") == "assistant":
-                ctx.conversation_history.pop()
-        elif ctx.message and ctx.message.strip():
-            # Symmetric with the DB-side guard in _log_user_turn: an empty /
-            # whitespace-only message (kobold-lite continue/prefetch) must not
-            # land a phantom `{'role':'user','content':''}` turn in the prompt,
-            # which would otherwise make the model generate off a blank turn.
-            # Noise reduction: Strip vertexai grounding redirect URLs from user message for LLM context.
-            ctx.conversation_history.append({"role": "user", "content": strip_vertex_links(ctx.message)})
-
-        # Respect per-request context overrides from the portal for history truncation.
-        ctx_limit = (ctx.local_inference_config or {}).get("max_context_length") or ctx.persona.get_max_context_tokens()
-        prompt_budget = ctx_limit - ctx.persona.get_response_token_limit()
-        ctx.conversation_history, dropped = truncate_messages_to_budget(
-            ctx.conversation_history, prompt_budget,
-        )
-        if dropped:
-            logger.info(
-                f"Token-prune: dropped {dropped} oldest messages to fit "
-                f"max_context_tokens={ctx.persona.get_max_context_tokens()} "
-                f"(prompt_budget={prompt_budget}) for persona={ctx.persona_name}"
-            )
-
-    def _log_user_turn(
-            self,
-            *,
-            is_retry: bool,
             persona_name: str,
             user_identifier: str,
             channel: str,
-            user_display_name: Optional[str],
             message: str,
-            server_id: Optional[str],
-            platform_message_id: Optional[str],
-            timestamp: datetime,
-    ) -> Tuple[Optional[int], Optional[int]]:
-        """Log the new user turn or archive prior assistant for retry.
-
-        Returns `(user_interaction_id, retry_assistant_id)`. Exactly one of
-        the two will be set on success: retries archive the prior assistant
-        and skip user-row insertion; non-retries log a fresh user row.
-        """
-        if is_retry:
-            try:
-                retry_assistant_id = self.memory_manager.handle_portal_retry(
-                    persona_name=persona_name,
-                    user_identifier=user_identifier,
-                    channel=channel,
-                )
-            except Exception as e:
-                logger.error(f"handle_portal_retry failed: {e}", exc_info=True)
-                retry_assistant_id = None
-            return None, retry_assistant_id
-
-        # Symmetric with the assistant-side guard in _commit_or_update_assistant:
-        # an empty / whitespace-only user message must never land a phantom row.
-        # kobold-lite continue/prefetch calls without a user message would
-        # otherwise leave zero-length user_interaction rows between turns,
-        # polluting context and confusing the model.
-        if not message or not message.strip():
-            return None, None
-
-        try:
-            user_interaction_id = self.memory_manager.log_message(
-                user_identifier=user_identifier, persona_name=persona_name,
-                channel=channel, author_role='user',
-                author_name=user_display_name, content=message,
-                timestamp=timestamp, server_id=server_id,
-                platform_message_id=platform_message_id,
-            )
-        except Exception as e:
-            logger.error(f"User log_message failed: {e}", exc_info=True)
-            user_interaction_id = None
-        return user_interaction_id, None
-
-    def _commit_or_update_assistant(
-            self,
             *,
-            persona_name: str,
-            user_identifier: str,
-            channel: str,
-            server_id: Optional[str],
-            final_text: str,
-            response_type: ResponseType,
-            user_interaction_id: Optional[int],
-            retry_assistant_id: Optional[int],
-            tool_context_json: Optional[str],
-    ) -> Optional[int]:
-        """Persist the assistant turn (UPDATE on retry, INSERT otherwise).
-
-        Returns the canonical assistant interaction_id, or None when the
-        text is empty or the response_type isn't a normal LLM generation.
-        """
-        if not final_text or not final_text.strip():
-            return None
-
-        if retry_assistant_id is not None:
-            try:
-                # Forward tool_context so the regenerated row's stored tool calls
-                # stay paired with its new content — a retried turn may use a
-                # different (or no) set of tools than the failed attempt.
-                self.memory_manager.update_interaction_content(
-                    retry_assistant_id, final_text, tool_context=tool_context_json,
-                )
-                return retry_assistant_id
-            except Exception as e:
-                logger.error(f"Retry update_interaction_content failed: {e}")
-                return None
-
-        if response_type != ResponseType.LLM_GENERATION:
-            return None
-
-        try:
-            assistant_id: Optional[int] = self.memory_manager.log_message(
-                user_identifier=user_identifier, persona_name=persona_name,
-                channel=channel, author_role='assistant',
-                author_name=persona_name, content=final_text,
-                timestamp=datetime.now(), server_id=server_id,
-                tool_context=tool_context_json,
-                reply_to_id=user_interaction_id,
-            )
-            return assistant_id
-        except Exception as e:
-            logger.error(f"Assistant log_message failed: {e}", exc_info=True)
-            return None
+            server_id: Optional[str] = None,
+            image_url: Optional[str] = None,
+            history_limit: Optional[int] = None,
+            local_inference_config: Optional[Dict[str, Any]] = None,
+            is_retry: bool = False,
+            client_messages: Optional[List[Dict[str, Any]]] = None,
+    ) -> Optional[AssembledRequest]:
+        """Dry-run assembler (S5 parity seam) — see RequestBuilder.assemble_request."""
+        return await self.request_builder.assemble_request(
+            persona_name, user_identifier, channel, message,
+            server_id=server_id, image_url=image_url,
+            history_limit=history_limit,
+            local_inference_config=local_inference_config,
+            is_retry=is_retry, client_messages=client_messages,
+        )
 
     async def _orchestrate(
             self,
@@ -940,10 +306,10 @@ class ChatSystem:
         )):
             if resume is None:
                 try:
-                    await self._prepare_request(ctx, is_retry=is_retry)
+                    await self.request_builder.prepare_request(ctx, is_retry=is_retry)
                 except Exception as e:
                     logger.error(
-                        f"_prepare_request failed for {user_identifier}: {e}", exc_info=True,
+                        f"prepare_request failed for {user_identifier}: {e}", exc_info=True,
                     )
                     yield ErrorEvent(message="An internal error occurred while processing your request.")
                     return
@@ -953,7 +319,7 @@ class ChatSystem:
                 #    the LLM call so the user row is always pinned even if the model
                 #    errors mid-flight.
                 user_ts = timestamp or datetime.now()
-                user_interaction_id, retry_assistant_id = self._log_user_turn(
+                user_interaction_id, retry_assistant_id = self.turn_persistence.log_user_turn(
                     is_retry=is_retry, persona_name=persona_name,
                     user_identifier=user_identifier, channel=channel,
                     user_display_name=user_display_name, message=message,
@@ -966,7 +332,7 @@ class ChatSystem:
                 # enqueues fire-and-forget. Either way, retain_turn returns quickly
                 # and does not block the LLM call below.
                 if user_interaction_id is not None and message and message.strip():
-                    await self._retain_turn_safe(
+                    await self.turn_persistence.retain_turn_safe(
                         persona_name=persona_name, role="user", content=message,
                         user_identifier=user_identifier, channel=channel,
                         server_id=server_id, timestamp=user_ts,
@@ -979,9 +345,16 @@ class ChatSystem:
                 #     decision. Runs inside turn_scope so write-tool execution
                 #     inherits the persona/channel/user scope.
                 user_interaction_id = None
-                retry_assistant_id = None
+                # Carry the park's retry linkage so a retried turn's resumed
+                # continuation UPDATEs the archived assistant row instead of
+                # INSERTing a fresh one beside it.
+                retry_assistant_id = resume.pending.retry_assistant_id
                 try:
-                    await self._apply_resume_decision(resume, ctx)
+                    ctx.turn_tainted = await self.confirmations.apply_resume_decision(
+                        resume.pending, resume.approved, ctx.conversation_history,
+                        operator_id=ctx.user_identifier,
+                        turn_tainted=ctx.turn_tainted,
+                    )
                 except Exception as e:
                     logger.error(
                         f"Error resuming pending confirmation for {user_identifier}: {e}",
@@ -997,9 +370,9 @@ class ChatSystem:
             #    siphons api_payload into the request cache, and unpacks the
             #    terminal _LoopFinishedEvent to drive CONFIRM-mode parking +
             #    assistant persistence.
-            params = ctx.persona.get_generation_params().copy()
-            if ctx.local_inference_config:
-                params.merge_inference_config(ctx.local_inference_config)
+            params = self.request_builder.resolve_generation_params(
+                ctx.persona, ctx.local_inference_config,
+            )
             params_first_iter = True
             final_text = ""
             response_type = ResponseType.LLM_GENERATION
@@ -1027,7 +400,7 @@ class ChatSystem:
                     ),
                 ):
                     if isinstance(ev, _ApiPayloadEvent):
-                        self._store_api_request(
+                        self.turn_persistence.store_api_request(
                             user_identifier, persona_name, ev.payload,
                             tools_for_llm=ctx.tools_for_llm if params_first_iter else None,
                             is_first_iteration=params_first_iter,
@@ -1051,14 +424,14 @@ class ChatSystem:
                         ctx.turn_tainted = ev.turn_tainted
                         # Persist back to the conversation cache for stickiness
                         taint_key = (ctx.user_identifier, ctx.persona_name, ctx.channel, ctx.server_id)
-                        self._set_conversation_taint(taint_key, ev.turn_tainted)
+                        self.request_builder.set_conversation_taint(taint_key, ev.turn_tainted)
             except asyncio.CancelledError:
                 # Client disconnect / abort. Flush whatever assistant text has
                 # accumulated so the row reflects what the user actually saw,
                 # then re-raise so the surrounding StreamingResponse aborts.
                 partial = "".join(accumulated_parts)
                 if partial.strip():
-                    self._commit_or_update_assistant(
+                    self.turn_persistence.commit_or_update_assistant(
                         persona_name=persona_name, user_identifier=user_identifier,
                         channel=channel, server_id=server_id,
                         final_text=partial,
@@ -1087,32 +460,12 @@ class ChatSystem:
                     audit_info=audit_info,
                     tool_context_start=tool_context_start,
                     confirmation_text=final_text if final_text else "",
+                    retry_assistant_id=retry_assistant_id,
                 )
-                confirm_key = (ctx.user_identifier, ctx.persona_name)
-                # A still-pending write for this (user, persona) is silently
-                # superseded by this one — the operator's eventual approve/deny
-                # would resolve the wrong intent. We can't queue both (the key
-                # is 1:1), so at minimum the eviction must leave an audit trail.
-                evicted = self._pending_confirmations.get(confirm_key)
-                if evicted is not None:
-                    self.memory_manager.log_audit_event(
-                        event_type="audit_parked_evicted",
-                        operator_id=ctx.user_identifier,
-                        prior_state="pending",
-                        new_state="evicted",
-                        reason="Superseded by a newer pending write for the same persona",
-                        metadata=evicted.audit_info,
-                    )
-                self._pending_confirmations[confirm_key] = parked
+                # Parking (incl. supersede-eviction + audit logging) is the
+                # ConfirmationManager's job; the kernel only decides *when*.
+                self.confirmations.park(ctx.user_identifier, ctx.persona_name, parked)
                 ephemeral_chunk_id = parked.token
-                # Phase 7: Log audit parking
-                self.memory_manager.log_audit_event(
-                    event_type="audit_parked",
-                    operator_id=ctx.user_identifier,
-                    new_state="pending",
-                    reason="Universal write-audit gate triggered",
-                    metadata=audit_info
-                )
                 # Surface the park to interactive consumers (the portal) so they
                 # can render an approve/deny affordance and resume via the token.
                 # Emitted before the terminal DoneEvent; non-interactive callers
@@ -1127,7 +480,7 @@ class ChatSystem:
                 )
 
             # 4. Log/update assistant turn. Original text (including links) is preserved.
-            assistant_id = self._commit_or_update_assistant(
+            assistant_id = self.turn_persistence.commit_or_update_assistant(
                 persona_name=persona_name, user_identifier=user_identifier,
                 channel=channel, server_id=server_id,
                 final_text=final_text, response_type=response_type,
@@ -1141,7 +494,7 @@ class ChatSystem:
             # store when the LLM consumed attacker-influenced tool output.
             if assistant_id is not None and final_text and final_text.strip() \
                     and response_type == ResponseType.LLM_GENERATION:
-                await self._retain_turn_safe(
+                await self.turn_persistence.retain_turn_safe(
                     persona_name=persona_name, role="assistant", content=final_text,
                     user_identifier=user_identifier, channel=channel,
                     server_id=server_id, timestamp=datetime.now(),
@@ -1254,45 +607,6 @@ class ChatSystem:
                     user_interaction_id = None
         return final_text, response_type, assistant_id, user_interaction_id
 
-    async def _apply_resume_decision(
-            self, resume: _ResumeState, ctx: RequestContext
-    ) -> None:
-        """Apply an approve/deny decision to the parked turn before continuation.
-
-        On approval the write calls execute and their results are appended to
-        the parked history (so they precede the model's continuation); denial
-        appends synthetic denial results instead. Either way the audit decision
-        is logged. Read-side taint is recomputed from the executed write calls
-        and folded into `ctx.turn_tainted` so the continuation loop inherits it.
-        """
-        pending = resume.pending
-        if resume.approved:
-            await self._execute_write_calls(pending.write_calls, ctx.conversation_history)
-            for wc in pending.write_calls:
-                wc_name = wc.get("name") or "unknown"
-                if get_tool_capabilities(wc_name).get("produces_untrusted"):
-                    ctx.turn_tainted = True
-            decision_state = "approved"
-            decision_reason = "Human approved tool execution"
-        else:
-            self._append_denied_tool_results(pending.write_calls, ctx.conversation_history)
-            decision_state = "denied"
-            decision_reason = "Human denied tool execution"
-
-        # Phase 7: Log audit decision
-        self.memory_manager.log_audit_event(
-            event_type="audit_decision",
-            operator_id=ctx.user_identifier,
-            prior_state="pending",
-            new_state=decision_state,
-            reason=decision_reason,
-            metadata={
-                "write_calls": pending.write_calls,
-                "audit_info": pending.audit_info,
-                "turn_tainted": ctx.turn_tainted,
-            },
-        )
-
     async def stream_resume_confirmation(
             self, user_identifier: str, persona_name: str, approved: bool,
             *, expected_token: Optional[str] = None,
@@ -1316,7 +630,7 @@ class ChatSystem:
         (user, persona) alone.
         """
         key = (user_identifier, persona_name)
-        pending = self._pending_confirmations.get(key)
+        pending = self.confirmations.pending.get(key)
 
         if not pending:
             yield DoneEvent(
@@ -1334,7 +648,7 @@ class ChatSystem:
 
         # Commit to acting on this park: remove it so a duplicate approve/deny
         # (double-click, retried POST) can't execute the writes twice.
-        self._pending_confirmations.pop(key, None)
+        self.confirmations.pending.pop(key, None)
 
         if time.time() - pending.created_at > PENDING_CONFIRMATION_TIMEOUT:
             yield DoneEvent(
