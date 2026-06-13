@@ -95,7 +95,22 @@ To support multiple agents working concurrently, the following rules are mandato
 - **Every** task must have a corresponding file in `memory/project/tasks/DP-XXX.md`.
 
 ### 2. Workspace Isolation
-- Parallel work **MUST** use Git Worktrees.
+- **MUST** use Git Worktrees — for *all* DP-XXX work, including solo single-task
+  sessions, not just when agents run concurrently. The main repo directory is a
+  shared mutable surface and may already hold another task's uncommitted edits.
+- **Start every DP-XXX by creating its worktree off a clean `master`:**
+  `git worktree add worktrees/DP-XXX -b bugfix/DP-XXX-slug master`. Do all
+  editing, testing, and committing inside that worktree.
+- **Never stage or commit from the main repo directory.** Before any
+  `git add`/`git commit`, confirm you are inside `worktrees/DP-XXX/` and that
+  `git status` shows only files *you* changed. If `git status` lists another
+  DP's uncommitted changes (the main tree was left dirty), **STOP** — do not
+  `git add` (a path-broad add will sweep up that WIP into your commit, which is
+  exactly how DP-142's first commit was contaminated).
+- **Run `pytest` from inside the worktree**, not from the main repo against
+  worktree paths. Worktrees share `.venv` via a junction, so a top-level
+  `pytest worktrees/DP-XXX/tests/...` imports `src` from the *main* tree, not
+  the worktree — silently masking real pass/fail.
 - Worktree root: `worktrees/DP-XXX/`.
 - Never run `git checkout` or `git pull` in the main repository directory while a parallel agent is working, as this can corrupt their local file state.
 
@@ -104,6 +119,15 @@ To support multiple agents working concurrently, the following rules are mandato
 - Verify all CI/CD checks (including `pytest`, `flake8` lint, and `mypy` type check as defined in `.github/workflows/deploy.yml`) after finishing any commit-ready change.
 - Human approval is required for all merges to `main` or `develop`.
 - After merge, the worktree directory `worktrees/DP-XXX/` should be removed via `git worktree remove`.
+- **NEVER `rm -rf` / `Remove-Item -Recurse` a worktree directory.** Each
+  worktree's `.venv` is a Windows **junction** to the main repo's `.venv`; a
+  recursive delete follows the junction and **destroys the real shared venv**
+  (this happened during DP-142 cleanup — the whole `.venv` had to be rebuilt).
+  Remove worktrees only with `git worktree remove [--force]`. If that fails
+  (permission/lock): (1) close any shell whose cwd is inside the worktree,
+  (2) `cmd /c rmdir "worktrees/DP-XXX/.venv"` to drop the junction link and
+  **verify it's gone**, (3) `git worktree prune`, then (4) delete the now
+  venv-free directory. Never recurse while the junction still exists.
 
 ## Documentation
 

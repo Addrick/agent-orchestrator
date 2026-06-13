@@ -526,6 +526,48 @@ def test_build_conversation_history_personal_mode(chat_system_with_mocks):
     memory_mock.get_personal_history.assert_called_once_with('user123', 'test_persona', persona.get_history_messages())
 
 
+# --- DP-142: read-only paths must not advance the hello override ---
+
+def test_get_view_history_does_not_advance_override(chat_system_with_mocks):
+    """A transcript fetch must not inflate the hello window (DP-142)."""
+    system, memory_mock, _, persona, _ = chat_system_with_mocks
+    persona.set_memory_mode(MemoryMode.CHANNEL_ISOLATED)
+    persona.start_new_conversation(0)
+    memory_mock.get_channel_history.return_value = []
+
+    system.get_view_history('test_persona', 'user', 'general', 'srv1')
+    system.get_view_history('test_persona', 'user', 'general', 'srv1')
+
+    assert persona.get_current_effective_history_messages() == 0
+
+
+@pytest.mark.asyncio
+async def test_assemble_request_does_not_advance_override(chat_system_with_mocks):
+    """The /assemble dry-run must not inflate the hello window (DP-142)."""
+    system, memory_mock, _, persona, _ = chat_system_with_mocks
+    persona.set_memory_mode(MemoryMode.CHANNEL_ISOLATED)
+    persona.start_new_conversation(0)
+    memory_mock.get_channel_history.return_value = []
+
+    await system.assemble_request('test_persona', 'user', 'general', 'hi', server_id='srv1')
+    await system.assemble_request('test_persona', 'user', 'general', 'hi', server_id='srv1')
+
+    assert persona.get_current_effective_history_messages() == 0
+
+
+def test_build_conversation_history_live_advances_override(chat_system_with_mocks):
+    """The live generation path still advances the hello window (DP-142)."""
+    system, memory_mock, _, persona, _ = chat_system_with_mocks
+    persona.set_memory_mode(MemoryMode.CHANNEL_ISOLATED)
+    persona.start_new_conversation(0)
+    memory_mock.get_channel_history.return_value = []
+
+    system._build_conversation_history(persona, 'user', 'general', 'srv1', None)
+    assert persona.get_current_effective_history_messages() == 2
+    system._build_conversation_history(persona, 'user', 'general', 'srv1', None)
+    assert persona.get_current_effective_history_messages() == 4
+
+
 # --- Tool Filtering Tests ---
 
 def test_filter_tools_wildcard(chat_system_with_mocks):

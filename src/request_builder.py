@@ -272,7 +272,9 @@ class RequestBuilder:
             return [], "global"
         if channel is None:
             return self.memory_manager.get_global_history(persona_name, limit), "global"
-        effective_limit = persona.get_history_messages()
+        # DP-142: transcript view is read-only — peek the window without
+        # advancing the hello override.
+        effective_limit = persona.get_history_messages(advance=False)
         if limit is not None:
             effective_limit = min(effective_limit, limit)
         return self.fetch_raw_history(
@@ -286,17 +288,21 @@ class RequestBuilder:
             user_identifier: str,
             channel: str,
             server_id: Optional[str],
-            history_limit: Optional[int]
+            history_limit: Optional[int],
+            advance: bool = True,
     ) -> Tuple[List[Dict[str, Any]], Optional[int]]:
         """Retrieves and formats conversation history based on the persona's memory mode.
 
         Returns (formatted_history, oldest_interaction_id).
         oldest_interaction_id is the interaction_id of the oldest message in the
         sliding window, used for the memory recency filter.
+
+        DP-142: ``advance`` gates the hello-override side effect. Live turns pass
+        True; read-only / dry-run callers pass False.
         """
         persona_name = persona.get_name()
 
-        effective_limit: int = persona.get_history_messages()
+        effective_limit: int = persona.get_history_messages(advance=advance)
         if history_limit is not None:
             effective_limit = min(effective_limit, history_limit)
 
@@ -396,8 +402,12 @@ class RequestBuilder:
         persona = self.persona_lookup(persona_name)
         if persona is None:
             return None
+        # DP-142: read-only LTM seam — peek the window, never advance the
+        # hello override (and avoid the prior double-advance from calling the
+        # getter here AND inside build_conversation_history).
         history, oldest_id = self.build_conversation_history(
-            persona, user_identifier, channel, server_id, persona.get_history_messages(),
+            persona, user_identifier, channel, server_id,
+            persona.get_history_messages(advance=False), advance=False,
         )
         block, _has_untrusted = await self.retrieve_memory_block(
             persona=persona,
@@ -511,7 +521,8 @@ class RequestBuilder:
             channel=channel,
             server_id=server_id,
         )):
-            await self.prepare_request(ctx, is_retry=is_retry)
+            # DP-142: dry-run — never advance the hello override.
+            await self.prepare_request(ctx, is_retry=is_retry, advance=False)
 
         params = self.resolve_generation_params(persona, local_inference_config)
         messages = build_wire_messages(persona, ctx.conversation_history)
@@ -580,7 +591,8 @@ class RequestBuilder:
 
         return tools_for_llm
 
-    async def prepare_request(self, ctx: RequestContext, is_retry: bool = False) -> None:
+    async def prepare_request(self, ctx: RequestContext, is_retry: bool = False,
+                              advance: bool = True) -> None:
         """Build history, inject long-term memory, filter tools, append user message.
 
         On `is_retry=True`: the prior user turn is already in DB, and the
@@ -598,7 +610,7 @@ class RequestBuilder:
         """
         ctx.conversation_history, ctx.oldest_interaction_id = self.build_conversation_history(
             ctx.persona, ctx.user_identifier, ctx.channel,
-            ctx.server_id, ctx.history_limit
+            ctx.server_id, ctx.history_limit, advance=advance
         )
 
         # Load sticky taint bit for this conversation (touch for LRU recency)
