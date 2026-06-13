@@ -221,6 +221,16 @@ RATE_LIMIT_ANTHROPIC_RPM = int(os.environ.get("RATE_LIMIT_ANTHROPIC_RPM", "50"))
 # conservative; the spawn-per-call cost is the practical limiter.
 RATE_LIMIT_AGY_RPM       = int(os.environ.get("RATE_LIMIT_AGY_RPM",       "15"))
 
+# Workspace persistence settings for the agy provider
+AGY_PERSISTENT_WORKSPACES = os.environ.get("AGY_PERSISTENT_WORKSPACES", "True").lower() in ("true", "1", "yes", "on")
+AGY_WORKSPACE_MODE = os.environ.get("AGY_WORKSPACE_MODE", "persona") # 'persona' or 'global'
+AGY_WORKSPACES_DIR = DATA_DIR / "workspaces"
+
+# Run agy under its built-in OS-level sandbox (--sandbox: nsjail on Linux,
+# sandbox-exec on macOS). Defense-in-depth while the prompt still forbids
+# agy's own tools; required before that restriction is ever lifted.
+AGY_SANDBOX = os.environ.get("AGY_SANDBOX", "True").lower() in ("true", "1", "yes", "on")
+
 # Models
 EMBEDDING_MODEL = 'gemini-embedding-001'
 EMBEDDING_DIMENSION = 3072

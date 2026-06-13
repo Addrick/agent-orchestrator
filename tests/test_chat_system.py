@@ -400,8 +400,8 @@ def test_get_model_prefix(model_name, expected_prefix):
 # --- Model Compatibility Filter Tests ---
 
 @pytest.mark.asyncio
-async def test_grounding_filtered_for_non_gemini_25_models(chat_system_with_mocks):
-    """google_grounding_search should be filtered out for non-Gemini-2.5 models."""
+async def test_grounding_filtered_for_non_grounding_models(chat_system_with_mocks):
+    """google_grounding_search should be filtered out for non-grounding-compatible models."""
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_enabled_tools(['*'])
 
@@ -426,8 +426,11 @@ async def test_grounding_filtered_for_non_gemini_25_models(chat_system_with_mock
 
 
 @pytest.mark.asyncio
-async def test_grounding_kept_for_gemini_25_models(chat_system_with_mocks):
-    """google_grounding_search should be kept for Gemini 2.5 models."""
+@pytest.mark.parametrize("model_name", [
+    "gemini-2.5-flash", "gemini-3.1-flash"
+])
+async def test_grounding_kept_for_compatible_gemini_models(chat_system_with_mocks, model_name):
+    """google_grounding_search should be kept for grounding-compatible Gemini models."""
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_enabled_tools(['*'])
 
@@ -441,7 +444,7 @@ async def test_grounding_kept_for_gemini_25_models(chat_system_with_mocks):
     }
     tool_manager_mock.get_tool_definitions.return_value = [grounding_tool, web_search_tool]
 
-    persona.set_model_name("gemini-2.5-flash")
+    persona.set_model_name(model_name)
     await system.generate_response("test_persona", "user", "channel", "test")
     call_args = text_engine_mock.generate_response.call_args
     tools_sent = call_args[1].get('tools', call_args[0][2] if len(call_args[0]) > 2 else [])
@@ -452,7 +455,7 @@ async def test_grounding_kept_for_gemini_25_models(chat_system_with_mocks):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [
-    "gpt-4o", "claude-3-opus-20240229", "gemma-4-31b-it", "gemini-3.1-flash", "local",
+    "gpt-4o", "claude-3-opus-20240229", "gemma-4-31b-it", "local",
 ])
 async def test_grounding_filtered_for_incompatible_models(chat_system_with_mocks, model_name):
     """Grounding should be filtered for all incompatible model prefixes."""
@@ -537,7 +540,49 @@ def test_build_conversation_history_personal_mode(chat_system_with_mocks):
 
     system.request_builder.build_conversation_history(persona, 'user123', 'ch', None, None)
 
-    memory_mock.get_personal_history.assert_called_once_with('user123', 'test_persona', persona.get_context_length())
+    memory_mock.get_personal_history.assert_called_once_with('user123', 'test_persona', persona.get_history_messages())
+
+
+# --- DP-142: read-only paths must not advance the hello override ---
+
+def test_get_view_history_does_not_advance_override(chat_system_with_mocks):
+    """A transcript fetch must not inflate the hello window (DP-142)."""
+    system, memory_mock, _, persona, _ = chat_system_with_mocks
+    persona.set_memory_mode(MemoryMode.CHANNEL_ISOLATED)
+    persona.start_new_conversation(0)
+    memory_mock.get_channel_history.return_value = []
+
+    system.get_view_history('test_persona', 'user', 'general', 'srv1')
+    system.get_view_history('test_persona', 'user', 'general', 'srv1')
+
+    assert persona.get_current_effective_history_messages() == 0
+
+
+@pytest.mark.asyncio
+async def test_assemble_request_does_not_advance_override(chat_system_with_mocks):
+    """The /assemble dry-run must not inflate the hello window (DP-142)."""
+    system, memory_mock, _, persona, _ = chat_system_with_mocks
+    persona.set_memory_mode(MemoryMode.CHANNEL_ISOLATED)
+    persona.start_new_conversation(0)
+    memory_mock.get_channel_history.return_value = []
+
+    await system.assemble_request('test_persona', 'user', 'general', 'hi', server_id='srv1')
+    await system.assemble_request('test_persona', 'user', 'general', 'hi', server_id='srv1')
+
+    assert persona.get_current_effective_history_messages() == 0
+
+
+def test_build_conversation_history_live_advances_override(chat_system_with_mocks):
+    """The live generation path still advances the hello window (DP-142)."""
+    system, memory_mock, _, persona, _ = chat_system_with_mocks
+    persona.set_memory_mode(MemoryMode.CHANNEL_ISOLATED)
+    persona.start_new_conversation(0)
+    memory_mock.get_channel_history.return_value = []
+
+    system.request_builder.build_conversation_history(persona, 'user', 'general', 'srv1', None)
+    assert persona.get_current_effective_history_messages() == 2
+    system.request_builder.build_conversation_history(persona, 'user', 'general', 'srv1', None)
+    assert persona.get_current_effective_history_messages() == 4
 
 
 # --- Tool Filtering Tests ---

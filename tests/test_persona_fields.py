@@ -103,6 +103,19 @@ def test_apply_patch_fields_rejection_semantics(persona):
     assert persona.get_memory_mode() == before
 
 
+def test_memory_mode_patch_accepts_current_mode_any_case(persona):
+    """Re-sending the persona's current memory mode must not be reported as a
+    rejection — including the lowercase form the API itself displays
+    (get_memory_mode().name.lower()), which Persona.set_memory_mode accepts."""
+    current = persona.get_memory_mode()
+
+    for same_value in (current.name, current.name.lower(), current):
+        rejected: list = []
+        apply_patch_fields(persona, {"memory_mode": same_value}, rejected)
+        assert rejected == [], f"no-op memory_mode={same_value!r} falsely rejected"
+        assert persona.get_memory_mode() == current
+
+
 def test_inject_timestamp_field(persona):
     set_table = cli_set_handlers()
     what_table = cli_what_handlers()

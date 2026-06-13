@@ -477,6 +477,14 @@ body.persona-blocked .secbanner { display: block; }
 .stream-cursor { display: inline-block; width: 7px; height: 13px; background: var(--accent); margin-left: 2px; vertical-align: text-bottom; animation: blink 1s step-end infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 
+/* typing indicator — shown before the first stream frame arrives */
+.text.typing { color: var(--ink-faint); display: flex; align-items: center; gap: 7px; }
+.typing-dots { display: inline-flex; gap: 3px; align-items: center; }
+.typing-dots span { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); animation: typing-bounce 1.2s infinite ease-in-out; }
+.typing-dots span:nth-child(2) { animation-delay: .15s; }
+.typing-dots span:nth-child(3) { animation-delay: .3s; }
+@keyframes typing-bounce { 0%, 60%, 100% { opacity: .25; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-2px); } }
+
 /* aborted / error treatments */
 .abortmark { margin-top: 9px; font-size: 10px; color: var(--write); border: 1px dashed rgba(231,173,98,0.5); border-radius: 5px; padding: 5px 9px; font-family: var(--sans); display: inline-block; }
 .msg.aborted { border-left: 2px solid var(--write); }

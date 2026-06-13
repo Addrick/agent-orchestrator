@@ -289,10 +289,17 @@ def test_transcript_folds_reasoning_into_think_block():
 def test_transcript_parses_tool_context_json():
     rows = [
         {"author_role": "assistant", "content": "done", "interaction_id": 5,
-         "tool_context": json.dumps([{"role": "tool", "content": "x"}])},
+         "tool_context": json.dumps([
+             {"role": "assistant", "tool_calls": [
+                 {"id": "c1", "name": "lookup", "arguments": {"q": "x"}}]},
+             {"role": "tool", "tool_call_id": "c1", "content": "x"},
+         ])},
     ]
     chunks = build_transcript(rows)["chunks"]
-    assert chunks[0]["tool_context"] == [{"role": "tool", "content": "x"}]
+    assert chunks[0]["tool_context"] == [{
+        "call_id": "c1", "group_id": None, "tool_name": "lookup",
+        "arguments": {"q": "x"}, "result": "x", "error": None,
+    }]
 
 def test_transcript_skips_non_renderable_rows():
     rows = [
@@ -402,6 +409,28 @@ def test_parse_tool_context_malformed_elements_do_not_raise():
     # must not raise AttributeError — that would escape the (TypeError, ValueError)
     # guard and 500 the entire /transcript endpoint rather than one row.
     assert _parse_tool_context(["x"]) == ["x"]
+    # role-bearing message that resolves nothing → None (DP-143), but the point
+    # here is that the non-dict tool_call doesn't raise.
     assert _parse_tool_context(
         [{"role": "assistant", "tool_calls": ["bad"]}]
-    ) == [{"role": "assistant", "tool_calls": ["bad"]}]
+    ) is None
+
+
+def test_parse_tool_context_orphaned_call_id_returns_none():
+    # Truncated/orphaned history: a tool row references a call_id with no
+    # matching assistant tool_calls in the slice → nothing resolves. Must NOT
+    # leak the raw {role, content} OpenAI messages (they lack call_id/tool_name/
+    # arguments → garbled ToolCard). Return None so no tool panel renders. DP-143.
+    raw = [
+        {"role": "assistant", "content": "let me check"},
+        {"role": "tool", "tool_call_id": "orphan", "content": "{}"},
+    ]
+    assert _parse_tool_context(raw) is None
+
+
+def test_parse_tool_context_structured_without_role_still_passes_through():
+    # Already-structured ToolContext[] carries no `role` key → passthrough
+    # unchanged even though nothing "resolves". DP-143 must not break this.
+    structured = [{"call_id": "c", "tool_name": "t", "arguments": {},
+                   "result": None, "error": None}]
+    assert _parse_tool_context(structured) == structured

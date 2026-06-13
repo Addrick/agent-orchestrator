@@ -154,9 +154,6 @@ class AgentManager:
         # Apply runtime config to instance attributes
         if "schedule" in merged:
             instance.schedule = merged["schedule"]
-        elif "poll_interval" in merged:
-            # Backward compat: convert old format
-            instance.schedule = {"interval": float(merged["poll_interval"])}
         if "action_history_limit" in merged:
             instance.action_history_limit = int(merged["action_history_limit"])
 

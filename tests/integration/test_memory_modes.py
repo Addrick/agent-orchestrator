@@ -32,8 +32,8 @@ def mem_test_system():
         text_engine=mock_text_engine,
     )
     chat_system.personas = {
-        'test_persona': Persona('test_persona', 'mock_model', 'prompt', context_length=10),
-        'persona_2': Persona('persona_2', 'mock_model', 'prompt', context_length=10)
+        'test_persona': Persona('test_persona', 'mock_model', 'prompt', history_messages=10),
+        'persona_2': Persona('persona_2', 'mock_model', 'prompt', history_messages=10)
     }
     yield chat_system, memory_manager, mock_text_engine
 
@@ -54,7 +54,7 @@ def real_test_system(monkeypatch):
     )
     chat_system.register_service(ZammadIntegration(zammad_client))
     chat_system.personas = {
-        'test_persona': Persona('test_persona', 'mock_model', 'prompt', context_length=10),
+        'test_persona': Persona('test_persona', 'mock_model', 'prompt', history_messages=10),
     }
     yield chat_system, memory_manager
 
@@ -283,7 +283,7 @@ def memory_e2e_system():
         embedding_service=mock_emb_service,
     )
     chat_system.personas = {
-        'test_persona': Persona('test_persona', 'mock_model', 'prompt', context_length=5),
+        'test_persona': Persona('test_persona', 'mock_model', 'prompt', history_messages=5),
     }
     yield chat_system, memory_manager, mock_text_engine
 
@@ -295,7 +295,7 @@ async def test_e2e_memory_injection_in_prepare_request(memory_e2e_system):
     block appears in _prepare_request conversation history."""
     system, mm, mock_engine = memory_e2e_system
 
-    # 1. Seed older messages (outside the sliding window of context_length=5)
+    # 1. Seed older messages (outside the sliding window of history_messages=5)
     now = datetime.now()
     for i in range(1, 8):
         mm.log_message("u1", "test_persona", "general", "user", "Alice",

@@ -39,7 +39,7 @@ def wired_system():
         "test_persona": Persona(
             persona_name="test_persona", model_name="gemini-2.5-flash",
             prompt="test", enabled_tools=["*"],
-            memory_mode=MemoryMode.CHANNEL_ISOLATED, context_length=10,
+            memory_mode=MemoryMode.CHANNEL_ISOLATED, history_messages=10,
             service_bindings=["zammad", "agents"],
         ),
     }

@@ -274,7 +274,16 @@ def _set_tool_policy(args: List[str], persona: Persona) -> Tuple[Optional[str], 
 def _patch_memory_mode(persona: Persona, value: Any) -> bool:
     before = persona.get_memory_mode()
     persona.set_memory_mode(value)
-    return persona.get_memory_mode() == before and value not in (None, before.name)
+    if persona.get_memory_mode() != before or value is None:
+        return False
+    # Mode unchanged: only reject a value that named a *different* mode (or was
+    # invalid). Re-sending the current mode — including the lowercase form the
+    # API itself displays — is a no-op, not a rejection.
+    if isinstance(value, MemoryMode):
+        return value != before
+    if isinstance(value, str):
+        return value.upper() != before.name
+    return True
 
 
 # ---------------------------------------------------------------------------

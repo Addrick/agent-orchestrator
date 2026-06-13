@@ -23,6 +23,12 @@ import type {
 
 export type ViewMode = 'rendered' | 'context'
 
+// localStorage key for the last-selected persona. Client-side only — the
+// engine's PUT /api/v1/model active persona is runtime routing state, not a
+// persisted setting, and resets on restart (intentionally not duplicated
+// server-side).
+const PERSONA_LS_KEY = 'derpr_ui_active_persona'
+
 // A transient row representing the in-flight assistant turn (not yet persisted).
 export interface StreamState {
   active: boolean
@@ -33,6 +39,11 @@ export interface StreamState {
   errored: boolean
   errorMsg: string | null
   responseType: string | null
+  // Optimistic echo of the just-sent user turn. Rendered as a transient row
+  // until an authoritative /transcript re-sync surfaces the persisted one —
+  // must be null whenever a re-sync has run (else the row duplicates) and on
+  // retry/regen (no new user turn exists).
+  userText: string | null
 }
 
 const EMPTY_STREAM: StreamState = {
@@ -44,6 +55,7 @@ const EMPTY_STREAM: StreamState = {
   errored: false,
   errorMsg: null,
   responseType: null,
+  userText: null,
 }
 
 export interface DevRow {
@@ -85,6 +97,11 @@ export function usePortalStore() {
 
   const abortRef = useRef<{ abort: () => void } | null>(null)
   const idFrameRef = useRef<DerprIdFrame | null>(null)
+  // True while an SSE stream is in flight. State (`stream.active`) is stale
+  // inside the action callbacks' closures, so concurrency guards read this ref
+  // instead — without it a regen/confirm racing an active stream interleaves
+  // tokens into the shared stream state and leaks the prior abort handle.
+  const streamingRef = useRef(false)
   // True while a CONFIRM-mode write is parked awaiting approval — drives the
   // approve/deny bar's busy state on the ephemeral chunk.
   const [resolvingConfirm, setResolvingConfirm] = useState<boolean>(false)
@@ -97,49 +114,78 @@ export function usePortalStore() {
   useEffect(() => {
     activeChannelRef.current = activeChannel
   }, [activeChannel])
+  // Mirror of activePersona for stream callbacks: lets onDone detect that the
+  // user switched persona mid-stream and drop the stale re-sync instead of
+  // overwriting the new persona's transcript.
+  const activePersonaRef = useRef(activePersona)
+  useEffect(() => {
+    activePersonaRef.current = activePersona
+  }, [activePersona])
+
+  // Mid-session fetch failures rethrow from the API client (mock fallback is
+  // pre-first-live-success only) — keep the last real state and banner it.
+  const UNREACHABLE = 'Engine unreachable — showing last loaded state'
+
   const refreshTranscript = useCallback(
     async (p: string, channel?: string) => {
-      const cs = await api.getTranscript(p, undefined, channel ?? activeChannelRef.current)
-      setChunks(cs)
-      setOffline(api.usingMock())
+      try {
+        const cs = await api.getTranscript(p, undefined, channel ?? activeChannelRef.current)
+        setChunks(cs)
+        setOffline(api.usingMock())
+      } catch {
+        setBanner(UNREACHABLE)
+      }
     },
     [],
   )
 
   const refreshPersona = useCallback(async (p: string) => {
-    const persObj = await api.getPersona(p)
-    setPersona(persObj)
-    setOffline(api.usingMock())
+    try {
+      const persObj = await api.getPersona(p)
+      setPersona(persObj)
+      setOffline(api.usingMock())
+    } catch {
+      setBanner(UNREACHABLE)
+    }
   }, [])
 
   const refreshChannels = useCallback(async (p: string) => {
-    setChannels(await api.getChannels(p))
+    try {
+      setChannels(await api.getChannels(p))
+    } catch {
+      setBanner(UNREACHABLE)
+    }
   }, [])
 
   const loadAll = useCallback(
     async (p: string) => {
       setLoading(true)
-      const [persObj, toolList, chanList] = await Promise.all([
-        api.getPersona(p),
-        api.getTools(),
-        api.getChannels(p),
-      ])
-      setPersona(persObj)
-      setTools(toolList)
-      setChannels(chanList)
-      await refreshTranscript(p)
-      
-      const isLtmOn = persObj.long_term_memory ?? true
-      setLtmOn(isLtmOn)
-      
-      if (isLtmOn) {
-        const blk = await api.getLtmBlock(p, '')
-        setLtmBlock(blk)
-      } else {
-        setLtmBlock(null)
+      try {
+        const [persObj, toolList, chanList] = await Promise.all([
+          api.getPersona(p),
+          api.getTools(),
+          api.getChannels(p),
+        ])
+        setPersona(persObj)
+        setTools(toolList)
+        setChannels(chanList)
+        await refreshTranscript(p)
+
+        const isLtmOn = persObj.long_term_memory ?? true
+        setLtmOn(isLtmOn)
+
+        if (isLtmOn) {
+          const blk = await api.getLtmBlock(p, '')
+          setLtmBlock(blk)
+        } else {
+          setLtmBlock(null)
+        }
+        setOffline(api.usingMock())
+      } catch {
+        setBanner(UNREACHABLE)
+      } finally {
+        setLoading(false)
       }
-      setOffline(api.usingMock())
-      setLoading(false)
     },
     [refreshTranscript],
   )
@@ -147,17 +193,32 @@ export function usePortalStore() {
   // initial boot
   useEffect(() => {
     ;(async () => {
-      const [active, list, models, templates] = await Promise.all([
+      try {
+      const [serverActive, list, models, templates] = await Promise.all([
         api.getActivePersona(),
         api.listPersonas(),
         api.getModelList(),
         api.getChatTemplates(),
       ])
+      // Persona selection is a client preference: the engine's in-memory
+      // active persona resets on restart, so localStorage is the boot
+      // authority. Fall back to the server's pick when nothing is saved or
+      // the saved persona no longer exists; push the saved pick back to the
+      // engine so the kobold-native passthrough routes agree with the UI.
+      const saved = localStorage.getItem(PERSONA_LS_KEY)
+      const active = saved && list.includes(saved) ? saved : serverActive
+      if (active !== serverActive) await api.setActivePersona(active)
       setActivePersona(active)
       setPersonaList(list.length ? list : [active])
       setModelList(models)
       setChatTemplates(templates)
       await loadAll(active)
+      } catch {
+        // A mixed-success boot (one call lands, a later one fails) rethrows
+        // past the mock fallback — surface it rather than white-screening.
+        setBanner(UNREACHABLE)
+        setLoading(false)
+      }
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -168,12 +229,12 @@ export function usePortalStore() {
     const next = !ltmOn
     const prevBlock = ltmBlock
     setLtmOn(next)
-    if (next) {
-      setLtmBlock(await api.getLtmBlock(persona.name, ''))
-    } else {
-      setLtmBlock(null)
-    }
     try {
+      if (next) {
+        setLtmBlock(await api.getLtmBlock(persona.name, ''))
+      } else {
+        setLtmBlock(null)
+      }
       await api.patchPersona(persona.name, { long_term_memory: next })
     } catch (e) {
       // roll back the optimistic flip so the UI matches the server
@@ -188,6 +249,7 @@ export function usePortalStore() {
   const switchPersona = useCallback(
     async (name: string) => {
       setActivePersona(name)
+      localStorage.setItem(PERSONA_LS_KEY, name)
       await api.setActivePersona(name)
       // A persona switch resets to its default channel; channel list reloads
       // inside loadAll for the new persona.
@@ -207,7 +269,11 @@ export function usePortalStore() {
       activeChannelRef.current = channel
       if (persona) {
         await refreshTranscript(persona.name)
-        if (ltmOn) setLtmBlock(await api.getLtmBlock(persona.name, '', channel))
+        try {
+          if (ltmOn) setLtmBlock(await api.getLtmBlock(persona.name, '', channel))
+        } catch {
+          setBanner(UNREACHABLE)
+        }
       }
     },
     [persona, ltmOn, refreshTranscript],
@@ -264,21 +330,37 @@ export function usePortalStore() {
         idFrameRef.current = f
         setStream((s) => ({ ...s, responseType: f.response_type }))
       },
-      onError: (msg: string) =>
-        setStream((s) => ({ ...s, active: false, errored: true, errorMsg: msg })),
+      onError: (msg: string) => {
+        streamingRef.current = false
+        abortRef.current = null
+        setStream((s) => ({ ...s, active: false, errored: true, errorMsg: msg }))
+      },
       onDone: async () => {
+        streamingRef.current = false
         // Authoritative re-sync: the id-frame is an optimization only. The
         // re-fetch surfaces a newly-persisted row, or the trailing ephemeral
-        // chunk when the turn (or a chained confirm) parked again. Re-sync the
-        // channel the turn was SENT under (captured at stream start), not the
-        // currently-active one — the user may have switched channels mid-stream.
-        await refreshTranscript(personaName, channel)
-        // A first turn on a brand-new channel materializes it in the DB; reload
-        // the channel list so it appears in the rail.
-        await refreshChannels(personaName)
+        // chunk when the turn (or a chained confirm) parked again — but ONLY
+        // if the view still matches what the turn was SENT under (captured at
+        // stream start). If the user switched persona or channel mid-stream,
+        // the result is stale: writing it would overwrite the transcript and
+        // channel rail the new view just loaded, so drop it.
+        const stale =
+          personaName !== activePersonaRef.current ||
+          channel !== activeChannelRef.current
+        if (!stale) {
+          await refreshTranscript(personaName, channel)
+          // A first turn on a brand-new channel materializes it in the DB;
+          // reload the channel list so it appears in the rail.
+          await refreshChannels(personaName)
+        }
         setStream((s) => {
-          if (s.errored) return { ...s, active: false }
-          if (s.aborted) return { ...s, active: false }
+          // A stale turn's row belongs to the old view — clear everything.
+          if (stale) return { ...EMPTY_STREAM }
+          // The re-fetch above already surfaced the persisted user row, so the
+          // optimistic echo must clear even on the kept-visible error/abort
+          // treatments — otherwise the turn renders twice.
+          if (s.errored) return { ...s, active: false, userText: null }
+          if (s.aborted) return { ...s, active: false, userText: null }
           return { ...EMPTY_STREAM }
         })
         setResolvingConfirm(false)
@@ -292,6 +374,10 @@ export function usePortalStore() {
   const sendTurn = useCallback(
     async (text: string, retry = false) => {
       if (!persona) return
+      // One stream at a time: a second send/regen while one is in flight would
+      // interleave both streams' frames into the shared stream state and leak
+      // the first abort handle.
+      if (streamingRef.current) return
       const trimmed = text.trim()
       if (!trimmed && !retry) return
 
@@ -310,7 +396,10 @@ export function usePortalStore() {
 
       setBanner(null)
       idFrameRef.current = null
-      setStream({ ...EMPTY_STREAM, active: true })
+      streamingRef.current = true
+      // Echo the user turn immediately; a retry replays the last persisted
+      // user turn, so it gets no new echo.
+      setStream({ ...EMPTY_STREAM, active: true, userText: retry ? null : trimmed })
 
       const handle = streamChat(
         {
@@ -345,8 +434,12 @@ export function usePortalStore() {
   const resolveConfirm = useCallback(
     async (token: string, approved: boolean) => {
       if (!persona) return
+      // Same single-stream guard as sendTurn — approve/deny while a stream is
+      // in flight would interleave into the shared stream state.
+      if (streamingRef.current) return
       setBanner(null)
       idFrameRef.current = null
+      streamingRef.current = true
       setResolvingConfirm(true)
       setStream({ ...EMPTY_STREAM, active: true })
       const handle = streamConfirm(
@@ -364,11 +457,19 @@ export function usePortalStore() {
     await api.abort()
     abortRef.current?.abort()
     abortRef.current = null
-    setStream((s) => ({ ...s, aborted: true }))
+    streamingRef.current = false
+    // The re-fetch below surfaces the persisted user row — drop the echo.
+    setStream((s) => ({ ...s, aborted: true, userText: null }))
     if (persona) await refreshTranscript(persona.name)
   }, [persona, refreshTranscript])
 
-  const dismissStream = useCallback(() => setStream(EMPTY_STREAM), [])
+  // Dismiss re-syncs: an errored turn skips the onDone re-fetch, so the user
+  // turn (persisted before generation) is only in the DB — surface it.
+  const dismissStream = useCallback(() => {
+    streamingRef.current = false
+    setStream(EMPTY_STREAM)
+    if (persona) void refreshTranscript(persona.name)
+  }, [persona, refreshTranscript])
   const dismissDevRow = useCallback(() => setDevRow(null), [])
 
   // ---- regenerate ----------------------------------------------------
@@ -449,9 +550,13 @@ export function usePortalStore() {
   const fetchAssembled = useCallback(
     async (message = '') => {
       if (!persona) return
-      const a = await api.getAssembled(persona.name, message)
-      setAssembled(a)
-      setOffline(api.usingMock())
+      try {
+        const a = await api.getAssembled(persona.name, message)
+        setAssembled(a)
+        setOffline(api.usingMock())
+      } catch {
+        setBanner(UNREACHABLE)
+      }
     },
     [persona],
   )

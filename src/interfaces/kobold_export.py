@@ -183,6 +183,13 @@ def _parse_tool_context(raw: Any) -> Optional[Any]:
         
         if contexts:
             return list(contexts.values())
+        # Nothing resolved. Distinguish raw OpenAI messages (carry a `role`
+        # key) that failed to resolve — orphaned/truncated call_ids — from an
+        # already-structured ToolContext[] passed straight through. Returning
+        # the raw {role, content} list would feed the ToolCard objects lacking
+        # call_id/tool_name/arguments → garbled panel (DP-143).
+        if any(isinstance(m, dict) and "role" in m for m in msgs):
+            return None
         return msgs
     except (TypeError, ValueError, AttributeError):
         return None

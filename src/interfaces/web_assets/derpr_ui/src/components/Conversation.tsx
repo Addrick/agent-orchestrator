@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import type { PortalStore } from '../state/store'
 import { splitThink, policyLabel } from '../state/util'
 import { MessageRow } from './MessageRow'
@@ -33,9 +34,24 @@ export function Conversation({ store }: { store: PortalStore }) {
 
   const onResync = () => persona && refreshTranscript(persona.name)
 
+  // Auto-scroll: follow new content (chunks, stream frames, dev rows) but only
+  // while the user is pinned near the bottom — scrolling up to read history
+  // releases the follow, returning to the bottom re-arms it.
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const followRef = useRef(true)
+  const onScroll = () => {
+    const el = scrollRef.current
+    if (!el) return
+    followRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+  }
+  useEffect(() => {
+    const el = scrollRef.current
+    if (el && followRef.current) el.scrollTop = el.scrollHeight
+  }, [chunks, stream, devRow, loading, viewMode])
+
   const historyText = chunks
     .filter((c) => !c.ephemeral)
-    .map((c) => splitThink(c.content).body)
+    .map((c) => (c.role === 'assistant' ? splitThink(c.content).body : c.content))
     .join('\n')
 
   return (
@@ -93,7 +109,7 @@ export function Conversation({ store }: { store: PortalStore }) {
         />
       )}
 
-      <div className="scroll">
+      <div className="scroll" ref={scrollRef} onScroll={onScroll}>
         <div className="transcript" id="transcript">
           {loading && <div className="dimrow">loading transcript…</div>}
 
@@ -156,6 +172,26 @@ export function Conversation({ store }: { store: PortalStore }) {
                   </RenderedSlot>
                 ))
               })()}
+
+              {/* optimistic echo of the just-sent user turn — replaced by the
+                  persisted row on the [DONE] /transcript re-sync. Not a Chunk:
+                  it has no interaction_id, so it must never get MessageRow's
+                  edit/del/retry affordances or count toward chevron gating. */}
+              {stream.userText != null && (
+                <div className="msg">
+                  <div className="gut">
+                    <div className="av user">U</div>
+                  </div>
+                  <div className="bd">
+                    <div className="meta">
+                      <span className="who user">portal</span>
+                      <span className="ts" />
+                      <span className="idtag">sending…</span>
+                    </div>
+                    <div className="text">{stream.userText}</div>
+                  </div>
+                </div>
+              )}
 
               <StreamRow
                 stream={stream}

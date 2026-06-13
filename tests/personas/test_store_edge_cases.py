@@ -51,26 +51,21 @@ def test_resolve_params_kwargs_nested_priority():
     }
     resolved = _resolve_params_kwargs(entry)
     assert resolved["params"] == {"temperature": 0.4, "top_p": 0.9}
-    # Legacy flat keys not echoed (only token_limit is)
+    # Only the nested block is surfaced; flat keys are not echoed.
     assert "temperature" not in resolved
     assert "top_p" not in resolved
 
 
-def test_resolve_params_kwargs_legacy_fallback():
-    """No `params` block → legacy flat keys are surfaced one-for-one."""
+def test_resolve_params_kwargs_no_block_yields_none():
+    """DP-221: with no `params` block, flat keys are no longer honored —
+    _resolve_params_kwargs returns no params (Persona falls back to defaults)."""
     entry = {
         "temperature": 0.5,
         "top_p": 0.85,
         "top_k": 40,
         "token_limit": 1024,
     }
-    resolved = _resolve_params_kwargs(entry)
-    assert resolved == {
-        "temperature": 0.5,
-        "top_p": 0.85,
-        "top_k": 40,
-        "token_limit": 1024,
-    }
+    assert _resolve_params_kwargs(entry) == {"params": None}
 
 
 # ---------------------------------------------------------------------------
@@ -184,8 +179,25 @@ def test_load_personas_security_violation(tmp_path):
     assert len(loaded["insecure"].get_security_block_reasons()) > 0
 
 
-def test_load_personas_context_length_legacy(tmp_path):
-    """Legacy field `context_length` falls through to history_messages."""
+def test_load_personas_history_messages(tmp_path):
+    """The canonical `history_messages` field loads into the persona."""
+    save_file = tmp_path / "personas.json"
+    save_file.write_text(json.dumps({
+        "personas": [{
+            "name": "modern",
+            "model_name": "m",
+            "prompt": "p",
+            "history_messages": 7,
+        }]
+    }))
+    loaded = load_personas_from_file(file_path_override=str(save_file))
+    assert loaded["modern"].get_base_history_messages() == 7
+
+
+def test_load_personas_legacy_context_length_ignored(tmp_path):
+    """DP-221: the retired `context_length` key is no longer honored on load —
+    a file that only sets it falls back to the default history count."""
+    from config import global_config
     save_file = tmp_path / "personas.json"
     save_file.write_text(json.dumps({
         "personas": [{
@@ -196,7 +208,7 @@ def test_load_personas_context_length_legacy(tmp_path):
         }]
     }))
     loaded = load_personas_from_file(file_path_override=str(save_file))
-    assert loaded["legacy"].get_base_history_messages() == 7
+    assert loaded["legacy"].get_base_history_messages() == global_config.DEFAULT_HISTORY_MESSAGES
 
 
 def test_load_personas_params_merge(tmp_path):
@@ -247,8 +259,25 @@ def test_load_system_personas_structure(tmp_path, monkeypatch):
     assert loaded["sys_one"].get_memory_mode() is MemoryMode.GLOBAL
 
 
-def test_load_system_personas_response_token_limit(tmp_path, monkeypatch):
-    """response_token_limit (system-persona legacy key) is mapped to token_limit."""
+def test_load_system_personas_params_block_max_tokens(tmp_path, monkeypatch):
+    """System personas carry the response token limit in params.max_tokens
+    (DP-221 retired the flat `response_token_limit` key)."""
+    sys_file = tmp_path / "system_personas.json"
+    sys_file.write_text(json.dumps({
+        "personas": [{
+            "name": "rtl",
+            "model_name": "m",
+            "prompt": "p",
+            "params": {"max_tokens": 256},
+        }]
+    }))
+    monkeypatch.setattr(global_config, "SYSTEM_PERSONA_FILE", str(sys_file))
+    loaded = load_system_personas_from_file()
+    assert loaded["rtl"].get_response_token_limit() == 256
+
+
+def test_load_system_personas_legacy_response_token_limit_ignored(tmp_path, monkeypatch):
+    """DP-221: the retired flat `response_token_limit` key no longer sets the limit."""
     sys_file = tmp_path / "system_personas.json"
     sys_file.write_text(json.dumps({
         "personas": [{
@@ -260,7 +289,7 @@ def test_load_system_personas_response_token_limit(tmp_path, monkeypatch):
     }))
     monkeypatch.setattr(global_config, "SYSTEM_PERSONA_FILE", str(sys_file))
     loaded = load_system_personas_from_file()
-    assert loaded["rtl"].get_response_token_limit() == 256
+    assert loaded["rtl"].get_response_token_limit() != 256
 
 
 # ---------------------------------------------------------------------------

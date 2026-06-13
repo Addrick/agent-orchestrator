@@ -49,6 +49,10 @@ export function StreamRow({ stream: s, tools, onDismiss, onRegen }: Props) {
   }
 
   const { reasoning, body } = splitThink(s.text)
+  // No frame of any kind yet — the provider hasn't produced bytes. True for
+  // the whole wait on non-streaming providers (everything except local), so
+  // show an explicit typing indicator rather than a bare cursor.
+  const waiting = s.active && !s.text && s.tools.length === 0
 
   return (
     <div className={'msg' + (treatment === 'aborted' ? ' aborted' : '')}>
@@ -70,14 +74,25 @@ export function StreamRow({ stream: s, tools, onDismiss, onRegen }: Props) {
           <ToolCard key={tc.call_id} tc={tc} tools={tools} />
         ))}
 
-        {(body.trim() || s.active) && (
-          <div
-            className="text"
-            style={{ marginTop: reasoning || s.tools.length ? 10 : 0 }}
-          >
-            {body}
-            {s.active && <span className="stream-cursor" />}
+        {waiting ? (
+          <div className="text typing">
+            <span className="typing-dots">
+              <span />
+              <span />
+              <span />
+            </span>
+            waiting for model…
           </div>
+        ) : (
+          (body.trim() || s.active) && (
+            <div
+              className="text"
+              style={{ marginTop: reasoning || s.tools.length ? 10 : 0 }}
+            >
+              {body}
+              {s.active && <span className="stream-cursor" />}
+            </div>
+          )
         )}
 
         {treatment === 'aborted' && (

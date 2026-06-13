@@ -107,7 +107,7 @@ Background (MemoryConsolidator, hourly daemon via app.register_task):
 - Stateful LLM config: model, system prompt, token limit, temperature, top_p, top_k
 - `ExecutionMode`: AUTONOMOUS, CONFIRM — recorded in the audit surface for display, but **does not gate write parking** (all write tools park for audit regardless; see ToolLoop universal write-audit)
 - `MemoryMode`: CHANNEL_ISOLATED, SERVER_WIDE, PERSONAL, GLOBAL, TICKET_ISOLATED
-- `get_context_length()` -> supports dynamic override via hello/goodbye commands (increments by 2 per turn)
+- `get_history_messages()` -> supports dynamic override via hello/goodbye commands (increments by 2 per turn)
 - Service bindings list determines which tools and services are available
 - `include_ambient_memory: bool = True` — whether to include ambient-channel memories in retrieval; controlled by `get_include_ambient_memory()`
 - `thinking_level: Optional[str]` — passed through to engine config (e.g. `"minimal"` for Gemma extended thinking)
