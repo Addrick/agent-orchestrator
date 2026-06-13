@@ -231,6 +231,10 @@ def _set_chat_template(args: List[str], persona: Persona) -> Tuple[Optional[str]
     if value_str in ('none', 'null', 'clear'):
         persona.set_chat_template(None)
         return f"Chat template for {persona.get_name()} cleared (reverting to global default).", True
+    from src.stream_engine import CHAT_TEMPLATES
+    if value_str not in CHAT_TEMPLATES:
+        available = ", ".join(sorted(CHAT_TEMPLATES))
+        return f"Error: unknown chat template '{value_str}'. Available: {available}.", False
     persona.set_chat_template(value_str)
     return f"Chat template for {persona.get_name()} set to '{value_str}'.", True
 

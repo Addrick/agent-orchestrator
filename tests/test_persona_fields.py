@@ -68,6 +68,27 @@ def test_what_set_round_trip(persona):
     assert "global" in what_table['memory_mode']([], persona)[0]
 
 
+def test_set_chat_template_validates_slug(persona):
+    """`set chat_template` accepts a known CHAT_TEMPLATES slug, rejects an
+    unknown one (with the available list), and clears on 'none'."""
+    from src.stream_engine import CHAT_TEMPLATES
+    set_ct = cli_set_handlers()['chat_template']
+
+    known = sorted(CHAT_TEMPLATES)[0]
+    msg, mutated = set_ct(['chat_template', known], persona)
+    assert mutated and known in msg
+    assert persona.get_chat_template() == known
+
+    msg, mutated = set_ct(['chat_template', 'not_a_real_template'], persona)
+    assert not mutated
+    assert "unknown chat template" in msg.lower()
+    assert known in msg  # available list surfaced
+    assert persona.get_chat_template() == known  # unchanged
+
+    msg, mutated = set_ct(['chat_template', 'none'], persona)
+    assert mutated and persona.get_chat_template() is None
+
+
 def test_optional_numeric_legacy_semantics(persona):
     """Factory must keep the quirky legacy contract: missing arg falls
     through, non-numeric input MUTATES (clears to default), range error

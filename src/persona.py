@@ -445,8 +445,10 @@ class Persona:
     def set_chat_template(self, value: Optional[str]) -> None:
         """Sets the instruct template name for local inference prompt rendering.
 
-        Accepted values: 'chatml', 'gemma', 'llama3', 'alpaca', or None to clear.
-        Invalid/unknown values are accepted and will fall back at render time.
+        Valid names are the keys of ``stream_engine.CHAT_TEMPLATES`` (None to
+        clear). This setter is lenient — unknown values are accepted and fall
+        back to chatml at render time, so config-load stays robust; the
+        ``set chat_template`` CLI handler validates and rejects unknowns.
         """
         self._chat_template = value if value else None
         logger.info(f"Persona '{self._name}' chat_template set to {value!r}.")
