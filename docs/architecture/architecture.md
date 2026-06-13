@@ -215,9 +215,6 @@ Pure helpers for enforcing per-persona `max_context_tokens`. Two callsites today
 - Forces AUTONOMOUS mode (overrides CONFIRM since Gmail has no interactive confirmation)
 - Does NOT call `log_message` -- no persistence currently
 
-### `src/interfaces/zammad_bot.py` -- Deprecated stub
-- Re-exports from `src/agents/zammad_bot.py` for backward compat only. Candidate for removal.
-
 ### `src/interfaces/kobold_adapter.py` -- KoboldAdapter
 - FastAPI app served from `KoboldAdapter.start()`; mounts the customised kobold-lite at `/portal` (`web_assets/portal.html`) and forwards inference traffic to local KoboldCPP.
 - Inference path is OAI-jinja only: the portal runs kobold-lite in kcpp-with-jinja mode, which hijacks `opmode==4` to `/v1/chat/completions`. **Phase D (2026-04-28) split the adapter routes:** `/v1/chat/completions` is now a thin SSE transcoder over `chat_system.stream_response` — the engine rebuilds messages from DB, prunes to budget, archives on retry, and commits the assistant turn; the adapter only formats OAI-shape SSE chunks (and the `event: derpr` frame on `DoneEvent`). Client `data["messages"]` is discarded; `derpr_user_text` (or last-user fallback for non-portal clients) drives the user turn. The native `/api/v1/generate` and `/api/extra/generate/stream` routes remain verbatim passthrough to KoboldCPP because the pre-rendered kobold prompt cannot be safely reconstructed from DB (template-tag drift hazard, see `decisions/2026-04-19-portal-phase2-approach.md`); deprecation queued pending an OAI-feature-parity audit. CORS is wide open (kobold-lite reaches localhost from a different origin).
