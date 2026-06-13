@@ -30,7 +30,12 @@ export function MessageRow({
   isLastUser,
   isLastAssistant,
 }: Props) {
-  const { reasoning, body } = splitThink(c.content)
+  // <think> folding is an assistant-output convention — never reinterpret a
+  // user's literal text as reasoning.
+  const { reasoning, body } =
+    c.role === 'assistant'
+      ? splitThink(c.content)
+      : { reasoning: null, body: c.content }
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(body)
 

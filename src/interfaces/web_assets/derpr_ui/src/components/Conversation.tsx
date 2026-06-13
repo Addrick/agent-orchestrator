@@ -51,7 +51,7 @@ export function Conversation({ store }: { store: PortalStore }) {
 
   const historyText = chunks
     .filter((c) => !c.ephemeral)
-    .map((c) => splitThink(c.content).body)
+    .map((c) => (c.role === 'assistant' ? splitThink(c.content).body : c.content))
     .join('\n')
 
   return (

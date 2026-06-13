@@ -22,7 +22,8 @@ export function ContextView({ persona, chunks, ltmBlock, ltmOn }: Props) {
   chunks
     .filter((c) => !c.ephemeral)
     .forEach((c) => {
-      const { body } = splitThink(c.content)
+      const body =
+        c.role === 'assistant' ? splitThink(c.content).body : c.content
       const tools = (c.tool_context || [])
         .map(
           (t) =>

@@ -19,13 +19,18 @@ export function VersionChevrons({ interactionId, onResync }: Props) {
 
   useEffect(() => {
     let live = true
-    api.getVersions(interactionId).then((v) => {
-      if (!live) return
-      setVers(v)
-      // Find the 1-indexed position of the canonical version
-      const canonicalIdx = v.versions.findIndex((entry) => entry.canonical)
-      setCur(canonicalIdx !== -1 ? canonicalIdx + 1 : v.versions.length)
-    })
+    api.getVersions(interactionId)
+      .then((v) => {
+        if (!live) return
+        setVers(v)
+        // Find the 1-indexed position of the canonical version
+        const canonicalIdx = v.versions.findIndex((entry) => entry.canonical)
+        setCur(canonicalIdx !== -1 ? canonicalIdx + 1 : v.versions.length)
+      })
+      // Engine unreachable mid-session (client rethrows past mock fallback):
+      // leave the disabled "…" chevrons rather than crash on an unhandled
+      // rejection.
+      .catch(() => {})
     return () => {
       live = false
     }

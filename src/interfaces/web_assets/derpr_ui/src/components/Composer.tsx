@@ -22,6 +22,9 @@ export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming }: Pro
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
+      // While streaming, let Enter insert a newline into the draft instead of
+      // silently swallowing the keypress (send is gated anyway).
+      if (streaming) return
       e.preventDefault()
       send()
     }

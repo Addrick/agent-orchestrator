@@ -39,6 +39,11 @@ import type {
 const BASE = ''
 
 let _usingMock = false
+// Whether ANY live call has succeeded this session. Mock fixtures are a
+// build/dev affordance for when no engine exists at all; once the engine has
+// answered, a failure is a real outage and must NOT be papered over with fake
+// data — liveOr rethrows so callers keep the last real state.
+let _liveSeen = false
 export const usingMock = () => _usingMock
 
 async function getJSON<T>(path: string): Promise<T> {
@@ -51,8 +56,10 @@ async function liveOr<T>(live: () => Promise<T>, mock: () => T): Promise<T> {
   try {
     const v = await live()
     _usingMock = false
+    _liveSeen = true
     return v
-  } catch {
+  } catch (e) {
+    if (_liveSeen) throw e
     _usingMock = true
     return mock()
   }
@@ -116,8 +123,9 @@ export async function setActivePersona(name: string): Promise<void> {
       body: JSON.stringify({ model: name }),
     })
     _usingMock = false
+    _liveSeen = true
   } catch {
-    _usingMock = true
+    if (!_liveSeen) _usingMock = true
   }
 }
 
