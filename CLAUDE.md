@@ -128,9 +128,15 @@ To support multiple agents working concurrently, the following rules are mandato
   is NOT safe on its own. Mandatory sequence, in order:
   1. Move every shell's cwd out of the worktree (a cwd inside it holds a Windows
      lock → "Device or resource busy").
-  2. `cmd /c rmdir "worktrees/DP-XXX/.venv"` to drop the junction link, and
-     **verify it's gone** (`ls worktrees/DP-XXX/.venv` must fail). This removes
-     only the link, never the target.
+  2. Drop the junction link (removes only the link, never the target) via the
+     **PowerShell tool**: `(Get-Item "worktrees\DP-XXX\.venv").Delete()`, then
+     **verify it's gone** (`ls worktrees/DP-XXX/.venv` must fail).
+     - ❌ Do NOT use `cmd /c rmdir ...` from the Bash tool — git-bash/MSYS
+       mangles `/c` and launches an interactive `cmd` without running the
+       command, so the junction is NOT dropped (this silently wiped the venv
+       during DP-221c).
+     - ❌ Do NOT use `Remove-Item -Recurse` — it follows the junction into the
+       shared venv and deletes the target.
   3. `git worktree remove worktrees/DP-XXX` (add `--force` only for uncommitted
      changes — by this point the junction is already gone, so `--force` is safe).
   4. `git worktree prune`.
