@@ -23,6 +23,12 @@ import type {
 
 export type ViewMode = 'rendered' | 'context'
 
+// localStorage key for the last-selected persona. Client-side only — the
+// engine's PUT /api/v1/model active persona is runtime routing state, not a
+// persisted setting, and resets on restart (intentionally not duplicated
+// server-side).
+const PERSONA_LS_KEY = 'derpr_ui_active_persona'
+
 // A transient row representing the in-flight assistant turn (not yet persisted).
 export interface StreamState {
   active: boolean
@@ -153,12 +159,20 @@ export function usePortalStore() {
   // initial boot
   useEffect(() => {
     ;(async () => {
-      const [active, list, models, templates] = await Promise.all([
+      const [serverActive, list, models, templates] = await Promise.all([
         api.getActivePersona(),
         api.listPersonas(),
         api.getModelList(),
         api.getChatTemplates(),
       ])
+      // Persona selection is a client preference: the engine's in-memory
+      // active persona resets on restart, so localStorage is the boot
+      // authority. Fall back to the server's pick when nothing is saved or
+      // the saved persona no longer exists; push the saved pick back to the
+      // engine so the kobold-native passthrough routes agree with the UI.
+      const saved = localStorage.getItem(PERSONA_LS_KEY)
+      const active = saved && list.includes(saved) ? saved : serverActive
+      if (active !== serverActive) await api.setActivePersona(active)
       setActivePersona(active)
       setPersonaList(list.length ? list : [active])
       setModelList(models)
@@ -194,6 +208,7 @@ export function usePortalStore() {
   const switchPersona = useCallback(
     async (name: string) => {
       setActivePersona(name)
+      localStorage.setItem(PERSONA_LS_KEY, name)
       await api.setActivePersona(name)
       // A persona switch resets to its default channel; channel list reloads
       // inside loadAll for the new persona.
