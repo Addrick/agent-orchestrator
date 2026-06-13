@@ -118,16 +118,23 @@ To support multiple agents working concurrently, the following rules are mandato
 - No task is considered "QA_READY" until `pytest` passes within its dedicated worktree.
 - Verify all CI/CD checks (including `pytest`, `flake8` lint, and `mypy` type check as defined in `.github/workflows/deploy.yml`) after finishing any commit-ready change.
 - Human approval is required for all merges to `main` or `develop`.
-- After merge, the worktree directory `worktrees/DP-XXX/` should be removed via `git worktree remove`.
-- **NEVER `rm -rf` / `Remove-Item -Recurse` a worktree directory.** Each
-  worktree's `.venv` is a Windows **junction** to the main repo's `.venv`; a
-  recursive delete follows the junction and **destroys the real shared venv**
-  (this happened during DP-142 cleanup — the whole `.venv` had to be rebuilt).
-  Remove worktrees only with `git worktree remove [--force]`. If that fails
-  (permission/lock): (1) close any shell whose cwd is inside the worktree,
-  (2) `cmd /c rmdir "worktrees/DP-XXX/.venv"` to drop the junction link and
-  **verify it's gone**, (3) `git worktree prune`, then (4) delete the now
-  venv-free directory. Never recurse while the junction still exists.
+- After merge, remove the worktree following the teardown sequence below.
+- **⚠️ DROP THE `.venv` JUNCTION FIRST — every teardown, no exceptions.** Each
+  worktree's `.venv` is a Windows **junction** to the main repo's `.venv`. ANY
+  removal that recurses the directory — `rm -rf`, `Remove-Item -Recurse`, **and
+  `git worktree remove --force` even on a clean happy-path remove** — follows the
+  junction and **destroys the real shared venv** (DP-142 cleanup, DP-214
+  teardown, DP-221 finalize all rebuilt it from scratch). `git worktree remove`
+  is NOT safe on its own. Mandatory sequence, in order:
+  1. Move every shell's cwd out of the worktree (a cwd inside it holds a Windows
+     lock → "Device or resource busy").
+  2. `cmd /c rmdir "worktrees/DP-XXX/.venv"` to drop the junction link, and
+     **verify it's gone** (`ls worktrees/DP-XXX/.venv` must fail). This removes
+     only the link, never the target.
+  3. `git worktree remove worktrees/DP-XXX` (add `--force` only for uncommitted
+     changes — by this point the junction is already gone, so `--force` is safe).
+  4. `git worktree prune`.
+  After any teardown, confirm the shared venv survived: `ls .venv/Scripts/python.exe`.
 
 ## Documentation
 
