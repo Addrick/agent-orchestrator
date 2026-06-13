@@ -33,10 +33,6 @@ from src.request_builder import (
     RequestBuilder,
     RequestContext as RequestContext,
 )
-from src.request_builder import (  # noqa: F401  (re-exports for tests/back-compat)
-    MAX_CONVERSATION_TAINTS as MAX_CONVERSATION_TAINTS,
-    _relative_time as _relative_time,
-)
 from src.tools.tool_loop import ToolLoop, _ApiPayloadEvent, _LoopFinishedEvent
 from src.turn_persistence import TurnPersistence
 from src.tools.tool_manager import ToolManager

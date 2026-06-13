@@ -739,9 +739,7 @@ _SETTER_TO_COMMAND = {
     'set_inject_timestamp': 'inject_timestamp',
 }
 
-# Legacy aliases that should not have commands (as they are being deprecated).
 _SETTER_EXCEPTIONS = {
-    'set_context_length',
     # provider_extras is reached via the dotted-path fallback in _handle_set,
     # not a dedicated set_<name> command. See Phase E in
     # plans/portal_engine_reintegration.md.
@@ -788,10 +786,6 @@ _GETTER_EXCEPTIONS = {
     # not a dedicated what_<name> command. See Phase E in
     # plans/portal_engine_reintegration.md.
     'get_provider_extra',
-    # Legacy aliases
-    'get_base_context_length',
-    'get_current_effective_context_length',
-    'get_context_length',
     # meta_visible is Sprint-4 groundwork (DP-111); no production caller reads
     # it yet. Sprint 5 (metabank) will wire a command if/when it ships.
     'get_meta_visible',

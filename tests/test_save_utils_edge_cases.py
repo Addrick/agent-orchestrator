@@ -184,8 +184,25 @@ def test_load_personas_security_violation(tmp_path):
     assert len(loaded["insecure"].get_security_block_reasons()) > 0
 
 
-def test_load_personas_context_length_legacy(tmp_path):
-    """Legacy field `context_length` falls through to history_messages."""
+def test_load_personas_history_messages(tmp_path):
+    """The canonical `history_messages` field loads into the persona."""
+    save_file = tmp_path / "personas.json"
+    save_file.write_text(json.dumps({
+        "personas": [{
+            "name": "modern",
+            "model_name": "m",
+            "prompt": "p",
+            "history_messages": 7,
+        }]
+    }))
+    loaded = load_personas_from_file(file_path_override=str(save_file))
+    assert loaded["modern"].get_base_history_messages() == 7
+
+
+def test_load_personas_legacy_context_length_ignored(tmp_path):
+    """DP-221: the retired `context_length` key is no longer honored on load —
+    a file that only sets it falls back to the default history count."""
+    from config import global_config
     save_file = tmp_path / "personas.json"
     save_file.write_text(json.dumps({
         "personas": [{
@@ -196,7 +213,7 @@ def test_load_personas_context_length_legacy(tmp_path):
         }]
     }))
     loaded = load_personas_from_file(file_path_override=str(save_file))
-    assert loaded["legacy"].get_base_history_messages() == 7
+    assert loaded["legacy"].get_base_history_messages() == global_config.DEFAULT_HISTORY_MESSAGES
 
 
 def test_load_personas_params_merge(tmp_path):

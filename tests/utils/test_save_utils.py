@@ -23,7 +23,7 @@ def mock_personas():
         persona_name="p2",
         model_name="another_model",
         prompt="prompt2",
-        context_length=500
+        history_messages=500
     )
     return {"p1": p1, "p2": p2}
 
@@ -94,7 +94,7 @@ def test_load_persona_attributes_integrity(tmp_path):
                 "name": "integrity_bot",
                 "model_name": "gpt-4-test-variant",
                 "prompt": "You are a test.",
-                "context_length": 99,
+                "history_messages": 99,
                 "token_limit": 500,
                 "temperature": 0.1,
                 "top_p": 0.9,
@@ -115,7 +115,7 @@ def test_load_persona_attributes_integrity(tmp_path):
 
     assert p.get_name() == "integrity_bot"
     assert p.get_model_name() == "gpt-4-test-variant"
-    assert p.get_base_context_length() == 99
+    assert p.get_base_history_messages() == 99
     assert p.get_response_token_limit() == 500
     assert p.get_temperature() == 0.1
     assert p.get_top_p() == 0.9

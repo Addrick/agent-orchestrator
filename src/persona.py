@@ -60,7 +60,6 @@ class Persona:
             ingest_bank: Optional[str] = None,
             security_block_reasons: Optional[List[str]] = None,
             inject_timestamp: bool = True,
-            **kwargs: Any,
     ) -> None:
         self._name: str = persona_name
         self._model_name: str = model_name
@@ -88,13 +87,10 @@ class Persona:
             token_limit if token_limit is not None else self._params.max_tokens
         )
 
-        # Handle legacy context_length from tests or old configs
-        effective_history = history_messages
-        if effective_history is None:
-            effective_history = kwargs.get("context_length")
-        if effective_history is None:
-            effective_history = global_config.DEFAULT_HISTORY_MESSAGES
-
+        effective_history = (
+            history_messages if history_messages is not None
+            else global_config.DEFAULT_HISTORY_MESSAGES
+        )
         self._history_messages: int = int(effective_history)
         self._execution_mode: ExecutionMode = self._resolve_enum(
             ExecutionMode, execution_mode, ExecutionMode.AUTONOMOUS)
@@ -169,17 +165,9 @@ class Persona:
 
         return self._history_messages
 
-    def get_context_length(self) -> int:
-        """Legacy alias for get_history_messages."""
-        return self.get_history_messages()
-
     def get_base_history_messages(self) -> int:
         """Returns the persona's static, default history message count."""
         return self._history_messages
-
-    def get_base_context_length(self) -> int:
-        """Legacy alias for get_base_history_messages."""
-        return self.get_base_history_messages()
 
     def get_temperature(self) -> Optional[float]:
         return self._params.temperature
@@ -385,10 +373,6 @@ class Persona:
                 f"Invalid history length provided: '{new_length}'. Setting to default value: {self._history_messages}.")
         return self._history_messages
 
-    def set_context_length(self, new_length: Any) -> int:
-        """Legacy alias for set_history_messages."""
-        return self.set_history_messages(new_length)
-
     def set_temperature(self, new_temp: Any) -> Optional[float]:
         """
         Sets the temperature. Returns the float value if successful,
@@ -552,10 +536,6 @@ class Persona:
         """Returns True if the persona is in a temporary, dynamic history conversation."""
         return self._temp_history_override is not None
 
-    def is_in_dynamic_context(self) -> bool:
-        """Legacy alias for is_in_dynamic_history."""
-        return self.is_in_dynamic_history()
-
     def get_current_effective_history_messages(self) -> int:
         """
         Returns the next history value that will be used, without incrementing the counter.
@@ -564,10 +544,6 @@ class Persona:
         if self._temp_history_override is not None:
             return self._temp_history_override
         return self._history_messages
-
-    def get_current_effective_context_length(self) -> int:
-        """Legacy alias for get_current_effective_history_messages."""
-        return self.get_current_effective_history_messages()
 
     # --- Utility Methods ---
 

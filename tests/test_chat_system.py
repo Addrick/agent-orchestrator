@@ -523,7 +523,7 @@ def test_build_conversation_history_personal_mode(chat_system_with_mocks):
 
     system._build_conversation_history(persona, 'user123', 'ch', None, None)
 
-    memory_mock.get_personal_history.assert_called_once_with('user123', 'test_persona', persona.get_context_length())
+    memory_mock.get_personal_history.assert_called_once_with('user123', 'test_persona', persona.get_history_messages())
 
 
 # --- Tool Filtering Tests ---

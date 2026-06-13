@@ -43,7 +43,7 @@ def _make_adapter_with_seeded_db(persona_name: str = "test_persona",
         persona_name=persona_name,
         model_name="local",
         prompt="you are test",
-        context_length=context_length,
+        history_messages=context_length,
     )
     def _get_view_history(persona_name, user_identifier, channel,
                           server_id=None, limit=None):
@@ -126,7 +126,7 @@ def _make_real_adapter(persona_name: str = "test_persona",
         persona_name=persona_name,
         model_name="local",
         prompt="you are test",
-        context_length=10,
+        history_messages=10,
     )
 
     if stream_messages is None:
@@ -1889,7 +1889,7 @@ def test_chat_completions_google_end_to_end_payload_structure(mock_google_client
         persona_name="test_google_persona",
         model_name="gemini-2.5-flash",
         prompt="Always speak like a pirate",
-        context_length=10,
+        history_messages=10,
         inject_timestamp=False,
     )
     
