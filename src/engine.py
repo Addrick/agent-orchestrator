@@ -36,6 +36,7 @@ from google.genai.types import GenerateContentConfig, Tool, GoogleSearch, Candid
 from src.utils.google_utils import process_grounding_metadata
 from src.generation_params import GenerationParams
 from src.llm_errors import LLMCommunicationError
+from src.security.vault import get_vault
 from src.stream_engine import StreamEngine
 from src.text_tool_protocol import (
     TOOL_CALL_OPEN,
@@ -135,7 +136,7 @@ class TextEngine:
     async def _get_openai_client(self) -> AsyncOpenAI:
         """Initializes and returns the OpenAI client."""
         if self.openai_client is None:
-            api_key = os.environ.get("OPENAI_API_KEY")
+            api_key = get_vault().get("OPENAI_API_KEY")
             if not api_key:
                 raise LLMCommunicationError("OPENAI_API_KEY not set — skipping OpenAI provider.")
             self.openai_client = AsyncOpenAI(api_key=api_key)
@@ -144,7 +145,7 @@ class TextEngine:
     def _get_anthropic_client(self) -> anthropic.AsyncAnthropic:
         """Initializes and returns the async Anthropic client."""
         if self.anthropic_client is None:
-            api_key = os.environ.get("ANTHROPIC_API_KEY")
+            api_key = get_vault().get("ANTHROPIC_API_KEY")
             if not api_key:
                 raise LLMCommunicationError("ANTHROPIC_API_KEY not set — skipping Anthropic provider.")
             self.anthropic_client = anthropic.AsyncAnthropic(api_key=api_key)
@@ -155,7 +156,7 @@ class TextEngine:
         if self.google_client is not None:
             return
 
-        api_key = os.environ.get("GOOGLE_GENERATIVEAI_API_KEY")
+        api_key = get_vault().get("GOOGLE_GENERATIVEAI_API_KEY")
         if not api_key: raise ValueError("GOOGLE_GENERATIVEAI_API_KEY not found in environment.")
 
         client: genai.client.BaseApiClient = genai.client.BaseApiClient(api_key=api_key)

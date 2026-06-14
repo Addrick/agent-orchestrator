@@ -6,6 +6,8 @@ import logging
 from dotenv import load_dotenv
 from typing import Optional, List, Dict, Any
 
+from src.security.vault import get_vault
+
 
 # Load environment variables from a .env file if it exists
 load_dotenv()
@@ -30,7 +32,7 @@ class ZammadClient:
             ValueError: If ZAMMAD_URL or ZAMMAD_API_TOKEN are not set in the environment.
         """
         url = os.environ.get("ZAMMAD_URL")
-        token = os.environ.get("ZAMMAD_API_KEY")
+        token = get_vault().get("ZAMMAD_API_KEY")
 
         if not url or not token:
             raise ValueError("ZAMMAD_URL and ZAMMAD_API_KEY must be set in .env")

@@ -3,7 +3,7 @@
 import pytest
 
 from src.security.scrubber import SecretScrubber
-from src.security.vault import CredentialVault
+from src.security.vault import CredentialVault, get_vault, reset_vault
 
 
 def _fake_source(values: dict):
@@ -90,3 +90,52 @@ def test_fake_source_does_not_touch_real_env():
     assert vault.get("OPENAI_API_KEY") == "fakeonly1"
     # An unrelated ref the fake source doesn't define stays None.
     assert vault.get("PATH") is None
+
+
+# --- get_vault() / reset_vault() singleton behavior ---------------------------
+
+
+def test_get_vault_returns_singleton():
+    reset_vault()
+    try:
+        first = get_vault()
+        second = get_vault()
+        assert first is second
+        assert isinstance(first, CredentialVault)
+    finally:
+        reset_vault()
+
+
+def test_reset_vault_replaces_singleton():
+    reset_vault()
+    try:
+        first = get_vault()
+        reset_vault()
+        second = get_vault()
+        assert first is not second
+    finally:
+        reset_vault()
+
+
+def test_reset_vault_injects_fake_source():
+    injected = CredentialVault(
+        source=_fake_source({"OPENAI_API_KEY": "injectedkey1"})
+    )
+    reset_vault(injected)
+    try:
+        assert get_vault() is injected
+        assert get_vault().get("OPENAI_API_KEY") == "injectedkey1"
+    finally:
+        reset_vault()
+
+
+def test_default_vault_reads_env_live(monkeypatch):
+    reset_vault()
+    try:
+        monkeypatch.setenv("OPENAI_API_KEY", "liveenvkey123")
+        # Vault was built before the env was set, proving it reads live.
+        assert get_vault().get("OPENAI_API_KEY") == "liveenvkey123"
+        monkeypatch.setenv("OPENAI_API_KEY", "changedkey456")
+        assert get_vault().get("OPENAI_API_KEY") == "changedkey456"
+    finally:
+        reset_vault()

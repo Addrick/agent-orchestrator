@@ -9,6 +9,7 @@ entrypoints (main.py, test/eval fixtures, scripts) should import this module;
 the boundary test forbids src/ modules from reaching into it.
 """
 
+import logging
 from typing import Dict, Optional, Set, Tuple
 
 from config import global_config
@@ -25,6 +26,21 @@ from src.utils.model_utils import get_model_list
 from src.personas.store import (
     load_personas_from_file, load_system_personas_from_file,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def register_credentials() -> int:
+    """Register every resolved machine secret into the egress scrubber.
+
+    Wires the credential vault into the process-global scrubber so the egress
+    seams redact real secret values. Returns the number of secrets registered
+    (count only — values are never logged). Safe to call more than once: the
+    scrubber dedupes by value.
+    """
+    from src.security.vault import get_vault
+    from src.security.scrubber import get_scrubber
+    return get_vault().register_into(get_scrubber())
 
 
 def load_all_personas(
@@ -85,6 +101,10 @@ def create_chat_system(
     still load); unit tests should use `tests.helpers.make_chat_system`, which
     skips the composition root entirely.
     """
+    registered = register_credentials()
+    logger.info(
+        "Registered %d credential(s) with the egress scrubber", registered
+    )
     personas, system_persona_names = load_all_personas(user_personas)
     tool_manager = build_tool_manager(memory_manager, personas)
     return ChatSystem(
