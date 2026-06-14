@@ -6,6 +6,19 @@ from src.security.scrubber import SecretScrubber
 from src.security.vault import CredentialVault, get_vault, reset_vault
 
 
+def test_package_reexports_vault_accessors():
+    """The src.security package must re-export the vault accessors, symmetric
+    with get_scrubber/reset_scrubber, so `from src.security import get_vault`
+    works."""
+    import src.security as security
+
+    assert security.get_vault is get_vault
+    assert security.reset_vault is reset_vault
+    assert security.CredentialVault is CredentialVault
+    for name in ("get_vault", "reset_vault", "CredentialVault"):
+        assert name in security.__all__
+
+
 def _fake_source(values: dict):
     """Return a source callable backed by a dict (never touches real env)."""
     return lambda ref: values.get(ref)

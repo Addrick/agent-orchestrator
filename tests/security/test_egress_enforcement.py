@@ -124,7 +124,73 @@ async def test_boundary1_tool_result_scrubbed_in_history_and_event():
     assert content == result_str
 
 
+@pytest.mark.asyncio
+async def test_boundary1_tool_error_scrubbed_in_event():
+    """A tool whose error message embeds a secret: ToolCallResultEvent.error is
+    surfaced raw in the portal SSE / ToolCard, so it must be redacted too — the
+    sibling result field being scrubbed is not sufficient."""
+    engine = _make_engine([
+        [
+            {"type": "tool_calls", "calls": [
+                {"id": "r1", "name": "search_tool", "arguments": {"q": "x"}}
+            ]},
+            {"type": "done", "full_text": ""},
+        ],
+        [
+            {"type": "text_delta", "text": "done"},
+            {"type": "done", "full_text": "done"},
+        ],
+    ])
+    tools = _make_tool_manager(
+        {"search_tool": {"error": f"auth failed: {SECRET}"}}
+    )
+    loop = ToolLoop(engine, tools, max_iterations=5)
+
+    events = await _drain(loop.run(
+        persona=_make_persona(), conversation_history=[],
+        params=MagicMock(), tools=[],
+    ))
+
+    result_events = [e for e in events if isinstance(e, ToolCallResultEvent)]
+    assert len(result_events) == 1
+    err = result_events[0].error
+    assert err is not None
+    assert SECRET not in err
+    assert REDACTED in err
+
+
 # ---- Boundary 2: audit args -> Agent_Actions + confirmation text ----------
+
+@pytest.mark.asyncio
+async def test_boundary2_model_reasoning_scrubbed_in_audit():
+    """model_reasoning (joined model text) is persisted in audit_info and shown
+    in the UI; a secret the model echoes there must be redacted too."""
+    engine = _make_engine([
+        [
+            {"type": "text_delta", "text": f"thinking about {SECRET} now"},
+            {"type": "tool_calls", "calls": [
+                {"id": "w1", "name": "create_ticket",
+                 "arguments": {"title": "t"}}
+            ]},
+            {"type": "done", "full_text": ""},
+        ],
+    ])
+    tools = _make_tool_manager({})
+    loop = ToolLoop(engine, tools)
+
+    events = await _drain(loop.run(
+        persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
+        conversation_history=[], params=MagicMock(), tools=[],
+    ))
+
+    finished = events[-1]
+    assert isinstance(finished, _LoopFinishedEvent)
+    assert finished.audit_info is not None
+    reasoning = finished.audit_info["model_reasoning"]
+    assert reasoning is not None
+    assert SECRET not in reasoning
+    assert REDACTED in reasoning
+
 
 @pytest.mark.asyncio
 async def test_boundary2_write_args_scrubbed_in_audit_and_confirmation():

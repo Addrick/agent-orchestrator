@@ -22,6 +22,13 @@ from typing import Dict, List, Optional, Pattern, Tuple
 # benign substrings, so they are ignored.
 MIN_SECRET_LEN = 8
 
+# The pattern fallback is skipped on strings longer than this. Real secrets are
+# short; the fallback exists to catch stray key-shaped tokens, not to regex-scan
+# large base64 blobs (e.g. image payloads cached every LLM iteration) where it
+# only wastes CPU and risks a false-positive redaction that corrupts the blob.
+# Registered exact secrets are still matched regardless of length.
+MAX_PATTERN_SCAN_LEN = 100_000
+
 # Compiled regexes for common UNREGISTERED secret shapes. Order matters: the
 # more specific Anthropic-style key must precede the generic ``sk-`` form so it
 # matches first. All are labelled ``[REDACTED:pattern]``.
@@ -90,9 +97,11 @@ class SecretScrubber:
             for value in sorted(self._secrets, key=len, reverse=True):
                 if value in text:
                     text = text.replace(value, f"[REDACTED:{self._secrets[value]}]")
-        # Pattern fallback for unregistered secret shapes.
-        for pattern in PATTERN_REDACTIONS:
-            text = pattern.sub(_PATTERN_LABEL, text)
+        # Pattern fallback for unregistered secret shapes. Skipped on very long
+        # strings (e.g. cached base64 image data) — see MAX_PATTERN_SCAN_LEN.
+        if len(text) <= MAX_PATTERN_SCAN_LEN:
+            for pattern in PATTERN_REDACTIONS:
+                text = pattern.sub(_PATTERN_LABEL, text)
         return text
 
 
@@ -118,5 +127,6 @@ __all__: List[str] = [
     "get_scrubber",
     "reset_scrubber",
     "MIN_SECRET_LEN",
+    "MAX_PATTERN_SCAN_LEN",
     "PATTERN_REDACTIONS",
 ]

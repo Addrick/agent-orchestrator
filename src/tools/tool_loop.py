@@ -262,11 +262,7 @@ class ToolLoop:
                     
                     audit_actions.append({
                         "tool": wc_name,
-                        # Egress scrub (DP-225 boundary 2): these args are
-                        # persisted to Agent_Actions and re-rendered into the
-                        # human confirmation text below, so redact any secret
-                        # before it can be stored or echoed.
-                        "arguments": cast(Dict[str, Any], get_scrubber().scrub(wc_args)),
+                        "arguments": wc_args,
                         "irreversible": is_irreversible(wc_name, wc_args),
                         "always_confirm": wc_name in ALWAYS_CONFIRM_TOOLS,
                         "service_binding": binding,
@@ -274,17 +270,26 @@ class ToolLoop:
                         "enrichment": enrichment,
                     })
 
-                audit_info = {
+                audit_info: Dict[str, Any] = {
                     "actions": audit_actions,
                     "tainted": turn_tainted,
                     "taint_sources": taint_sources,
                     "model_reasoning": model_reasoning or None,
                     "execution_mode": persona.get_execution_mode().name,
                 }
+                # Egress scrub (DP-225 boundary 2): scrub the whole audit_info
+                # once at the seam, so EVERY secret-bearing field — action
+                # arguments, model_reasoning, enrichment — is redacted before it
+                # is persisted to Agent_Actions or echoed to the UI and the
+                # confirmation text built below. Scrubbing the dict (not each
+                # field) means fields added here later are covered automatically.
+                # pending_writes (raw write_calls) stays unscrubbed so the
+                # approved write still executes with real argument values.
+                audit_info = cast(Dict[str, Any], get_scrubber().scrub(audit_info))
 
-                # Build human-readable confirmation text
+                # Build human-readable confirmation text from the scrubbed actions.
                 lines = ["I'd like to perform the following actions:"]
-                for a in audit_actions:
+                for a in audit_info["actions"]:
                     flags = []
                     if a["service_binding"]:
                         flags.append(a["service_binding"].upper())
@@ -375,7 +380,11 @@ class ToolLoop:
             result_str = cast(str, get_scrubber().scrub(json.dumps(tool_result)))
             err_str: Optional[str] = None
             if isinstance(tool_result, dict) and tool_result.get("error"):
-                err_str = str(tool_result["error"])
+                # Egress scrub (DP-225 boundary 1): the error is surfaced raw in
+                # ToolCallResultEvent.error (portal SSE / ToolCard), so redact it
+                # exactly like result_str above — the sibling result field being
+                # scrubbed is not enough on its own.
+                err_str = cast(str, get_scrubber().scrub(str(tool_result["error"])))
 
             conversation_history.append({
                 "role": "tool",

@@ -3,6 +3,7 @@
 import pytest
 
 from src.security.scrubber import (
+    MAX_PATTERN_SCAN_LEN,
     MIN_SECRET_LEN,
     SecretScrubber,
     get_scrubber,
@@ -89,6 +90,31 @@ def test_pattern_fallback_catches_bearer_token():
     scrubber = SecretScrubber()
     out = scrubber.scrub("Bearer abcdefghijklmnopqrstuvwxyz")
     assert out == "[REDACTED:pattern]"
+
+
+def test_pattern_fallback_skipped_on_long_string_but_registered_still_redacts():
+    scrubber = SecretScrubber()
+    scrubber.register("supersecretvalue", "REF")
+    leaked = "sk-abcdefghijklmnopqrstuvwxyz0123"
+    # A string longer than the scan cap: the unregistered key-shape must NOT be
+    # touched (fallback skipped), but the registered exact secret still redacts.
+    blob = "A" * (MAX_PATTERN_SCAN_LEN + 1)
+    text = f"{leaked} {blob} supersecretvalue"
+    out = scrubber.scrub(text)
+    assert leaked in out  # pattern fallback skipped on the long string
+    assert "supersecretvalue" not in out
+    assert "[REDACTED:REF]" in out
+
+
+def test_pattern_fallback_runs_at_threshold_boundary():
+    scrubber = SecretScrubber()
+    leaked = "sk-abcdefghijklmnopqrstuvwxyz0123"
+    pad = "A" * (MAX_PATTERN_SCAN_LEN - len(leaked))
+    text = leaked + pad  # exactly at the cap → still scanned
+    assert len(text) == MAX_PATTERN_SCAN_LEN
+    out = scrubber.scrub(text)
+    assert leaked not in out
+    assert "[REDACTED:pattern]" in out
 
 
 def test_non_str_scalars_pass_through():
