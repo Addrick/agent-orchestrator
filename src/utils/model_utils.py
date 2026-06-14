@@ -36,6 +36,8 @@ def get_model_prefix(model_name: str) -> str:
         return "gemini-3.1"
     elif "gemini" in name_lower:
         return "gemini"
+    elif name_lower.startswith("cc-"):
+        return "cc"
     elif name_lower.startswith("agy"):
         return "agy"
     elif name_lower == "local":
@@ -117,6 +119,7 @@ def refresh_available_anthropic_models() -> List[str]:
 # Keyed by display group so they slot into the same shape as the API groups.
 STATIC_MODELS: Dict[str, List[str]] = {
     'Antigravity (OAuth tier)': ['agy-flash'],
+    'Claude Code (sandboxed)': ['cc-sonnet', 'cc-opus', 'cc-haiku'],
     'Local': ['local'],
 }
 

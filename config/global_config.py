@@ -231,6 +231,41 @@ AGY_WORKSPACES_DIR = DATA_DIR / "workspaces"
 # agy's own tools; required before that restriction is ever lifted.
 AGY_SANDBOX = os.environ.get("AGY_SANDBOX", "True").lower() in ("true", "1", "yes", "on")
 
+# Claude Code (cc) local runtime (DP-222) — `cc-*` models route through the
+# local `claude -p` headless CLI on the user's OAuth/subscription tier, running
+# as an autonomous agent with its OWN sandboxed tools (vs the agy route, which
+# clamps tools off and uses derpr's <tool_call> text protocol). Structural
+# parity with the agy provider: subprocess-per-call, one-shot, POSIX-only,
+# per-persona persistent workspace, dedicated rate limiter.
+RATE_LIMIT_CC_RPM = int(os.environ.get("RATE_LIMIT_CC_RPM", "15"))
+
+# Workspace persistence (mirrors the AGY_* knobs). CC_WORKSPACE_DIR is an
+# explicit override (absolute path) — set it to the derpr checkout to talk to
+# Claude Code about its own codebase from any interface; otherwise per-persona
+# scratch dirs under DATA_DIR/workspaces are used.
+CC_PERSISTENT_WORKSPACES = os.environ.get("CC_PERSISTENT_WORKSPACES", "True").lower() in ("true", "1", "yes", "on")
+CC_WORKSPACE_MODE = os.environ.get("CC_WORKSPACE_MODE", "persona")  # 'persona' or 'global'
+CC_WORKSPACES_DIR = DATA_DIR / "workspaces"
+CC_WORKSPACE_DIR = os.environ.get("CC_WORKSPACE_DIR")  # explicit absolute override, or None
+
+# Run claude with --dangerously-skip-permissions (yolo) bounded by Claude
+# Code's built-in OS sandbox (Seatbelt/bubblewrap). When CC_SANDBOX is on, the
+# settings block below is passed via `--settings`; root is permitted because
+# skip-permissions' root check is waived inside a recognized sandbox.
+CC_SANDBOX = os.environ.get("CC_SANDBOX", "True").lower() in ("true", "1", "yes", "on")
+# Unprivileged containers (e.g. the derpr Docker deploy) cannot mount a fresh
+# /proc for bubblewrap; this bind-mounts the container's existing /proc instead.
+# Only safe when the outer container already provides isolation.
+CC_SANDBOX_WEAKER_NESTED = os.environ.get("CC_SANDBOX_WEAKER_NESTED", "False").lower() in ("true", "1", "yes", "on")
+# Comma-separated domains the sandboxed Bash tool may reach (no domains are
+# pre-allowed by default; headless runs cannot answer a domain prompt, so
+# network-needing tasks must list domains here).
+CC_SANDBOX_ALLOWED_DOMAINS = [
+    d.strip() for d in os.environ.get("CC_SANDBOX_ALLOWED_DOMAINS", "").split(",") if d.strip()
+]
+# Cap on agentic turns for one headless run (--max-turns). 0/empty = no cap.
+CC_MAX_TURNS = int(os.environ.get("CC_MAX_TURNS", "0"))
+
 # Models
 EMBEDDING_MODEL = 'gemini-embedding-001'
 EMBEDDING_DIMENSION = 3072

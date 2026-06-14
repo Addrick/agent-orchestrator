@@ -23,7 +23,7 @@ from config.global_config import (
     RATE_LIMIT_GEMINI_3_RPM,
     RATE_LIMIT_GEMMA_3_RPM, RATE_LIMIT_GEMMA_4_RPM,
     RATE_LIMIT_OPENAI_RPM, RATE_LIMIT_ANTHROPIC_RPM,
-    RATE_LIMIT_AGY_RPM,
+    RATE_LIMIT_AGY_RPM, RATE_LIMIT_CC_RPM,
 )
 # --- Provider-specific imports ---
 import base64
@@ -46,10 +46,16 @@ from src.text_tool_protocol import (
 )
 
 AGY_CALL_TIMEOUT_SECONDS = 120.0
+# Claude Code runs a full agentic loop (its own tools) in one headless call, so
+# it needs far more headroom than the one-shot agy text route.
+CC_CALL_TIMEOUT_SECONDS = 600.0
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["TextEngine", "LLMCommunicationError", "AGY_CALL_TIMEOUT_SECONDS"]
+__all__ = [
+    "TextEngine", "LLMCommunicationError",
+    "AGY_CALL_TIMEOUT_SECONDS", "CC_CALL_TIMEOUT_SECONDS",
+]
 
 
 class TextEngine:
@@ -91,9 +97,11 @@ class TextEngine:
         self._openai_limiter        = AsyncLimiter(max_rate=RATE_LIMIT_OPENAI_RPM,    time_period=60)
         self._anthropic_limiter     = AsyncLimiter(max_rate=RATE_LIMIT_ANTHROPIC_RPM, time_period=60)
         self._agy_limiter           = AsyncLimiter(max_rate=RATE_LIMIT_AGY_RPM,       time_period=60)
-        # Persistent agy workspaces are shared across calls; a per-workspace
+        self._cc_limiter            = AsyncLimiter(max_rate=RATE_LIMIT_CC_RPM,        time_period=60)
+        # Persistent agy/cc workspaces are shared across calls; a per-workspace
         # lock serializes them so one call's CLI state can't clobber another's.
         self._agy_workspace_locks: Dict[str, asyncio.Lock] = {}
+        self._cc_workspace_locks: Dict[str, asyncio.Lock] = {}
         logger.info(
             f"Rate limiters initialised — "
             f"Gemini 2.5: {RATE_LIMIT_GEMINI_25_RPM} RPM / {RATE_LIMIT_GEMINI_25_RPD} RPD | "
@@ -101,7 +109,8 @@ class TextEngine:
             f"Gemma 3: {RATE_LIMIT_GEMMA_3_RPM} RPM | Gemma 4: {RATE_LIMIT_GEMMA_4_RPM} RPM | "
             f"OpenAI: {RATE_LIMIT_OPENAI_RPM} RPM | "
             f"Anthropic: {RATE_LIMIT_ANTHROPIC_RPM} RPM | "
-            f"AGY: {RATE_LIMIT_AGY_RPM} RPM"
+            f"AGY: {RATE_LIMIT_AGY_RPM} RPM | "
+            f"CC: {RATE_LIMIT_CC_RPM} RPM"
         )
 
         self._initialize_env()
@@ -174,6 +183,11 @@ class TextEngine:
         (api_payload → text_delta* → [tool_calls] → done); the `local` factory
         additionally accepts `local_inference_config`.
         Raises LLMCommunicationError for unsupported models."""
+        # cc-* must be checked before the `"claude" in model_name` branch below,
+        # which would otherwise capture it and route to the Anthropic API.
+        if model_name.startswith("cc-"):
+            self._ensure_cc_supported()
+            return self._stream_cc_response, [self._cc_limiter]
         if model_name.startswith("gpt"):
             return self._stream_openai_response, [self._openai_limiter]
         if "claude" in model_name:
@@ -1209,6 +1223,182 @@ class TextEngine:
         exit, there is no token stream to make canonical); streaming consumers
         get the full text as a single text_delta."""
         result, api_payload = await self._generate_agy_response(
+            config, history_object, tools
+        )
+        async for ev in self._events_from_one_shot(result, api_payload):
+            yield ev
+
+    # ------------------------------------------------------------------
+    # Claude Code (cc-*) provider — DP-222
+    #
+    # Structural parity with the agy route (subprocess-per-call, one-shot,
+    # POSIX-only, persistent per-persona workspace, dedicated rate limiter),
+    # but with a deliberate behavioural divergence: the agy route CLAMPS tools
+    # off and round-trips derpr's <tool_call> text protocol, whereas Claude
+    # Code runs its OWN sandboxed tools autonomously (`--dangerously-skip-
+    # permissions` bounded by the built-in OS sandbox). So the cc route ignores
+    # the engine's `tools` argument and returns Claude Code's final text; derpr's
+    # tool loop does not wrap it. Bridging derpr tools -> Claude Code is future
+    # MCP work, where approval routing will also live.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _ensure_cc_supported() -> None:
+        """Claude Code's OS sandbox (Seatbelt/bubblewrap) only runs on
+        macOS/Linux/WSL2 — never native Windows. Since this provider runs
+        `--dangerously-skip-permissions` (yolo), the sandbox is the safety
+        boundary, so refuse the route on non-POSIX hosts when the sandbox is
+        enabled. Run the engine on the POSIX host (Linux/macOS/WSL/Docker).
+        """
+        if global_config.CC_SANDBOX and os.name != "posix":
+            raise LLMCommunicationError(
+                "The 'cc-*' (Claude Code) provider runs yolo bounded by Claude "
+                "Code's OS sandbox, which is unavailable on native Windows. Run "
+                "the engine on the POSIX host (Linux/macOS/WSL/Docker), or set "
+                "CC_SANDBOX=False to run unsandboxed (not recommended). "
+                "See docs/user_guide.md (Claude Code / cc provider)."
+            )
+
+    @staticmethod
+    def _cc_model_arg(model_name: str) -> str:
+        """Map a `cc-<alias>` model name onto Claude Code's `--model` value
+        (e.g. `cc-sonnet` -> `sonnet`). A bare `cc-` falls back to `sonnet`."""
+        alias = model_name[len("cc-"):] if model_name.startswith("cc-") else model_name
+        return alias or "sonnet"
+
+    @staticmethod
+    def _resolve_cc_workspace(persona_name: Optional[str]) -> Optional[str]:
+        """Returns the working dir for this call, or None when persistence is
+        disabled (caller uses a throwaway temp dir). Precedence: explicit
+        CC_WORKSPACE_DIR override (e.g. the derpr checkout) > per-persona dir >
+        global dir. Does not create the directory."""
+        if global_config.CC_WORKSPACE_DIR:
+            return os.path.abspath(global_config.CC_WORKSPACE_DIR)
+        if not global_config.CC_PERSISTENT_WORKSPACES:
+            return None
+        workspaces_dir = global_config.CC_WORKSPACES_DIR
+        slug = TextEngine._sanitize_agy_workspace_name(persona_name)
+        if global_config.CC_WORKSPACE_MODE == "persona" and slug:
+            return os.path.abspath(workspaces_dir / f"cc_{slug}")
+        return os.path.abspath(workspaces_dir / "cc_global")
+
+    @staticmethod
+    def _build_cc_sandbox_settings() -> Optional[Dict[str, Any]]:
+        """Build the `--settings` sandbox block, or None when CC_SANDBOX is off.
+        Auto-allows sandboxed Bash so a headless run never blocks on a prompt;
+        the OS sandbox confines it to the workspace + allowed domains."""
+        if not global_config.CC_SANDBOX:
+            return None
+        sandbox: Dict[str, Any] = {
+            "enabled": True,
+            "autoAllowBashIfSandboxed": True,
+        }
+        if global_config.CC_SANDBOX_WEAKER_NESTED:
+            sandbox["enableWeakerNestedSandbox"] = True
+        if global_config.CC_SANDBOX_ALLOWED_DOMAINS:
+            sandbox["network"] = {"allowedDomains": list(global_config.CC_SANDBOX_ALLOWED_DOMAINS)}
+        return {"sandbox": sandbox}
+
+    def _build_cc_args(self, prompt: str, system_prompt: str, model_arg: str) -> List[str]:
+        """Assemble the `claude -p` argv (without the binary)."""
+        args = ["-p", prompt, "--output-format", "text", "--model", model_arg]
+        if system_prompt:
+            args += ["--system-prompt", system_prompt]
+        # yolo: skip per-tool approval prompts. The OS sandbox (when enabled) is
+        # the boundary; root's skip-permissions check is waived inside it.
+        args += ["--dangerously-skip-permissions"]
+        if global_config.CC_MAX_TURNS > 0:
+            args += ["--max-turns", str(global_config.CC_MAX_TURNS)]
+        sandbox_settings = self._build_cc_sandbox_settings()
+        if sandbox_settings is not None:
+            args += ["--settings", json.dumps(sandbox_settings)]
+        return args
+
+    async def _run_cc_cli(
+        self,
+        prompt: str,
+        system_prompt: str,
+        model_arg: str,
+        timeout: float = CC_CALL_TIMEOUT_SECONDS,
+        persona_name: Optional[str] = None,
+    ) -> str:
+        self._ensure_cc_supported()
+
+        binary = os.environ.get("CLAUDE_CLI_PATH") or shutil.which("claude")
+        if not binary:
+            raise LLMCommunicationError("Claude Code 'claude' binary not found on PATH.")
+
+        args = self._build_cc_args(prompt, system_prompt, model_arg)
+
+        workspace_dir = self._resolve_cc_workspace(persona_name)
+        if workspace_dir is None:
+            temp_dir = tempfile.mkdtemp()
+            try:
+                return await self._exec_agy(binary, args, temp_dir, timeout)
+            finally:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+
+        os.makedirs(workspace_dir, exist_ok=True)
+        lock = self._cc_workspace_locks.setdefault(workspace_dir, asyncio.Lock())
+        async with lock:
+            return await self._exec_agy(binary, args, workspace_dir, timeout)
+
+    async def _generate_cc_response(
+        self, config: Dict[str, Any], history_object: Dict[str, Any], tools: Optional[List[Dict[str, Any]]] = None
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """One-shot Claude Code path. The persona prompt is delivered via
+        `--system-prompt` (replace); the rendered history transcript is the `-p`
+        prompt. `tools` is intentionally ignored — Claude Code uses its own
+        sandboxed tools and returns final text."""
+        system_prompt, history = self._extract_system_prompt(history_object)
+        prompt = self._render_agy_prompt(history)
+        model_arg = self._cc_model_arg(config.get("model_name", ""))
+        persona_name = config.get("persona_name")
+        workspace_dir = self._resolve_cc_workspace(persona_name)
+
+        if tools:
+            logger.debug(
+                "cc provider ignoring %d derpr tool(s) — Claude Code uses its own tools.",
+                len(tools),
+            )
+
+        api_payload = {
+            "model": config.get("model_name"),
+            "cc_model": model_arg,
+            "prompt_chars": len(prompt),
+            "system_prompt_chars": len(system_prompt or ""),
+            "tools_ignored": [
+                t["function"]["name"] for t in tools or []
+                if "function" in t and "name" in t["function"]
+            ],
+            "isolation": {
+                "stdin": "devnull",
+                "skip_permissions": True,
+                "sandbox": global_config.CC_SANDBOX,
+                "max_turns": global_config.CC_MAX_TURNS or None,
+                "workspace": workspace_dir if workspace_dir else "temp-dir-per-call",
+            },
+        }
+
+        try:
+            raw = await self._run_cc_cli(
+                prompt, system_prompt or "", model_arg, persona_name=persona_name
+            )
+        except LLMCommunicationError as e:
+            if e.api_payload is None:
+                e.api_payload = api_payload
+            raise
+
+        return {"type": "text", "content": raw.strip()}, api_payload
+
+    async def _stream_cc_response(
+        self, config: Dict[str, Any], history_object: Dict[str, Any],
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Claude Code adapter into the unified event shape. One-shot by nature
+        (the headless `claude -p` agentic run's full result arrives at process
+        exit); streaming consumers get the final text as a single text_delta."""
+        result, api_payload = await self._generate_cc_response(
             config, history_object, tools
         )
         async for ev in self._events_from_one_shot(result, api_payload):

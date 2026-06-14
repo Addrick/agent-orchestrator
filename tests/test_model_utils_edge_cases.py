@@ -115,7 +115,11 @@ def test_refresh_anthropic_error(monkeypatch):
 def test_get_model_list_no_update_missing_file():
     """When update=False and the underlying file is missing, returns the default models fallback."""
     with patch("src.utils.model_utils.persona_store.load_models_from_file", return_value=None):
-        assert model_utils.get_model_list(update=False) == {"Antigravity (OAuth tier)": ["agy-flash"], "Local": ["local"]}
+        assert model_utils.get_model_list(update=False) == {
+            "Antigravity (OAuth tier)": ["agy-flash"],
+            "Claude Code (sandboxed)": ["cc-sonnet", "cc-opus", "cc-haiku"],
+            "Local": ["local"],
+        }
 
 
 def test_get_model_list_update_saves():
@@ -133,6 +137,7 @@ def test_get_model_list_update_saves():
         "From Google": ["gemini-2.5"],
         "From Anthropic": ["claude-3"],
         "Antigravity (OAuth tier)": ["agy-flash"],
+        "Claude Code (sandboxed)": ["cc-sonnet", "cc-opus", "cc-haiku"],
         "Local": ["local"],
     }
     m_save.assert_called_once_with(expected)
