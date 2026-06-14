@@ -58,8 +58,11 @@ def main() -> int:
                           "-m", "not integration and not zammad_live "
                                 "and not llm_live and not discord_live"]
         else:
-            # Exactly what CI runs. Live tiers auto-skip without credentials.
-            pytest_cmd = [PY, "-m", "pytest", "-m", "not integration"]
+            # CI's selection (-m "not integration"; live tiers auto-skip without
+            # credentials), plus -n auto for pytest-xdist parallelism. xdist is a
+            # CI dependency (requirements-dev.txt), so this matches what CI *could*
+            # run; -n changes worker count only, not which tests pass.
+            pytest_cmd = [PY, "-m", "pytest", "-n", "auto", "-m", "not integration"]
         stages.append(("pytest", pytest_cmd))
 
     results = [run(name, cmd) for name, cmd in stages]
