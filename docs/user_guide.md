@@ -259,6 +259,14 @@ To prevent sophisticated injection attacks, the system refuses to load any perso
 ### Irreversibility Flags
 Some tools are marked as **IRREVERSIBLE** (e.g., `delete_user`). Others may be dynamically flagged based on their arguments—for example, `add_note_to_ticket` is flagged as irreversible if the note is visible to a customer (`internal: false`). These flags are surfaced in the approval dialogue to highlight high-stakes actions.
 
+### Credential Scoping
+Machine secrets — provider API keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVEAI_API_KEY`) and the Zammad API token — are kept out of the LLM's reach by design:
+- **Central vault.** All secrets are resolved through a single credential vault rather than read ad-hoc from the environment, giving one authoritative inventory of what counts as a secret. The model never receives secrets as tool arguments.
+- **Egress scrubbing.** At startup every known secret value is registered with an egress scrubber. Any string headed for a place the model (or operator inspector) can read it back is scrubbed first, with the value replaced by `[REDACTED:<KEY_NAME>]`. Three boundaries are enforced: **tool results** before they re-enter the conversation, **write-audit arguments** before they are stored or shown in an approval dialogue, and the **cached request payload** surfaced by the `/assemble` inspector.
+- **Shape-based fallback.** Beyond known values, the scrubber also redacts strings that *look* like secrets (e.g. `sk-…` API keys, `Token token=…` headers, bearer tokens), so an unregistered credential that leaks into a tool result is still caught.
+
+This is defense-in-depth: today's curated tool surface means no tool returns secrets, but the guarantee holds automatically the moment a more powerful tool (e.g. shell execution) or a bring-your-own-credentials mode is added.
+
 ## Memory Modes
 
 Determines which conversation history is loaded into the LLM context window.
