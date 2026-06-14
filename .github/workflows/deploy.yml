@@ -50,7 +50,7 @@ jobs:
         run: mypy src/ --config-file mypy.ini
 
       - name: Run tests with pytest, skipping integration.
-        run: pytest -m "not integration"
+        run: pytest -n auto -m "not integration"
 
   # JOB 2: Build & Push Docker Image
   # Only runs if 'test' passes and we are pushing to main (not PRs)
