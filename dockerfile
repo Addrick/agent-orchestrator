@@ -21,23 +21,39 @@ ENV PYTHONUNBUFFERED=1
 # Set the working directory in the container
 WORKDIR /app
 
-# Install system dependencies (Git is needed for your app_manager.py, curl to install agy)
+# Install system dependencies:
+# - git: app_manager.py git ops
+# - curl: installs agy + claude
+# - bubblewrap + socat: Claude Code's Linux OS sandbox (DP-222) — bwrap enforces
+#   filesystem isolation, socat relays sandboxed network through the proxy.
 RUN apt-get update && apt-get install -y \
     git \
     curl \
+    bubblewrap \
+    socat \
     && rm -rf /var/lib/apt/lists/*
 
 # Create a non-root user matching the 'ubuntu' user (UID 1000) on the AWS host
 RUN useradd -u 1000 -m botuser
 
-# Install Antigravity CLI (agy) as the botuser
+# Install Antigravity CLI (agy) and Claude Code (claude) as the botuser, into
+# ~/.local/bin. The claude native installer needs no node; auth for headless
+# `claude -p` is supplied at runtime via CLAUDE_CODE_OAUTH_TOKEN (see compose),
+# so no browser login or credentials volume is required (unlike agy).
 USER botuser
 RUN curl -fsSL https://antigravity.google/cli/install.sh | bash
-# Pre-create agy's state dir with botuser ownership: deploy mounts a named
-# volume here, and Docker's copy-on-first-use propagates this ownership so
+RUN curl -fsSL https://claude.ai/install.sh | bash
+# Pre-create agy's + claude's state dirs with botuser ownership: deploy mounts a
+# named volume here, and Docker's copy-on-first-use propagates this ownership so
 # OAuth/cache state survives container recreation.
-RUN mkdir -p /home/botuser/.gemini
+RUN mkdir -p /home/botuser/.gemini /home/botuser/.claude
 USER root
+
+# DP-222: claude lands in ~/.local/bin; put it on PATH so shutil.which("claude")
+# resolves it (CLAUDE_CLI_PATH can still override). DISABLE_AUTOUPDATER pins the
+# image's claude version — the container must not self-update under a volume.
+ENV PATH="/home/botuser/.local/bin:${PATH}"
+ENV DISABLE_AUTOUPDATER=1
 
 # Copy requirements first to leverage Docker cache layers
 COPY requirements.txt .
