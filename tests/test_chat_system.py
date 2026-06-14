@@ -132,10 +132,16 @@ async def test_generate_response_stores_payload_on_llm_error(chat_system_with_mo
     # We don't need the response, just to trigger the error handling
     await system.generate_response("test_persona", "user123", "channel", "test message")
 
-    # Assert that the payload from the exception was stored
+    # Assert that the payload from the exception was stored. store_api_request
+    # adds a `_tools_for_llm` key and (DP-225) scrubs into a fresh dict, so the
+    # cached copy is no longer the same object as failed_payload — compare the
+    # meaningful content rather than asserting object equality.
     assert "user123" in system.turn_persistence.last_api_requests
     assert "test_persona" in system.turn_persistence.last_api_requests["user123"]
-    assert system.turn_persistence.last_api_requests["user123"]["test_persona"] == failed_payload
+    stored = system.turn_persistence.last_api_requests["user123"]["test_persona"]
+    assert stored is not None
+    assert stored["model"] == failed_payload["model"]
+    assert stored["messages"] == failed_payload["messages"]
 
 
 def test_store_api_request_preserves_tools_across_iterations(chat_system_with_mocks):

@@ -16,10 +16,11 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, List, Optional, Union
+from typing import Any, AsyncIterator, Dict, List, Optional, Union, cast
 
 from config.global_config import MAX_TOOL_CALLS
 from src.engine import LLMCommunicationError, TextEngine
+from src.security.scrubber import get_scrubber
 from src.generation_events import (
     ErrorEvent, ResponseType, TokenEvent,
     ToolCallResultEvent, ToolCallStartEvent,
@@ -261,7 +262,11 @@ class ToolLoop:
                     
                     audit_actions.append({
                         "tool": wc_name,
-                        "arguments": wc_args,
+                        # Egress scrub (DP-225 boundary 2): these args are
+                        # persisted to Agent_Actions and re-rendered into the
+                        # human confirmation text below, so redact any secret
+                        # before it can be stored or echoed.
+                        "arguments": cast(Dict[str, Any], get_scrubber().scrub(wc_args)),
                         "irreversible": is_irreversible(wc_name, wc_args),
                         "always_confirm": wc_name in ALWAYS_CONFIRM_TOOLS,
                         "service_binding": binding,
@@ -364,7 +369,10 @@ class ToolLoop:
         # Append/emit in original order — concurrency must not reorder the
         # transcript the model reads next iteration.
         for r, tool_result in zip(resolved, results):
-            result_str = json.dumps(tool_result)
+            # Egress scrub (DP-225 boundary 1): redact any registered secret
+            # before the serialized result reaches BOTH the LLM-visible history
+            # and the UI event, so both stay consistent and secret-free.
+            result_str = cast(str, get_scrubber().scrub(json.dumps(tool_result)))
             err_str: Optional[str] = None
             if isinstance(tool_result, dict) and tool_result.get("error"):
                 err_str = str(tool_result["error"])

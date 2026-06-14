@@ -11,13 +11,14 @@ these happen; this module owns *how* and holds the cache state.
 import logging
 from collections import defaultdict
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 from config.global_config import MAX_CACHED_API_REQUESTS
 from src.generation_events import ResponseType
 from src.memory.backend.base import MemoryBackend
 from src.memory.memory_manager import MemoryManager
 from src.request_builder import build_scope_tags
+from src.security.scrubber import get_scrubber
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,11 @@ class TurnPersistence:
         per-turn iteration list so dump_history shows the whole tool loop (one
         payload per LLM call) rather than only the final iteration.
         """
+        # Egress scrub (DP-225 boundary 3): the cached payload is surfaced by
+        # the /assemble inspector and the portal, so redact any registered
+        # secret before it enters last_api_requests / last_api_iterations.
+        payload = cast(Dict[str, Any], get_scrubber().scrub(payload))
+
         if tools_for_llm is not None:
             payload["_tools_for_llm"] = tools_for_llm
         else:
