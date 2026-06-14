@@ -9,6 +9,7 @@ from unittest.mock import patch, AsyncMock
 from src.chat_system import ResponseType
 from src.persona import ExecutionMode
 
+from tests.helpers import route_stream_through_generate_response
 from tests.live.conftest import wait_for_search
 
 pytestmark = pytest.mark.zammad_live
@@ -22,6 +23,10 @@ async def test_confirm_mode_pends_write_tools(live_chat_system, managed_zammad_u
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_service_bindings(["zammad"])
     user_info = managed_zammad_user
+
+    # DP-206b: the tool loop streams through `_stream_response`, not
+    # `generate_response`; bridge re-points the driver at the mock below.
+    route_stream_through_generate_response(chat_system.text_engine)
 
     tool_call = ({'type': 'tool_calls', 'calls': [
         {'id': 'call_1', 'name': 'create_ticket', 'arguments': {'title': 'Pending Ticket', 'body': 'test'}}]}, {})
@@ -46,6 +51,8 @@ async def test_confirm_mode_resume_approved_creates_ticket(live_chat_system, man
     persona.set_service_bindings(["zammad"])
     user_info = managed_zammad_user
     created_ticket_id = None
+
+    route_stream_through_generate_response(chat_system.text_engine)
 
     try:
         tool_call = ({'type': 'tool_calls', 'calls': [
@@ -102,6 +109,8 @@ async def test_confirm_mode_resume_denied_skips_tool(live_chat_system, managed_z
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_service_bindings(["zammad"])
     user_info = managed_zammad_user
+
+    route_stream_through_generate_response(chat_system.text_engine)
 
     tool_call = ({'type': 'tool_calls', 'calls': [
         {'id': 'call_1', 'name': 'create_ticket',
