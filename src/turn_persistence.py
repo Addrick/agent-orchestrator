@@ -161,8 +161,12 @@ class TurnPersistence:
                 # Forward tool_context so the regenerated row's stored tool calls
                 # stay paired with its new content — a retried turn may use a
                 # different (or no) set of tools than the failed attempt.
+                # Explicit reasoning_content=None clears the stale `<think>` of
+                # the prior attempt: it no longer matches the regenerated text
+                # (DP-141 sentinel contract — omitting would now *preserve* it).
                 self.memory_manager.update_interaction_content(
-                    retry_assistant_id, final_text, tool_context=tool_context_json,
+                    retry_assistant_id, final_text,
+                    reasoning_content=None, tool_context=tool_context_json,
                 )
                 return retry_assistant_id
             except Exception as e:
