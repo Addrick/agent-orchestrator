@@ -1511,6 +1511,35 @@ class TestClaudeCodeProvider:
         args = text_engine._build_cc_args("p", "sys", "sonnet")
         assert "--settings" not in args
 
+    def test_build_cc_args_no_yolo_when_sandbox_off(self, text_engine, monkeypatch):
+        """Unsandboxed path must NEVER pass bare --dangerously-skip-permissions."""
+        from config import global_config
+        monkeypatch.setattr(global_config, "CC_SANDBOX", False)
+        monkeypatch.setattr(global_config, "CC_ALLOWED_TOOLS", [])
+        args = text_engine._build_cc_args("p", "sys", "sonnet")
+        assert "--dangerously-skip-permissions" not in args
+        assert "--allowedTools" not in args  # empty allowlist = default-deny
+
+    def test_build_cc_args_allowlist_when_sandbox_off(self, text_engine, monkeypatch):
+        """CC_ALLOWED_TOOLS feeds --allowedTools on the unsandboxed path (no yolo)."""
+        from config import global_config
+        monkeypatch.setattr(global_config, "CC_SANDBOX", False)
+        monkeypatch.setattr(global_config, "CC_ALLOWED_TOOLS", ["Read", "Bash(npm run lint *)"])
+        args = text_engine._build_cc_args("p", "sys", "sonnet")
+        assert "--dangerously-skip-permissions" not in args
+        idx = args.index("--allowedTools")
+        assert args[idx + 1] == "Read"
+        assert args[idx + 2] == "Bash(npm run lint *)"
+
+    def test_build_cc_args_yolo_only_when_sandbox_on(self, text_engine, monkeypatch):
+        """yolo is bounded by the OS sandbox; allowlist is ignored when sandboxed."""
+        from config import global_config
+        monkeypatch.setattr(global_config, "CC_SANDBOX", True)
+        monkeypatch.setattr(global_config, "CC_ALLOWED_TOOLS", ["Read"])
+        args = text_engine._build_cc_args("p", "sys", "sonnet")
+        assert "--dangerously-skip-permissions" in args
+        assert "--allowedTools" not in args
+
     def test_build_cc_args_max_turns(self, text_engine, monkeypatch):
         from config import global_config
         monkeypatch.setattr(global_config, "CC_SANDBOX", False)

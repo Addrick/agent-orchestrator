@@ -26,7 +26,12 @@ MODEL_BLACKLIST = [
 def get_model_prefix(model_name: str) -> str:
     """Return the model family prefix for routing and compatibility checks."""
     name_lower = model_name.lower()
-    if name_lower.startswith("gpt"):
+    # cc-* (Claude Code) is checked before the `"claude" in name_lower` branch
+    # so a future alias like `cc-claude-*` can't be misclassified as the
+    # Anthropic API family — mirrors the precedence in engine._get_provider_route.
+    if name_lower.startswith("cc-"):
+        return "cc"
+    elif name_lower.startswith("gpt"):
         return "gpt"
     elif "claude" in name_lower:
         return "claude"
@@ -36,8 +41,6 @@ def get_model_prefix(model_name: str) -> str:
         return "gemini-3.1"
     elif "gemini" in name_lower:
         return "gemini"
-    elif name_lower.startswith("cc-"):
-        return "cc"
     elif name_lower.startswith("agy"):
         return "agy"
     elif name_lower == "local":

@@ -1125,7 +1125,11 @@ class TextEngine:
                     pass
 
     @staticmethod
-    async def _exec_agy(binary: str, args: List[str], workspace_dir: str, timeout: float) -> str:
+    async def _exec_agy(binary: str, args: List[str], workspace_dir: str, timeout: float,
+                        label: str = "agy") -> str:
+        # `label` names the provider in error messages — this CLI runner is
+        # shared by the agy and cc (Claude Code) routes, so a failure must
+        # point at the route the caller actually invoked.
         proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -1140,13 +1144,13 @@ class TextEngine:
             try:
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
             except asyncio.TimeoutError as e:
-                raise LLMCommunicationError(f"agy CLI timed out after {timeout} seconds.") from e
+                raise LLMCommunicationError(f"{label} CLI timed out after {timeout} seconds.") from e
 
             if proc.returncode != 0:
                 stderr_excerpt = stderr.decode("utf-8", errors="replace").strip()
                 excerpt = stderr_excerpt[-200:] if len(stderr_excerpt) > 200 else stderr_excerpt
                 raise LLMCommunicationError(
-                    f"agy CLI failed with exit code {proc.returncode}. Stderr: {excerpt}"
+                    f"{label} CLI failed with exit code {proc.returncode}. Stderr: {excerpt}"
                 )
 
             return stdout.decode("utf-8", errors="replace")
@@ -1255,7 +1259,8 @@ class TextEngine:
                 "The 'cc-*' (Claude Code) provider runs yolo bounded by Claude "
                 "Code's OS sandbox, which is unavailable on native Windows. Run "
                 "the engine on the POSIX host (Linux/macOS/WSL/Docker), or set "
-                "CC_SANDBOX=False to run unsandboxed (not recommended). "
+                "CC_SANDBOX=False to run unsandboxed (no yolo; tools gated to "
+                "CC_ALLOWED_TOOLS). "
                 "See docs/user_guide.md (Claude Code / cc provider)."
             )
 
@@ -1304,9 +1309,16 @@ class TextEngine:
         args = ["-p", prompt, "--output-format", "text", "--model", model_arg]
         if system_prompt:
             args += ["--system-prompt", system_prompt]
-        # yolo: skip per-tool approval prompts. The OS sandbox (when enabled) is
-        # the boundary; root's skip-permissions check is waived inside it.
-        args += ["--dangerously-skip-permissions"]
+        if global_config.CC_SANDBOX:
+            # yolo: skip per-tool approval prompts. The OS sandbox is the safety
+            # boundary; root's skip-permissions check is waived inside it.
+            args += ["--dangerously-skip-permissions"]
+        elif global_config.CC_ALLOWED_TOOLS:
+            # Unsandboxed (e.g. native Windows smoke): NEVER bare yolo. Use
+            # Claude Code's OS-independent permission system — only the
+            # explicitly allowlisted tools may run; everything else is refused
+            # (headless cannot answer an approval prompt).
+            args += ["--allowedTools", *global_config.CC_ALLOWED_TOOLS]
         if global_config.CC_MAX_TURNS > 0:
             args += ["--max-turns", str(global_config.CC_MAX_TURNS)]
         sandbox_settings = self._build_cc_sandbox_settings()
@@ -1334,14 +1346,14 @@ class TextEngine:
         if workspace_dir is None:
             temp_dir = tempfile.mkdtemp()
             try:
-                return await self._exec_agy(binary, args, temp_dir, timeout)
+                return await self._exec_agy(binary, args, temp_dir, timeout, label="Claude Code")
             finally:
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
         os.makedirs(workspace_dir, exist_ok=True)
         lock = self._cc_workspace_locks.setdefault(workspace_dir, asyncio.Lock())
         async with lock:
-            return await self._exec_agy(binary, args, workspace_dir, timeout)
+            return await self._exec_agy(binary, args, workspace_dir, timeout, label="Claude Code")
 
     async def _generate_cc_response(
         self, config: Dict[str, Any], history_object: Dict[str, Any], tools: Optional[List[Dict[str, Any]]] = None

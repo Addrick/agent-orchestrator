@@ -265,6 +265,17 @@ CC_SANDBOX_ALLOWED_DOMAINS = [
 ]
 # Cap on agentic turns for one headless run (--max-turns). 0/empty = no cap.
 CC_MAX_TURNS = int(os.environ.get("CC_MAX_TURNS", "0"))
+# Comma-separated tool allowlist for the UNSANDBOXED path (CC_SANDBOX=False).
+# `--dangerously-skip-permissions` (yolo) is passed ONLY when the OS sandbox is
+# the safety boundary (CC_SANDBOX=True). Without the sandbox — e.g. a native
+# Windows smoke — yolo would be bare, so the engine drops it and instead passes
+# these tools via `--allowedTools` (Claude Code's OS-independent permission
+# system). Empty = no tools pre-allowed (default-deny; headless can't prompt, so
+# tool-needing actions are refused — safe, and enough to smoke that the CLI
+# runs and returns text).
+CC_ALLOWED_TOOLS = [
+    t.strip() for t in os.environ.get("CC_ALLOWED_TOOLS", "").split(",") if t.strip()
+]
 
 # Models
 EMBEDDING_MODEL = 'gemini-embedding-001'
