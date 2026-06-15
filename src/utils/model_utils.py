@@ -26,7 +26,12 @@ MODEL_BLACKLIST = [
 def get_model_prefix(model_name: str) -> str:
     """Return the model family prefix for routing and compatibility checks."""
     name_lower = model_name.lower()
-    if name_lower.startswith("gpt"):
+    # cc-* (Claude Code) is checked before the `"claude" in name_lower` branch
+    # so a future alias like `cc-claude-*` can't be misclassified as the
+    # Anthropic API family — mirrors the precedence in engine._get_provider_route.
+    if name_lower.startswith("cc-"):
+        return "cc"
+    elif name_lower.startswith("gpt"):
         return "gpt"
     elif "claude" in name_lower:
         return "claude"
@@ -117,6 +122,7 @@ def refresh_available_anthropic_models() -> List[str]:
 # Keyed by display group so they slot into the same shape as the API groups.
 STATIC_MODELS: Dict[str, List[str]] = {
     'Antigravity (OAuth tier)': ['agy-flash'],
+    'Claude Code (sandboxed)': ['cc-sonnet', 'cc-opus', 'cc-haiku'],
     'Local': ['local'],
 }
 

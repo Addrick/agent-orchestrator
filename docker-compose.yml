@@ -3,7 +3,15 @@ services:
     build: .
     container_name: chatbot_production
     restart: unless-stopped
+    # Claude Code's bubblewrap sandbox creates user namespaces; the default
+    # seccomp profile blocks some of the syscalls it needs. Unconfining seccomp
+    # lets bwrap run inside this unprivileged container. (Remove if CC_SANDBOX
+    # is disabled.) If bwrap still fails, the next step up is `cap_add:
+    # [SYS_ADMIN]`; avoid full `privileged: true`.
+    security_opt:
+      - seccomp:unconfined
     # Pass environment variables from your local .env file
+    # (CLAUDE_CODE_OAUTH_TOKEN — from `claude setup-token` — belongs here.)
     env_file:
       - .env
     environment:
@@ -12,6 +20,16 @@ services:
       # If you are running on Linux/AWS, you might need to set the Repo path for your git-pull logic
       # Though usually, in Docker, we prefer rebuilding the image over git-pulling inside.
       - REPO_PATH=/app
+      # --- Claude Code (cc-*) provider (DP-222) ---
+      - CLAUDE_CLI_PATH=/home/botuser/.local/bin/claude
+      - CLAUDE_CONFIG_DIR=/home/botuser/.claude
+      - CC_SANDBOX=True
+      # Unprivileged container: bind-mount the container's /proc for bwrap.
+      - CC_SANDBOX_WEAKER_NESTED=True
+      - CC_WORKSPACE_MODE=persona
+      # Headless runs can't answer a domain-approval prompt, so the sandboxed
+      # Bash tool has NO network unless domains are listed here (comma-sep).
+      # - CC_SANDBOX_ALLOWED_DOMAINS=github.com,api.github.com
     volumes:
       # Persist the SQLite database and other data
       - ./data:/app/data
@@ -19,3 +37,13 @@ services:
       - ./credentials:/app/credentials
       # Optional: Mount logs if you write to files
       - ./logs:/app/logs
+      # agy OAuth/cache state (DP-208) — matches the deployed derpr_agy_home volume
+      - derpr_agy_home:/home/botuser/.gemini
+      # Claude Code settings/cache + per-persona workspaces. Auth itself rides
+      # CLAUDE_CODE_OAUTH_TOKEN, so this volume is cache-only (optional but keeps
+      # CC's project index across container recreation).
+      - derpr_cc_home:/home/botuser/.claude
+
+volumes:
+  derpr_agy_home:
+  derpr_cc_home:

@@ -1401,3 +1401,314 @@ class TestAgyCliInvocation:
         assert captured_cwd == [os.path.abspath(workspace)]
         assert cache_target.exists()
         assert link.exists()
+
+
+class TestClaudeCodeProvider:
+    """DP-222: the `cc-*` Claude Code provider. Structural parity with agy
+    (subprocess one-shot, POSIX-only-when-sandboxed, persistent per-persona
+    workspace, dedicated limiter) but Claude Code runs its OWN sandboxed tools
+    (`--dangerously-skip-permissions`), so the engine's `tools` arg is ignored
+    and only the final text comes back."""
+
+    class _FakeProc:
+        def __init__(self, *, stdout=b"", stderr=b"", returncode=0, pid=4321):
+            self._stdout = stdout
+            self._stderr = stderr
+            self.returncode = returncode
+            self.pid = pid
+
+        async def communicate(self):
+            return self._stdout, self._stderr
+
+    # --- model-name mapping -------------------------------------------------
+
+    def test_cc_model_arg_strips_prefix(self, text_engine):
+        assert text_engine._cc_model_arg("cc-sonnet") == "sonnet"
+        assert text_engine._cc_model_arg("cc-opus") == "opus"
+        assert text_engine._cc_model_arg("cc-haiku") == "haiku"
+
+    def test_cc_model_arg_bare_prefix_defaults_sonnet(self, text_engine):
+        assert text_engine._cc_model_arg("cc-") == "sonnet"
+
+    def test_cc_prefix_not_classified_as_anthropic(self):
+        """`cc-*` must not be captured by the substring `claude` check."""
+        from src.utils.model_utils import get_model_prefix
+        assert get_model_prefix("cc-sonnet") == "cc"
+        assert get_model_prefix("claude-4-opus") == "claude"
+
+    def test_cc_excluded_from_image_support(self, text_engine):
+        assert text_engine.model_supports_images("cc-sonnet") is False
+
+    def test_cc_limiter_constructed(self, text_engine):
+        from aiolimiter import AsyncLimiter
+        assert isinstance(text_engine._cc_limiter, AsyncLimiter)
+
+    # --- routing ------------------------------------------------------------
+
+    def test_route_resolves_to_cc_handler(self, text_engine, monkeypatch):
+        monkeypatch.setattr(text_engine, "_ensure_cc_supported", lambda: None)
+        handler, limiters = text_engine._get_provider_route("cc-sonnet")
+        assert handler == text_engine._stream_cc_response
+        assert limiters == [text_engine._cc_limiter]
+
+    def test_route_cc_takes_precedence_over_anthropic(self, text_engine, monkeypatch):
+        """A cc- model must route to Claude Code, never the Anthropic API."""
+        monkeypatch.setattr(text_engine, "_ensure_cc_supported", lambda: None)
+        handler, _ = text_engine._get_provider_route("cc-opus")
+        assert handler == text_engine._stream_cc_response
+        assert handler != text_engine._stream_anthropic_response
+
+    def test_route_refuses_cc_on_windows_when_sandboxed(self, text_engine, monkeypatch):
+        import src.engine as engine_mod
+        from config import global_config
+        monkeypatch.setattr(global_config, "CC_SANDBOX", True)
+        monkeypatch.setattr(engine_mod.os, "name", "nt")
+        with pytest.raises(LLMCommunicationError, match="native Windows"):
+            text_engine._get_provider_route("cc-sonnet")
+
+    def test_route_allows_cc_on_windows_when_unsandboxed(self, text_engine, monkeypatch):
+        import src.engine as engine_mod
+        from config import global_config
+        monkeypatch.setattr(global_config, "CC_SANDBOX", False)
+        monkeypatch.setattr(engine_mod.os, "name", "nt")
+        handler, _ = text_engine._get_provider_route("cc-sonnet")
+        assert handler == text_engine._stream_cc_response
+
+    def test_ensure_cc_supported_ok_on_posix(self, text_engine, monkeypatch):
+        import src.engine as engine_mod
+        from config import global_config
+        monkeypatch.setattr(global_config, "CC_SANDBOX", True)
+        monkeypatch.setattr(engine_mod.os, "name", "posix")
+        text_engine._ensure_cc_supported()  # no raise
+
+    # --- argv construction --------------------------------------------------
+
+    def test_build_cc_args_core_flags(self, text_engine, monkeypatch):
+        from config import global_config
+        monkeypatch.setattr(global_config, "CC_SANDBOX", True)
+        monkeypatch.setattr(global_config, "CC_MAX_TURNS", 0)
+        args = text_engine._build_cc_args("the prompt", "the persona", "sonnet")
+        assert args[:2] == ["-p", "the prompt"]
+        assert "--output-format" in args and "text" in args
+        assert args[args.index("--model") + 1] == "sonnet"
+        assert args[args.index("--system-prompt") + 1] == "the persona"
+        assert "--dangerously-skip-permissions" in args
+        # sandbox settings present and well-formed
+        settings_raw = args[args.index("--settings") + 1]
+        parsed = json.loads(settings_raw)
+        assert parsed["sandbox"]["enabled"] is True
+        assert parsed["sandbox"]["autoAllowBashIfSandboxed"] is True
+
+    def test_build_cc_args_omits_system_prompt_when_empty(self, text_engine, monkeypatch):
+        from config import global_config
+        monkeypatch.setattr(global_config, "CC_SANDBOX", False)
+        args = text_engine._build_cc_args("p", "", "sonnet")
+        assert "--system-prompt" not in args
+
+    def test_build_cc_args_no_settings_when_sandbox_off(self, text_engine, monkeypatch):
+        from config import global_config
+        monkeypatch.setattr(global_config, "CC_SANDBOX", False)
+        args = text_engine._build_cc_args("p", "sys", "sonnet")
+        assert "--settings" not in args
+
+    def test_build_cc_args_no_yolo_when_sandbox_off(self, text_engine, monkeypatch):
+        """Unsandboxed path must NEVER pass bare --dangerously-skip-permissions."""
+        from config import global_config
+        monkeypatch.setattr(global_config, "CC_SANDBOX", False)
+        monkeypatch.setattr(global_config, "CC_ALLOWED_TOOLS", [])
+        args = text_engine._build_cc_args("p", "sys", "sonnet")
+        assert "--dangerously-skip-permissions" not in args
+        assert "--allowedTools" not in args  # empty allowlist = default-deny
+
+    def test_build_cc_args_allowlist_when_sandbox_off(self, text_engine, monkeypatch):
+        """CC_ALLOWED_TOOLS feeds --allowedTools on the unsandboxed path (no yolo)."""
+        from config import global_config
+        monkeypatch.setattr(global_config, "CC_SANDBOX", False)
+        monkeypatch.setattr(global_config, "CC_ALLOWED_TOOLS", ["Read", "Bash(npm run lint *)"])
+        args = text_engine._build_cc_args("p", "sys", "sonnet")
+        assert "--dangerously-skip-permissions" not in args
+        idx = args.index("--allowedTools")
+        assert args[idx + 1] == "Read"
+        assert args[idx + 2] == "Bash(npm run lint *)"
+
+    def test_build_cc_args_yolo_only_when_sandbox_on(self, text_engine, monkeypatch):
+        """yolo is bounded by the OS sandbox; allowlist is ignored when sandboxed."""
+        from config import global_config
+        monkeypatch.setattr(global_config, "CC_SANDBOX", True)
+        monkeypatch.setattr(global_config, "CC_ALLOWED_TOOLS", ["Read"])
+        args = text_engine._build_cc_args("p", "sys", "sonnet")
+        assert "--dangerously-skip-permissions" in args
+        assert "--allowedTools" not in args
+
+    def test_build_cc_args_max_turns(self, text_engine, monkeypatch):
+        from config import global_config
+        monkeypatch.setattr(global_config, "CC_SANDBOX", False)
+        monkeypatch.setattr(global_config, "CC_MAX_TURNS", 4)
+        args = text_engine._build_cc_args("p", "sys", "sonnet")
+        assert args[args.index("--max-turns") + 1] == "4"
+
+    def test_sandbox_settings_weaker_nested_and_domains(self, text_engine, monkeypatch):
+        from config import global_config
+        monkeypatch.setattr(global_config, "CC_SANDBOX", True)
+        monkeypatch.setattr(global_config, "CC_SANDBOX_WEAKER_NESTED", True)
+        monkeypatch.setattr(global_config, "CC_SANDBOX_ALLOWED_DOMAINS", ["github.com"])
+        settings = text_engine._build_cc_sandbox_settings()
+        assert settings["sandbox"]["enableWeakerNestedSandbox"] is True
+        assert settings["sandbox"]["network"]["allowedDomains"] == ["github.com"]
+
+    # --- handler ------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_handler_text_path(self, text_engine, base_context, monkeypatch):
+        mock_cli = AsyncMock(return_value="  claude code answer  ")
+        monkeypatch.setattr(text_engine, "_run_cc_cli", mock_cli)
+        config = {"model_name": "cc-sonnet"}
+        response, api_payload = await text_engine._generate_cc_response(config, base_context)
+        assert response == {"type": "text", "content": "claude code answer"}
+        assert api_payload["cc_model"] == "sonnet"
+
+    @pytest.mark.asyncio
+    async def test_handler_ignores_tools(self, text_engine, base_context, monkeypatch):
+        """derpr tools are NOT advertised to Claude Code, and no <tool_call>
+        protocol is injected into the prompt — CC uses its own tools."""
+        mock_cli = AsyncMock(return_value="done")
+        monkeypatch.setattr(text_engine, "_run_cc_cli", mock_cli)
+        config = {"model_name": "cc-sonnet"}
+        tools = [{"function": {"name": "get_weather", "description": "w",
+                               "parameters": {"type": "object", "properties": {}}}}]
+        response, api_payload = await text_engine._generate_cc_response(
+            config, base_context, tools=tools
+        )
+        assert response["type"] == "text"
+        assert api_payload["tools_ignored"] == ["get_weather"]
+        # system prompt goes via the --system-prompt flag, not the -p prompt;
+        # and the tool protocol is never rendered into the prompt.
+        prompt_arg, system_arg = mock_cli.call_args[0][0], mock_cli.call_args[0][1]
+        assert "<tool_call>" not in prompt_arg
+        assert "get_weather" not in prompt_arg
+        assert system_arg == "You are a test bot."
+
+    @pytest.mark.asyncio
+    async def test_handler_api_payload_has_no_secret(self, text_engine, base_context, monkeypatch):
+        mock_cli = AsyncMock(return_value="answer")
+        monkeypatch.setattr(text_engine, "_run_cc_cli", mock_cli)
+        config = {"model_name": "cc-sonnet"}
+        _, api_payload = await text_engine._generate_cc_response(config, base_context)
+        payload_str = str(api_payload).lower()
+        for forbidden in ["secret", "token", "oauth", "api_key", "password"]:
+            assert forbidden not in payload_str
+
+    @pytest.mark.asyncio
+    async def test_generate_response_end_to_end_text(self, text_engine, base_context, monkeypatch):
+        monkeypatch.setattr(text_engine, "_ensure_cc_supported", lambda: None)
+        mock_cli = AsyncMock(return_value="end-to-end cc answer")
+        monkeypatch.setattr(text_engine, "_run_cc_cli", mock_cli)
+        config = {"model_name": "cc-sonnet"}
+        response, _ = await text_engine.generate_response(config, base_context)
+        assert response == {"type": "text", "content": "end-to-end cc answer"}
+
+    # --- subprocess wiring + workspaces ------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_run_cc_cli_spawns_claude_binary(self, text_engine, monkeypatch, tmp_path):
+        import src.engine as engine_mod
+        from config import global_config
+        monkeypatch.setattr(global_config, "CC_SANDBOX", True)
+        monkeypatch.setattr(global_config, "CC_WORKSPACE_DIR", None)
+        monkeypatch.setattr(global_config, "CC_WORKSPACES_DIR", tmp_path / "workspaces")
+        monkeypatch.setattr(global_config, "CC_WORKSPACE_MODE", "persona")
+
+        captured = {}
+
+        async def fake_exec(*args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return self._FakeProc(stdout=b"hi from claude")
+
+        monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/claude")
+        monkeypatch.delenv("CLAUDE_CLI_PATH", raising=False)
+        monkeypatch.setattr(text_engine, "_ensure_cc_supported", lambda: None)
+
+        out = await text_engine._run_cc_cli("say hi", "be terse", "sonnet", persona_name="alice")
+
+        assert out == "hi from claude"
+        assert captured["args"][0] == "/usr/bin/claude"
+        assert "--dangerously-skip-permissions" in captured["args"]
+        assert captured["kwargs"].get("start_new_session") is True
+        assert captured["kwargs"].get("cwd") == os.path.abspath(tmp_path / "workspaces" / "cc_alice")
+
+    @pytest.mark.asyncio
+    async def test_run_cc_cli_workspace_dir_override(self, text_engine, monkeypatch, tmp_path):
+        import src.engine as engine_mod
+        from config import global_config
+        override = tmp_path / "derpr_checkout"
+        override.mkdir()
+        monkeypatch.setattr(global_config, "CC_WORKSPACE_DIR", str(override))
+
+        captured_cwd = []
+
+        async def fake_exec(*args, **kwargs):
+            captured_cwd.append(kwargs.get("cwd"))
+            return self._FakeProc(stdout=b"ok")
+
+        monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/claude")
+        monkeypatch.setattr(text_engine, "_ensure_cc_supported", lambda: None)
+
+        await text_engine._run_cc_cli("hi", "sys", "sonnet", persona_name="alice")
+        # explicit override wins over per-persona dir
+        assert captured_cwd == [os.path.abspath(override)]
+
+    @pytest.mark.asyncio
+    async def test_run_cc_cli_global_mode(self, text_engine, monkeypatch, tmp_path):
+        import src.engine as engine_mod
+        from config import global_config
+        monkeypatch.setattr(global_config, "CC_WORKSPACE_DIR", None)
+        monkeypatch.setattr(global_config, "CC_PERSISTENT_WORKSPACES", True)
+        monkeypatch.setattr(global_config, "CC_WORKSPACE_MODE", "global")
+        monkeypatch.setattr(global_config, "CC_WORKSPACES_DIR", tmp_path / "workspaces")
+
+        captured_cwd = []
+
+        async def fake_exec(*args, **kwargs):
+            captured_cwd.append(kwargs.get("cwd"))
+            return self._FakeProc(stdout=b"ok")
+
+        monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/claude")
+        monkeypatch.setattr(text_engine, "_ensure_cc_supported", lambda: None)
+
+        await text_engine._run_cc_cli("hi", "sys", "sonnet", persona_name="alice")
+        assert captured_cwd == [os.path.abspath(tmp_path / "workspaces" / "cc_global")]
+
+    @pytest.mark.asyncio
+    async def test_run_cc_cli_stateless_fallback_cleans_temp(self, text_engine, monkeypatch, tmp_path):
+        import src.engine as engine_mod
+        from config import global_config
+        monkeypatch.setattr(global_config, "CC_WORKSPACE_DIR", None)
+        monkeypatch.setattr(global_config, "CC_PERSISTENT_WORKSPACES", False)
+
+        captured_cwd = []
+
+        async def fake_exec(*args, **kwargs):
+            captured_cwd.append(kwargs.get("cwd"))
+            return self._FakeProc(stdout=b"ok")
+
+        monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/claude")
+        monkeypatch.setattr(text_engine, "_ensure_cc_supported", lambda: None)
+
+        out = await text_engine._run_cc_cli("hi", "sys", "sonnet")
+        assert out == "ok"
+        assert len(captured_cwd) == 1
+        assert not os.path.exists(captured_cwd[0])
+
+    @pytest.mark.asyncio
+    async def test_run_cc_cli_missing_binary_raises(self, text_engine, monkeypatch):
+        import src.engine as engine_mod
+        monkeypatch.setattr(text_engine, "_ensure_cc_supported", lambda: None)
+        monkeypatch.setattr(engine_mod.shutil, "which", lambda name: None)
+        monkeypatch.delenv("CLAUDE_CLI_PATH", raising=False)
+        with pytest.raises(LLMCommunicationError, match="binary not found"):
+            await text_engine._run_cc_cli("hi", "sys", "sonnet")

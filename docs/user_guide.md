@@ -198,6 +198,52 @@ normal tool loop — so persona tool policy, the read/write split, CONFIRM-mode
 approval, and untrusted-taint all apply exactly as they do for the other
 providers. The model never executes tools itself.
 
+### Claude Code (`cc`) — sandboxed autonomous provider
+
+`cc-*` models (`set model cc-sonnet`, `cc-opus`, `cc-haiku`) route through the
+local `claude -p` headless CLI instead of an API, running on the user's Claude
+**subscription/OAuth tier**. Like `agy` it is a subprocess-per-call, one-shot,
+**POSIX-only** provider with a persistent per-persona workspace and its own rate
+limiter — but it differs from every other provider in one important way:
+
+> **Claude Code runs its *own* tools.** The other providers (including `agy`)
+> only generate text; DERPR's tool loop executes any tools. The `cc` provider
+> instead launches Claude Code as an **autonomous agent** with
+> `--dangerously-skip-permissions` (yolo), bounded by Claude Code's built-in OS
+> sandbox. It edits files, runs shell commands, and uses its own tools inside
+> the workspace, then returns its final text. DERPR's `tools` argument is
+> **ignored** for this provider, and DERPR's read/write split, CONFIRM-mode
+> approval, and untrusted-taint do **not** gate Claude Code's actions — the OS
+> sandbox is the only boundary. Use it for self-contained goals/tasks, e.g.
+> pointing a persona at the DERPR checkout to talk to Claude Code about its own
+> codebase from any interface. (Approval routing for Claude Code's tool calls is
+> deferred to a future MCP-based tool layer.)
+
+The persona's system prompt **replaces** Claude Code's default system prompt
+(via `--system-prompt`); the conversation history is rendered into the `-p`
+prompt. Configure in `.env` or `config/global_config.py`:
+- `RATE_LIMIT_CC_RPM` (default `15`).
+- `CC_PERSISTENT_WORKSPACES` (default `True`): `False` reverts to throwaway temp dirs.
+- `CC_WORKSPACE_MODE` (default `"persona"`): `"global"` shares one DERPR-wide workspace (`data/workspaces/cc_{persona}` or `cc_global`).
+- `CC_WORKSPACE_DIR` (default unset): an explicit absolute path overriding the above — set it to the DERPR checkout to manage that repo from a chat interface.
+- `CC_SANDBOX` (default `True`): run bounded by Claude Code's OS sandbox (Seatbelt on macOS, bubblewrap on Linux/WSL2), with `--dangerously-skip-permissions` (yolo) waived inside that boundary. `False` runs unsandboxed: yolo is **dropped** and tools are gated to `CC_ALLOWED_TOOLS` instead — this is the only way to run on native Windows (the sandbox can't), e.g. a smoke test.
+- `CC_ALLOWED_TOOLS` (default empty): comma-separated tool allowlist for the unsandboxed path (`CC_SANDBOX=False`), passed via `--allowedTools` (Claude Code's OS-independent permission system, works on Windows). Empty = no tools pre-allowed (default-deny; a headless run can't answer an approval prompt, so tool-needing actions are refused — enough to verify the CLI runs and returns text). Ignored when `CC_SANDBOX=True`.
+- `CC_SANDBOX_WEAKER_NESTED` (default `False`): set `True` inside an unprivileged container (e.g. the DERPR Docker deploy) so bubblewrap can start; only safe when the container already provides isolation.
+- `CC_SANDBOX_ALLOWED_DOMAINS` (default empty): comma-separated domains the sandboxed Bash tool may reach. Empty = no network (a headless run cannot answer a domain-approval prompt, so network-needing tasks must list domains here).
+- `CC_MAX_TURNS` (default `0` = no cap): bound on agentic turns per call (`--max-turns`).
+
+> **Platform: POSIX only when sandboxed.** The Claude Code OS sandbox runs on
+> macOS/Linux/WSL2, never native Windows. Because this provider runs yolo, the
+> sandbox is the safety boundary, so DERPR refuses the `cc` route on native
+> Windows while `CC_SANDBOX` is on. Run the engine on the POSIX host
+> (Linux/macOS/WSL/Docker). On Linux/WSL2 the sandbox needs `bubblewrap` and
+> `socat` installed; inside an unprivileged container also set
+> `CC_SANDBOX_WEAKER_NESTED=True`.
+>
+> To smoke-test on native Windows, set `CC_SANDBOX=False`: the `claude -p` CLI
+> itself is cross-platform and headless, so it runs and returns text; only the
+> OS sandbox is POSIX-only. Tools stay gated to `CC_ALLOWED_TOOLS` (no yolo).
+
 ## Personas
 
 Personas are stateful LLM configuration objects. Each persona has its own model, system prompt, token limits, sampling parameters, tool access, and memory scope. Users interact with personas through the routing mechanisms described above.
