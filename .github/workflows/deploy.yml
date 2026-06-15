@@ -93,6 +93,10 @@ jobs:
       # agy keeps OAuth tokens + workspace cache under ~/.gemini; without this
       # volume every deploy wipes them and the agy route needs a re-login.
       AGY_HOME_VOLUME: derpr_agy_home
+      # Claude Code (cc-*) caches its config/state under ~/.claude. Cache-only
+      # (auth is the CLAUDE_CODE_OAUTH_TOKEN env var, not this volume), but
+      # persisting it avoids re-priming on every deploy.
+      CC_HOME_VOLUME: derpr_cc_home
       CONTAINER_NAME: chatbot
 
     steps:
@@ -123,12 +127,26 @@ jobs:
       - name: Run new container
         shell: powershell
         run: |
+          # cc-* (Claude Code) sandbox notes:
+          # - seccomp=unconfined: bubblewrap needs user-namespace syscalls that
+          #   Docker's default seccomp profile blocks in an unprivileged container.
+          # - CC_SANDBOX_WEAKER_NESTED=True: bind-mount the container's existing
+          #   /proc (can't mount a fresh one unprivileged). The container is Linux
+          #   (WSL2 backend) so bubblewrap works even though the host is Windows.
+          # - CLAUDE_CODE_OAUTH_TOKEN must be present in $ENV_FILE (.env) — a
+          #   1-year token from `claude setup-token`, set ONCE on a browser
+          #   machine. Without it cc-* auth fails; other personas still serve.
           docker run -d `
             --name $env:CONTAINER_NAME `
             --restart unless-stopped `
             --env-file $env:ENV_FILE `
+            --security-opt seccomp=unconfined `
+            -e CC_SANDBOX=True `
+            -e CC_SANDBOX_WEAKER_NESTED=True `
+            -e CC_WORKSPACE_MODE=persona `
             -v "${env:DATA_VOLUME}:/app/data" `
             -v "${env:AGY_HOME_VOLUME}:/home/botuser/.gemini" `
+            -v "${env:CC_HOME_VOLUME}:/home/botuser/.claude" `
             -p 5003:5003 `
             ${{ env.IMAGE_NAME }}:latest
 
