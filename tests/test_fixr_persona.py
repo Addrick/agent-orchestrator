@@ -19,7 +19,11 @@ def test_fixr_persona_loads_clean():
     assert personas is not None
     assert "fixr" in personas
     fixr = personas["fixr"]
-    assert fixr.get_model_name() == "claude-opus-4-8"
+    # gemini-3.1-flash-lite: an API tool-calling model that's actually keyed on
+    # prod. (claude-opus-4-8 was wrong — this deployment has no Anthropic API
+    # key; the supervisor needs a working tool-calling provider, and cc-* can't
+    # host it since cc-* bypasses derpr's tool loop.)
+    assert fixr.get_model_name() == "gemini-3.1-flash-lite"
     assert "fixr" in fixr.get_service_bindings()
     # Not quarantined — its tool policy composes cleanly.
     assert not fixr.get_security_block_reasons()
