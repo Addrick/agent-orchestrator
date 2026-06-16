@@ -169,6 +169,31 @@ def test_timeout_surfaces_error(tmp_path, monkeypatch):
         prepare_fixr_workspace(str(clone_dir), source_root=str(source_root))
 
 
+def test_refuses_clone_dir_that_is_live_source(tmp_path, monkeypatch):
+    """A clone_dir equal to (or containing) the live source tree must be
+    refused before any destructive git op runs — reset --hard/clean -fdx would
+    wipe the running checkout."""
+    source_root = tmp_path / "repo"
+    (source_root / ".git").mkdir(parents=True)
+
+    ran = {"called": False}
+
+    def fake_run(*a, **k):
+        ran["called"] = True
+        return _ok("")
+
+    monkeypatch.setattr(cm.subprocess, "run", fake_run)
+
+    # clone_dir == source tree
+    with pytest.raises(CloneManagerError, match="live source tree"):
+        prepare_fixr_workspace(str(source_root), source_root=str(source_root))
+    # clone_dir is a parent of the source tree
+    with pytest.raises(CloneManagerError, match="live source tree"):
+        prepare_fixr_workspace(str(tmp_path), source_root=str(source_root))
+
+    assert ran["called"] is False  # refused before any git ran
+
+
 def test_lock_serializes_concurrent_callers(tmp_path, monkeypatch):
     """The module lock prevents two callers from running git ops interleaved
     against the same tree."""

@@ -128,6 +128,22 @@ def prepare_fixr_workspace(
     base_ref = base_ref or global_config.CC_FIXR_BASE_REF
     src_root = source_root or str(global_config.PROJECT_ROOT)
     clone_dir = os.path.abspath(clone_dir)
+    src_abs = os.path.abspath(src_root)
+
+    # Safety: `reset --hard` + `clean -fdx` are destructive. Refuse to operate on
+    # the live checkout (or any dir containing it) — a misconfigured
+    # CC_FIXR_CLONE_DIR must never wipe the running source tree or its parents.
+    try:
+        # ValueError when on different drives/roots (Windows) → no containment.
+        common = os.path.commonpath([clone_dir, src_abs])
+    except ValueError:
+        common = None
+    if clone_dir == src_abs or common == clone_dir:
+        raise CloneManagerError(
+            f"Refusing to use {clone_dir} as the fixr clone dir: it is, or "
+            f"contains, the live source tree {src_abs}. Point CC_FIXR_CLONE_DIR "
+            "at a dedicated path."
+        )
 
     with _clone_lock:
         git_dir = os.path.join(clone_dir, ".git")
