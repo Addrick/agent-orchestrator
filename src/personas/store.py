@@ -117,7 +117,7 @@ def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
         persona_json: Dict[str, Any] = {
             "name": persona.get_name(),
             "prompt": persona.get_prompt(),
-            "model_name": persona.get_model_name(),
+            "model_name": persona.get_raw_model_name(),  # keep the "default" sentinel intact, not the resolved id
             "history_messages": persona.get_base_history_messages(),  # Save the base value, not the dynamic one
             "params": persona.get_generation_params().to_dict(),
             "display_name_in_chat": persona.should_display_name_in_chat(),
