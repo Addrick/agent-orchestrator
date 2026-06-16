@@ -4,9 +4,10 @@ interface Props {
   store: PortalStore
   collapsed: { rail: boolean; chan: boolean; insp: boolean }
   toggle: (k: 'rail' | 'chan' | 'insp') => void
+  onNewPersona: () => void
 }
 
-export function TopBar({ store, collapsed, toggle }: Props) {
+export function TopBar({ store, collapsed, toggle, onNewPersona }: Props) {
   const { persona, personaList, activePersona, switchPersona, offline } = store
   const initials = (persona?.display_name || activePersona || 'AS').slice(0, 2).toUpperCase()
 
@@ -32,6 +33,10 @@ export function TopBar({ store, collapsed, toggle }: Props) {
         </select>
         <span className="car">▾</span>
       </label>
+
+      <button className="newpersona-btn" title="create a new persona" onClick={onNewPersona}>
+        + new
+      </button>
 
       <div className="spacer" />
 

@@ -10,7 +10,7 @@ that also consumed these was retired in DP-200 finding A).
 from typing import Any, Callable, Dict, List, Tuple
 
 from src.persona import Persona
-from src.persona_fields import registry_patch_keys
+from src.persona_fields import apply_patch_fields, registry_patch_keys
 
 
 # (key, coercer) pairs. Coercer raises ValueError/TypeError on bad input,
@@ -55,6 +55,32 @@ def _apply_kobold_sampler_extras(
             persona.set_provider_extra("kobold", key, coercer(raw))
         except (ValueError, TypeError):
             rejected.append(key)
+
+
+def apply_persona_patch_body(
+    persona: Persona, data: Dict[str, Any], rejected: List[str]
+) -> None:
+    """Apply a full persona edit body to `persona` in place.
+
+    The single chokepoint shared by the PATCH /persona/{name} route (existing
+    persona edit) and the POST /personas route (create) so the two surfaces can
+    never drift. Runs the registry-managed keys, the history_messages/
+    context_length pair, instruct_tags, and the kobold sampler extras. Mutates
+    `persona`; appends any rejected (coerced-away / refused) field keys to
+    `rejected`. Unknown keys are ignored here — the caller reports them.
+    """
+    apply_patch_fields(persona, data, rejected)
+    if "history_messages" in data:
+        persona.set_history_messages(data["history_messages"])
+    elif "context_length" in data:
+        persona.set_history_messages(data["context_length"])
+    if "instruct_tags" in data:
+        tags = data["instruct_tags"]
+        if isinstance(tags, dict) and any(tags.values()):
+            persona.set_provider_extra("kobold", "instruct_tags", tags)
+        else:
+            persona.clear_provider_extra("kobold", "instruct_tags")
+    _apply_kobold_sampler_extras(persona, data, rejected)
 
 
 def get_kobold_extras_for_get(persona: Persona) -> Dict[str, Any]:

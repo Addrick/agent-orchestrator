@@ -99,6 +99,15 @@ export interface PatchPersonaResult {
   detail?: string
 }
 
+// ---- POST /api/v1/personas (create) ----
+export interface CreatePersonaResult {
+  result: string // 'created'
+  rejected_fields: string[]
+  unknown_fields: string[]
+  // the created persona, same shape as GET /persona/{name}
+  persona: Persona
+}
+
 // ---- GET /api/v1/tools/catalog ----
 export interface ToolCapabilities {
   locality: 'local' | 'remote'
