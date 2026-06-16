@@ -136,6 +136,18 @@ class Persona:
         return self._name
 
     def get_model_name(self) -> str:
+        """Effective model id used at runtime. The literal ``"default"`` is a
+        sentinel that resolves to the global ``DEFAULT_MODEL_NAME`` so personas
+        can inherit the project-wide default and move together when it changes.
+        Persistence + UI display use ``get_raw_model_name`` to keep the sentinel
+        intact (see store.save_personas_to_file, GET /api/v1/persona)."""
+        if self._model_name == "default":
+            return global_config.DEFAULT_MODEL_NAME
+        return self._model_name
+
+    def get_raw_model_name(self) -> str:
+        """The model id as authored (may be the ``"default"`` sentinel,
+        unresolved). For serialization + display, never for engine routing."""
         return self._model_name
 
     def get_prompt(self) -> str:
@@ -547,7 +559,7 @@ class Persona:
         """Returns a dictionary of the current generation parameters for the TextEngine."""
         config: Dict[str, Any] = {
             "persona_name": self._name,
-            "model_name": self._model_name,
+            "model_name": self.get_model_name(),
             "max_output_tokens": self._params.max_tokens,
             "temperature": self._params.temperature,
             "top_p": self._params.top_p,

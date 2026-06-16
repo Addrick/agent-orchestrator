@@ -19,7 +19,15 @@ def test_fixr_persona_loads_clean():
     assert personas is not None
     assert "fixr" in personas
     fixr = personas["fixr"]
-    assert fixr.get_model_name() == "claude-opus-4-8"
+    # fixr inherits the global default via the "default" sentinel so it moves
+    # with DEFAULT_MODEL_NAME instead of pinning a soon-deprecated id. The raw
+    # value stays "default" (round-trips through save/UI); get_model_name()
+    # resolves it for the engine. (A concrete id like claude-opus-4-8 was wrong
+    # — this deployment has no Anthropic API key — and cc-* can't host the
+    # supervisor since it bypasses derpr's tool loop. Loop live-smoked on prod
+    # 2026-06-16 → PR; the *-preview gemini tier 429s, non-preview is fine.)
+    assert fixr.get_raw_model_name() == "default"
+    assert fixr.get_model_name() == global_config.DEFAULT_MODEL_NAME
     assert "fixr" in fixr.get_service_bindings()
     # Not quarantined — its tool policy composes cleanly.
     assert not fixr.get_security_block_reasons()

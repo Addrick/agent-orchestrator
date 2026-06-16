@@ -787,6 +787,9 @@ _GETTER_TO_COMMAND = {
 # Getters that intentionally have no what command (internal/derived values).
 _GETTER_EXCEPTIONS = {
     'get_name',
+    # Internal serialization/display helper: returns the raw model_name (may be
+    # the "default" sentinel). 'what model' uses get_model_name (resolved).
+    'get_raw_model_name',
     'get_base_history_messages',
     'get_current_effective_history_messages',
     'get_config_for_engine',
