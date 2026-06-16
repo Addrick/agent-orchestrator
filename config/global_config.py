@@ -313,6 +313,22 @@ CC_FIXR_CHANNEL = os.environ.get("CC_FIXR_CHANNEL", "fixr")
 CC_FIXR_MODEL_ARG = os.environ.get("CC_FIXR_MODEL_ARG", "sonnet")
 CC_FIXR_DISCORD_CHANNEL = os.environ.get("CC_FIXR_DISCORD_CHANNEL", "")
 
+# Direct subagent ↔ Discord channel (DP-230). Each dispatched agent gets its own
+# THREAD under one auto-silenced parent channel; a human talks straight to the
+# agent in-thread (question → human → answer_agent) with NO fixr LLM turn.
+# CC_FIXR_AGENTS_CHANNEL_ID — Discord channel id under which per-agent threads are
+#   created. Empty/0 => the direct-channel feature is OFF (events still wake fixr).
+#   The channel must be pre-created (we do not auto-create channels).
+# CC_FIXR_IDLE_MINUTES — minutes an unanswered `question` waits in-thread before
+#   falling back to a (rare) fixr wake to auto-answer or kill the agent.
+# CC_FIXR_PROGRESS_DEBOUNCE_SECONDS — coalesce window for bursty `progress`
+#   events so the thread isn't one Discord message per event (rate-limit-safe).
+CC_FIXR_AGENTS_CHANNEL_ID = os.environ.get("CC_FIXR_AGENTS_CHANNEL_ID", "")
+CC_FIXR_IDLE_MINUTES = float(os.environ.get("CC_FIXR_IDLE_MINUTES", "10"))
+CC_FIXR_PROGRESS_DEBOUNCE_SECONDS = float(
+    os.environ.get("CC_FIXR_PROGRESS_DEBOUNCE_SECONDS", "1.5")
+)
+
 # Models
 EMBEDDING_MODEL = 'gemini-embedding-001'
 EMBEDDING_DIMENSION = 3072

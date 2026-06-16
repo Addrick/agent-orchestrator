@@ -41,6 +41,9 @@ class AgentRecord:
     status: str = RUNNING
     pr_url: Optional[str] = None
     last_event: Optional[str] = None
+    #: Discord thread carrying this agent's transcript + Q&A (DP-230). Set when
+    #: the per-agent thread is created; resolves inbound thread→agent_id.
+    discord_thread_id: Optional[str] = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
@@ -86,6 +89,16 @@ class AgentRegistry:
     async def remove(self, agent_id: str) -> Optional[AgentRecord]:
         async with self._lock:
             return self._records.pop(agent_id, None)
+
+    async def get_by_thread(self, thread_id: str) -> Optional[AgentRecord]:
+        """Resolve the agent whose Discord thread is ``thread_id`` (DP-230).
+
+        Inbound thread messages route to ``answer_agent`` via this lookup."""
+        async with self._lock:
+            for rec in self._records.values():
+                if rec.discord_thread_id == thread_id:
+                    return rec
+            return None
 
     async def has_active_for_bug(self, bug_id: str) -> bool:
         """True if a still-running/waiting agent already owns this bug — the

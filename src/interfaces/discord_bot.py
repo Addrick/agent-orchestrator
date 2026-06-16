@@ -77,6 +77,57 @@ class CustomDiscordBot(discord.Client):
             logger.error(f"Failed to send message to channel {channel_id}: {e}")
             return False
 
+    async def create_agent_thread(self, parent_channel_id: int, name: str) -> Optional[int]:
+        """Create a standalone public thread under ``parent_channel_id`` (DP-230).
+
+        Used for a dispatched agent's transcript + Q&A. Returns the thread id, or
+        None if the parent isn't a text channel / creation fails."""
+        try:
+            await self.wait_until_ready()
+            parent = await self.fetch_channel(parent_channel_id)
+            if not isinstance(parent, discord.TextChannel):
+                logger.error(f"fixr-agents parent {parent_channel_id} is not a text channel.")
+                return None
+            thread = await parent.create_thread(
+                name=name, auto_archive_duration=1440,
+                type=discord.ChannelType.public_thread,
+            )
+            return thread.id
+        except Exception as e:
+            logger.error(f"Failed to create agent thread under {parent_channel_id}: {e}")
+            return None
+
+
+async def route_agent_thread_message(
+    chat_system: 'ChatSystem', thread_id: str, content: str
+) -> bool:
+    """Route a message posted in an agent thread straight to the agent (DP-230).
+
+    Returns True when the message was handled here (i.e. the thread belongs to a
+    dispatched agent) so the caller skips the persona/LLM path entirely — the
+    whole point is a human↔agent round-trip with NO fixr LLM turn. A ``//``
+    prefix is a note-to-self and is swallowed without forwarding."""
+    fixr = chat_system.get_service("fixr")
+    if fixr is None:
+        return False
+    registry = getattr(fixr, "registry", None)
+    dispatcher = getattr(fixr, "dispatcher", None)
+    if registry is None or dispatcher is None:
+        return False
+    record = await registry.get_by_thread(thread_id)
+    if record is None:
+        return False  # a thread we don't own — let normal handling skip it
+    text = content.strip()
+    if text.startswith("//"):
+        return True  # note-to-self: handled (swallowed), not forwarded
+    if not text:
+        return True
+    try:
+        await dispatcher.answer_agent(record.agent_id, text)
+    except Exception as e:
+        logger.error(f"Failed to answer agent {record.agent_id} from thread: {e}")
+    return True
+
 
 async def get_image_url(message: discord.Message) -> Optional[str]:
     if message.attachments:
@@ -209,8 +260,13 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                 isinstance(message.channel, discord.abc.GuildChannel) and message.channel.id == DISCORD_DEBUG_CHANNEL):
             return
 
-        # Skip processing messages in threads
+        # DP-230: a message in a dispatched agent's thread goes straight to that
+        # agent (answer_agent → claude --resume), bypassing the persona/LLM path.
+        # Any other thread is skipped as before.
         if isinstance(message.channel, discord.Thread):
+            await route_agent_thread_message(
+                chat_system, str(message.channel.id), message.content
+            )
             return
 
         active_persona_name: Optional[str] = None

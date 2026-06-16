@@ -400,6 +400,24 @@ Config knobs: `CC_FIXR_CLONE_DIR` (base clone path; worktrees live under
 needs `github.com,api.github.com` in `CC_SANDBOX_ALLOWED_DOMAINS` and a scoped
 `GH_TOKEN` in the host env (never in chat).
 
+#### Talking directly to an agent (DP-230)
+
+When `CC_FIXR_AGENTS_CHANNEL_ID` is set to a Discord channel id, each dispatched
+agent gets its **own thread** under that channel. The thread is the agent's live
+transcript — progress (coalesced), questions (highlighted), and the final
+done/error summary stream into it. **Reply in the thread to talk straight to the
+agent**: your message routes to `answer_agent` (`claude --resume`) with **no
+`fixr` LLM turn** in the loop — a human↔agent round-trip, not a relayed one. A
+`//` prefix is a note-to-self (logged, not sent to the agent).
+
+If a `question` goes unanswered for `CC_FIXR_IDLE_MINUTES` (default 10), `fixr`
+is woken as a fallback to answer or kill the agent. When
+`CC_FIXR_AGENTS_CHANNEL_ID` is unset, agent questions wake `fixr` directly as
+before (the feature is off). The parent channel must be pre-created. Extra knobs:
+`CC_FIXR_PROGRESS_DEBOUNCE_SECONDS` (progress-coalesce window, default 1.5). The
+agent's thread "face" is the hidden `fixr-agent` system persona (identity/routing
+only — it never generates an LLM reply).
+
 ### Memory Tools (no service binding required)
 
 Available to any persona with `enabled_tools: ["*"]` (e.g., `joy`, `it-help`). These tools interact with the long-term memory store built by MemoryAgent.

@@ -106,6 +106,12 @@ def _register_interfaces(
     if DISCORD_BOT:
         logger.info("Initializing Discord bot...")
         discord_bot = create_discord_bot(bot)
+        # DP-230: late-bind the Discord client to the fixr supervisor so agent
+        # transcripts/questions can post to per-agent threads. FixrIntegration is
+        # constructed before this (step 7.1), so it can't receive the bot at ctor.
+        fixr = bot.get_service("fixr")
+        if fixr is not None and hasattr(fixr, "attach_discord"):
+            fixr.attach_discord(discord_bot)
         discord_token = os.environ.get("DISCORD_API_KEY")
         if not discord_token:
             logger.error("DISCORD_API_KEY not set. Cannot start Discord bot.")

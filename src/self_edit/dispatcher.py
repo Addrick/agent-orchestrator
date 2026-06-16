@@ -53,6 +53,9 @@ _AGENT_MAX_LIFE_SECONDS = 60 * 60
 
 #: on_wake(record, event) -> Awaitable — called for each {question,done,error}.
 WakeCallback = Callable[[AgentRecord, AgentEvent], Awaitable[None]]
+#: on_event(record, event) -> Awaitable — called for EVERY event (DP-230), so the
+#: transcript sink (per-agent Discord thread) sees progress, not just wakes.
+EventCallback = Callable[[AgentRecord, AgentEvent], Awaitable[None]]
 
 
 class DispatcherError(RuntimeError):
@@ -65,12 +68,14 @@ class Dispatcher:
         registry: AgentRegistry,
         *,
         on_wake: WakeCallback,
+        on_event: Optional[EventCallback] = None,
         platform: str = "claude",
         model_arg: Optional[str] = None,
         clone_dir: Optional[str] = None,
     ) -> None:
         self._registry = registry
         self._on_wake = on_wake
+        self._on_event = on_event
         self._platform = platform
         self._model_arg = model_arg or "sonnet"
         self._clone_dir = clone_dir
@@ -337,6 +342,13 @@ class Dispatcher:
         elif ev.type == STARTED and ev.payload.get("session_id"):
             fields["session_id"] = ev.payload["session_id"]
         await self._registry.update(record.agent_id, **fields)
+        # Transcript sink (DP-230) sees EVERY event; the fixr wake only fires for
+        # wake types. A failing sink must never kill the bridge.
+        if self._on_event is not None:
+            try:
+                await self._on_event(record, ev)
+            except Exception:  # noqa: BLE001
+                logger.exception("on_event failed for agent %s", record.agent_id)
         if ev.is_wake:
             try:
                 await self._on_wake(record, ev)

@@ -152,6 +152,25 @@
       "long_term_memory": false,
       "inject_timestamp": false,
       "history_messages": 0
+    },
+    {
+      "name": "fixr-agent",
+      "model_name": "local",
+      "params": {
+        "temperature": 0.0,
+        "top_p": null,
+        "top_k": null,
+        "max_tokens": 100
+      },
+      "prompt": "Identity/routing placeholder for a dispatched coding agent's Discord thread (DP-230). This persona is the agent's 'face' in the per-agent thread and the portal channel list; it is NEVER routed through generate_response — inbound thread messages go straight to dispatcher.answer_agent. If this persona ever produces an LLM turn, that is a routing bug.",
+      "display_name_in_chat": false,
+      "execution_mode": "AUTONOMOUS",
+      "enabled_tools": [],
+      "memory_mode": "global",
+      "meta_visible": false,
+      "long_term_memory": false,
+      "inject_timestamp": false,
+      "history_messages": 0
     }
   ]
 }

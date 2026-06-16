@@ -237,13 +237,19 @@ async def test_image_url_is_extracted_and_passed(mock_reset, mock_discord_client
 
 @pytest.mark.asyncio
 async def test_bot_ignores_thread_messages(mock_discord_client, mock_chat_system, mock_message):
-    """Tests that the bot ignores all messages sent in threads."""
+    """Bot ignores messages in threads that aren't dispatched-agent threads (DP-230).
+
+    Agent threads route to answer_agent (covered in tests/test_subagent_channel.py);
+    a plain thread with no fixr service falls through to no-op."""
     # Make the channel a thread
     mock_thread = AsyncMock(spec=discord.Thread)
     mock_thread.name = "SYSTEM"
+    mock_thread.id = 12345
     mock_thread.parent = mock_message.channel
     mock_message.channel = mock_thread
     mock_message.content = "vocal hello in thread"
+    # No fixr supervisor registered → the DP-230 thread router is a no-op.
+    mock_chat_system.get_service.return_value = None
 
     await mock_discord_client.on_message(mock_message)
 
