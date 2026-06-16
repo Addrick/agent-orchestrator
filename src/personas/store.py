@@ -132,6 +132,7 @@ def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
             "tool_policy": persona.get_tool_policy().to_dict(),
             "meta_visible": persona.get_meta_visible(),
             "inject_timestamp": persona.get_inject_timestamp(),
+            "self_edit": persona.get_self_edit(),
         }
         persona_list.append(persona_json)
     return persona_list
@@ -225,6 +226,7 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
                 ingest_bank=new_persona.get("ingest_bank"),
                 security_block_reasons=validation_errors,
                 inject_timestamp=new_persona.get("inject_timestamp", True),
+                self_edit=new_persona.get("self_edit", False),
                 **_resolve_params_kwargs(new_persona),
             )
 
@@ -297,6 +299,7 @@ def load_system_personas_from_file() -> Dict[str, Any]:
                 ingest_bank=new_persona.get("ingest_bank"),
                 security_block_reasons=validation_errors,
                 inject_timestamp=new_persona.get("inject_timestamp", False),
+                self_edit=new_persona.get("self_edit", False),
                 **params_kwargs,
             )
 

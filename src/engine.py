@@ -1273,11 +1273,16 @@ class TextEngine:
         return alias or "sonnet"
 
     @staticmethod
-    def _resolve_cc_workspace(persona_name: Optional[str]) -> Optional[str]:
+    def _resolve_cc_workspace(
+        persona_name: Optional[str], workspace_override: Optional[str] = None
+    ) -> Optional[str]:
         """Returns the working dir for this call, or None when persistence is
-        disabled (caller uses a throwaway temp dir). Precedence: explicit
-        CC_WORKSPACE_DIR override (e.g. the derpr checkout) > per-persona dir >
-        global dir. Does not create the directory."""
+        disabled (caller uses a throwaway temp dir). Precedence: per-call
+        workspace_override (e.g. the DP-227 fixr clone, set by the orchestration
+        layer) > explicit CC_WORKSPACE_DIR (the derpr checkout) > per-persona
+        dir > global dir. Does not create the directory."""
+        if workspace_override:
+            return os.path.abspath(workspace_override)
         if global_config.CC_WORKSPACE_DIR:
             return os.path.abspath(global_config.CC_WORKSPACE_DIR)
         if not global_config.CC_PERSISTENT_WORKSPACES:
@@ -1334,6 +1339,7 @@ class TextEngine:
         model_arg: str,
         timeout: float = CC_CALL_TIMEOUT_SECONDS,
         persona_name: Optional[str] = None,
+        workspace_override: Optional[str] = None,
     ) -> str:
         self._ensure_cc_supported()
 
@@ -1343,7 +1349,7 @@ class TextEngine:
 
         args = self._build_cc_args(prompt, system_prompt, model_arg)
 
-        workspace_dir = self._resolve_cc_workspace(persona_name)
+        workspace_dir = self._resolve_cc_workspace(persona_name, workspace_override)
         if workspace_dir is None:
             temp_dir = tempfile.mkdtemp()
             try:
@@ -1367,7 +1373,10 @@ class TextEngine:
         prompt = self._render_agy_prompt(history)
         model_arg = self._cc_model_arg(config.get("model_name", ""))
         persona_name = config.get("persona_name")
-        workspace_dir = self._resolve_cc_workspace(persona_name)
+        # DP-227: the orchestration layer may inject a per-run workspace (the
+        # fixr self-edit clone). It takes precedence over CC_WORKSPACE_DIR.
+        workspace_override = config.get("cc_workspace_override")
+        workspace_dir = self._resolve_cc_workspace(persona_name, workspace_override)
 
         if tools:
             logger.debug(
@@ -1395,7 +1404,8 @@ class TextEngine:
 
         try:
             raw = await self._run_cc_cli(
-                prompt, system_prompt or "", model_arg, persona_name=persona_name
+                prompt, system_prompt or "", model_arg,
+                persona_name=persona_name, workspace_override=workspace_override,
             )
         except LLMCommunicationError as e:
             if e.api_payload is None:

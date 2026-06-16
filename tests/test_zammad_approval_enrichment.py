@@ -31,6 +31,7 @@ async def test_zammad_approval_enrichment():
     mock_persona.get_prompt.return_value = "You are a helpful assistant."
     mock_persona.get_config_for_engine.return_value = {}
     mock_persona.get_execution_mode.return_value = ExecutionMode.CONFIRM
+    mock_persona.get_self_edit.return_value = False
     
     # 2. Run ToolLoop
     tool_loop = ToolLoop(mock_engine, tool_manager)
@@ -89,6 +90,7 @@ async def test_zammad_merge_enrichment():
     mock_persona.get_prompt.return_value = "You are a helpful assistant."
     mock_persona.get_config_for_engine.return_value = {}
     mock_persona.get_execution_mode.return_value = ExecutionMode.CONFIRM
+    mock_persona.get_self_edit.return_value = False
     
     # 2. Run ToolLoop
     tool_loop = ToolLoop(mock_engine, tool_manager)

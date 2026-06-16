@@ -41,6 +41,7 @@ def _make_persona(execution_mode=ExecutionMode.AUTONOMOUS):
     p.get_config_for_engine.return_value = {"model_name": "local"}
     p.get_prompt.return_value = "You are a test assistant."
     p.get_execution_mode.return_value = execution_mode
+    p.get_self_edit.return_value = False
     return p
 
 

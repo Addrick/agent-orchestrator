@@ -22,6 +22,7 @@ def _make_persona(execution_mode=ExecutionMode.AUTONOMOUS):
     p.get_config_for_engine.return_value = {"model_name": "local"}
     p.get_prompt.return_value = "You are a test assistant."
     p.get_execution_mode.return_value = execution_mode
+    p.get_self_edit.return_value = False
     return p
 
 
@@ -308,3 +309,80 @@ async def test_confirm_mode_parks_write_calls():
     assert finished.pending_writes[0]["name"] == "create_ticket"
     # Write tool was NOT executed — manager should not have been called for it.
     tools.execute_tool.assert_not_called()
+
+
+# --- DP-227: self_edit workspace injection ---
+
+@pytest.mark.asyncio
+async def test_self_edit_persona_injects_workspace_override(monkeypatch):
+    """A self_edit persona seeds the fixr clone and injects its path into the
+    engine config as cc_workspace_override before generation."""
+    import src.self_edit as self_edit_mod
+
+    captured_config = {}
+
+    def fake_prepare(*args, **kwargs):
+        return "/abs/fixr_clone"
+
+    monkeypatch.setattr(self_edit_mod, "prepare_fixr_workspace", fake_prepare)
+
+    engine = _make_engine([
+        [
+            {"type": "api_payload", "payload": {"req": 1}},
+            {"type": "text_delta", "text": "done"},
+            {"type": "done", "full_text": "done"},
+        ],
+    ])
+
+    def stream_messages(persona_config, *args, **kwargs):
+        captured_config.update(persona_config)
+        return _stream([
+            {"type": "api_payload", "payload": {"req": 1}},
+            {"type": "text_delta", "text": "done"},
+            {"type": "done", "full_text": "done"},
+        ])
+    engine.stream_messages.side_effect = stream_messages
+
+    persona = _make_persona()
+    persona.get_self_edit.return_value = True
+    persona.get_config_for_engine.return_value = {"model_name": "cc-sonnet"}
+
+    tools = _make_tool_manager({})
+    loop = ToolLoop(engine, tools)
+    events = await _drain(loop.run(
+        persona=persona, conversation_history=[],
+        params=MagicMock(), tools=[],
+    ))
+
+    assert captured_config.get("cc_workspace_override") == "/abs/fixr_clone"
+    assert any(isinstance(e, _LoopFinishedEvent) for e in events)
+
+
+@pytest.mark.asyncio
+async def test_self_edit_clone_failure_yields_error(monkeypatch):
+    """If clone prep fails, the turn ends with an ErrorEvent and never calls
+    the engine."""
+    import src.self_edit as self_edit_mod
+    from src.self_edit import CloneManagerError
+
+    def fake_prepare(*args, **kwargs):
+        raise CloneManagerError("git fetch failed")
+
+    monkeypatch.setattr(self_edit_mod, "prepare_fixr_workspace", fake_prepare)
+
+    engine = MagicMock()
+    engine.stream_messages.side_effect = AssertionError("engine must not run")
+
+    persona = _make_persona()
+    persona.get_self_edit.return_value = True
+    persona.get_config_for_engine.return_value = {"model_name": "cc-sonnet"}
+
+    loop = ToolLoop(engine, _make_tool_manager({}))
+    events = await _drain(loop.run(
+        persona=persona, conversation_history=[],
+        params=MagicMock(), tools=[],
+    ))
+
+    assert len(events) == 1
+    assert isinstance(events[0], ErrorEvent)
+    assert "workspace" in events[0].message.lower()

@@ -511,3 +511,45 @@ def test_build_wire_messages_no_inject_timestamp(base_persona_args):
     assert messages[0]["content"] == "You are a test persona."
 
 
+
+
+# --- DP-227: self_edit (fixr self-repair persona) ---
+
+def test_self_edit_default_false(base_persona_args):
+    """self_edit defaults to False so old configs without the key are unchanged."""
+    p = Persona(**base_persona_args)
+    assert p.get_self_edit() is False
+
+
+def test_self_edit_absent_in_config(base_persona_args):
+    """Loading from a config that predates the field => False (backward compat)."""
+    # base_persona_args intentionally omits self_edit, simulating an old config.
+    p = Persona(**base_persona_args)
+    assert p.get_self_edit() is False
+
+
+def test_self_edit_explicit_true(base_persona_args):
+    p = Persona(**base_persona_args, self_edit=True)
+    assert p.get_self_edit() is True
+
+
+def test_self_edit_setter(base_persona_args):
+    p = Persona(**base_persona_args)
+    p.set_self_edit(True)
+    assert p.get_self_edit() is True
+    p.set_self_edit(False)
+    assert p.get_self_edit() is False
+
+
+def test_self_edit_coerced_to_bool(base_persona_args):
+    p = Persona(**base_persona_args, self_edit=1)  # type: ignore[arg-type]
+    assert p.get_self_edit() is True
+
+
+def test_self_edit_in_config_for_engine_only_when_true(base_persona_args):
+    """get_config_for_engine exposes self_edit only when enabled (key absent
+    otherwise, matching the engine's opt-in contract)."""
+    off = Persona(**base_persona_args).get_config_for_engine()
+    assert "self_edit" not in off
+    on = Persona(**base_persona_args, self_edit=True).get_config_for_engine()
+    assert on.get("self_edit") is True

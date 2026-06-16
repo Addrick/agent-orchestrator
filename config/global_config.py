@@ -277,6 +277,29 @@ CC_ALLOWED_TOOLS = [
     t.strip() for t in os.environ.get("CC_ALLOWED_TOOLS", "").split(",") if t.strip()
 ]
 
+# --- DP-227: fixr self-edit clone ---------------------------------------------
+# The "fixr" persona (self_edit=True) operates on a pristine, per-run-refreshed
+# clone of derpr's OWN repo so it can diagnose -> edit -> test -> commit ->
+# open a PR against itself. The orchestration layer
+# (src/self_edit/clone_manager.py) seeds this clone and points the cc-* engine
+# workspace at it; engine.py stays transport-only.
+#
+# CC_FIXR_CLONE_DIR  — absolute path of the persistent clone (refreshed to a
+#                      clean base ref each run). Default: DATA_DIR/fixr_clone.
+# CC_FIXR_REPO_URL   — repo to clone. None => derive from `git remote get-url
+#                      origin` of the running checkout at seed time.
+# CC_FIXR_BASE_REF   — ref the clone is hard-reset to each run (origin/master).
+#
+# LIVE-RUN PREREQUISITES (do NOT hardcode secrets here):
+#   - add `github.com,api.github.com` to CC_SANDBOX_ALLOWED_DOMAINS so the
+#     sandboxed run can fetch/push and reach the GitHub API, and
+#   - provide a GitHub token via the `GH_TOKEN` env var (read straight through
+#     to the inherited child `gh`/`git` environment) — set it in the host
+#     `.env`/an Actions secret, never in source or chat.
+CC_FIXR_CLONE_DIR = os.environ.get("CC_FIXR_CLONE_DIR") or str(DATA_DIR / "fixr_clone")
+CC_FIXR_REPO_URL = os.environ.get("CC_FIXR_REPO_URL")  # None => derive from origin
+CC_FIXR_BASE_REF = os.environ.get("CC_FIXR_BASE_REF", "origin/master")
+
 # Models
 EMBEDDING_MODEL = 'gemini-embedding-001'
 EMBEDDING_DIMENSION = 3072

@@ -163,3 +163,32 @@ def test_inject_timestamp_field(persona):
     assert not rejected
     assert persona.get_inject_timestamp() is False
 
+
+def test_self_edit_field(persona):
+    """DP-227: self_edit is queryable, settable, and patchable through the
+    registry, default disabled."""
+    set_table = cli_set_handlers()
+    what_table = cli_what_handlers()
+
+    # Default disabled
+    assert "disabled" in what_table['self_edit']([], persona)[0]
+
+    # Turn on via CLI setter
+    msg, mutated = set_table['self_edit'](['self_edit', 'on'], persona)
+    assert mutated
+    assert "enabled" in msg
+    assert persona.get_self_edit() is True
+    assert "enabled" in what_table['self_edit']([], persona)[0]
+
+    # Turn off via CLI setter
+    msg, mutated = set_table['self_edit'](['self_edit', 'off'], persona)
+    assert mutated
+    assert "disabled" in msg
+    assert persona.get_self_edit() is False
+
+    # PATCH apply
+    rejected = []
+    apply_patch_fields(persona, {"self_edit": True}, rejected)
+    assert not rejected
+    assert persona.get_self_edit() is True
+

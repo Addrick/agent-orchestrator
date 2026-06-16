@@ -462,6 +462,22 @@ PERSONA_FIELDS: List[PersonaField] = [
         patch_apply=_plain_patch(lambda p, v: p.set_inject_timestamp(bool(v))),
     ),
     PersonaField(
+        name='self_edit',
+        describe=lambda p: (
+            f"Self-edit mode for '{p.get_name()}' is "
+            f"{'enabled' if p.get_self_edit() else 'disabled'}."
+        ),
+        set_cli=_bool_setter(
+            apply=lambda p, v: p.set_self_edit(v),
+            missing_msg="Error: Please specify 'on' or 'off' for self_edit.",
+            state_msg=lambda v, name: (
+                f"Self-edit mode {'enabled' if v else 'disabled'} for {name}."
+            ),
+        ),
+        patch_key='self_edit',
+        patch_apply=_plain_patch(lambda p, v: p.set_self_edit(bool(v))),
+    ),
+    PersonaField(
         name='ingest_bank',
         describe=lambda p: (
             f"Ingest target bank for '{p.get_name()}' is "

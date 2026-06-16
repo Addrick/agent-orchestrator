@@ -248,3 +248,58 @@ def test_save_personas_excludes_system_personas(temp_save_file: Path):
     with open(temp_save_file) as f:
         data = json.load(f)
     assert [entry["name"] for entry in data["personas"]] == ["joy"]
+
+
+# --- DP-227: self_edit field load/save ---
+
+def test_self_edit_absent_in_config_defaults_false(tmp_path: Path):
+    """Old config without the self_edit key loads with self_edit False."""
+    test_file = tmp_path / "no_self_edit.json"
+    test_file.write_text(json.dumps({
+        "personas": [{
+            "name": "legacy_bot",
+            "model_name": "gemini-2.5-flash",
+            "prompt": "hi",
+        }]
+    }))
+    loaded = save_utils.load_personas_from_file(str(test_file))
+    assert loaded["legacy_bot"].get_self_edit() is False
+
+
+def test_self_edit_present_in_config(tmp_path: Path):
+    """A config with self_edit:true loads the persona in self-edit mode."""
+    test_file = tmp_path / "with_self_edit.json"
+    test_file.write_text(json.dumps({
+        "personas": [{
+            "name": "fixr_like",
+            "model_name": "cc-sonnet",
+            "prompt": "fix bugs",
+            "self_edit": True,
+        }]
+    }))
+    loaded = save_utils.load_personas_from_file(str(test_file))
+    assert loaded["fixr_like"].get_self_edit() is True
+
+
+def test_self_edit_round_trip(temp_save_file: Path):
+    """self_edit survives save -> load."""
+    p = Persona(persona_name="se", model_name="cc-sonnet", prompt="p", self_edit=True)
+    save_utils.save_personas_to_file({"se": p}, set(), file_path_override=str(temp_save_file))
+    loaded = save_utils.load_personas_from_file(file_path_override=str(temp_save_file))
+    assert loaded["se"].get_self_edit() is True
+
+
+def test_default_personas_json_loads_fixr():
+    """The shipped default_personas.json defines a working fixr persona routed
+    to the cc-* engine with self_edit enabled (DP-227)."""
+    from config import global_config
+    default_file = os.path.join(global_config.CONFIG_DIR, "default_personas.json")
+    loaded = save_utils.load_personas_from_file(default_file)
+    assert loaded is not None
+    assert "fixr" in loaded
+    fixr = loaded["fixr"]
+    assert fixr.get_self_edit() is True
+    assert fixr.get_model_name() == "cc-sonnet"
+    assert fixr.get_execution_mode() == ExecutionMode.AUTONOMOUS
+    # config exposes self_edit to the engine
+    assert fixr.get_config_for_engine().get("self_edit") is True

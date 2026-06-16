@@ -1712,3 +1712,65 @@ class TestClaudeCodeProvider:
         monkeypatch.delenv("CLAUDE_CLI_PATH", raising=False)
         with pytest.raises(LLMCommunicationError, match="binary not found"):
             await text_engine._run_cc_cli("hi", "sys", "sonnet")
+
+    # --- DP-227: per-call workspace override (fixr self-edit clone) ----------
+
+    def test_resolve_cc_workspace_override_beats_workspace_dir(
+        self, text_engine, monkeypatch, tmp_path
+    ):
+        """The per-call override (the fixr clone) wins over CC_WORKSPACE_DIR,
+        which wins over the per-persona dir."""
+        from config import global_config
+        wsdir = tmp_path / "live_checkout"
+        override = tmp_path / "fixr_clone"
+        monkeypatch.setattr(global_config, "CC_WORKSPACE_DIR", str(wsdir))
+        # override present -> override wins over CC_WORKSPACE_DIR
+        assert text_engine._resolve_cc_workspace(
+            "alice", str(override)
+        ) == os.path.abspath(override)
+        # no override -> CC_WORKSPACE_DIR wins (existing precedence preserved)
+        assert text_engine._resolve_cc_workspace(
+            "alice", None
+        ) == os.path.abspath(wsdir)
+
+    def test_resolve_cc_workspace_override_beats_persona_dir(
+        self, text_engine, monkeypatch, tmp_path
+    ):
+        from config import global_config
+        monkeypatch.setattr(global_config, "CC_WORKSPACE_DIR", None)
+        monkeypatch.setattr(global_config, "CC_PERSISTENT_WORKSPACES", True)
+        monkeypatch.setattr(global_config, "CC_WORKSPACE_MODE", "persona")
+        monkeypatch.setattr(global_config, "CC_WORKSPACES_DIR", tmp_path / "workspaces")
+        override = tmp_path / "fixr_clone"
+        # override wins even over the per-persona dir
+        assert text_engine._resolve_cc_workspace(
+            "alice", str(override)
+        ) == os.path.abspath(override)
+        # without it, per-persona dir is used (unchanged behavior)
+        assert text_engine._resolve_cc_workspace("alice", None) == os.path.abspath(
+            tmp_path / "workspaces" / "cc_alice"
+        )
+
+    @pytest.mark.asyncio
+    async def test_generate_cc_response_uses_config_override(
+        self, text_engine, base_context, monkeypatch
+    ):
+        """`cc_workspace_override` in the engine config is threaded down to the
+        CLI runner as the workspace."""
+        monkeypatch.setattr(text_engine, "_ensure_cc_supported", lambda: None)
+        captured = {}
+
+        async def fake_run(prompt, system_prompt, model_arg, **kwargs):
+            captured.update(kwargs)
+            return "ok"
+
+        monkeypatch.setattr(text_engine, "_run_cc_cli", fake_run)
+        config = {
+            "model_name": "cc-sonnet",
+            "persona_name": "fixr",
+            "cc_workspace_override": "/abs/fixr_clone",
+        }
+        result, _ = await text_engine._generate_cc_response(config, base_context)
+        assert result == {"type": "text", "content": "ok"}
+        assert captured.get("workspace_override") == "/abs/fixr_clone"
+        assert captured.get("persona_name") == "fixr"

@@ -129,6 +129,20 @@ class ToolLoop:
         the approved write, and its result) rather than only post-resume calls.
         """
         persona_config = persona.get_config_for_engine()
+        # DP-227: self-edit personas ("fixr") operate on a pristine, per-run
+        # clone of derpr's own repo. Seed it here (orchestration, above the
+        # engine) and inject its path as the cc-* workspace override, so the
+        # engine stays transport-only. Failure to seed surfaces as an error
+        # event for this turn rather than silently editing the wrong tree.
+        if persona.get_self_edit():
+            from src.self_edit import CloneManagerError, prepare_fixr_workspace
+            try:
+                clone_path = await asyncio.to_thread(prepare_fixr_workspace)
+                persona_config["cc_workspace_override"] = clone_path
+            except CloneManagerError as e:
+                logger.error("fixr workspace preparation failed: %s", e)
+                yield ErrorEvent(message=f"Self-edit workspace error: {e}")
+                return
         history_start = (
             history_start_override if history_start_override is not None
             else len(conversation_history)

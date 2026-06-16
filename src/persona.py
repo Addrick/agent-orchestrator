@@ -60,6 +60,7 @@ class Persona:
             ingest_bank: Optional[str] = None,
             security_block_reasons: Optional[List[str]] = None,
             inject_timestamp: bool = True,
+            self_edit: bool = False,
     ) -> None:
         self._name: str = persona_name
         self._model_name: str = model_name
@@ -108,6 +109,11 @@ class Persona:
         self._meta_visible: bool = bool(meta_visible)
         self._ingest_bank: Optional[str] = ingest_bank if ingest_bank else None
         self._inject_timestamp: bool = bool(inject_timestamp)
+        # DP-227: when True this persona operates on a fresh, per-run-refreshed
+        # checkout of derpr's own codebase (the "fixr" self-edit spine). The
+        # orchestration layer (src/self_edit/clone_manager.py) seeds the clone
+        # and injects its path as the cc-* workspace override before the turn.
+        self._self_edit: bool = bool(self_edit)
 
         try:
             self._max_context_tokens: int = int(max_context_tokens) if max_context_tokens is not None else global_config.DEFAULT_MAX_CONTEXT_TOKENS
@@ -263,6 +269,17 @@ class Persona:
     def get_inject_timestamp(self) -> bool:
         """Whether to inject the current timestamp into the system prompt."""
         return self._inject_timestamp
+
+    def get_self_edit(self) -> bool:
+        """Whether this persona edits derpr's own codebase (DP-227 "fixr").
+
+        When True, the orchestration layer prepares a pristine per-run clone of
+        the repo and points the cc-* engine workspace at it, so the persona can
+        diagnose → edit → test → commit → open a PR against derpr itself.
+        Approval lives at the PR boundary; fixr never merges. Default False, so
+        old configs without the key behave exactly as before.
+        """
+        return self._self_edit
 
     def set_meta_visible(self, value: bool) -> None:
         self._meta_visible = bool(value)
@@ -437,6 +454,11 @@ class Persona:
         self._inject_timestamp = bool(value)
         logger.info(f"Persona '{self._name}' inject_timestamp set to {self._inject_timestamp}.")
 
+    def set_self_edit(self, value: bool) -> None:
+        """Enables/disables self-edit mode (DP-227 "fixr"). See get_self_edit."""
+        self._self_edit = bool(value)
+        logger.info(f"Persona '{self._name}' self_edit set to {self._self_edit}.")
+
     def set_thinking_level(self, value: Optional[str]) -> None:
         """Sets the thinking level for extended thinking models (e.g. 'minimal', None to clear)."""
         self._thinking_level = value
@@ -558,6 +580,8 @@ class Persona:
         if self._chat_template is not None:
             config["chat_template"] = self._chat_template
         config["max_context_tokens"] = self._max_context_tokens
+        if self._self_edit:
+            config["self_edit"] = True
         if self._params.provider_extras:
             config["provider_extras"] = {
                 k: dict(v) for k, v in self._params.provider_extras.items()
