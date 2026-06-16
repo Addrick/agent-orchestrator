@@ -244,6 +244,39 @@ prompt. Configure in `.env` or `config/global_config.py`:
 > itself is cross-platform and headless, so it runs and returns text; only the
 > OS sandbox is POSIX-only. Tools stay gated to `CC_ALLOWED_TOOLS` (no yolo).
 
+### Self-editing personas (`self_edit`) — the `fixr` bug-fix loop (DP-227)
+
+A persona with `self_edit: true` is wired to repair DERPR's **own codebase** from
+a chat report. Report a bug to the shipped `fixr` persona (routes to `cc-sonnet`),
+and it diagnoses → edits → runs the test suite → commits to a branch → opens a
+pull request — then stops. **Approval lives at the PR boundary:** a human reviews
+and merges every PR. `fixr`'s prompt hard-forbids `gh pr merge`, pushing to
+master, force-pushing, and editing CI/test infrastructure.
+
+To avoid touching the live, running checkout (uncommitted WIP + the `.venv`
+junction), each run operates inside a **dedicated, pristine clone** of the repo:
+on every turn DERPR refreshes that clone to an up-to-date base ref
+(`git fetch` + `reset --hard` + `clean -fdx`) and seeds gitignored test-support
+files (`.env.test`). The clone path is injected as the `cc-*` workspace for that
+call (highest workspace precedence), so the engine stays transport-only. If the
+clone can't be prepared, the turn fails with an error rather than editing the
+wrong tree.
+
+Configure in `.env` or `config/global_config.py`:
+- `CC_FIXR_CLONE_DIR` (default `data/fixr_clone`): where the self-edit clone lives.
+  DERPR **refuses** to use a path that is — or contains — the live source tree.
+- `CC_FIXR_REPO_URL` (default unset): clone source; falls back to the running
+  checkout's `origin` remote.
+- `CC_FIXR_BASE_REF` (default `origin/master`): the pristine ref each run resets to.
+
+> **Live prerequisites.** Opening PRs needs `GH_TOKEN` (a scoped bot PAT — branch
+> push + PRs, never admin/merge) in the environment, and `github.com` +
+> `api.github.com` in `CC_SANDBOX_ALLOWED_DOMAINS`. Like all `cc-*` runs, the
+> sandboxed path is POSIX-only. **Never paste a token into chat** — put it in
+> `.env`. Hardening for multi-bot setups: give the bot a separate machine-user
+> identity and protect `master` with a ruleset (require PR + review, bypass = you)
+> so the procedural "never merge" rule becomes enforced.
+
 ## Personas
 
 Personas are stateful LLM configuration objects. Each persona has its own model, system prompt, token limits, sampling parameters, tool access, and memory scope. Users interact with personas through the routing mechanisms described above.
@@ -261,6 +294,7 @@ These ship with the bot (defined in `config/default_personas.json`):
 | chatgpt | gpt-5 | General-purpose GPT | AUTONOMOUS | None |
 | claude | claude-haiku-4-5-20251001 | General-purpose Claude | AUTONOMOUS | None |
 | testr | gemini-2.5-flash | Test persona (responds "success") | AUTONOMOUS | None |
+| fixr | cc-sonnet | Self-edit: fix DERPR's own bugs → branch + PR (`self_edit`, see above) | AUTONOMOUS | None (uses Claude Code's own tools) |
 
 ### System Personas
 
