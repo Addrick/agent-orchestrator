@@ -302,6 +302,17 @@ CC_FIXR_CLONE_DIR = os.environ.get("CC_FIXR_CLONE_DIR") or str(DATA_DIR / "fixr_
 CC_FIXR_REPO_URL = os.environ.get("CC_FIXR_REPO_URL")  # None => derive from origin
 CC_FIXR_BASE_REF = os.environ.get("CC_FIXR_BASE_REF", "origin/master")
 
+# Supervisor wiring (the woken fixr persona + dispatched-agent model).
+# CC_FIXR_PERSONA  — persona name the event bridge wakes on agent events.
+# CC_FIXR_CHANNEL  — channel the bridge files fixr's woken turns under (memory scope).
+# CC_FIXR_MODEL_ARG — `claude --model` arg for DISPATCHED coding agents (not the
+#                     supervisor; the supervisor's model is its persona config).
+# CC_FIXR_DISCORD_CHANNEL — default recipient id for fixr's send_discord tool.
+CC_FIXR_PERSONA = os.environ.get("CC_FIXR_PERSONA", "fixr")
+CC_FIXR_CHANNEL = os.environ.get("CC_FIXR_CHANNEL", "fixr")
+CC_FIXR_MODEL_ARG = os.environ.get("CC_FIXR_MODEL_ARG", "sonnet")
+CC_FIXR_DISCORD_CHANNEL = os.environ.get("CC_FIXR_DISCORD_CHANNEL", "")
+
 # Models
 EMBEDDING_MODEL = 'gemini-embedding-001'
 EMBEDDING_DIMENSION = 3072
