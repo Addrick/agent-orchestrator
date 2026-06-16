@@ -365,6 +365,41 @@ Tools are capabilities the LLM can invoke during a conversation. Available tools
 | `get_agent_history` | Read | Recent action log with optional ticket/customer filters |
 | `manage_agent` | Write | Start, stop, or restart an agent |
 
+### fixr Tools (requires `service_bindings: ["fixr"]`)
+
+The `fixr` supervisor persona (`claude-opus-4-8`) repairs DERPR's own code. It
+does **not** edit code itself — it **dispatches** detached Claude Code coding
+agents (one per bug, each in an isolated `git worktree` off a pristine base
+clone of the repo) and is **woken by their log events** to coordinate and
+report. Report a bug to `fixr`; it dispatches an agent (after you approve), the
+agent diagnoses → fixes → tests → opens a PR, and **a human reviews and merges**
+— the agent never merges or pushes master.
+
+| Tool | Type | Description |
+|------|------|-------------|
+| `dispatch_fix` | **Write (parked)** | Spawn a coding agent for one bug in an isolated worktree. The **only** always-gated fixr tool — it parks for your approval before any agent runs. One agent per bug. |
+| `inspect_agents` | Read | List dispatched agents + status (running/waiting/done/error/killed), branch, PR url, last event. |
+| `answer_agent` | Write (ungated) | Resume a *waiting* agent (one that asked a question) with a decision, headless via `claude --resume`. |
+| `kill_agent` | Write (ungated) | Stop a stuck/runaway agent's process + event bridge; optionally drop its worktree. |
+| `send_discord` | Write (ungated) | Post a curated report (e.g. "agent opened PR <link>", or a fork needing a human) to the team channel. fixr reports on its own judgment. |
+
+Only `dispatch_fix` is confirmation-gated ("gate every dispatch; dial the rest
+later"); the coordination + reporting tools run ungated so the woken supervisor
+isn't approval-prompted on every agent event. Autonomy is bounded by the
+dispatch gate **and** the human-merge PR boundary.
+
+An agent signals its supervisor through its final message: `FIXR_QUESTION:` (I
+need a decision), `FIXR_DONE: <pr-url>` (finished), `FIXR_ERROR:` (blocked). A
+per-agent event bridge tails the agent's log, maps it to a common event schema,
+and wakes `fixr` on those events.
+
+Config knobs: `CC_FIXR_CLONE_DIR` (base clone path; worktrees live under
+`<clone>/worktrees/<bug>`), `CC_FIXR_BASE_REF` (default `origin/master`),
+`CC_FIXR_MODEL_ARG` (dispatched-agent model, default `sonnet`),
+`CC_FIXR_DISCORD_CHANNEL` (default `send_discord` recipient). A live run also
+needs `github.com,api.github.com` in `CC_SANDBOX_ALLOWED_DOMAINS` and a scoped
+`GH_TOKEN` in the host env (never in chat).
+
 ### Memory Tools (no service binding required)
 
 Available to any persona with `enabled_tools: ["*"]` (e.g., `joy`, `it-help`). These tools interact with the long-term memory store built by MemoryAgent.
