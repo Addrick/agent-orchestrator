@@ -96,6 +96,10 @@ Personas with `history_messages: 0` always render an empty transcript — the po
 
 **Persona selection persistence (DP-219):** your last-selected persona is remembered client-side (browser `localStorage`) and restored on page load, surviving engine restarts. The engine's own active-persona slot (`PUT /api/v1/model`) remains runtime routing state only — it is not persisted server-side; on boot the portal pushes the saved selection back to the engine so kobold-native passthrough routes agree. If the saved persona no longer exists, the portal falls back to the engine's default.
 
+**Create a persona (DP-231):** a **`+ new`** button beside the persona picker opens a create dialog. It captures the essentials — name (the routing key, lowercase `[a-z0-9_-]` only, no spaces), system prompt, model, memory mode, temperature, max tokens, and history window. Name is the only required field; a blank prompt/model falls back to the engine defaults (the prompt defaults to `you are in character as <name>`, matching the `add` dev command). On create the persona is persisted (`POST /api/v1/personas` → `personas.json`) and the portal switches to it, so the full **Inspector** — including the Tools tab for service bindings and tool policy — is immediately available to finish configuring it. A duplicate or malformed name is rejected with the engine's error shown inline.
+
+**Bulk tool toggles (DP-231):** the Inspector's **Tools** tab has a *set all tools* row (off · allow · ask) that flips every tool at once, plus per-service-group *off · allow* quick-set buttons in each group header — useful when configuring a freshly created persona that should start with most tools on (or off). Changes still save through the same `set tool_policy` path that revalidates the security composition.
+
 ## Commands
 
 All commands are entered as the message body when addressing a persona. Commands are case-insensitive.

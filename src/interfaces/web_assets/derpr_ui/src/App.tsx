@@ -5,6 +5,7 @@ import { NavRail } from './components/NavRail'
 import { Channels } from './components/Channels'
 import { Conversation } from './components/Conversation'
 import { Inspector } from './components/Inspector'
+import { NewPersonaModal } from './components/NewPersonaModal'
 
 interface Collapsed {
   rail: boolean
@@ -19,6 +20,7 @@ export default function App() {
     chan: false,
     insp: false,
   })
+  const [newPersonaOpen, setNewPersonaOpen] = useState(false)
 
   // The grid collapse rules in theme.css key off classes on <body>.
   useEffect(() => {
@@ -33,13 +35,21 @@ export default function App() {
 
   return (
     <div className="app">
-      <TopBar store={store} collapsed={collapsed} toggle={toggle} />
+      <TopBar
+        store={store}
+        collapsed={collapsed}
+        toggle={toggle}
+        onNewPersona={() => setNewPersonaOpen(true)}
+      />
       <div className="body">
         <NavRail />
         <Channels store={store} />
         <Conversation store={store} />
         <Inspector store={store} />
       </div>
+      {newPersonaOpen && (
+        <NewPersonaModal store={store} onClose={() => setNewPersonaOpen(false)} />
+      )}
     </div>
   )
 }

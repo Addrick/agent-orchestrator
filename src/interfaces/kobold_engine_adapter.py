@@ -10,6 +10,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 
 from src.request_builder import AssembledRequest
 
@@ -45,10 +46,9 @@ from src.interfaces.kobold_export import build_kobold_savefile, build_transcript
 from src.stream_engine import CHAT_TEMPLATES
 from src.interfaces.portal_render import render_portal_html
 from src.personas.store import save_personas_to_file
-from src.persona_fields import apply_patch_fields
 from src.interfaces._persona_patch import (
     _KNOWN_PATCH_KEYS_ENGINE as _KNOWN_PATCH_KEYS,
-    _apply_kobold_sampler_extras,
+    apply_persona_patch_body,
     get_kobold_extras_for_get,
 )
 
@@ -60,6 +60,11 @@ if TYPE_CHECKING:
     from src.tools.tool_manager import ToolManager
 
 logger = logging.getLogger(__name__)
+
+# Persona names are the routing key and a single dev-command token (the
+# `<persona> <command>` surface splits on whitespace), so a new persona's name
+# must be a single lowercase [a-z0-9_-] token. Enforced on POST /personas.
+_VALID_PERSONA_NAME = re.compile(r"[a-z0-9_-]+")
 
 
 def _kobold_base_url() -> str:
@@ -203,6 +208,34 @@ class KoboldEngineAdapter:
         """Public LTM seam for the client-side ltm_block route."""
         return self.chat_system.get_session_memory_block
 
+    def _persona_to_dict(self, p: "Persona") -> Dict[str, Any]:
+        """The persona JSON shape returned by GET /persona/{name} and the
+        POST /personas create route — one builder so the two never drift."""
+        return {
+            "name": p.get_name(),
+            "display_name": p.get_name().title(),
+            "prompt": p.get_prompt(),
+            "model_name": p.get_model_name(),
+            "temperature": p.get_temperature(),
+            "top_p": p.get_top_p(),
+            "top_k": p.get_top_k(),
+            "max_tokens": p.get_response_token_limit(),
+            "history_messages": p.get_base_history_messages(),
+            "thinking_level": p.get_thinking_level(),
+            "memory_mode": p.get_memory_mode().name,
+            "max_context_tokens": p.get_max_context_tokens(),
+            "long_term_memory": p.get_long_term_memory(),
+            "inject_timestamp": p.get_inject_timestamp(),
+            "chat_template": p.get_chat_template(),
+            "instruct_tags": p.get_provider_extra("kobold", "instruct_tags"),
+            "kobold_extras": get_kobold_extras_for_get(p),
+            "enabled_tools": p.get_enabled_tools(),
+            "tool_policy": p.get_tool_policy().to_dict(),
+            "service_bindings": p.get_service_bindings(),
+            "security_blocked": p.is_security_blocked(),
+            "security_block_reasons": p.get_security_block_reasons(),
+        }
+
     def _setup_portal(self) -> None:
         @self.app.get("/portal")
         async def get_portal() -> HTMLResponse:
@@ -295,31 +328,7 @@ class KoboldEngineAdapter:
         async def get_persona(name: str) -> Any:
             if name not in self._personas:
                 return JSONResponse(status_code=404, content={"error": f"Persona '{name}' not found"})
-            p = self._personas[name]
-            return {
-                "name": p.get_name(),
-                "display_name": p.get_name().title(),
-                "prompt": p.get_prompt(),
-                "model_name": p.get_model_name(),
-                "temperature": p.get_temperature(),
-                "top_p": p.get_top_p(),
-                "top_k": p.get_top_k(),
-                "max_tokens": p.get_response_token_limit(),
-                "history_messages": p.get_base_history_messages(),
-                "thinking_level": p.get_thinking_level(),
-                "memory_mode": p.get_memory_mode().name,
-                "max_context_tokens": p.get_max_context_tokens(),
-                "long_term_memory": p.get_long_term_memory(),
-                "inject_timestamp": p.get_inject_timestamp(),
-                "chat_template": p.get_chat_template(),
-                "instruct_tags": p.get_provider_extra("kobold", "instruct_tags"),
-                "kobold_extras": get_kobold_extras_for_get(p),
-                "enabled_tools": p.get_enabled_tools(),
-                "tool_policy": p.get_tool_policy().to_dict(),
-                "service_bindings": p.get_service_bindings(),
-                "security_blocked": p.is_security_blocked(),
-                "security_block_reasons": p.get_security_block_reasons(),
-            }
+            return self._persona_to_dict(self._personas[name])
 
         @self.app.get("/api/v1/channels")
         async def list_channels(persona: Optional[str] = None) -> Any:
@@ -727,6 +736,68 @@ class KoboldEngineAdapter:
                 "already_suppressed": not inserted,
             }
 
+        @self.app.post("/api/v1/personas")
+        async def create_persona(request: Request) -> Any:
+            """Create a new user persona from the portal's "+ New persona" form.
+
+            Body: {"name": str, plus any PATCH-able field (prompt, model_name,
+            memory_mode, samplers, …)}. The name is the routing key — lowercased
+            and restricted to a single [a-z0-9_-] token because the dev-command
+            surface splits on whitespace (`<persona> <command>`). A blank prompt
+            falls back to the same default as the `add` dev command. After
+            construction the body is applied through the shared edit chokepoint
+            (so create and PATCH stay identical), then persisted.
+            """
+            try:
+                data = await request.json()
+            except Exception as e:
+                return JSONResponse(status_code=400, content={"error": f"invalid JSON: {e}"})
+            if not isinstance(data, dict):
+                return JSONResponse(status_code=400, content={"error": "body must be a JSON object"})
+
+            raw_name = str(data.get("name") or "").strip().lower()
+            if not raw_name:
+                return JSONResponse(status_code=400, content={"error": "name is required"})
+            if not _VALID_PERSONA_NAME.fullmatch(raw_name):
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": "invalid name — use only lowercase letters, digits, '-' and '_' (no spaces)"},
+                )
+            if raw_name in self._personas:
+                return JSONResponse(
+                    status_code=409,
+                    content={"error": f"Persona '{raw_name}' already exists"},
+                )
+
+            from src.persona import Persona  # local import: avoid TYPE_CHECKING-only cycle
+            prompt = str(data.get("prompt") or "").strip() or f"you are in character as {raw_name}"
+            model_name = str(data.get("model_name") or "").strip() or global_config.DEFAULT_MODEL_NAME
+            p = Persona(persona_name=raw_name, model_name=model_name, prompt=prompt)
+
+            rejected: List[str] = []
+            apply_persona_patch_body(p, data, rejected)
+            unknown = sorted(set(data.keys()) - _KNOWN_PATCH_KEYS - {"name"})
+
+            self._personas[raw_name] = p
+            try:
+                save_personas_to_file(self._personas, self._system_persona_names)
+            except Exception as e:
+                # Roll back the in-memory registration so a failed save doesn't
+                # leave a phantom persona that vanishes on next restart.
+                self._personas.pop(raw_name, None)
+                logger.error(f"Persona create save failed for {raw_name}: {e}")
+                return JSONResponse(status_code=500, content={"error": "save_failed", "detail": str(e)})
+            logger.info(f"Created persona '{raw_name}' (rejected={rejected}, unknown={unknown})")
+            return JSONResponse(
+                status_code=201,
+                content={
+                    "result": "created",
+                    "rejected_fields": rejected,
+                    "unknown_fields": unknown,
+                    "persona": self._persona_to_dict(p),
+                },
+            )
+
         @self.app.patch("/api/v1/persona/{name}")
         async def patch_persona(name: str, request: Request) -> Any:
             if name not in self._personas:
@@ -739,24 +810,10 @@ class KoboldEngineAdapter:
 
             # Numeric setters silently coerce bad input to None / defaults and
             # return the resolved value. Capture rejections so the portal can
-            # surface them instead of pretending the save was clean.
+            # surface them instead of pretending the save was clean. The apply
+            # chokepoint is shared with the POST /personas create route.
             rejected: List[str] = []
-
-            # Core persona fields apply via the shared registry — one source
-            # of truth with the dev-command surface (DP-200 slice D).
-            apply_patch_fields(p, data, rejected)
-            if "history_messages" in data:
-                p.set_history_messages(data["history_messages"])
-            elif "context_length" in data:
-                p.set_history_messages(data["context_length"])
-            if "instruct_tags" in data:
-                tags = data["instruct_tags"]
-                if isinstance(tags, dict) and any(tags.values()):
-                    p.set_provider_extra("kobold", "instruct_tags", tags)
-                else:
-                    p.clear_provider_extra("kobold", "instruct_tags")
-
-            _apply_kobold_sampler_extras(p, data, rejected)
+            apply_persona_patch_body(p, data, rejected)
 
             unknown = sorted(set(data.keys()) - _KNOWN_PATCH_KEYS)
             if unknown:

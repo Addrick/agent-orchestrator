@@ -29,6 +29,7 @@ import type {
   ToolsCatalog,
   LtmBlockResponse,
   PatchPersonaResult,
+  CreatePersonaResult,
   VersionsResponse,
   DevCommandResponse,
   AssembledRequest,
@@ -127,6 +128,32 @@ export async function setActivePersona(name: string): Promise<void> {
   } catch {
     if (!_liveSeen) _usingMock = true
   }
+}
+
+// Create a new user persona (POST /api/v1/personas). Body carries `name` plus
+// any PATCH-able field (prompt, model_name, memory_mode, samplers…). NOT routed
+// through liveOr: creation must hit the real engine — a mock "success" would
+// lie. The engine echoes the created persona (same shape as GET) so the caller
+// can switch straight to it. On a 4xx the engine's {error} message is rethrown.
+export async function createPersona(
+  body: Record<string, unknown>,
+): Promise<CreatePersonaResult> {
+  const r = await fetch(`${BASE}/api/v1/personas`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!r.ok) {
+    let msg = `create persona → ${r.status}`
+    try {
+      const j = (await r.json()) as { error?: string }
+      if (j?.error) msg = j.error
+    } catch {
+      /* non-JSON body — keep the status message */
+    }
+    throw new Error(msg)
+  }
+  return (await r.json()) as CreatePersonaResult
 }
 
 export async function patchPersona(
