@@ -205,6 +205,12 @@ async def main() -> None:
     if zammad_client is not None:
         notification_router.register("zammad", ZammadNotifier(zammad_client))
 
+    # 7.1 Register the fixr self-improvement supervisor (DP-227). Needs both the
+    # ChatSystem (the event bridge wakes fixr via generate_response) and the
+    # NotificationRouter (fixr's send_discord), so it registers after the router.
+    from src.self_edit.integration import FixrIntegration
+    bot.register_service(FixrIntegration(bot, notification_router))
+
     # 8. Register interfaces
     _register_interfaces(app, bot, notification_router)
 

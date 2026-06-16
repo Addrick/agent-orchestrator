@@ -149,6 +149,9 @@ jobs:
             -e CC_SANDBOX=True `
             -e CC_SANDBOX_WEAKER_NESTED=True `
             -e CC_WORKSPACE_MODE=persona `
+            -e GH_TOKEN=${{ secrets.SELF_EDIT_REQUESTS }} `
+            -e CC_FIXR_REPO_URL=https://github.com/Addrick/agent-orchestrator.git `
+            -e CC_FIXR_MODEL_ARG=haiku `
             -v "${env:DATA_VOLUME}:/app/data" `
             -v "${env:AGY_HOME_VOLUME}:/home/botuser/.gemini" `
             -v "${env:CC_HOME_VOLUME}:/home/botuser/.claude" `
