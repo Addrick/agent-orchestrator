@@ -16,7 +16,12 @@ permissions:
 env:
   # Use your actual image name here
   IMAGE_NAME: ghcr.io/addrick/derpr-python
-  GOOGLE_GENERATIVEAI_API_KEY: ${{secrets.GOOGLE_GENERATIVEAI_API_KEY}}
+  # NOTE: secrets MUST NOT live at workflow-level env — that injects them into the
+  # `test` job, which runs on every pull_request. Same-repo-branch PRs receive full
+  # secrets (only forks are withheld), so a PR could exfiltrate them via test code.
+  # CI runs `-m "not integration"` + llm_live auto-skips, so no provider key is
+  # needed here. If a job ever needs one, scope it to that step, never globally.
+  # (DP-229; see memory codebase/ci-pr-secret-exposure.)
 
 jobs:
   # JOB 1: Run Tests and Static Analysis
@@ -144,6 +149,9 @@ jobs:
             -e CC_SANDBOX=True `
             -e CC_SANDBOX_WEAKER_NESTED=True `
             -e CC_WORKSPACE_MODE=persona `
+            -e GH_TOKEN=${{ secrets.SELF_EDIT_REQUESTS }} `
+            -e CC_FIXR_REPO_URL=https://github.com/Addrick/agent-orchestrator.git `
+            -e CC_FIXR_MODEL_ARG=haiku `
             -v "${env:DATA_VOLUME}:/app/data" `
             -v "${env:AGY_HOME_VOLUME}:/home/botuser/.gemini" `
             -v "${env:CC_HOME_VOLUME}:/home/botuser/.claude" `

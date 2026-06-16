@@ -215,7 +215,9 @@ class KoboldEngineAdapter:
             "name": p.get_name(),
             "display_name": p.get_name().title(),
             "prompt": p.get_prompt(),
-            "model_name": p.get_model_name(),
+            # raw, not resolved: show the "default" sentinel so a portal
+            # round-trip preserves it (DP-227).
+            "model_name": p.get_raw_model_name(),
             "temperature": p.get_temperature(),
             "top_p": p.get_top_p(),
             "top_k": p.get_top_k(),

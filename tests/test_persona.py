@@ -123,6 +123,29 @@ def test_set_model_name(persona):
     assert persona.get_model_name() == new_model
 
 
+def test_default_model_sentinel_resolves(base_persona_args, monkeypatch):
+    """A persona authored with model_name="default" inherits DEFAULT_MODEL_NAME
+    at runtime, while the raw value (for save + UI) stays the sentinel."""
+    monkeypatch.setattr(global_config, "DEFAULT_MODEL_NAME", "gemini-3.1-flash-lite")
+    args = {**base_persona_args, "model_name": "default"}
+    p = Persona(**args)
+    assert p.get_raw_model_name() == "default"
+    assert p.get_model_name() == "gemini-3.1-flash-lite"
+    # The engine config carries the resolved id (never the sentinel).
+    assert p.get_config_for_engine()["model_name"] == "gemini-3.1-flash-lite"
+    # Tracks the global default if it changes.
+    monkeypatch.setattr(global_config, "DEFAULT_MODEL_NAME", "gemini-2.5-flash")
+    assert p.get_model_name() == "gemini-2.5-flash"
+
+
+def test_concrete_model_name_not_resolved(base_persona_args):
+    """A concrete id passes through untouched — only the "default" literal is a
+    sentinel."""
+    p = Persona(**{**base_persona_args, "model_name": "gemini-2.5-flash"})
+    assert p.get_raw_model_name() == "gemini-2.5-flash"
+    assert p.get_model_name() == "gemini-2.5-flash"
+
+
 def test_set_response_token_limit(persona):
     """Tests valid, invalid, and edge cases for setting token limit."""
     assert persona.set_response_token_limit(500) == 500

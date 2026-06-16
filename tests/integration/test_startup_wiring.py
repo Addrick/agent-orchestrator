@@ -40,7 +40,7 @@ def wired_system():
             persona_name="test_persona", model_name="gemini-2.5-flash",
             prompt="test", enabled_tools=["*"],
             memory_mode=MemoryMode.CHANNEL_ISOLATED, history_messages=10,
-            service_bindings=["zammad", "agents"],
+            service_bindings=["zammad", "agents", "fixr"],
         ),
     }
 
@@ -53,6 +53,11 @@ def wired_system():
     chat_system.register_service(ZammadIntegration(mock_zammad))
     agent_manager = AgentManager(chat_system=chat_system, memory_manager=memory_manager)
     chat_system.register_service(AgentServiceIntegration(agent_manager, memory_manager))
+
+    # DP-227 fixr supervisor (needs ChatSystem + a NotificationRouter)
+    from src.self_edit.integration import FixrIntegration
+    from src.clients.notification import NotificationRouter
+    chat_system.register_service(FixrIntegration(chat_system, NotificationRouter()))
 
     try:
         yield chat_system

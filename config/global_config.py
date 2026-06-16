@@ -119,7 +119,7 @@ ALLOWED_SENDER_LIST = [
 # =============================================================================
 # LLM ENGINE SETTINGS
 # =============================================================================
-DEFAULT_MODEL_NAME = "gemini-2.5-flash-lite"
+DEFAULT_MODEL_NAME = "gemini-3.1-flash-lite"
 DEFAULT_ULTRAFAST_MODEL_NAME = "gemini-2.5-flash-lite"
 DEFAULT_PERSONA = "You are a helpful LLM assistant."
 
@@ -276,6 +276,42 @@ CC_MAX_TURNS = int(os.environ.get("CC_MAX_TURNS", "0"))
 CC_ALLOWED_TOOLS = [
     t.strip() for t in os.environ.get("CC_ALLOWED_TOOLS", "").split(",") if t.strip()
 ]
+
+# --- DP-227: fixr base clone + per-dispatch worktrees -------------------------
+# The "fixr" supervisor dispatches one detached coding agent per bug. Each agent
+# runs in an isolated `git worktree` off a PRISTINE base clone of derpr's OWN
+# repo (only ever `git fetch`ed, never reset/cleaned while worktrees attached),
+# so parallel dispatches can't corrupt each other. The dispatch tool
+# (src/self_edit/clone_manager.py) creates the worktree and points the cc-*
+# engine workspace at it; engine.py stays transport-only.
+#
+# CC_FIXR_CLONE_DIR  — absolute path of the persistent BASE clone. Worktrees
+#                      live under <CC_FIXR_CLONE_DIR>/worktrees/<bug-id>.
+#                      Default: DATA_DIR/fixr_clone.
+# CC_FIXR_REPO_URL   — repo to clone. None => derive from `git remote get-url
+#                      origin` of the running checkout at clone time.
+# CC_FIXR_BASE_REF   — ref each per-dispatch worktree branches off (origin/master).
+#
+# LIVE-RUN PREREQUISITES (do NOT hardcode secrets here):
+#   - add `github.com,api.github.com` to CC_SANDBOX_ALLOWED_DOMAINS so the
+#     sandboxed run can fetch/push and reach the GitHub API, and
+#   - provide a GitHub token via the `GH_TOKEN` env var (read straight through
+#     to the inherited child `gh`/`git` environment) — set it in the host
+#     `.env`/an Actions secret, never in source or chat.
+CC_FIXR_CLONE_DIR = os.environ.get("CC_FIXR_CLONE_DIR") or str(DATA_DIR / "fixr_clone")
+CC_FIXR_REPO_URL = os.environ.get("CC_FIXR_REPO_URL")  # None => derive from origin
+CC_FIXR_BASE_REF = os.environ.get("CC_FIXR_BASE_REF", "origin/master")
+
+# Supervisor wiring (the woken fixr persona + dispatched-agent model).
+# CC_FIXR_PERSONA  — persona name the event bridge wakes on agent events.
+# CC_FIXR_CHANNEL  — channel the bridge files fixr's woken turns under (memory scope).
+# CC_FIXR_MODEL_ARG — `claude --model` arg for DISPATCHED coding agents (not the
+#                     supervisor; the supervisor's model is its persona config).
+# CC_FIXR_DISCORD_CHANNEL — default recipient id for fixr's send_discord tool.
+CC_FIXR_PERSONA = os.environ.get("CC_FIXR_PERSONA", "fixr")
+CC_FIXR_CHANNEL = os.environ.get("CC_FIXR_CHANNEL", "fixr")
+CC_FIXR_MODEL_ARG = os.environ.get("CC_FIXR_MODEL_ARG", "sonnet")
+CC_FIXR_DISCORD_CHANNEL = os.environ.get("CC_FIXR_DISCORD_CHANNEL", "")
 
 # Models
 EMBEDDING_MODEL = 'gemini-embedding-001'
