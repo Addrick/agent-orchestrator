@@ -19,11 +19,12 @@ def test_fixr_persona_loads_clean():
     assert personas is not None
     assert "fixr" in personas
     fixr = personas["fixr"]
-    # gemini-3.1-flash-lite: an API tool-calling model that's actually keyed on
-    # prod. (claude-opus-4-8 was wrong — this deployment has no Anthropic API
-    # key; the supervisor needs a working tool-calling provider, and cc-* can't
-    # host it since cc-* bypasses derpr's tool loop.)
-    assert fixr.get_model_name() == "gemini-3.1-flash-lite"
+    # gemini-2.5-flash: an API tool-calling model that's actually keyed AND
+    # quota'd on prod. (gemini-3.1-flash-lite resolved to the zero-quota
+    # *-preview tier → 429; claude-opus-4-8 was wrong too — this deployment has
+    # no Anthropic API key, and cc-* can't host the supervisor since it bypasses
+    # derpr's tool loop. Live-smoked PONG on prod :5003 2026-06-16.)
+    assert fixr.get_model_name() == "gemini-2.5-flash"
     assert "fixr" in fixr.get_service_bindings()
     # Not quarantined — its tool policy composes cleanly.
     assert not fixr.get_security_block_reasons()
