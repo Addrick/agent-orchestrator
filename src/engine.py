@@ -33,6 +33,7 @@ from openai import AsyncOpenAI, APIStatusError, APITimeoutError
 from google import genai
 from google.genai.types import GenerateContentConfig, Tool, GoogleSearch, Candidate, \
     FunctionDeclaration, Part, ThinkingConfig
+from src.utils.claude_cli_env import build_claude_cli_env
 from src.utils.google_utils import process_grounding_metadata
 from src.generation_params import GenerationParams
 from src.llm_errors import LLMCommunicationError
@@ -1127,10 +1128,12 @@ class TextEngine:
 
     @staticmethod
     async def _exec_agy(binary: str, args: List[str], workspace_dir: str, timeout: float,
-                        label: str = "agy") -> str:
+                        label: str = "agy", env: Optional[Dict[str, str]] = None) -> str:
         # `label` names the provider in error messages — this CLI runner is
         # shared by the agy and cc (Claude Code) routes, so a failure must
-        # point at the route the caller actually invoked.
+        # point at the route the caller actually invoked. `env` overrides the
+        # child environment (cc passes a subscription-scrubbed env; agy passes
+        # None = inherit unchanged).
         proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -1140,6 +1143,7 @@ class TextEngine:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=workspace_dir,
+                env=env,
                 start_new_session=True
             )
             try:
@@ -1348,19 +1352,22 @@ class TextEngine:
             raise LLMCommunicationError("Claude Code 'claude' binary not found on PATH.")
 
         args = self._build_cc_args(prompt, system_prompt, model_arg)
+        # cc-* must use the Claude subscription, not the metered API: strip the
+        # inherited ANTHROPIC_API_KEY so `-p` mode falls through to the OAuth token.
+        cc_env = build_claude_cli_env()
 
         workspace_dir = self._resolve_cc_workspace(persona_name, workspace_override)
         if workspace_dir is None:
             temp_dir = tempfile.mkdtemp()
             try:
-                return await self._exec_agy(binary, args, temp_dir, timeout, label="Claude Code")
+                return await self._exec_agy(binary, args, temp_dir, timeout, label="Claude Code", env=cc_env)
             finally:
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
         os.makedirs(workspace_dir, exist_ok=True)
         lock = self._cc_workspace_locks.setdefault(workspace_dir, asyncio.Lock())
         async with lock:
-            return await self._exec_agy(binary, args, workspace_dir, timeout, label="Claude Code")
+            return await self._exec_agy(binary, args, workspace_dir, timeout, label="Claude Code", env=cc_env)
 
     async def _generate_cc_response(
         self, config: Dict[str, Any], history_object: Dict[str, Any], tools: Optional[List[Dict[str, Any]]] = None

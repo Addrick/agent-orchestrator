@@ -43,6 +43,7 @@ from src.self_edit.registry import (
     AgentRegistry,
 )
 from src.self_edit import registry as reg
+from src.utils.claude_cli_env import build_claude_cli_env
 
 logger = logging.getLogger(__name__)
 
@@ -205,12 +206,16 @@ class Dispatcher:
         if not binary:
             raise DispatcherError("Claude Code 'claude' binary not found on PATH.")
         argv = self._build_argv(prompt, system_prompt, resume_session)
+        # Force the dispatched agent onto the Claude subscription (strip the
+        # inherited ANTHROPIC_API_KEY so `-p` mode doesn't silently bill the API).
+        env = build_claude_cli_env()
         # Append-mode so a resume continues the same audit trail.
         log_fh = open(raw_log, "a", encoding="utf-8")
         try:
             proc = await asyncio.create_subprocess_exec(
                 binary, *argv,
                 cwd=cwd,
+                env=env,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=log_fh,
                 stderr=asyncio.subprocess.STDOUT,

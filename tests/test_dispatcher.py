@@ -9,6 +9,7 @@ import os
 import pytest
 
 import src.self_edit.dispatcher as disp
+from config import global_config
 from src.self_edit import registry as reg
 from src.self_edit.dispatcher import Dispatcher, DispatcherError, _read_from
 from src.self_edit.events import DONE, ERROR, QUESTION
@@ -210,6 +211,34 @@ async def test_answer_agent_requires_session(tmp_path):
 
     with pytest.raises(DispatcherError, match="Unknown agent_id"):
         await d.answer_agent("ghost", "hi")
+
+
+async def test_spawn_strips_api_key_from_child_env(tmp_path, monkeypatch):
+    """DP-232: the dispatched `claude` must run on the subscription — `_spawn`
+    must hand create_subprocess_exec an env with ANTHROPIC_API_KEY removed."""
+    monkeypatch.setattr(global_config, "CC_USE_SUBSCRIPTION", True)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-keep")
+    monkeypatch.setenv("CLAUDE_CLI_PATH", "claude")  # skip shutil.which lookup
+
+    captured = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured.update(kwargs)
+        return _FakeProc(pid=7)
+
+    monkeypatch.setattr(disp.asyncio, "create_subprocess_exec", fake_exec)
+
+    d = Dispatcher(AgentRegistry(), on_wake=_noop_wake)
+    await d._spawn(
+        prompt="p", system_prompt="s", cwd=str(tmp_path),
+        raw_log=str(tmp_path / "raw.jsonl"),
+    )
+
+    env = captured["env"]
+    assert env is not None
+    assert "ANTHROPIC_API_KEY" not in env
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-keep"
 
 
 async def _noop_wake(record, event):
