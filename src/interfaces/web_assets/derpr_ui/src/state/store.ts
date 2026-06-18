@@ -260,6 +260,29 @@ export function usePortalStore() {
     [loadAll],
   )
 
+  // ---- create a new persona (DP-231) --------------------------------
+  // POST the create body, refresh the picker list, then switch to the new
+  // persona so its (real) Inspector is immediately available for the rest of
+  // the config (tools, samplers). Returns {ok} so the modal can keep itself
+  // open and surface the engine's error (duplicate / invalid name) on failure.
+  const createPersona = useCallback(
+    async (
+      body: Record<string, unknown>,
+    ): Promise<{ ok: boolean; name?: string; error?: string }> => {
+      try {
+        const res = await api.createPersona(body)
+        const name = res.persona.name
+        const list = await api.listPersonas()
+        setPersonaList(list.length ? list : [name])
+        await switchPersona(name)
+        return { ok: true, name }
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) }
+      }
+    },
+    [switchPersona],
+  )
+
   // ---- channel switch / create (6b) ---------------------------------
   // Switch the active channel and re-fetch the transcript scoped to it. The
   // engine honors the persona's memory_mode for isolation.
@@ -587,6 +610,7 @@ export function usePortalStore() {
     setViewMode,
     toggleLtm,
     switchPersona,
+    createPersona,
     switchChannel,
     newChannel,
     resolveConfirm,

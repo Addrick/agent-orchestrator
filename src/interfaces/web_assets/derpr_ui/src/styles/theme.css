@@ -596,3 +596,49 @@ body.persona-blocked .secbanner { display: block; }
 .ovrow { display: flex; align-items: center; gap: 8px; padding: 5px 0; cursor: pointer; }
 .ovrow .ovlbl { font-size: 10.5px; color: var(--ink-2); font-family: var(--sans); }
 .ovrow code { font-size: 9.5px; color: var(--ink-faint); }
+
+/* ---- create-persona (DP-231) ---- */
+.newpersona-btn {
+  font-size: 11px; color: var(--accent); background: var(--accent-bg);
+  border: 1px solid var(--accent-dim); border-radius: var(--r);
+  padding: 6px 11px; cursor: pointer; white-space: nowrap;
+}
+.newpersona-btn:hover { color: var(--accent-2); border-color: var(--accent); }
+
+.modal-backdrop {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(4, 6, 10, 0.62);
+  display: grid; place-items: center; padding: 24px;
+}
+.modal {
+  width: min(520px, 100%); max-height: 88vh; overflow: auto;
+  background: var(--panel-2); border: 1px solid var(--line-2);
+  border-radius: 10px; box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+}
+.modal-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 14px; border-bottom: 1px solid var(--line);
+}
+.modal-head b { font-size: 13px; color: var(--ink); }
+.modal-head .cbtn { margin-left: auto; width: 26px; height: 26px; }
+.modal-body { display: block; }
+.modal-hint {
+  display: block; margin-top: 7px; font-size: 9.5px; font-family: var(--sans);
+  color: var(--ink-faint); line-height: 1.4;
+}
+.modal .savebar { border-top: 1px solid var(--line); }
+
+/* bulk tool-state setters (Tools tab) */
+.bulkrow {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 14px; border-bottom: 1px solid var(--line);
+}
+.bulkrow .lbl { font-size: 9px; letter-spacing: 0.5px; text-transform: uppercase; color: var(--ink-faint); }
+.bulkrow .tristate {
+  margin-left: auto; display: inline-flex;
+  border: 1px solid var(--line); border-radius: 5px; overflow: hidden;
+}
+.grpbulk {
+  display: inline-flex; margin-left: 8px;
+  border: 1px solid var(--line); border-radius: 5px; overflow: hidden;
+}

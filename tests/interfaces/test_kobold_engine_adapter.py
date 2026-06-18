@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 
+from config import global_config
 from memory.memory_manager import MemoryManager
 from src.chat_system import ChatSystem
 from src.engine import TextEngine
@@ -704,6 +705,107 @@ def test_patch_persona_unknown_mode_does_not_crash():
         r = client.patch("/api/v1/persona/test_persona", json={"memory_mode": "INVALID_MODE"})
     assert r.status_code == 200
     assert persona.get_memory_mode() == original
+    mm.close()
+
+
+# -------- DP-231: POST /api/v1/personas (create) --------
+
+def _adapter_with_temp_save(tmp_path, monkeypatch):
+    """Seeded adapter whose persona save file is redirected to a temp path so
+    create-route persistence is asserted without touching data/personas.json."""
+    monkeypatch.setattr(global_config, "PERSONA_SAVE_FILE", tmp_path / "personas.json")
+    return _make_adapter_with_seeded_db()
+
+
+def test_create_persona_minimal(tmp_path, monkeypatch):
+    adapter, mm, _ = _adapter_with_temp_save(tmp_path, monkeypatch)
+    with TestClient(adapter.app) as client:
+        r = client.post("/api/v1/personas", json={"name": "newbie"})
+    assert r.status_code == 201
+    body = r.json()
+    assert body["result"] == "created"
+    assert body["persona"]["name"] == "newbie"
+    # default prompt mirrors the `add` dev command
+    assert body["persona"]["prompt"] == "you are in character as newbie"
+    # registered in the live registry → routable + GET-able
+    assert "newbie" in adapter._personas
+    with TestClient(adapter.app) as client:
+        assert client.get("/api/v1/persona/newbie").status_code == 200
+    mm.close()
+
+
+def test_create_persona_lowercases_name(tmp_path, monkeypatch):
+    adapter, mm, _ = _adapter_with_temp_save(tmp_path, monkeypatch)
+    with TestClient(adapter.app) as client:
+        r = client.post("/api/v1/personas", json={"name": "MixedCase"})
+    assert r.status_code == 201
+    assert r.json()["persona"]["name"] == "mixedcase"
+    assert "mixedcase" in adapter._personas
+    mm.close()
+
+
+def test_create_persona_applies_fields(tmp_path, monkeypatch):
+    adapter, mm, _ = _adapter_with_temp_save(tmp_path, monkeypatch)
+    with TestClient(adapter.app) as client:
+        r = client.post("/api/v1/personas", json={
+            "name": "tuned",
+            "prompt": "be terse",
+            "model_name": "local",
+            "memory_mode": "GLOBAL",
+            "temperature": 0.4,
+        })
+    assert r.status_code == 201
+    p = adapter._personas["tuned"]
+    assert p.get_prompt() == "be terse"
+    assert p.get_model_name() == "local"
+    assert p.get_memory_mode().name == "GLOBAL"
+    assert p.get_temperature() == 0.4
+    mm.close()
+
+
+def test_create_persona_duplicate_returns_409(tmp_path, monkeypatch):
+    adapter, mm, _ = _adapter_with_temp_save(tmp_path, monkeypatch)
+    # test_persona already exists in the seeded registry
+    with TestClient(adapter.app) as client:
+        r = client.post("/api/v1/personas", json={"name": "test_persona"})
+    assert r.status_code == 409
+    assert "already exists" in r.json()["error"]
+    mm.close()
+
+
+def test_create_persona_invalid_name_returns_400(tmp_path, monkeypatch):
+    adapter, mm, _ = _adapter_with_temp_save(tmp_path, monkeypatch)
+    with TestClient(adapter.app) as client:
+        for bad in ["has space", "bad/slash", "", "   "]:
+            r = client.post("/api/v1/personas", json={"name": bad})
+            assert r.status_code == 400, bad
+    # nothing leaked into the registry
+    assert set(adapter._personas) == {"test_persona"}
+    mm.close()
+
+
+def test_create_persona_persists_to_file(tmp_path, monkeypatch):
+    adapter, mm, _ = _adapter_with_temp_save(tmp_path, monkeypatch)
+    with TestClient(adapter.app) as client:
+        r = client.post("/api/v1/personas", json={"name": "saved_one", "prompt": "hi"})
+    assert r.status_code == 201
+    on_disk = json.loads((tmp_path / "personas.json").read_text())
+    names = [p["name"] for p in on_disk["personas"]]
+    assert "saved_one" in names
+    mm.close()
+
+
+def test_create_persona_rolls_back_on_save_failure(tmp_path, monkeypatch):
+    adapter, mm, _ = _adapter_with_temp_save(tmp_path, monkeypatch)
+    with patch(
+        "src.interfaces.kobold_engine_adapter.save_personas_to_file",
+        side_effect=OSError("disk full"),
+    ):
+        with TestClient(adapter.app) as client:
+            r = client.post("/api/v1/personas", json={"name": "ghost"})
+    assert r.status_code == 500
+    # failed save must not leave a phantom in-memory persona
+    assert "ghost" not in adapter._personas
     mm.close()
 
 

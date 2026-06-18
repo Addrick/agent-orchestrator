@@ -587,6 +587,16 @@ function ToolsPane({
 
   const setToolState = (name: string, s: ToolState) =>
     setDraft((d) => ({ ...d, states: { ...d.states, [name]: s } }))
+  // Bulk setters (DP-231): flip every tool, or every tool in one service
+  // group, to the same state in a single click — the "check all" affordance for
+  // a fresh persona that wants most tools on (or off).
+  const setManyStates = (names: string[], s: ToolState) =>
+    setDraft((d) => {
+      const states = { ...d.states }
+      for (const n of names) states[n] = s
+      return { ...d, states }
+    })
+  const setAllState = (s: ToolState) => setManyStates(tools.map((t) => t.name), s)
   const setDefault = (def: string) => setDraft((d) => ({ ...d, default: def }))
   const toggleBinding = (b: string) =>
     setDraft((d) => {
@@ -719,6 +729,23 @@ function ToolsPane({
         </select>
       </div>
 
+      <div className="bulkrow">
+        <span className="lbl">set all tools</span>
+        <div className="tristate" role="group" aria-label="set all tools">
+          {(['off', 'allow', 'ask'] as ToolState[]).map((s) => (
+            <button
+              key={s}
+              className="tri"
+              disabled={busy}
+              title={`set every tool to ${s}`}
+              onClick={() => setAllState(s)}
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {knownBindings.length > 0 && (
         <>
           <div className="section">
@@ -764,6 +791,24 @@ function ToolsPane({
                 {nAllow && nAsk ? ' · ' : ''}
                 {nAsk ? `${nAsk} ask` : ''}
                 {!nAllow && !nAsk ? 'none enabled' : ''}
+              </span>
+              <span
+                className="grpbulk tristate"
+                role="group"
+                aria-label={`set all ${label} tools`}
+                onClick={(e) => e.stopPropagation()}
+              >
+                {(['off', 'allow'] as ToolState[]).map((s) => (
+                  <button
+                    key={s}
+                    className="tri"
+                    disabled={busy}
+                    title={`set all ${label} tools to ${s}`}
+                    onClick={() => setManyStates(groupTools.map((t) => t.name), s)}
+                  >
+                    {s}
+                  </button>
+                ))}
               </span>
               <span className="car">▾</span>
             </div>
