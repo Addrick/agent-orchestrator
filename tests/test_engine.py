@@ -1607,6 +1607,32 @@ class TestClaudeCodeProvider:
         response, _ = await text_engine.generate_response(config, base_context)
         assert response == {"type": "text", "content": "end-to-end cc answer"}
 
+    @pytest.mark.asyncio
+    async def test_run_cc_cli_strips_api_key_from_env(self, text_engine, monkeypatch):
+        """DP-232: cc-* must run on the Claude subscription, not the metered API —
+        _run_cc_cli hands _exec_agy an env with ANTHROPIC_API_KEY removed."""
+        from config import global_config
+        monkeypatch.setattr(global_config, "CC_USE_SUBSCRIPTION", True)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret")
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-keep")
+        monkeypatch.setenv("CLAUDE_CLI_PATH", "claude")  # skip shutil.which
+        monkeypatch.setattr(text_engine, "_ensure_cc_supported", lambda: None)
+        monkeypatch.setattr(text_engine, "_resolve_cc_workspace", lambda *a, **k: None)
+
+        captured = {}
+
+        async def fake_exec(binary, args, workspace_dir, timeout, label="agy", env=None):
+            captured["env"] = env
+            return "ok"
+
+        monkeypatch.setattr(text_engine, "_exec_agy", fake_exec)
+
+        out = await text_engine._run_cc_cli("p", "s", "sonnet")
+        assert out == "ok"
+        env = captured["env"]
+        assert env is not None and "ANTHROPIC_API_KEY" not in env
+        assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-keep"
+
     # --- subprocess wiring + workspaces ------------------------------------
 
     @pytest.mark.asyncio

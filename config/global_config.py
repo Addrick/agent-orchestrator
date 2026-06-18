@@ -265,6 +265,15 @@ CC_SANDBOX_ALLOWED_DOMAINS = [
 ]
 # Cap on agentic turns for one headless run (--max-turns). 0/empty = no cap.
 CC_MAX_TURNS = int(os.environ.get("CC_MAX_TURNS", "0"))
+# Force cc-*/fixr `claude` subprocesses onto the Claude SUBSCRIPTION instead of
+# the metered API. In `-p` mode the CLI prefers ANTHROPIC_API_KEY over the
+# subscription OAuth token, so an inherited key (the in-process Anthropic
+# provider needs one) silently bills the API. When True (default) we strip the
+# API-key vars from the CLI child env so it uses CLAUDE_CODE_OAUTH_TOKEN /
+# stored `/login` creds. Set False to keep API-key billing (escape hatch).
+# NB: with this on, a host WITHOUT a provisioned CLAUDE_CODE_OAUTH_TOKEN makes
+# the CLI fail auth (fail-loud) rather than bill the API.
+CC_USE_SUBSCRIPTION = os.environ.get("CC_USE_SUBSCRIPTION", "True").lower() in ("true", "1", "yes", "on")
 # Comma-separated tool allowlist for the UNSANDBOXED path (CC_SANDBOX=False).
 # `--dangerously-skip-permissions` (yolo) is passed ONLY when the OS sandbox is
 # the safety boundary (CC_SANDBOX=True). Without the sandbox — e.g. a native
