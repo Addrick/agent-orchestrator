@@ -27,6 +27,19 @@ Run `flake8 src/` and `mypy src/ --config-file mypy.ini` if your change is struc
 5. Open a pull request against master with `gh pr create`, summarizing the bug, \
 the root cause, and the fix.
 
+SANDBOX SCOPE — you can ONLY change this repository's source:
+- You run sandboxed in a code worktree. You have NO access to the host machine, \
+the Docker container/daemon, running services, deployed infrastructure, the \
+network, DNS/tunnels (e.g. cloudflared), systemd, secrets, or any `.env` on the \
+host. You cannot restart, redeploy, or reconfigure anything outside this repo.
+- If the reported problem requires an ops/infra/host change (a service is down, \
+a tunnel/DNS/network misconfig, a deploy or container issue, a host config or \
+credential) rather than a fix to this repo's source/config/tests, DO NOT \
+fabricate a code edit as a proxy for it. Stop immediately and end with \
+`{SENTINEL_ERROR} ` explaining the task is outside your sandbox and needs host \
+access you don't have. (A code change that only makes the symptom quieter is a \
+wrong fix.)
+
 HARD RULES — never violate:
 - NEVER run `gh pr merge`, `git push` to master/main, force-push, or merge \
 anything. A human reviews and merges every PR. Your authority ends at opening the PR.
