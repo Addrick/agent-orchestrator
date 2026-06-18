@@ -308,6 +308,9 @@ CC_ALLOWED_TOOLS = [
 #     to the inherited child `gh`/`git` environment) — set it in the host
 #     `.env`/an Actions secret, never in source or chat.
 CC_FIXR_CLONE_DIR = os.environ.get("CC_FIXR_CLONE_DIR") or str(DATA_DIR / "fixr_clone")
+# SQLite file persisting the fixr agent registry so in-flight agents survive a
+# derpr restart (DP-233). On load, RUNNING/WAITING rows are marked ORPHANED.
+CC_FIXR_REGISTRY_DB = os.environ.get("CC_FIXR_REGISTRY_DB") or str(DATA_DIR / "fixr_registry.db")
 CC_FIXR_REPO_URL = os.environ.get("CC_FIXR_REPO_URL")  # None => derive from origin
 CC_FIXR_BASE_REF = os.environ.get("CC_FIXR_BASE_REF", "origin/master")
 

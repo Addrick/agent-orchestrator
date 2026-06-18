@@ -1,15 +1,18 @@
 # src/self_edit/registry.py
-"""In-memory registry of dispatched coding agents (DP-227).
+"""Registry of dispatched coding agents (DP-227), SQLite-backed (DP-233).
 
 The "management view" the supervisor (fixr) inspects and acts on. One record per
 dispatched bug-fix agent: where its worktree is, its OS pid, the resumable
 Claude session id, current status, log paths, and the eventual PR url.
 
-In-memory for v1 (fits the woken-supervisor model — derpr is up whenever fixr
-runs). Persisting to SQLite (so in-flight agents survive a derpr restart) is the
-documented next step, hung off the same `dynamic_tasks_and_watches` storage.
-Access is serialized by an asyncio.Lock since the dispatch tool, the per-agent
-bridge tasks, and inspect/kill tools all touch it concurrently.
+An in-memory dict is the hot path; when an ``AgentStore`` is injected, every
+mutation write-throughs to SQLite so in-flight agents survive a derpr restart
+(DP-233). On construction with a store, records are loaded and any still marked
+RUNNING/WAITING are flipped to ORPHANED — their detached process + in-process
+bridge task did not survive the restart, so they can't be resumed. Access is
+serialized by an asyncio.Lock since the dispatch tool, the per-agent bridge
+tasks, and inspect/kill tools all touch it concurrently (and the store's single
+connection relies on that serialization).
 """
 
 from __future__ import annotations
@@ -17,7 +20,10 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+if TYPE_CHECKING:
+    from src.self_edit.store import AgentStore
 
 # Status lifecycle.
 RUNNING = "running"
@@ -25,6 +31,7 @@ WAITING = "waiting"     # asked a question, awaiting answer_agent
 DONE = "done"
 ERROR = "error"
 KILLED = "killed"
+ORPHANED = "orphaned"   # was RUNNING/WAITING at a restart; process + bridge gone
 
 
 @dataclass
@@ -54,15 +61,24 @@ class AgentRecord:
 class AgentRegistry:
     """Async-safe store of ``AgentRecord``s keyed by ``agent_id``."""
 
-    def __init__(self) -> None:
+    def __init__(self, store: Optional["AgentStore"] = None) -> None:
         self._records: Dict[str, AgentRecord] = {}
         self._lock = asyncio.Lock()
+        self._store = store
+        if store is not None:
+            # Restart recovery: orphan stale rows in the DB, then load the
+            # (now-corrected) records into the in-memory hot path.
+            store.orphan_stale()
+            for rec in store.load_all():
+                self._records[rec.agent_id] = rec
 
     async def add(self, record: AgentRecord) -> None:
         async with self._lock:
             if record.agent_id in self._records:
                 raise KeyError(f"agent_id already registered: {record.agent_id}")
             self._records[record.agent_id] = record
+            if self._store is not None:
+                await asyncio.to_thread(self._store.upsert, record)
 
     async def get(self, agent_id: str) -> Optional[AgentRecord]:
         async with self._lock:
@@ -77,6 +93,8 @@ class AgentRegistry:
                 if hasattr(rec, k):
                     setattr(rec, k, v)
             rec.updated_at = time.time()
+            if self._store is not None:
+                await asyncio.to_thread(self._store.upsert, rec)
             return rec
 
     async def list(self, *, active_only: bool = False) -> List[AgentRecord]:
@@ -88,7 +106,10 @@ class AgentRegistry:
 
     async def remove(self, agent_id: str) -> Optional[AgentRecord]:
         async with self._lock:
-            return self._records.pop(agent_id, None)
+            rec = self._records.pop(agent_id, None)
+            if rec is not None and self._store is not None:
+                await asyncio.to_thread(self._store.delete, agent_id)
+            return rec
 
     async def get_by_thread(self, thread_id: str) -> Optional[AgentRecord]:
         """Resolve the agent whose Discord thread is ``thread_id`` (DP-230).
