@@ -37,6 +37,7 @@ from src.self_edit.events import (
     AgentEvent,
 )
 from src.self_edit.registry import AgentRecord, AgentRegistry
+from src.self_edit.store import AgentStore
 
 if TYPE_CHECKING:
     from src.chat_system import ChatSystem
@@ -114,7 +115,9 @@ class FixrIntegration(ServiceIntegration):
     ) -> None:
         self._chat_system = chat_system
         self._notifier = notification_router
-        self.registry = registry or AgentRegistry()
+        self.registry = registry or AgentRegistry(
+            store=AgentStore(global_config.CC_FIXR_REGISTRY_DB)
+        )
         self.dispatcher = dispatcher or Dispatcher(
             self.registry,
             on_wake=self._on_wake,
