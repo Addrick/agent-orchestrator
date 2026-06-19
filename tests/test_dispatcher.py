@@ -282,6 +282,29 @@ async def test_answer_agent_spawn_failure_reverts_to_waiting(tmp_path, monkeypat
     assert (await registry.get("a1")).status == reg.WAITING  # reverted
 
 
+async def test_answer_agent_post_spawn_failure_kills_proc_and_reverts(tmp_path, monkeypatch):
+    """If wiring fails AFTER a successful spawn (e.g. bridge start raises), the
+    spawned proc is terminated, its handle dropped, and the claim rolled back to
+    WAITING — never left RUNNING with an un-bridged process."""
+    registry = AgentRegistry()
+    d = Dispatcher(registry, on_wake=_noop_wake)
+    await _add(registry, reg.WAITING)
+    proc = _FakeProc(pid=99)
+    _stub_spawn(d, monkeypatch, proc=proc)
+
+    def boom(*a, **k):
+        raise RuntimeError("bridge boom")
+    monkeypatch.setattr(d, "_start_bridge", boom)
+
+    with pytest.raises(RuntimeError, match="bridge boom"):
+        await d.answer_agent("a1", "answer")
+
+    assert proc.terminated is True       # spawned proc was killed
+    assert "a1" not in d._procs          # handle dropped
+    rec = await registry.get("a1")
+    assert rec.status == reg.WAITING and rec.pid is None  # reverted
+
+
 async def test_compare_and_set_status_single_winner(tmp_path):
     """Concurrent CAS on one WAITING agent: exactly one transition wins."""
     registry = AgentRegistry()

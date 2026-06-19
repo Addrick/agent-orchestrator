@@ -155,6 +155,9 @@ async def route_agent_thread_message(
         await _react(message, "📝")  # note-to-self: seen, not forwarded
         return True
     if not text:
+        # Empty/attachment-only reply: nothing to forward, but tell the human
+        # so an image-only answer to a parked agent isn't silently dropped.
+        await _ack(channel, "⚠️ I can only forward text to the agent — please type your answer.")
         return True
     try:
         await dispatcher.answer_agent(record.agent_id, text)
