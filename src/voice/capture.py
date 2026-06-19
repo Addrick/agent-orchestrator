@@ -66,7 +66,12 @@ class DiscordVoiceCapture(CaptureSource):
                 "enable voice capture."
             ) from e
 
-        await self._client.wait_until_ready()
+        # ``attach_discord`` launches this before the Discord client's ``start()``
+        # task has run, so the client may not be logged in yet. ``wait_until_ready``
+        # *raises* ("Client has not been properly initialised") if called pre-login,
+        # whereas ``is_ready`` only returns False — poll it until the gateway is up.
+        while not self._client.is_ready():
+            await asyncio.sleep(0.2)
         channel = self._client.get_channel(self._channel_id) or await self._client.fetch_channel(
             self._channel_id
         )
