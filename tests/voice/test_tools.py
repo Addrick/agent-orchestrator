@@ -33,6 +33,40 @@ async def test_set_timer_falls_back_to_config(monkeypatch):
     assert result["seconds"] == 30
 
 
+async def test_set_timer_web_ui_channel_routes_to_web():
+    # A portal turn (web_ui tag) has no Discord id → the alarm must route to the
+    # "web" NotificationRouter channel (SSE push) carrying the tag, so it fires
+    # back in the same conversation it was set from.
+    svc = _svc()
+    handler = VoiceTimerToolHandler(svc)
+    with turn_scope(_ctx("web_ui")):
+        result = await handler._set_timer("10 minutes")
+    assert result["status"] == "scheduled"
+    t = svc.list()[0]
+    assert t.target.channel == "web"
+    assert t.target.recipient == "web_ui"
+
+
+async def test_set_timer_web_ui_named_channel_preserves_tag():
+    svc = _svc()
+    handler = VoiceTimerToolHandler(svc)
+    with turn_scope(_ctx("web_ui:kitchen")):
+        await handler._set_timer("5 minutes")
+    t = svc.list()[0]
+    assert t.target.channel == "web"
+    assert t.target.recipient == "web_ui:kitchen"
+
+
+async def test_set_timer_numeric_channel_routes_to_discord():
+    svc = _svc()
+    handler = VoiceTimerToolHandler(svc)
+    with turn_scope(_ctx("555")):
+        await handler._set_timer("1 minute")
+    t = svc.list()[0]
+    assert t.target.channel == "discord_channel"
+    assert t.target.recipient == "555"
+
+
 async def test_set_timer_bad_duration():
     handler = VoiceTimerToolHandler(_svc())
     with turn_scope(_ctx("555")):

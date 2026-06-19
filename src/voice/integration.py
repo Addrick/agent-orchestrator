@@ -21,6 +21,7 @@ from typing import Any, Dict, Optional, TYPE_CHECKING
 
 from config import global_config
 from src.clients.service_integration import ServiceIntegration
+from src.voice.alarm_bus import AlarmBus, WebAlarmNotifier
 from src.voice.intent import KeywordTimerRouter, TimerIntent
 from src.voice.timer import Timer, TimerService
 from src.voice.transcriber import MoonshineTranscriber
@@ -58,6 +59,9 @@ class VoiceIntegration(ServiceIntegration):
     ) -> None:
         self._notifier = notification_router
         self.timer_service = timer_service or TimerService(on_fire=self._on_fire)
+        # Fan-out for portal-set timers: a fired timer whose target channel is
+        # "web" is published here and streamed to the SPA over SSE (DP-238).
+        self.alarm_bus = AlarmBus()
         self._discord: Any = None
         self._pipeline: Optional["VoicePipeline"] = None
         self._start_task: Optional["asyncio.Task[None]"] = None
@@ -126,11 +130,16 @@ class VoiceIntegration(ServiceIntegration):
 
         if self._pipeline is None:
             self._pipeline = self._build_pipeline(capture=None)
+        # Route web-targeted fired timers (set from the portal) back to the
+        # browser: the "web" NotificationRouter channel publishes onto the alarm
+        # bus, which the GET /voice/alarms SSE stream below fans out to the SPA.
+        self._notifier.register("web", WebAlarmNotifier(self.alarm_bus))
         register_voice_web(
             app,
             self._handle_web_utterance,
             self._handle_web_transcribe,
             self._pipeline.dictation_stream,
+            self.alarm_bus,
         )
         # Pre-warm STT in the background so the first spoken command isn't lost to
         # model load + onnxruntime first-inference graph compilation (DP-238).

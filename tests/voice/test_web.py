@@ -1,19 +1,26 @@
 # tests/voice/test_web.py
 """Browser/phone push-to-talk web capture (DP-238 web)."""
+import asyncio
+
 import numpy as np
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from src.voice.alarm_bus import AlarmBus
 from src.voice.integration import VoiceIntegration
 from src.voice.intent import KeywordTimerRouter
 from src.voice.pipeline import VoicePipeline
 from src.voice.transcriber import NullTranscriber
-from src.voice.web import register_voice_web
+from src.voice.web import _alarm_events, register_voice_web
 
 
 class _FakeRouter:
     def __init__(self):
         self.sent = []
+        self.registered = {}
+
+    def register(self, channel, notifier):
+        self.registered[channel] = notifier
 
     async def send(self, channel, recipient, subject, body):
         self.sent.append({"recipient": recipient, "body": body})
@@ -64,7 +71,7 @@ def test_register_voice_web_serves_page_and_accepts_utterance():
     async def transcribe(pcm, sample_rate):
         return {"text": "hello there"}
 
-    register_voice_web(app, handler, transcribe, _noop_stream)
+    register_voice_web(app, handler, transcribe, _noop_stream, AlarmBus())
     client = TestClient(app)
 
     page = client.get("/voice")
@@ -88,7 +95,7 @@ def test_utterance_route_rejects_missing_rate_and_empty_body():
     async def handler(pcm, sample_rate):  # pragma: no cover - not reached on 400
         return {}
 
-    register_voice_web(app, handler, handler, _noop_stream)
+    register_voice_web(app, handler, handler, _noop_stream, AlarmBus())
     client = TestClient(app)
     pcm = np.zeros(2000, dtype=np.int16).tobytes()
 
@@ -109,7 +116,7 @@ def test_utterance_route_handler_error_is_500_not_crash():
     async def handler(pcm, sample_rate):
         raise RuntimeError("boom")
 
-    register_voice_web(app, handler, handler, _noop_stream)
+    register_voice_web(app, handler, handler, _noop_stream, AlarmBus())
     client = TestClient(app, raise_server_exceptions=False)
     pcm = np.zeros(2000, dtype=np.int16).tobytes()
     r = client.post("/voice/utterance", content=pcm, headers={"X-Sample-Rate": "16000"})
@@ -126,7 +133,7 @@ def test_stream_ws_returns_transcript_per_closed_utterance():
     async def handler(pcm, sample_rate):  # pragma: no cover - not used here
         return {}
 
-    register_voice_web(app, handler, handler, _noop_stream)
+    register_voice_web(app, handler, handler, _noop_stream, AlarmBus())
     client = TestClient(app)
     pcm = np.zeros(2000, dtype=np.int16).tobytes()
 
@@ -143,7 +150,7 @@ def test_stream_ws_ignores_frames_before_sample_rate():
     async def handler(pcm, sample_rate):  # pragma: no cover - not used here
         return {}
 
-    register_voice_web(app, handler, handler, _noop_stream)
+    register_voice_web(app, handler, handler, _noop_stream, AlarmBus())
     client = TestClient(app)
     pcm = np.zeros(2000, dtype=np.int16).tobytes()
 
@@ -165,7 +172,7 @@ def test_stream_ws_non_dict_control_frame_does_not_crash():
     async def handler(pcm, sample_rate):  # pragma: no cover - not used here
         return {}
 
-    register_voice_web(app, handler, handler, _noop_stream)
+    register_voice_web(app, handler, handler, _noop_stream, AlarmBus())
     client = TestClient(app)
     pcm = np.zeros(2000, dtype=np.int16).tobytes()
 
@@ -295,5 +302,44 @@ async def test_attach_web_enabled_builds_pipeline_and_routes(monkeypatch):
     paths = {getattr(r, "path", None) for r in app.routes}
     assert "/voice" in paths and "/voice/utterance" in paths
     assert "/voice/transcribe" in paths and "/voice/stream" in paths
+    assert "/voice/alarms" in paths
+    # the "web" NotificationRouter channel must be registered so a web-targeted
+    # fired timer reaches the alarm bus instead of falling back to the logger
+    assert "web" in integ._notifier.registered
     assert integ._warmup_task is not None
     await integ._warmup_task  # NullTranscriber warmup is a no-op; just don't leak it
+
+
+# -- alarm SSE back-channel (GET /voice/alarms) ------------------------------
+
+async def test_alarm_events_streams_published_alarm_then_unsubscribes():
+    bus = AlarmBus()
+
+    class _Req:
+        async def is_disconnected(self):
+            return False
+
+    gen = _alarm_events(_Req(), bus)
+    # First __anext__ subscribes, then blocks on the queue; publish while blocked.
+    pending = asyncio.ensure_future(gen.__anext__())
+    await asyncio.sleep(0)
+    assert bus.subscriber_count == 1
+    await bus.publish({"text": "⏰ Timer up!", "channel": "web_ui"})
+    frame = await asyncio.wait_for(pending, 1.0)
+    assert frame.startswith("data: ")
+    assert "⏰ Timer up!" in frame
+    await gen.aclose()  # finally: unsubscribe
+    assert bus.subscriber_count == 0
+
+
+async def test_alarm_events_stops_on_disconnect():
+    bus = AlarmBus()
+
+    class _Req:
+        async def is_disconnected(self):
+            return True
+
+    gen = _alarm_events(_Req(), bus)
+    with __import__("pytest").raises(StopAsyncIteration):
+        await gen.__anext__()
+    assert bus.subscriber_count == 0

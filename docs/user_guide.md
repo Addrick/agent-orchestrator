@@ -476,6 +476,13 @@ Countdown timers, usable two ways with one shared service:
 - **Typed** — the same tools are LLM-callable from any text conversation, so a
   persona can set/list/cancel timers in chat too.
 
+A fired timer announces **back through the channel it was set in**: a timer set
+from the derpr portal (by dictation or typing) fires back **in that same portal
+conversation** — it appears as a ⏰ chat line and plays a short beep, streamed to
+the browser over an SSE back-channel (`GET /voice/alarms`), with no Discord
+channel involved. A timer set in a Discord text channel announces there; if a
+turn carries no usable channel, it falls back to `VOICE_NOTIFY_CHANNEL_ID`.
+
 > **Why not listen in a Discord voice channel?** It's no longer possible. Discord
 > made end-to-end encryption (the DAVE protocol) mandatory on all voice channels
 > in 2026, and no Python library can decrypt received audio. The
@@ -484,7 +491,7 @@ Countdown timers, usable two ways with one shared service:
 
 | Tool | Type | Description |
 |------|------|-------------|
-| `set_timer` | Read | Start a countdown. `duration` is natural language ("10 minutes", "30 seconds", "1 hour"); optional `label`. Announces in the channel when it fires. |
+| `set_timer` | Read | Start a countdown. `duration` is natural language ("10 minutes", "30 seconds", "1 hour"); optional `label`. Fires back in the channel it was set in (the portal conversation for a web turn, the Discord channel for a Discord turn, else `VOICE_NOTIFY_CHANNEL_ID`). |
 | `list_timers` | Read | List pending timers with remaining time and ids. |
 | `cancel_timer` | Read | Cancel a pending timer by `timer_id` (from `list_timers`). |
 

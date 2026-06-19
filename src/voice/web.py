@@ -15,15 +15,28 @@ handler that drives ``VoicePipeline.submit_utterance`` and formats the reply.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, Awaitable, Callable, Dict, Optional, Protocol
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from starlette.websockets import WebSocketState
 
 logger = logging.getLogger(__name__)
+
+
+class AlarmSource(Protocol):
+    """The subscribe/unsubscribe surface of a ``voice.alarm_bus.AlarmBus``."""
+
+    def subscribe(self) -> "Any": ...
+    def unsubscribe(self, q: "Any") -> None: ...
+
+
+# How often the SSE stream emits a keep-alive comment when idle, so proxies and
+# the browser don't drop a connection that has had no alarm in a while.
+_ALARM_KEEPALIVE_S = 25.0
 
 # handler(pcm_bytes, sample_rate) -> {"text": str, "message": str, "matched": bool}
 UtteranceHandler = Callable[[bytes, int], Awaitable[Dict[str, Any]]]
@@ -126,11 +139,33 @@ async def _run_stream(ws: WebSocket, session: StreamSession) -> None:
         await _flush_stream(ws, session)
 
 
+async def _alarm_events(request: Request, bus: AlarmSource) -> Any:
+    """SSE generator: stream fired-timer alarms to one connected portal tab.
+
+    Each alarm is one ``data: {json}\\n\\n`` event; an idle stream emits a
+    comment heartbeat so the connection isn't reaped. The subscription is dropped
+    when the client disconnects (browser tab closed / navigated away)."""
+    q = bus.subscribe()
+    try:
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                event = await asyncio.wait_for(q.get(), timeout=_ALARM_KEEPALIVE_S)
+            except asyncio.TimeoutError:
+                yield ": keep-alive\n\n"
+                continue
+            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+    finally:
+        bus.unsubscribe(q)
+
+
 def register_voice_web(
     app: FastAPI,
     handler: UtteranceHandler,
     transcribe_handler: TranscribeHandler,
     stream_factory: StreamFactory,
+    alarm_bus: AlarmSource,
 ) -> None:
     """Mount the push-to-talk page + upload routes on an existing FastAPI app.
 
@@ -139,7 +174,8 @@ def register_voice_web(
     ``/voice/transcribe`` is STT-only for the SPA mic button (dictation into the
     composer — the LLM owns intents). ``/voice/stream`` is the always-listening
     WebSocket variant (item B): continuous frames, VAD-endpointed, transcript per
-    closed utterance."""
+    closed utterance. ``/voice/alarms`` is the SSE back-channel a portal-set timer
+    fires through (DP-238)."""
 
     @app.get("/voice", response_class=HTMLResponse)
     async def _voice_page() -> HTMLResponse:  # pragma: no cover - static asset
@@ -156,6 +192,14 @@ def register_voice_web(
     @app.websocket("/voice/stream")
     async def _voice_stream(ws: WebSocket) -> None:
         await _run_stream(ws, stream_factory())
+
+    @app.get("/voice/alarms")
+    async def _voice_alarms(request: Request) -> StreamingResponse:
+        return StreamingResponse(
+            _alarm_events(request, alarm_bus),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     logger.info("Voice push-to-talk web capture mounted at GET /voice")
 

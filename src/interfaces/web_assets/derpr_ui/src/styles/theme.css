@@ -502,6 +502,11 @@ body.persona-blocked .secbanner { display: block; }
 .devrow .lbl { color: var(--ink-dim); }
 .devrow .text { color: var(--ink-2); font-size: 11.5px; font-family: var(--mono); white-space: pre-wrap; margin-top: 5px; }
 
+/* fired-timer alarm line (DP-238) — pushed over SSE, not a transcript chunk */
+.alarmrow { border-left: 2px solid var(--accent); background: var(--panel); }
+.alarmrow .av { background: transparent; font-size: 18px; }
+.alarmrow .who { color: var(--accent); }
+
 /* inline edit */
 .editbox { width: 100%; background: var(--bg); border: 1px solid var(--accent-dim); border-radius: var(--r); color: var(--ink); font-family: var(--sans); font-size: 12.5px; padding: 9px 11px; resize: vertical; min-height: 60px; }
 .editbar { display: flex; gap: 7px; margin-top: 7px; }
