@@ -42,8 +42,13 @@ export function useMicStream(onText: (t: string) => void): MicStream {
   const nodeRef = useRef<ScriptProcessorNode | null>(null)
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
+  // `active` only flips true at the end of the async start(), so two fast toggles
+  // would both see active=false and open a second stream/ctx/ws that orphans the
+  // first. This ref guards re-entry synchronously.
+  const startingRef = useRef(false)
 
   const teardown = useCallback(() => {
+    startingRef.current = false
     nodeRef.current?.disconnect()
     sourceRef.current?.disconnect()
     streamRef.current?.getTracks().forEach((t) => t.stop())
@@ -59,6 +64,8 @@ export function useMicStream(onText: (t: string) => void): MicStream {
   }, [])
 
   const start = useCallback(async () => {
+    if (startingRef.current || wsRef.current) return // already starting/active
+    startingRef.current = true
     setError(null)
     let stream: MediaStream
     try {
@@ -67,6 +74,7 @@ export function useMicStream(onText: (t: string) => void): MicStream {
       })
     } catch {
       setError('mic access denied')
+      startingRef.current = false
       return
     }
     const Ctx: typeof AudioContext =
@@ -110,6 +118,7 @@ export function useMicStream(onText: (t: string) => void): MicStream {
     sourceRef.current = source
     nodeRef.current = node
     wsRef.current = ws
+    startingRef.current = false
     setActive(true)
   }, [teardown])
 

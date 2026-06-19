@@ -87,7 +87,8 @@ export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming }: Pro
   const micStart = async () => {
     if (mic.recording) return
     setMicStatus(null)
-    await mic.start()
+    const ok = await mic.start()
+    if (!ok) setMicStatus('mic access denied')
   }
 
   const micStop = async () => {

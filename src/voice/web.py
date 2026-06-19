@@ -21,6 +21,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional, Protocol
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
+from starlette.websockets import WebSocketState
 
 logger = logging.getLogger(__name__)
 
@@ -70,14 +71,21 @@ async def _dispatch(request: Request, fn: UtteranceHandler, what: str) -> JSONRe
 def _parse_sample_rate(text_frame: str, current: int) -> int:
     """Read a ``{"sample_rate": N}`` control frame; keep ``current`` on garbage."""
     try:
-        sr = int(json.loads(text_frame).get("sample_rate", 0))
+        parsed = json.loads(text_frame)
+        sr = int(parsed.get("sample_rate", 0)) if isinstance(parsed, dict) else 0
     except (ValueError, TypeError):
         return current
     return sr if sr > 0 else current
 
 
 async def _flush_stream(ws: WebSocket, session: StreamSession) -> None:
-    """Flush trailing speech on close; the client may be gone, so guard the send."""
+    """Flush trailing speech on close. This only runs after the receive loop ends
+    — i.e. once the client has disconnected — so if the socket is already gone we
+    skip the (expensive) STT work entirely: a flushed transcript couldn't be
+    delivered anyway. (Delivering the tail on a *graceful* stop would need a client
+    "stop" control frame that flushes while still connected — a follow-up.)"""
+    if ws.client_state != WebSocketState.CONNECTED:
+        return
     try:
         tail = await session.flush()
         if tail:

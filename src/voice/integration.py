@@ -171,6 +171,17 @@ class VoiceIntegration(ServiceIntegration):
                 "matched": False,
                 "message": '(no timer command — try "set a timer for 10 minutes")',
             }
+        # A web utterance carries no source channel, so a fired timer can only
+        # announce in VOICE_NOTIFY_CHANNEL_ID. When it's unset, _on_intent (already
+        # called inside submit_utterance) drops the schedule — so don't tell the
+        # browser the timer was set when nothing will ever fire.
+        if not global_config.VOICE_NOTIFY_CHANNEL_ID:
+            logger.warning("voice web timer recognized but VOICE_NOTIFY_CHANNEL_ID unset; not scheduled")
+            return {
+                "text": text,
+                "matched": False,
+                "message": "(heard a timer, but no announce channel is configured — set VOICE_NOTIFY_CHANNEL_ID)",
+            }
         label = f" for {intent.label}" if intent.label else ""
         return {
             "text": text,

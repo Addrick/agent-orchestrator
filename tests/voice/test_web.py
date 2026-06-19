@@ -157,6 +157,27 @@ def test_stream_ws_ignores_frames_before_sample_rate():
         assert ws.receive_json() == {"text": "hello world"}
 
 
+def test_stream_ws_non_dict_control_frame_does_not_crash():
+    # A valid-JSON but non-dict control frame ("5", '"x"') must be ignored, not
+    # raise AttributeError on .get() and kill the stream handler.
+    app = FastAPI()
+
+    async def handler(pcm, sample_rate):  # pragma: no cover - not used here
+        return {}
+
+    register_voice_web(app, handler, handler, _noop_stream)
+    client = TestClient(app)
+    pcm = np.zeros(2000, dtype=np.int16).tobytes()
+
+    with client.websocket_connect("/voice/stream") as ws:
+        ws.send_text("5")  # non-dict JSON — ignored, sample_rate stays 0
+        ws.send_text('"x"')  # also non-dict — ignored
+        ws.send_json({"sample_rate": 16000})
+        ws.send_bytes(pcm)
+        ws.send_bytes(pcm)  # closes an utterance
+        assert ws.receive_json() == {"text": "hello world"}
+
+
 # -- integration handler wiring ----------------------------------------------
 
 async def test_handle_web_utterance_matched_schedules_timer(monkeypatch):
@@ -188,6 +209,29 @@ async def test_handle_web_utterance_non_command(monkeypatch):
     res = await integ._handle_web_utterance(pcm, 16000)
     assert res["matched"] is False
     assert res["text"] == "what is the weather today"
+
+
+async def test_handle_web_utterance_no_notify_channel_not_matched(monkeypatch):
+    # With VOICE_NOTIFY_CHANNEL_ID unset, _on_intent drops the schedule for a web
+    # utterance (no source channel), so the reply must NOT claim the timer was set.
+    from config import global_config
+    monkeypatch.setattr(global_config, "VOICE_NOTIFY_CHANNEL_ID", "")
+    integ = VoiceIntegration(_FakeRouter())
+    integ._pipeline = _ptt_pipeline(integ, "set a timer for 5 minutes")
+
+    scheduled = []
+
+    async def fake_schedule(seconds, target, *, label=None):  # pragma: no cover
+        scheduled.append(seconds)
+
+    monkeypatch.setattr(integ.timer_service, "schedule", fake_schedule)
+    pcm = np.full(16000, 1000, dtype=np.int16).tobytes()
+    res = await integ._handle_web_utterance(pcm, 16000)
+
+    assert res["matched"] is False
+    assert res["text"] == "set a timer for 5 minutes"
+    assert "VOICE_NOTIFY_CHANNEL_ID" in res["message"]
+    assert scheduled == []  # nothing scheduled
 
 
 async def test_handle_web_utterance_empty_transcript():
