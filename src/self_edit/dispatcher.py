@@ -161,6 +161,7 @@ class Dispatcher:
                 "nothing to answer."
             )
 
+        proc = None
         try:
             proc = await self._spawn(
                 prompt=message,
@@ -169,15 +170,24 @@ class Dispatcher:
                 raw_log=record.raw_log,
                 resume_session=record.session_id,
             )
+            await self._registry.update(agent_id, pid=proc.pid)
+            self._procs[agent_id] = proc
+            # Re-arm the bridge if the previous one finished on the question event.
+            if agent_id not in self._bridges or self._bridges[agent_id].done():
+                self._start_bridge(record, resume_tail=True)
         except Exception:
-            # Roll the claim back so a later answer can retry this agent.
-            await self._registry.update(agent_id, status=reg.WAITING)
+            # Anything between the claim and a fully wired resume fails the
+            # answer: kill any process we did spawn so it can't run un-bridged,
+            # drop our handle to it, and roll the claim back so a later answer
+            # can retry this agent.
+            if proc is not None and proc.returncode is None:
+                try:
+                    proc.terminate()
+                except ProcessLookupError:
+                    pass
+            self._procs.pop(agent_id, None)
+            await self._registry.update(agent_id, status=reg.WAITING, pid=None)
             raise
-        await self._registry.update(agent_id, pid=proc.pid)
-        self._procs[agent_id] = proc
-        # Re-arm the bridge if the previous one finished on the question event.
-        if agent_id not in self._bridges or self._bridges[agent_id].done():
-            self._start_bridge(record, resume_tail=True)
         logger.info("Resumed agent %s (pid %s)", agent_id, proc.pid)
         return record
 
@@ -203,6 +213,45 @@ class Dispatcher:
             )
         logger.info("Killed agent %s", agent_id)
         return True
+
+    async def prune(
+        self,
+        *,
+        agent_id: Optional[str] = None,
+        max_age_hours: Optional[float] = None,
+    ) -> List[AgentRecord]:
+        """Reap terminal-state agents' worktrees and soft-archive their rows (DP-237).
+
+        Only DONE/ERROR/KILLED/ORPHANED, not-already-archived agents are eligible.
+        ``agent_id`` prunes one; ``max_age_hours`` limits to rows untouched for at
+        least that long. The worktree is removed via clone_manager (which drops the
+        .venv junction first), then the record is archived (kept for audit, hidden
+        from the default management view). Returns the pruned records.
+
+        A bug with a still-active agent is skipped: a re-dispatch reuses the same
+        ``worktrees/<bug>`` path, so reaping a terminal sibling would delete the
+        live worktree."""
+        now = time.time()
+        pruned: List[AgentRecord] = []
+        for rec in await self._registry.list(include_archived=False):
+            if rec.status not in reg.TERMINAL:
+                continue
+            if agent_id is not None and rec.agent_id != agent_id:
+                continue
+            if max_age_hours is not None and (now - rec.updated_at) < max_age_hours * 3600:
+                continue
+            if await self._registry.has_active_for_bug(rec.bug_id):
+                logger.info("prune: skipping %s — bug %s has an active agent",
+                            rec.agent_id, rec.bug_id)
+                continue
+            await asyncio.to_thread(
+                clone_manager.remove_worktree,
+                rec.bug_id, clone_dir=self._clone_dir, force=True,
+            )
+            await self._registry.archive(rec.agent_id)
+            pruned.append(rec)
+            logger.info("Pruned agent %s (worktree reaped, archived)", rec.agent_id)
+        return pruned
 
     async def shutdown(self) -> None:
         """Cancel all bridge tasks (process cleanup is best-effort on exit)."""

@@ -282,6 +282,29 @@ async def test_answer_agent_spawn_failure_reverts_to_waiting(tmp_path, monkeypat
     assert (await registry.get("a1")).status == reg.WAITING  # reverted
 
 
+async def test_answer_agent_post_spawn_failure_kills_proc_and_reverts(tmp_path, monkeypatch):
+    """If wiring fails AFTER a successful spawn (e.g. bridge start raises), the
+    spawned proc is terminated, its handle dropped, and the claim rolled back to
+    WAITING — never left RUNNING with an un-bridged process."""
+    registry = AgentRegistry()
+    d = Dispatcher(registry, on_wake=_noop_wake)
+    await _add(registry, reg.WAITING)
+    proc = _FakeProc(pid=99)
+    _stub_spawn(d, monkeypatch, proc=proc)
+
+    def boom(*a, **k):
+        raise RuntimeError("bridge boom")
+    monkeypatch.setattr(d, "_start_bridge", boom)
+
+    with pytest.raises(RuntimeError, match="bridge boom"):
+        await d.answer_agent("a1", "answer")
+
+    assert proc.terminated is True       # spawned proc was killed
+    assert "a1" not in d._procs          # handle dropped
+    rec = await registry.get("a1")
+    assert rec.status == reg.WAITING and rec.pid is None  # reverted
+
+
 async def test_compare_and_set_status_single_winner(tmp_path):
     """Concurrent CAS on one WAITING agent: exactly one transition wins."""
     registry = AgentRegistry()
@@ -330,6 +353,89 @@ async def test_spawn_strips_api_key_from_child_env(tmp_path, monkeypatch):
     assert env is not None
     assert "ANTHROPIC_API_KEY" not in env
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-keep"
+
+
+def _arec(agent_id, bug_id, status, updated_at=None):
+    rec = AgentRecord(
+        agent_id=agent_id, bug_id=bug_id, description="x", worktree="/w",
+        branch="b", raw_log="/r", events_log="/e", status=status)
+    if updated_at is not None:
+        rec.updated_at = updated_at
+    return rec
+
+
+async def test_prune_reaps_terminal_and_archives(tmp_path, monkeypatch):
+    registry = AgentRegistry()
+    d = Dispatcher(registry, on_wake=_noop_wake)
+    removed = []
+    monkeypatch.setattr(
+        disp.clone_manager, "remove_worktree",
+        lambda bug_id, clone_dir=None, force=False: removed.append(bug_id))
+    await registry.add(_arec("done1", "DP-1", reg.DONE))
+    await registry.add(_arec("run1", "DP-2", reg.RUNNING))
+
+    pruned = await d.prune()
+
+    assert [r.agent_id for r in pruned] == ["done1"]
+    assert removed == ["DP-1"]
+    assert (await registry.get("done1")).archived is True
+    assert (await registry.get("run1")).archived is False
+    # archived row is hidden from the default list, running one still shows.
+    assert {r.agent_id for r in await registry.list()} == {"run1"}
+    assert {r.agent_id for r in await registry.list(include_archived=True)} == {"done1", "run1"}
+
+
+async def test_prune_skips_bug_with_active_agent(tmp_path, monkeypatch):
+    """A terminal agent sharing a bug with a still-active one is NOT reaped: a
+    re-dispatch reuses worktrees/<bug>, so pruning would delete the live tree."""
+    registry = AgentRegistry()
+    d = Dispatcher(registry, on_wake=_noop_wake)
+    removed = []
+    monkeypatch.setattr(
+        disp.clone_manager, "remove_worktree",
+        lambda bug_id, clone_dir=None, force=False: removed.append(bug_id))
+    await registry.add(_arec("old", "DP-1", reg.ERROR))
+    await registry.add(_arec("new", "DP-1", reg.RUNNING))
+
+    pruned = await d.prune()
+
+    assert pruned == []
+    assert removed == []
+    assert (await registry.get("old")).archived is False
+
+
+async def test_prune_respects_max_age_hours(tmp_path, monkeypatch):
+    import time as _t
+    registry = AgentRegistry()
+    d = Dispatcher(registry, on_wake=_noop_wake)
+    removed = []
+    monkeypatch.setattr(
+        disp.clone_manager, "remove_worktree",
+        lambda bug_id, clone_dir=None, force=False: removed.append(bug_id))
+    await registry.add(_arec("fresh", "DP-1", reg.DONE, updated_at=_t.time()))
+    await registry.add(_arec("old", "DP-2", reg.DONE, updated_at=_t.time() - 7200))
+
+    pruned = await d.prune(max_age_hours=1)
+
+    assert [r.agent_id for r in pruned] == ["old"]
+    assert removed == ["DP-2"]
+
+
+async def test_prune_single_agent_by_id(tmp_path, monkeypatch):
+    registry = AgentRegistry()
+    d = Dispatcher(registry, on_wake=_noop_wake)
+    removed = []
+    monkeypatch.setattr(
+        disp.clone_manager, "remove_worktree",
+        lambda bug_id, clone_dir=None, force=False: removed.append(bug_id))
+    await registry.add(_arec("a", "DP-1", reg.DONE))
+    await registry.add(_arec("b", "DP-2", reg.KILLED))
+
+    pruned = await d.prune(agent_id="a")
+
+    assert [r.agent_id for r in pruned] == ["a"]
+    assert removed == ["DP-1"]
+    assert (await registry.get("b")).archived is False
 
 
 async def _noop_wake(record, event):

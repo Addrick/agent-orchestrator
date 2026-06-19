@@ -36,7 +36,7 @@ from src.self_edit.events import (
     STARTED,
     AgentEvent,
 )
-from src.self_edit.registry import AgentRecord, AgentRegistry
+from src.self_edit.registry import AgentRecord, AgentRegistry, ORPHANED
 from src.self_edit.store import AgentStore
 
 if TYPE_CHECKING:
@@ -56,6 +56,9 @@ class DiscordThreadClient(Protocol):
         ...
 
     async def send_to_channel(self, channel_id: int, content: str) -> bool:
+        ...
+
+    async def close_agent_thread(self, thread_id: int) -> bool:
         ...
 
 
@@ -137,7 +140,10 @@ class FixrIntegration(ServiceIntegration):
 
     def register_tools(self, tool_manager: "ToolManager") -> None:
         from src.self_edit.fixr_tools import FixrToolHandler
-        handler = FixrToolHandler(self.dispatcher, self.registry, self._notifier)
+        handler = FixrToolHandler(
+            self.dispatcher, self.registry, self._notifier,
+            on_prune_close=self._close_agent_threads,
+        )
         handler.register(tool_manager)
 
     # -- DP-230 wiring -------------------------------------------------------
@@ -149,6 +155,71 @@ class FixrIntegration(ServiceIntegration):
     def _direct_channel_active(self) -> bool:
         """True when agent Q&A should go straight to a human thread, not fixr."""
         return self._discord is not None and bool(global_config.CC_FIXR_AGENTS_CHANNEL_ID)
+
+    # -- DP-237 lifecycle ----------------------------------------------------
+
+    async def notify_orphans(self) -> int:
+        """Surface agents orphaned by a restart (DP-237).
+
+        ``AgentRegistry.__init__`` flips RUNNING/WAITING rows to ORPHANED on load,
+        but that happens before Discord is attached and is otherwise silent — an
+        orphaned agent can't be resumed (answer_agent rejects non-WAITING). This
+        runs once at startup: it posts a "lost, redispatch?" notice into each
+        orphan's thread and one digest to the fixr channel so a human can decide.
+        No auto-redispatch. Returns the orphan count."""
+        orphans = [
+            r for r in await self.registry.list(include_archived=False)
+            if r.status == ORPHANED
+        ]
+        if not orphans:
+            return 0
+        # Wait for the Discord client to be ready so thread posts land.
+        ready = getattr(self._discord, "wait_until_ready", None)
+        if ready is not None:
+            try:
+                await ready()
+            except Exception:  # noqa: BLE001 — readiness wait must not crash startup
+                logger.exception("notify_orphans: wait_until_ready failed")
+        for rec in orphans:
+            if rec.discord_thread_id:
+                await self._post_thread(rec, (
+                    "⚠️ **derpr restarted** — this agent was lost mid-run (its "
+                    "process + bridge did not survive). It can't be resumed. "
+                    f"Redispatch bug `{rec.bug_id}` with `dispatch_fix` if still needed."
+                ))
+        await self._digest_orphans(orphans)
+        return len(orphans)
+
+    async def _digest_orphans(self, orphans: list[AgentRecord]) -> None:
+        """One human-visible summary to the fixr channel (no LLM turn)."""
+        channel = global_config.CC_FIXR_DISCORD_CHANNEL
+        if not channel:
+            return
+        lines = [f"- `{r.agent_id}` (bug {r.bug_id}) — {r.branch}" for r in orphans]
+        body = (
+            f"{len(orphans)} agent(s) orphaned by a restart and cannot be resumed. "
+            "Redispatch any still needed:\n" + "\n".join(lines)
+        )
+        try:
+            await self._notifier.send(
+                "discord", str(channel), "fixr: orphaned agents after restart", body,
+            )
+        except Exception:  # noqa: BLE001 — digest is best-effort
+            logger.exception("notify_orphans: digest send failed")
+
+    async def _close_agent_threads(self, records: list[AgentRecord]) -> None:
+        """Lock/archive pruned agents' Discord threads so stale replies signal
+        'closed' (DP-237). Best-effort; called from the prune tool."""
+        closer = getattr(self._discord, "close_agent_thread", None)
+        if closer is None:
+            return
+        for rec in records:
+            if not rec.discord_thread_id:
+                continue
+            try:
+                await closer(int(rec.discord_thread_id))
+            except Exception:  # noqa: BLE001 — a failed close must not fail prune
+                logger.exception("close_agent_thread failed for %s", rec.agent_id)
 
     # -- transcript sink (every event) ---------------------------------------
 

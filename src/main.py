@@ -112,6 +112,10 @@ def _register_interfaces(
         fixr = bot.get_service("fixr")
         if fixr is not None and hasattr(fixr, "attach_discord"):
             fixr.attach_discord(discord_bot)
+            # DP-237: once started, surface any agents orphaned by the last
+            # restart into their threads (one-shot, awaits Discord readiness).
+            if hasattr(fixr, "notify_orphans"):
+                app.register_task("fixr_orphan_notify", fixr.notify_orphans())
         # DP-238: late-bind the Discord client to the voice subsystem so it can
         # join its always-listening voice channel (no-op when VOICE_ENABLED off).
         voice = bot.get_service("voice")

@@ -33,6 +33,10 @@ ERROR = "error"
 KILLED = "killed"
 ORPHANED = "orphaned"   # was RUNNING/WAITING at a restart; process + bridge gone
 
+#: The statuses an agent can never leave on its own. Used by the prune tool to
+#: pick reapable rows and by notify_orphans to find stranded agents.
+TERMINAL = (DONE, ERROR, KILLED, ORPHANED)
+
 
 @dataclass
 class AgentRecord:
@@ -51,6 +55,10 @@ class AgentRecord:
     #: Discord thread carrying this agent's transcript + Q&A (DP-230). Set when
     #: the per-agent thread is created; resolves inbound thread→agent_id.
     discord_thread_id: Optional[str] = None
+    #: Soft-archive flag (DP-237). A pruned terminal agent is archived (worktree
+    #: reaped, thread closed) but kept for audit; inspect_agents hides archived
+    #: rows by default. Never set on a non-terminal agent.
+    archived: bool = False
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
@@ -97,12 +105,21 @@ class AgentRegistry:
                 await asyncio.to_thread(self._store.upsert, rec)
             return rec
 
-    async def list(self, *, active_only: bool = False) -> List[AgentRecord]:
+    async def list(
+        self, *, active_only: bool = False, include_archived: bool = False
+    ) -> List[AgentRecord]:
         async with self._lock:
             recs = list(self._records.values())
+        if not include_archived:
+            recs = [r for r in recs if not r.archived]
         if active_only:
             recs = [r for r in recs if r.status in (RUNNING, WAITING)]
         return sorted(recs, key=lambda r: r.created_at)
+
+    async def archive(self, agent_id: str) -> Optional[AgentRecord]:
+        """Soft-archive a (terminal) agent: keep the row for audit but hide it
+        from the default management view (DP-237). Write-through to the store."""
+        return await self.update(agent_id, archived=True)
 
     async def remove(self, agent_id: str) -> Optional[AgentRecord]:
         async with self._lock:
