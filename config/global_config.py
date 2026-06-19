@@ -346,6 +346,14 @@ CC_FIXR_PROGRESS_DEBOUNCE_SECONDS = float(
 # joined and the optional voice deps (discord-ext-voice-recv, Moonshine) are
 # never imported.
 # VOICE_ENABLED — master switch for the always-listening Discord capture path.
+#   NOTE: Discord voice RECEIVE is currently impossible — Discord's mandatory DAVE
+#   end-to-end encryption (negotiated by discord.py >= 2.7.0) means received Opus
+#   is E2E-encrypted and no Python lib can decrypt it. Use VOICE_WEB_ENABLED.
+#   See memory codebase/dp238-discord-voice-recv-dead-dave-e2ee.md.
+# VOICE_WEB_ENABLED — browser/phone push-to-talk capture at GET /voice on the web
+#   interface (:5003). Records while a button is held, POSTs the utterance to
+#   /voice/utterance → STT → keyword intent → timer. Needs WEB_INTERFACE on and,
+#   for the fired-timer ping, VOICE_NOTIFY_CHANNEL_ID set.
 # VOICE_DISCORD_CHANNEL_ID — voice channel id the bot joins to listen.
 # VOICE_NOTIFY_CHANNEL_ID — text channel id a fired timer announces in (falls
 #   back to the source voice channel id when unset).
@@ -353,6 +361,7 @@ CC_FIXR_PROGRESS_DEBOUNCE_SECONDS = float(
 # VOICE_WAKEWORD — optional gate word an utterance must contain to be routed.
 # VOICE_VAD_SILENCE_MS — trailing silence (ms) that closes a spoken utterance.
 VOICE_ENABLED = os.environ.get("VOICE_ENABLED", "False").lower() in ("true", "1", "yes", "on")
+VOICE_WEB_ENABLED = os.environ.get("VOICE_WEB_ENABLED", "False").lower() in ("true", "1", "yes", "on")
 VOICE_DISCORD_CHANNEL_ID = os.environ.get("VOICE_DISCORD_CHANNEL_ID", "")
 VOICE_NOTIFY_CHANNEL_ID = os.environ.get("VOICE_NOTIFY_CHANNEL_ID", "")
 VOICE_STT_MODEL = os.environ.get("VOICE_STT_MODEL", "base")

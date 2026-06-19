@@ -451,14 +451,22 @@ Agents that leave the happy path are no longer silent or leaky:
 
 Countdown timers, usable two ways with one shared service:
 
-- **Spoken** — when `VOICE_ENABLED`, derpr joins the configured voice channel
-  (`VOICE_DISCORD_CHANNEL_ID`) and always-listens. Say "set a timer for 10
-  minutes" (or "…for the pasta") and it announces in `VOICE_NOTIFY_CHANNEL_ID`
-  (or the source voice channel) when it fires, pinging whoever set it. A cheap
-  local keyword match handles this — no LLM call per utterance. An optional
-  `VOICE_WAKEWORD` gates which utterances are considered.
+- **Spoken (browser/phone push-to-talk)** — when `VOICE_WEB_ENABLED`, open
+  `http://<host>:5003/voice`, hold the button, and say "set a timer for 10
+  minutes" (or "…for the pasta"). On release the clip is transcribed locally and,
+  if it's a timer command, scheduled; the page echoes back what it heard and the
+  timer it set. When it fires it announces in `VOICE_NOTIFY_CHANNEL_ID`, pinging
+  whoever set it. A cheap local keyword match handles this — no LLM call per
+  utterance. The page uses the browser's native mic API (works on phones too); no
+  app to install.
 - **Typed** — the same tools are LLM-callable from any text conversation, so a
   persona can set/list/cancel timers in chat too.
+
+> **Why not listen in a Discord voice channel?** It's no longer possible. Discord
+> made end-to-end encryption (the DAVE protocol) mandatory on all voice channels
+> in 2026, and no Python library can decrypt received audio. The
+> `VOICE_ENABLED`/`VOICE_DISCORD_CHANNEL_ID` Discord-capture path is kept behind
+> the same internal seam but is inert. Use the push-to-talk page instead.
 
 | Tool | Type | Description |
 |------|------|-------------|
@@ -467,9 +475,11 @@ Countdown timers, usable two ways with one shared service:
 | `cancel_timer` | Read | Cancel a pending timer by `timer_id` (from `list_timers`). |
 
 Speech-to-text uses Moonshine on CPU (purpose-built for short voice commands),
-so it never contends with the GPU serving the local LLM. Config: `VOICE_ENABLED`,
-`VOICE_DISCORD_CHANNEL_ID`, `VOICE_NOTIFY_CHANNEL_ID`, `VOICE_STT_MODEL`
-(`base`/`tiny`), `VOICE_WAKEWORD`, `VOICE_VAD_SILENCE_MS`. All default-off.
+so it never contends with the GPU serving the local LLM. Config: `VOICE_WEB_ENABLED`
+(push-to-talk page), `VOICE_NOTIFY_CHANNEL_ID` (where a fired timer pings),
+`VOICE_STT_MODEL` (`base`/`tiny`), `VOICE_WAKEWORD`. The inert Discord-capture
+path also reads `VOICE_ENABLED`, `VOICE_DISCORD_CHANNEL_ID`, `VOICE_VAD_SILENCE_MS`.
+All default-off.
 
 ### Memory Tools (no service binding required)
 

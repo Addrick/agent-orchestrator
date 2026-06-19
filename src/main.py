@@ -142,6 +142,11 @@ def _register_interfaces(
         logger.info(f"Initializing Kobold Engine API on port {engine_port}...")
         engine_adapter = create_kobold_engine_adapter(bot)
         engine_adapter.port = engine_port
+        # DP-238 web: mount the browser/phone push-to-talk voice capture on the
+        # engine adapter's FastAPI app (GET /voice). No-op unless VOICE_WEB_ENABLED.
+        voice = bot.get_service("voice")
+        if voice is not None and hasattr(voice, "attach_web"):
+            voice.attach_web(engine_adapter.app)
         app.register_task("kobold_engine_api", engine_adapter.start())
 
 

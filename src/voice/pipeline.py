@@ -15,7 +15,7 @@ constructor change, not a rewrite.
 from __future__ import annotations
 
 import logging
-from typing import Awaitable, Callable, Dict, Optional
+from typing import Awaitable, Callable, Dict, Optional, Tuple
 
 from src.voice.capture import CaptureSource
 from src.voice.intent import IntentRouter, TimerIntent
@@ -34,12 +34,15 @@ class VoicePipeline:
     def __init__(
         self,
         *,
-        capture: CaptureSource,
+        capture: Optional[CaptureSource] = None,
         vad_factory: VADFactory,
         transcriber: Transcriber,
         intent_router: IntentRouter,
         on_intent: OnIntent,
     ) -> None:
+        # ``capture`` is the streaming pull source (Discord VC). It is optional:
+        # the browser push-to-talk path (DP-238 web) hands complete utterances to
+        # ``submit_utterance`` and has no always-on capture to start.
         self._capture = capture
         self._vad_factory = vad_factory
         self._transcriber = transcriber
@@ -51,11 +54,17 @@ class VoicePipeline:
         self._frames_seen = 0
         self._utterances_seen = 0
 
+    async def warmup(self) -> None:
+        """Pre-load the STT model so the first utterance isn't lost to cold-start."""
+        await self._transcriber.warmup()
+
     async def start(self) -> None:
-        await self._capture.start()
+        if self._capture is not None:
+            await self._capture.start()
 
     async def stop(self) -> None:
-        await self._capture.stop()
+        if self._capture is not None:
+            await self._capture.stop()
         # Flush any speech still buffered per speaker.
         for user_id, vad in list(self._vads.items()):
             tail = vad.flush()
@@ -85,7 +94,34 @@ class VoicePipeline:
                 )
             )
 
-    async def _handle_utterance(self, utterance: Utterance) -> None:
+    async def submit_utterance(
+        self,
+        pcm: bytes,
+        sample_rate: int,
+        channels: int,
+        *,
+        user_id: Optional[int] = None,
+        source_channel_id: Optional[int] = None,
+    ) -> Tuple[Optional[str], Optional[TimerIntent]]:
+        """Push a *complete* pre-segmented utterance (DP-238 web push-to-talk).
+
+        The browser delimits the utterance with the talk button, so there is no
+        VAD in this path — the raw PCM is resampled to 16 kHz mono and routed
+        straight through transcribe → intent. Returns ``(transcript, intent)``:
+        ``transcript`` is ``None`` when nothing was transcribed, ``intent`` is the
+        matched ``TimerIntent`` (already scheduled) or ``None``. The caller echoes
+        both back to the browser.
+        """
+        mono16k = to_16k_mono(pcm, sample_rate, channels)
+        if not mono16k:
+            return None, None
+        return await self._handle_utterance(
+            Utterance(pcm16k_mono=mono16k, user_id=user_id, source_channel_id=source_channel_id)
+        )
+
+    async def _handle_utterance(
+        self, utterance: Utterance
+    ) -> Tuple[Optional[str], Optional[TimerIntent]]:
         self._utterances_seen += 1
         logger.info(
             "Voice: VAD closed utterance #%d (user=%s, %d bytes); transcribing…",
@@ -94,7 +130,7 @@ class VoicePipeline:
         text = (await self._transcriber.transcribe(utterance.pcm16k_mono)).strip()
         if not text:
             logger.info("Voice: transcription empty (user=%s)", utterance.user_id)
-            return
+            return None, None
         logger.info("Voice utterance (user=%s): %r", utterance.user_id, text)
         command = VoiceCommand(
             raw_text=text,
@@ -104,9 +140,10 @@ class VoicePipeline:
         intent = await self._intent_router.route(text)
         if intent is None:
             logger.info("Voice: no timer intent in %r (needs 'timer'/'alarm' + duration)", text)
-            return
+            return text, None
         logger.info("Voice: matched timer intent %ds (user=%s)", intent.seconds, utterance.user_id)
         try:
             await self._on_intent(intent, command)
         except Exception:  # noqa: BLE001 - an action failure must not kill the pipeline
             logger.exception("voice intent handler failed")
+        return text, intent

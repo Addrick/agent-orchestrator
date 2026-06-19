@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, Dict, Optional, TYPE_CHECKING
 
 from config import global_config
 from src.clients.service_integration import ServiceIntegration
@@ -35,16 +35,18 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _format_fire(timer: Timer) -> str:
-    minutes, seconds = divmod(timer.seconds, 60)
+def _format_duration(total_seconds: int) -> str:
+    minutes, seconds = divmod(total_seconds, 60)
     if minutes and seconds:
-        dur = f"{minutes}m {seconds}s"
-    elif minutes:
-        dur = f"{minutes} minute{'s' if minutes != 1 else ''}"
-    else:
-        dur = f"{seconds} second{'s' if seconds != 1 else ''}"
+        return f"{minutes}m {seconds}s"
+    if minutes:
+        return f"{minutes} minute{'s' if minutes != 1 else ''}"
+    return f"{seconds} second{'s' if seconds != 1 else ''}"
+
+
+def _format_fire(timer: Timer) -> str:
     label = f" — {timer.label}" if timer.label else ""
-    return f"⏰ Timer up ({dur}){label}!"
+    return f"⏰ Timer up ({_format_duration(timer.seconds)}){label}!"
 
 
 class VoiceIntegration(ServiceIntegration):
@@ -59,6 +61,7 @@ class VoiceIntegration(ServiceIntegration):
         self._discord: Any = None
         self._pipeline: Optional["VoicePipeline"] = None
         self._start_task: Optional["asyncio.Task[None]"] = None
+        self._warmup_task: Optional["asyncio.Task[None]"] = None
 
     @property
     def name(self) -> str:
@@ -87,15 +90,46 @@ class VoiceIntegration(ServiceIntegration):
     # -- voice pipeline (DP-238) --------------------------------------------
 
     def attach_discord(self, discord_client: Any) -> None:
-        """Late-bind the Discord client and, if voice is enabled, build + start
-        the capture pipeline. Called from ``_register_interfaces`` in main."""
+        """Late-bind the Discord client and, if the Discord capture path is
+        enabled, build + start it. Called from ``_register_interfaces`` in main.
+
+        NOTE: Discord voice *receive* no longer works — Discord's mandatory DAVE
+        end-to-end encryption (discord.py >= 2.7.0) makes received Opus
+        undecryptable by any Python lib. This path is kept behind the same seam
+        but stays off unless ``VOICE_ENABLED`` is forced on for an experiment
+        (e.g. a Stage-channel test). The supported capture path is the web
+        push-to-talk source (``attach_web`` / ``VOICE_WEB_ENABLED``)."""
         self._discord = discord_client
         if not self._voice_enabled():
-            logger.info("Voice pipeline disabled (VOICE_ENABLED / channel unset).")
+            logger.info("Voice Discord capture disabled (VOICE_ENABLED / channel unset).")
             return
-        self._pipeline = self._build_pipeline()
+        from src.voice.capture import DiscordVoiceCapture
+
+        channel_id = int(global_config.VOICE_DISCORD_CHANNEL_ID)
+        capture = DiscordVoiceCapture(
+            self._discord, channel_id, on_frame=lambda f: self._pipeline.on_frame(f),  # type: ignore[union-attr]
+        )
+        self._pipeline = self._build_pipeline(capture=capture)
         # capture.start() waits for the bot to be ready, so launch it detached.
         self._start_task = asyncio.create_task(self._start_pipeline())
+
+    def attach_web(self, app: Any) -> None:
+        """Mount the browser/phone push-to-talk capture on the FastAPI web app.
+
+        Called from ``_register_interfaces`` with the engine adapter's app. No-op
+        unless ``VOICE_WEB_ENABLED``. Builds a capture-less pipeline (the browser
+        delimits utterances, so no VAD/pull source) and registers the routes."""
+        if not global_config.VOICE_WEB_ENABLED:
+            logger.info("Voice web push-to-talk disabled (VOICE_WEB_ENABLED unset).")
+            return
+        from src.voice.web import register_voice_web
+
+        if self._pipeline is None:
+            self._pipeline = self._build_pipeline(capture=None)
+        register_voice_web(app, self._handle_web_utterance)
+        # Pre-warm STT in the background so the first spoken command isn't lost to
+        # model load + onnxruntime first-inference graph compilation (DP-238).
+        self._warmup_task = asyncio.create_task(self._pipeline.warmup())
 
     def _voice_enabled(self) -> bool:
         return bool(
@@ -104,14 +138,9 @@ class VoiceIntegration(ServiceIntegration):
             and global_config.VOICE_DISCORD_CHANNEL_ID
         )
 
-    def _build_pipeline(self) -> "VoicePipeline":
-        from src.voice.capture import DiscordVoiceCapture
+    def _build_pipeline(self, *, capture: Any) -> "VoicePipeline":
         from src.voice.pipeline import VoicePipeline
 
-        channel_id = int(global_config.VOICE_DISCORD_CHANNEL_ID)
-        capture = DiscordVoiceCapture(
-            self._discord, channel_id, on_frame=lambda f: self._pipeline.on_frame(f),  # type: ignore[union-attr]
-        )
         return VoicePipeline(
             capture=capture,
             vad_factory=lambda: EnergyVAD(silence_ms=global_config.VOICE_VAD_SILENCE_MS),
@@ -121,6 +150,28 @@ class VoiceIntegration(ServiceIntegration):
             ),
             on_intent=self._on_intent,
         )
+
+    async def _handle_web_utterance(self, pcm: bytes, sample_rate: int) -> Dict[str, Any]:
+        """Route one push-to-talk upload → STT → intent → timer, and build the
+        browser reply (transcript + an ack)."""
+        assert self._pipeline is not None
+        text, intent = await self._pipeline.submit_utterance(
+            pcm, sample_rate, channels=1,
+        )
+        if not text:
+            return {"text": "", "matched": False, "message": "(didn't catch that)"}
+        if intent is None:
+            return {
+                "text": text,
+                "matched": False,
+                "message": '(no timer command — try "set a timer for 10 minutes")',
+            }
+        label = f" for {intent.label}" if intent.label else ""
+        return {
+            "text": text,
+            "matched": True,
+            "message": f"⏰ Timer set: {_format_duration(intent.seconds)}{label}",
+        }
 
     async def _start_pipeline(self) -> None:
         try:
