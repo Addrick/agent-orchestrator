@@ -46,6 +46,10 @@ class VoicePipeline:
         self._intent_router = intent_router
         self._on_intent = on_intent
         self._vads: Dict[Optional[int], VAD] = {}
+        # DP-238d diagnostics: prove where the spoken path stops (receive → VAD →
+        # STT). Cheap counters; the first-frame/first-utterance logs fire once.
+        self._frames_seen = 0
+        self._utterances_seen = 0
 
     async def start(self) -> None:
         await self._capture.start()
@@ -61,6 +65,9 @@ class VoicePipeline:
 
     async def on_frame(self, frame: AudioFrame) -> None:
         """Capture callback. One frame of raw PCM for one speaker."""
+        self._frames_seen += 1
+        if self._frames_seen == 1:
+            logger.info("Voice: first audio frame received (user=%s)", frame.user_id)
         mono16k = to_16k_mono(frame.pcm, frame.sample_rate, frame.channels)
         if not mono16k:
             return
@@ -79,8 +86,14 @@ class VoicePipeline:
             )
 
     async def _handle_utterance(self, utterance: Utterance) -> None:
+        self._utterances_seen += 1
+        logger.info(
+            "Voice: VAD closed utterance #%d (user=%s, %d bytes); transcribing…",
+            self._utterances_seen, utterance.user_id, len(utterance.pcm16k_mono),
+        )
         text = (await self._transcriber.transcribe(utterance.pcm16k_mono)).strip()
         if not text:
+            logger.info("Voice: transcription empty (user=%s)", utterance.user_id)
             return
         logger.info("Voice utterance (user=%s): %r", utterance.user_id, text)
         command = VoiceCommand(
@@ -90,7 +103,9 @@ class VoicePipeline:
         )
         intent = await self._intent_router.route(text)
         if intent is None:
+            logger.info("Voice: no timer intent in %r (needs 'timer'/'alarm' + duration)", text)
             return
+        logger.info("Voice: matched timer intent %ds (user=%s)", intent.seconds, utterance.user_id)
         try:
             await self._on_intent(intent, command)
         except Exception:  # noqa: BLE001 - an action failure must not kill the pipeline
