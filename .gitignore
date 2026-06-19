@@ -47,3 +47,6 @@ eval_harnesses/suites/memory_recall/fixtures/.test_persona_seeded.json
 
 # Local exploration artifacts (not for the public repo)
 scratch/
+
+# Parallel-agent worktrees (each has a .venv junction to the shared venv)
+worktrees/
