@@ -716,6 +716,11 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
                         "description": "When listing, include only running/waiting agents.",
                         "default": False,
                     },
+                    "include_archived": {
+                        "type": "boolean",
+                        "description": "When listing, also show pruned/archived agents (hidden by default).",
+                        "default": False,
+                    },
                 },
                 "required": [],
             },
@@ -786,6 +791,42 @@ ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
                     },
                 },
                 "required": ["agent_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "is_write": False,
+        "service_binding": "fixr",
+        "capabilities": {
+            "produces_untrusted": False,
+            "irreversible": False,
+            "locality": "local",
+            "sensitivity": "internal",
+        },
+        "function": {
+            "name": "prune_agents",
+            "description": (
+                "Reap finished agents: delete the on-disk git worktrees of "
+                "terminal agents (done/error/killed/orphaned) and archive their "
+                "records (kept for audit, hidden from the default list). Use to "
+                "free disk after PRs land. Prune one with agent_id, or bound by "
+                "max_age_hours. Active agents and bugs with an in-flight agent "
+                "are never touched."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Prune a single terminal agent. Omit to prune all eligible.",
+                    },
+                    "max_age_hours": {
+                        "type": "number",
+                        "description": "Only prune agents untouched for at least this many hours.",
+                    },
+                },
+                "required": [],
             },
         },
     },

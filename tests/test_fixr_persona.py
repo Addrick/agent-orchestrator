@@ -33,7 +33,7 @@ def test_fixr_persona_loads_clean():
     assert not fixr.get_security_block_reasons()
     tools = set(fixr.get_enabled_tools())
     assert {"dispatch_fix", "inspect_agents", "answer_agent",
-            "kill_agent", "send_discord"} <= tools
+            "kill_agent", "prune_agents", "send_discord"} <= tools
 
 
 def test_config_without_fixr_still_loads(tmp_path):
@@ -62,7 +62,8 @@ def test_dispatch_fix_is_the_only_parked_fixr_write():
         if t.get("service_binding") == "fixr"
     }
     assert set(fixr_tools) == {
-        "dispatch_fix", "inspect_agents", "answer_agent", "kill_agent", "send_discord"
+        "dispatch_fix", "inspect_agents", "answer_agent", "kill_agent",
+        "prune_agents", "send_discord"
     }
     writes = {n for n, t in fixr_tools.items() if t.get("is_write")}
     assert writes == {"dispatch_fix"}

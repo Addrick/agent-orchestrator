@@ -56,6 +56,22 @@ async def test_list_active_only():
     assert {x.agent_id for x in active} == {"a1", "a3"}
 
 
+async def test_archive_hides_from_default_list():
+    r = AgentRegistry()
+    await r.add(_rec("a1", "DP-1", reg.DONE))
+    await r.add(_rec("a2", "DP-2", reg.RUNNING))
+    archived = await r.archive("a1")
+    assert archived is not None and archived.archived is True
+    # default list hides archived; include_archived shows it.
+    assert {x.agent_id for x in await r.list()} == {"a2"}
+    assert {x.agent_id for x in await r.list(include_archived=True)} == {"a1", "a2"}
+
+
+async def test_archive_unknown_is_none():
+    r = AgentRegistry()
+    assert await r.archive("ghost") is None
+
+
 async def test_has_active_for_bug():
     r = AgentRegistry()
     await r.add(_rec("a1", "DP-1", reg.RUNNING))

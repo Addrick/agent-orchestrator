@@ -98,6 +98,24 @@ class CustomDiscordBot(discord.Client):
             logger.error(f"Failed to create agent thread under {parent_channel_id}: {e}")
             return None
 
+    async def close_agent_thread(self, thread_id: int) -> bool:
+        """Lock + archive a dispatched agent's thread (DP-237).
+
+        Called when the agent is pruned so stale replies visibly hit a closed
+        thread. Returns True on success; a missing/non-thread channel or any API
+        failure is logged and returns False (best-effort)."""
+        try:
+            await self.wait_until_ready()
+            thread = await self.fetch_channel(thread_id)
+            if not isinstance(thread, discord.Thread):
+                logger.error(f"close_agent_thread: {thread_id} is not a thread.")
+                return False
+            await thread.edit(archived=True, locked=True)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to close agent thread {thread_id}: {e}")
+            return False
+
 
 async def _ack(channel: Optional[discord.abc.Messageable], text: str) -> None:
     """Best-effort post of a short status line into the agent thread. A failed
