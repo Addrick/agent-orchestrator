@@ -18,6 +18,7 @@ IMPORT_TO_PKG = {
     "google_genai": "google-genai",
     "google": "google-auth", # Common root for google-auth, google-cloud, etc.
     "httpx": "httpx",
+    "moonshine": "useful-moonshine",  # DP-238 voice STT (lazy-imported)
     # Add more as discovered
 }
 

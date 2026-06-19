@@ -112,6 +112,11 @@ def _register_interfaces(
         fixr = bot.get_service("fixr")
         if fixr is not None and hasattr(fixr, "attach_discord"):
             fixr.attach_discord(discord_bot)
+        # DP-238: late-bind the Discord client to the voice subsystem so it can
+        # join its always-listening voice channel (no-op when VOICE_ENABLED off).
+        voice = bot.get_service("voice")
+        if voice is not None and hasattr(voice, "attach_discord"):
+            voice.attach_discord(discord_bot)
         discord_token = os.environ.get("DISCORD_API_KEY")
         if not discord_token:
             logger.error("DISCORD_API_KEY not set. Cannot start Discord bot.")
@@ -216,6 +221,13 @@ async def main() -> None:
     # NotificationRouter (fixr's send_discord), so it registers after the router.
     from src.self_edit.integration import FixrIntegration
     bot.register_service(FixrIntegration(bot, notification_router))
+
+    # 7.2 Register the voice command subsystem (DP-238). Needs the
+    # NotificationRouter to announce fired timers; the Discord client is
+    # late-bound in _register_interfaces (like fixr) so the always-listening
+    # capture pipeline can join its voice channel.
+    from src.voice import VoiceIntegration
+    bot.register_service(VoiceIntegration(notification_router))
 
     # 8. Register interfaces
     _register_interfaces(app, bot, notification_router)

@@ -341,6 +341,24 @@ CC_FIXR_PROGRESS_DEBOUNCE_SECONDS = float(
     os.environ.get("CC_FIXR_PROGRESS_DEBOUNCE_SECONDS", "1.5")
 )
 
+# Voice command pipeline (DP-238). All default-off: with VOICE_ENABLED false the
+# subsystem only exposes the text-callable timer tools — no voice channel is
+# joined and the optional voice deps (discord-ext-voice-recv, Moonshine) are
+# never imported.
+# VOICE_ENABLED — master switch for the always-listening Discord capture path.
+# VOICE_DISCORD_CHANNEL_ID — voice channel id the bot joins to listen.
+# VOICE_NOTIFY_CHANNEL_ID — text channel id a fired timer announces in (falls
+#   back to the source voice channel id when unset).
+# VOICE_STT_MODEL — Moonshine tier: "base" (default) or "tiny".
+# VOICE_WAKEWORD — optional gate word an utterance must contain to be routed.
+# VOICE_VAD_SILENCE_MS — trailing silence (ms) that closes a spoken utterance.
+VOICE_ENABLED = os.environ.get("VOICE_ENABLED", "False").lower() in ("true", "1", "yes", "on")
+VOICE_DISCORD_CHANNEL_ID = os.environ.get("VOICE_DISCORD_CHANNEL_ID", "")
+VOICE_NOTIFY_CHANNEL_ID = os.environ.get("VOICE_NOTIFY_CHANNEL_ID", "")
+VOICE_STT_MODEL = os.environ.get("VOICE_STT_MODEL", "base")
+VOICE_WAKEWORD = os.environ.get("VOICE_WAKEWORD", "")
+VOICE_VAD_SILENCE_MS = int(os.environ.get("VOICE_VAD_SILENCE_MS", "700"))
+
 # Models
 EMBEDDING_MODEL = 'gemini-embedding-001'
 EMBEDDING_DIMENSION = 3072
