@@ -39,7 +39,10 @@ def test_register_voice_web_serves_page_and_accepts_utterance():
     async def handler(pcm, sample_rate):
         return {"text": "set a timer for 1 minute", "matched": True, "message": "ok"}
 
-    register_voice_web(app, handler)
+    async def transcribe(pcm, sample_rate):
+        return {"text": "hello there"}
+
+    register_voice_web(app, handler, transcribe)
     client = TestClient(app)
 
     page = client.get("/voice")
@@ -51,6 +54,11 @@ def test_register_voice_web_serves_page_and_accepts_utterance():
     assert ok.status_code == 200
     assert ok.json()["matched"] is True
 
+    # dictation route: STT-only, returns just the transcript
+    tr = client.post("/voice/transcribe", content=pcm, headers={"X-Sample-Rate": "16000"})
+    assert tr.status_code == 200
+    assert tr.json() == {"text": "hello there"}
+
 
 def test_utterance_route_rejects_missing_rate_and_empty_body():
     app = FastAPI()
@@ -58,13 +66,18 @@ def test_utterance_route_rejects_missing_rate_and_empty_body():
     async def handler(pcm, sample_rate):  # pragma: no cover - not reached on 400
         return {}
 
-    register_voice_web(app, handler)
+    register_voice_web(app, handler, handler)
     client = TestClient(app)
     pcm = np.zeros(2000, dtype=np.int16).tobytes()
 
     assert client.post("/voice/utterance", content=pcm).status_code == 400  # no header
     assert client.post(
         "/voice/utterance", content=b"", headers={"X-Sample-Rate": "16000"}
+    ).status_code == 400  # empty body
+    # the transcribe route shares the same validation
+    assert client.post("/voice/transcribe", content=pcm).status_code == 400  # no header
+    assert client.post(
+        "/voice/transcribe", content=b"", headers={"X-Sample-Rate": "16000"}
     ).status_code == 400  # empty body
 
 
@@ -74,10 +87,12 @@ def test_utterance_route_handler_error_is_500_not_crash():
     async def handler(pcm, sample_rate):
         raise RuntimeError("boom")
 
-    register_voice_web(app, handler)
+    register_voice_web(app, handler, handler)
     client = TestClient(app, raise_server_exceptions=False)
     pcm = np.zeros(2000, dtype=np.int16).tobytes()
     r = client.post("/voice/utterance", content=pcm, headers={"X-Sample-Rate": "16000"})
+    assert r.status_code == 500
+    r = client.post("/voice/transcribe", content=pcm, headers={"X-Sample-Rate": "16000"})
     assert r.status_code == 500
 
 
@@ -124,6 +139,32 @@ async def test_handle_web_utterance_empty_transcript():
     assert "didn't catch" in res["message"]
 
 
+async def test_handle_web_transcribe_returns_text_without_routing(monkeypatch):
+    # Dictation must NOT schedule a timer even for a timer-shaped utterance —
+    # the LLM owns intents on the SPA path.
+    integ = VoiceIntegration(_FakeRouter())
+    integ._pipeline = _ptt_pipeline(integ, "set a timer for 5 minutes")
+
+    scheduled = []
+
+    async def fake_schedule(seconds, target, *, label=None):  # pragma: no cover
+        scheduled.append(seconds)
+
+    monkeypatch.setattr(integ.timer_service, "schedule", fake_schedule)
+    pcm = np.full(16000, 1000, dtype=np.int16).tobytes()
+    res = await integ._handle_web_transcribe(pcm, 16000)
+    assert res == {"text": "set a timer for 5 minutes"}
+    assert scheduled == []
+
+
+async def test_handle_web_transcribe_empty():
+    integ = VoiceIntegration(_FakeRouter())
+    integ._pipeline = _ptt_pipeline(integ, "")
+    pcm = np.full(16000, 1000, dtype=np.int16).tobytes()
+    res = await integ._handle_web_transcribe(pcm, 16000)
+    assert res == {"text": ""}
+
+
 # -- attach_web enable/disable ------------------------------------------------
 
 def test_attach_web_disabled_mounts_nothing(monkeypatch):
@@ -148,5 +189,6 @@ async def test_attach_web_enabled_builds_pipeline_and_routes(monkeypatch):
     assert integ._pipeline is not None
     paths = {getattr(r, "path", None) for r in app.routes}
     assert "/voice" in paths and "/voice/utterance" in paths
+    assert "/voice/transcribe" in paths
     assert integ._warmup_task is not None
     await integ._warmup_task  # NullTranscriber warmup is a no-op; just don't leak it

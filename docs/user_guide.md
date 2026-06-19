@@ -459,6 +459,13 @@ Countdown timers, usable two ways with one shared service:
   whoever set it. A cheap local keyword match handles this — no LLM call per
   utterance. The page uses the browser's native mic API (works on phones too); no
   app to install.
+- **Dictation in the portal** — the derpr web UI (`/derpr`) has a hold-to-talk mic
+  button next to Send (when `VOICE_WEB_ENABLED`). Holding it records, and on release
+  the clip is transcribed and the text dropped into the composer to edit and send —
+  so the LLM (which owns the timer tools) acts on it, not a keyword match. A "voice
+  auto-send" toggle (off by default, remembered per browser) sends the transcript
+  immediately once you trust the transcription. Needs a secure context for mic
+  access (localhost / HTTPS / the tailscale-cloudflared path).
 - **Typed** — the same tools are LLM-callable from any text conversation, so a
   persona can set/list/cancel timers in chat too.
 

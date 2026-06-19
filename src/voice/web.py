@@ -25,14 +25,47 @@ logger = logging.getLogger(__name__)
 
 # handler(pcm_bytes, sample_rate) -> {"text": str, "message": str, "matched": bool}
 UtteranceHandler = Callable[[bytes, int], Awaitable[Dict[str, Any]]]
+# transcribe(pcm_bytes, sample_rate) -> {"text": str} (dictation, no intent routing)
+TranscribeHandler = Callable[[bytes, int], Awaitable[Dict[str, Any]]]
 
 # Cap an uploaded utterance so a stuck/abusive client can't post unbounded audio.
 # 16-bit mono @ 48 kHz ≈ 96 KB/s, so 8 MB ≈ ~85 s of speech — plenty for a command.
 _MAX_UTTERANCE_BYTES = 8 * 1024 * 1024
 
 
-def register_voice_web(app: FastAPI, handler: UtteranceHandler) -> None:
-    """Mount the push-to-talk page + upload route on an existing FastAPI app."""
+async def _dispatch(request: Request, fn: UtteranceHandler, what: str) -> JSONResponse:
+    """Validate a raw-PCM upload (octet-stream body + ``X-Sample-Rate`` header),
+    run ``fn``, and shape the JSON reply. Shared by both upload routes."""
+    try:
+        sample_rate = int(request.headers.get("X-Sample-Rate", "0"))
+    except ValueError:
+        sample_rate = 0
+    if sample_rate <= 0:
+        return JSONResponse({"error": "missing/invalid X-Sample-Rate"}, status_code=400)
+    pcm = await request.body()
+    if not pcm:
+        return JSONResponse({"error": "empty body"}, status_code=400)
+    if len(pcm) > _MAX_UTTERANCE_BYTES:
+        return JSONResponse({"error": "utterance too large"}, status_code=413)
+    try:
+        result = await fn(pcm, sample_rate)
+    except Exception:  # noqa: BLE001 - a bad upload must not 500 the whole app
+        logger.exception("voice web %s handler failed", what)
+        return JSONResponse({"error": "internal error"}, status_code=500)
+    return JSONResponse(result)
+
+
+def register_voice_web(
+    app: FastAPI,
+    handler: UtteranceHandler,
+    transcribe_handler: TranscribeHandler,
+) -> None:
+    """Mount the push-to-talk page + upload routes on an existing FastAPI app.
+
+    Two upload routes share the same raw-PCM body contract: ``/voice/utterance``
+    runs the full STT→intent→timer path (the standalone ``/voice`` page), while
+    ``/voice/transcribe`` is STT-only for the SPA mic button (dictation into the
+    composer — the LLM owns intents)."""
 
     @app.get("/voice", response_class=HTMLResponse)
     async def _voice_page() -> HTMLResponse:  # pragma: no cover - static asset
@@ -40,23 +73,11 @@ def register_voice_web(app: FastAPI, handler: UtteranceHandler) -> None:
 
     @app.post("/voice/utterance")
     async def _voice_utterance(request: Request) -> JSONResponse:
-        try:
-            sample_rate = int(request.headers.get("X-Sample-Rate", "0"))
-        except ValueError:
-            sample_rate = 0
-        if sample_rate <= 0:
-            return JSONResponse({"error": "missing/invalid X-Sample-Rate"}, status_code=400)
-        pcm = await request.body()
-        if not pcm:
-            return JSONResponse({"error": "empty body"}, status_code=400)
-        if len(pcm) > _MAX_UTTERANCE_BYTES:
-            return JSONResponse({"error": "utterance too large"}, status_code=413)
-        try:
-            result = await handler(pcm, sample_rate)
-        except Exception:  # noqa: BLE001 - a bad upload must not 500 the whole app
-            logger.exception("voice web utterance handler failed")
-            return JSONResponse({"error": "internal error"}, status_code=500)
-        return JSONResponse(result)
+        return await _dispatch(request, handler, "utterance")
+
+    @app.post("/voice/transcribe")
+    async def _voice_transcribe(request: Request) -> JSONResponse:
+        return await _dispatch(request, transcribe_handler, "transcribe")
 
     logger.info("Voice push-to-talk web capture mounted at GET /voice")
 

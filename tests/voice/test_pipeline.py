@@ -171,6 +171,36 @@ async def test_submit_utterance_empty_pcm():
     assert text is None and intent is None
 
 
+async def test_transcribe_returns_text_without_intent_routing():
+    # Dictation path: STT only, no intent firing even for a timer utterance.
+    seen = []
+
+    pipe = VoicePipeline(
+        capture=None,
+        vad_factory=lambda: _ImmediateVAD(),
+        transcriber=NullTranscriber("set a timer for 10 minutes"),
+        intent_router=KeywordTimerRouter(),
+        on_intent=lambda i, c: seen.append(i),  # type: ignore[arg-type,return-value]
+    )
+    pcm = np.full(16000, 1000, dtype=np.int16).tobytes()
+    text = await pipe.transcribe(pcm, 16000, 1)
+    assert text == "set a timer for 10 minutes"
+    assert seen == []  # intent router never invoked
+
+
+async def test_transcribe_empty_pcm_and_blank():
+    pipe = VoicePipeline(
+        capture=None,
+        vad_factory=lambda: _ImmediateVAD(),
+        transcriber=NullTranscriber("   "),  # whitespace-only → None
+        intent_router=KeywordTimerRouter(),
+        on_intent=lambda i, c: None,  # type: ignore[arg-type,return-value]
+    )
+    assert await pipe.transcribe(b"", 16000, 1) is None  # empty audio
+    pcm = np.full(16000, 1000, dtype=np.int16).tobytes()
+    assert await pipe.transcribe(pcm, 16000, 1) is None  # blank transcript
+
+
 async def test_start_stop_noop_without_capture():
     pipe = VoicePipeline(
         capture=None,

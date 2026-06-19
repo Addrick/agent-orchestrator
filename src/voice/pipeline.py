@@ -119,6 +119,20 @@ class VoicePipeline:
             Utterance(pcm16k_mono=mono16k, user_id=user_id, source_channel_id=source_channel_id)
         )
 
+    async def transcribe(
+        self, pcm: bytes, sample_rate: int, channels: int
+    ) -> Optional[str]:
+        """Transcribe a complete utterance WITHOUT intent routing (DP-238 web
+        dictation). Used by the SPA mic button: the transcript is dropped into
+        the composer so the LLM — which already owns the timer tools — handles
+        any command, rather than the keyword router second-guessing it. Returns
+        the stripped transcript or ``None`` when nothing was transcribed."""
+        mono16k = to_16k_mono(pcm, sample_rate, channels)
+        if not mono16k:
+            return None
+        text = (await self._transcriber.transcribe(mono16k)).strip()
+        return text or None
+
     async def _handle_utterance(
         self, utterance: Utterance
     ) -> Tuple[Optional[str], Optional[TimerIntent]]:

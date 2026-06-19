@@ -126,7 +126,9 @@ class VoiceIntegration(ServiceIntegration):
 
         if self._pipeline is None:
             self._pipeline = self._build_pipeline(capture=None)
-        register_voice_web(app, self._handle_web_utterance)
+        register_voice_web(
+            app, self._handle_web_utterance, self._handle_web_transcribe
+        )
         # Pre-warm STT in the background so the first spoken command isn't lost to
         # model load + onnxruntime first-inference graph compilation (DP-238).
         self._warmup_task = asyncio.create_task(self._pipeline.warmup())
@@ -172,6 +174,14 @@ class VoiceIntegration(ServiceIntegration):
             "matched": True,
             "message": f"⏰ Timer set: {_format_duration(intent.seconds)}{label}",
         }
+
+    async def _handle_web_transcribe(self, pcm: bytes, sample_rate: int) -> Dict[str, Any]:
+        """Dictation: STT-only, no intent routing (SPA mic button). The transcript
+        goes into the composer for the LLM to act on, so the keyword timer router
+        is deliberately bypassed here."""
+        assert self._pipeline is not None
+        text = await self._pipeline.transcribe(pcm, sample_rate, channels=1)
+        return {"text": text or ""}
 
     async def _start_pipeline(self) -> None:
         try:

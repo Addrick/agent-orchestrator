@@ -370,6 +370,8 @@ body.resizing { cursor: col-resize; user-select: none; }
 .cbox textarea:focus { outline: none; border-color: var(--accent-dim); }
 .send { padding: 0 18px; height: 46px; border-radius: var(--r); border: 1px solid var(--accent-dim); background: var(--accent-bg); color: var(--accent); font-size: 12px; font-weight: 600; }
 .send:hover { background: rgba(90,214,207,0.18); }
+.send.mic { padding: 0 13px; font-size: 14px; -webkit-user-select: none; user-select: none; touch-action: none; }
+.send.mic.rec { border-color: rgba(229,114,114,0.5); background: var(--danger-bg); color: var(--danger); }
 .kbd { font-size: 9.5px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 1px 5px; color: var(--ink-dim); }
 
 /* ============================================================ INSPECTOR */
