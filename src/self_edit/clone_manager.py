@@ -102,6 +102,35 @@ def _derive_repo_url(source_root: str) -> str:
     return url
 
 
+def _configure_push_auth(clone_dir: str) -> None:
+    """Configure git so the dispatched agent's `git push` / `gh pr create`
+    authenticate to GitHub without writing any secret to disk.
+
+    The base clone is fetched anonymously (agent-orchestrator is public), but a
+    dispatched agent must PUSH its bugfix branch to open a PR. `gh` reads
+    ``GH_TOKEN`` for its own API calls, but the `git push` that `gh pr create`
+    runs uses git's credential system — unconfigured in a fresh clone. We point
+    git's credential helper at `gh` (`gh auth git-credential`), which resolves
+    ``GH_TOKEN`` from the environment at push time. The token therefore never
+    lands in `.git/config` (matching the no-secret-on-disk rule in _SEED_FILES);
+    only the helper *reference* is stored. Shared `.git/config` → every worktree
+    inherits it. Idempotent: re-running just rewrites the same config value.
+
+    Non-fatal on failure: the agent can still diagnose/commit, just not push.
+    """
+    try:
+        _run_git(
+            [
+                "config",
+                "credential.https://github.com.helper",
+                "!gh auth git-credential",
+            ],
+            cwd=clone_dir,
+        )
+    except CloneManagerError as e:
+        logger.warning("Could not configure GitHub push credential helper: %s", e)
+
+
 def _seed_support_files(target_dir: str, source_root: str) -> None:
     """Copy gitignored test-support files (.env.test, ...) into a fresh worktree.
     Never the live .env — see _SEED_FILES. Missing source files are skipped
@@ -194,6 +223,7 @@ def prepare_base_clone(
             _run_git(["clone", url, clone_dir])
         logger.debug("Fetching origin in base clone %s", clone_dir)
         _run_git(["fetch", "origin"], cwd=clone_dir)
+        _configure_push_auth(clone_dir)
         return clone_dir
 
 
