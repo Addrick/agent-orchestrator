@@ -111,6 +111,25 @@ class AgentRegistry:
                 await asyncio.to_thread(self._store.delete, agent_id)
             return rec
 
+    async def compare_and_set_status(
+        self, agent_id: str, expected: str, new: str
+    ) -> bool:
+        """Atomically flip ``agent_id``'s status from ``expected`` to ``new``.
+
+        Returns False (no change) if the agent is missing or not currently in
+        ``expected``. Done under the registry lock so two callers racing to
+        resume one WAITING agent (e.g. two quick thread replies) can never both
+        win — exactly one observes the WAITING→RUNNING transition succeed."""
+        async with self._lock:
+            rec = self._records.get(agent_id)
+            if rec is None or rec.status != expected:
+                return False
+            rec.status = new
+            rec.updated_at = time.time()
+            if self._store is not None:
+                await asyncio.to_thread(self._store.upsert, rec)
+            return True
+
     async def get_by_thread(self, thread_id: str) -> Optional[AgentRecord]:
         """Resolve the agent whose Discord thread is ``thread_id`` (DP-230).
 

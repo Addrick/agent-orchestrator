@@ -14,6 +14,7 @@ from src.utils.message_utils import split_string_by_limit
 from src.personas.store import save_personas_to_file
 from src.chat_system import ChatSystem, ResponseType
 from src.persona import Persona
+from src.self_edit.dispatcher import DispatcherError
 
 # THE FIX: Initialize the logger at the top of the module.
 logger = logging.getLogger(__name__)
@@ -98,15 +99,47 @@ class CustomDiscordBot(discord.Client):
             return None
 
 
+async def _ack(channel: Optional[discord.abc.Messageable], text: str) -> None:
+    """Best-effort post of a short status line into the agent thread. A failed
+    ack must never break inbound routing."""
+    if channel is None:
+        return
+    try:
+        await channel.send(text)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Failed to post agent-thread ack: {e}")
+
+
+async def _react(message: Optional[discord.Message], emoji: str) -> None:
+    """Best-effort reaction (e.g. mark a note-to-self as seen)."""
+    if message is None:
+        return
+    try:
+        await message.add_reaction(emoji)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Failed to react to agent-thread message: {e}")
+
+
 async def route_agent_thread_message(
-    chat_system: 'ChatSystem', thread_id: str, content: str
+    chat_system: 'ChatSystem',
+    thread_id: str,
+    content: str,
+    *,
+    channel: Optional[discord.abc.Messageable] = None,
+    message: Optional[discord.Message] = None,
 ) -> bool:
     """Route a message posted in an agent thread straight to the agent (DP-230).
 
     Returns True when the message was handled here (i.e. the thread belongs to a
     dispatched agent) so the caller skips the persona/LLM path entirely — the
     whole point is a human↔agent round-trip with NO fixr LLM turn. A ``//``
-    prefix is a note-to-self and is swallowed without forwarding."""
+    prefix is a note-to-self and is swallowed without forwarding.
+
+    When ``channel``/``message`` are supplied (the live path), the human gets
+    feedback in the thread: a 📝 reaction on a swallowed note, a ✅ ack when the
+    answer resumes the agent, and a ⚠️ notice (with the reason) when it can't —
+    e.g. the agent isn't waiting. Without them (unit tests) routing still works,
+    just silently."""
     fixr = chat_system.get_service("fixr")
     if fixr is None:
         return False
@@ -119,13 +152,19 @@ async def route_agent_thread_message(
         return False  # a thread we don't own — let normal handling skip it
     text = content.strip()
     if text.startswith("//"):
-        return True  # note-to-self: handled (swallowed), not forwarded
+        await _react(message, "📝")  # note-to-self: seen, not forwarded
+        return True
     if not text:
         return True
     try:
         await dispatcher.answer_agent(record.agent_id, text)
-    except Exception as e:
+        await _ack(channel, "✅ Answer received — resuming the agent…")
+    except DispatcherError as e:
+        # Expected business case (e.g. agent not waiting) — tell the human why.
+        await _ack(channel, f"⚠️ Can't deliver that answer: {e}")
+    except Exception as e:  # noqa: BLE001 — unexpected; log + generic notice
         logger.error(f"Failed to answer agent {record.agent_id} from thread: {e}")
+        await _ack(channel, "⚠️ Something went wrong delivering that answer.")
     return True
 
 
@@ -265,7 +304,8 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
         # Any other thread is skipped as before.
         if isinstance(message.channel, discord.Thread):
             await route_agent_thread_message(
-                chat_system, str(message.channel.id), message.content
+                chat_system, str(message.channel.id), message.content,
+                channel=message.channel, message=message,
             )
             return
 

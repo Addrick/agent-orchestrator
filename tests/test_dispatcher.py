@@ -3,6 +3,7 @@
 wiring, and resume guards. No real subprocess or git — spawn + clone_manager
 are stubbed."""
 
+import asyncio
 import json
 import os
 
@@ -211,6 +212,96 @@ async def test_answer_agent_requires_session(tmp_path):
 
     with pytest.raises(DispatcherError, match="Unknown agent_id"):
         await d.answer_agent("ghost", "hi")
+
+
+async def _add(registry, status, *, session_id="sid-1", agent_id="a1"):
+    await registry.add(AgentRecord(
+        agent_id=agent_id, bug_id="DP-1", description="x", worktree="/w",
+        branch="b", raw_log="/r", events_log="/e", status=status,
+        session_id=session_id))
+
+
+def _stub_spawn(d, monkeypatch, proc=None, fail=False):
+    """Replace _spawn + _start_bridge so answer_agent never touches a real
+    subprocess or starts a background tail. Returns a dict flagging whether
+    _spawn was invoked."""
+    seen = {"spawned": False}
+    proc = proc or _FakeProc(pid=99)
+
+    async def fake_spawn(**kwargs):
+        seen["spawned"] = True
+        if fail:
+            raise RuntimeError("spawn boom")
+        return proc
+
+    monkeypatch.setattr(d, "_spawn", fake_spawn)
+    monkeypatch.setattr(d, "_start_bridge", lambda *a, **k: None)
+    return seen
+
+
+async def test_answer_agent_resumes_waiting(tmp_path, monkeypatch):
+    registry = AgentRegistry()
+    d = Dispatcher(registry, on_wake=_noop_wake)
+    await _add(registry, reg.WAITING)
+    seen = _stub_spawn(d, monkeypatch)
+
+    rec = await d.answer_agent("a1", "use option B")
+
+    assert seen["spawned"] is True
+    assert rec.status == reg.RUNNING
+    assert (await registry.get("a1")).pid == 99
+
+
+@pytest.mark.parametrize("status", [reg.RUNNING, reg.DONE, reg.ERROR, reg.KILLED, reg.ORPHANED])
+async def test_answer_agent_rejects_non_waiting(tmp_path, monkeypatch, status):
+    """Only a WAITING agent is resumable — resuming a RUNNING agent would spawn
+    a competing claude; resuming a terminal agent would resurrect it."""
+    registry = AgentRegistry()
+    d = Dispatcher(registry, on_wake=_noop_wake)
+    await _add(registry, status)
+    seen = _stub_spawn(d, monkeypatch)
+
+    with pytest.raises(DispatcherError, match="not waiting"):
+        await d.answer_agent("a1", "answer")
+
+    assert seen["spawned"] is False  # never spawned
+    assert (await registry.get("a1")).status == status  # status untouched
+
+
+async def test_answer_agent_spawn_failure_reverts_to_waiting(tmp_path, monkeypatch):
+    """If the resume spawn fails after the WAITING→RUNNING claim, the status is
+    rolled back to WAITING so the answer can be retried."""
+    registry = AgentRegistry()
+    d = Dispatcher(registry, on_wake=_noop_wake)
+    await _add(registry, reg.WAITING)
+    _stub_spawn(d, monkeypatch, fail=True)
+
+    with pytest.raises(RuntimeError, match="spawn boom"):
+        await d.answer_agent("a1", "answer")
+
+    assert (await registry.get("a1")).status == reg.WAITING  # reverted
+
+
+async def test_compare_and_set_status_single_winner(tmp_path):
+    """Concurrent CAS on one WAITING agent: exactly one transition wins."""
+    registry = AgentRegistry()
+    await _add(registry, reg.WAITING)
+
+    results = await asyncio.gather(*[
+        registry.compare_and_set_status("a1", reg.WAITING, reg.RUNNING)
+        for _ in range(8)
+    ])
+
+    assert sum(results) == 1  # only one caller saw WAITING
+    assert (await registry.get("a1")).status == reg.RUNNING
+
+
+async def test_compare_and_set_status_rejects_wrong_state_or_missing(tmp_path):
+    registry = AgentRegistry()
+    await _add(registry, reg.RUNNING)
+    assert await registry.compare_and_set_status("a1", reg.WAITING, reg.RUNNING) is False
+    assert await registry.compare_and_set_status("ghost", reg.WAITING, reg.RUNNING) is False
+    assert (await registry.get("a1")).status == reg.RUNNING  # unchanged
 
 
 async def test_spawn_strips_api_key_from_child_env(tmp_path, monkeypatch):
