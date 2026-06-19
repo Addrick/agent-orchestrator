@@ -119,6 +119,13 @@ class VoicePipeline:
             Utterance(pcm16k_mono=mono16k, user_id=user_id, source_channel_id=source_channel_id)
         )
 
+    def dictation_stream(self) -> "DictationStream":
+        """A per-connection streaming dictation session (DP-238 item B): its own
+        VAD endpoints continuous mic frames into utterances, each transcribed
+        WITHOUT intent routing (the LLM owns intents, as with ``transcribe``).
+        One per WebSocket so two clients never share VAD state."""
+        return DictationStream(self._vad_factory(), self._transcriber)
+
     async def transcribe(
         self, pcm: bytes, sample_rate: int, channels: int
     ) -> Optional[str]:
@@ -161,3 +168,39 @@ class VoicePipeline:
         except Exception:  # noqa: BLE001 - an action failure must not kill the pipeline
             logger.exception("voice intent handler failed")
         return text, intent
+
+
+class DictationStream:
+    """One streaming dictation session (DP-238 item B). Continuous mic frames are
+    resampled to 16 kHz mono and fed to a private ``VAD`` that endpoints them into
+    utterances on trailing silence; each closed utterance is transcribed (no intent
+    routing — the LLM owns intents). Stateful and single-speaker, so the caller
+    builds one per WebSocket connection.
+
+    Endpointing quality is bounded by the VAD: too short a silence cuts mid-sentence,
+    too long adds latency (tuned via ``VOICE_VAD_SILENCE_MS``). A smarter
+    "done talking?" endpointer (Silero VAD / a tiny LLM turn-end classifier /
+    streaming partial transcripts) is a known follow-up — see tasks/DP-238.md.
+    """
+
+    def __init__(self, vad: VAD, transcriber: Transcriber) -> None:
+        self._vad = vad
+        self._transcriber = transcriber
+
+    async def push(self, pcm: bytes, sample_rate: int, channels: int) -> Optional[str]:
+        """Feed one frame. Returns the transcript when this frame closes an
+        utterance (trailing silence reached), else ``None``."""
+        mono16k = to_16k_mono(pcm, sample_rate, channels)
+        if not mono16k:
+            return None
+        completed = self._vad.add_chunk(mono16k)
+        if not completed:
+            return None
+        return (await self._transcriber.transcribe(completed)).strip() or None
+
+    async def flush(self) -> Optional[str]:
+        """Transcribe any speech still buffered (e.g. on disconnect)."""
+        tail = self._vad.flush()
+        if not tail:
+            return None
+        return (await self._transcriber.transcribe(tail)).strip() or None

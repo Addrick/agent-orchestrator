@@ -466,6 +466,13 @@ Countdown timers, usable two ways with one shared service:
   auto-send" toggle (off by default, remembered per browser) sends the transcript
   immediately once you trust the transcription. Needs a secure context for mic
   access (localhost / HTTPS / the tailscale-cloudflared path).
+- **Always-listening dictation** — the same UI has a "listen" toggle that opens a
+  continuous mic stream (WebSocket); the server detects when you stop talking and
+  drops each spoken phrase into the composer (or auto-sends it, honouring the same
+  toggle). It's a hot mic only while the toggle is on — there's no auth, so it
+  trusts the LAN/tailscale network like the rest of the portal. Phrase boundaries
+  are silence-based, so a long pause mid-sentence can split a phrase (tunable via
+  `VOICE_VAD_SILENCE_MS`).
 - **Typed** — the same tools are LLM-callable from any text conversation, so a
   persona can set/list/cancel timers in chat too.
 

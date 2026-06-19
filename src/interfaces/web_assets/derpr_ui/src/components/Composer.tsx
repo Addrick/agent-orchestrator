@@ -1,5 +1,6 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useCallback } from 'react'
 import { useMicCapture } from './useMicCapture'
+import { useMicStream } from './useMicStream'
 import { transcribeVoice } from '../api/client'
 
 interface Props {
@@ -59,6 +60,25 @@ export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming }: Pro
       })
   }
 
+  // One rule for both mic modes: auto-send (when toggled on and the engine isn't
+  // mid-stream) or drop into the draft to edit. Refs read by the streaming WS
+  // callback so it never sees a stale toggle/streaming value.
+  const autoSendRef = useRef(autoSend)
+  autoSendRef.current = autoSend
+  const streamingRef = useRef(streaming)
+  streamingRef.current = streaming
+  const onSendRef = useRef(onSend)
+  onSendRef.current = onSend
+
+  const routeDictation = useCallback((t: string) => {
+    if (autoSendRef.current && !streamingRef.current) onSendRef.current(t)
+    else appendDraft(t)
+    // appendDraft is stable enough for this hook's purpose; deps intentionally [].
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const stream = useMicStream(routeDictation)
+
   const setAutoSendPref = (on: boolean) => {
     setAutoSend(on)
     localStorage.setItem(AUTOSEND_KEY, on ? '1' : '0')
@@ -85,8 +105,7 @@ export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming }: Pro
         return
       }
       setMicStatus(null)
-      if (autoSend && !streaming) onSend(t)
-      else appendDraft(t)
+      routeDictation(t)
     } catch {
       setMicStatus('transcribe failed')
     }
@@ -115,7 +134,20 @@ export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming }: Pro
             voice auto-send
           </button>
         )}
+        {stream.supported && (
+          <button
+            className={'toggle-chip' + (stream.active ? ' on' : '')}
+            onClick={stream.toggle}
+            title="always-listening dictation — continuously streams the mic and drops what you say into the composer"
+          >
+            <span className="sw" />
+            {stream.active ? 'listening…' : 'listen'}
+          </button>
+        )}
         <span className="grow" />
+        {stream.error && (
+          <span style={{ fontSize: 10, color: 'var(--danger)' }}>{stream.error}</span>
+        )}
         {micStatus && (
           <span style={{ fontSize: 10, color: 'var(--ink-faint)' }}>{micStatus}</span>
         )}

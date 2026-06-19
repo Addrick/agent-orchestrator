@@ -20,6 +20,28 @@ class _FakeRouter:
         return True
 
 
+class _FakeStream:
+    """Closes an utterance every 2nd pushed frame; flush emits a tail once."""
+
+    def __init__(self):
+        self.frames = 0
+        self.flushed = False
+
+    async def push(self, pcm, sample_rate, channels):
+        self.frames += 1
+        return "hello world" if self.frames % 2 == 0 else None
+
+    async def flush(self):
+        if self.flushed:
+            return None
+        self.flushed = True
+        return "tail words"
+
+
+def _noop_stream():
+    return _FakeStream()
+
+
 def _ptt_pipeline(integ, transcript):
     """A capture-less pipeline wired to the integration's intent handler."""
     return VoicePipeline(
@@ -42,7 +64,7 @@ def test_register_voice_web_serves_page_and_accepts_utterance():
     async def transcribe(pcm, sample_rate):
         return {"text": "hello there"}
 
-    register_voice_web(app, handler, transcribe)
+    register_voice_web(app, handler, transcribe, _noop_stream)
     client = TestClient(app)
 
     page = client.get("/voice")
@@ -66,7 +88,7 @@ def test_utterance_route_rejects_missing_rate_and_empty_body():
     async def handler(pcm, sample_rate):  # pragma: no cover - not reached on 400
         return {}
 
-    register_voice_web(app, handler, handler)
+    register_voice_web(app, handler, handler, _noop_stream)
     client = TestClient(app)
     pcm = np.zeros(2000, dtype=np.int16).tobytes()
 
@@ -87,13 +109,52 @@ def test_utterance_route_handler_error_is_500_not_crash():
     async def handler(pcm, sample_rate):
         raise RuntimeError("boom")
 
-    register_voice_web(app, handler, handler)
+    register_voice_web(app, handler, handler, _noop_stream)
     client = TestClient(app, raise_server_exceptions=False)
     pcm = np.zeros(2000, dtype=np.int16).tobytes()
     r = client.post("/voice/utterance", content=pcm, headers={"X-Sample-Rate": "16000"})
     assert r.status_code == 500
     r = client.post("/voice/transcribe", content=pcm, headers={"X-Sample-Rate": "16000"})
     assert r.status_code == 500
+
+
+# -- streaming WebSocket (/voice/stream) -------------------------------------
+
+def test_stream_ws_returns_transcript_per_closed_utterance():
+    app = FastAPI()
+
+    async def handler(pcm, sample_rate):  # pragma: no cover - not used here
+        return {}
+
+    register_voice_web(app, handler, handler, _noop_stream)
+    client = TestClient(app)
+    pcm = np.zeros(2000, dtype=np.int16).tobytes()
+
+    with client.websocket_connect("/voice/stream") as ws:
+        ws.send_json({"sample_rate": 48000})
+        ws.send_bytes(pcm)  # frame 1 → None (no message)
+        ws.send_bytes(pcm)  # frame 2 → closes an utterance
+        assert ws.receive_json() == {"text": "hello world"}
+
+
+def test_stream_ws_ignores_frames_before_sample_rate():
+    app = FastAPI()
+
+    async def handler(pcm, sample_rate):  # pragma: no cover - not used here
+        return {}
+
+    register_voice_web(app, handler, handler, _noop_stream)
+    client = TestClient(app)
+    pcm = np.zeros(2000, dtype=np.int16).tobytes()
+
+    with client.websocket_connect("/voice/stream") as ws:
+        # No sample-rate control frame yet → these binary frames are dropped, so
+        # the first transcript only arrives after the 2nd POST-rate frame.
+        ws.send_bytes(pcm)
+        ws.send_json({"sample_rate": 16000})
+        ws.send_bytes(pcm)
+        ws.send_bytes(pcm)
+        assert ws.receive_json() == {"text": "hello world"}
 
 
 # -- integration handler wiring ----------------------------------------------
@@ -189,6 +250,6 @@ async def test_attach_web_enabled_builds_pipeline_and_routes(monkeypatch):
     assert integ._pipeline is not None
     paths = {getattr(r, "path", None) for r in app.routes}
     assert "/voice" in paths and "/voice/utterance" in paths
-    assert "/voice/transcribe" in paths
+    assert "/voice/transcribe" in paths and "/voice/stream" in paths
     assert integ._warmup_task is not None
     await integ._warmup_task  # NullTranscriber warmup is a no-op; just don't leak it

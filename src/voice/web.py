@@ -15,10 +15,11 @@ handler that drives ``VoicePipeline.submit_utterance`` and formats the reply.
 """
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any, Awaitable, Callable, Dict
+from typing import Any, Awaitable, Callable, Dict, Optional, Protocol
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,17 @@ logger = logging.getLogger(__name__)
 UtteranceHandler = Callable[[bytes, int], Awaitable[Dict[str, Any]]]
 # transcribe(pcm_bytes, sample_rate) -> {"text": str} (dictation, no intent routing)
 TranscribeHandler = Callable[[bytes, int], Awaitable[Dict[str, Any]]]
+
+
+class StreamSession(Protocol):
+    """One streaming dictation session (a pipeline ``DictationStream``)."""
+
+    async def push(self, pcm: bytes, sample_rate: int, channels: int) -> Optional[str]: ...
+    async def flush(self) -> Optional[str]: ...
+
+
+# Builds a fresh session per WebSocket connection (own VAD state).
+StreamFactory = Callable[[], StreamSession]
 
 # Cap an uploaded utterance so a stuck/abusive client can't post unbounded audio.
 # 16-bit mono @ 48 kHz ≈ 96 KB/s, so 8 MB ≈ ~85 s of speech — plenty for a command.
@@ -55,17 +67,71 @@ async def _dispatch(request: Request, fn: UtteranceHandler, what: str) -> JSONRe
     return JSONResponse(result)
 
 
+def _parse_sample_rate(text_frame: str, current: int) -> int:
+    """Read a ``{"sample_rate": N}`` control frame; keep ``current`` on garbage."""
+    try:
+        sr = int(json.loads(text_frame).get("sample_rate", 0))
+    except (ValueError, TypeError):
+        return current
+    return sr if sr > 0 else current
+
+
+async def _flush_stream(ws: WebSocket, session: StreamSession) -> None:
+    """Flush trailing speech on close; the client may be gone, so guard the send."""
+    try:
+        tail = await session.flush()
+        if tail:
+            await ws.send_json({"text": tail})
+    except Exception:  # noqa: BLE001 - disconnected client / flush failure
+        pass
+
+
+async def _run_stream(ws: WebSocket, session: StreamSession) -> None:
+    """Drive one ``/voice/stream`` connection: the browser sends a ``{"sample_rate":
+    N}`` text frame, then continuous binary int16 PCM frames; each closed utterance
+    is transcribed and pushed back as ``{"text": ...}``. LAN/tailscale trust — no
+    auth (matches the other web endpoints; this is a continuous hot mic)."""
+    await ws.accept()
+    sample_rate = 0
+    try:
+        while True:
+            msg = await ws.receive()
+            if msg["type"] == "websocket.disconnect":
+                break
+            text_frame = msg.get("text")
+            if text_frame is not None:  # control frame
+                sample_rate = _parse_sample_rate(text_frame, sample_rate)
+                continue
+            pcm = msg.get("bytes")
+            if not pcm or sample_rate <= 0:
+                continue
+            try:
+                text = await session.push(pcm, sample_rate, 1)
+            except Exception:  # noqa: BLE001 - one bad frame must not drop the stream
+                logger.exception("voice stream push failed")
+                continue
+            if text:
+                await ws.send_json({"text": text})
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await _flush_stream(ws, session)
+
+
 def register_voice_web(
     app: FastAPI,
     handler: UtteranceHandler,
     transcribe_handler: TranscribeHandler,
+    stream_factory: StreamFactory,
 ) -> None:
     """Mount the push-to-talk page + upload routes on an existing FastAPI app.
 
     Two upload routes share the same raw-PCM body contract: ``/voice/utterance``
     runs the full STT→intent→timer path (the standalone ``/voice`` page), while
     ``/voice/transcribe`` is STT-only for the SPA mic button (dictation into the
-    composer — the LLM owns intents)."""
+    composer — the LLM owns intents). ``/voice/stream`` is the always-listening
+    WebSocket variant (item B): continuous frames, VAD-endpointed, transcript per
+    closed utterance."""
 
     @app.get("/voice", response_class=HTMLResponse)
     async def _voice_page() -> HTMLResponse:  # pragma: no cover - static asset
@@ -78,6 +144,10 @@ def register_voice_web(
     @app.post("/voice/transcribe")
     async def _voice_transcribe(request: Request) -> JSONResponse:
         return await _dispatch(request, transcribe_handler, "transcribe")
+
+    @app.websocket("/voice/stream")
+    async def _voice_stream(ws: WebSocket) -> None:
+        await _run_stream(ws, stream_factory())
 
     logger.info("Voice push-to-talk web capture mounted at GET /voice")
 

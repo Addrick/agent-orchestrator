@@ -127,7 +127,10 @@ class VoiceIntegration(ServiceIntegration):
         if self._pipeline is None:
             self._pipeline = self._build_pipeline(capture=None)
         register_voice_web(
-            app, self._handle_web_utterance, self._handle_web_transcribe
+            app,
+            self._handle_web_utterance,
+            self._handle_web_transcribe,
+            self._pipeline.dictation_stream,
         )
         # Pre-warm STT in the background so the first spoken command isn't lost to
         # model load + onnxruntime first-inference graph compilation (DP-238).
