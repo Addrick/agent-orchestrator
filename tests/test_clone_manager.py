@@ -70,10 +70,57 @@ def test_existing_base_fetch_only(tmp_path, monkeypatch):
     prepare_base_clone(str(clone_dir), source_root=str(source_root))
 
     op_names = [c[1] for c in calls]
-    assert op_names == ["fetch"]
+    # fetch refreshes the base; config sets the push credential helper.
+    assert op_names == ["fetch", "config"]
     assert "clone" not in op_names
     assert "reset" not in op_names
     assert "clean" not in op_names
+
+
+def test_configures_github_push_credential_helper(tmp_path, monkeypatch):
+    """prepare_base_clone points git's GitHub credential helper at `gh` so the
+    dispatched agent's `git push` / `gh pr create` authenticate via GH_TOKEN.
+    The token itself is never written — only the helper reference."""
+    clone_dir = tmp_path / "fixr_clone"
+    (clone_dir / ".git").mkdir(parents=True)
+    source_root = tmp_path / "src_checkout"
+    source_root.mkdir()
+
+    calls = []
+    monkeypatch.setattr(
+        cm.subprocess, "run",
+        lambda cmd, **k: (calls.append(cmd), _ok(""))[1],
+    )
+
+    prepare_base_clone(str(clone_dir), source_root=str(source_root))
+
+    config_call = next(c for c in calls if c[1] == "config")
+    assert config_call[2] == "credential.https://github.com.helper"
+    assert config_call[3] == "!gh auth git-credential"
+    # No raw secret anywhere in the git argv.
+    assert all("GH_TOKEN" not in str(arg) for c in calls for arg in c)
+
+
+def test_push_auth_failure_is_nonfatal(tmp_path, monkeypatch):
+    """A failed credential-helper config must not abort base-clone prep — the
+    agent can still diagnose/commit, just not push."""
+    clone_dir = tmp_path / "fixr_clone"
+    (clone_dir / ".git").mkdir(parents=True)
+    source_root = tmp_path / "src_checkout"
+    source_root.mkdir()
+
+    def fake_run(cmd, **k):
+        if cmd[1] == "config":
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=1, stdout="", stderr="config failed"
+            )
+        return _ok("")
+
+    monkeypatch.setattr(cm.subprocess, "run", fake_run)
+
+    # Does not raise despite the config op failing.
+    result = prepare_base_clone(str(clone_dir), source_root=str(source_root))
+    assert result == os.path.abspath(str(clone_dir))
 
 
 def test_create_worktree_adds_branch_off_base_ref(tmp_path, monkeypatch):

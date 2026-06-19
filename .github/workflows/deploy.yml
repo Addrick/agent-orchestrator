@@ -150,6 +150,7 @@ jobs:
             -e CC_SANDBOX_WEAKER_NESTED=True `
             -e CC_WORKSPACE_MODE=persona `
             -e GH_TOKEN=${{ secrets.SELF_EDIT_REQUESTS }} `
+            -e CC_SANDBOX_ALLOWED_DOMAINS=github.com,api.github.com `
             -e CC_FIXR_REPO_URL=https://github.com/Addrick/agent-orchestrator.git `
             -e CC_FIXR_MODEL_ARG=haiku `
             -v "${env:DATA_VOLUME}:/app/data" `
