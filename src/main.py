@@ -112,6 +112,10 @@ def _register_interfaces(
         fixr = bot.get_service("fixr")
         if fixr is not None and hasattr(fixr, "attach_discord"):
             fixr.attach_discord(discord_bot)
+            # DP-237: once started, surface any agents orphaned by the last
+            # restart into their threads (one-shot, awaits Discord readiness).
+            if hasattr(fixr, "notify_orphans"):
+                app.register_task("fixr_orphan_notify", fixr.notify_orphans())
         discord_token = os.environ.get("DISCORD_API_KEY")
         if not discord_token:
             logger.error("DISCORD_API_KEY not set. Cannot start Discord bot.")

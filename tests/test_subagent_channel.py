@@ -28,6 +28,7 @@ class FakeDiscord:
     def __init__(self) -> None:
         self.threads_created: list = []
         self.posts: list = []
+        self.closed: list = []
         self._next = 9001
 
     async def create_agent_thread(self, parent_channel_id: int, name: str):
@@ -38,6 +39,10 @@ class FakeDiscord:
 
     async def send_to_channel(self, channel_id: int, content: str) -> bool:
         self.posts.append((channel_id, content))
+        return True
+
+    async def close_agent_thread(self, thread_id: int) -> bool:
+        self.closed.append(thread_id)
         return True
 
 
@@ -316,6 +321,48 @@ async def test_inbound_note_reacts_when_message_supplied():
     assert handled is True
     dispatcher.answer_agent.assert_not_called()
     message.add_reaction.assert_awaited_once_with("📝")
+
+
+# -- DP-237 lifecycle: orphan notify + thread close --------------------------
+
+async def test_notify_orphans_posts_to_threads_and_digests(monkeypatch):
+    integ, _ = _make_integration()
+    discord = _activate(integ, monkeypatch)
+    notifier = AsyncMock()
+    integ._notifier = notifier
+    monkeypatch.setattr(global_config, "CC_FIXR_DISCORD_CHANNEL", "team-1")
+    await integ.registry.add(_record(
+        agent_id="orph", bug_id="DP-9", status="orphaned", discord_thread_id="9001"))
+    await integ.registry.add(_record(
+        agent_id="fin", bug_id="DP-8", status="done", discord_thread_id="9002"))
+
+    n = await integ.notify_orphans()
+
+    assert n == 1
+    # the orphan's thread got the lost notice; the done agent's did not.
+    assert any(cid == 9001 and "restarted" in body for cid, body in discord.posts)
+    assert all(cid != 9002 for cid, _ in discord.posts)
+    # one human-visible digest to the fixr channel
+    notifier.send.assert_awaited_once()
+    assert "team-1" in notifier.send.await_args.args
+
+
+async def test_notify_orphans_none_returns_zero(monkeypatch):
+    integ, _ = _make_integration()
+    _activate(integ, monkeypatch)
+    await integ.registry.add(_record(agent_id="run", status="running"))
+    assert await integ.notify_orphans() == 0
+
+
+async def test_close_agent_threads_locks_pruned(monkeypatch):
+    integ, _ = _make_integration()
+    discord = _activate(integ, monkeypatch)
+    recs = [
+        _record(agent_id="a", discord_thread_id="9001", status="done"),
+        _record(agent_id="b", discord_thread_id=None, status="done"),  # no thread
+    ]
+    await integ._close_agent_threads(recs)
+    assert discord.closed == [9001]
 
 
 # -- hidden agent-face persona ----------------------------------------------

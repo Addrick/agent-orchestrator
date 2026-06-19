@@ -27,7 +27,7 @@ from src.self_edit.registry import AgentRecord, ORPHANED, RUNNING, WAITING
 _COLUMNS = [
     "agent_id", "bug_id", "description", "worktree", "branch", "raw_log",
     "events_log", "pid", "session_id", "status", "pr_url", "last_event",
-    "discord_thread_id", "created_at", "updated_at",
+    "discord_thread_id", "archived", "created_at", "updated_at",
 ]
 
 
@@ -57,6 +57,7 @@ class AgentStore:
                 pr_url            TEXT,
                 last_event        TEXT,
                 discord_thread_id TEXT,
+                archived          INTEGER NOT NULL DEFAULT 0,
                 created_at        REAL NOT NULL,
                 updated_at        REAL NOT NULL
             )
@@ -65,7 +66,20 @@ class AgentStore:
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_fixr_agents_bug ON fixr_agents(bug_id)"
         )
+        self._migrate_add_archived()
         self._conn.commit()
+
+    def _migrate_add_archived(self) -> None:
+        """DP-237: add the ``archived`` column to a pre-DP-237 DB. The CREATE
+        above only fires on a fresh DB (IF NOT EXISTS), so an existing table from
+        an earlier deploy lacks the column — add it idempotently."""
+        cols = {row["name"] for row in self._conn.execute(
+            "PRAGMA table_info(fixr_agents)"
+        ).fetchall()}
+        if "archived" not in cols:
+            self._conn.execute(
+                "ALTER TABLE fixr_agents ADD COLUMN archived INTEGER NOT NULL DEFAULT 0"
+            )
 
     def upsert(self, record: AgentRecord) -> None:
         d = record.to_dict()
@@ -95,4 +109,12 @@ class AgentStore:
         rows = self._conn.execute(
             "SELECT * FROM fixr_agents ORDER BY created_at"
         ).fetchall()
-        return [AgentRecord(**{c: row[c] for c in _COLUMNS}) for row in rows]
+        return [_row_to_record(row) for row in rows]
+
+
+def _row_to_record(row: sqlite3.Row) -> AgentRecord:
+    """SQLite stores ``archived`` as 0/1; coerce it back to bool so the in-memory
+    record matches the dataclass type."""
+    fields = {c: row[c] for c in _COLUMNS}
+    fields["archived"] = bool(fields["archived"])
+    return AgentRecord(**fields)

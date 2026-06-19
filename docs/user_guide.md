@@ -385,6 +385,7 @@ agent diagnoses → fixes → tests → opens a PR, and **a human reviews and me
 | `inspect_agents` | Read | List dispatched agents + status (running/waiting/done/error/killed), branch, PR url, last event. |
 | `answer_agent` | Write (ungated) | Resume a *waiting* agent (one that asked a question) with a decision, headless via `claude --resume`. |
 | `kill_agent` | Write (ungated) | Stop a stuck/runaway agent's process + event bridge; optionally drop its worktree. |
+| `prune_agents` | Write (ungated) | Reap finished agents: delete the on-disk worktrees of terminal agents (done/error/killed/orphaned) and archive their records (kept for audit, hidden from the default list). Prune one by `agent_id` or bound by `max_age_hours`. Skips any bug with a still-active agent. |
 | `send_discord` | Write (ungated) | Post a curated report (e.g. "agent opened PR <link>", or a fork needing a human) to the team channel. fixr reports on its own judgment. |
 
 Only `dispatch_fix` is confirmation-gated ("gate every dispatch; dial the rest
@@ -427,6 +428,24 @@ before (the feature is off). The parent channel must be pre-created. Extra knobs
 `CC_FIXR_PROGRESS_DEBOUNCE_SECONDS` (progress-coalesce window, default 1.5). The
 agent's thread "face" is the hidden `fixr-agent` system persona (identity/routing
 only — it never generates an LLM reply).
+
+#### Agent lifecycle after the happy path (DP-237)
+
+Agents that leave the happy path are no longer silent or leaky:
+
+- **Restart recovery.** A derpr restart marks every in-flight (running/waiting)
+  agent `orphaned` — its detached process + bridge didn't survive, so it can't be
+  resumed. On the next startup `fixr` posts a "⚠️ derpr restarted — this agent was
+  lost, redispatch?" notice into each orphan's thread and one digest to the fixr
+  channel. **Recovery is human-decided** (redispatch with `dispatch_fix`); there
+  is no automatic respawn.
+- **Worktree + record cleanup.** Terminal agents' worktrees pile up on disk and
+  their records clutter `inspect_agents`. Call `prune_agents` to reap the
+  worktrees and soft-archive the rows (kept for audit). Archived agents are
+  hidden from `inspect_agents` by default — pass `include_archived: true` to see
+  them. Pruning a bug that still has an active agent is refused (a re-dispatch
+  reuses the same worktree path). When an agent is pruned its thread is locked +
+  archived so stale replies visibly hit a closed thread.
 
 ### Memory Tools (no service binding required)
 

@@ -17,6 +17,7 @@ class _FakeDispatcher:
         self.dispatched = []
         self.answered = []
         self.killed = []
+        self.pruned_calls = []
         self.raise_on_dispatch = None
 
     async def dispatch(self, bug_id, description):
@@ -37,6 +38,13 @@ class _FakeDispatcher:
     async def kill(self, agent_id, remove_worktree=False):
         self.killed.append((agent_id, remove_worktree))
         return True
+
+    async def prune(self, *, agent_id=None, max_age_hours=None):
+        self.pruned_calls.append((agent_id, max_age_hours))
+        return [AgentRecord(
+            agent_id="DP-1-1", bug_id="DP-1", description="x", worktree="/w",
+            branch="b", raw_log="/r", events_log="/e", status=reg.DONE,
+            archived=True)]
 
 
 class _FakeNotifier:
@@ -93,6 +101,44 @@ async def test_answer_and_kill():
     out2 = await h._kill_agent("a1", remove_worktree=True)
     assert out2["status"] == "killed"
     assert d.killed == [("a1", True)]
+
+
+async def test_prune_agents_forwards_args_and_reports():
+    h, d, _, _ = await _handler()
+    out = await h._prune_agents(agent_id="DP-1-1", max_age_hours=24)
+    assert out["status"] == "pruned"
+    assert out["count"] == 1
+    assert out["agents"][0]["agent_id"] == "DP-1-1"
+    assert out["agents"][0]["archived"] is True
+    assert d.pruned_calls == [("DP-1-1", 24)]
+
+
+async def test_prune_agents_invokes_close_callback():
+    registry = AgentRegistry()
+    dispatcher = _FakeDispatcher()
+    closed = []
+
+    async def on_close(records):
+        closed.extend(r.agent_id for r in records)
+
+    h = FixrToolHandler(dispatcher, registry, _FakeNotifier(), on_prune_close=on_close)
+    await h._prune_agents()
+    assert closed == ["DP-1-1"]
+
+
+async def test_inspect_agents_hides_archived_by_default():
+    h, _, registry, _ = await _handler()
+    await registry.add(AgentRecord(
+        agent_id="live", bug_id="DP-1", description="x", worktree="/w",
+        branch="b", raw_log="/r", events_log="/e", status=reg.RUNNING))
+    await registry.add(AgentRecord(
+        agent_id="gone", bug_id="DP-2", description="x", worktree="/w",
+        branch="b", raw_log="/r", events_log="/e", status=reg.DONE, archived=True))
+
+    default = await h._inspect_agents()
+    assert {a["agent_id"] for a in default["agents"]} == {"live"}
+    full = await h._inspect_agents(include_archived=True)
+    assert {a["agent_id"] for a in full["agents"]} == {"live", "gone"}
 
 
 async def test_send_discord_requires_recipient(monkeypatch):
