@@ -33,6 +33,46 @@ _DISCORD_RATE = 48000
 _DISCORD_CHANNELS = 2
 
 
+_opus_resilience_patched = False
+
+
+def _patch_voice_recv_opus_resilience() -> None:
+    """Stop a single corrupted Opus packet from killing voice receive.
+
+    discord-ext-voice-recv (experimental alpha) runs Opus decode in a
+    ``PacketRouter`` thread whose ``run()`` has no per-packet error handling: any
+    ``OpusError`` ("corrupted stream") propagates out of the loop, and the
+    ``finally`` calls ``stop_listening()`` — permanently tearing down receive for
+    the whole session (upstream issue #27 "stops listening even with the example
+    script"). The error is upstream of our sink, so we can't catch it there.
+
+    Wrap ``PacketDecoder.pop_data`` to drop a bad packet and return ``None`` (which
+    the router already treats as "no data this tick"), so the loop survives.
+    Idempotent; a no-op if the library internals move.
+    """
+    global _opus_resilience_patched
+    if _opus_resilience_patched:
+        return
+    try:
+        from discord.ext.voice_recv.opus import PacketDecoder
+        from discord.opus import OpusError
+    except Exception:  # pragma: no cover - lib missing / internals changed
+        return
+
+    original = PacketDecoder.pop_data
+
+    def _safe_pop_data(self: Any, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return original(self, *args, **kwargs)
+        except OpusError:
+            logger.warning("Dropped corrupted Opus packet (voice-recv decode error)")
+            return None
+
+    PacketDecoder.pop_data = _safe_pop_data
+    _opus_resilience_patched = True
+    logger.info("Applied voice-recv Opus-decode resilience patch")
+
+
 class CaptureSource(ABC):
     @abstractmethod
     async def start(self) -> None:
@@ -65,6 +105,8 @@ class DiscordVoiceCapture(CaptureSource):
                 "`pip install discord-ext-voice-recv` (and libopus/PyNaCl) to "
                 "enable voice capture."
             ) from e
+
+        _patch_voice_recv_opus_resilience()
 
         # ``attach_discord`` launches this before the Discord client's ``start()``
         # task has run, so the client may not be logged in yet. ``wait_until_ready``
