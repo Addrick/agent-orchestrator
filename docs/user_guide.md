@@ -417,6 +417,8 @@ thread confirms what happened: a ✅ ack when your answer resumes the agent, or 
 agent that asked a `question` and parked is resumable; a reply while it's still
 working or after it finished is rejected, not silently spawned as a second run).
 A `//` prefix is a note-to-self (gets a 📝 reaction, not sent to the agent).
+Only text is forwarded — an attachment-only reply gets a ⚠️ notice to type your
+answer, never a silent drop.
 
 If a `question` goes unanswered for `CC_FIXR_IDLE_MINUTES` (default 10), `fixr`
 is woken as a fallback to answer or kill the agent. When

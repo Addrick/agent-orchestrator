@@ -286,6 +286,22 @@ async def test_inbound_notifies_human_on_dispatcher_error():
     assert "⚠️" in posted and "not waiting" in posted
 
 
+async def test_inbound_empty_reply_notifies_human():
+    """An attachment-only/empty reply to a parked agent gets a ⚠️ notice instead
+    of being silently dropped, and is never forwarded."""
+    chat, registry, rec, dispatcher = _chat_with_agent()
+    await registry.add(rec)
+    channel = MagicMock()
+    channel.send = AsyncMock()
+
+    handled = await route_agent_thread_message(chat, "4242", "   ", channel=channel)
+
+    assert handled is True
+    dispatcher.answer_agent.assert_not_called()
+    channel.send.assert_awaited_once()
+    assert "⚠️" in channel.send.await_args.args[0]
+
+
 async def test_inbound_note_reacts_when_message_supplied():
     """D — a // note-to-self gets a 📝 reaction and is not forwarded."""
     chat, registry, rec, dispatcher = _chat_with_agent()

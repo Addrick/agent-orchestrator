@@ -161,6 +161,7 @@ class Dispatcher:
                 "nothing to answer."
             )
 
+        proc = None
         try:
             proc = await self._spawn(
                 prompt=message,
@@ -169,15 +170,24 @@ class Dispatcher:
                 raw_log=record.raw_log,
                 resume_session=record.session_id,
             )
+            await self._registry.update(agent_id, pid=proc.pid)
+            self._procs[agent_id] = proc
+            # Re-arm the bridge if the previous one finished on the question event.
+            if agent_id not in self._bridges or self._bridges[agent_id].done():
+                self._start_bridge(record, resume_tail=True)
         except Exception:
-            # Roll the claim back so a later answer can retry this agent.
-            await self._registry.update(agent_id, status=reg.WAITING)
+            # Anything between the claim and a fully wired resume fails the
+            # answer: kill any process we did spawn so it can't run un-bridged,
+            # drop our handle to it, and roll the claim back so a later answer
+            # can retry this agent.
+            if proc is not None and proc.returncode is None:
+                try:
+                    proc.terminate()
+                except ProcessLookupError:
+                    pass
+            self._procs.pop(agent_id, None)
+            await self._registry.update(agent_id, status=reg.WAITING, pid=None)
             raise
-        await self._registry.update(agent_id, pid=proc.pid)
-        self._procs[agent_id] = proc
-        # Re-arm the bridge if the previous one finished on the question event.
-        if agent_id not in self._bridges or self._bridges[agent_id].done():
-            self._start_bridge(record, resume_tail=True)
         logger.info("Resumed agent %s (pid %s)", agent_id, proc.pid)
         return record
 
