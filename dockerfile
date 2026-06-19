@@ -26,11 +26,15 @@ WORKDIR /app
 # - curl: installs agy + claude
 # - bubblewrap + socat: Claude Code's Linux OS sandbox (DP-222) — bwrap enforces
 #   filesystem isolation, socat relays sandboxed network through the proxy.
+# - libopus0 + ffmpeg: DP-238 voice — discord-ext-voice-recv decodes Opus via
+#   libopus; ffmpeg is required by discord.py's voice stack. PyNaCl comes from pip.
 RUN apt-get update && apt-get install -y \
     git \
     curl \
     bubblewrap \
     socat \
+    libopus0 \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Create a non-root user matching the 'ubuntu' user (UID 1000) on the AWS host

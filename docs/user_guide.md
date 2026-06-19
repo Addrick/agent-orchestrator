@@ -447,6 +447,30 @@ Agents that leave the happy path are no longer silent or leaky:
   reuses the same worktree path). When an agent is pruned its thread is locked +
   archived so stale replies visibly hit a closed thread.
 
+### Voice / Timer Tools (requires `service_bindings: ["voice"]`)
+
+Countdown timers, usable two ways with one shared service:
+
+- **Spoken** — when `VOICE_ENABLED`, derpr joins the configured voice channel
+  (`VOICE_DISCORD_CHANNEL_ID`) and always-listens. Say "set a timer for 10
+  minutes" (or "…for the pasta") and it announces in `VOICE_NOTIFY_CHANNEL_ID`
+  (or the source voice channel) when it fires, pinging whoever set it. A cheap
+  local keyword match handles this — no LLM call per utterance. An optional
+  `VOICE_WAKEWORD` gates which utterances are considered.
+- **Typed** — the same tools are LLM-callable from any text conversation, so a
+  persona can set/list/cancel timers in chat too.
+
+| Tool | Type | Description |
+|------|------|-------------|
+| `set_timer` | Read | Start a countdown. `duration` is natural language ("10 minutes", "30 seconds", "1 hour"); optional `label`. Announces in the channel when it fires. |
+| `list_timers` | Read | List pending timers with remaining time and ids. |
+| `cancel_timer` | Read | Cancel a pending timer by `timer_id` (from `list_timers`). |
+
+Speech-to-text uses Moonshine on CPU (purpose-built for short voice commands),
+so it never contends with the GPU serving the local LLM. Config: `VOICE_ENABLED`,
+`VOICE_DISCORD_CHANNEL_ID`, `VOICE_NOTIFY_CHANNEL_ID`, `VOICE_STT_MODEL`
+(`base`/`tiny`), `VOICE_WAKEWORD`, `VOICE_VAD_SILENCE_MS`. All default-off.
+
 ### Memory Tools (no service binding required)
 
 Available to any persona with `enabled_tools: ["*"]` (e.g., `joy`, `it-help`). These tools interact with the long-term memory store built by MemoryAgent.

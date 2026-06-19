@@ -19,6 +19,15 @@ httpx
 # Bot interfaces
 discord.py
 google-auth
+# DP-238 voice command pipeline. Lazy-imported only when VOICE_ENABLED, but
+# pinned here so the dep check passes. Run pip-compile to sync requirements.txt,
+# and add libopus + ffmpeg to the container image, before a deploy that enables
+# voice. Moonshine's onnx backend is a SEPARATE package `useful-moonshine-onnx`
+# (import `moonshine_onnx`) — CPU-only, no torch. There is no `[onnx]` extra on
+# the base `useful-moonshine` package.
+discord-ext-voice-recv  # voice receive (stock discord.py only sends)
+useful-moonshine-onnx  # STT (import name: moonshine_onnx); onnx pkg = CPU, no torch
+audioop-lts ; python_version >= "3.13"  # stdlib audioop removed in 3.13+
 google-auth-oauthlib
 google-cloud-pubsub
 google-api-python-client  # googleapiclient

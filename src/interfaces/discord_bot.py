@@ -275,6 +275,7 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
     intents.message_content = True
     intents.messages = True  # Required for on_message_delete
     intents.members = True   # Required for verifying mutual guilds for DMs
+    intents.voice_states = True  # DP-238: required to join/listen in voice channels
     client = CustomDiscordBot(chat_system, intents=intents)
 
     discord_client_logger = logging.getLogger('discord.client')
