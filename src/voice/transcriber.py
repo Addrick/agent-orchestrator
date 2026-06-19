@@ -7,7 +7,7 @@ CPU (the idle 5800X on the .70 host) — purpose-built for short voice commands,
 gemma model. A whisper.cpp-Vulkan backend for long-form dictation on the R9700
 can be added later behind this same ABC.
 
-The heavy ``moonshine`` import is lazy and the model loads once on first use, so
+The heavy ``moonshine_onnx`` import is lazy and the model loads once on first use, so
 importing this module (and the whole ``src.voice`` package) costs nothing and
 never fails when the optional dependency is absent — ``main.py`` and the unit
 tests import it unconditionally.
@@ -81,11 +81,11 @@ class MoonshineTranscriber(Transcriber):
 
     def _load(self) -> _TranscribeFn:
         try:
-            import moonshine
+            import moonshine_onnx as moonshine
         except ImportError as e:  # pragma: no cover - exercised only without the dep
             raise RuntimeError(
-                "Moonshine is not installed. `pip install useful-moonshine` "
-                "(plus onnxruntime) to enable voice transcription."
+                "Moonshine is not installed. `pip install useful-moonshine-onnx` "
+                "(CPU onnx backend) to enable voice transcription."
             ) from e
         model_id = self._model_id
 
