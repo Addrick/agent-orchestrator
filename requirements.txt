@@ -329,7 +329,9 @@ standard-sunau==3.13.0
     #   audioread
     #   librosa
 starlette==1.2.1
-    # via fastapi
+    # via
+    #   -r requirements.in
+    #   fastapi
 tenacity==9.1.4
     # via google-genai
 threadpoolctl==3.6.0
