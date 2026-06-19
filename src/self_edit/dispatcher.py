@@ -132,7 +132,15 @@ class Dispatcher:
         return record
 
     async def answer_agent(self, agent_id: str, message: str) -> AgentRecord:
-        """Resume a waiting agent headlessly with ``claude --resume <sid> -p``.
+        """Resume a WAITING agent headlessly with ``claude --resume <sid> -p``.
+
+        Only an agent in ``WAITING`` (it asked a question and parked) is
+        resumable. Resuming a RUNNING agent would spawn a *second* ``claude``
+        appending to the same raw log and orphan the first process; resuming a
+        terminal agent (DONE/ERROR/KILLED/ORPHANED) would resurrect it. We claim
+        the agent with an atomic WAITING→RUNNING compare-and-set, so concurrent
+        replies can't both resume it, then spawn. On spawn failure the status is
+        reverted to WAITING so the answer can be retried.
 
         The resumed run appends to the SAME raw log; the bridge (restarted if it
         had stopped) keeps converting from where it left off."""
@@ -143,15 +151,29 @@ class Dispatcher:
             raise DispatcherError(
                 f"Agent {agent_id} has no session_id yet — cannot resume."
             )
+        # Atomic claim: only one caller wins WAITING→RUNNING; a non-WAITING
+        # agent (still running, finished, killed) is rejected.
+        if not await self._registry.compare_and_set_status(
+            agent_id, reg.WAITING, reg.RUNNING
+        ):
+            raise DispatcherError(
+                f"Agent {agent_id} is not waiting (status={record.status}); "
+                "nothing to answer."
+            )
 
-        proc = await self._spawn(
-            prompt=message,
-            system_prompt=None,            # session carries the system prompt
-            cwd=record.worktree,
-            raw_log=record.raw_log,
-            resume_session=record.session_id,
-        )
-        await self._registry.update(agent_id, status=reg.RUNNING, pid=proc.pid)
+        try:
+            proc = await self._spawn(
+                prompt=message,
+                system_prompt=None,            # session carries the system prompt
+                cwd=record.worktree,
+                raw_log=record.raw_log,
+                resume_session=record.session_id,
+            )
+        except Exception:
+            # Roll the claim back so a later answer can retry this agent.
+            await self._registry.update(agent_id, status=reg.WAITING)
+            raise
+        await self._registry.update(agent_id, pid=proc.pid)
         self._procs[agent_id] = proc
         # Re-arm the bridge if the previous one finished on the question event.
         if agent_id not in self._bridges or self._bridges[agent_id].done():

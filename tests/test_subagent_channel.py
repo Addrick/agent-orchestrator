@@ -243,6 +243,65 @@ async def test_inbound_no_fixr_service_not_handled():
     assert await route_agent_thread_message(chat, "1", "hi") is False
 
 
+def _chat_with_agent(thread_id="4242", *, answer_side_effect=None):
+    """Wire a fake chat_system whose fixr service owns one threaded agent."""
+    registry = AgentRegistry()
+    rec = _record(discord_thread_id=thread_id, session_id="sX")
+    dispatcher = MagicMock()
+    dispatcher.answer_agent = AsyncMock(side_effect=answer_side_effect)
+    fixr = MagicMock(registry=registry, dispatcher=dispatcher)
+    chat = MagicMock()
+    chat.get_service = MagicMock(return_value=fixr)
+    return chat, registry, rec, dispatcher
+
+
+async def test_inbound_acks_human_on_successful_resume():
+    """A — the human gets a ✅ ack in the thread when their answer resumes the agent."""
+    chat, registry, rec, dispatcher = _chat_with_agent()
+    await registry.add(rec)
+    channel = MagicMock()
+    channel.send = AsyncMock()
+
+    await route_agent_thread_message(chat, "4242", "do X", channel=channel)
+
+    dispatcher.answer_agent.assert_awaited_once_with(rec.agent_id, "do X")
+    channel.send.assert_awaited_once()
+    assert "✅" in channel.send.await_args.args[0]
+
+
+async def test_inbound_notifies_human_on_dispatcher_error():
+    """A — a DispatcherError (e.g. agent not waiting) is surfaced into the thread."""
+    from src.self_edit.dispatcher import DispatcherError
+    chat, registry, rec, dispatcher = _chat_with_agent(
+        answer_side_effect=DispatcherError("Agent a1 is not waiting (status=running)")
+    )
+    await registry.add(rec)
+    channel = MagicMock()
+    channel.send = AsyncMock()
+
+    await route_agent_thread_message(chat, "4242", "do X", channel=channel)
+
+    channel.send.assert_awaited_once()
+    posted = channel.send.await_args.args[0]
+    assert "⚠️" in posted and "not waiting" in posted
+
+
+async def test_inbound_note_reacts_when_message_supplied():
+    """D — a // note-to-self gets a 📝 reaction and is not forwarded."""
+    chat, registry, rec, dispatcher = _chat_with_agent()
+    await registry.add(rec)
+    message = MagicMock()
+    message.add_reaction = AsyncMock()
+
+    handled = await route_agent_thread_message(
+        chat, "4242", "// note", message=message
+    )
+
+    assert handled is True
+    dispatcher.answer_agent.assert_not_called()
+    message.add_reaction.assert_awaited_once_with("📝")
+
+
 # -- hidden agent-face persona ----------------------------------------------
 
 def test_fixr_agent_persona_is_a_system_persona():

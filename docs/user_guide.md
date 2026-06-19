@@ -411,8 +411,12 @@ agent gets its **own thread** under that channel. The thread is the agent's live
 transcript — progress (coalesced), questions (highlighted), and the final
 done/error summary stream into it. **Reply in the thread to talk straight to the
 agent**: your message routes to `answer_agent` (`claude --resume`) with **no
-`fixr` LLM turn** in the loop — a human↔agent round-trip, not a relayed one. A
-`//` prefix is a note-to-self (logged, not sent to the agent).
+`fixr` LLM turn** in the loop — a human↔agent round-trip, not a relayed one. The
+thread confirms what happened: a ✅ ack when your answer resumes the agent, or a
+⚠️ notice with the reason if it can't (e.g. the agent isn't waiting — only an
+agent that asked a `question` and parked is resumable; a reply while it's still
+working or after it finished is rejected, not silently spawned as a second run).
+A `//` prefix is a note-to-self (gets a 📝 reaction, not sent to the agent).
 
 If a `question` goes unanswered for `CC_FIXR_IDLE_MINUTES` (default 10), `fixr`
 is woken as a fallback to answer or kill the agent. When
