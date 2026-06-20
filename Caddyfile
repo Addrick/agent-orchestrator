@@ -1,4 +1,8 @@
-:8444 {
+{
+    debug
+    default_sni 10.0.0.70
+}
+10.0.0.70:5003, derpr-host:5003 {
     tls internal
-    reverse_proxy host.docker.internal:5003
+    reverse_proxy host.docker.internal:5004
 }

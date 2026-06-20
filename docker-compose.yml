@@ -49,7 +49,7 @@ services:
     container_name: derpr_caddy
     restart: unless-stopped
     ports:
-      - "8444:8444"
+      - "5003:5003"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile
       - caddy_data:/data
