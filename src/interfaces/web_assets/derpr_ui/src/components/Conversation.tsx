@@ -30,6 +30,8 @@ export function Conversation({ store }: { store: PortalStore }) {
     resolveConfirm,
     resolvingConfirm,
     refreshTranscript,
+    alarms,
+    dismissAlarm,
   } = store
 
   const onResync = () => persona && refreshTranscript(persona.name)
@@ -47,7 +49,7 @@ export function Conversation({ store }: { store: PortalStore }) {
   useEffect(() => {
     const el = scrollRef.current
     if (el && followRef.current) el.scrollTop = el.scrollHeight
-  }, [chunks, stream, devRow, loading, viewMode])
+  }, [chunks, stream, devRow, loading, viewMode, alarms])
 
   const historyText = chunks
     .filter((c) => !c.ephemeral)
@@ -227,6 +229,32 @@ export function Conversation({ store }: { store: PortalStore }) {
               ltmOn={ltmOn}
             />
           )}
+
+          {/* fired-timer alarms (DP-238): pushed from the engine over SSE, NOT
+              transcript chunks — read-only assistant-style lines that beep on
+              arrival and dismiss locally. Shown in both view modes so an alarm
+              is never missed. */}
+          {alarms.map((a) => (
+            <div className="msg alarmrow" key={a.id}>
+              <div className="gut">
+                <div className="av">⏰</div>
+              </div>
+              <div className="bd">
+                <div className="meta">
+                  <span className="who">timer</span>
+                  {a.channel && <span className="idtag">{a.channel}</span>}
+                  <button
+                    className="mini"
+                    style={{ marginLeft: 'auto' }}
+                    onClick={() => dismissAlarm(a.id)}
+                  >
+                    dismiss
+                  </button>
+                </div>
+                <div className="text">{a.text}</div>
+              </div>
+            </div>
+          ))}
         </div>
       </div>
 

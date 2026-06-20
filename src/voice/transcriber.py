@@ -37,6 +37,11 @@ class Transcriber(ABC):
     async def transcribe(self, pcm16k_mono: bytes) -> str:
         """Transcribe one 16 kHz mono int16 PCM utterance to text."""
 
+    async def warmup(self) -> None:
+        """Load the model and run one throwaway inference so the first *real*
+        utterance isn't dropped or stalled by cold-start. No-op by default."""
+        return None
+
 
 class NullTranscriber(Transcriber):
     """Test/dev double. Returns scripted text (or a fixed string) — no model.
@@ -108,3 +113,21 @@ class MoonshineTranscriber(Transcriber):
         except Exception:  # noqa: BLE001 - a bad clip must not kill the pipeline
             logger.exception("Moonshine transcription failed")
             return ""
+
+    async def warmup(self) -> None:
+        """Load the model + run one inference on 0.5 s of silence. The first
+        onnxruntime inference compiles/optimizes the graph (seconds) and the
+        model download happens here too — doing it at startup means the first
+        spoken command is fast and isn't lost to cold-start (DP-238 web)."""
+        try:
+            loop = asyncio.get_event_loop()
+            start = loop.time()
+            await self._ensure_loaded()
+            assert self._transcribe_fn is not None
+            silence = np.zeros(8000, dtype=np.int16).tobytes()  # 0.5 s @ 16 kHz
+            await asyncio.to_thread(self._transcribe_fn, silence)
+            logger.info(
+                "Moonshine (%s) warmed up in %.1fs", self._model_id, loop.time() - start
+            )
+        except Exception:  # noqa: BLE001 - warmup is best-effort, never fatal
+            logger.exception("Moonshine warmup failed (will lazy-load on first use)")

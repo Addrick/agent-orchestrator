@@ -44,15 +44,27 @@ class VoiceTimerToolHandler:
         manager.register("cancel_timer", self._cancel_timer)
 
     def _default_target(self) -> Optional[TimerTarget]:
+        """Fire a text-set timer back through the channel the turn came from.
+
+        - A portal turn carries a ``web_ui``-prefixed channel tag (DP-136); it has
+          no Discord id, so the alarm routes to the ``web`` NotificationRouter
+          channel (an SSE push back to the portal) with the tag as the recipient,
+          so it surfaces in the same conversation it was set from.
+        - A Discord turn carries a numeric channel id → announce there.
+        - Otherwise fall back to the configured ``VOICE_NOTIFY_CHANNEL_ID``.
+        """
         ctx = get_turn_context()
-        recipient: Optional[str] = None
-        if ctx is not None and ctx.channel and ctx.channel.isdigit():
-            recipient = ctx.channel
-        elif global_config.VOICE_NOTIFY_CHANNEL_ID:
-            recipient = str(global_config.VOICE_NOTIFY_CHANNEL_ID)
-        if recipient is None:
-            return None
-        return TimerTarget(channel="discord_channel", recipient=recipient)
+        if ctx is not None and ctx.channel:
+            if ctx.channel.startswith("web_ui"):
+                return TimerTarget(channel="web", recipient=ctx.channel)
+            if ctx.channel.isdigit():
+                return TimerTarget(channel="discord_channel", recipient=ctx.channel)
+        if global_config.VOICE_NOTIFY_CHANNEL_ID:
+            return TimerTarget(
+                channel="discord_channel",
+                recipient=str(global_config.VOICE_NOTIFY_CHANNEL_ID),
+            )
+        return None
 
     async def _set_timer(
         self, duration: str, label: Optional[str] = None,

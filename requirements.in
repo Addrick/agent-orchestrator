@@ -13,6 +13,7 @@ google-genai
 aiohttp
 aiolimiter
 fastapi
+starlette  # imported directly in voice/web.py (WebSocketState); FastAPI's ASGI base
 uvicorn
 httpx
 

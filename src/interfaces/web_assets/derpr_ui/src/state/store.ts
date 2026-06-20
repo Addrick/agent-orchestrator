@@ -64,6 +64,44 @@ export interface DevRow {
   mutated: boolean
 }
 
+// A fired-timer alarm pushed from the engine over GET /voice/alarms (SSE).
+// Rendered as a read-only assistant-style line beneath the transcript (it is
+// NOT a persisted interaction, so it carries no interaction_id and offers no row
+// actions) and accompanied by a short beep.
+export interface AlarmLine {
+  id: string
+  text: string
+  channel: string
+}
+
+// A short two-tone beep via the Web Audio API — no asset to bundle. Best-effort:
+// a browser that blocks autoplay before any user gesture just stays silent.
+function playBeep(): void {
+  try {
+    const Ctx = window.AudioContext || (window as unknown as {
+      webkitAudioContext: typeof AudioContext
+    }).webkitAudioContext
+    const ctx = new Ctx()
+    const now = ctx.currentTime
+    for (const [i, freq] of [880, 660].entries()) {
+      const osc = ctx.createOscillator()
+      const gain = ctx.createGain()
+      osc.type = 'sine'
+      osc.frequency.value = freq
+      const t0 = now + i * 0.22
+      gain.gain.setValueAtTime(0.0001, t0)
+      gain.gain.exponentialRampToValueAtTime(0.25, t0 + 0.02)
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.2)
+      osc.connect(gain).connect(ctx.destination)
+      osc.start(t0)
+      osc.stop(t0 + 0.2)
+    }
+    setTimeout(() => void ctx.close(), 800)
+  } catch {
+    /* no audio context — surface the line silently */
+  }
+}
+
 export function usePortalStore() {
   const [activePersona, setActivePersona] = useState<string>('assistant')
   const [personaList, setPersonaList] = useState<string[]>([])
@@ -90,6 +128,7 @@ export function usePortalStore() {
   const [stream, setStream] = useState<StreamState>(EMPTY_STREAM)
   const [devRow, setDevRow] = useState<DevRow | null>(null)
   const [banner, setBanner] = useState<string | null>(null)
+  const [alarms, setAlarms] = useState<AlarmLine[]>([])
   // The /assemble dry-run payload for the Raw-req inspector (S5). Lazily
   // fetched by the Raw tab, keyed on the active persona + an optional preview
   // message; null until first fetched.
@@ -121,6 +160,45 @@ export function usePortalStore() {
   useEffect(() => {
     activePersonaRef.current = activePersona
   }, [activePersona])
+
+  // ---- fired-timer alarms (SSE back-channel) ------------------------
+  // A timer set from the portal fires back here: the engine pushes the alarm
+  // over GET /voice/alarms and we surface it as a chat line + beep. One stream
+  // for the session (not per-channel); the alarm carries the channel it was set
+  // in. No-op if the voice web routes aren't mounted (EventSource just retries).
+  useEffect(() => {
+    let es: EventSource | null = null
+    try {
+      es = new EventSource('/voice/alarms')
+    } catch {
+      return
+    }
+    es.onmessage = (ev: MessageEvent) => {
+      try {
+        const data = JSON.parse(ev.data) as { text?: string; channel?: string }
+        if (!data.text) return
+        setAlarms((prev) => [
+          ...prev,
+          {
+            id: `alarm-${Date.now()}-${prev.length}`,
+            text: data.text as string,
+            channel: data.channel || '',
+          },
+        ])
+        playBeep()
+      } catch {
+        /* malformed event — ignore */
+      }
+    }
+    // The engine endpoint may not be mounted (VOICE_WEB_ENABLED off); let the
+    // browser's own EventSource backoff handle reconnects silently.
+    es.onerror = () => {}
+    return () => es?.close()
+  }, [])
+
+  const dismissAlarm = useCallback((id: string) => {
+    setAlarms((prev) => prev.filter((a) => a.id !== id))
+  }, [])
 
   // Mid-session fetch failures rethrow from the API client (mock fallback is
   // pre-first-live-success only) — keep the last real state and banner it.
@@ -604,8 +682,10 @@ export function usePortalStore() {
     resolvingConfirm,
     devRow,
     banner,
+    alarms,
     assembled,
     // actions
+    dismissAlarm,
     fetchAssembled,
     setViewMode,
     toggleLtm,

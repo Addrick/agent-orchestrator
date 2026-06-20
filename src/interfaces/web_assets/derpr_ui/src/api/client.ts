@@ -334,3 +334,25 @@ export async function abort(): Promise<void> {
     /* best-effort */
   }
 }
+
+// ---- voice dictation (DP-238) ----------------------------------------
+// POST a raw 16-bit PCM utterance to the STT-only transcribe route and get the
+// text back. Mic capture lives in the composer; the LLM owns any intent (timers
+// etc.), so this path does NOT run the keyword router. No mock fallback — voice
+// is opt-in (VOICE_WEB_ENABLED) and a failure surfaces to the caller.
+export async function transcribeVoice(
+  pcm: ArrayBuffer,
+  sampleRate: number,
+): Promise<string> {
+  const r = await fetch(`${BASE}/voice/transcribe`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/octet-stream',
+      'X-Sample-Rate': String(sampleRate),
+    },
+    body: pcm,
+  })
+  const j = await r.json()
+  if (!r.ok || j.error) throw new Error(j.error || `transcribe → ${r.status}`)
+  return (j.text as string) || ''
+}
