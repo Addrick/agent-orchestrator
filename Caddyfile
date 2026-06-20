@@ -1,0 +1,4 @@
+:8444 {
+    tls internal
+    reverse_proxy host.docker.internal:5003
+}
