@@ -560,7 +560,10 @@ export function usePortalStore() {
     abortRef.current = null
     streamingRef.current = false
     // The re-fetch below surfaces the persisted user row — drop the echo.
-    setStream((s) => ({ ...s, aborted: true, userText: null }))
+    // active:false is essential — Conversation passes stream.active as the
+    // Composer `streaming` prop, so omitting it leaves the composer stuck on
+    // the "■ stop" button and the StreamRow cursor blinking forever.
+    setStream((s) => ({ ...s, active: false, aborted: true, userText: null }))
     if (persona) await refreshTranscript(persona.name)
   }, [persona, refreshTranscript])
 
