@@ -58,7 +58,9 @@ export function useMicCapture(): MicCapture {
       audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
     })
     const Ctx: typeof AudioContext =
-      window.AudioContext || (window as any).webkitAudioContext
+      window.AudioContext ||
+      (window as Window & { webkitAudioContext?: typeof AudioContext })
+        .webkitAudioContext!
     const ctx = new Ctx()
     const source = ctx.createMediaStreamSource(stream)
     const node = ctx.createScriptProcessor(4096, 1, 1)

@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import { useMicCapture } from './useMicCapture'
 import { useMicStream } from './useMicStream'
 import { transcribeVoice } from '../api/client'
@@ -64,17 +64,18 @@ export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming }: Pro
   // mid-stream) or drop into the draft to edit. Refs read by the streaming WS
   // callback so it never sees a stale toggle/streaming value.
   const autoSendRef = useRef(autoSend)
-  autoSendRef.current = autoSend
   const streamingRef = useRef(streaming)
-  streamingRef.current = streaming
   const onSendRef = useRef(onSend)
-  onSendRef.current = onSend
+  useEffect(() => {
+    autoSendRef.current = autoSend
+    streamingRef.current = streaming
+    onSendRef.current = onSend
+  })
 
   const routeDictation = useCallback((t: string) => {
     if (autoSendRef.current && !streamingRef.current) onSendRef.current(t)
     else appendDraft(t)
     // appendDraft is stable enough for this hook's purpose; deps intentionally [].
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const stream = useMicStream(routeDictation)

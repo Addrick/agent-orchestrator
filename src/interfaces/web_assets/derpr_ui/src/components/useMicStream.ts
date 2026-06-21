@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 // Always-listening streaming dictation (DP-238 item B). A toggle opens a
 // WebSocket to /voice/stream, then continuously streams mic frames (getUserMedia
@@ -35,7 +35,9 @@ export function useMicStream(onText: (t: string) => void): MicStream {
   // onText changes identity each render; read the latest via a ref so the audio
   // callback closure never goes stale.
   const onTextRef = useRef(onText)
-  onTextRef.current = onText
+  useEffect(() => {
+    onTextRef.current = onText
+  })
 
   const ctxRef = useRef<AudioContext | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
@@ -78,7 +80,9 @@ export function useMicStream(onText: (t: string) => void): MicStream {
       return
     }
     const Ctx: typeof AudioContext =
-      window.AudioContext || (window as any).webkitAudioContext
+      window.AudioContext ||
+      (window as Window & { webkitAudioContext?: typeof AudioContext })
+        .webkitAudioContext!
     const ctx = new Ctx()
     if (ctx.state === 'suspended') await ctx.resume()
     const source = ctx.createMediaStreamSource(stream)
