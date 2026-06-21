@@ -141,6 +141,11 @@ jobs:
           # - CLAUDE_CODE_OAUTH_TOKEN must be present in $ENV_FILE (.env) — a
           #   1-year token from `claude setup-token`, set ONCE on a browser
           #   machine. Without it cc-* auth fails; other personas still serve.
+          # - Port: Caddy (run separately via docker-compose) owns host 5003 and
+          #   terminates TLS for the voice web UI (HTTPS is required for browser
+          #   mic access), reverse-proxying to host.docker.internal:5004. So
+          #   publish the container's 5003 web port on host 5004, NOT 5003 —
+          #   binding 5003 here collides with Caddy ("port is already allocated").
           docker run -d `
             --name $env:CONTAINER_NAME `
             --restart unless-stopped `
@@ -156,7 +161,7 @@ jobs:
             -v "${env:DATA_VOLUME}:/app/data" `
             -v "${env:AGY_HOME_VOLUME}:/home/botuser/.gemini" `
             -v "${env:CC_HOME_VOLUME}:/home/botuser/.claude" `
-            -p 5003:5003 `
+            -p 5004:5003 `
             ${{ env.IMAGE_NAME }}:latest
 
       - name: Prune unused images

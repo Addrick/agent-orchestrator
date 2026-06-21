@@ -14,6 +14,11 @@ services:
     # (CLAUDE_CODE_OAUTH_TOKEN — from `claude setup-token` — belongs here.)
     env_file:
       - .env
+    # Caddy (below) terminates TLS on host 5003 and reverse-proxies to
+    # host.docker.internal:5004, so publish the container's 5003 web port on
+    # host 5004. Do NOT bind 5003 here — Caddy owns it.
+    ports:
+      - "5004:5003"
     environment:
       # Override the DB path to point to the persistent volume
       - MEMORY_DATABASE_FILE=/app/data/user_memory.db
