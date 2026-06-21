@@ -99,13 +99,18 @@ class VoiceIntegration(ServiceIntegration):
 
         NOTE: Discord voice *receive* no longer works — Discord's mandatory DAVE
         end-to-end encryption (discord.py >= 2.7.0) makes received Opus
-        undecryptable by any Python lib. This path is kept behind the same seam
-        but stays off unless ``VOICE_ENABLED`` is forced on for an experiment
-        (e.g. a Stage-channel test). The supported capture path is the web
-        push-to-talk source (``attach_web`` / ``VOICE_WEB_ENABLED``)."""
+        undecryptable by any Python lib. The join therefore stays off unless the
+        explicit ``VOICE_DISCORD_EXPERIMENT`` flag is set (e.g. a Stage-channel
+        test) — ``VOICE_ENABLED`` alone will NOT autojoin. The supported capture
+        path is the web push-to-talk source (``attach_web`` /
+        ``VOICE_WEB_ENABLED``)."""
         self._discord = discord_client
         if not self._voice_enabled():
-            logger.info("Voice Discord capture disabled (VOICE_ENABLED / channel unset).")
+            logger.info(
+                "Voice Discord capture disabled (Discord receive is dead — DAVE "
+                "E2EE; set VOICE_DISCORD_EXPERIMENT + VOICE_DISCORD_CHANNEL_ID to "
+                "force-join for an experiment)."
+            )
             return
         from src.voice.capture import DiscordVoiceCapture
 
@@ -148,6 +153,7 @@ class VoiceIntegration(ServiceIntegration):
     def _voice_enabled(self) -> bool:
         return bool(
             global_config.VOICE_ENABLED
+            and global_config.VOICE_DISCORD_EXPERIMENT
             and self._discord is not None
             and global_config.VOICE_DISCORD_CHANNEL_ID
         )

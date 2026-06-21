@@ -350,6 +350,11 @@ CC_FIXR_PROGRESS_DEBOUNCE_SECONDS = float(
 #   end-to-end encryption (negotiated by discord.py >= 2.7.0) means received Opus
 #   is E2E-encrypted and no Python lib can decrypt it. Use VOICE_WEB_ENABLED.
 #   See memory codebase/dp238-discord-voice-recv-dead-dave-e2ee.md.
+#   Because the receive path is dead, VOICE_ENABLED alone no longer makes the bot
+#   join a voice channel — the join is additionally gated behind the explicit
+#   VOICE_DISCORD_EXPERIMENT flag below so a stray VOICE_ENABLED can't autojoin.
+# VOICE_DISCORD_EXPERIMENT — opt-in escape hatch to actually join the Discord voice
+#   channel (e.g. a Stage-channel decryption experiment). Default off. Leave unset.
 # VOICE_WEB_ENABLED — browser/phone push-to-talk capture at GET /voice on the web
 #   interface (:5003). Records while a button is held, POSTs the utterance to
 #   /voice/utterance → STT → keyword intent → timer. Needs WEB_INTERFACE on and,
@@ -361,6 +366,7 @@ CC_FIXR_PROGRESS_DEBOUNCE_SECONDS = float(
 # VOICE_WAKEWORD — optional gate word an utterance must contain to be routed.
 # VOICE_VAD_SILENCE_MS — trailing silence (ms) that closes a spoken utterance.
 VOICE_ENABLED = os.environ.get("VOICE_ENABLED", "False").lower() in ("true", "1", "yes", "on")
+VOICE_DISCORD_EXPERIMENT = os.environ.get("VOICE_DISCORD_EXPERIMENT", "False").lower() in ("true", "1", "yes", "on")
 VOICE_WEB_ENABLED = os.environ.get("VOICE_WEB_ENABLED", "False").lower() in ("true", "1", "yes", "on")
 VOICE_DISCORD_CHANNEL_ID = os.environ.get("VOICE_DISCORD_CHANNEL_ID", "")
 VOICE_NOTIFY_CHANNEL_ID = os.environ.get("VOICE_NOTIFY_CHANNEL_ID", "")

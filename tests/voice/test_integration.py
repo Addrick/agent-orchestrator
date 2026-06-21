@@ -99,6 +99,18 @@ def test_attach_discord_disabled_builds_no_pipeline(monkeypatch):
     assert integ._pipeline is None
 
 
+def test_attach_discord_no_autojoin_without_experiment_flag(monkeypatch):
+    """VOICE_ENABLED alone must NOT join the (dead) Discord voice path — the join
+    is gated behind the explicit VOICE_DISCORD_EXPERIMENT escape hatch."""
+    from config import global_config
+    monkeypatch.setattr(global_config, "VOICE_ENABLED", True)
+    monkeypatch.setattr(global_config, "VOICE_DISCORD_CHANNEL_ID", "12345")
+    monkeypatch.setattr(global_config, "VOICE_DISCORD_EXPERIMENT", False)
+    integ = VoiceIntegration(_FakeRouter())
+    integ.attach_discord(object())
+    assert integ._pipeline is None
+
+
 def test_format_fire_variants():
     base = TimerTarget(channel="discord_channel", recipient="1")
     assert "1 minute" in _format_fire(Timer("a", 60, 0.0, base))
