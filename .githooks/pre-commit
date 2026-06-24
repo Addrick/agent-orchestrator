@@ -1,2 +1,21 @@
 #!/bin/sh
+# Memory-update reminder marker (existing behavior).
 echo 'pending' > .claude/.memory_update_pending
+
+# Keep .agents/AGENTS.md (read by Antigravity) in sync with the canonical
+# CLAUDE.md. CLAUDE.md is the single source of truth; the mirror is generated.
+staged=$(git diff --cached --name-only)
+
+if echo "$staged" | grep -Fxq "CLAUDE.md"; then
+    # CLAUDE.md changed -> regenerate the mirror and stage it in this commit.
+    mkdir -p .agents
+    cp CLAUDE.md .agents/AGENTS.md
+    git add .agents/AGENTS.md
+elif echo "$staged" | grep -Fxq ".agents/AGENTS.md"; then
+    # Mirror staged without touching CLAUDE.md -> someone edited the wrong file.
+    if ! cmp -s CLAUDE.md .agents/AGENTS.md; then
+        echo "pre-commit: .agents/AGENTS.md is auto-generated from CLAUDE.md." >&2
+        echo "  Edit CLAUDE.md instead; the hook regenerates the mirror on commit." >&2
+        exit 1
+    fi
+fi
