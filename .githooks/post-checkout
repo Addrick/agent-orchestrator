@@ -29,30 +29,29 @@ for f in .env .env.test; do
   fi
 done
 
-# Link the main worktree's .venv in so `.venv/Scripts/python.exe` (and PyCharm
-# auto-detection) resolve identically here as in main — no per-worktree venv to
-# create, no fragile `../../.venv` paths. Shared interpreter (option 1): right
-# when the worktree isn't changing requirements*.txt. Delete the link and make a
-# real venv if you need isolated deps. Junction on Windows (no admin needed),
-# symlink on POSIX.
-if [ ! -e "$here/.venv" ] && [ -d "$main_root/.venv" ]; then
-  case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*)
-      # Drive the junction through PowerShell (accepts Windows paths, no admin
-      # needed). cygpath gives PS a native path; `cmd //c mklink` is avoided
-      # because MSYS path-mangling of `/c` and `/J` makes it unreliable.
-      win_here=$(cygpath -w "$here/.venv" 2>/dev/null) || win_here="$here\\.venv"
-      win_main=$(cygpath -w "$main_root/.venv" 2>/dev/null) || win_main="$main_root\\.venv"
-      powershell -NoProfile -Command \
-        "New-Item -ItemType Junction -Path '$win_here' -Target '$win_main' | Out-Null" \
-        >/dev/null 2>&1 \
-        && echo "[post-checkout] linked .venv -> main worktree (junction)"
-      ;;
-    *)
-      ln -s "$main_root/.venv" "$here/.venv" \
-        && echo "[post-checkout] linked .venv -> main worktree (symlink)"
-      ;;
-  esac
+# Build a real, isolated per-worktree venv with uv. uv hardlinks packages from
+# its global cache, so this is near-instant and cheap on disk — and because it's
+# a REAL venv (not a junction into the main .venv), `git worktree remove` and
+# `rm -rf` are always safe: no junction-drop teardown ritual, no risk of nuking
+# the shared venv. Deps come from the worktree's own requirements*.txt, so a
+# branch that changes deps gets the right ones. Requires uv
+# (https://docs.astral.sh/uv/); if it's missing we warn and skip rather than
+# block the checkout.
+if [ ! -e "$here/.venv" ]; then
+  if command -v uv >/dev/null 2>&1; then
+    reqs=""
+    [ -f "$here/requirements.txt" ] && reqs="$reqs -r requirements.txt"
+    [ -f "$here/requirements-dev.txt" ] && reqs="$reqs -r requirements-dev.txt"
+    if ( cd "$here" \
+         && uv venv .venv >/dev/null 2>&1 \
+         && VIRTUAL_ENV="$here/.venv" uv pip install --quiet $reqs ); then
+      echo "[post-checkout] created isolated venv via uv"
+    else
+      echo "[post-checkout] WARN: uv venv/install failed — create .venv manually"
+    fi
+  else
+    echo "[post-checkout] WARN: uv not found — no .venv created (install uv: https://docs.astral.sh/uv/)"
+  fi
 fi
 
 exit 0
