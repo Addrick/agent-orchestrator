@@ -4,11 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Multiple agents work this repo
 
-Both **Claude Code** and **Antigravity (Gemini)** operate in this repository, sometimes on the same tasks. To stop instructions from drifting between tools:
+Both **Claude Code** and **Antigravity (Gemini)** work in this repository, sometimes on the same tasks. To keep instructions from drifting between tools:
 
-- **CLAUDE.md is the canonical, single source of truth.** `.agents/AGENTS.md` (the file Antigravity reads) is an **auto-generated copy** of this file, synced by the `.githooks/pre-commit` hook. **Edit CLAUDE.md only** — never edit `.agents/AGENTS.md` by hand (the hook overwrites it) and never fork tool-specific instructions.
-- Regardless of which agent you are, follow the **same** DP-ID / worktree / memory-tier discipline below, so notes and code stay consistent no matter who wrote them.
-- `ANTIGRAVITY.md` at the repo root is **not** read by anything (Antigravity uses `.agents/AGENTS.md`; `.antigravity/` is its system-state folder). It is vestigial — ignore it.
+- **CLAUDE.md is the single source of truth.** `.agents/AGENTS.md` (the file Antigravity reads) is an auto-generated copy, synced by `.githooks/pre-commit` — edit CLAUDE.md only; never hand-edit the mirror or fork tool-specific instructions.
+- Whichever agent you are, follow the same DP-ID / worktree / memory-tier discipline below, so notes and code stay consistent no matter who wrote them.
 
 ## Commands
 
@@ -113,8 +112,7 @@ To support multiple agents working concurrently, the following rules are mandato
   `git add`/`git commit`, confirm you are inside `worktrees/DP-XXX/` and that
   `git status` shows only files *you* changed. If `git status` lists another
   DP's uncommitted changes (the main tree was left dirty), **STOP** — do not
-  `git add` (a path-broad add will sweep up that WIP into your commit, which is
-  exactly how DP-142's first commit was contaminated).
+  `git add` (a path-broad add sweeps that unrelated WIP into your commit).
 - **Run `pytest` from inside the worktree** (using its own `.venv`), not from
   the main repo against worktree paths. `pytest`'s `pythonpath = src .` resolves
   relative to the run directory, so a top-level `pytest worktrees/DP-XXX/...`
@@ -157,9 +155,7 @@ Two living documents track the system's design:
 
 ## Memory System — Viking L0/L1/L2 Protocol
 
-This project uses a tiered memory system inspired by [OpenViking](https://github.com/volcengine/OpenViking)'s context database, layered on top of the default auto-memory system. The core principle is **progressive disclosure**: load the minimum context needed to make decisions, and only drill deeper when required. This avoids dumping large documents into every conversation and keeps the context window efficient.
-
-**Relationship to auto-memory:** The system prompt describes a flat memory system with types and frontmatter. This protocol extends it with hierarchical organization and navigation rules. Follow both: use the system prompt's type/frontmatter conventions for individual files, but organize and navigate them using the Viking tiers below.
+A tiered memory system (inspired by [OpenViking](https://github.com/volcengine/OpenViking)) layered on the default auto-memory. Core principle — **progressive disclosure**: load the minimum context to decide, drill deeper only when needed. Use the system prompt's type/frontmatter conventions for individual files; organize and navigate them with the Viking tiers below.
 
 ### Structure
 
@@ -211,18 +207,9 @@ memory/
 
 **Automated (hook-enforced):** A git pre-commit hook writes a marker file (`.claude/.memory_update_pending`). A `UserPromptSubmit` hook in `settings.local.json` checks for it and injects a reminder on the next user message. When you see this reminder, review what was committed and update affected L2 → L1 → L0 files before proceeding with new work.
 
-**Self-directed:** The hook only catches commits. You must be vigilant about updating memory in contexts where no hook fires. Common situations:
+**Self-directed:** the hook only catches commits — be vigilant where none fires. Save: user feedback/corrections on how to work; the *rationale* behind an architectural decision (code shows what, memory stores why); research conclusions (tool evals, security findings, API discoveries); new or revised plans; facts about the user's background/goals; root-cause reasoning for a non-obvious bug. Test: "would a future session benefit, and is it not derivable from code/git?" → if yes, save it.
 
-- User gives feedback or corrections about how to work ("don't do X", "yes that approach was right") — these are high-value and easy to miss
-- An architectural decision is made during discussion — capture the *rationale*, not just the choice. The code shows what; memory stores why.
-- Research or exploration surfaces conclusions worth keeping (tool evaluations, security findings, API discoveries) — session context vanishes, but the conclusions shouldn't
-- A plan is created or substantially revised
-- You learn something new about the user's background, role, or goals
-- A non-obvious bug is resolved — the root cause reasoning is often not in the commit message or code
-
-When in doubt, ask: "would a future session benefit from knowing this?" If yes, save it. If it's derivable from the code or git history, don't.
-
-**Self-check:** If this conversation involved research, decisions, or user feedback and you have NOT written any memory files this session, you are probably missing something. Review the conversation for saveable context before it ends. Conversations about code changes are covered by the commit hook, but discussions, explorations, and planning sessions have no safety net — if you don't save it, it's gone.
+**Self-check:** if a session involved research, decisions, or feedback and you've written no memory, you're probably missing something — discussions and planning have no commit-hook safety net.
 
 ### Update Protocol
 
@@ -236,16 +223,8 @@ When updating memory (whether triggered by hook or self-directed):
 
 If an L1 or L2 memory conflicts with what you observe in the code, **trust the code**. Update the memory. Do not act on stale information.
 
-### Project Scope
-
-This memory system is scoped to this project. User profile and universal feedback (preferences that apply across all projects) are stored here but are conceptually global. If working across multiple projects, these may need manual synchronization. Codebase and project memories are correctly project-scoped and should never leak across projects.
+### Scope
+Project-scoped. `user/` profile + universal feedback are conceptually global (may need manual sync across projects); codebase/project memories must never leak across projects.
 
 ### Hindsight Recall (supplementary)
-
-A separate memory layer is available via the `mcp__hindsight__*` tools. Hindsight auto-ingests Claude Code session transcripts and exposes them through associative `recall`. It is **supplementary**, not a replacement for Viking.
-
-- **Viking is authoritative.** Hindsight is new, the DB has stale entries from earlier sessions, and mental-model tuning is in progress. When recall and a Viking note disagree, trust Viking.
-- **Recall for episodic gaps** — call it when you hit project-specific context Viking didn't give you (referenced prior work, unfamiliar artifact, surprising local state). Overlap with Viking is fine right now; coverage matters more than minimalism.
-- **Flag bad recalls in conversation** — stale, wrong-project, or Viking-contradicting results. No file needed; visibility drives DB and mission tuning.
-
-Mental model candidates under evaluation are tracked in `project/plans/hindsight_mental_models.md`.
+The `mcp__hindsight__*` tools auto-ingest session transcripts for associative `recall` — **supplementary to Viking, which stays authoritative** (Hindsight has stale entries; trust Viking on conflicts). Use recall for episodic gaps Viking missed; flag stale/wrong-project results in conversation. Mental-model candidates: `project/plans/hindsight_mental_models.md`.
