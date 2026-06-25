@@ -18,7 +18,7 @@ def mock_google_part(monkeypatch):
         instance._kwargs = kwargs
         return instance
     mock_part_cls.side_effect = side_effect
-    monkeypatch.setattr('src.engine.Part', mock_part_cls)
+    monkeypatch.setattr('src.engine.driver.Part', mock_part_cls)
     return mock_part_cls
 
 @pytest.mark.asyncio

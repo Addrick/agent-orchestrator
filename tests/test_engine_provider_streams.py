@@ -42,7 +42,7 @@ async def _drain(stream):
 # ---------------------------------------------------------------------------
 
 
-@patch("src.engine.AsyncOpenAI")
+@patch("src.engine.providers.openai.AsyncOpenAI")
 class TestOpenAIStream:
     @pytest.mark.asyncio
     async def test_event_order_payload_deltas_done(self, mock_cls, text_engine,

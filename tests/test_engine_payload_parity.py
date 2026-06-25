@@ -136,7 +136,7 @@ OPENAI_GOLDEN_PAYLOAD = {
 @pytest.mark.asyncio
 async def test_openai_wire_payload_matches_golden(text_engine, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "dummy")
-    with patch("src.engine.AsyncOpenAI") as cls:
+    with patch("src.engine.providers.openai.AsyncOpenAI") as cls:
         inst = cls.return_value
         inst.chat.completions.create = AsyncMock(
             return_value=openai_text_stream("parity ok")

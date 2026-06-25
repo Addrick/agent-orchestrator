@@ -1,4 +1,4 @@
-# src/engine.py
+# src/engine/driver.py
 
 import json
 import logging
@@ -29,7 +29,6 @@ from config.global_config import (
 import base64
 import aiohttp
 import anthropic
-from openai import AsyncOpenAI, APIStatusError, APITimeoutError
 from google import genai
 from google.genai.types import GenerateContentConfig, Tool, GoogleSearch, Candidate, \
     FunctionDeclaration, Part, ThinkingConfig
@@ -46,6 +45,12 @@ from src.text_tool_protocol import (
     extract_first_tool_call_block,
     render_tool_descriptions,
 )
+# DP-244: Provider ABC family + ordered registry. OpenAI is fully extracted into
+# `providers.openai`; the other five route through thin `_EngineProvider`
+# adapters until their own slice. `_shared` holds the hoisted free helpers.
+from src.engine.registry import build_registry
+from src.engine.providers import _shared
+from src.engine.providers.openai import stream_openai
 
 AGY_CALL_TIMEOUT_SECONDS = 120.0
 # Claude Code runs a full agentic loop (its own tools) in one headless call, so
@@ -72,7 +77,8 @@ class TextEngine:
 
     def __init__(self, stream_engine: Optional[Any] = None) -> None:
         # --- Lazy-loaded clients ---
-        self.openai_client: Optional[AsyncOpenAI] = None
+        # OpenAIProvider (providers.openai) lazily fills this cache slot.
+        self.openai_client: Optional[Any] = None
         self.anthropic_client: Optional[anthropic.AsyncAnthropic] = None
         # Kobold-native local provider (DP-206b: engine-owned — the engine is
         # the single entry; StreamEngine is its `local` transport component).
@@ -115,6 +121,11 @@ class TextEngine:
             f"CC: {RATE_LIMIT_CC_RPM} RPM"
         )
 
+        # DP-244: ordered Provider registry (replaces the _get_provider_route
+        # string-prefix waterfall). Built after the limiters so providers can
+        # reference them.
+        self._registry = build_registry(self)
+
         self._initialize_env()
 
     async def aclose(self) -> None:
@@ -142,15 +153,6 @@ class TextEngine:
         if 'gemini' in model_name or 'gemma' in model_name:
             return True
         return False
-
-    async def _get_openai_client(self) -> AsyncOpenAI:
-        """Initializes and returns the OpenAI client."""
-        if self.openai_client is None:
-            api_key = get_vault().get("OPENAI_API_KEY")
-            if not api_key:
-                raise LLMCommunicationError("OPENAI_API_KEY not set — skipping OpenAI provider.")
-            self.openai_client = AsyncOpenAI(api_key=api_key)
-        return self.openai_client
 
     def _get_anthropic_client(self) -> anthropic.AsyncAnthropic:
         """Initializes and returns the async Anthropic client."""
@@ -180,34 +182,15 @@ class TextEngine:
         return cls._FALLBACK_MODELS.get(model_name)
 
     def _get_provider_route(self, model_name: str) -> Tuple[Callable, List[AsyncLimiter]]:
-        """Returns (stream_factory, [limiters]) for the model name (DP-206b).
-        Every factory is an async generator emitting the unified event shape
-        (api_payload → text_delta* → [tool_calls] → done); the `local` factory
-        additionally accepts `local_inference_config`.
-        Raises LLMCommunicationError for unsupported models."""
-        # cc-* must be checked before the `"claude" in model_name` branch below,
-        # which would otherwise capture it and route to the Anthropic API.
-        if model_name.startswith("cc-"):
-            self._ensure_cc_supported()
-            return self._stream_cc_response, [self._cc_limiter]
-        if model_name.startswith("gpt"):
-            return self._stream_openai_response, [self._openai_limiter]
-        if "claude" in model_name:
-            return self._stream_anthropic_response, [self._anthropic_limiter]
-        if "gemma-4" in model_name:
-            return self._stream_google_response, [self._gemma_4_rpm_limiter]
-        if "gemma" in model_name:
-            return self._stream_google_response, [self._gemma_4_rpm_limiter]
-        if "gemini-3.1" in model_name:
-            return self._stream_google_response, [self._gemini_3_rpm_limiter]
-        if "gemini" in model_name:
-            return self._stream_google_response, [self._gemini_25_rpm_limiter, self._gemini_25_rpd_limiter]
-        if model_name.startswith("agy"):
-            self._ensure_agy_supported()
-            return self._stream_agy_response, [self._agy_limiter]
-        if model_name == 'local':
-            return self._stream_local_response, []
-        raise LLMCommunicationError(f"Error: Model '{model_name}' is not supported.")
+        """Back-compat shim over the registry (DP-244). Returns
+        (stream_factory, [limiters]) — the bound `_stream_<provider>_response`
+        method and its limiters — for callers/tests written against the
+        pre-244 waterfall. The driver itself resolves providers directly via
+        `self._registry`. Runs the provider host guard and raises
+        LLMCommunicationError for unsupported models, exactly as before."""
+        provider = self._registry.resolve(model_name)
+        handler = getattr(self, provider.route_method_name)
+        return handler, provider.limiters_for(model_name)
 
     @staticmethod
     @asynccontextmanager
@@ -290,7 +273,7 @@ class TextEngine:
             )
             history_object["current_message"]["image_url"] = None
 
-        stream_factory, limiters = self._get_provider_route(model_name)
+        provider = self._registry.resolve(model_name)
 
         for attempt in range(EMPTY_RESPONSE_RETRIES + 1):
             committed = False
@@ -303,11 +286,11 @@ class TextEngine:
             attempt_done_text: Optional[str] = None
 
             try:
-                async with self._rate_limited(limiters):
-                    if model_name == 'local':
-                        stream = stream_factory(persona_config, history_object, tools, local_inference_config)
-                    else:
-                        stream = stream_factory(persona_config, history_object, tools)
+                async with self._rate_limited(provider.limiters_for(model_name)):
+                    stream = provider.stream(
+                        persona_config, history_object, tools,
+                        local_inference_config=local_inference_config,
+                    )
                     async for ev in stream:
                         if committed:
                             yield ev
@@ -382,7 +365,7 @@ class TextEngine:
                         )
                         persona_config = {**persona_config, "model_name": fallback}
                         model_name = fallback
-                        stream_factory, limiters = self._get_provider_route(model_name)
+                        provider = self._registry.resolve(model_name)
                         continue
                     logger.warning(f"Rate limit (429) hit for model '{model_name}'. Aborting retries.")
                     raise
@@ -399,138 +382,20 @@ class TextEngine:
 
     @staticmethod
     def _parse_openai_tool_calls(raw_calls: list) -> List[Dict[str, Any]]:
-        """Parses OpenAI tool call objects into standardized dicts."""
-        tool_calls: List[Dict[str, Any]] = []
-        for call in raw_calls:
-            try:
-                arguments = json.loads(call.function.arguments)
-                tool_calls.append({"id": call.id, "name": call.function.name, "arguments": arguments})
-            except json.JSONDecodeError:
-                logger.error(f"Failed to parse tool call arguments: {call.function.arguments}")
-                continue
-        return tool_calls
-
-    @staticmethod
-    def _attach_openai_image(messages: List[Dict[str, Any]], image_url: str) -> None:
-        """Attaches an image URL to the last user message for OpenAI."""
-        last_message = messages[-1]
-        if last_message['role'] != 'user':
-            return
-        if isinstance(last_message['content'], str):
-            last_message['content'] = [{"type": "text", "text": last_message['content']}]
-        last_message['content'].append({"type": "image_url", "image_url": {"url": image_url}})
-
-    def _build_openai_params(self, config: Dict[str, Any], history_object: Dict[str, Any],
-                             tools: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
-        """Builds the chat.completions request kwargs. Single source of truth
-        shared by the canonical streaming driver and the local one-shot path
-        — wire-payload parity between them holds by construction
-        (pinned by tests/test_engine_payload_parity.py)."""
-        messages: List[Dict[str, Any]] = []
-        message_history = history_object.get("message_history", history_object.get("history", []))
-        if message_history and message_history[0]["role"] == "system":
-            messages.append(message_history[0])
-            history_to_process = message_history[1:]
-        else:
-            messages.append({"role": "system", "content": history_object["persona_prompt"]})
-            history_to_process = message_history
-
-        # Add remaining history
-        for msg in history_to_process:
-            if msg["role"] == "system":
-                continue
-            messages.append(msg)
-
-        if history_object["current_message"].get("image_url"):
-            self._attach_openai_image(messages, history_object["current_message"]["image_url"])
-
-        api_params: Dict[str, Any] = {
-            "model": config["model_name"],
-            "messages": messages,
-            "max_tokens": config.get("max_output_tokens") or global_config.DEFAULT_TOKEN_LIMIT,
-            "temperature": config.get("temperature"),
-            "top_p": config.get("top_p")
-        }
-        if tools:
-            api_params["tools"] = [
-                {"type": "function", "function": t["function"]}
-                for t in tools if "function" in t
-            ]
-            api_params["tool_choice"] = "auto"
-
-        api_params = {k: v for k, v in api_params.items() if v is not None}
-        return api_params
-
-    @staticmethod
-    def _openai_dump_params(api_params: Dict[str, Any]) -> Dict[str, Any]:
-        """Log-safe copy of the request kwargs: tools listed by name."""
-        dump = dict(api_params)
-        if "tools" in dump:
-            dump["tools"] = [tool.get("function", {}).get("name", "unknown")
-                             for tool in dump["tools"]]
-        return dump
+        """Thin seam over `providers._shared.parse_openai_tool_calls` (DP-244);
+        kept on the engine for callers/tests written against the pre-244 API."""
+        return _shared.parse_openai_tool_calls(raw_calls)
 
     async def _stream_openai_response(
         self, config: Dict[str, Any], history_object: Dict[str, Any],
         tools: Optional[List[Dict[str, Any]]] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
-        """Canonical OpenAI driver (DP-206): a true SDK token stream emitting
-        the unified event shape (api_payload → text_delta* → [tool_calls] →
-        done). The one-shot path is `collect_stream` over this generator."""
-        client = await self._get_openai_client()
-        api_params = self._build_openai_params(config, history_object, tools)
-        yield {"type": "api_payload", "payload": self._openai_dump_params(api_params)}
-
-        text_parts: List[str] = []
-        # index → {"id", "name", "arguments"} accumulated across delta chunks
-        raw_calls: Dict[int, Dict[str, Any]] = {}
-        try:
-            stream = await client.chat.completions.create(**api_params, stream=True)
-            async for chunk in stream:
-                choices = getattr(chunk, "choices", None)
-                if not choices:
-                    continue
-                delta = choices[0].delta
-                content = getattr(delta, "content", None)
-                if content:
-                    text_parts.append(content)
-                    yield {"type": "text_delta", "text": content}
-                for tc in (getattr(delta, "tool_calls", None) or []):
-                    idx = getattr(tc, "index", 0) or 0
-                    slot = raw_calls.setdefault(idx, {"id": None, "name": "", "arguments": ""})
-                    if getattr(tc, "id", None):
-                        slot["id"] = tc.id
-                    fn = getattr(tc, "function", None)
-                    if fn is not None:
-                        if getattr(fn, "name", None):
-                            slot["name"] = fn.name
-                        slot["arguments"] += getattr(fn, "arguments", None) or ""
-        except (APIStatusError, APITimeoutError) as e:
-            rate_limited = isinstance(e, APIStatusError) and e.status_code == 429
-            is_server_error = isinstance(e, APIStatusError) and e.status_code >= 500
-            logger.error(f"OpenAI API error: {e}", exc_info=not is_server_error)
-            raise LLMCommunicationError(f"OpenAI API returned an error: {e}", api_payload=api_params,
-                                        rate_limited=rate_limited) from e
-        except Exception as e:
-            logger.error(f"An unexpected OpenAI error occurred: {e}", exc_info=True)
-            raise LLMCommunicationError("An unexpected error occurred with the OpenAI API.",
-                                        api_payload=api_params) from e
-
-        if raw_calls:
-            # Reuse the one parser: wrap accumulated fragments in the same
-            # attribute shape the SDK's non-streaming message objects expose.
-            wrapped = [
-                SimpleNamespace(
-                    id=slot["id"],
-                    function=SimpleNamespace(name=slot["name"], arguments=slot["arguments"]),
-                )
-                for _, slot in sorted(raw_calls.items())
-            ]
-            tool_calls = self._parse_openai_tool_calls(wrapped)
-            yield {"type": "tool_calls", "calls": tool_calls}
-            yield {"type": "done", "full_text": ""}
-        else:
-            yield {"type": "done", "full_text": "".join(text_parts)}
+        """Engine seam for the OpenAI provider (DP-244). The logic lives in
+        `providers.openai.stream_openai`; this delegator is the patch point the
+        driver routes through (`OpenAIProvider.stream` calls back into it) so
+        the driver-policy tests can inject fake streams as before."""
+        async for ev in stream_openai(self, config, history_object, tools):
+            yield ev
 
     async def _attach_anthropic_image(self, messages: List[Dict[str, Any]], image_url: str) -> None:
         """Downloads and attaches an image to the last user message for Anthropic."""
@@ -645,13 +510,8 @@ class TextEngine:
 
     @staticmethod
     def _extract_system_prompt(history_object: Dict[str, Any]) -> Tuple[str, List[Dict[str, Any]]]:
-        """Returns (merged_system_prompt, remaining_history)."""
-        system_prompt = history_object["persona_prompt"]
-        history = history_object.get("message_history", history_object.get("history", []))
-        if history and history[0]["role"] == "system":
-            system_prompt = f"{system_prompt}\n\n{history[0]['content']}"
-            history = history[1:]
-        return system_prompt, history
+        """Thin seam over `providers._shared.extract_system_prompt` (DP-244)."""
+        return _shared.extract_system_prompt(history_object)
 
     @staticmethod
     def _render_agy_prompt(history: List[Dict[str, Any]]) -> str:
@@ -688,14 +548,8 @@ class TextEngine:
         return "\n\n".join(lines)
 
     async def _download_image(self, image_url: str) -> Tuple[bytes, str]:
-        """Downloads image, returns (raw_bytes, mime_type).
-        Raises aiohttp.ClientError on failure."""
-        async with aiohttp.ClientSession() as session:
-            async with session.get(image_url) as resp:
-                resp.raise_for_status()
-                image_bytes = await resp.read()
-                mime_type = resp.content_type
-        return image_bytes, mime_type
+        """Thin seam over `providers._shared.download_image` (DP-244)."""
+        return await _shared.download_image(image_url)
 
     async def _build_google_history(
         self, system_prompt: str, history: List[Dict[str, Any]], image_url: Optional[str]
