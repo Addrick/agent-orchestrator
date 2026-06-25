@@ -68,7 +68,7 @@ def _patch_voice_recv_opus_resilience() -> None:
             logger.warning("Dropped corrupted Opus packet (voice-recv decode error)")
             return None
 
-    PacketDecoder.pop_data = _safe_pop_data
+    PacketDecoder.pop_data = _safe_pop_data  # type: ignore[method-assign]
     _opus_resilience_patched = True
     logger.info("Applied voice-recv Opus-decode resilience patch")
 
@@ -98,7 +98,7 @@ class DiscordVoiceCapture(CaptureSource):
 
     async def start(self) -> None:
         try:
-            from discord.ext import voice_recv  # type: ignore[attr-defined]
+            from discord.ext import voice_recv
         except ImportError as e:  # pragma: no cover - only without the dep
             raise RuntimeError(
                 "discord-ext-voice-recv is not installed. "
