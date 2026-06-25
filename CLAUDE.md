@@ -98,7 +98,7 @@ To support multiple agents working concurrently, the following rules are mandato
 
 ### 1. The DP-ID Anchor
 - **Every** branch must follow: `feature/DP-XXX-slug` or `bugfix/DP-XXX-slug`.
-- **Every** commit message must follow: `<gitmoji> DP-XXX: description`.
+- **Every** commit message must follow: `DP-XXX: description` (an optional Conventional-Commits type prefix is fine, e.g. `fix: DP-238 …`; no decorative emoji).
 - **Every** task must have a corresponding file in `memory/project/tasks/DP-XXX.md`.
 
 ### 2. Workspace Isolation
