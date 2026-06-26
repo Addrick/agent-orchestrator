@@ -7,14 +7,11 @@ replaces the `_get_provider_route` string-prefix waterfall.
 raises for an unknown model — byte-identical to the old waterfall, including
 the `cc-*`-before-`claude` precedence.
 
-Five of the six providers are thin `_EngineProvider` adapters that delegate to
-the engine's existing `_stream_<provider>_response` methods (their own slices
-come later, 244b–g). OpenAI is the fully-extracted proof in `providers.openai`.
+All six providers are now fully-extracted `Provider` objects (DP-244 244a–g):
+each owns its logic in `providers/<name>.py` (agy/cc share `providers/_subprocess.py`).
 """
 
-from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Dict, List, Optional
-
-from aiolimiter import AsyncLimiter
+from typing import TYPE_CHECKING, List
 
 from src.llm_errors import LLMCommunicationError
 
@@ -23,64 +20,11 @@ from .providers.openai import OpenAIProvider
 from .providers.anthropic import AnthropicProvider
 from .providers.google import GoogleProvider
 from .providers.local import LocalProvider
+from .providers.agy import AgyProvider
+from .providers.cc import CcProvider
 
 if TYPE_CHECKING:
     from src.engine.driver import TextEngine
-
-
-class _EngineProvider(Provider):
-    """A thin adapter binding a `Provider` face onto one of the engine's
-    existing `_stream_<provider>_response` methods. Transitional: each provider
-    gets its own real class in a later DP-244 slice."""
-
-    def __init__(
-        self,
-        engine: "TextEngine",
-        *,
-        method_name: str,
-        matches: Callable[[str], bool],
-        limiters: Callable[["TextEngine", str], List[AsyncLimiter]],
-        supports_images: Callable[[str], bool] = lambda m: False,
-        guard_name: Optional[str] = None,
-        passes_local_config: bool = False,
-    ) -> None:
-        self._engine = engine
-        self.route_method_name = method_name
-        self._matches = matches
-        self._limiters = limiters
-        self._supports_images = supports_images
-        self._guard_name = guard_name
-        self._passes_local_config = passes_local_config
-
-    def matches(self, model_name: str) -> bool:
-        return self._matches(model_name)
-
-    def limiters_for(self, model_name: str) -> List[AsyncLimiter]:
-        return self._limiters(self._engine, model_name)
-
-    def supports_images(self, model_name: str) -> bool:
-        return self._supports_images(model_name)
-
-    def ensure_supported(self, model_name: str) -> None:
-        if self._guard_name is not None:
-            # Looked up live so per-test monkeypatches of the guard take effect.
-            getattr(self._engine, self._guard_name)()
-
-    async def stream(
-        self,
-        persona_config: Dict[str, Any],
-        history_object: Dict[str, Any],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        *,
-        local_inference_config: Optional[Dict[str, Any]] = None,
-    ) -> AsyncIterator[Dict[str, Any]]:
-        method = getattr(self._engine, self.route_method_name)
-        if self._passes_local_config:
-            async for ev in method(persona_config, history_object, tools, local_inference_config):
-                yield ev
-        else:
-            async for ev in method(persona_config, history_object, tools):
-                yield ev
 
 
 class ProviderRegistry:
@@ -104,23 +48,11 @@ def build_registry(engine: "TextEngine") -> ProviderRegistry:
     `_get_provider_route` waterfall — notably `cc-*` before `claude`."""
     providers: List[Provider] = [
         # cc-* must precede the `"claude" in model_name` match below.
-        _EngineProvider(
-            engine,
-            method_name="_stream_cc_response",
-            matches=lambda m: m.startswith("cc-"),
-            limiters=lambda e, m: [e._cc_limiter],
-            guard_name="_ensure_cc_supported",
-        ),
+        CcProvider(engine),
         OpenAIProvider(engine),
         AnthropicProvider(engine),
         GoogleProvider(engine),
-        _EngineProvider(
-            engine,
-            method_name="_stream_agy_response",
-            matches=lambda m: m.startswith("agy"),
-            limiters=lambda e, m: [e._agy_limiter],
-            guard_name="_ensure_agy_supported",
-        ),
+        AgyProvider(engine),
         LocalProvider(engine),
     ]
     return ProviderRegistry(providers)

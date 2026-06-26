@@ -1,13 +1,8 @@
 # src/engine/driver.py
 
-import json
 import logging
 import os
 import asyncio
-import re
-import shutil
-import tempfile
-import uuid
 from typing import Dict, Any, Optional, Tuple, List, Callable, AsyncIterator
 from contextlib import asynccontextmanager, AsyncExitStack
 
@@ -15,7 +10,6 @@ from dotenv import load_dotenv
 
 from aiolimiter import AsyncLimiter
 
-from config import global_config
 from config.global_config import (
     EMPTY_RESPONSE_RETRIES, EMPTY_RESPONSE_RETRY_DELAY,
     RATE_LIMIT_GEMINI_25_RPM, RATE_LIMIT_GEMINI_25_RPD,
@@ -28,25 +22,21 @@ from config.global_config import (
 import anthropic
 from google import genai
 from google.genai.types import Tool
-from src.utils.claude_cli_env import build_claude_cli_env
 from src.generation_params import GenerationParams
 from src.llm_errors import LLMCommunicationError
 from src.stream_engine import StreamEngine
-from src.text_tool_protocol import (
-    TOOL_CALL_OPEN,
-    TOOL_CALL_CLOSE,
-    decode_tool_call_payload,
-    extract_first_tool_call_block,
-    render_tool_descriptions,
-)
-# DP-244: Provider ABC family + ordered registry. OpenAI is fully extracted into
-# `providers.openai`; the other five route through thin `_EngineProvider`
-# adapters until their own slice. `_shared` holds the hoisted free helpers.
+# DP-244: Provider ABC family + ordered registry. Every provider is fully
+# extracted into `providers/<name>.py` (agy/cc share `providers/_subprocess.py`);
+# the driver keeps thin `_stream_<provider>_response` / helper seams that the
+# providers route back through. `_shared` holds the hoisted free helpers.
 from src.engine.registry import build_registry
 from src.engine.providers import _shared
 from src.engine.providers.openai import stream_openai
 from src.engine.providers.anthropic import stream_anthropic
 from src.engine.providers import google
+from src.engine.providers import agy as agy_provider
+from src.engine.providers import cc as cc_provider
+from src.engine.providers import _subprocess
 
 AGY_CALL_TIMEOUT_SECONDS = 120.0
 # Claude Code runs a full agentic loop (its own tools) in one headless call, so
@@ -390,37 +380,10 @@ class TextEngine:
 
     @staticmethod
     def _render_agy_prompt(history: List[Dict[str, Any]]) -> str:
-        """Flatten a message history into a single role-tagged transcript for the
-        `agy` route.
-
-        The Antigravity SDK's `chat()` accepts only one user turn and offers no
-        API to seed prior assistant turns, while the engine is stateless and
-        rebuilds the full context on every call. We therefore render the entire
-        `history` — which already ends with the current user turn (see
-        `_extract_system_prompt`) — into one deterministic, auditable transcript
-        so `agy` contributes nothing of its own. This is also what lets the
-        engine's multi-turn tool loop work: a `tool`-role result from a prior
-        iteration is just another rendered line.
-
-        The system prompt is delivered separately via `CustomSystemInstructions`
-        and is intentionally not included here. `current_message["text"]` is a
-        duplicate of the final user turn already present in `history`, so it is
-        not appended (doing so would duplicate the last message).
-        """
-        lines: List[str] = []
-        for item in history:
-            role = item.get("role")
-            if role == "tool":
-                lines.append(f"Tool({item.get('name', 'unknown')}): {item.get('content', '')}")
-            elif role == "assistant":
-                if item.get("content"):
-                    lines.append(f"Assistant: {item['content']}")
-                for call in item.get("tool_calls", []) or []:
-                    args = json.dumps(call.get("arguments", {}), ensure_ascii=False)
-                    lines.append(f"Assistant (tool call {call.get('name', 'unknown')}): {args}")
-            else:  # user (and any unlabeled turn) renders as the user
-                lines.append(f"User: {item.get('content', '')}")
-        return "\n\n".join(lines)
+        """Engine seam (DP-244). Shared by agy and cc; logic lives in
+        `providers._subprocess.render_transcript`. Kept here because tests call
+        it directly on the engine."""
+        return _subprocess.render_transcript(history)
 
     async def _download_image(self, image_url: str) -> Tuple[bytes, str]:
         """Thin seam over `providers._shared.download_image` (DP-244)."""
@@ -487,238 +450,60 @@ class TextEngine:
                 yield {"type": "text_delta", "text": text}
             yield {"type": "done", "full_text": text}
 
+    # ------------------------------------------------------------------
+    # agy provider — DP-244 engine seams. Logic lives in providers/agy.py;
+    # shared subprocess machinery in providers/_subprocess.py. Each method is a
+    # thin delegator (the seam tests call/patch on the engine directly); module
+    # funcs route cross-calls back through these seams so instance monkeypatches
+    # still intercept.
+    # ------------------------------------------------------------------
+
     @staticmethod
     def _render_agy_tool_protocol(tools: Optional[List[Dict[str, Any]]]) -> str:
-        if not tools:
-            return ""
-
-        protocol_desc = (
-            "You may request a tool by emitting EXACTLY "
-            f"{TOOL_CALL_OPEN}{{\"name\": \"<tool_name>\", \"arguments\": "
-            f"{{<json args>}}}}{TOOL_CALL_CLOSE} "
-            "as the last thing. Answer in plain text otherwise, and use no other tools/files/shell/web."
-        )
-
-        # Shared renderer keeps the agy and streaming paths from drifting on
-        # how a tool's name/description/parameters are formatted.
-        lines = [protocol_desc, *render_tool_descriptions(tools)]
-        return "\n".join(lines)
+        return agy_provider.render_agy_tool_protocol(tools)
 
     @staticmethod
     def _parse_agy_tool_call(text: str) -> Optional[List[Dict[str, Any]]]:
-        if not text:
-            return None
-        cleaned = re.sub(r"<SYSTEM_MESSAGE>.*?</SYSTEM_MESSAGE>", "", text, flags=re.DOTALL)
-        inner = extract_first_tool_call_block(cleaned)
-        if inner is None:
-            return None
-        parsed = decode_tool_call_payload(inner)
-        if parsed is None:
-            return None
-        # agy policy: both keys must be present; id is a fresh uuid.
-        if "name" not in parsed or "arguments" not in parsed:
-            return None
-        call_id = f"agy_{uuid.uuid4().hex}"
-        return [{
-            "id": call_id,
-            "name": parsed["name"],
-            "arguments": parsed["arguments"]
-        }]
+        return agy_provider.parse_agy_tool_call(text)
 
     @staticmethod
     def _ensure_agy_supported() -> None:
-        """agy is a TUI CLI that only emits its response to a TTY. DERPR captures
-        stdout via a pipe — fine on POSIX, but on native Windows agy renders to
-        the console and writes *nothing* to a non-TTY stdout/file, so the route
-        silently returns empty. Fail loudly instead and point at the docs; run
-        the engine on the POSIX host (Linux/macOS/WSL/Docker) to use agy.
-        """
-        if os.name != "posix":
-            raise LLMCommunicationError(
-                "The 'agy' provider is unsupported on native Windows: agy only "
-                "writes its response to a TTY, but DERPR captures stdout via a "
-                "pipe, so the response is always empty. Run the engine on the "
-                "POSIX host (Linux/macOS/WSL/Docker) to use agy. "
-                "See docs/user_guide.md (Antigravity / agy provider)."
-            )
+        agy_provider.ensure_agy_supported()
 
     @staticmethod
     def _sanitize_agy_workspace_name(persona_name: Optional[str]) -> Optional[str]:
-        """Persona names come from config and may contain path separators or
-        other filesystem-hostile characters; reduce to a safe slug. Returns
-        None when nothing usable remains (caller falls back to global)."""
-        if not persona_name:
-            return None
-        slug = re.sub(r"[^A-Za-z0-9._-]+", "_", persona_name).strip("._")
-        return slug or None
+        """Engine seam (DP-244). Shared by agy and cc workspace resolution;
+        logic in `providers._subprocess.sanitize_workspace_name`."""
+        return _subprocess.sanitize_workspace_name(persona_name)
 
-    @staticmethod
-    def _resolve_agy_workspace(persona_name: Optional[str]) -> Optional[str]:
-        """Returns the persistent workspace dir for this call, or None when
-        persistence is disabled (caller uses a throwaway temp dir). Does not
-        create the directory."""
-        if not global_config.AGY_PERSISTENT_WORKSPACES:
-            return None
-        workspaces_dir = global_config.AGY_WORKSPACES_DIR
-        slug = TextEngine._sanitize_agy_workspace_name(persona_name)
-        if global_config.AGY_WORKSPACE_MODE == "persona" and slug:
-            return os.path.abspath(workspaces_dir / f"agy_{slug}")
-        return os.path.abspath(workspaces_dir / "agy_global")
+    def _resolve_agy_workspace(self, persona_name: Optional[str]) -> Optional[str]:
+        return agy_provider.resolve_agy_workspace(self, persona_name)
 
-    async def _run_agy_cli(self, prompt: str, timeout: float = AGY_CALL_TIMEOUT_SECONDS, persona_name: Optional[str] = None) -> str:
-        self._ensure_agy_supported()
-
-        binary = os.environ.get("ANTIGRAVITY_HARNESS_PATH") or shutil.which("agy")
-        if not binary:
-            raise LLMCommunicationError("Antigravity harness/agy binary not found.")
-
-        timeout_sec_str = f"{int(timeout) + 30}s"
-        args = ["--print-timeout", timeout_sec_str, "-p", prompt]
-        if global_config.AGY_SANDBOX:
-            args = ["--sandbox", *args]
-
-        workspace_dir = self._resolve_agy_workspace(persona_name)
-        if workspace_dir is None:
-            temp_dir = tempfile.mkdtemp()
-            try:
-                return await self._exec_agy(binary, args, temp_dir, timeout)
-            finally:
-                # The CLI leaves symlinks under .antigravitycli pointing at
-                # files outside the temp dir; remove the targets so rmtree
-                # doesn't strand them. Persistent workspaces keep this state
-                # on purpose — that cache is the point of persistence.
-                self._remove_agy_cli_link_targets(temp_dir)
-                shutil.rmtree(temp_dir, ignore_errors=True)
-
-        os.makedirs(workspace_dir, exist_ok=True)
-        lock = self._agy_workspace_locks.setdefault(workspace_dir, asyncio.Lock())
-        async with lock:
-            return await self._exec_agy(binary, args, workspace_dir, timeout)
+    async def _run_agy_cli(self, prompt: str, timeout: float = AGY_CALL_TIMEOUT_SECONDS,
+                           persona_name: Optional[str] = None) -> str:
+        return await agy_provider.run_agy_cli(self, prompt, timeout, persona_name)
 
     @staticmethod
     def _remove_agy_cli_link_targets(workspace_dir: str) -> None:
-        cli_dir = os.path.join(workspace_dir, ".antigravitycli")
-        if not os.path.isdir(cli_dir):
-            return
-        for f in os.listdir(cli_dir):
-            p = os.path.join(cli_dir, f)
-            if os.path.islink(p):
-                try:
-                    target = os.readlink(p)
-                    if os.path.exists(target):
-                        os.remove(target)
-                except Exception:
-                    pass
+        agy_provider.remove_agy_cli_link_targets(workspace_dir)
 
     @staticmethod
     async def _exec_agy(binary: str, args: List[str], workspace_dir: str, timeout: float,
                         label: str = "agy", env: Optional[Dict[str, str]] = None) -> str:
-        # `label` names the provider in error messages — this CLI runner is
-        # shared by the agy and cc (Claude Code) routes, so a failure must
-        # point at the route the caller actually invoked. `env` overrides the
-        # child environment (cc passes a subscription-scrubbed env; agy passes
-        # None = inherit unchanged).
-        proc = None
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                binary,
-                *args,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=workspace_dir,
-                env=env,
-                start_new_session=True
-            )
-            try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
-            except asyncio.TimeoutError as e:
-                raise LLMCommunicationError(f"{label} CLI timed out after {timeout} seconds.") from e
-
-            if proc.returncode != 0:
-                stderr_excerpt = stderr.decode("utf-8", errors="replace").strip()
-                excerpt = stderr_excerpt[-200:] if len(stderr_excerpt) > 200 else stderr_excerpt
-                raise LLMCommunicationError(
-                    f"{label} CLI failed with exit code {proc.returncode}. Stderr: {excerpt}"
-                )
-
-            return stdout.decode("utf-8", errors="replace")
-        finally:
-            if proc is not None:
-                try:
-                    import signal
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except Exception:
-                    pass
+        """Engine seam (DP-244). Shared subprocess runner; logic in
+        `providers._subprocess.exec_cli`."""
+        return await _subprocess.exec_cli(binary, args, workspace_dir, timeout, label, env)
 
     async def _generate_agy_response(
         self, config: Dict[str, Any], history_object: Dict[str, Any], tools: Optional[List[Dict[str, Any]]] = None
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """One-shot agy path. DP-206 decision: agy stays one-shot-only — it is
-        a TUI CLI invoked as a subprocess (POSIX-only, see
-        `_ensure_agy_supported`) whose entire response arrives at process exit;
-        there is no token stream to make canonical. Streaming consumers get it
-        via `stream_messages`' generate_response wrap (single text_delta)."""
-        system_prompt, history = self._extract_system_prompt(history_object)
-
-        prompt_parts = []
-        if system_prompt:
-            prompt_parts.append(system_prompt)
-
-        if tools:
-            rendered_tools = self._render_agy_tool_protocol(tools)
-            if rendered_tools:
-                prompt_parts.append(rendered_tools)
-
-        rendered_history = self._render_agy_prompt(history)
-        if rendered_history:
-            prompt_parts.append(rendered_history)
-
-        prompt = "\n\n".join(prompt_parts)
-
-        tool_names = []
-        if tools:
-            tool_names = [t["function"]["name"] for t in tools if "function" in t and "name" in t["function"]]
-
-        persona_name = config.get("persona_name")
-        workspace_dir = self._resolve_agy_workspace(persona_name)
-        api_payload = {
-            "model": config.get("model_name"),
-            "prompt_chars": len(prompt),
-            "tools": tool_names,
-            "isolation": {
-                "stdin": "devnull",
-                "skip_permissions": False,
-                "workspace": workspace_dir if workspace_dir else "temp-dir-per-call",
-            }
-        }
-
-        try:
-            raw = await self._run_agy_cli(prompt, persona_name=persona_name)
-        except LLMCommunicationError as e:
-            if e.api_payload is None:
-                e.api_payload = api_payload
-            raise
-
-        calls = self._parse_agy_tool_call(raw)
-        if calls:
-            return {"type": "tool_calls", "calls": calls}, api_payload
-        else:
-            cleaned_content = re.sub(r"<SYSTEM_MESSAGE>.*?</SYSTEM_MESSAGE>", "", raw, flags=re.DOTALL).strip()
-            return {"type": "text", "content": cleaned_content}, api_payload
+        return await agy_provider.generate_agy(self, config, history_object, tools)
 
     async def _stream_agy_response(
         self, config: Dict[str, Any], history_object: Dict[str, Any],
         tools: Optional[List[Dict[str, Any]]] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
-        """agy adapter into the unified event shape. agy stays one-shot by
-        decision (subprocess TUI CLI — the entire response arrives at process
-        exit, there is no token stream to make canonical); streaming consumers
-        get the full text as a single text_delta."""
-        result, api_payload = await self._generate_agy_response(
-            config, history_object, tools
-        )
-        async for ev in self._events_from_one_shot(result, api_payload):
+        async for ev in agy_provider.stream_agy(self, config, history_object, tools):
             yield ev
 
     # ------------------------------------------------------------------
@@ -735,90 +520,36 @@ class TextEngine:
     # MCP work, where approval routing will also live.
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Claude Code (cc-*) provider — DP-222, engine seams DP-244.
+    #
+    # Structural parity with the agy route (subprocess-per-call, one-shot,
+    # POSIX-only, persistent per-persona workspace, dedicated rate limiter), but
+    # cc runs its OWN sandboxed tools autonomously and ignores the engine's
+    # `tools` argument (agy clamps tools to the <tool_call> text protocol).
+    # Logic lives in providers/cc.py; these are thin delegators (the seams tests
+    # call/patch on the engine directly).
+    # ------------------------------------------------------------------
+
     @staticmethod
     def _ensure_cc_supported() -> None:
-        """Claude Code's OS sandbox (Seatbelt/bubblewrap) only runs on
-        macOS/Linux/WSL2 — never native Windows. Since this provider runs
-        `--dangerously-skip-permissions` (yolo), the sandbox is the safety
-        boundary, so refuse the route on non-POSIX hosts when the sandbox is
-        enabled. Run the engine on the POSIX host (Linux/macOS/WSL/Docker).
-        """
-        if global_config.CC_SANDBOX and os.name != "posix":
-            raise LLMCommunicationError(
-                "The 'cc-*' (Claude Code) provider runs yolo bounded by Claude "
-                "Code's OS sandbox, which is unavailable on native Windows. Run "
-                "the engine on the POSIX host (Linux/macOS/WSL/Docker), or set "
-                "CC_SANDBOX=False to run unsandboxed (no yolo; tools gated to "
-                "CC_ALLOWED_TOOLS). "
-                "See docs/user_guide.md (Claude Code / cc provider)."
-            )
+        cc_provider.ensure_cc_supported()
 
     @staticmethod
     def _cc_model_arg(model_name: str) -> str:
-        """Map a `cc-<alias>` model name onto Claude Code's `--model` value
-        (e.g. `cc-sonnet` -> `sonnet`). A bare `cc-` falls back to `sonnet`."""
-        alias = model_name[len("cc-"):] if model_name.startswith("cc-") else model_name
-        return alias or "sonnet"
+        return cc_provider.cc_model_arg(model_name)
 
-    @staticmethod
     def _resolve_cc_workspace(
-        persona_name: Optional[str], workspace_override: Optional[str] = None
+        self, persona_name: Optional[str], workspace_override: Optional[str] = None
     ) -> Optional[str]:
-        """Returns the working dir for this call, or None when persistence is
-        disabled (caller uses a throwaway temp dir). Precedence: per-call
-        workspace_override (e.g. the DP-227 fixr clone, set by the orchestration
-        layer) > explicit CC_WORKSPACE_DIR (the derpr checkout) > per-persona
-        dir > global dir. Does not create the directory."""
-        if workspace_override:
-            return os.path.abspath(workspace_override)
-        if global_config.CC_WORKSPACE_DIR:
-            return os.path.abspath(global_config.CC_WORKSPACE_DIR)
-        if not global_config.CC_PERSISTENT_WORKSPACES:
-            return None
-        workspaces_dir = global_config.CC_WORKSPACES_DIR
-        slug = TextEngine._sanitize_agy_workspace_name(persona_name)
-        if global_config.CC_WORKSPACE_MODE == "persona" and slug:
-            return os.path.abspath(workspaces_dir / f"cc_{slug}")
-        return os.path.abspath(workspaces_dir / "cc_global")
+        return cc_provider.resolve_cc_workspace(self, persona_name, workspace_override)
 
     @staticmethod
     def _build_cc_sandbox_settings() -> Optional[Dict[str, Any]]:
-        """Build the `--settings` sandbox block, or None when CC_SANDBOX is off.
-        Auto-allows sandboxed Bash so a headless run never blocks on a prompt;
-        the OS sandbox confines it to the workspace + allowed domains."""
-        if not global_config.CC_SANDBOX:
-            return None
-        sandbox: Dict[str, Any] = {
-            "enabled": True,
-            "autoAllowBashIfSandboxed": True,
-        }
-        if global_config.CC_SANDBOX_WEAKER_NESTED:
-            sandbox["enableWeakerNestedSandbox"] = True
-        if global_config.CC_SANDBOX_ALLOWED_DOMAINS:
-            sandbox["network"] = {"allowedDomains": list(global_config.CC_SANDBOX_ALLOWED_DOMAINS)}
-        return {"sandbox": sandbox}
+        return cc_provider.build_cc_sandbox_settings()
 
     def _build_cc_args(self, prompt: str, system_prompt: str, model_arg: str) -> List[str]:
-        """Assemble the `claude -p` argv (without the binary)."""
-        args = ["-p", prompt, "--output-format", "text", "--model", model_arg]
-        if system_prompt:
-            args += ["--system-prompt", system_prompt]
-        if global_config.CC_SANDBOX:
-            # yolo: skip per-tool approval prompts. The OS sandbox is the safety
-            # boundary; root's skip-permissions check is waived inside it.
-            args += ["--dangerously-skip-permissions"]
-        elif global_config.CC_ALLOWED_TOOLS:
-            # Unsandboxed (e.g. native Windows smoke): NEVER bare yolo. Use
-            # Claude Code's OS-independent permission system — only the
-            # explicitly allowlisted tools may run; everything else is refused
-            # (headless cannot answer an approval prompt).
-            args += ["--allowedTools", *global_config.CC_ALLOWED_TOOLS]
-        if global_config.CC_MAX_TURNS > 0:
-            args += ["--max-turns", str(global_config.CC_MAX_TURNS)]
-        sandbox_settings = self._build_cc_sandbox_settings()
-        if sandbox_settings is not None:
-            args += ["--settings", json.dumps(sandbox_settings)]
-        return args
+        return cc_provider.build_cc_args(self, prompt, system_prompt, model_arg)
 
     async def _run_cc_cli(
         self,
@@ -829,93 +560,20 @@ class TextEngine:
         persona_name: Optional[str] = None,
         workspace_override: Optional[str] = None,
     ) -> str:
-        self._ensure_cc_supported()
-
-        binary = os.environ.get("CLAUDE_CLI_PATH") or shutil.which("claude")
-        if not binary:
-            raise LLMCommunicationError("Claude Code 'claude' binary not found on PATH.")
-
-        args = self._build_cc_args(prompt, system_prompt, model_arg)
-        # cc-* must use the Claude subscription, not the metered API: strip the
-        # inherited ANTHROPIC_API_KEY so `-p` mode falls through to the OAuth token.
-        cc_env = build_claude_cli_env()
-
-        workspace_dir = self._resolve_cc_workspace(persona_name, workspace_override)
-        if workspace_dir is None:
-            temp_dir = tempfile.mkdtemp()
-            try:
-                return await self._exec_agy(binary, args, temp_dir, timeout, label="Claude Code", env=cc_env)
-            finally:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-
-        os.makedirs(workspace_dir, exist_ok=True)
-        lock = self._cc_workspace_locks.setdefault(workspace_dir, asyncio.Lock())
-        async with lock:
-            return await self._exec_agy(binary, args, workspace_dir, timeout, label="Claude Code", env=cc_env)
+        return await cc_provider.run_cc_cli(
+            self, prompt, system_prompt, model_arg, timeout, persona_name, workspace_override
+        )
 
     async def _generate_cc_response(
         self, config: Dict[str, Any], history_object: Dict[str, Any], tools: Optional[List[Dict[str, Any]]] = None
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """One-shot Claude Code path. The persona prompt is delivered via
-        `--system-prompt` (replace); the rendered history transcript is the `-p`
-        prompt. `tools` is intentionally ignored — Claude Code uses its own
-        sandboxed tools and returns final text."""
-        system_prompt, history = self._extract_system_prompt(history_object)
-        prompt = self._render_agy_prompt(history)
-        model_arg = self._cc_model_arg(config.get("model_name", ""))
-        persona_name = config.get("persona_name")
-        # DP-227: the orchestration layer may inject a per-run workspace (the
-        # fixr self-edit clone). It takes precedence over CC_WORKSPACE_DIR.
-        workspace_override = config.get("cc_workspace_override")
-        workspace_dir = self._resolve_cc_workspace(persona_name, workspace_override)
-
-        if tools:
-            logger.debug(
-                "cc provider ignoring %d derpr tool(s) — Claude Code uses its own tools.",
-                len(tools),
-            )
-
-        api_payload = {
-            "model": config.get("model_name"),
-            "cc_model": model_arg,
-            "prompt_chars": len(prompt),
-            "system_prompt_chars": len(system_prompt or ""),
-            "tools_ignored": [
-                t["function"]["name"] for t in tools or []
-                if "function" in t and "name" in t["function"]
-            ],
-            "isolation": {
-                "stdin": "devnull",
-                "skip_permissions": True,
-                "sandbox": global_config.CC_SANDBOX,
-                "max_turns": global_config.CC_MAX_TURNS or None,
-                "workspace": workspace_dir if workspace_dir else "temp-dir-per-call",
-            },
-        }
-
-        try:
-            raw = await self._run_cc_cli(
-                prompt, system_prompt or "", model_arg,
-                persona_name=persona_name, workspace_override=workspace_override,
-            )
-        except LLMCommunicationError as e:
-            if e.api_payload is None:
-                e.api_payload = api_payload
-            raise
-
-        return {"type": "text", "content": raw.strip()}, api_payload
+        return await cc_provider.generate_cc(self, config, history_object, tools)
 
     async def _stream_cc_response(
         self, config: Dict[str, Any], history_object: Dict[str, Any],
         tools: Optional[List[Dict[str, Any]]] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
-        """Claude Code adapter into the unified event shape. One-shot by nature
-        (the headless `claude -p` agentic run's full result arrives at process
-        exit); streaming consumers get the final text as a single text_delta."""
-        result, api_payload = await self._generate_cc_response(
-            config, history_object, tools
-        )
-        async for ev in self._events_from_one_shot(result, api_payload):
+        async for ev in cc_provider.stream_cc(self, config, history_object, tools):
             yield ev
 
     # ------------------------------------------------------------------
