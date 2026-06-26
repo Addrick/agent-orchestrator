@@ -120,7 +120,7 @@ class TestGenerateResponseLogic:
         assert calls == ["gemma-4-31b-it", "gemma-4-26b-a4b-it"]
 
 
-@patch('src.engine.AsyncOpenAI')
+@patch('src.engine.providers.openai.AsyncOpenAI')
 class TestOpenAI:
     @pytest.mark.asyncio
     async def test_success_text_response(self, mock_openai_class, text_engine, openai_config, base_context, monkeypatch):
@@ -637,7 +637,7 @@ class TestProviderRouting:
         assert "cannot see" in base_context["persona_prompt"]
 
 
-@patch('src.engine.AsyncOpenAI')
+@patch('src.engine.providers.openai.AsyncOpenAI')
 class TestOpenAIImage:
     @pytest.mark.asyncio
     async def test_image_url_passed_to_openai(self, mock_openai_class, text_engine,

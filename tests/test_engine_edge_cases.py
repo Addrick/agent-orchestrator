@@ -35,7 +35,7 @@ def base_context():
 # ------------------------------------------------------------------
 
 
-@patch("src.engine.AsyncOpenAI")
+@patch("src.engine.providers.openai.AsyncOpenAI")
 class TestOpenAIHistoryEdgeCases:
     @pytest.mark.asyncio
     async def test_openai_system_message_deduplication(

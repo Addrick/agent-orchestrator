@@ -184,7 +184,7 @@ async def test_personal_mode_isolates_by_user_and_persona(mem_test_system):
 
 @pytest.mark.asyncio
 @patch('src.clients.zammad_client.requests.request')
-@patch('src.engine.AsyncOpenAI')
+@patch('src.engine.providers.openai.AsyncOpenAI')
 async def test_channel_mode_in_non_server_context_integration(
         mock_async_openai, mock_requests_request, real_test_system, monkeypatch
 ):
