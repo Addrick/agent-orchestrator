@@ -178,10 +178,6 @@ class OpenAIProvider(Provider):
     def limiters_for(self, model_name: str) -> List[AsyncLimiter]:
         return [self._engine._openai_limiter]
 
-    def supports_images(self, model_name: str) -> bool:
-        model_name = model_name.lower()
-        return 'gpt-4' in model_name or model_name.startswith('o1')
-
     async def stream(
         self,
         persona_config: Dict[str, Any],

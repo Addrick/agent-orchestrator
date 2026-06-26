@@ -12,7 +12,9 @@ contract:
   - `ensure_supported(model_name)` — host/precondition guard run at routing time,
   - `stream(...)`                — the one streaming contract.
 
-`supports_images` / `fallback_model` are optional side-channels with defaults.
+Image-support and 429-fallback policy stay on the driver
+(`model_supports_images` / `_FALLBACK_MODELS`), not the provider — a provider
+hook for them would be dead until the driver routes through it.
 """
 
 from abc import ABC, abstractmethod
@@ -36,13 +38,9 @@ class Provider(ABC):
         """Host / precondition guard, run when the model is routed. Default no-op.
         Raise ``LLMCommunicationError`` to refuse the route."""
 
-    def supports_images(self, model_name: str) -> bool:
-        """Whether this model accepts image inputs. Default False."""
-        return False
-
-    def fallback_model(self, model_name: str) -> Optional[str]:
-        """A model to retry with on a 429, or None. Default None."""
-        return None
+    #: Name of the engine seam method the driver routes this provider through
+    #: (back-compat for ``_get_provider_route``). Every concrete provider sets it.
+    route_method_name: str
 
     @abstractmethod
     def stream(

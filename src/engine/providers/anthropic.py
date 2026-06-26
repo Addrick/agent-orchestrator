@@ -133,14 +133,18 @@ async def stream_anthropic(
         if response.stop_reason == "tool_use":
             tool_calls = []
             for content_block in response.content:
-                if getattr(content_block, "type", None) == 'tool_use':
+                if content_block.type == 'tool_use':
                     tool_calls.append({
-                        "id": getattr(content_block, "id", None),
-                        "name": getattr(content_block, "name", None),
-                        "arguments": getattr(content_block, "input", None)
+                        "id": content_block.id,
+                        "name": content_block.name,
+                        "arguments": content_block.input
                     })
         else:
-            response_content = getattr(response.content[0], "text", "") or ""
+            # content[0] is a TextBlock for a normal stop; .text is unnarrowed in
+            # the SDK union (ignore). A non-text first block (e.g. a thinking
+            # block) raises AttributeError -> caught below -> retried, matching
+            # the pre-DP-244 behaviour.
+            response_content = response.content[0].text or ""  # type: ignore[union-attr]
 
     except anthropic.APIError as e:
         status_code = getattr(e, 'status_code', None)
@@ -175,10 +179,6 @@ class AnthropicProvider(Provider):
 
     def limiters_for(self, model_name: str) -> List[AsyncLimiter]:
         return [self._engine._anthropic_limiter]
-
-    def supports_images(self, model_name: str) -> bool:
-        model_name = model_name.lower()
-        return 'claude-3' in model_name or 'claude-4' in model_name
 
     async def stream(
         self,

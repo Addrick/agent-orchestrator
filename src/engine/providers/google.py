@@ -357,10 +357,6 @@ class GoogleProvider(Provider):
             return [self._engine._gemini_3_rpm_limiter]
         return [self._engine._gemini_25_rpm_limiter, self._engine._gemini_25_rpd_limiter]
 
-    def supports_images(self, model_name: str) -> bool:
-        model_name = model_name.lower()
-        return 'gemini' in model_name or 'gemma' in model_name
-
     async def stream(
         self,
         persona_config: Dict[str, Any],

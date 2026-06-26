@@ -38,10 +38,11 @@ from src.engine.providers import agy as agy_provider
 from src.engine.providers import cc as cc_provider
 from src.engine.providers import _subprocess
 
-AGY_CALL_TIMEOUT_SECONDS = 120.0
-# Claude Code runs a full agentic loop (its own tools) in one headless call, so
-# it needs far more headroom than the one-shot agy text route.
-CC_CALL_TIMEOUT_SECONDS = 600.0
+# Single source of truth lives in each provider module (the agy route is a
+# one-shot text call; cc runs a full agentic loop in one headless call, so it
+# needs far more headroom). Re-exported here for back-compat callers/tests.
+AGY_CALL_TIMEOUT_SECONDS = agy_provider.AGY_CALL_TIMEOUT_SECONDS
+CC_CALL_TIMEOUT_SECONDS = cc_provider.CC_CALL_TIMEOUT_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +121,10 @@ class TextEngine:
 
     def _initialize_env(self) -> None:
         """Load API keys from .env file."""
-        env_path = os.path.join(os.path.dirname(__file__), '..', '.env')
+        # driver.py lives at src/engine/, so two `..` reach the repo-root .env
+        # (DP-244: was one `..` when this was src/engine.py — the file move
+        # silently retargeted it to a nonexistent src/.env).
+        env_path = os.path.join(os.path.dirname(__file__), '..', '..', '.env')
         if os.path.exists(env_path):
             load_dotenv(env_path)
         else:
@@ -146,7 +150,7 @@ class TextEngine:
         """Returns a fallback model for rate-limited requests, or None."""
         return cls._FALLBACK_MODELS.get(model_name)
 
-    def _get_provider_route(self, model_name: str) -> Tuple[Callable, List[AsyncLimiter]]:
+    def _get_provider_route(self, model_name: str) -> Tuple[Callable[..., Any], List[AsyncLimiter]]:
         """Back-compat shim over the registry (DP-244). Returns
         (stream_factory, [limiters]) — the bound `_stream_<provider>_response`
         method and its limiters — for callers/tests written against the
@@ -239,6 +243,7 @@ class TextEngine:
             history_object["current_message"]["image_url"] = None
 
         provider = self._registry.resolve(model_name)
+        limiters = provider.limiters_for(model_name)
 
         for attempt in range(EMPTY_RESPONSE_RETRIES + 1):
             committed = False
@@ -251,7 +256,7 @@ class TextEngine:
             attempt_done_text: Optional[str] = None
 
             try:
-                async with self._rate_limited(provider.limiters_for(model_name)):
+                async with self._rate_limited(limiters):
                     stream = provider.stream(
                         persona_config, history_object, tools,
                         local_inference_config=local_inference_config,
@@ -331,6 +336,7 @@ class TextEngine:
                         persona_config = {**persona_config, "model_name": fallback}
                         model_name = fallback
                         provider = self._registry.resolve(model_name)
+                        limiters = provider.limiters_for(model_name)
                         continue
                     logger.warning(f"Rate limit (429) hit for model '{model_name}'. Aborting retries.")
                     raise
@@ -346,7 +352,7 @@ class TextEngine:
         raise LLMCommunicationError("LLM provider returned an empty or invalid response after all retries.")
 
     @staticmethod
-    def _parse_openai_tool_calls(raw_calls: list) -> List[Dict[str, Any]]:
+    def _parse_openai_tool_calls(raw_calls: List[Any]) -> List[Dict[str, Any]]:
         """Thin seam over `providers._shared.parse_openai_tool_calls` (DP-244);
         kept on the engine for callers/tests written against the pre-244 API."""
         return _shared.parse_openai_tool_calls(raw_calls)
@@ -688,7 +694,7 @@ class TextEngine:
             raise LLMCommunicationError(
                 f"stream_prompt only supports local models, got '{model_name}'"
             )
-        return self.stream_engine.stream_prompt(
+        return self.stream_engine.stream_prompt(  # type: ignore[no-any-return]
             persona_config, rendered_prompt, params,
             stop_sequences=stop_sequences,
             tools_advertised=tools_advertised,
