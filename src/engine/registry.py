@@ -20,6 +20,7 @@ from src.llm_errors import LLMCommunicationError
 
 from .providers.base import Provider
 from .providers.openai import OpenAIProvider
+from .providers.anthropic import AnthropicProvider
 
 if TYPE_CHECKING:
     from src.engine.driver import TextEngine
@@ -120,13 +121,7 @@ def build_registry(engine: "TextEngine") -> ProviderRegistry:
             guard_name="_ensure_cc_supported",
         ),
         OpenAIProvider(engine),
-        _EngineProvider(
-            engine,
-            method_name="_stream_anthropic_response",
-            matches=lambda m: "claude" in m,
-            limiters=lambda e, m: [e._anthropic_limiter],
-            supports_images=lambda m: 'claude-3' in m.lower() or 'claude-4' in m.lower(),
-        ),
+        AnthropicProvider(engine),
         _EngineProvider(
             engine,
             method_name="_stream_google_response",

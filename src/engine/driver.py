@@ -51,6 +51,7 @@ from src.text_tool_protocol import (
 from src.engine.registry import build_registry
 from src.engine.providers import _shared
 from src.engine.providers.openai import stream_openai
+from src.engine.providers.anthropic import stream_anthropic
 
 AGY_CALL_TIMEOUT_SECONDS = 120.0
 # Claude Code runs a full agentic loop (its own tools) in one headless call, so
@@ -153,15 +154,6 @@ class TextEngine:
         if 'gemini' in model_name or 'gemma' in model_name:
             return True
         return False
-
-    def _get_anthropic_client(self) -> anthropic.AsyncAnthropic:
-        """Initializes and returns the async Anthropic client."""
-        if self.anthropic_client is None:
-            api_key = get_vault().get("ANTHROPIC_API_KEY")
-            if not api_key:
-                raise LLMCommunicationError("ANTHROPIC_API_KEY not set — skipping Anthropic provider.")
-            self.anthropic_client = anthropic.AsyncAnthropic(api_key=api_key)
-        return self.anthropic_client
 
     def _initialize_google_client(self) -> None:
         """Initializes the Google client using the original project's method."""
@@ -397,116 +389,16 @@ class TextEngine:
         async for ev in stream_openai(self, config, history_object, tools):
             yield ev
 
-    async def _attach_anthropic_image(self, messages: List[Dict[str, Any]], image_url: str) -> None:
-        """Downloads and attaches an image to the last user message for Anthropic."""
-        last_message = messages[-1]
-        if last_message['role'] != 'user':
-            return
-        if isinstance(last_message['content'], str):
-            last_message['content'] = [{"type": "text", "text": last_message['content']}]
-        try:
-            image_bytes, mime_type = await self._download_image(image_url)
-            if mime_type not in ['image/jpeg', 'image/png', 'image/webp', 'image/gif']:
-                logger.warning(f"Unsupported image MIME type '{mime_type}' for Claude. Skipping image.")
-            else:
-                last_message['content'].append({
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": mime_type,
-                        "data": base64.b64encode(image_bytes).decode('utf-8'),
-                    },
-                })
-        except aiohttp.ClientError as e:
-            logger.error(f"Failed to download image from {image_url}: {e}")
-
-    async def _build_anthropic_params(self, config: Dict[str, Any], history_object: Dict[str, Any],
-                                      tools: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
-        """Builds the messages request kwargs for Anthropic. Single source of
-        truth for the canonical streaming driver (pinned by
-        tests/test_engine_payload_parity.py)."""
-        system_prompt, history = self._extract_system_prompt(history_object)
-
-        if history_object["current_message"].get("image_url"):
-            await self._attach_anthropic_image(history, history_object["current_message"]["image_url"])
-
-        api_params: Dict[str, Any] = {
-            "model": config["model_name"],
-            "system": system_prompt,
-            "messages": history,
-            "max_tokens": config.get("max_output_tokens") or global_config.DEFAULT_TOKEN_LIMIT,
-            "temperature": config.get("temperature"),
-            "top_p": config.get("top_p"),
-            "top_k": config.get("top_k")
-        }
-        if tools:
-            api_params["tools"] = [
-                {"name": t["function"]["name"],
-                 "description": t["function"].get("description", ""),
-                 "input_schema": t["function"].get("parameters", {})}
-                for t in tools if "function" in t
-            ]
-
-        return {k: v for k, v in api_params.items() if v is not None}
-
-    @staticmethod
-    def _anthropic_dump_params(api_params: Dict[str, Any]) -> Dict[str, Any]:
-        """Log-safe copy of the request kwargs: tools listed by name."""
-        dump = dict(api_params)
-        if "tools" in dump:
-            dump["tools"] = [tool.get("name", "unknown") for tool in dump["tools"]]
-        return dump
-
     async def _stream_anthropic_response(
         self, config: Dict[str, Any], history_object: Dict[str, Any],
         tools: Optional[List[Dict[str, Any]]] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
-        """Canonical Anthropic driver (DP-206): `messages.stream(...)` with the
-        SDK's accumulator, emitting the unified event shape. The one-shot path
-        is `collect_stream` over this generator. Uses `AsyncAnthropic`
-        (DP-211) so token iteration never blocks the event loop; the request
-        kwargs are identical to the sync client's (frozen payload goldens)."""
-        client = self._get_anthropic_client()
-        api_params = await self._build_anthropic_params(config, history_object, tools)
-        yield {"type": "api_payload", "payload": self._anthropic_dump_params(api_params)}
-
-        tool_calls: Optional[List[Dict[str, Any]]] = None
-        response_content = ""
-        try:
-            async with client.messages.stream(**api_params) as stream:
-                async for text_chunk in stream.text_stream:
-                    if text_chunk:
-                        yield {"type": "text_delta", "text": text_chunk}
-                response = await stream.get_final_message()
-
-            if response.stop_reason == "tool_use":
-                tool_calls = []
-                for content_block in response.content:
-                    if content_block.type == 'tool_use':
-                        tool_calls.append({
-                            "id": content_block.id,
-                            "name": content_block.name,
-                            "arguments": content_block.input
-                        })
-            else:
-                response_content = response.content[0].text or ""
-
-        except anthropic.APIError as e:
-            rate_limited = hasattr(e, 'status_code') and e.status_code == 429
-            is_server_error = hasattr(e, 'status_code') and e.status_code >= 500
-            logger.error(f"Anthropic API error: {e}", exc_info=not is_server_error)
-            raise LLMCommunicationError(f"Anthropic API returned an error: {e}", api_payload=api_params,
-                                        rate_limited=rate_limited) from e
-        except Exception as e:
-            logger.error(f"An unexpected Anthropic error occurred: {e}", exc_info=True)
-            raise LLMCommunicationError("An unexpected error occurred with the Anthropic API.",
-                                        api_payload=api_params) from e
-
-        if tool_calls is not None:
-            yield {"type": "tool_calls", "calls": tool_calls}
-            yield {"type": "done", "full_text": ""}
-        else:
-            yield {"type": "done", "full_text": response_content}
+        """Engine seam for the Anthropic provider (DP-244). The logic lives in
+        `providers.anthropic.stream_anthropic`; this delegator is the patch point
+        the driver routes through (`AnthropicProvider.stream` calls back into it)
+        so the driver-policy tests can inject fake streams as before."""
+        async for ev in stream_anthropic(self, config, history_object, tools):
+            yield ev
 
     @staticmethod
     def _extract_system_prompt(history_object: Dict[str, Any]) -> Tuple[str, List[Dict[str, Any]]]:
