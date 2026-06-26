@@ -21,6 +21,7 @@ from src.llm_errors import LLMCommunicationError
 from .providers.base import Provider
 from .providers.openai import OpenAIProvider
 from .providers.anthropic import AnthropicProvider
+from .providers.google import GoogleProvider
 
 if TYPE_CHECKING:
     from src.engine.driver import TextEngine
@@ -81,17 +82,6 @@ class _EngineProvider(Provider):
                 yield ev
 
 
-def _google_limiters(engine: "TextEngine", model_name: str) -> List[AsyncLimiter]:
-    """Google splits rate limits by model family (preserves the waterfall:
-    gemma-4/gemma → gemma-4 RPM; gemini-3.1 → gemini-3 RPM; gemini → 2.5
-    RPM+RPD)."""
-    if "gemma" in model_name:
-        return [engine._gemma_4_rpm_limiter]
-    if "gemini-3.1" in model_name:
-        return [engine._gemini_3_rpm_limiter]
-    return [engine._gemini_25_rpm_limiter, engine._gemini_25_rpd_limiter]
-
-
 class ProviderRegistry:
     """Ordered collection of providers with first-match routing."""
 
@@ -122,13 +112,7 @@ def build_registry(engine: "TextEngine") -> ProviderRegistry:
         ),
         OpenAIProvider(engine),
         AnthropicProvider(engine),
-        _EngineProvider(
-            engine,
-            method_name="_stream_google_response",
-            matches=lambda m: "gemma" in m or "gemini" in m,
-            limiters=_google_limiters,
-            supports_images=lambda m: 'gemini' in m.lower() or 'gemma' in m.lower(),
-        ),
+        GoogleProvider(engine),
         _EngineProvider(
             engine,
             method_name="_stream_agy_response",

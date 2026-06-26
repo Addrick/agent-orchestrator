@@ -8,7 +8,6 @@ import re
 import shutil
 import tempfile
 import uuid
-from types import SimpleNamespace
 from typing import Dict, Any, Optional, Tuple, List, Callable, AsyncIterator
 from contextlib import asynccontextmanager, AsyncExitStack
 
@@ -26,17 +25,12 @@ from config.global_config import (
     RATE_LIMIT_AGY_RPM, RATE_LIMIT_CC_RPM,
 )
 # --- Provider-specific imports ---
-import base64
-import aiohttp
 import anthropic
 from google import genai
-from google.genai.types import GenerateContentConfig, Tool, GoogleSearch, Candidate, \
-    FunctionDeclaration, Part, ThinkingConfig
+from google.genai.types import Tool
 from src.utils.claude_cli_env import build_claude_cli_env
-from src.utils.google_utils import process_grounding_metadata
 from src.generation_params import GenerationParams
 from src.llm_errors import LLMCommunicationError
-from src.security.vault import get_vault
 from src.stream_engine import StreamEngine
 from src.text_tool_protocol import (
     TOOL_CALL_OPEN,
@@ -52,6 +46,7 @@ from src.engine.registry import build_registry
 from src.engine.providers import _shared
 from src.engine.providers.openai import stream_openai
 from src.engine.providers.anthropic import stream_anthropic
+from src.engine.providers import google
 
 AGY_CALL_TIMEOUT_SECONDS = 120.0
 # Claude Code runs a full agentic loop (its own tools) in one headless call, so
@@ -155,18 +150,6 @@ class TextEngine:
             return True
         return False
 
-    def _initialize_google_client(self) -> None:
-        """Initializes the Google client using the original project's method."""
-        if self.google_client is not None:
-            return
-
-        api_key = get_vault().get("GOOGLE_GENERATIVEAI_API_KEY")
-        if not api_key: raise ValueError("GOOGLE_GENERATIVEAI_API_KEY not found in environment.")
-
-        client: genai.client.BaseApiClient = genai.client.BaseApiClient(api_key=api_key)
-        self.google_client = genai.client.AsyncClient(client)
-        self.google_search_tool = Tool(google_search=GoogleSearch())
-        logger.info("Google AI Studio client initialized.")
 
     @classmethod
     def _get_fallback_model(cls, model_name: str) -> Optional[str]:
@@ -446,275 +429,30 @@ class TextEngine:
     async def _build_google_history(
         self, system_prompt: str, history: List[Dict[str, Any]], image_url: Optional[str]
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        """Returns (history_for_api, serializable_history)."""
-        history_for_api = []
-        serializable_history = []
-        if system_prompt:
-            serializable_history.append({'role': 'system', 'parts': [{'text': system_prompt}]})
-
-        for item in history:
-            role = 'model' if item['role'] == 'assistant' else 'user'
-            serializable_item = item.copy()
-
-            if item['role'] == 'tool':
-                part_dict = {'function_response': {'name': item['name'], 'response': json.loads(item['content'])}}
-                if history_for_api and history_for_api[-1]['role'] == 'tool':
-                    history_for_api[-1]['parts'].append(Part(**part_dict))
-                    serializable_history[-1]['parts'].append(part_dict)
-                else:
-                    history_for_api.append({'role': 'tool', 'parts': [Part(**part_dict)]})
-                    serializable_item['parts'] = [part_dict]
-                    serializable_history.append(serializable_item)
-            elif item.get('tool_calls'):
-                api_parts = []
-                serializable_parts = []
-                for call in item['tool_calls']:
-                    part_kwargs: Dict[str, Any] = {
-                        'function_call': {'name': call['name'], 'args': call['arguments']}
-                    }
-                    ser_part: Dict[str, Any] = {'function_call': part_kwargs['function_call']}
-                    if call.get('thought_signature') is not None:
-                        # Convert back from base64 string to bytes for the Google API
-                        part_kwargs['thought_signature'] = base64.b64decode(call['thought_signature'])
-                        ser_part['thought_signature'] = '...present...'
-                    api_parts.append(Part(**part_kwargs))
-                    serializable_parts.append(ser_part)
-                if history_for_api and history_for_api[-1]['role'] == 'model':
-                    history_for_api[-1]['parts'].extend(api_parts)
-                    serializable_history[-1]['parts'].extend(serializable_parts)
-                else:
-                    history_for_api.append({'role': 'model', 'parts': api_parts})
-                    serializable_item['parts'] = serializable_parts
-                    serializable_history.append(serializable_item)
-            else:
-                content_text = item['content']
-                parts_for_api = [Part(text=content_text)]
-                serializable_parts = [{'text': content_text}]
-
-                if image_url and role == 'user' and item is history[-1]:
-                    try:
-                        image_bytes, mime_type = await self._download_image(image_url)
-                        if mime_type not in ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif']:
-                            logger.warning(f"Unsupported image MIME type '{mime_type}'. Skipping image.")
-                        else:
-                            parts_for_api.append(Part(inline_data={'data': image_bytes, 'mime_type': mime_type}))
-                            serializable_parts.append({'inline_data': {'mime_type': mime_type, 'data': '...bytes...'}})
-                    except aiohttp.ClientError as e:
-                        logger.error(f"Failed to download image from {image_url}: {e}")
-
-                if history_for_api and history_for_api[-1]['role'] == role:
-                    history_for_api[-1]['parts'].extend(parts_for_api)
-                    serializable_history[-1]['parts'].extend(serializable_parts)
-                else:
-                    history_for_api.append({'role': role, 'parts': parts_for_api})
-                    serializable_item['parts'] = serializable_parts
-                    serializable_history.append(serializable_item)
-        return history_for_api, serializable_history
-
-    def _build_google_tools(
-        self, tools: Optional[List[Dict[str, Any]]]
-    ) -> Tuple[List[Tool], Optional[Dict[str, Any]]]:
-        """Returns (api_tools, tool_config_or_none)."""
-        api_tools: List[Tool] = []
-        tool_config = None
-        if tools:
-            if any(t.get('type') == 'google_grounding' for t in tools):
-                api_tools.append(self.google_search_tool)
-            function_tools = [t for t in tools if t.get('type') == 'function' and t.get('function')]
-            if function_tools:
-                api_tools.extend([Tool(function_declarations=[FunctionDeclaration(**t['function'])])
-                                  for t in function_tools])
-                tool_config = {"function_calling_config": {"mode": "AUTO"}}
-        return api_tools, tool_config
+        """Engine seam for Google history-building (DP-244). Logic lives in
+        `providers.google.build_google_history`; kept here because tests call it
+        directly on the engine."""
+        return await google.build_google_history(self, system_prompt, history, image_url)
 
     @staticmethod
     def _parse_google_response(
         response_obj: Any, api_params: Dict[str, Any]
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Parses Google response into standard result format.
-        Raises LLMCommunicationError if response was blocked."""
-        if response_obj.prompt_feedback and response_obj.prompt_feedback.block_reason:
-            raise LLMCommunicationError(
-                f"Response blocked by Google due to {response_obj.prompt_feedback.block_reason.name}.")
-
-        candidate: Optional[Candidate] = response_obj.candidates[0] if response_obj.candidates else None
-        if not candidate or not candidate.content or not candidate.content.parts:
-            return {}, api_params
-
-        tool_calls: List[Dict[str, Any]] = []
-        for i, part in enumerate(candidate.content.parts):
-            if part.function_call:
-                arguments = {k: v for k, v in part.function_call.args.items()}
-                call_dict: Dict[str, Any] = {
-                    "id": f"call_{part.function_call.name}_{i}",
-                    "name": part.function_call.name,
-                    "arguments": arguments,
-                }
-                thought_sig = getattr(part, 'thought_signature', None)
-                if isinstance(thought_sig, (bytes, bytearray)):
-                    # thought_signature is bytes, must be serializable for our history storage
-                    call_dict["thought_signature"] = base64.b64encode(thought_sig).decode('utf-8')
-                tool_calls.append(call_dict)
-        if tool_calls:
-            return {"type": "tool_calls", "calls": tool_calls}, api_params
-
-        base_text_from_response = "".join(
-            part.text for part in candidate.content.parts if hasattr(part, 'text') and part.text)
-        final_text_content, search_query_display, citations_display = process_grounding_metadata(
-            base_text_from_response, candidate.grounding_metadata, logger
-        )
-        if search_query_display:
-            final_text_content += search_query_display
-        if citations_display:
-            final_text_content += citations_display
-
-        return {"type": "text", "content": final_text_content.strip()}, api_params
-
-    @staticmethod
-    def _build_google_dump_params(
-        model_name: str, content_config: Dict[str, Any], serializable_history: List[Dict[str, Any]]
-    ) -> Dict[str, Any]:
-        """Builds a serializable version of API params for logging."""
-        dump_config = content_config.copy()
-        if 'tools' in dump_config:
-            tool_names = []
-            for t in dump_config['tools']:
-                if hasattr(t, 'function_declarations') and t.function_declarations:
-                    tool_names.extend([d.name for d in t.function_declarations])
-                elif hasattr(t, 'google_search') and t.google_search is not None:
-                    tool_names.append("google_search")
-            dump_config['tools'] = tool_names
-        return {'model': model_name, 'contents': serializable_history, 'config': dump_config}
-
-    async def _build_google_params(self, config: Dict[str, Any], history_object: Dict[str, Any],
-                                   tools: Optional[List[Dict[str, Any]]] = None) -> Tuple[
-        List[Dict[str, Any]], Dict[str, Any], Dict[str, Any]]:
-        """Builds the generate_content request pieces. Single source of truth
-        for the canonical streaming driver (pinned by
-        tests/test_engine_payload_parity.py). Returns
-        (history_for_api, content_config_for_api, api_params_for_dumping)."""
-        system_prompt, history_to_process = self._extract_system_prompt(history_object)
-        image_url = history_object["current_message"].get("image_url")
-        history_for_api, serializable_history = await self._build_google_history(
-            system_prompt, history_to_process, image_url
-        )
-
-        content_config_for_api: Dict[str, Any] = {"safety_settings": self.google_safety_settings}
-        if system_prompt:
-            content_config_for_api['system_instruction'] = system_prompt
-
-        api_tools, tool_config = self._build_google_tools(tools)
-        if tool_config:
-            content_config_for_api['tool_config'] = tool_config
-        if api_tools:
-            content_config_for_api['tools'] = api_tools
-
-        content_config_for_api['max_output_tokens'] = config.get(
-            "max_output_tokens") or global_config.DEFAULT_TOKEN_LIMIT
-        if isinstance(config.get("temperature"), (int, float)):
-            content_config_for_api['temperature'] = config.get("temperature")
-        if isinstance(config.get("top_p"), (int, float)):
-            content_config_for_api['top_p'] = config.get("top_p")
-        if isinstance(config.get("top_k"), (int, float)):
-            content_config_for_api['top_k'] = config.get("top_k")
-
-        if config.get("thinking_level"):
-            content_config_for_api['thinking_config'] = ThinkingConfig(
-                thinking_level=config["thinking_level"]
-            )
-
-        api_params_for_dumping = self._build_google_dump_params(
-            config["model_name"], content_config_for_api, serializable_history
-        )
-        return history_for_api, content_config_for_api, api_params_for_dumping
-
-    @staticmethod
-    def _accumulate_google_chunks(chunks: List[Any]) -> Any:
-        """Recombine streamed GenerateContentResponse chunks into one
-        response-shaped object that `_parse_google_response` understands:
-        parts concatenate in arrival order (text may be split across chunks;
-        joining them reproduces the non-streamed text), prompt_feedback comes
-        from the first chunk that carries one, and grounding_metadata from the
-        last chunk that carries one (the SDK attaches it to the final chunk)."""
-        prompt_feedback = next(
-            (c.prompt_feedback for c in chunks if getattr(c, "prompt_feedback", None)), None
-        )
-        parts: List[Any] = []
-        grounding_metadata: Any = None
-        for chunk in chunks:
-            candidate = chunk.candidates[0] if getattr(chunk, "candidates", None) else None
-            if candidate is None:
-                continue
-            if candidate.content and candidate.content.parts:
-                parts.extend(candidate.content.parts)
-            if getattr(candidate, "grounding_metadata", None) is not None:
-                grounding_metadata = candidate.grounding_metadata
-        candidates: List[Any] = []
-        if parts:
-            candidates = [SimpleNamespace(
-                content=SimpleNamespace(parts=parts),
-                grounding_metadata=grounding_metadata,
-            )]
-        return SimpleNamespace(prompt_feedback=prompt_feedback, candidates=candidates)
+        """Engine seam for Google response-parsing (DP-244). Logic lives in
+        `providers.google.parse_google_response`; kept here because tests call it
+        directly on the engine."""
+        return google.parse_google_response(response_obj, api_params)
 
     async def _stream_google_response(
         self, config: Dict[str, Any], history_object: Dict[str, Any],
         tools: Optional[List[Dict[str, Any]]] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
-        """Canonical Google driver (DP-206): `generate_content_stream` chunks,
-        emitting the unified event shape. Text parts stream as raw deltas; the
-        terminal `done` carries the grounding-processed full text (citations /
-        search queries appended), so collect_stream reproduces the pre-DP-206
-        one-shot result exactly."""
-        try:
-            self._initialize_google_client()
-            assert self.google_client is not None and self.google_search_tool is not None
-        except (ValueError, AssertionError) as e:
-            raise LLMCommunicationError(f"Error: Google not configured: {e}") from e
-
-        history_for_api, content_config_for_api, api_params_for_dumping = \
-            await self._build_google_params(config, history_object, tools)
-        yield {"type": "api_payload", "payload": api_params_for_dumping}
-
-        chunks: List[Any] = []
-        try:
-            stream = await self.google_client.models.generate_content_stream(
-                model=config["model_name"],
-                contents=history_for_api,
-                config=GenerateContentConfig(**content_config_for_api)
-            )
-            async for chunk in stream:
-                chunks.append(chunk)
-                candidate = chunk.candidates[0] if getattr(chunk, "candidates", None) else None
-                if candidate is None or not candidate.content or not candidate.content.parts:
-                    continue
-                for part in candidate.content.parts:
-                    if part.function_call:
-                        continue
-                    if hasattr(part, 'text') and part.text:
-                        yield {"type": "text_delta", "text": part.text}
-        except Exception as e:
-            err_str = str(e)
-            rate_limited = '429' in err_str or 'RESOURCE_EXHAUSTED' in err_str
-
-            if rate_limited:
-                logger.warning(f"Google API rate-limited ({config['model_name']}): retryable.")
-            else:
-                # Only emit the full traceback when verbose (DEBUG) logging is on;
-                # by default a single-line error is plenty for transient API errors.
-                logger.error(f"Google API error: {e}", exc_info=logger.isEnabledFor(logging.DEBUG))
-
-            raise LLMCommunicationError(f"An error occurred with Google API: {e}",
-                                        api_payload=api_params_for_dumping, rate_limited=rate_limited) from e
-
-        result, _ = self._parse_google_response(
-            self._accumulate_google_chunks(chunks), api_params_for_dumping
-        )
-        if result.get("type") == "tool_calls":
-            yield {"type": "tool_calls", "calls": result["calls"]}
-            yield {"type": "done", "full_text": ""}
-        else:
-            yield {"type": "done", "full_text": result.get("content", "")}
+        """Engine seam for the Google provider (DP-244). The logic lives in
+        `providers.google.stream_google`; this delegator is the patch point the
+        driver routes through (`GoogleProvider.stream` calls back into it) so the
+        driver-policy tests can inject fake streams as before."""
+        async for ev in google.stream_google(self, config, history_object, tools):
+            yield ev
 
     async def _stream_local_response(
         self, config: Dict[str, Any], history_object: Dict[str, Any],
