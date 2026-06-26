@@ -22,6 +22,7 @@ from .providers.base import Provider
 from .providers.openai import OpenAIProvider
 from .providers.anthropic import AnthropicProvider
 from .providers.google import GoogleProvider
+from .providers.local import LocalProvider
 
 if TYPE_CHECKING:
     from src.engine.driver import TextEngine
@@ -120,12 +121,6 @@ def build_registry(engine: "TextEngine") -> ProviderRegistry:
             limiters=lambda e, m: [e._agy_limiter],
             guard_name="_ensure_agy_supported",
         ),
-        _EngineProvider(
-            engine,
-            method_name="_stream_local_response",
-            matches=lambda m: m == "local",
-            limiters=lambda e, m: [],
-            passes_local_config=True,
-        ),
+        LocalProvider(engine),
     ]
     return ProviderRegistry(providers)
