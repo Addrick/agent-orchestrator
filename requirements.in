@@ -1,6 +1,12 @@
-# Runtime dependencies — what the application needs to run.
+# Base runtime dependencies — the lean core the application needs to run.
 # Compiled into requirements.txt via pip-compile.
-# This file is used by the Dockerfile for production builds.
+#
+# DP-250: the heavy voice/STT stack (discord-ext-voice-recv, useful-moonshine-onnx
+# and their ML transitive deps: numba/onnxruntime/scikit-learn/librosa/...) lives
+# in requirements-voice.in, NOT here, so CI (which installs requirements-dev.txt,
+# inheriting THIS file) stays lean and avoids the heavy/py-version-fragile ML
+# wheels. Production installs requirements-voice.txt (base + voice). See the
+# Dockerfile and requirements-voice.in.
 
 # LLM providers
 anthropic
@@ -20,15 +26,7 @@ httpx
 # Bot interfaces
 discord.py
 google-auth
-# DP-238 voice command pipeline. Lazy-imported only when VOICE_ENABLED, but
-# pinned here so the dep check passes. Run pip-compile to sync requirements.txt,
-# and add libopus + ffmpeg to the container image, before a deploy that enables
-# voice. Moonshine's onnx backend is a SEPARATE package `useful-moonshine-onnx`
-# (import `moonshine_onnx`) — CPU-only, no torch. There is no `[onnx]` extra on
-# the base `useful-moonshine` package.
-discord-ext-voice-recv  # voice receive (stock discord.py only sends)
-useful-moonshine-onnx  # STT (import name: moonshine_onnx); onnx pkg = CPU, no torch
-audioop-lts ; python_version >= "3.13"  # stdlib audioop removed in 3.13+
+audioop-lts ; python_version >= "3.13"  # stdlib audioop removed in 3.13+; needed by discord.py
 google-auth-oauthlib
 google-cloud-pubsub
 google-api-python-client  # googleapiclient

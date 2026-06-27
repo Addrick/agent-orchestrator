@@ -59,14 +59,19 @@ def get_requirements(req_file):
 
 def main():
     src_dir = "src"
-    req_file = "requirements.in"
-    
+    # DP-250: deps are split across requirements.in (lean base, used by CI) and
+    # requirements-voice.in (heavy voice/STT stack, prod-only). An import is
+    # satisfied if it appears in EITHER, so union both .in files here.
+    req_files = ["requirements.in", "requirements-voice.in"]
+
     if not os.path.exists(src_dir):
         print(f"Error: {src_dir} directory not found.")
         sys.exit(1)
-        
+
     all_imports = get_all_imports(src_dir)
-    requirements = get_requirements(req_file)
+    requirements = set()
+    for req_file in req_files:
+        requirements |= get_requirements(req_file)
     
     # Filter out standard library and local imports
     missing = []
@@ -87,10 +92,11 @@ def main():
                 missing.append((imp, pkg_name))
 
     if missing:
-        print("\n[!] Error: Found imported packages missing from requirements.in:")
+        print("\n[!] Error: Found imported packages missing from requirements.in / requirements-voice.in:")
         for imp, pkg in sorted(missing):
             print(f"    - Import '{imp}' requires package '{pkg}'")
-        print("\nPlease add these to requirements.in and run scripts/sync_deps.ps1\n")
+        print("\nAdd these to requirements.in (base) or requirements-voice.in (voice/ML),"
+              " then run scripts/sync_deps.ps1\n")
         sys.exit(1)
     else:
         print("\n[+] All imports are accounted for in requirements.in\n")

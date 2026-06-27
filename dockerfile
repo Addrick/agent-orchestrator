@@ -59,11 +59,14 @@ USER root
 ENV PATH="/home/botuser/.local/bin:${PATH}"
 ENV DISABLE_AUTOUPDATER=1
 
-# Copy requirements first to leverage Docker cache layers
-COPY requirements.txt .
+# Copy requirements first to leverage Docker cache layers.
+# Production = base + voice/STT stack (DP-250): requirements-voice.txt is
+# base requirements.txt plus the heavy ML deps kept out of CI. libopus0/ffmpeg
+# (installed above) back the voice runtime.
+COPY requirements.txt requirements-voice.txt ./
 
 # Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements-voice.txt
 
 # Copy the rest of the application code
 COPY . .

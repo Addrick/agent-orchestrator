@@ -1,0 +1,39 @@
+#!/bin/sh
+# DP-250: run the local CI gate before every push so failures surface here, not
+# on GitHub. Mirrors .github/workflows/deploy.yml via scripts/ci_check.py
+# (flake8 errors -> missing-deps -> mypy -> pytest "not integration").
+#
+# Pre-PUSH, not pre-commit: the full gate is ~90s (pytest dominates), too slow to
+# run on every commit. Push is the right boundary — it's what feeds CI.
+#
+# Uses the worktree's own .venv if present (so the gate runs against the same
+# interpreter/deps as the branch), else falls back to `python` on PATH.
+# Escape hatch: `git push --no-verify` skips this (use sparingly).
+#
+# Tracked + activated via core.hooksPath=.githooks (see scripts/setup-hooks.sh).
+
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+
+# Pick an interpreter: prefer the worktree venv (Windows uv layout = Scripts/,
+# POSIX = bin/), then fall back to python/python3 on PATH.
+if [ -x "$root/.venv/Scripts/python.exe" ]; then
+  py="$root/.venv/Scripts/python.exe"
+elif [ -x "$root/.venv/bin/python" ]; then
+  py="$root/.venv/bin/python"
+elif command -v python >/dev/null 2>&1; then
+  py=python
+elif command -v python3 >/dev/null 2>&1; then
+  py=python3
+else
+  echo "[pre-push] WARN: no python interpreter found — skipping CI gate" >&2
+  exit 0
+fi
+
+echo "[pre-push] running local CI gate (scripts/ci_check.py) — skip with --no-verify"
+( cd "$root" && "$py" scripts/ci_check.py )
+status=$?
+if [ "$status" -ne 0 ]; then
+  echo "[pre-push] CI gate FAILED — push aborted. Fix the above, or 'git push --no-verify' to override." >&2
+  exit 1
+fi
+exit 0

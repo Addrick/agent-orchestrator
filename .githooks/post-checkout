@@ -39,9 +39,15 @@ done
 # block the checkout.
 if [ ! -e "$here/.venv" ]; then
   if command -v uv >/dev/null 2>&1; then
+    # DP-250: install the FULL local set so worktrees can run everything,
+    # including voice. requirements-dev.txt is the lean base+tooling (what CI
+    # installs); requirements-voice.txt adds the heavy voice/STT stack. CI's
+    # leanness lives only in the deploy.yml install line, not here.
     reqs=""
-    [ -f "$here/requirements.txt" ] && reqs="$reqs -r requirements.txt"
     [ -f "$here/requirements-dev.txt" ] && reqs="$reqs -r requirements-dev.txt"
+    [ -f "$here/requirements-voice.txt" ] && reqs="$reqs -r requirements-voice.txt"
+    # Fallback for older branches that predate the dev/voice split.
+    [ -z "$reqs" ] && [ -f "$here/requirements.txt" ] && reqs="-r requirements.txt"
     if ( cd "$here" \
          && uv venv .venv >/dev/null 2>&1 \
          && VIRTUAL_ENV="$here/.venv" uv pip install --quiet $reqs ); then
