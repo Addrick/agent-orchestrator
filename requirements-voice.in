@@ -15,3 +15,6 @@
 
 discord-ext-voice-recv  # voice receive (stock discord.py only sends)
 useful-moonshine-onnx  # STT (import name: moonshine_onnx); onnx pkg = CPU, no torch
+# pynacl: transitive via discord.py[voice]. Dependabot medium CVE wants >=1.6.2
+# (libsodium incomplete-disallowed-inputs), but discord.py 2.7.1 (latest) caps
+# PyNaCl<1.6 -> can't bump until discord.py relaxes the pin. Blocked upstream. DP-251.
