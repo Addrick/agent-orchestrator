@@ -1,0 +1,58 @@
+#!/bin/sh
+# DP-250: run the local CI gate before every push so failures surface here, not
+# on GitHub. Mirrors .github/workflows/deploy.yml via scripts/ci_check.py
+# (flake8 errors -> missing-deps -> mypy -> pytest "not integration").
+#
+# Pre-PUSH, not pre-commit: the full gate is ~90s (pytest dominates), too slow to
+# run on every commit. Push is the right boundary — it's what feeds CI.
+#
+# Uses the worktree's own .venv if present (so the gate runs against the same
+# interpreter/deps as the branch), else falls back to `python` on PATH.
+# Escape hatch: `git push --no-verify` skips this (use sparingly).
+#
+# NOTE (env divergence): the worktree .venv carries the FULL local set (base +
+# tooling + voice, per post-checkout), whereas CI installs only the lean
+# requirements-dev.txt (no voice). So env-DEPENDENT failures — chiefly the
+# DP-249 class where mypy resolves the optional voice_recv import differently
+# with/without the dep — can pass this gate yet still go red on GitHub. This gate
+# catches lint, the bulk of mypy, and tests fast; CI remains the authority for
+# the lean-env-only cases.
+#
+# Tracked + activated via core.hooksPath=.githooks (see scripts/setup-hooks.sh).
+
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+
+# Pick an interpreter: prefer the worktree venv (Windows uv layout = Scripts/,
+# POSIX = bin/), then fall back to python/python3 on PATH.
+venv_py=1
+if [ -x "$root/.venv/Scripts/python.exe" ]; then
+  py="$root/.venv/Scripts/python.exe"
+elif [ -x "$root/.venv/bin/python" ]; then
+  py="$root/.venv/bin/python"
+elif command -v python >/dev/null 2>&1; then
+  py=python
+  venv_py=0
+elif command -v python3 >/dev/null 2>&1; then
+  py=python3
+  venv_py=0
+else
+  echo "[pre-push] WARN: no python interpreter found — skipping CI gate" >&2
+  exit 0
+fi
+
+# A PATH python (no worktree .venv) likely lacks the gate's deps (flake8/mypy/
+# pytest). Running anyway yields confusing ModuleNotFound failures that look like
+# real gate failures and block the push. Probe first; warn+skip if deps absent.
+if [ "$venv_py" -eq 0 ] && ! "$py" -c "import flake8, mypy, pytest" >/dev/null 2>&1; then
+  echo "[pre-push] WARN: no worktree .venv and PATH python lacks gate deps — skipping CI gate" >&2
+  exit 0
+fi
+
+echo "[pre-push] running local CI gate (scripts/ci_check.py) — skip with --no-verify"
+( cd "$root" && "$py" scripts/ci_check.py )
+status=$?
+if [ "$status" -ne 0 ]; then
+  echo "[pre-push] CI gate FAILED — push aborted. Fix the above, or 'git push --no-verify' to override." >&2
+  exit 1
+fi
+exit 0

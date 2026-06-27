@@ -98,7 +98,7 @@ class DiscordVoiceCapture(CaptureSource):
 
     async def start(self) -> None:
         try:
-            from discord.ext import voice_recv
+            from discord.ext import voice_recv  # type: ignore[attr-defined]
         except ImportError as e:  # pragma: no cover - only without the dep
             raise RuntimeError(
                 "discord-ext-voice-recv is not installed. "

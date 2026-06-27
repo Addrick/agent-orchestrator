@@ -10,7 +10,10 @@
 #
 # What the tracked hooks do (.githooks/):
 #   - pre-commit:    writes .claude/.memory_update_pending (memory-update nudge)
-#   - post-checkout: seeds gitignored .env/.env.test into new `git worktree add`
+#   - post-checkout: seeds gitignored .env/.env.test + builds the per-worktree
+#                    .venv (uv) on new `git worktree add`
+#   - pre-push:      runs the local CI gate (scripts/ci_check.py, ~90s); skip
+#                    with `git push --no-verify` (DP-250)
 #
 # core.hooksPath is shared across worktrees, so setting it in the main clone is
 # enough for every worktree of that clone.
