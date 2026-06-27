@@ -99,7 +99,7 @@ def main():
               " then run scripts/sync_deps.ps1\n")
         sys.exit(1)
     else:
-        print("\n[+] All imports are accounted for in requirements.in\n")
+        print("\n[+] All imports are accounted for in requirements.in / requirements-voice.in\n")
         sys.exit(0)
 
 if __name__ == "__main__":
