@@ -255,6 +255,33 @@ async def test_worker_survives_connect_error(backend: HindsightBackend) -> None:
 
 
 @pytest.mark.asyncio
+async def test_recall_strips_exclude_after_tag(backend: HindsightBackend) -> None:
+    """DP-254: the SQLite-only `exclude_after:` cutoff must not reach Hindsight.
+
+    Hindsight ANDs every tag as a real filter; no stored memory carries an
+    `exclude_after:` tag, so passing it through zeroes out recall. The backend
+    strips it while preserving genuine scope tags.
+    """
+    captured: Dict[str, Any] = {}
+
+    async def fake_arecall(bank_id: str, query: str, **kw):
+        captured["tags"] = kw.get("tags")
+        return []
+
+    client = backend._get_client()
+    with patch.object(client, "arecall", side_effect=fake_arecall):
+        await backend.recall(
+            "alice", "q",
+            tag_filter=["channel:web_ui", "user:portal", "exclude_after:9999"],
+        )
+        assert captured["tags"] == ["channel:web_ui", "user:portal"]
+
+        # Only exclude_after present → tags collapses to None (no filter at all).
+        await backend.recall("alice", "q", tag_filter=["exclude_after:42"])
+        assert captured["tags"] is None
+
+
+@pytest.mark.asyncio
 async def test_mark_trusted_audit_and_recall_override(backend: HindsightBackend) -> None:
     """Flip → recall → assert MemoryHit.untrusted reflects new value. Flip back → re-verify."""
     fake_results = [
