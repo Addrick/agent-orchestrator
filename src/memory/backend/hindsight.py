@@ -703,6 +703,16 @@ class HindsightBackend(MemoryBackend):
         # DP-253: `memory_mode` is a sqlite-side scoping hint; Hindsight scopes
         # purely via `tag_filter`, so the caller drops the channel tag for
         # non-channel modes and this param is accepted-and-ignored here.
+        #
+        # DP-254: `exclude_after:<id>` is a SQLite-only sliding-window cutoff
+        # (SqliteSemanticBackend translates it into exclude_after_interaction_id).
+        # Hindsight does NOT ignore unknown tag prefixes — it ANDs every tag as a
+        # real filter, and no stored memory carries an `exclude_after:` tag, so
+        # leaving it in zeroes out the result set. Strip it here so it stays the
+        # intended no-op on this backend.
+        clean_tags = [
+            t for t in (tag_filter or []) if not t.startswith("exclude_after:")
+        ] or None
         # 0.6.1 recall is budget-driven (no `k`). Translate the caller's `k`
         # into a soft token cap; slice the result list to honor `k` post-hoc.
         # Cheap heuristic: ~500 tokens/hit max. Caller can override via max_tokens.
@@ -713,7 +723,7 @@ class HindsightBackend(MemoryBackend):
             results = await client.arecall(
                 bank_id=bank_id, query=query,
                 max_tokens=max_tokens, budget=budget,
-                tags=tag_filter, types=types,
+                tags=clean_tags, types=types,
             )
         except (httpx.RequestError, HindsightAPIError) as e:
             logger.warning("Hindsight recall failed: %s", e)
