@@ -86,6 +86,42 @@ async def test_sqlite_recall_clean_summary_is_trusted() -> None:
         mm.close()
 
 
+@pytest.mark.asyncio
+async def test_sqlite_recall_global_mode_crosses_channels() -> None:
+    """DP-253: an explicit memory_mode='global' recalls across all channels,
+    while 'channel' mode (and the legacy no-mode path) stays channel-pinned.
+
+    Regression for the LTM-doesn't-fire bug: a GLOBAL persona queried from the
+    portal (channel=web_ui) must still see memory ingested under other channels.
+    """
+    mm = MemoryManager(db_path=":memory:")
+    mm.create_schema()
+    try:
+        backend = SqliteSemanticBackend(mm, embedding_service=_StubEmbeddingService())
+        now = datetime.now(timezone.utc)
+        s1 = backend.store_segment("c1", None, "alice", 1, 3, 3, now)
+        backend.store_summary(s1, "fact in c1", _embed(0.5),
+                              EMBEDDING_MODEL, now, summary_level=1)
+        s2 = backend.store_segment("c2", None, "alice", 4, 6, 3, now)
+        backend.store_summary(s2, "fact in c2", _embed(0.5),
+                              EMBEDDING_MODEL, now, summary_level=1)
+
+        # Global mode, no channel tag → both channels surface.
+        g = await backend.recall("alice", "q", k=5, tag_filter=[], memory_mode="global")
+        assert {h.content for h in g} == {"fact in c1", "fact in c2"}
+
+        # Channel mode with the c1 tag → only c1.
+        c = await backend.recall("alice", "q", k=5,
+                                 tag_filter=["channel:c1"], memory_mode="channel")
+        assert {h.content for h in c} == {"fact in c1"}
+
+        # Legacy path (no memory_mode) + channel tag → still channel-scoped.
+        legacy = await backend.recall("alice", "q", k=5, tag_filter=["channel:c1"])
+        assert {h.content for h in legacy} == {"fact in c1"}
+    finally:
+        mm.close()
+
+
 # ---------- Hindsight leg (mocked REST) ----------
 
 

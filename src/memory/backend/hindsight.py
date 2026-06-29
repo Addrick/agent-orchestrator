@@ -698,7 +698,11 @@ class HindsightBackend(MemoryBackend):
         tag_filter: Optional[List[str]] = None,
         max_tokens: Optional[int] = None,
         budget: Optional[str] = None,
+        memory_mode: Optional[str] = None,
     ) -> List[MemoryHit]:
+        # DP-253: `memory_mode` is a sqlite-side scoping hint; Hindsight scopes
+        # purely via `tag_filter`, so the caller drops the channel tag for
+        # non-channel modes and this param is accepted-and-ignored here.
         # 0.6.1 recall is budget-driven (no `k`). Translate the caller's `k`
         # into a soft token cap; slice the result list to honor `k` post-hoc.
         # Cheap heuristic: ~500 tokens/hit max. Caller can override via max_tokens.
