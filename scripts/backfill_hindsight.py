@@ -11,7 +11,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from src.memory.memory_manager import MemoryManager
 from src.memory.backend.hindsight import HindsightBackend
-from src.personas.store import load_system_personas_from_file
+from src.personas.store import load_personas_from_file, load_system_personas_from_file
 from config.global_config import HINDSIGHT_URL, MEMORY_DATABASE_FILE
 
 logging.basicConfig(
@@ -35,8 +35,17 @@ OBSERVATIONS_MISSION_TEMPLATE = (
 )
 
 
-def _missions_for(persona: str) -> tuple[str, str, str]:
-    """(retain, reflect, observations) missions tailored to a persona."""
+def _missions_for(persona: str, persona_obj=None) -> tuple[str, str, str]:
+    """(retain, reflect, observations) missions for a persona.
+
+    DP-255: prefer the persona's *configured* missions (persona JSON) and fall
+    back to the archetype defaults below for any mission left unset. ``persona``
+    is the bank id / name; ``persona_obj`` is the loaded Persona (or None when
+    no config exists, e.g. a bank id with no matching persona)."""
+    cfg_retain = persona_obj.get_retain_mission() if persona_obj is not None else None
+    cfg_reflect = persona_obj.get_reflect_mission() if persona_obj is not None else None
+    cfg_obs = persona_obj.get_observations_mission() if persona_obj is not None else None
+
     if persona == "ambient":
         retain = (
             "You are an observer listening to an ambient channel. The messages "
@@ -64,7 +73,12 @@ def _missions_for(persona: str) -> tuple[str, str, str]:
             f"Reason over '{persona}'s memories to identify durable "
             "preferences, recurring patterns, and long-lived context."
         )
-    return retain, reflect, OBSERVATIONS_MISSION_TEMPLATE
+    # Persona config wins over the archetype default for any mission it sets.
+    return (
+        cfg_retain or retain,
+        cfg_reflect or reflect,
+        cfg_obs or OBSERVATIONS_MISSION_TEMPLATE,
+    )
 
 
 def is_junk_prompt(text: str) -> bool:
@@ -88,7 +102,12 @@ async def backfill(persona_filter: list[str] | None = None, wipe: bool = False):
 
     # 2. Pick personas. Explicit --personas list wins; otherwise auto-include
     # everything in User_Interactions minus system pipeline workers.
-    system_persona_names = set((load_system_personas_from_file() or {}).keys())
+    system_personas = load_system_personas_from_file() or {}
+    system_persona_names = set(system_personas.keys())
+    # DP-255: load configured personas so bank missions come from persona config
+    # (user personas win on name collision; both maps feed _missions_for).
+    persona_map = dict(system_personas)
+    persona_map.update(load_personas_from_file() or {})
     with mm.transaction() as conn:
         all_personas = [row["persona_name"] for row in conn.execute("SELECT DISTINCT persona_name FROM User_Interactions")]
     if persona_filter:
@@ -108,7 +127,9 @@ async def backfill(persona_filter: list[str] | None = None, wipe: bool = False):
             logger.info(f"Wiping bank for persona: {persona}")
             await hindsight.delete_bank(persona)
         
-        retain_mission, reflect_mission, observations_mission = _missions_for(persona)
+        retain_mission, reflect_mission, observations_mission = _missions_for(
+            persona, persona_map.get(persona)
+        )
         await hindsight.ensure_bank(
             bank_id=persona,
             enable_observations=True,

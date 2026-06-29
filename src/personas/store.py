@@ -133,6 +133,19 @@ def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
             "meta_visible": persona.get_meta_visible(),
             "inject_timestamp": persona.get_inject_timestamp(),
         }
+        # DP-255: Hindsight retain-tuning knobs. Only persist when set so old
+        # save files (and personas that never tuned them) stay compact and
+        # round-trip to the same on-disk shape.
+        if persona.get_retain_mission() is not None:
+            persona_json["retain_mission"] = persona.get_retain_mission()
+        if persona.get_reflect_mission() is not None:
+            persona_json["reflect_mission"] = persona.get_reflect_mission()
+        if persona.get_observations_mission() is not None:
+            persona_json["observations_mission"] = persona.get_observations_mission()
+        if persona.get_enable_observations() is not None:
+            persona_json["enable_observations"] = persona.get_enable_observations()
+        if persona.get_disposition() is not None:
+            persona_json["disposition"] = persona.get_disposition()
         persona_list.append(persona_json)
     return persona_list
 
@@ -225,6 +238,11 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
                 ingest_bank=new_persona.get("ingest_bank"),
                 security_block_reasons=validation_errors,
                 inject_timestamp=new_persona.get("inject_timestamp", True),
+                retain_mission=new_persona.get("retain_mission"),
+                reflect_mission=new_persona.get("reflect_mission"),
+                observations_mission=new_persona.get("observations_mission"),
+                enable_observations=new_persona.get("enable_observations"),
+                disposition=new_persona.get("disposition"),
                 **_resolve_params_kwargs(new_persona),
             )
 
@@ -297,6 +315,11 @@ def load_system_personas_from_file() -> Dict[str, Any]:
                 ingest_bank=new_persona.get("ingest_bank"),
                 security_block_reasons=validation_errors,
                 inject_timestamp=new_persona.get("inject_timestamp", False),
+                retain_mission=new_persona.get("retain_mission"),
+                reflect_mission=new_persona.get("reflect_mission"),
+                observations_mission=new_persona.get("observations_mission"),
+                enable_observations=new_persona.get("enable_observations"),
+                disposition=new_persona.get("disposition"),
                 **params_kwargs,
             )
 
