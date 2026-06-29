@@ -60,6 +60,11 @@ class Persona:
             ingest_bank: Optional[str] = None,
             security_block_reasons: Optional[List[str]] = None,
             inject_timestamp: bool = True,
+            retain_mission: Optional[str] = None,
+            reflect_mission: Optional[str] = None,
+            observations_mission: Optional[str] = None,
+            enable_observations: Optional[bool] = None,
+            disposition: Optional[Dict[str, Any]] = None,
     ) -> None:
         self._name: str = persona_name
         self._model_name: str = model_name
@@ -108,6 +113,20 @@ class Persona:
         self._meta_visible: bool = bool(meta_visible)
         self._ingest_bank: Optional[str] = ingest_bank if ingest_bank else None
         self._inject_timestamp: bool = bool(inject_timestamp)
+
+        # DP-255: per-persona Hindsight retain-tuning knobs. All optional;
+        # None means "leave unset" so old persona JSON loads unchanged and the
+        # bank keeps its archetype/server default. retain_mission and
+        # reflect_mission are only honoured at bank creation (acreate_bank);
+        # observations_mission / enable_observations / disposition are
+        # live-patchable (apatch_bank_config).
+        self._retain_mission: Optional[str] = retain_mission if retain_mission else None
+        self._reflect_mission: Optional[str] = reflect_mission if reflect_mission else None
+        self._observations_mission: Optional[str] = observations_mission if observations_mission else None
+        self._enable_observations: Optional[bool] = (
+            bool(enable_observations) if enable_observations is not None else None
+        )
+        self._disposition: Optional[Dict[str, int]] = self._sanitize_disposition(disposition)
 
         try:
             self._max_context_tokens: int = int(max_context_tokens) if max_context_tokens is not None else global_config.DEFAULT_MAX_CONTEXT_TOKENS
@@ -246,6 +265,30 @@ class Persona:
         """Whether long-term memory retrieval is enabled for this persona."""
         return self._long_term_memory
 
+    def get_retain_mission(self) -> Optional[str]:
+        """Hindsight retain mission for this persona's bank (None = unset).
+        Only honoured at bank creation — see chat_system.startup (DP-255)."""
+        return self._retain_mission
+
+    def get_reflect_mission(self) -> Optional[str]:
+        """Hindsight reflect mission for this persona's bank (None = unset).
+        Only honoured at bank creation (DP-255)."""
+        return self._reflect_mission
+
+    def get_observations_mission(self) -> Optional[str]:
+        """Hindsight observations mission (None = unset). Live-patchable (DP-255)."""
+        return self._observations_mission
+
+    def get_enable_observations(self) -> Optional[bool]:
+        """Whether Hindsight observation consolidation is enabled for this bank.
+        None = leave at the bank/server default. Live-patchable (DP-255)."""
+        return self._enable_observations
+
+    def get_disposition(self) -> Optional[Dict[str, int]]:
+        """Hindsight extraction disposition ``{skepticism|literalism|empathy: 1..5}``
+        or None for the neutral default. Live-patchable (DP-255)."""
+        return dict(self._disposition) if self._disposition else None
+
     def get_ingest_bank(self) -> Optional[str]:
         """Optional override bank for the `ingest_path` tool. None = use persona name."""
         return self._ingest_bank
@@ -308,6 +351,31 @@ class Persona:
         return True
 
     # --- Private Helpers ---
+
+    _DISPOSITION_KEYS = ("skepticism", "literalism", "empathy")
+
+    @classmethod
+    def _sanitize_disposition(cls, value: Any) -> Optional[Dict[str, int]]:
+        """Coerce a disposition dict to ``{skepticism|literalism|empathy: 1..5}``.
+
+        Returns None for absent/empty/invalid input (so old JSON without the
+        field stays at the bank's neutral default). Only the three known keys
+        are kept; each is clamped to the 1-5 integer range. Unparseable values
+        for a key drop that key rather than failing the whole load.
+        """
+        if not isinstance(value, dict) or not value:
+            return None
+        out: Dict[str, int] = {}
+        for key in cls._DISPOSITION_KEYS:
+            if key not in value:
+                continue
+            try:
+                iv = int(value[key])
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid disposition.{key} value {value[key]!r}; skipping.")
+                continue
+            out[key] = max(1, min(5, iv))
+        return out or None
 
     @staticmethod
     def _resolve_enum(enum_class: Type[E], value: Any, default: E) -> E:
@@ -443,6 +511,33 @@ class Persona:
         """Enables or disables long-term memory retrieval for this persona."""
         self._long_term_memory = value
         logger.info(f"Persona '{self._name}' long_term_memory set to {value}.")
+
+    def set_retain_mission(self, value: Optional[str]) -> None:
+        """Set (or clear with None/empty) the Hindsight retain mission. Takes
+        effect on next bank (re)creation only — not live-patchable (DP-255)."""
+        self._retain_mission = value if value else None
+        logger.info(f"Persona '{self._name}' retain_mission set ({'cleared' if not self._retain_mission else 'updated'}).")
+
+    def set_reflect_mission(self, value: Optional[str]) -> None:
+        """Set (or clear) the Hindsight reflect mission. Bank-creation only (DP-255)."""
+        self._reflect_mission = value if value else None
+        logger.info(f"Persona '{self._name}' reflect_mission set ({'cleared' if not self._reflect_mission else 'updated'}).")
+
+    def set_observations_mission(self, value: Optional[str]) -> None:
+        """Set (or clear) the Hindsight observations mission. Live-patchable (DP-255)."""
+        self._observations_mission = value if value else None
+        logger.info(f"Persona '{self._name}' observations_mission set ({'cleared' if not self._observations_mission else 'updated'}).")
+
+    def set_enable_observations(self, value: Optional[bool]) -> None:
+        """Enable/disable Hindsight observations (None to leave at default). Live-patchable (DP-255)."""
+        self._enable_observations = bool(value) if value is not None else None
+        logger.info(f"Persona '{self._name}' enable_observations set to {self._enable_observations}.")
+
+    def set_disposition(self, value: Optional[Dict[str, Any]]) -> None:
+        """Set the Hindsight extraction disposition (clamped 1-5, unknown keys
+        dropped; None/empty clears to neutral default). Live-patchable (DP-255)."""
+        self._disposition = self._sanitize_disposition(value)
+        logger.info(f"Persona '{self._name}' disposition set to {self._disposition}.")
 
     def set_inject_timestamp(self, value: bool) -> None:
         """Sets whether to inject the current timestamp into the system prompt."""

@@ -534,3 +534,111 @@ def test_build_wire_messages_no_inject_timestamp(base_persona_args):
     assert messages[0]["content"] == "You are a test persona."
 
 
+
+
+# --- DP-255: Hindsight retain-tuning fields ---
+
+def test_persona_retain_fields_default_to_none(persona):
+    """Old persona JSON has none of these fields; they must default to None/neutral."""
+    assert persona.get_retain_mission() is None
+    assert persona.get_reflect_mission() is None
+    assert persona.get_observations_mission() is None
+    assert persona.get_enable_observations() is None
+    assert persona.get_disposition() is None
+
+
+def test_persona_retain_fields_present(base_persona_args):
+    """When supplied (new config), the fields are stored and readable."""
+    p = Persona(
+        **base_persona_args,
+        retain_mission="Extract durable signal only.",
+        reflect_mission="Reason over durable preferences.",
+        observations_mission="Consolidate beliefs.",
+        enable_observations=True,
+        disposition={"skepticism": 4, "literalism": 2, "empathy": 3},
+    )
+    assert p.get_retain_mission() == "Extract durable signal only."
+    assert p.get_reflect_mission() == "Reason over durable preferences."
+    assert p.get_observations_mission() == "Consolidate beliefs."
+    assert p.get_enable_observations() is True
+    assert p.get_disposition() == {"skepticism": 4, "literalism": 2, "empathy": 3}
+
+
+def test_persona_disposition_sanitizes_and_clamps(base_persona_args):
+    """Out-of-range ints clamp to 1-5; unknown keys and bad values are dropped."""
+    p = Persona(
+        **base_persona_args,
+        disposition={"skepticism": 9, "literalism": 0, "empathy": "x", "bogus": 5},
+    )
+    assert p.get_disposition() == {"skepticism": 5, "literalism": 1}
+
+
+def test_persona_disposition_empty_is_none(base_persona_args):
+    p = Persona(**base_persona_args, disposition={})
+    assert p.get_disposition() is None
+
+
+def test_persona_retain_field_setters(persona):
+    persona.set_retain_mission("new mission")
+    assert persona.get_retain_mission() == "new mission"
+    persona.set_retain_mission(None)
+    assert persona.get_retain_mission() is None
+    persona.set_enable_observations(False)
+    assert persona.get_enable_observations() is False
+    persona.set_disposition({"empathy": 7})
+    assert persona.get_disposition() == {"empathy": 5}
+    persona.set_disposition(None)
+    assert persona.get_disposition() is None
+
+
+def test_persona_retain_fields_roundtrip_through_store(tmp_path, base_persona_args):
+    """to_dict -> load preserves the fields; a persona without them omits the keys."""
+    from src.personas import store
+
+    tuned = Persona(
+        **base_persona_args,
+        retain_mission="Tuned retain.",
+        disposition={"skepticism": 4},
+        enable_observations=True,
+    )
+    plain = Persona(persona_name="plain", model_name="m", prompt="p")
+
+    serialized = store.to_dict({"tester": tuned, "plain": plain})
+    by_name = {e["name"]: e for e in serialized}
+    # tuned persona carries the keys
+    assert by_name["tester"]["retain_mission"] == "Tuned retain."
+    assert by_name["tester"]["disposition"] == {"skepticism": 4}
+    assert by_name["tester"]["enable_observations"] is True
+    # plain persona (old-style) omits all of them
+    assert "retain_mission" not in by_name["plain"]
+    assert "disposition" not in by_name["plain"]
+    assert "enable_observations" not in by_name["plain"]
+
+    # Round-trip back through the loader.
+    save_file = tmp_path / "personas.json"
+    save_file.write_text(__import__("json").dumps({"personas": serialized, "models": {}}))
+    loaded = store.load_personas_from_file(str(save_file))
+    assert loaded["tester"].get_retain_mission() == "Tuned retain."
+    assert loaded["tester"].get_disposition() == {"skepticism": 4}
+    assert loaded["plain"].get_retain_mission() is None
+    assert loaded["plain"].get_disposition() is None
+
+
+def test_load_persona_json_without_retain_fields(tmp_path):
+    """An old persona JSON entry (no retain fields at all) still loads cleanly."""
+    from src.personas import store
+
+    old_entry = {
+        "personas": [
+            {"name": "legacy", "model_name": "m", "prompt": "hello"}
+        ],
+        "models": {},
+    }
+    save_file = tmp_path / "old.json"
+    save_file.write_text(__import__("json").dumps(old_entry))
+    loaded = store.load_personas_from_file(str(save_file))
+    assert loaded is not None
+    p = loaded["legacy"]
+    assert p.get_retain_mission() is None
+    assert p.get_enable_observations() is None
+    assert p.get_disposition() is None

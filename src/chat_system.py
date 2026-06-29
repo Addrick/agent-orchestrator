@@ -709,6 +709,10 @@ class ChatSystem:
         from src.memory.backend import HindsightBackend
         if not isinstance(self.memory_backend, HindsightBackend):
             return
+        # Bind a narrowed local: the isinstance guard above doesn't propagate
+        # into the nested `_ensure` closure for mypy, and the disposition patch
+        # below reaches `_get_client`, which only exists on HindsightBackend.
+        backend: HindsightBackend = self.memory_backend
         # Only personas that converse with users get a bank; system personas
         # (model_selector, triage_*, etc.) are single-shot pipeline workers
         # with no accumulating chat history — provisioning would just create
@@ -719,9 +723,32 @@ class ChatSystem:
         logger.info(f"Initializing Hindsight memory banks for {len(targets)} persona(s)...")
 
         async def _ensure(name: str) -> None:
+            persona = self.personas[name]
             try:
-                await self.memory_backend.ensure_bank(bank_id=name)
+                # retain_mission / reflect_mission are honoured only at bank
+                # CREATION (ensure_bank → acreate_bank, 409-noop if it exists);
+                # observations_mission / enable_observations are seeded here too.
+                # DP-255.
+                await backend.ensure_bank(
+                    bank_id=name,
+                    retain_mission=persona.get_retain_mission(),
+                    reflect_mission=persona.get_reflect_mission(),
+                    enable_observations=persona.get_enable_observations(),
+                    observations_mission=persona.get_observations_mission(),
+                )
             except Exception as e:
                 logger.warning(f"Could not ensure Hindsight bank for {name}: {e}")
+                return
+
+            # disposition is LIVE-patchable (apatch_bank_config) so it applies to
+            # existing banks without a rebuild, unlike the retain mission. DP-255.
+            disposition = persona.get_disposition()
+            if not disposition:
+                return
+            patch = {f"disposition_{k}": v for k, v in disposition.items()}
+            try:
+                await backend._get_client().apatch_bank_config(name, patch)
+            except Exception as e:
+                logger.warning(f"Could not patch disposition for Hindsight bank {name}: {e}")
 
         await asyncio.gather(*(_ensure(n) for n in targets))

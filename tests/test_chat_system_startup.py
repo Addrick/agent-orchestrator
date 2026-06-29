@@ -65,3 +65,62 @@ async def test_startup_skips_when_backend_not_hindsight() -> None:
     await system.startup()
 
     backend.ensure_bank.assert_not_awaited()
+
+
+def _persona_tuned(name: str) -> Persona:
+    return Persona(
+        persona_name=name,
+        model_name="m",
+        prompt="p",
+        retain_mission=f"retain-{name}",
+        reflect_mission=f"reflect-{name}",
+        enable_observations=True,
+        observations_mission=f"obs-{name}",
+        disposition={"skepticism": 4},
+    )
+
+
+@pytest.mark.asyncio
+async def test_startup_passes_configured_missions_to_ensure_bank() -> None:
+    """DP-255: per-persona retain/reflect/observations missions reach ensure_bank."""
+    backend = MagicMock(spec=HindsightBackend)
+    backend.ensure_bank = AsyncMock()
+    # disposition goes through the live PATCH path, not ensure_bank.
+    client = MagicMock()
+    client.apatch_bank_config = AsyncMock()
+    backend._get_client = MagicMock(return_value=client)
+
+    system = _make_system(backend, {"sage": _persona_tuned("sage")})
+    await system.startup()
+
+    backend.ensure_bank.assert_awaited_once()
+    kwargs = backend.ensure_bank.await_args.kwargs
+    assert kwargs["bank_id"] == "sage"
+    assert kwargs["retain_mission"] == "retain-sage"
+    assert kwargs["reflect_mission"] == "reflect-sage"
+    assert kwargs["enable_observations"] is True
+    assert kwargs["observations_mission"] == "obs-sage"
+
+    # disposition patched live with disposition_* keys.
+    client.apatch_bank_config.assert_awaited_once_with("sage", {"disposition_skepticism": 4})
+
+
+@pytest.mark.asyncio
+async def test_startup_unset_missions_pass_none() -> None:
+    """A persona that never configured missions passes None (bank keeps default),
+    and disposition patch is NOT called when no disposition is set."""
+    backend = MagicMock(spec=HindsightBackend)
+    backend.ensure_bank = AsyncMock()
+    client = MagicMock()
+    client.apatch_bank_config = AsyncMock()
+    backend._get_client = MagicMock(return_value=client)
+
+    system = _make_system(backend, {"plain": _persona("plain")})
+    await system.startup()
+
+    kwargs = backend.ensure_bank.await_args.kwargs
+    assert kwargs["retain_mission"] is None
+    assert kwargs["reflect_mission"] is None
+    assert kwargs["enable_observations"] is None
+    assert kwargs["observations_mission"] is None
+    client.apatch_bank_config.assert_not_awaited()

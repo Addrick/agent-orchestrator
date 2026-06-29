@@ -275,6 +275,52 @@ def _set_tool_policy(args: List[str], persona: Persona) -> Tuple[Optional[str], 
         return f"Error: {e}", False
 
 
+def _mission_setter(
+        *,
+        apply: Callable[[Persona, Optional[str]], Any],
+        label: str,
+) -> SetFn:
+    """Free-text mission setter: joins the remaining args; 'none'/'clear'
+    clears it (DP-255 retain/reflect/observations missions)."""
+    def set_cli(args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
+        text = ' '.join(args[1:]).strip()
+        if not text:
+            return f"Usage: set {label} <mission text | none>", False
+        if text.lower() in ('none', 'clear', 'null'):
+            apply(persona, None)
+            return f"{label} for {persona.get_name()} cleared.", True
+        apply(persona, text)
+        return f"{label} for {persona.get_name()} updated.", True
+    return set_cli
+
+
+def _set_disposition(args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
+    """`set disposition <json>` — e.g. {\"skepticism\": 4}. 'none' clears."""
+    if len(args) < 2:
+        return "Usage: set disposition <json | none>  (keys: skepticism, literalism, empathy; 1-5)", False
+    raw = ' '.join(args[1:]).strip()
+    if raw.lower() in ('none', 'clear', 'null'):
+        persona.set_disposition(None)
+        return f"Disposition for {persona.get_name()} cleared (neutral).", True
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return "Error: Invalid JSON for disposition.", False
+    if not isinstance(value, dict):
+        return "Error: disposition must be a JSON object of {skepticism|literalism|empathy: 1-5}.", False
+    persona.set_disposition(value)
+    return f"Disposition for {persona.get_name()} set to {persona.get_disposition()}.", True
+
+
+def _patch_disposition(persona: Persona, value: Any) -> bool:
+    """PATCH apply for disposition: accept a dict (or None to clear); reject a
+    non-dict, non-null value."""
+    if value is not None and not isinstance(value, dict):
+        return True
+    persona.set_disposition(value)
+    return False
+
+
 def _patch_memory_mode(persona: Persona, value: Any) -> bool:
     before = persona.get_memory_mode()
     persona.set_memory_mode(value)
@@ -430,6 +476,70 @@ PERSONA_FIELDS: List[PersonaField] = [
         ),
         patch_key='long_term_memory',
         patch_apply=_plain_patch(lambda p, v: p.set_long_term_memory(bool(v))),
+    ),
+    PersonaField(
+        name='retain_mission',
+        describe=lambda p: (
+            f"Retain mission for '{p.get_name()}': "
+            + (repr(p.get_retain_mission()) if p.get_retain_mission() else "not set (bank default)")
+            + "."
+        ),
+        set_cli=_mission_setter(apply=lambda p, v: p.set_retain_mission(v), label='retain_mission'),
+        patch_key='retain_mission',
+        patch_apply=_plain_patch(lambda p, v: p.set_retain_mission(v)),
+    ),
+    PersonaField(
+        name='reflect_mission',
+        describe=lambda p: (
+            f"Reflect mission for '{p.get_name()}': "
+            + (repr(p.get_reflect_mission()) if p.get_reflect_mission() else "not set (bank default)")
+            + "."
+        ),
+        set_cli=_mission_setter(apply=lambda p, v: p.set_reflect_mission(v), label='reflect_mission'),
+        patch_key='reflect_mission',
+        patch_apply=_plain_patch(lambda p, v: p.set_reflect_mission(v)),
+    ),
+    PersonaField(
+        name='observations_mission',
+        describe=lambda p: (
+            f"Observations mission for '{p.get_name()}': "
+            + (repr(p.get_observations_mission()) if p.get_observations_mission() else "not set (bank default)")
+            + "."
+        ),
+        set_cli=_mission_setter(apply=lambda p, v: p.set_observations_mission(v), label='observations_mission'),
+        patch_key='observations_mission',
+        patch_apply=_plain_patch(lambda p, v: p.set_observations_mission(v)),
+    ),
+    PersonaField(
+        name='enable_observations',
+        describe=lambda p: (
+            f"Observation consolidation for '{p.get_name()}' is "
+            + ("not set (bank default)" if p.get_enable_observations() is None
+               else ("enabled" if p.get_enable_observations() else "disabled"))
+            + "."
+        ),
+        set_cli=_bool_setter(
+            apply=lambda p, v: p.set_enable_observations(v),
+            missing_msg="Error: Please specify 'on' or 'off' for enable_observations.",
+            state_msg=lambda v, name: (
+                f"Observation consolidation {'enabled' if v else 'disabled'} for {name}."
+            ),
+        ),
+        patch_key='enable_observations',
+        patch_apply=_plain_patch(
+            lambda p, v: p.set_enable_observations(None if v is None else bool(v))
+        ),
+    ),
+    PersonaField(
+        name='disposition',
+        describe=lambda p: (
+            f"Disposition for '{p.get_name()}': "
+            + (json.dumps(p.get_disposition()) if p.get_disposition() else "neutral (default)")
+            + "."
+        ),
+        set_cli=_set_disposition,
+        patch_key='disposition',
+        patch_apply=_patch_disposition,
     ),
     PersonaField(
         name='include_ambient_memory',
