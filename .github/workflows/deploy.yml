@@ -15,7 +15,7 @@ permissions:
 
 env:
   # Use your actual image name here
-  IMAGE_NAME: ghcr.io/addrick/derpr-python
+  IMAGE_NAME: ghcr.io/addrick/orchestratr
   # NOTE: secrets MUST NOT live at workflow-level env — that injects them into the
   # `test` job, which runs on every pull_request. Same-repo-branch PRs receive full
   # secrets (only forks are withheld), so a PR could exfiltrate them via test code.
