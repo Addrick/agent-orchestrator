@@ -352,8 +352,17 @@ class MemoryBackend(ABC):
         tag_filter: Optional[List[str]] = None,
         max_tokens: Optional[int] = None,
         budget: Optional[str] = None,
+        memory_mode: Optional[str] = None,
     ) -> List[MemoryHit]:
         """Semantic recall (new-shape).
+
+        `memory_mode` (DP-253) is the persona's isolation-mode label —
+        "channel" / "server" / "personal" / "global" / "ticket" — mirroring
+        `RequestBuilder.fetch_raw_history`. It tells the backend how to scope
+        recall so a GLOBAL persona retrieves across channels instead of being
+        pinned to the caller's channel. When None, backends fall back to their
+        legacy channel-presence derivation (back-compat). Hindsight scopes via
+        `tag_filter` and ignores this hint.
 
         Sprint 1 stub — Hindsight backend (Sprint 2) implements; SQLite raises.
         """

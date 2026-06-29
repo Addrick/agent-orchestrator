@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from memory.memory_manager import MemoryManager
-from src.request_builder import RequestBuilder, _relative_time
+from src.request_builder import RequestBuilder, _relative_time, recall_scope_tags
 from src.embedding_service import EmbeddingService
 from src.memory.backend.base import MemoryHit
 from src.persona import MemoryMode
@@ -345,6 +345,78 @@ async def test_retrieve_memory_block_untrusted_propagation(chat_system_with_memo
     assert result is not None
     assert is_untrusted is True
     assert "Untrusted content" in result
+
+
+# --- DP-253: memory-mode-aware recall scoping ---
+
+def test_recall_scope_tags_global_drops_channel():
+    tags, label = recall_scope_tags(
+        MemoryMode.GLOBAL, channel="web_ui", server_id=None, user_identifier="portal")
+    assert tags == []
+    assert label == "global"
+
+
+def test_recall_scope_tags_channel_keeps_scope():
+    tags, label = recall_scope_tags(
+        MemoryMode.CHANNEL_ISOLATED, channel="web_ui", server_id="s1", user_identifier="u1")
+    assert "channel:web_ui" in tags
+    assert "server:s1" in tags
+    assert "user:u1" in tags
+    assert label == "channel"
+
+
+def test_recall_scope_tags_server_and_personal():
+    st, sl = recall_scope_tags(
+        MemoryMode.SERVER_WIDE, channel="c", server_id="s1", user_identifier="u1")
+    assert st == ["server:s1"]
+    assert sl == "server"
+    pt, pl = recall_scope_tags(
+        MemoryMode.PERSONAL, channel="c", server_id="s1", user_identifier="u1")
+    assert pt == ["user:u1"]
+    assert pl == "personal"
+
+
+def test_recall_scope_tags_ticket():
+    tt, tl = recall_scope_tags(
+        MemoryMode.TICKET_ISOLATED, channel="c", server_id=None, user_identifier="u1")
+    assert tt == []
+    assert tl == "ticket"
+
+
+@pytest.mark.asyncio
+@patch('src.request_builder.MEMORY_RETRIEVAL_ENABLED', True)
+async def test_retrieve_memory_block_global_persona_crosses_channel(
+        chat_system_with_memory, mock_persona):
+    """DP-253: a GLOBAL persona drops the channel tag and forwards memory_mode."""
+    system, _, _ = chat_system_with_memory
+    mock_persona.get_memory_mode.return_value = MemoryMode.GLOBAL
+    system.memory_backend.recall = AsyncMock(return_value=[])
+
+    await system.request_builder.retrieve_memory_block(
+        mock_persona, "portal", "web_ui", None,
+        [{"role": "user", "content": "hi"}],
+    )
+    kwargs = system.memory_backend.recall.call_args.kwargs
+    assert kwargs["memory_mode"] == "global"
+    assert not any(t.startswith("channel:") for t in kwargs["tag_filter"])
+
+
+@pytest.mark.asyncio
+@patch('src.request_builder.MEMORY_RETRIEVAL_ENABLED', True)
+async def test_retrieve_memory_block_channel_persona_keeps_channel(
+        chat_system_with_memory, mock_persona):
+    """DP-253 regression: CHANNEL_ISOLATED keeps the prior channel-scoped recall."""
+    system, _, _ = chat_system_with_memory
+    mock_persona.get_memory_mode.return_value = MemoryMode.CHANNEL_ISOLATED
+    system.memory_backend.recall = AsyncMock(return_value=[])
+
+    await system.request_builder.retrieve_memory_block(
+        mock_persona, "user1", "web_ui", None,
+        [{"role": "user", "content": "hi"}],
+    )
+    kwargs = system.memory_backend.recall.call_args.kwargs
+    assert kwargs["memory_mode"] == "channel"
+    assert "channel:web_ui" in kwargs["tag_filter"]
 
 
 # --- _relative_time Tests ---

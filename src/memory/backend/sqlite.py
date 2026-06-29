@@ -714,6 +714,7 @@ class SqliteSemanticBackend(MemoryBackend):
         tag_filter: Optional[List[str]] = None,
         max_tokens: Optional[int] = None,
         budget: Optional[str] = None,
+        memory_mode: Optional[str] = None,
     ) -> List[MemoryHit]:
         if self._embedding_service is None:
             logger.info("SqliteSemanticBackend.recall: no embedding service set; returning empty.")
@@ -723,7 +724,11 @@ class SqliteSemanticBackend(MemoryBackend):
         channel = scope["channel"]
         server_id = scope["server"]
         user_identifier = scope["user"]
-        memory_mode = "channel" if channel else "global"
+        # DP-253: honor the persona's explicit isolation mode when the caller
+        # supplies it, so a GLOBAL persona recalls across channels instead of
+        # being pinned to the caller's channel. Fall back to the legacy
+        # channel-presence derivation when no mode is passed (back-compat).
+        memory_mode = memory_mode or ("channel" if channel else "global")
         try:
             exclude_after = int(scope["exclude_after"]) if scope["exclude_after"] else None
         except (TypeError, ValueError):

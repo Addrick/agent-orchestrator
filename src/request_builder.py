@@ -90,6 +90,47 @@ def build_scope_tags(
     return tags
 
 
+def recall_scope_tags(
+    mode: "MemoryMode",
+    *,
+    channel: Optional[str],
+    server_id: Optional[str],
+    user_identifier: Optional[str],
+) -> Tuple[List[str], str]:
+    """Build the recall tag predicate + mode label for a persona's memory mode.
+
+    DP-253 — recall must scope the same way history does (`fetch_raw_history`),
+    not by blindly tagging the caller's channel. The returned tags are the
+    *recall filter* (Hindsight scopes purely on these); the label is forwarded
+    to the backend's `recall(memory_mode=...)` so the sqlite index applies the
+    matching WHERE branch instead of its legacy channel-presence guess.
+
+    - GLOBAL          → no scope tags (recall across all channels/servers)
+    - SERVER_WIDE     → server tag only (server_id may be None for the portal)
+    - PERSONAL        → user tag only
+    - TICKET_ISOLATED → no tags ("ticket"; sqlite recall returns nothing here)
+    - CHANNEL_ISOLATED (default) → channel (+ server + user), the prior behavior
+    """
+    if mode == MemoryMode.GLOBAL:
+        return [], "global"
+    if mode == MemoryMode.TICKET_ISOLATED:
+        return [], "ticket"
+    if mode == MemoryMode.SERVER_WIDE:
+        tags: List[str] = []
+        if server_id:
+            tags.append(f"server:{server_id}")
+        return tags, "server"
+    if mode == MemoryMode.PERSONAL:
+        tags = []
+        if user_identifier:
+            tags.append(f"user:{user_identifier}")
+        return tags, "personal"
+    # CHANNEL_ISOLATED / default — preserve the exact prior scoping.
+    return build_scope_tags(
+        channel=channel, server_id=server_id, user_identifier=user_identifier,
+    ), "channel"
+
+
 @dataclass
 class RequestContext:
     """Bundles resolved pipeline state flowing through generate_response phases."""
@@ -354,7 +395,14 @@ class RequestBuilder:
             logger.warning(f"### RequestBuilder: Skipping retrieval for {persona.get_name()} (no text content to embed)")
             return None, False
 
-        tag_filter = build_scope_tags(
+        # DP-253: scope the recall by the persona's isolation mode, mirroring
+        # `fetch_raw_history`. Previously this always emitted a `channel:` tag,
+        # which pinned recall to the caller's channel even for GLOBAL personas —
+        # so a GLOBAL persona queried from the portal (channel=web_ui) never saw
+        # memory ingested under any other channel. `recall_scope_tags` drops the
+        # channel tag for non-channel modes and returns the explicit mode label.
+        tag_filter, mode_label = recall_scope_tags(
+            persona.get_memory_mode(),
             channel=channel, server_id=server_id, user_identifier=user_identifier,
         )
         # Carry the sliding-window cutoff through the backend boundary as a
@@ -371,6 +419,7 @@ class RequestBuilder:
                 query=query_text,
                 k=MEMORY_MAX_SUMMARIES_IN_CONTEXT,
                 tag_filter=tag_filter,
+                memory_mode=mode_label,
             )
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Memory recall failed: {e}")

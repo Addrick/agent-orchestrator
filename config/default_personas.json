@@ -16,7 +16,7 @@
       "enabled_tools": [
         "google_grounding_search"
       ],
-      "memory_mode": "CHANNEL_ISOLATED",
+      "memory_mode": "GLOBAL",
       "meta_visible": false
     },
     {
