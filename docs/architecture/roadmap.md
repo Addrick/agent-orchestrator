@@ -1,6 +1,6 @@
 ---
 name: Project roadmap
-description: Prioritized derpr-python roadmap — grounded in actual needs, informed by OpenClaw/OpenCode comparisons and design conversations
+description: Prioritized agent-orchestrator roadmap — grounded in actual needs, informed by OpenClaw/OpenCode comparisons and design conversations
 type: project
 ---
 

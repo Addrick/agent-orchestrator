@@ -95,8 +95,8 @@ tests/                   4-tier pytest suite
 ### Local install
 
 ```bash
-git clone <repo-url> derpr-python
-cd derpr-python
+git clone <repo-url> agent-orchestrator
+cd agent-orchestrator
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1     # PowerShell — bash: source .venv/bin/activate
 pip install -r requirements.txt

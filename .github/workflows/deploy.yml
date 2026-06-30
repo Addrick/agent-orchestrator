@@ -15,7 +15,7 @@ permissions:
 
 env:
   # Use your actual image name here
-  IMAGE_NAME: ghcr.io/addrick/derpr-python
+  IMAGE_NAME: ghcr.io/addrick/orchestratr
   # NOTE: secrets MUST NOT live at workflow-level env — that injects them into the
   # `test` job, which runs on every pull_request. Same-repo-branch PRs receive full
   # secrets (only forks are withheld), so a PR could exfiltrate them via test code.
@@ -84,87 +84,41 @@ jobs:
           push: true
           tags: ${{ env.IMAGE_NAME }}:latest
 
-  # JOB 3: Deploy to self-hosted runner on .70 (AUX-DESKTOP)
-  # Only runs if build-and-push succeeds
+  # JOB 3: Deploy to self-hosted runner on CT100 (.70 — Proxmox LXC, Linux)
+  # Only runs if build-and-push succeeds.
+  #
+  # Post-cutover (2026-06-23) .70 is a Linux LXC, not the old Windows AUX-DESKTOP
+  # box, so the runner + steps are bash/compose, not PowerShell/docker-run. Prod
+  # is now defined by the compose file at $DEPLOY_DIR (source of truth, captured
+  # from the live containers during the migration). The deploy just pulls the
+  # fresh image and re-ups the chatbot service from that compose file. All env
+  # (Discord/provider keys, GH_TOKEN, CC_*, VOICE_*), the 3 named volumes
+  # (derpr_data / derpr_agy_home / derpr_cc_home), the 5004:5003 port map, and
+  # security_opt seccomp=unconfined (cc-* bubblewrap sandbox) live in
+  # docker-compose.yml + ./.env there — NOT in this workflow.
   deploy:
     needs: build-and-push
-    runs-on: [self-hosted, Windows, derpr]
+    runs-on: [self-hosted, Linux, derpr]
     permissions:
       packages: read
     env:
-      DOCKER_CONFIG: C:\Server\derpr\.docker
-      ENV_FILE: C:\Server\derpr\.env
-      DATA_VOLUME: derpr_data
-      # agy keeps OAuth tokens + workspace cache under ~/.gemini; without this
-      # volume every deploy wipes them and the agy route needs a re-login.
-      AGY_HOME_VOLUME: derpr_agy_home
-      # Claude Code (cc-*) caches its config/state under ~/.claude. Cache-only
-      # (auth is the CLAUDE_CODE_OAUTH_TOKEN env var, not this volume), but
-      # persisting it avoids re-priming on every deploy.
-      CC_HOME_VOLUME: derpr_cc_home
-      CONTAINER_NAME: chatbot
+      DEPLOY_DIR: /opt/configs/derpr
+      SERVICE: chatbot
 
     steps:
       - name: Log in to GHCR
-        shell: powershell
-        run: |
-          # Write GHCR auth into our pinned docker config dir, bypassing wincred
-          # (wincred fails for non-interactive sessions; see C:\Server\derpr\.docker\config.json)
-          $auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}"))
-          $cfg = @{
-            auths = @{ "ghcr.io" = @{ auth = $auth } }
-            credHelpers = @{ "ghcr.io" = ""; "docker.io" = ""; "index.docker.io" = ""; "registry-1.docker.io" = "" }
-          } | ConvertTo-Json -Compress -Depth 4
-          New-Item -ItemType Directory -Path $env:DOCKER_CONFIG -Force | Out-Null
-          [System.IO.File]::WriteAllText("$env:DOCKER_CONFIG\config.json", $cfg)
+        # Refresh GHCR auth each run so a rotated/expired host login can't block
+        # the pull. GITHUB_TOKEN is auto-scoped to this repo's packages (read).
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: Pull new image
-        shell: powershell
-        run: docker pull ${{ env.IMAGE_NAME }}:latest
+        working-directory: ${{ env.DEPLOY_DIR }}
+        run: docker compose pull ${{ env.SERVICE }}
 
-      - name: Stop and remove old container
-        shell: powershell
-        run: |
-          docker stop $env:CONTAINER_NAME 2>$null
-          docker rm   $env:CONTAINER_NAME 2>$null
-          exit 0   # ignore failures if container absent
-
-      - name: Run new container
-        shell: powershell
-        run: |
-          # cc-* (Claude Code) sandbox notes:
-          # - seccomp=unconfined: bubblewrap needs user-namespace syscalls that
-          #   Docker's default seccomp profile blocks in an unprivileged container.
-          # - CC_SANDBOX_WEAKER_NESTED=True: bind-mount the container's existing
-          #   /proc (can't mount a fresh one unprivileged). The container is Linux
-          #   (WSL2 backend) so bubblewrap works even though the host is Windows.
-          # - CLAUDE_CODE_OAUTH_TOKEN must be present in $ENV_FILE (.env) — a
-          #   1-year token from `claude setup-token`, set ONCE on a browser
-          #   machine. Without it cc-* auth fails; other personas still serve.
-          # - Port: Caddy (run separately via docker-compose) owns host 5003 and
-          #   terminates TLS for the voice web UI (HTTPS is required for browser
-          #   mic access), reverse-proxying to host.docker.internal:5004. So
-          #   publish the container's 5003 web port on host 5004, NOT 5003 —
-          #   binding 5003 here collides with Caddy ("port is already allocated").
-          docker run -d `
-            --name $env:CONTAINER_NAME `
-            --restart unless-stopped `
-            --env-file $env:ENV_FILE `
-            --security-opt seccomp=unconfined `
-            -e CC_SANDBOX=True `
-            -e CC_SANDBOX_WEAKER_NESTED=True `
-            -e CC_WORKSPACE_MODE=persona `
-            -e GH_TOKEN=${{ secrets.SELF_EDIT_REQUESTS }} `
-            -e CC_SANDBOX_ALLOWED_DOMAINS=github.com,api.github.com `
-            -e CC_FIXR_REPO_URL=https://github.com/Addrick/agent-orchestrator.git `
-            -e CC_FIXR_MODEL_ARG=haiku `
-            -v "${env:DATA_VOLUME}:/app/data" `
-            -v "${env:AGY_HOME_VOLUME}:/home/botuser/.gemini" `
-            -v "${env:CC_HOME_VOLUME}:/home/botuser/.claude" `
-            -p 5004:5003 `
-            ${{ env.IMAGE_NAME }}:latest
+      - name: Recreate chatbot from compose
+        working-directory: ${{ env.DEPLOY_DIR }}
+        run: docker compose up -d ${{ env.SERVICE }}
 
       - name: Prune unused images
-        shell: powershell
         run: docker image prune -f
 
