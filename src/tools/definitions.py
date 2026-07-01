@@ -87,7 +87,21 @@ def validate_tool_capabilities(tool: Dict[str, Any]) -> None:
                     f"Tool '{name}' capability '{required}' must be str, "
                     f"got {type(caps[required]).__name__}"
                 )
-    classifier = caps.get("irreversible_if")
+    # Optional: exfil_capable (bool). When present and False, a network tool is
+    # excluded from exfil-composition accounting (tool_policy Rules 2/3) — used
+    # for constrained-arg egress to trusted infra that can't carry a payload out.
+    if "exfil_capable" in caps and not isinstance(caps["exfil_capable"], bool):
+        raise ValueError(
+            f"Tool '{name}' capability 'exfil_capable' must be bool, "
+            f"got {type(caps['exfil_capable']).__name__}"
+        )
+
+    _validate_irreversible_if(name, caps.get("irreversible_if"))
+
+
+def _validate_irreversible_if(name: str, classifier: Any) -> None:
+    """Assert an optional `irreversible_if` is a `module:function` dotted path
+    that resolves to a callable. None is allowed (no classifier)."""
     if classifier is None:
         return
     if not isinstance(classifier, str) or ":" not in classifier:
