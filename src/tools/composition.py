@@ -22,7 +22,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Dict, List
 
 from src.tool_policy import ToolPolicy
-from src.tools.definitions import ALL_TOOL_DEFINITIONS
+from src.tools.definitions import get_all_tool_definitions
 
 if TYPE_CHECKING:
     from src.persona import Persona
@@ -31,17 +31,20 @@ logger = logging.getLogger(__name__)
 
 
 def resolve_policy_tools(policy: ToolPolicy) -> List[Dict[str, Any]]:
-    """The subset of ALL_TOOL_DEFINITIONS a policy exposes (allow + ask).
+    """The subset of the live tool catalog a policy exposes (allow + ask).
 
     Validation runs against the GLOBAL definitions (not binding-filtered),
     matching the original load-time check: ``['*']`` is always the full
-    toolset regardless of ``service_bindings``.
+    toolset regardless of ``service_bindings``. Reads the registry (not the
+    static ``ALL_TOOL_DEFINITIONS``) so runtime-registered tools are
+    composition-checked too.
     """
+    all_tools = get_all_tool_definitions()
     if policy.default == "allow" and "*" in policy.allow:
-        return ALL_TOOL_DEFINITIONS
+        return all_tools
     allowed = set(policy.allow + policy.ask)
     return [
-        t for t in ALL_TOOL_DEFINITIONS
+        t for t in all_tools
         if t.get("function", {}).get("name") in allowed
     ]
 

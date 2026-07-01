@@ -4,7 +4,7 @@ import asyncio
 import logging
 from typing import Any, Coroutine, Dict, List, Callable, Optional, cast
 
-from src.tools.definitions import ALL_TOOL_DEFINITIONS
+from src.tools.definitions import get_all_tool_definitions
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ class ToolManager:
     def get_tool_definitions(self) -> List[Dict[str, Any]]:
         """Returns definitions for registered tools plus non-callable tool flags."""
         return [
-            t for t in ALL_TOOL_DEFINITIONS
+            t for t in get_all_tool_definitions()
             if t.get('function', {}).get('name') in self._handlers
             or t.get('type') != 'function'
         ]

@@ -2,7 +2,7 @@
 
 import importlib
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, cast
 
 from src.tools.tool_defs import (
     SEARCH_TOOLS,
@@ -122,12 +122,6 @@ def _validate_irreversible_if(name: str, classifier: Any) -> None:
         )
 
 
-# Validate at import time so any consumer (engine, tests, tooling) catches
-# capability drift immediately.
-for _tool in ALL_TOOL_DEFINITIONS:
-    validate_tool_capabilities(_tool)
-
-
 # Model prefixes that do NOT support each tool.
 # Uses the same prefix logic as engine.py routing.
 # Tools not listed here are compatible with all providers.
@@ -137,19 +131,9 @@ MODEL_INCOMPATIBLE_TOOLS = {
     'google_grounding_search': GROUNDING_INCOMPATIBLE_PREFIXES,
 }
 
-# Derived from tool metadata — no manual maintenance needed when adding new tools.
-WRITE_TOOLS = {t['function']['name'] for t in ALL_TOOL_DEFINITIONS if t.get('is_write')}
-
 # Tools that ALWAYS require confirmation, even in AUTONOMOUS mode.
 # These are typically high-impact or destructive operations.
 ALWAYS_CONFIRM_TOOLS = {"merge_tickets", "delete_user"}
-
-# Name → definition index. ALL_TOOL_DEFINITIONS is static after import, and
-# the lookups below run per tool call inside the tool loop — a linear scan
-# per call adds up with batched calls over a 50+ tool catalog.
-_TOOL_DEFINITION_INDEX: Dict[str, Dict[str, Any]] = {
-    t.get("function", {}).get("name", ""): t for t in ALL_TOOL_DEFINITIONS
-}
 
 _DEFAULT_CAPABILITIES: Dict[str, Any] = {
     "produces_untrusted": False,
@@ -159,16 +143,100 @@ _DEFAULT_CAPABILITIES: Dict[str, Any] = {
 }
 
 
+class ToolDefinitionRegistry:
+    """The runtime tool-definition catalog: the static `ALL_TOOL_DEFINITIONS`
+    seed plus any definitions registered after import (DP-268: MCP-discovered
+    tools). Everything that must see the *live* toolset — the tool loop,
+    composition validation, ToolManager listing — reads through this registry
+    (via the module-level accessors below); `ALL_TOOL_DEFINITIONS` itself
+    remains the static seed only.
+
+    The name index and write-tool set are maintained incrementally because the
+    lookups run per tool call inside the tool loop — a linear scan per call
+    adds up with batched calls over a 50+ tool catalog.
+    """
+
+    def __init__(self, seed: List[Dict[str, Any]]) -> None:
+        self._definitions: List[Dict[str, Any]] = []
+        self._index: Dict[str, Dict[str, Any]] = {}
+        self._write_tools: set[str] = set()
+        for tool in seed:
+            self.register(tool)
+
+    def register(self, tool: Dict[str, Any]) -> None:
+        """Validate and add a tool definition to the live catalog.
+
+        Raises ValueError on a missing/invalid `capabilities` block or on a
+        name collision — a dynamically discovered tool must never shadow an
+        existing one (namespacing is the caller's job, e.g. `mcp__<server>__`).
+        Non-callable entries (no function name, e.g. `google_grounding`) are
+        listed but not indexed.
+        """
+        validate_tool_capabilities(tool)
+        name = tool.get("function", {}).get("name")
+        if name:
+            if name in self._index:
+                raise ValueError(f"Tool '{name}' is already registered")
+            self._index[name] = tool
+            if tool.get("is_write"):
+                self._write_tools.add(name)
+        self._definitions.append(tool)
+
+    def all_definitions(self) -> List[Dict[str, Any]]:
+        """The live toolset (static seed + dynamic). Treat as read-only."""
+        return self._definitions
+
+    def get(self, tool_name: str) -> Optional[Dict[str, Any]]:
+        return self._index.get(tool_name)
+
+    def capabilities(self, tool_name: str) -> Dict[str, Any]:
+        tool = self._index.get(tool_name)
+        if tool is not None:
+            caps = tool.get("capabilities")
+            if caps is not None:
+                return cast(Dict[str, Any], caps)
+        return dict(_DEFAULT_CAPABILITIES)
+
+    def is_write(self, tool_name: str) -> bool:
+        return tool_name in self._write_tools
+
+
+# Import-time seeding doubles as the validation pass: any capability drift in
+# the static definitions raises immediately for every consumer (engine, tests,
+# tooling), exactly like the former module-level validation loop.
+_REGISTRY = ToolDefinitionRegistry(ALL_TOOL_DEFINITIONS)
+
+
+def get_registry() -> ToolDefinitionRegistry:
+    return _REGISTRY
+
+
+def get_all_tool_definitions() -> List[Dict[str, Any]]:
+    """The live toolset: static seed + dynamically registered definitions.
+    Readers that must see runtime-registered tools (tool loop, composition,
+    ToolManager) use this, NOT `ALL_TOOL_DEFINITIONS`."""
+    return _REGISTRY.all_definitions()
+
+
+def register_tool_definition(tool: Dict[str, Any]) -> None:
+    """Register a definition discovered after import (validates; rejects
+    duplicate names)."""
+    _REGISTRY.register(tool)
+
+
+def is_write_tool(tool_name: str) -> bool:
+    """Whether a tool is flagged `is_write` (parks for audit). Replaces the
+    former import-time `WRITE_TOOLS` set so runtime-registered tools are
+    covered."""
+    return _REGISTRY.is_write(tool_name)
+
+
 def get_tool_capabilities(tool_name: str) -> Dict[str, Any]:
     """
     Retrieves the security capabilities block for a given tool name.
     Returns a default block (all False) if the tool is not found.
     """
-    tool = _TOOL_DEFINITION_INDEX.get(tool_name)
-    if tool is not None:
-        from typing import cast
-        return cast(Dict[str, Any], tool.get("capabilities", dict(_DEFAULT_CAPABILITIES)))
-    return dict(_DEFAULT_CAPABILITIES)
+    return _REGISTRY.capabilities(tool_name)
 
 
 def get_tool_definition(tool_name: str) -> Optional[Dict[str, Any]]:
@@ -176,7 +244,7 @@ def get_tool_definition(tool_name: str) -> Optional[Dict[str, Any]]:
     Retrieves the full JSON definition for a given tool name.
     Returns None if the tool is not found.
     """
-    return _TOOL_DEFINITION_INDEX.get(tool_name)
+    return _REGISTRY.get(tool_name)
 
 
 def is_irreversible(tool_name: str, args: Dict[str, Any]) -> bool:
