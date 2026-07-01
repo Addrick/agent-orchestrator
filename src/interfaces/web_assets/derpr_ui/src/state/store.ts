@@ -369,7 +369,7 @@ export function usePortalStore() {
       setActiveChannel(channel)
       activeChannelRef.current = channel
       if (persona) {
-        await refreshTranscript(persona.name)
+        await refreshTranscript(persona.name, channel)
         try {
           if (ltmOn) setLtmBlock(await api.getLtmBlock(persona.name, '', channel))
         } catch {
@@ -491,7 +491,7 @@ export function usePortalStore() {
           mutated: Boolean(resp.mutated),
         })
         if (resp.mutated) await refreshPersona(persona.name)
-        await refreshTranscript(persona.name)
+        await refreshTranscript(persona.name, activeChannel)
         return
       }
 
@@ -564,7 +564,7 @@ export function usePortalStore() {
     // Composer `streaming` prop, so omitting it leaves the composer stuck on
     // the "■ stop" button and the StreamRow cursor blinking forever.
     setStream((s) => ({ ...s, active: false, aborted: true, userText: null }))
-    if (persona) await refreshTranscript(persona.name)
+    if (persona) await refreshTranscript(persona.name, activeChannelRef.current)
   }, [persona, refreshTranscript])
 
   // Dismiss re-syncs: an errored turn skips the onDone re-fetch, so the user
@@ -572,7 +572,7 @@ export function usePortalStore() {
   const dismissStream = useCallback(() => {
     streamingRef.current = false
     setStream(EMPTY_STREAM)
-    if (persona) void refreshTranscript(persona.name)
+    if (persona) void refreshTranscript(persona.name, activeChannelRef.current)
   }, [persona, refreshTranscript])
   const dismissDevRow = useCallback(() => setDevRow(null), [])
 
@@ -586,7 +586,7 @@ export function usePortalStore() {
   const editRow = useCallback(
     async (id: number, content: string) => {
       await api.patchInteraction(id, content)
-      if (persona) await refreshTranscript(persona.name)
+      if (persona) await refreshTranscript(persona.name, activeChannelRef.current)
     },
     [persona, refreshTranscript],
   )
@@ -594,7 +594,7 @@ export function usePortalStore() {
   const deleteRow = useCallback(
     async (id: number) => {
       await api.deleteInteraction(id)
-      if (persona) await refreshTranscript(persona.name)
+      if (persona) await refreshTranscript(persona.name, activeChannelRef.current)
     },
     [persona, refreshTranscript],
   )

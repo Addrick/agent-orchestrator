@@ -16,7 +16,9 @@ export function Channels({ store }: Props) {
   const onNew = () => {
     const name = window.prompt('New channel name (web_ui prefix added if absent):')
     if (name === null) return
-    void newChannel(name)
+    void newChannel(name).catch((err) => {
+      console.error('Failed to create channel:', err)
+    })
   }
 
   const groups = channels
