@@ -9,13 +9,16 @@ interface Props {
   onSend: (text: string) => void
   onAbort: () => void
   streaming: boolean
+  // Fired as the draft changes so the store can debounce-fetch the LTM preview
+  // for the real message text (DP-257). Preview-only — not the submit path.
+  onDraftChange: (text: string) => void
 }
 
 // Auto-send preference persists across reloads: off by default (dictation goes
 // into the draft so STT errors can be fixed), flip on once dictation is trusted.
 const AUTOSEND_KEY = 'derpr.voice.autoSend'
 
-export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming }: Props) {
+export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming, onDraftChange }: Props) {
   const [text, setText] = useState('')
   const [autoSend, setAutoSend] = useState(
     () => localStorage.getItem(AUTOSEND_KEY) === '1',
@@ -44,6 +47,7 @@ export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming }: Pro
 
   const grow = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setText(e.target.value)
+    onDraftChange(e.target.value)
     const el = e.target
     el.style.height = 'auto'
     el.style.height = Math.min(el.scrollHeight, 200) + 'px'
@@ -51,7 +55,14 @@ export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming }: Pro
 
   // Append dictated text to the draft and resize the textarea to fit.
   const appendDraft = (t: string) => {
-    setText((prev) => (prev ? prev.replace(/\s+$/, '') + ' ' : '') + t)
+    setText((prev) => {
+      const next = (prev ? prev.replace(/\s+$/, '') + ' ' : '') + t
+      // Fired from the updater so the preview sees the appended result without a
+      // second text mirror; the store debounces, so a StrictMode double-call is
+      // harmless. Use the ref so the stable routeDictation closure isn't stale.
+      onDraftChangeRef.current(next)
+      return next
+    })
     const el = ref.current
     if (el)
       requestAnimationFrame(() => {
@@ -66,10 +77,12 @@ export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming }: Pro
   const autoSendRef = useRef(autoSend)
   const streamingRef = useRef(streaming)
   const onSendRef = useRef(onSend)
+  const onDraftChangeRef = useRef(onDraftChange)
   useEffect(() => {
     autoSendRef.current = autoSend
     streamingRef.current = streaming
     onSendRef.current = onSend
+    onDraftChangeRef.current = onDraftChange
   })
 
   const routeDictation = useCallback((t: string) => {

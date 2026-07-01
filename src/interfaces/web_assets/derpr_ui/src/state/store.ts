@@ -160,6 +160,15 @@ export function usePortalStore() {
   useEffect(() => {
     activePersonaRef.current = activePersona
   }, [activePersona])
+  // Mirrors for the debounced LTM-preview callback (DP-257): the async fetch
+  // fired off a keystroke must read the current persona/toggle, not the values
+  // closed over when the debounce was armed.
+  const personaRef = useRef(persona)
+  const ltmOnRef = useRef(ltmOn)
+  useEffect(() => {
+    personaRef.current = persona
+    ltmOnRef.current = ltmOn
+  })
 
   // ---- fired-timer alarms (SSE back-channel) ------------------------
   // A timer set from the portal fires back here: the engine pushes the alarm
@@ -322,6 +331,46 @@ export function usePortalStore() {
       setBanner('Failed to update LTM setting — reverted')
     }
   }, [ltmOn, ltmBlock, persona])
+
+  // ---- LTM preview keyed on the composer draft (DP-257) -------------
+  // The panel/token-count otherwise show an empty-query block, which the
+  // backend resolves to "most recent history turn" — for a GLOBAL persona that
+  // drifts across channels and rarely matches what the user is about to send.
+  // As the user types we debounce-fetch the block for the real draft so the
+  // preview mirrors the per-message recall the engine recomputes at submit.
+  // Preview-only: the submit path still sends derpr_user_text untouched.
+  const ltmPreviewTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const ltmPreviewSeq = useRef(0)
+  const previewLtm = useCallback((draft: string) => {
+    if (ltmPreviewTimer.current) clearTimeout(ltmPreviewTimer.current)
+    const trimmed = draft.trim()
+    // Blank draft → leave the existing empty-query preview in place; don't fire.
+    if (!trimmed) return
+    ltmPreviewTimer.current = setTimeout(() => {
+      const p = personaRef.current
+      if (!p || !ltmOnRef.current) return
+      const seq = ++ltmPreviewSeq.current
+      const pName = p.name
+      const chan = activeChannelRef.current
+      void (async () => {
+        try {
+          const blk = await api.getLtmBlock(pName, trimmed, chan)
+          // Drop a response superseded by a newer keystroke, an LTM-off toggle,
+          // or a persona/channel switch that landed while this was in flight.
+          if (
+            seq !== ltmPreviewSeq.current ||
+            !ltmOnRef.current ||
+            personaRef.current?.name !== pName ||
+            activeChannelRef.current !== chan
+          )
+            return
+          setLtmBlock(blk)
+        } catch {
+          /* preview-only — keep the last block on a transient fetch failure */
+        }
+      })()
+    }, 400)
+  }, [])
 
   // ---- persona switch -----------------------------------------------
   const switchPersona = useCallback(
@@ -692,6 +741,7 @@ export function usePortalStore() {
     fetchAssembled,
     setViewMode,
     toggleLtm,
+    previewLtm,
     switchPersona,
     createPersona,
     switchChannel,

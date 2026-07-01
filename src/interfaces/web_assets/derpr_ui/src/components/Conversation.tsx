@@ -17,6 +17,7 @@ export function Conversation({ store }: { store: PortalStore }) {
     viewMode,
     setViewMode,
     toggleLtm,
+    previewLtm,
     stream,
     devRow,
     loading,
@@ -264,6 +265,7 @@ export function Conversation({ store }: { store: PortalStore }) {
         onSend={(t) => sendTurn(t)}
         onAbort={abortTurn}
         streaming={stream.active}
+        onDraftChange={previewLtm}
       />
     </div>
   )
