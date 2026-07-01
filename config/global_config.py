@@ -398,8 +398,8 @@ VOICE_VAD_SILENCE_MS = int(os.environ.get("VOICE_VAD_SILENCE_MS", "700"))
 # PVE_MODEL_UNITS — JSON object mapping a friendly model name → its systemd unit
 #   on PVE_MODEL_HOST_VMID. Exactly one unit is enabled/active at a time (all bind
 #   :5001). Swapping = disable --now the current, enable --now the target.
-#   Defaults reflect the CT101 units known as of 2026-06-30; override in .env when
-#   units change (verify against the box — do not trust these blindly).
+#   Defaults are the real CT101 units verified 2026-07-01 (`systemctl list-unit-files`
+#   + each unit's --model path); override in .env when units change.
 PVE_TOOLS_ENABLED = os.environ.get("PVE_TOOLS_ENABLED", "False").lower() in ("true", "1", "yes", "on")
 PVE_SSH_HOST = os.environ.get("PVE_SSH_HOST", "10.0.0.71")
 PVE_SSH_USER = os.environ.get("PVE_SSH_USER", "root")
@@ -409,10 +409,13 @@ PVE_MODEL_HOST_VMID = os.environ.get("PVE_MODEL_HOST_VMID", "101")
 PVE_MODEL_UNITS: Dict[str, str] = json.loads(
     os.environ.get("PVE_MODEL_UNITS", "")
     or json.dumps({
-        "fable": "koboldcpp.service",
-        "gemma": "gemma-4-31b-abliterated.service",
-        "qwen-a3b": "qwen36a3b.service",
-        "qwen-27b": "qwen35-27b.service",
+        "fable": "koboldcpp-fable-q6xl.service",       # Gemma-4-31B-Fable-5 Q6_K_XL (active)
+        "fable-q5": "koboldcpp-fable-q5.service",       # Fable-5 Q5_K_M
+        "fable-q8": "koboldcpp-fable-q8.service",       # Fable-5 Q8_0
+        "fable-q4": "koboldcpp.service",                # Fable-5 Q4_K_M (generic unit name)
+        "gemma": "koboldcpp-gemma-abliterated.service",  # gemma-4-31b-abliterated Q4_K_M
+        "qwen-27b": "koboldcpp-qwen.service",           # Qwen3.5-27B-Uncensored Q4_K_M
+        "qwen-a3b": "koboldcpp-qwen36a3b.service",      # Qwen3.6-35B-A3B-Uncensored Q4_K_M
     })
 )
 
