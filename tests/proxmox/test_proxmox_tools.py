@@ -18,12 +18,29 @@ from src.proxmox.ssh import SSHError, SSHResult, SSHRunner, _reject_bad_args
 class FakeRunner:
     """Stand-in for SSHRunner: records calls, returns queued/canned results."""
 
-    def __init__(self, result: SSHResult | None = None) -> None:
+    def __init__(
+        self,
+        result: SSHResult | None = None,
+        present_units: set[str] | None = None,
+    ) -> None:
         self.calls: List[List[str]] = []
         self._result = result or SSHResult(0, "ok-stdout", "")
+        # None => every unit's model file "exists"; else only these unit names.
+        self._present = present_units
 
     async def run(self, argv: Sequence[str]) -> SSHResult:
-        self.calls.append(list(argv))
+        a = list(argv)
+        self.calls.append(a)
+        # `systemctl show <unit> --property=ExecStart --value` → synth a line that
+        # embeds a --model path derived from the unit name.
+        if "show" in a and "--property=ExecStart" in a:
+            unit = next((x for x in a if x.endswith(".service")), "u.service")
+            return SSHResult(0, f"argv[]=/opt/kcpp --model /models/{unit}.gguf ;", "")
+        # `test -f /models/<unit>.gguf` → present per self._present.
+        if len(a) >= 2 and a[-2] == "-f":
+            unit = a[-1].split("/")[-1][:-5]  # strip ".gguf"
+            ok = self._present is None or unit in self._present
+            return SSHResult(0 if ok else 1, "", "" if ok else "No such file")
         return self._result
 
 
@@ -181,3 +198,30 @@ def test_ssh_runner_config_defaults(monkeypatch):
     monkeypatch.setattr(global_config, "PVE_SSH_TIMEOUT", 9.0)
     r = SSHRunner()
     assert r._host == "1.2.3.4" and r._user == "root" and r._key == "/k" and r._timeout == 9.0
+
+
+# -- DP-264: model availability filter + swap guard --------------------------
+
+@pytest.mark.asyncio
+async def test_list_models_omits_units_with_missing_model_file(enabled):
+    """Only units whose gguf is on disk are listed (koboldcpp present, gemma not)."""
+    runner = FakeRunner(present_units={"koboldcpp.service"})
+    h = ProxmoxToolHandler(runner)  # type: ignore[arg-type]
+    res = await h._list_models()
+    assert res["status"] == "ok"
+    names = {m["name"] for m in res["models"]}
+    assert names == {"fable"}  # gemma omitted (no file)
+
+
+@pytest.mark.asyncio
+async def test_set_active_model_refuses_when_target_file_missing(enabled):
+    """Swap to a unit with no gguf is refused; current model left untouched
+    (no disable/enable issued)."""
+    # target for "fable" is koboldcpp.service; mark only gemma present.
+    runner = FakeRunner(present_units={"gemma.service"})
+    h = ProxmoxToolHandler(runner)  # type: ignore[arg-type]
+    res = await h._set_active_model("fable")
+    assert res["status"] == "error"
+    assert "not on disk" in res["message"]
+    # crucially: nothing was disabled or enabled
+    assert not any("disable" in c or "enable" in c for c in runner.calls)

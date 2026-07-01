@@ -516,12 +516,12 @@ straight through.
 | Tool | Type | Description |
 |------|------|-------------|
 | `pve_status` | Read | Node uptime + `pct list` (containers) + `qm list` (VMs) with run state. Use to find guest ids before acting. |
-| `list_models` | Read | Configured koboldcpp models for `:5001` and which one is currently active on the GPU container. |
+| `list_models` | Read | koboldcpp models for `:5001` that are **immediately available** (their model file is on disk) and which one is active. Configured units whose model file is missing are omitted — they can't be loaded. |
 | `reboot_node` | **Write (parked, irreversible)** | Reboot the metal — takes down every guest on it. Last resort. |
 | `reboot_guest` | **Write (parked)** | Reboot one guest by `vmid` + `kind` (`ct`/`vm`). |
 | `start_guest` | **Write (parked)** | Start a stopped guest. |
 | `stop_guest` | **Write (parked)** | Hard-stop a running guest (power-off, not graceful shutdown). |
-| `set_active_model` | **Write (parked)** | Swap the active model on `:5001`: disables the current unit, enables+starts the target (only one runs at a time). Pass a `name` from `list_models`. |
+| `set_active_model` | **Write (parked)** | Swap the active model on `:5001`: disables the current unit, enables+starts the target (only one runs at a time). Pass a `name` from `list_models`. Pre-flight guard: if the target's model file isn't on disk it **refuses and leaves the current model running** (never takes `:5001` down). |
 
 Disabled by default. Enable with `PVE_TOOLS_ENABLED=true` and mount the pve SSH
 key into the container. Config knobs: `PVE_SSH_HOST`/`PVE_SSH_USER`/`PVE_SSH_KEY`/

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict, List, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from config import global_config
 from src.proxmox.ssh import SSHError, SSHRunner
@@ -83,6 +83,28 @@ class ProxmoxToolHandler:
             }
         return {"status": "ok", "stdout": res.stdout, "stderr": res.stderr}
 
+    # -- model availability helpers ------------------------------------------
+
+    async def _model_path(self, vmid: str, unit: str) -> Optional[str]:
+        """Resolve a unit's ``--model`` gguf path from its ExecStart, or None."""
+        res = await self._run([
+            "pct", "exec", vmid, "--",
+            "systemctl", "show", unit, "--property=ExecStart", "--value",
+        ])
+        toks = (res.get("stdout") or "").split()
+        for i, t in enumerate(toks):
+            if t == "--model" and i + 1 < len(toks):
+                return toks[i + 1]
+        return None
+
+    async def _model_present(self, vmid: str, unit: str) -> bool:
+        """True when the unit's model gguf exists on disk (immediately loadable)."""
+        path = await self._model_path(vmid, unit)
+        if not path:
+            return False
+        res = await self._run(["pct", "exec", vmid, "--", "test", "-f", path])
+        return res.get("status") == "ok"
+
     # -- read tools ----------------------------------------------------------
 
     async def _pve_status(self) -> Dict[str, Any]:
@@ -110,19 +132,20 @@ class ProxmoxToolHandler:
         vmid = global_config.PVE_MODEL_HOST_VMID
         if not self._enabled():
             return _err("Proxmox tools are disabled (set PVE_TOOLS_ENABLED=true).")
-        # Report configured names + which unit is active on the GPU container.
-        active: Dict[str, str] = {}
+        # Only surface models whose gguf is actually on disk (immediately
+        # loadable). Units whose model file is missing are omitted — enabling one
+        # would fail to start and take :5001 down. (A separate future tool will
+        # download+deploy ggufs from HF — see DP-265 note.)
+        models: List[Dict[str, Any]] = []
         for name, unit in units.items():
-            res = await self._run(["pct", "exec", vmid, "--", "systemctl", "is-active", unit])
-            active[name] = (res.get("stdout") or res.get("message") or "unknown").strip()
-        return {
-            "status": "ok",
-            "host_vmid": vmid,
-            "models": [
-                {"name": name, "unit": unit, "state": active.get(name, "unknown")}
-                for name, unit in units.items()
-            ],
-        }
+            if not await self._model_present(vmid, unit):
+                continue
+            state_res = await self._run(
+                ["pct", "exec", vmid, "--", "systemctl", "is-active", unit]
+            )
+            state = (state_res.get("stdout") or state_res.get("message") or "unknown").strip()
+            models.append({"name": name, "unit": unit, "state": state})
+        return {"status": "ok", "host_vmid": vmid, "models": models}
 
     # -- write tools (parked for confirmation) -------------------------------
 
@@ -163,6 +186,13 @@ class ProxmoxToolHandler:
             )
         if not self._enabled():
             return _err("Proxmox tools are disabled (set PVE_TOOLS_ENABLED=true).")
+        # Pre-flight: never disable the running model to enable a unit that can't
+        # start. If the target's gguf isn't on disk, refuse and leave :5001 as-is.
+        if not await self._model_present(vmid, target):
+            return _err(
+                f"model file for {name!r} (unit {target}) is not on disk; "
+                "not switching — current model left running."
+            )
         # Disable every other configured unit (all bind :5001 — only one may run),
         # then enable+start the target. Idempotent: re-selecting the active model
         # just re-enables it.
