@@ -40,7 +40,7 @@ def wired_system():
             persona_name="test_persona", model_name="gemini-2.5-flash",
             prompt="test", enabled_tools=["*"],
             memory_mode=MemoryMode.CHANNEL_ISOLATED, history_messages=10,
-            service_bindings=["zammad", "agents", "fixr", "voice"],
+            service_bindings=["zammad", "agents", "fixr", "voice", "proxmox"],
         ),
     }
 
@@ -63,6 +63,10 @@ def wired_system():
     # DP-238 voice command subsystem (timer tools behind the "voice" binding)
     from src.voice import VoiceIntegration
     chat_system.register_service(VoiceIntegration(notification_router))
+
+    # DP-262 Proxmox management subsystem (tools behind the "proxmox" binding)
+    from src.proxmox import ProxmoxIntegration
+    chat_system.register_service(ProxmoxIntegration())
 
     try:
         yield chat_system

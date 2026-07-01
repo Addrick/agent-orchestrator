@@ -502,6 +502,32 @@ so it never contends with the GPU serving the local LLM. Config: `VOICE_WEB_ENAB
 path also reads `VOICE_ENABLED`, `VOICE_DISCORD_CHANNEL_ID`, `VOICE_VAD_SILENCE_MS`.
 All default-off.
 
+### Proxmox Tools (requires `service_bindings: ["proxmox"]`)
+
+Manage the Proxmox host that runs the stack: reboot the node or a guest, start/stop
+a guest, and swap which koboldcpp model serves `:5001` on the GPU container. Every
+action executes over SSH to the pve node (`pct`/`qm`/`systemctl`/`reboot`); all
+**destructive** tools are write tools, so they **park for your approval** before
+running (`reboot_node` is additionally flagged irreversible). Read tools run
+straight through.
+
+| Tool | Type | Description |
+|------|------|-------------|
+| `pve_status` | Read | Node uptime + `pct list` (containers) + `qm list` (VMs) with run state. Use to find guest ids before acting. |
+| `list_models` | Read | Configured koboldcpp models for `:5001` and which one is currently active on the GPU container. |
+| `reboot_node` | **Write (parked, irreversible)** | Reboot the metal — takes down every guest on it. Last resort. |
+| `reboot_guest` | **Write (parked)** | Reboot one guest by `vmid` + `kind` (`ct`/`vm`). |
+| `start_guest` | **Write (parked)** | Start a stopped guest. |
+| `stop_guest` | **Write (parked)** | Hard-stop a running guest (power-off, not graceful shutdown). |
+| `set_active_model` | **Write (parked)** | Swap the active model on `:5001`: disables the current unit, enables+starts the target (only one runs at a time). Pass a `name` from `list_models`. |
+
+Disabled by default. Enable with `PVE_TOOLS_ENABLED=true` and mount the pve SSH
+key into the container. Config knobs: `PVE_SSH_HOST`/`PVE_SSH_USER`/`PVE_SSH_KEY`/
+`PVE_SSH_TIMEOUT` (the node + how to reach it), `PVE_MODEL_HOST_VMID` (GPU
+container id whose systemd units bind `:5001`), and `PVE_MODEL_UNITS` (JSON map of
+friendly model name → systemd unit). When disabled, every tool call returns a
+clear "disabled" error instead of attempting SSH.
+
 ### Memory Tools (no service binding required)
 
 Available to any persona with `enabled_tools: ["*"]` (e.g., `joy`, `it-help`). These tools interact with the long-term memory store built by MemoryAgent.
