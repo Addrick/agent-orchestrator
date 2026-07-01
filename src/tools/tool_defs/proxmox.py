@@ -14,13 +14,16 @@ All results originate from infra we control (not attacker text) →
 from typing import Any, Dict, List
 
 
-def _caps(*, irreversible: bool = False) -> Dict[str, Any]:
-    return {
+def _caps(*, irreversible: bool = False, exfil_capable: bool = True) -> Dict[str, Any]:
+    caps: Dict[str, Any] = {
         "produces_untrusted": False,
         "irreversible": irreversible,
         "locality": "network",
         "sensitivity": "internal",
     }
+    if not exfil_capable:
+        caps["exfil_capable"] = False
+    return caps
 
 
 _GUEST_PARAMS = {
@@ -131,7 +134,11 @@ PROXMOX_TOOLS: List[Dict[str, Any]] = [
         "type": "function",
         "is_write": True,
         "service_binding": "proxmox",
-        "capabilities": _caps(),
+        # exfil_capable=False: arg is a name from a fixed config map, no payload
+        # can ride out over the SSH → not a data-exfil vector, so it must never
+        # trip the exfil-composition rules. Destruction risk is nil (reversible
+        # model swap) and any write still parks for confirmation.
+        "capabilities": _caps(exfil_capable=False),
         "function": {
             "name": "set_active_model",
             "description": (

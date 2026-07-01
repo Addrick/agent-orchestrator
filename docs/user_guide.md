@@ -306,6 +306,8 @@ To prevent sophisticated injection attacks, the system refuses to load any perso
 - **`untrusted:read` + `network:write`**: Prevents untrusted data from being exfiltrated to a network endpoint.
 - **`pii:read` + `network:*`**: Prevents sensitive Personal Identifiable Information (PII) from being sent over the network.
 
+A `network` tool may opt out of the exfiltration rules (the last two above) with `capabilities.exfil_capable: false` when its egress carries no model-controlled payload — e.g. `set_active_model`, whose only argument is a name from a fixed config map, so nothing can ride out over its SSH. Such tools can freely combine with `untrusted:read`/`pii:read` tools. This affects only *exfiltration* accounting; any destructive effect is still gated by the write-audit (parked for confirmation). The default is `true`, so every other tool is unchanged.
+
 ### Irreversibility Flags
 Some tools are marked as **IRREVERSIBLE** (e.g., `delete_user`). Others may be dynamically flagged based on their arguments—for example, `add_note_to_ticket` is flagged as irreversible if the note is visible to a customer (`internal: false`). These flags are surfaced in the approval dialogue to highlight high-stakes actions.
 
