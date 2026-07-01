@@ -107,23 +107,35 @@ def _configure_push_auth(clone_dir: str) -> None:
     authenticate to GitHub without writing any secret to disk.
 
     The base clone is fetched anonymously (agent-orchestrator is public), but a
-    dispatched agent must PUSH its bugfix branch to open a PR. `gh` reads
-    ``GH_TOKEN`` for its own API calls, but the `git push` that `gh pr create`
-    runs uses git's credential system — unconfigured in a fresh clone. We point
-    git's credential helper at `gh` (`gh auth git-credential`), which resolves
-    ``GH_TOKEN`` from the environment at push time. The token therefore never
-    lands in `.git/config` (matching the no-secret-on-disk rule in _SEED_FILES);
-    only the helper *reference* is stored. Shared `.git/config` → every worktree
-    inherits it. Idempotent: re-running just rewrites the same config value.
+    dispatched agent must PUSH its bugfix branch to open a PR. The `git push`
+    uses git's credential system — unconfigured in a fresh clone. We install an
+    inline shell credential helper that emits ``x-access-token`` + ``$GH_TOKEN``
+    (read from the environment) on git's ``get`` request. The token therefore
+    never lands in `.git/config` (matching the no-secret-on-disk rule in
+    _SEED_FILES); only the helper *script* is stored. Shared `.git/config` →
+    every worktree inherits it. Idempotent: re-running rewrites the same value.
+
+    We deliberately do NOT use `gh auth git-credential`: the deployed chatbot
+    container ships git but not the `gh` CLI, so that helper fails
+    (`gh: not found`) and every dispatched push dies with "could not read
+    Username for https://github.com". The inline helper needs only `git` + `sh`
+    (both present) and the ``GH_TOKEN`` already inherited by the child.
 
     Non-fatal on failure: the agent can still diagnose/commit, just not push.
     """
+    # git runs a `!`-prefixed helper via sh, calling `<helper> get`; it expects
+    # `username=`/`password=` on stdout. Reading $GH_TOKEN at call time keeps the
+    # token out of .git/config. Single-quoted so Python interpolates nothing.
+    helper = (
+        '!f() { test "$1" = get && '
+        'printf "username=x-access-token\\npassword=%s\\n" "$GH_TOKEN"; }; f'
+    )
     try:
         _run_git(
             [
                 "config",
                 "credential.https://github.com.helper",
-                "!gh auth git-credential",
+                helper,
             ],
             cwd=clone_dir,
         )
