@@ -12,6 +12,7 @@ from src.tools.tool_defs.agents import AGENT_TOOLS
 from src.tools.tool_defs.memory import MEMORY_TOOLS
 from src.tools.tool_defs.fixr import FIXR_TOOLS
 from src.tools.tool_defs.voice import VOICE_TOOLS
+from src.tools.tool_defs.proxmox import PROXMOX_TOOLS
 
 __all__ = [
     "SEARCH_TOOLS",
@@ -20,4 +21,5 @@ __all__ = [
     "MEMORY_TOOLS",
     "FIXR_TOOLS",
     "VOICE_TOOLS",
+    "PROXMOX_TOOLS",
 ]

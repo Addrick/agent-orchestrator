@@ -11,6 +11,7 @@ from src.tools.tool_defs import (
     MEMORY_TOOLS,
     FIXR_TOOLS,
     VOICE_TOOLS,
+    PROXMOX_TOOLS,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,7 @@ when present, runtime ORs its result with `irreversible`.
 # is navigability-only; all capability/helper logic below stays here.
 ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = (
     SEARCH_TOOLS + ZAMMAD_TOOLS + AGENT_TOOLS + MEMORY_TOOLS + FIXR_TOOLS + VOICE_TOOLS
+    + PROXMOX_TOOLS
 )
 
 

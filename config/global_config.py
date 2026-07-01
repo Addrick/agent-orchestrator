@@ -1,5 +1,7 @@
+import json
 import os
 from pathlib import Path
+from typing import Dict
 from dotenv import load_dotenv
 
 # =============================================================================
@@ -373,6 +375,46 @@ VOICE_NOTIFY_CHANNEL_ID = os.environ.get("VOICE_NOTIFY_CHANNEL_ID", "")
 VOICE_STT_MODEL = os.environ.get("VOICE_STT_MODEL", "base")
 VOICE_WAKEWORD = os.environ.get("VOICE_WAKEWORD", "")
 VOICE_VAD_SILENCE_MS = int(os.environ.get("VOICE_VAD_SILENCE_MS", "700"))
+
+# Proxmox management tools (DP-262). Bot-callable ops over SSH to the pve node:
+# node/guest reboot + start/stop and swapping the active koboldcpp model on the
+# GPU container's :5001. All destructive tools are is_write → parked for human
+# confirmation. Default-off: with no reachable key/host the tools register but
+# every call returns a clear error (they never crash startup).
+#
+# PVE_TOOLS_ENABLED — master switch. When false the ProxmoxIntegration still
+#   registers (so the startup-wiring contract holds) but tool calls short-circuit
+#   with a "disabled" error instead of attempting SSH.
+# PVE_SSH_HOST / PVE_SSH_USER — the Proxmox node the tools drive (NOT a guest).
+#   pct/qm/systemctl/reboot all run here; the node reaches its own guests.
+# PVE_SSH_KEY — path (inside the derpr container) to the private key mounted
+#   read-only from the host's ~/.ssh/pve_derpr. Register this ref in the vault so
+#   the egress scrubber redacts it (DP-225). Blast radius should be bounded on
+#   the pve side with a forced-command authorized_keys entry (fast-follow).
+# PVE_SSH_TIMEOUT — seconds before an SSH op is abandoned (ConnectTimeout + hard
+#   asyncio wait). Keeps a hung node from stalling the tool loop.
+# PVE_MODEL_HOST_VMID — the container id whose systemd koboldcpp units bind :5001
+#   (CT101 GPU box). set_active_model/list_models run `pct exec <vmid> -- ...`.
+# PVE_MODEL_UNITS — JSON object mapping a friendly model name → its systemd unit
+#   on PVE_MODEL_HOST_VMID. Exactly one unit is enabled/active at a time (all bind
+#   :5001). Swapping = disable --now the current, enable --now the target.
+#   Defaults reflect the CT101 units known as of 2026-06-30; override in .env when
+#   units change (verify against the box — do not trust these blindly).
+PVE_TOOLS_ENABLED = os.environ.get("PVE_TOOLS_ENABLED", "False").lower() in ("true", "1", "yes", "on")
+PVE_SSH_HOST = os.environ.get("PVE_SSH_HOST", "10.0.0.71")
+PVE_SSH_USER = os.environ.get("PVE_SSH_USER", "root")
+PVE_SSH_KEY = os.environ.get("PVE_SSH_KEY", "/run/secrets/pve_derpr")
+PVE_SSH_TIMEOUT = float(os.environ.get("PVE_SSH_TIMEOUT", "20"))
+PVE_MODEL_HOST_VMID = os.environ.get("PVE_MODEL_HOST_VMID", "101")
+PVE_MODEL_UNITS: Dict[str, str] = json.loads(
+    os.environ.get("PVE_MODEL_UNITS", "")
+    or json.dumps({
+        "fable": "koboldcpp.service",
+        "gemma": "gemma-4-31b-abliterated.service",
+        "qwen-a3b": "qwen36a3b.service",
+        "qwen-27b": "qwen35-27b.service",
+    })
+)
 
 # Models
 EMBEDDING_MODEL = 'gemini-embedding-001'

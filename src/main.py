@@ -238,6 +238,13 @@ async def main() -> None:
     from src.voice import VoiceIntegration
     bot.register_service(VoiceIntegration(notification_router))
 
+    # 7.3 Register the Proxmox management subsystem (DP-262). Registration-only;
+    # its tools SSH to the pve node. Registers even when PVE_TOOLS_ENABLED is
+    # false so the startup-wiring contract holds (handlers short-circuit disabled
+    # calls with an error). Personas opt in via service_bindings: ["proxmox"].
+    from src.proxmox import ProxmoxIntegration
+    bot.register_service(ProxmoxIntegration())
+
     # 8. Register interfaces
     _register_interfaces(app, bot, notification_router)
 
