@@ -195,6 +195,39 @@ def test_module_accessors_route_through_registry(monkeypatch):
     assert tool not in ALL_TOOL_DEFINITIONS
 
 
+def test_registry_unregister_removes_dynamic_tool():
+    reg = ToolDefinitionRegistry([])
+    tool = _make_tool("mcp__srv__x", is_write=True)
+    tool["dynamic"] = True
+    reg.register(tool)
+    assert reg.unregister("mcp__srv__x") is True
+    assert reg.get("mcp__srv__x") is None
+    assert reg.is_write("mcp__srv__x") is False
+    assert tool not in reg.all_definitions()
+
+
+def test_registry_unregister_refuses_static_tool():
+    reg = ToolDefinitionRegistry(ALL_TOOL_DEFINITIONS)
+    with pytest.raises(ValueError, match="static"):
+        reg.unregister("web_search")
+    assert reg.get("web_search") is not None
+
+
+def test_registry_unregister_unknown_returns_false():
+    reg = ToolDefinitionRegistry([])
+    assert reg.unregister("nope") is False
+
+
+def test_module_unregister_accessor_routes_through_registry(monkeypatch):
+    fresh = ToolDefinitionRegistry([])
+    monkeypatch.setattr(definitions, "_REGISTRY", fresh)
+    tool = _make_tool("mcp__srv__dyn")
+    tool["dynamic"] = True
+    definitions.register_tool_definition(tool)
+    assert definitions.unregister_tool_definition("mcp__srv__dyn") is True
+    assert definitions.get_tool_definition("mcp__srv__dyn") is None
+
+
 def test_add_note_classifier_internal_is_reversible():
     from src.tools.classifiers import add_note_irreversible_check
     assert add_note_irreversible_check({"internal": True}) is False

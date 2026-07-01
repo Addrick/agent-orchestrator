@@ -35,18 +35,14 @@ def resolve_policy_tools(policy: ToolPolicy) -> List[Dict[str, Any]]:
 
     Validation runs against the GLOBAL definitions (not binding-filtered),
     matching the original load-time check: ``['*']`` is always the full
-    toolset regardless of ``service_bindings``. Reads the registry (not the
-    static ``ALL_TOOL_DEFINITIONS``) so runtime-registered tools are
-    composition-checked too.
+    *static* toolset regardless of ``service_bindings``. Reads the registry
+    (not the static ``ALL_TOOL_DEFINITIONS``) so runtime-registered tools are
+    composition-checked too — but delegates the expansion to
+    ``ToolPolicy.filter_tools`` so the wildcard's dynamic-tool exclusion
+    (DP-268: ``['*']`` never auto-includes MCP-discovered defs) is the same
+    here as at request time, by construction.
     """
-    all_tools = get_all_tool_definitions()
-    if policy.default == "allow" and "*" in policy.allow:
-        return all_tools
-    allowed = set(policy.allow + policy.ask)
-    return [
-        t for t in all_tools
-        if t.get("function", {}).get("name") in allowed
-    ]
+    return policy.filter_tools(get_all_tool_definitions())
 
 
 def validate_policy_composition(policy: ToolPolicy) -> List[str]:

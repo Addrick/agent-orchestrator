@@ -12,6 +12,7 @@ from src.tools.tool_defs import (
     FIXR_TOOLS,
     VOICE_TOOLS,
     PROXMOX_TOOLS,
+    MCP_TOOLS,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,7 +54,7 @@ when present, runtime ORs its result with `irreversible`.
 # is navigability-only; all capability/helper logic below stays here.
 ALL_TOOL_DEFINITIONS: List[Dict[str, Any]] = (
     SEARCH_TOOLS + ZAMMAD_TOOLS + AGENT_TOOLS + MEMORY_TOOLS + FIXR_TOOLS + VOICE_TOOLS
-    + PROXMOX_TOOLS
+    + PROXMOX_TOOLS + MCP_TOOLS
 )
 
 
@@ -182,6 +183,25 @@ class ToolDefinitionRegistry:
                 self._write_tools.add(name)
         self._definitions.append(tool)
 
+    def unregister(self, tool_name: str) -> bool:
+        """Remove a dynamically registered definition from the live catalog.
+
+        Only definitions carrying the ``dynamic`` marker (runtime-registered,
+        e.g. MCP-discovered) may be removed — the static seed is permanent.
+        Returns True if a definition was removed, False if the name is unknown.
+        """
+        tool = self._index.get(tool_name)
+        if tool is None:
+            return False
+        if not tool.get("dynamic"):
+            raise ValueError(
+                f"Tool '{tool_name}' is a static definition and cannot be unregistered"
+            )
+        del self._index[tool_name]
+        self._write_tools.discard(tool_name)
+        self._definitions.remove(tool)
+        return True
+
     def all_definitions(self) -> List[Dict[str, Any]]:
         """The live toolset (static seed + dynamic). Treat as read-only."""
         return self._definitions
@@ -222,6 +242,12 @@ def register_tool_definition(tool: Dict[str, Any]) -> None:
     """Register a definition discovered after import (validates; rejects
     duplicate names)."""
     _REGISTRY.register(tool)
+
+
+def unregister_tool_definition(tool_name: str) -> bool:
+    """Remove a runtime-registered (``dynamic``) definition. Raises on an
+    attempt to remove a static seed definition."""
+    return _REGISTRY.unregister(tool_name)
 
 
 def is_write_tool(tool_name: str) -> bool:

@@ -419,6 +419,28 @@ PVE_MODEL_UNITS: Dict[str, str] = json.loads(
     })
 )
 
+# =============================================================================
+# --- MCP Client (DP-268) ---
+# =============================================================================
+# Consume external MCP tool servers (streamable-HTTP transport). Discovered
+# tools register into the normal tool system under mcp__<server>__<tool> with
+# restrictive default security metadata; personas must explicitly list them
+# (never included by the ['*'] wildcard) and bind mcp:<server>.
+#
+# MCP_ENABLED — master switch. When false the mcp management tools
+#   (add/remove/list_mcp_server[s]) still register so the startup-wiring
+#   contract holds, but every call short-circuits with a "disabled" error and
+#   no configured server is connected at startup.
+# MCP_SERVERS_FILE — persisted server config (written by add_mcp_server,
+#   hand-editable for per-tool security overrides). Lives in data/ (gitignored)
+#   like personas.json.
+# MCP_CONNECT_TIMEOUT / MCP_CALL_TIMEOUT — seconds before a server connect /
+#   a single tool call is abandoned (keeps a hung server out of the tool loop).
+MCP_ENABLED = os.environ.get("MCP_ENABLED", "False").lower() in ("true", "1", "yes", "on")
+MCP_SERVERS_FILE = Path(os.environ.get("MCP_SERVERS_FILE", str(DATA_DIR / "mcp_servers.json")))
+MCP_CONNECT_TIMEOUT = float(os.environ.get("MCP_CONNECT_TIMEOUT", "30"))
+MCP_CALL_TIMEOUT = float(os.environ.get("MCP_CALL_TIMEOUT", "120"))
+
 # Models
 EMBEDDING_MODEL = 'gemini-embedding-001'
 EMBEDDING_DIMENSION = 3072

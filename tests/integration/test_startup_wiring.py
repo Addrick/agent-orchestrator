@@ -40,7 +40,7 @@ def wired_system():
             persona_name="test_persona", model_name="gemini-2.5-flash",
             prompt="test", enabled_tools=["*"],
             memory_mode=MemoryMode.CHANNEL_ISOLATED, history_messages=10,
-            service_bindings=["zammad", "agents", "fixr", "voice", "proxmox"],
+            service_bindings=["zammad", "agents", "fixr", "voice", "proxmox", "mcp"],
         ),
     }
 
@@ -67,6 +67,13 @@ def wired_system():
     # DP-262 Proxmox management subsystem (tools behind the "proxmox" binding)
     from src.proxmox import ProxmoxIntegration
     chat_system.register_service(ProxmoxIntegration())
+
+    # DP-268 MCP client subsystem (management tools behind the "mcp" binding)
+    from src.tools.mcp_client import MCPClientManager
+    from src.tools.mcp_integration import MCPIntegration
+    chat_system.register_service(
+        MCPIntegration(MCPClientManager(personas_provider=lambda: chat_system.personas))
+    )
 
     try:
         yield chat_system

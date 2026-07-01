@@ -530,6 +530,53 @@ container id whose systemd units bind `:5001`), and `PVE_MODEL_UNITS` (JSON map 
 friendly model name → systemd unit). When disabled, every tool call returns a
 clear "disabled" error instead of attempting SSH.
 
+### MCP Servers (requires `service_bindings: ["mcp"]` to manage; `["mcp:<server>"]` to use)
+
+Plug external tool servers into the bot via the
+[Model Context Protocol](https://modelcontextprotocol.io) (streamable-HTTP
+transport). Discovered tools register into the normal tool system — they park,
+taint, and composition-validate exactly like native tools — under the name
+`mcp__<server>__<tool>`.
+
+**Setup is agent-driven — no config-file wiring before launch.** Ask a persona
+that has the management tools to add a server; the add parks for your approval,
+then connects, discovers, and registers the server's tools live (no restart).
+The config file (`data/mcp_servers.json`) persists what the tool writes.
+
+| Tool | Type | Description |
+|------|------|-------------|
+| `add_mcp_server` | **Write (parked)** | Connect a new MCP server by `name` + `url`, discover its tools, register them live, persist the config. The approval banner is your chance to reject an unexpected capability install. |
+| `remove_mcp_server` | **Write (parked)** | Disconnect a server, unregister all of its tools, delete it from the config. |
+| `list_mcp_servers` | Read | Configured servers with connection status and their registered tools. |
+
+Security model for discovered tools:
+
+- **Restrictive defaults.** Every discovered tool starts as `is_write: True`
+  (parks for approval) with `produces_untrusted/irreversible` set and
+  `sensitivity: "pii"`. The server's own `readOnlyHint`/`destructiveHint`
+  annotations are logged but **never** drive policy — an untrusted party
+  doesn't get to classify its own tools. To relax a tool (e.g. a genuinely
+  read-only sensor query), edit its `tool_overrides` entry in
+  `data/mcp_servers.json` and re-add/restart.
+- **Never in the wildcard.** `enabled_tools: ["*"]` / `allow: ["*"]` policies
+  do NOT include MCP tools. A persona must list each `mcp__<server>__<tool>`
+  explicitly in `allow`/`ask` **and** bind `mcp:<server>` in
+  `service_bindings`. This means installing a server can never silently widen
+  (or quarantine) an unrelated persona.
+- **Per-server egress domain.** Each server is its own domain under the
+  composition rules: reading and writing the same server is a closed loop;
+  combining a server's tools with foreign-domain tools (web search, zammad, a
+  second MCP server) re-arms the exfiltration rules.
+- Tool descriptions are server-authored text that enters the system prompt
+  (a prompt-injection surface); they are length-capped at discovery.
+
+Disabled by default. Enable with `MCP_ENABLED=true`. Config knobs:
+`MCP_SERVERS_FILE`, `MCP_CONNECT_TIMEOUT`, `MCP_CALL_TIMEOUT`. When disabled,
+the management tools return a clear "disabled" error and no configured server
+is contacted. A server that dies at runtime degrades to per-call errors
+(`restart or re-add to reconnect`); a server that is down at startup is
+skipped with a logged error and never blocks the app.
+
 ### Memory Tools (no service binding required)
 
 Available to any persona with `enabled_tools: ["*"]` (e.g., `joy`, `it-help`). These tools interact with the long-term memory store built by MemoryAgent.

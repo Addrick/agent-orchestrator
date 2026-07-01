@@ -39,3 +39,6 @@ python-dotenv
 requests
 ddgs
 sqlite-vec
+
+# MCP client (DP-268): consume external MCP tool servers over streamable HTTP
+mcp

@@ -178,12 +178,28 @@ class ToolPolicy:
     def filter_tools(self, all_tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Returns the subset of tools allowed by this policy.
-        """
-        if self.default == "allow" and "*" in self.allow:
-            return all_tools
 
+        The ``['*']`` wildcard NEVER auto-includes definitions carrying the
+        ``dynamic`` marker (runtime-registered, e.g. MCP-discovered tools,
+        DP-268): a third-party server registering one untrusted+write tool
+        must not silently widen — and quarantine-cascade — every wildcard
+        persona. Dynamic tools require explicit allow/ask listing, which works
+        under a wildcard policy too.
+
+        ``composition.resolve_policy_tools`` delegates here, so exposure
+        filtering and composition validation see the same expansion by
+        construction.
+        """
         allowed_names = set(self.allow)
         ask_names = set(self.ask)
+
+        if self.default == "allow" and "*" in self.allow:
+            return [
+                t for t in all_tools
+                if not t.get("dynamic")
+                or t.get("function", {}).get("name") in allowed_names
+                or t.get("function", {}).get("name") in ask_names
+            ]
 
         filtered = []
         for tool in all_tools:
