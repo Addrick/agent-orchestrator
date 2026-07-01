@@ -395,6 +395,10 @@ class KoboldEngineAdapter:
         """CONFIRM-mode park store — pending map keyed by (user, persona)."""
         return self.chat_system.confirmations
 
+    async def _provision_persona_memory(self, name: str) -> None:
+        """Dynamic bank provisioning (DP-266)."""
+        await self.chat_system.provision_persona_memory(name)
+
     @property
     def _stream_response(self) -> Callable[..., AsyncIterator[GenerationEvent]]:
         """Live generation kernel — the /v1/chat/completions event source."""
@@ -1032,6 +1036,13 @@ class KoboldEngineAdapter:
                 {"fields": sorted(set(data.keys()) - {"name"} - set(unknown))},
                 {"rejected": rejected, "unknown": unknown},
             )
+
+            # DP-266: dynamically provision bank so early chat doesn't drop
+            asyncio.create_task(
+                self._provision_persona_memory(raw_name),
+                name=f"provision-bank-{raw_name}"
+            )
+
             logger.info(f"Created persona '{raw_name}' (rejected={rejected}, unknown={unknown})")
             return JSONResponse(
                 status_code=201,

@@ -777,7 +777,21 @@ def test_create_persona_minimal(tmp_path, monkeypatch):
     assert "newbie" in adapter._personas
     with TestClient(adapter.app) as client:
         assert client.get("/api/v1/persona/newbie").status_code == 200
+
+
+def test_create_persona_provisions_hindsight_bank(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+    adapter, mm, _ = _adapter_with_temp_save(tmp_path, monkeypatch)
+    adapter.chat_system.provision_persona_memory = AsyncMock()
+    with TestClient(adapter.app) as client:
+        r = client.post("/api/v1/personas", json={"name": "newbie"})
+    assert r.status_code == 201
+
+    # In TestClient (Starlette/AnyIO), background tasks are run in the portal.
+    # The async mock is scheduled and run.
+    adapter.chat_system.provision_persona_memory.assert_awaited_once_with("newbie")
     mm.close()
+
 
 
 def test_create_persona_lowercases_name(tmp_path, monkeypatch):
@@ -2538,6 +2552,7 @@ def test_adapter_engine_surface_is_enumerated():
         "tool_manager": "_tool_manager",
         "bot_logic": "_bot_logic",
         "confirmations": "_confirmations",
+        "provision_persona_memory": "_provision_persona_memory",
         "stream_response": "_stream_response",
         "stream_resume_confirmation": "_stream_resume_confirmation",
         "assemble_request": "_assemble_request",
