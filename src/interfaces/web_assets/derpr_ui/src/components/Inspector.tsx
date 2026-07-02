@@ -552,6 +552,20 @@ function ToolsPane({
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const [draft, setDraft] = useState<PolicyDraft>(() => deriveDraft(persona, tools))
 
+  // The draft is seeded once at mount, but the catalog can change underneath it
+  // (late boot fetch, DP-268 dynamic MCP add/remove) without the persona-keyed
+  // remount firing. A draft derived from a stale catalog is destructive on
+  // save: draftToPolicy filters the NEW `tools` against the old draft.states,
+  // so untracked tools all read 'off' and the persona's real policy is wiped.
+  // Re-derive whenever the catalog identity changes (render-time adjust per
+  // react.dev "adjusting state when props change"); edits-in-progress against
+  // a stale catalog are not worth preserving over that failure mode.
+  const [seededFromTools, setSeededFromTools] = useState(tools)
+  if (seededFromTools !== tools) {
+    setSeededFromTools(tools)
+    setDraft(deriveDraft(persona, tools))
+  }
+
   // Group the catalog by owning service so the (often long) per-service tool
   // sets can be collapsed. Null binding = built-in/local; sorted last.
   const groups = useMemo(() => {

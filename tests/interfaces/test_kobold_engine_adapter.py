@@ -178,6 +178,24 @@ def _seed_history(mm: MemoryManager, persona_name: str, turns: int):
         )
 
 
+# -------- /api/v1/capabilities --------
+
+def test_capabilities_reports_voice_web_flag(monkeypatch):
+    # The portal hides its mic buttons when the /voice/* routes aren't mounted;
+    # this flag is its only way to know (the routes are conditionally
+    # registered, so a probe would otherwise be a generic 404).
+    from config import global_config
+
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    for enabled in (True, False):
+        monkeypatch.setattr(global_config, "VOICE_WEB_ENABLED", enabled, raising=False)
+        with TestClient(adapter.app) as client:
+            r = client.get("/api/v1/capabilities")
+        assert r.status_code == 200
+        assert r.json()["voice_web"] is enabled
+    mm.close()
+
+
 # -------- /api/v1/session/{persona}/kobold_export --------
 
 def test_kobold_export_unknown_persona_returns_404():

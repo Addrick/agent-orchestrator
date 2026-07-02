@@ -304,6 +304,18 @@ class KoboldEngineAdapter:
             ]
             return {"object": "list", "data": models}
 
+        @self.app.get("/api/v1/capabilities")
+        async def get_capabilities() -> Any:
+            """Feature flags the SPA needs before rendering optional chrome.
+
+            voice_web: whether the /voice/* routes are mounted
+            (VOICE_WEB_ENABLED) — the portal hides its mic buttons when the
+            backend can't serve them, instead of 404ing on every press.
+            """
+            return {
+                "voice_web": bool(getattr(global_config, "VOICE_WEB_ENABLED", False)),
+            }
+
         @self.app.get("/api/v1/tools/catalog")
         async def get_tools_catalog() -> Any:
             defs = self._tool_manager.get_tool_definitions()

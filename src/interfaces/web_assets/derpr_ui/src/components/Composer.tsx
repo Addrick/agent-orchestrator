@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { useMicCapture } from './useMicCapture'
 import { useMicStream } from './useMicStream'
-import { transcribeVoice } from '../api/client'
+import { transcribeVoice, getVoiceWebEnabled } from '../api/client'
 
 interface Props {
   ltmOn: boolean
@@ -24,6 +24,20 @@ export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming, onDra
     () => localStorage.getItem(AUTOSEND_KEY) === '1',
   )
   const [micStatus, setMicStatus] = useState<string | null>(null)
+  // Whether the engine mounted the /voice/* routes (VOICE_WEB_ENABLED). Browser
+  // capability alone isn't enough: with voice disabled server-side the mic
+  // buttons would render fully functional and every press would end in a
+  // generic 404 "transcribe failed".
+  const [voiceWeb, setVoiceWeb] = useState(false)
+  useEffect(() => {
+    let live = true
+    void getVoiceWebEnabled().then((v) => {
+      if (live) setVoiceWeb(v)
+    })
+    return () => {
+      live = false
+    }
+  }, [])
   const ref = useRef<HTMLTextAreaElement>(null)
   const mic = useMicCapture()
 
@@ -98,14 +112,42 @@ export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming, onDra
     localStorage.setItem(AUTOSEND_KEY, on ? '1' : '0')
   }
 
+  // Quick-tap race: mouseup can fire while mic.start() is still awaiting
+  // getUserMedia — at that point mic.recording is still false, so a naive stop
+  // bails and the deferred start then flips the mic hot with the pointer
+  // already released (recording forever). Track the pending start and honor a
+  // stop that arrived during it once the start resolves.
+  const micStartPending = useRef(false)
+  const micStopRequested = useRef(false)
+
   const micStart = async () => {
-    if (mic.recording) return
+    if (mic.recording || micStartPending.current) return
     setMicStatus(null)
-    const ok = await mic.start()
-    if (!ok) setMicStatus('mic access denied')
+    micStopRequested.current = false
+    micStartPending.current = true
+    let ok: boolean
+    try {
+      ok = await mic.start()
+    } finally {
+      micStartPending.current = false
+    }
+    if (!ok) {
+      setMicStatus('mic access denied')
+      return
+    }
+    if (micStopRequested.current) {
+      // The tap ended before the mic opened — nothing worth transcribing;
+      // just release the audio graph.
+      micStopRequested.current = false
+      void mic.stop()
+    }
   }
 
   const micStop = async () => {
+    if (micStartPending.current) {
+      micStopRequested.current = true
+      return
+    }
     if (!mic.recording) return
     const chunk = await mic.stop()
     if (!chunk) {
@@ -139,7 +181,7 @@ export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming, onDra
           <span className="sw" />
           LTM recall
         </button>
-        {mic.supported && (
+        {voiceWeb && mic.supported && (
           <button
             className={'toggle-chip' + (autoSend ? ' on' : '')}
             onClick={() => setAutoSendPref(!autoSend)}
@@ -149,7 +191,7 @@ export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming, onDra
             voice auto-send
           </button>
         )}
-        {stream.supported && (
+        {voiceWeb && stream.supported && (
           <button
             className={'toggle-chip' + (stream.active ? ' on' : '')}
             onClick={stream.toggle}
@@ -184,13 +226,13 @@ export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming, onDra
           onKeyDown={onKeyDown}
           placeholder={streaming ? 'streaming… (draft your next message)' : 'message the engine, or / for a dev command'}
         />
-        {mic.supported && (
+        {voiceWeb && mic.supported && (
           <button
             className={'send mic' + (mic.recording ? ' rec' : '')}
             title='hold to talk — e.g. "set a timer for 10 minutes"'
             onMouseDown={micStart}
             onMouseUp={micStop}
-            onMouseLeave={() => mic.recording && micStop()}
+            onMouseLeave={() => (mic.recording || micStartPending.current) && micStop()}
             onTouchStart={(e) => {
               e.preventDefault()
               micStart()

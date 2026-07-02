@@ -293,8 +293,17 @@ export function usePortalStore() {
       // the saved persona no longer exists; push the saved pick back to the
       // engine so the kobold-native passthrough routes agree with the UI.
       const saved = localStorage.getItem(PERSONA_LS_KEY)
-      const active = saved && list.includes(saved) ? saved : serverActive
-      if (active !== serverActive) await api.setActivePersona(active)
+      let active = saved && list.includes(saved) ? saved : serverActive
+      if (active !== serverActive) {
+        try {
+          await api.setActivePersona(active)
+        } catch (e) {
+          // Engine refused the saved pick (deleted persona, guard) — fall back
+          // to its own active persona rather than desyncing UI from engine.
+          console.error(e)
+          active = serverActive
+        }
+      }
       setActivePersona(active)
       setPersonaList(list.length ? list : [active])
       setModelList(models)
@@ -375,9 +384,21 @@ export function usePortalStore() {
   // ---- persona switch -----------------------------------------------
   const switchPersona = useCallback(
     async (name: string) => {
+      const prev = activePersonaRef.current
       setActivePersona(name)
       localStorage.setItem(PERSONA_LS_KEY, name)
-      await api.setActivePersona(name)
+      try {
+        await api.setActivePersona(name)
+      } catch (e) {
+        // Engine refused the switch (unknown persona / outage). Revert — the
+        // engine still generates under the OLD persona, so advancing the UI
+        // would silently log every turn to the wrong persona.
+        console.error(e)
+        setActivePersona(prev)
+        localStorage.setItem(PERSONA_LS_KEY, prev)
+        setBanner(`Persona switch failed: ${e instanceof Error ? e.message : String(e)}`)
+        return
+      }
       // A persona switch resets to its default channel; channel list reloads
       // inside loadAll for the new persona.
       setActiveChannel('web_ui')
@@ -483,6 +504,10 @@ export function usePortalStore() {
       onError: (msg: string) => {
         streamingRef.current = false
         abortRef.current = null
+        // A failed CONFIRM resume must re-arm the approve/deny bar — onDone
+        // never fires on this path, and leaving resolvingConfirm set keeps the
+        // bar permanently disabled ("resolving…") until a page reload.
+        setResolvingConfirm(false)
         setStream((s) => ({ ...s, active: false, errored: true, errorMsg: msg }))
       },
       onDone: async () => {
@@ -533,14 +558,21 @@ export function usePortalStore() {
 
       // dev command path
       if (trimmed.startsWith('/')) {
-        const resp = await api.devCommand(persona.name, trimmed)
-        setDevRow({
-          command: trimmed,
-          response: resp.response,
-          mutated: Boolean(resp.mutated),
-        })
-        if (resp.mutated) await refreshPersona(persona.name)
-        await refreshTranscript(persona.name)
+        try {
+          const resp = await api.devCommand(persona.name, trimmed)
+          setDevRow({
+            command: trimmed,
+            response: resp.response,
+            mutated: Boolean(resp.mutated),
+          })
+          if (resp.mutated) await refreshPersona(persona.name)
+          await refreshTranscript(persona.name)
+        } catch (e) {
+          // Engine down: without this the command silently does nothing
+          // (unhandled rejection, no UI feedback).
+          console.error(e)
+          setBanner('Dev command failed — engine unreachable')
+        }
         return
       }
 
@@ -613,6 +645,8 @@ export function usePortalStore() {
     // Composer `streaming` prop, so omitting it leaves the composer stuck on
     // the "■ stop" button and the StreamRow cursor blinking forever.
     setStream((s) => ({ ...s, active: false, aborted: true, userText: null }))
+    // An aborted CONFIRM resume never reaches onDone — re-arm the bar.
+    setResolvingConfirm(false)
     if (persona) await refreshTranscript(persona.name)
   }, [persona, refreshTranscript])
 
@@ -620,6 +654,7 @@ export function usePortalStore() {
   // turn (persisted before generation) is only in the DB — surface it.
   const dismissStream = useCallback(() => {
     streamingRef.current = false
+    setResolvingConfirm(false)
     setStream(EMPTY_STREAM)
     if (persona) void refreshTranscript(persona.name)
   }, [persona, refreshTranscript])
@@ -634,7 +669,16 @@ export function usePortalStore() {
   // ---- row mutations -------------------------------------------------
   const editRow = useCallback(
     async (id: number, content: string) => {
-      await api.patchInteraction(id, content)
+      // Callers are fire-and-forget (the row editor has already closed), so a
+      // rejection here would otherwise vanish — the user believes the edit
+      // persisted while the DB still holds the old content.
+      try {
+        await api.patchInteraction(id, content)
+      } catch (e) {
+        console.error(e)
+        setBanner('Edit failed — row unchanged')
+        return
+      }
       if (persona) await refreshTranscript(persona.name)
     },
     [persona, refreshTranscript],
@@ -642,7 +686,13 @@ export function usePortalStore() {
 
   const deleteRow = useCallback(
     async (id: number) => {
-      await api.deleteInteraction(id)
+      try {
+        await api.deleteInteraction(id)
+      } catch (e) {
+        console.error(e)
+        setBanner('Delete failed — row unchanged')
+        return
+      }
       if (persona) await refreshTranscript(persona.name)
     },
     [persona, refreshTranscript],
