@@ -19,19 +19,10 @@ import type {
   ToolResultFrame,
 } from '../types/contracts'
 
-export interface ConfirmFrame {
-  text: string
-  persona: string
-  token: string
-  calls: { name: string; arguments: Record<string, unknown>; id: string }[]
-  audit_info?: unknown
-}
-
 export interface StreamHandlers {
   onToken: (delta: string) => void
   onToolStart: (f: ToolStartFrame) => void
   onToolResult: (f: ToolResultFrame) => void
-  onConfirm?: (f: ConfirmFrame) => void
   onIdFrame: (f: DerprIdFrame) => void
   onError: (message: string) => void
   onDone: () => void
@@ -90,7 +81,8 @@ function dispatchBlock(block: string, h: StreamHandlers, sawError: { v: boolean 
       h.onToolResult(obj as unknown as ToolResultFrame)
       return
     case 'derpr-confirm':
-      h.onConfirm?.(obj as unknown as ConfirmFrame)
+      // Deliberately ignored: parked writes are surfaced by the /transcript
+      // re-sync after [DONE], not consumed off the wire.
       return
     case 'derpr':
       h.onIdFrame(obj as unknown as DerprIdFrame)
@@ -151,18 +143,24 @@ async function consume(
   }
 }
 
-/** Open the chat stream. Returns an abort handle. */
-export function streamChat(req: ChatRequest, h: StreamHandlers): { abort: () => void } {
+// Shared POST-SSE scaffold: fetch with abort handle, HTTP-status check,
+// then hand the body to `consume`.
+function openSse(
+  url: string,
+  body: Record<string, unknown>,
+  label: string,
+  h: StreamHandlers,
+): { abort: () => void } {
   const ctrl = new AbortController()
-  fetch('/v1/chat/completions', {
+  fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-    body: JSON.stringify({ stream: true, ...req }),
+    body: JSON.stringify(body),
     signal: ctrl.signal,
   })
     .then((resp) => {
       if (!resp.ok) {
-        h.onError(`chat → ${resp.status}`)
+        h.onError(`${label} → ${resp.status}`)
         return
       }
       return consume(resp, h, ctrl.signal)
@@ -173,6 +171,11 @@ export function streamChat(req: ChatRequest, h: StreamHandlers): { abort: () => 
   return { abort: () => ctrl.abort() }
 }
 
+/** Open the chat stream. Returns an abort handle. */
+export function streamChat(req: ChatRequest, h: StreamHandlers): { abort: () => void } {
+  return openSse('/v1/chat/completions', { stream: true, ...req }, 'chat', h)
+}
+
 /** Resolve a parked CONFIRM write (S6 reuse). Same wire protocol. */
 export function streamConfirm(
   persona: string,
@@ -180,22 +183,10 @@ export function streamConfirm(
   token: string,
   h: StreamHandlers,
 ): { abort: () => void } {
-  const ctrl = new AbortController()
-  fetch(`/api/v1/persona/${encodeURIComponent(persona)}/confirm`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-    body: JSON.stringify({ approved, token }),
-    signal: ctrl.signal,
-  })
-    .then((resp) => {
-      if (!resp.ok) {
-        h.onError(`confirm → ${resp.status}`)
-        return
-      }
-      return consume(resp, h, ctrl.signal)
-    })
-    .catch((e) => {
-      if (!ctrl.signal.aborted) h.onError(String(e))
-    })
-  return { abort: () => ctrl.abort() }
+  return openSse(
+    `/api/v1/persona/${encodeURIComponent(persona)}/confirm`,
+    { approved, token },
+    'confirm',
+    h,
+  )
 }

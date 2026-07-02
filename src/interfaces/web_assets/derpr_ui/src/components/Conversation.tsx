@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import type { PortalStore } from '../state/store'
 import { splitThink, policyLabel } from '../state/util'
 import { MessageRow } from './MessageRow'
@@ -35,7 +35,11 @@ export function Conversation({ store }: { store: PortalStore }) {
     dismissAlarm,
   } = store
 
-  const onResync = () => persona && refreshTranscript(persona.name)
+  // Stable identity so the memoized MessageRow isn't re-rendered per token.
+  const personaName = persona?.name
+  const onResync = useCallback(() => {
+    if (personaName) void refreshTranscript(personaName)
+  }, [personaName, refreshTranscript])
 
   // Auto-scroll: follow new content (chunks, stream frames, dev rows) but only
   // while the user is pinned near the bottom — scrolling up to read history
@@ -52,10 +56,39 @@ export function Conversation({ store }: { store: PortalStore }) {
     if (el && followRef.current) el.scrollTop = el.scrollHeight
   }, [chunks, stream, devRow, loading, viewMode, alarms])
 
-  const historyText = chunks
-    .filter((c) => !c.ephemeral)
-    .map((c) => (c.role === 'assistant' ? splitThink(c.content).body : c.content))
-    .join('\n')
+  // Feeds only the BudgetBar; the filter + splitThink + join over the whole
+  // transcript is too heavy to redo on every per-frame stream re-render.
+  const historyText = useMemo(
+    () =>
+      chunks
+        .filter((c) => !c.ephemeral)
+        .map((c) => (c.role === 'assistant' ? splitThink(c.content).body : c.content))
+        .join('\n'),
+    [chunks],
+  )
+
+  // Identity-based row positions (DP-132 #9); memoized so streaming re-renders
+  // skip the three full-transcript scans.
+  const { lastUserChunkIndex, lastAssistantChunkIndex, firstUserChunkIndex } =
+    useMemo(() => {
+      const lastUser = chunks.reduce(
+        (acc, c, i) => (c.role === 'user' && !c.ephemeral ? i : acc),
+        -1,
+      )
+      const lastAssistant = chunks.reduce(
+        (acc, c, i) => (c.role === 'assistant' && !c.ephemeral ? i : acc),
+        -1,
+      )
+      // LTM author's-note row renders after the FIRST real user turn, located
+      // by identity (not positional index===1, which vanished on a single-chunk
+      // transcript and mispositioned when chunk[0] was an assistant turn).
+      const firstUser = chunks.findIndex((c) => c.role === 'user' && !c.ephemeral)
+      return {
+        lastUserChunkIndex: lastUser,
+        lastAssistantChunkIndex: lastAssistant,
+        firstUserChunkIndex: firstUser,
+      }
+    }, [chunks])
 
   return (
     <div className="col convo">
@@ -129,52 +162,34 @@ export function Conversation({ store }: { store: PortalStore }) {
                 <div className="text">{persona.prompt}</div>
               </div>
 
-              {(() => {
-                const lastUserChunkIndex = chunks.reduce(
-                  (acc, c, i) => (c.role === 'user' && !c.ephemeral ? i : acc),
-                  -1,
-                )
-                const lastAssistantChunkIndex = chunks.reduce(
-                  (acc, c, i) =>
-                    c.role === 'assistant' && !c.ephemeral ? i : acc,
-                  -1,
-                )
-                // LTM author's-note row renders after the FIRST real user turn,
-                // located by identity (not positional index===1, which vanished
-                // on a single-chunk transcript and mispositioned when chunk[0]
-                // was an assistant turn) — DP-132 #9.
-                const firstUserChunkIndex = chunks.findIndex(
-                  (c) => c.role === 'user' && !c.ephemeral,
-                )
-                return chunks.map((c, i) => (
-                  <RenderedSlot
-                    key={c.interaction_id ?? c.ephemeral_chunk_id ?? `slot-${i}`}
-                    showLtm={i === firstUserChunkIndex}
-                    ltmOn={ltmOn}
-                    ltmBlock={ltmBlock}
-                    persona={persona}
-                  >
-                    <MessageRow
-                      chunk={c}
-                      tools={tools}
-                      isLastUser={
-                        i === lastUserChunkIndex &&
-                        lastUserChunkIndex > lastAssistantChunkIndex
-                      }
-                      isLastAssistant={
-                        i === lastAssistantChunkIndex &&
-                        lastAssistantChunkIndex > lastUserChunkIndex
-                      }
-                      onEdit={editRow}
-                      onDelete={deleteRow}
-                      onRegen={regen}
-                      onResync={onResync}
-                      onResolveConfirm={resolveConfirm}
-                      resolvingConfirm={resolvingConfirm}
-                    />
-                  </RenderedSlot>
-                ))
-              })()}
+              {chunks.map((c, i) => (
+                <RenderedSlot
+                  key={c.interaction_id ?? c.ephemeral_chunk_id ?? `slot-${i}`}
+                  showLtm={i === firstUserChunkIndex}
+                  ltmOn={ltmOn}
+                  ltmBlock={ltmBlock}
+                  persona={persona}
+                >
+                  <MessageRow
+                    chunk={c}
+                    tools={tools}
+                    isLastUser={
+                      i === lastUserChunkIndex &&
+                      lastUserChunkIndex > lastAssistantChunkIndex
+                    }
+                    isLastAssistant={
+                      i === lastAssistantChunkIndex &&
+                      lastAssistantChunkIndex > lastUserChunkIndex
+                    }
+                    onEdit={editRow}
+                    onDelete={deleteRow}
+                    onRegen={regen}
+                    onResync={onResync}
+                    onResolveConfirm={resolveConfirm}
+                    resolvingConfirm={resolvingConfirm}
+                  />
+                </RenderedSlot>
+              ))}
 
               {/* optimistic echo of the just-sent user turn — replaced by the
                   persisted row on the [DONE] /transcript re-sync. Not a Chunk:

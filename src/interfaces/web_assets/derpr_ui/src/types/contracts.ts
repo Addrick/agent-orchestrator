@@ -149,10 +149,7 @@ export interface ChannelItem {
   id: string
   // the raw source-agnostic `channel` string used to scope transcript/submit
   channel: string
-  name: string
   source: ChannelSource
-  persona: string
-  active?: boolean
   preview: string
 }
 export interface ChannelGroup {

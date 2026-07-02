@@ -11,6 +11,7 @@ import logging
 import mimetypes
 import os
 import re
+import time
 
 from src.request_builder import AssembledRequest
 
@@ -924,11 +925,20 @@ class KoboldEngineAdapter:
             async def relay_stream() -> AsyncIterator[bytes]:
                 full_response: List[str] = []
                 committed = False
+                # StreamingResponse already cancels this generator on client
+                # drop (the CancelledError path commits the partial turn); the
+                # explicit poll is a belt-and-braces early-out, so once per
+                # second is plenty — per-event it costs an asyncio receive-poll
+                # per token.
+                last_dc_check = time.monotonic()
                 try:
                     async with self._http.stream("POST", url, json=forward_body) as upstream:
                         async for chunk in upstream.aiter_raw():
-                            if await request.is_disconnected():
-                                return
+                            now = time.monotonic()
+                            if now - last_dc_check >= 1.0:
+                                last_dc_check = now
+                                if await request.is_disconnected():
+                                    return
                             if not chunk:
                                 continue
                             try:
@@ -1027,27 +1037,10 @@ class KoboldEngineAdapter:
             else:
                 user_text = self._find_last_user_content(data.get("messages") or []) or ""
 
-            # --- DEBUG: dump incoming messages so we can diagnose empty user_text ---
+            # Client message array: used only as a non-portal fallback (above)
+            # and by the non-stream path; the streaming path discards it so the
+            # engine's DB stays the source of truth for history.
             msgs_in = data.get("messages") or []
-            logger.warning(
-                "OAI /chat/completions DEBUG — "
-                "derpr_user_text=%r  user_text=%r  msg_count=%d  "
-                "roles=%s  continue_assistant_turn=%r",
-                sidecar_user,
-                user_text[:120] if user_text else "",
-                len(msgs_in),
-                [m.get("role") for m in msgs_in],
-                data.get("continue_assistant_turn"),
-            )
-            if msgs_in:
-                last = msgs_in[-1]
-                logger.warning(
-                    "OAI DEBUG last message — role=%r  content_type=%s  content_preview=%r",
-                    last.get("role"),
-                    type(last.get("content")).__name__,
-                    str(last.get("content"))[:200] if last.get("content") else None,
-                )
-            # --- END DEBUG ---
 
             # Extract sampling parameters from the OAI request for the local engine
             local_inference_config = {
@@ -1149,6 +1142,9 @@ class KoboldEngineAdapter:
                     pass
 
             async def relay() -> AsyncIterator[bytes]:
+                # Same rationale as relay_stream: cancellation is the real
+                # disconnect signal; poll at most once per second.
+                last_dc_check = time.monotonic()
                 try:
                     # Pass through the request to the central ChatSystem.
                     # In the Engine Adapter, we DISCARD the client-side message array
@@ -1166,8 +1162,11 @@ class KoboldEngineAdapter:
                         client_messages=None,  # Explicitly None to force DB history rebuild
                     ):
 
-                        if await request.is_disconnected():
-                            return
+                        now = time.monotonic()
+                        if now - last_dc_check >= 1.0:
+                            last_dc_check = now
+                            if await request.is_disconnected():
+                                return
                         # Rich diagnostic dump for DoneEvent (dump-only, not a
                         # wire frame) — preserved alongside the shared transcoder.
                         if dump_fh is not None and isinstance(ev, DoneEvent):
