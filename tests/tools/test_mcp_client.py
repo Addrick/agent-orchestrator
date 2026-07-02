@@ -586,22 +586,146 @@ async def test_tools_list_changed_triggers_rediscovery(
     await manager.aclose()
 
 
-async def test_rediscovery_failure_keeps_old_toolset(
+async def test_rediscovery_failure_keeps_old_toolset_and_retries(
         tmp_path, fresh_registry, fake_transport):
     session = FakeSession(tools=[_mcp_tool("a")])
     fake_transport["http://srv/mcp"] = session
     manager, _ = _make_manager(tmp_path)
     await manager.add_server("home", "http://srv/mcp")
 
+    original_list_tools = session.list_tools
+
     async def broken_list_tools():
         raise ConnectionError("mid-flight death")
     session.list_tools = broken_list_tools
+    session.tools = [_mcp_tool("b")]
     await session.notify_tools_changed()
 
+    manager._wake.clear()  # the loop clears the wake before each pass
     await manager._maintain()  # logged, no raise
     assert definitions.get_tool_definition("mcp__home__a") is not None
     assert (await manager.list_servers())[0]["tools"] == ["mcp__home__a"]
+    # The change signal survives the transient failure (no wake — the next
+    # periodic tick retries instead of spinning).
+    assert "home" in manager._tools_changed
+    assert not manager._wake.is_set()
+
+    # Listing works again → the next pass completes the swap.
+    session.list_tools = original_list_tools
+    await manager._maintain()
+    assert definitions.get_tool_definition("mcp__home__a") is None
+    assert definitions.get_tool_definition("mcp__home__b") is not None
     await manager.aclose()
+
+
+async def test_registration_failure_flags_retry_not_stranded(
+        tmp_path, fresh_registry, fake_transport):
+    """If the re-registration half of a swap fails, the server must be
+    re-flagged for the next tick — not stranded connected-but-toolless."""
+    session = FakeSession(tools=[_mcp_tool("a")])
+    fake_transport["http://srv/mcp"] = session
+    manager, _ = _make_manager(tmp_path)
+    await manager.add_server("home", "http://srv/mcp")
+
+    session.tools = [_mcp_tool("b")]
+    await session.notify_tools_changed()
+    original_register = manager._register_definitions
+    calls = {"n": 0}
+
+    def flaky_register(name, defs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ValueError("bad definition")
+        return original_register(name, defs)
+    manager._register_definitions = flaky_register  # type: ignore[method-assign]
+
+    await manager._maintain()  # swap fails; zero tools this pass
+    assert (await manager.list_servers())[0]["tools"] == []
+    assert "home" in manager._tools_changed
+
+    await manager._maintain()  # retried and recovered
+    assert definitions.get_tool_definition("mcp__home__b") is not None
+    assert (await manager.list_servers())[0]["tools"] == ["mcp__home__b"]
+    await manager.aclose()
+
+
+async def test_reconnect_identical_toolset_skips_revalidation_churn(
+        tmp_path, fresh_registry, fake_transport):
+    """A flapping server whose toolset is unchanged must not unregister/
+    re-register (window where tools vanish) or re-run persona validation."""
+    revalidations = []
+
+    def personas_provider():
+        revalidations.append(1)
+        return {}
+
+    fake_transport["http://srv/mcp"] = FakeSession(tools=[_mcp_tool("a")])
+    manager = MCPClientManager(
+        config_path=tmp_path / "mcp_servers.json",
+        personas_provider=personas_provider,
+        enabled=True,
+        reconnect_interval=60,
+    )
+    tool_manager = ToolManager()
+    MCPIntegration(manager).register_tools(tool_manager)
+    await manager.add_server("home", "http://srv/mcp")
+    baseline = len(revalidations)
+
+    await _kill_session(manager, "home")
+    await manager._maintain()  # reconnects; same toolset
+    assert (await manager.list_servers())[0]["connected"] is True
+    assert (await manager.list_servers())[0]["tools"] == ["mcp__home__a"]
+    assert len(revalidations) == baseline
+    await manager.aclose()
+
+
+async def test_stop_after_external_cancel_does_not_poison_aclose(
+        tmp_path, fresh_registry, fake_transport):
+    """A session task that ended cancelled must not make stop()/aclose()
+    raise CancelledError (the old code caught this; a regression aborts
+    shutdown mid-loop)."""
+    fake_transport["http://a/mcp"] = FakeSession(tools=[_mcp_tool("a")])
+    fake_transport["http://b/mcp"] = FakeSession(tools=[_mcp_tool("b")])
+    manager, _ = _make_manager(tmp_path)
+    await manager.add_server("srv-a", "http://a/mcp")
+    await manager.add_server("srv-b", "http://b/mcp")
+
+    task_a = manager._connections["srv-a"]._task
+    task_a.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task_a
+
+    await manager.aclose()  # must not raise, must stop srv-b too
+    assert manager._connections == {}
+    assert manager._connections.get("srv-b") is None
+
+
+async def test_cancelled_connect_reaps_session_task(
+        tmp_path, fresh_registry, fake_transport, monkeypatch):
+    """Cancelling add_server mid-connect must not orphan the freshly spawned
+    session task (it is not in _connections yet — nobody else stops it)."""
+    started = asyncio.Event()
+
+    @asynccontextmanager
+    async def hanging_open_session(url, message_handler=None):
+        started.set()
+        await asyncio.Event().wait()  # never connects
+        yield None  # pragma: no cover
+
+    monkeypatch.setattr(mcp_client, "_open_session", hanging_open_session)
+    manager, _ = _make_manager(tmp_path)
+
+    add_task = asyncio.create_task(manager.add_server("home", "http://srv/mcp"))
+    await started.wait()
+    add_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await add_task
+
+    orphans = [
+        t for t in asyncio.all_tasks()
+        if t.get_name().startswith("mcp-session-") and not t.done()
+    ]
+    assert orphans == []
 
 
 async def test_rediscovery_revalidates_personas(

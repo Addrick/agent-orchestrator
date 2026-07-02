@@ -65,6 +65,7 @@ from config.global_config import (
 )
 from src.tools.composition import revalidate_persona_security
 from src.tools.definitions import (
+    get_tool_definition,
     register_tool_definition,
     unregister_tool_definition,
 )
@@ -81,6 +82,9 @@ _SERVER_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 # Provider function-calling APIs restrict tool names to [A-Za-z0-9_-], 64 chars.
 _TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _DESCRIPTION_MAX_CHARS = 1024
+# Floor between maintenance passes: bounds how fast an untrusted server can
+# drive re-discovery (and persona revalidation) by spamming tools/list_changed.
+_MIN_PASS_GAP = 5.0
 
 # Most-restrictive defaults for a discovered tool. Operator ``tool_overrides``
 # (per tool, in the config file) may relax individual keys; server annotations
@@ -146,6 +150,14 @@ class _ServerConnection:
             raise RuntimeError(
                 f"MCP server '{self.name}' did not connect within {timeout}s"
             )
+        except asyncio.CancelledError:
+            # Caller cancelled mid-connect (e.g. shutdown): the fresh session
+            # task is not registered anywhere yet — reap it here or it
+            # survives as an orphan into event-loop teardown.
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
+            raise
         if self.session is None:
             raise RuntimeError(
                 f"MCP server '{self.name}' connection failed: {self.error}"
@@ -180,7 +192,7 @@ class _ServerConnection:
 
     async def stop(self) -> None:
         self._stop.set()
-        if self._task is None:
+        if self._task is None or self._task.done():
             return
         try:
             await asyncio.wait_for(self._task, timeout=10)
@@ -190,6 +202,14 @@ class _ServerConnection:
             self._task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
+        except asyncio.CancelledError:
+            # Two ways to land here: our own caller is being cancelled
+            # (propagate — never absorb a requested cancellation), or the
+            # session task got cancelled externally while we waited (it is
+            # unwound; stop() succeeded and must not poison aclose/remove).
+            cur = asyncio.current_task()
+            if cur is not None and cur.cancelling():
+                raise
 
 
 class MCPClientManager:
@@ -256,9 +276,12 @@ class MCPClientManager:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._maintenance_task
             self._maintenance_task = None
-        for conn in list(self._connections.values()):
-            await conn.stop()
+        conns = list(self._connections.values())
         self._connections.clear()
+        if conns:
+            # Stops are independent; run them concurrently so shutdown costs
+            # one slowest server, not the sum of every hung transport.
+            await asyncio.gather(*(conn.stop() for conn in conns))
 
     # ----------------------------------------------------------- tool handlers
 
@@ -296,11 +319,7 @@ class MCPClientManager:
                 # A failed persist must not leave a live-but-unpersisted
                 # server (callable, yet invisible to list_mcp_servers and
                 # gone after restart): roll the registration back first.
-                conn = self._connections.pop(name, None)
-                self._unregister_server_tools(name)
-                self._revalidate_personas()
-                if conn is not None:
-                    await conn.stop()
+                await self._teardown_server(name)
                 raise
 
         logger.info(
@@ -328,14 +347,10 @@ class MCPClientManager:
             if not known_in_config and name not in self._connections:
                 raise ValueError(f"MCP server '{name}' is not configured.")
 
-            conn = self._connections.pop(name, None)
-            if conn is not None:
-                await conn.stop()
-            removed = self._unregister_server_tools(name)
+            removed = await self._teardown_server(name)
             if known_in_config:
                 del config["servers"][name]
                 self._save_config(config)
-            self._revalidate_personas()
 
         logger.info(f"MCP server '{name}' removed; unregistered tools: {removed}")
         return {"server": name, "tools_unregistered": removed}
@@ -361,10 +376,12 @@ class MCPClientManager:
         """Invoke a discovered tool on its server session."""
         conn = self._connections.get(server)
         if conn is None or conn.session is None:
-            raise RuntimeError(
-                f"MCP server '{server}' is not connected. "
-                "Restart or re-add the server to reconnect."
+            hint = (
+                "Reconnection is retried automatically; try again shortly."
+                if self._reconnect_interval > 0
+                else "Restart or re-add the server to reconnect."
             )
+            raise RuntimeError(f"MCP server '{server}' is not connected. {hint}")
         result = await asyncio.wait_for(
             conn.session.call_tool(
                 tool_name,
@@ -394,8 +411,10 @@ class MCPClientManager:
 
     async def _maintenance_loop(self) -> None:
         """Reconnect dead servers and re-discover changed toolsets. Runs a
-        pass every ``reconnect_interval`` seconds, or immediately when a
-        server signals ``tools/list_changed``."""
+        pass every ``reconnect_interval`` seconds, or as soon as a server
+        signals ``tools/list_changed``. Passes are rate-limited: a (hostile
+        or buggy) server spamming notifications must not spin this loop into
+        continuous re-discovery and persona revalidation."""
         while True:
             try:
                 await asyncio.wait_for(
@@ -408,57 +427,72 @@ class MCPClientManager:
                 await self._maintain()
             except Exception as e:
                 logger.error(f"MCP maintenance pass failed: {e}")
+            await asyncio.sleep(min(_MIN_PASS_GAP, self._reconnect_interval))
 
     async def _maintain(self) -> None:
-        """One maintenance pass over every enabled configured server."""
+        """One maintenance pass over every enabled configured server.
+
+        The lock is held only for the state snapshot — never across the
+        per-server network work (_reconnect/_rediscover re-take it for their
+        mutations). A dead server's 30s connect timeout must not block
+        add/remove_server tool calls for the whole pass.
+        """
         async with self._lock:
-            changed = self._tools_changed
-            self._tools_changed = set()
+            changed, self._tools_changed = self._tools_changed, set()
             config = self._load_config(strict=False)
-            for name, server_cfg in config.get("servers", {}).items():
-                if not server_cfg.get("enabled", True):
-                    continue
-                conn = self._connections.get(name)
-                if conn is None or conn.session is None:
-                    try:
-                        await self._reconnect(name, server_cfg)
-                    except Exception as e:
-                        logger.warning(
-                            f"MCP server '{name}' reconnect failed: {e}"
-                        )
-                elif name in changed:
-                    try:
-                        await self._rediscover(name, server_cfg)
-                    except Exception as e:
-                        logger.error(
-                            f"MCP server '{name}' re-discovery failed: {e}"
-                        )
+            servers = {
+                name: dict(server_cfg)
+                for name, server_cfg in config.get("servers", {}).items()
+                if isinstance(server_cfg, dict) and server_cfg.get("enabled", True)
+            }
+        for name, server_cfg in servers.items():
+            conn = self._connections.get(name)
+            if conn is None or conn.session is None:
+                try:
+                    await self._reconnect(name, server_cfg)
+                except Exception as e:
+                    logger.warning(f"MCP server '{name}' reconnect failed: {e}")
+            elif name in changed:
+                try:
+                    await self._rediscover(name, server_cfg)
+                except Exception as e:
+                    # Keep the change flagged (without waking the loop) so
+                    # the next periodic tick retries — a transient listing
+                    # failure must not strand a stale toolset forever.
+                    self._tools_changed.add(name)
+                    logger.error(f"MCP server '{name}' re-discovery failed: {e}")
 
     async def _reconnect(self, name: str, server_cfg: Dict[str, Any]) -> None:
         """Replace a dead (or never-established) connection.
 
-        Caller holds ``self._lock``. Existing registrations stay in place
+        Network work runs unlocked; existing registrations stay in place
         until the new discovery succeeds — a server that is merely down keeps
         degrading to per-call errors instead of having its tools vanish (and
-        persona policies churn) on every failed retry.
+        persona policies churn) on every failed retry. The swap re-checks
+        state under the lock: the server may have been removed, disabled, or
+        re-added while we were connecting.
         """
-        old_conn = self._connections.get(name)
-        conn = _ServerConnection(
-            name,
-            str(server_cfg["url"]),
-            on_tools_changed=lambda: self._mark_tools_changed(name),
-        )
-        await conn.start(MCP_CONNECT_TIMEOUT)
-        try:
-            assert conn.session is not None
-            defs = await self._discover_definitions(name, server_cfg, conn.session)
-        except BaseException:
+        conn, defs = await self._open_and_discover(name, server_cfg)
+        old_conn: Optional[_ServerConnection] = None
+        registered: Optional[List[str]] = None
+        async with self._lock:
+            config = self._load_config(strict=False)
+            cfg_now = config.get("servers", {}).get(name)
+            current = self._connections.get(name)
+            if (
+                isinstance(cfg_now, dict)
+                and cfg_now.get("enabled", True)
+                and (current is None or current.session is None)
+            ):
+                old_conn = self._connections.pop(name, None)
+                self._connections[name] = conn
+                registered = self._swap_registrations(name, defs)
+        if registered is None:
+            # Removed, disabled, or replaced live while we were connecting.
             await conn.stop()
-            raise
+            return
         if old_conn is not None:
             await old_conn.stop()
-        self._connections[name] = conn
-        registered = self._swap_registrations(name, defs)
         logger.info(
             f"MCP server '{name}' reconnected; {len(registered)} tool(s) registered."
         )
@@ -466,13 +500,17 @@ class MCPClientManager:
     async def _rediscover(self, name: str, server_cfg: Dict[str, Any]) -> None:
         """Refresh a live server's toolset after ``tools/list_changed``.
 
-        Caller holds ``self._lock``. On listing failure the old registrations
-        stay untouched (the next pass retries).
+        Listing runs unlocked; on failure the old registrations stay
+        untouched and the caller re-flags the server for the next tick.
         """
-        conn = self._connections[name]
-        assert conn.session is not None
+        conn = self._connections.get(name)
+        if conn is None or conn.session is None:
+            return  # died in the meantime; the reconnect branch owns it now
         defs = await self._discover_definitions(name, server_cfg, conn.session)
-        registered = self._swap_registrations(name, defs)
+        async with self._lock:
+            if self._connections.get(name) is not conn:
+                return  # removed or replaced while we were listing
+            registered = self._swap_registrations(name, defs)
         logger.info(
             f"MCP server '{name}' re-discovered; {len(registered)} tool(s) registered."
         )
@@ -481,15 +519,26 @@ class MCPClientManager:
         self, name: str, defs: List[Tuple[str, Dict[str, Any]]]
     ) -> List[str]:
         """Replace a server's registered toolset with fresh definitions and
-        revalidate personas once for the whole swap."""
+        revalidate personas once for the whole swap. Caller holds the lock.
+
+        An identical toolset is a no-op — a flapping server must not churn
+        persona validation or open a tools-unregistered window every pass.
+        """
+        current = self._registered_tools.get(name, [])
+        fresh = {d["function"]["name"]: d for _, d in defs}
+        if set(current) == set(fresh) and all(
+            get_tool_definition(n) == fresh[n] for n in current
+        ):
+            return current
         self._unregister_server_tools(name)
         try:
             registered = self._register_definitions(name, defs)
         except Exception as e:
             # _register_definitions rolled back its partial work, but the old
-            # defs are already gone — the server ends up connected with zero
-            # tools until a later pass re-discovers successfully.
+            # defs are already gone — flag the server for retry on the next
+            # periodic tick rather than stranding it connected-but-toolless.
             logger.error(f"MCP server '{name}' tool re-registration failed: {e}")
+            self._tools_changed.add(name)
             registered = []
         self._registered_tools[name] = registered
         self._revalidate_personas()
@@ -510,15 +559,8 @@ class MCPClientManager:
         if name in self._connections:
             raise ValueError(f"MCP server '{name}' is already connected.")
 
-        conn = _ServerConnection(
-            name,
-            str(server_cfg["url"]),
-            on_tools_changed=lambda: self._mark_tools_changed(name),
-        )
-        await conn.start(MCP_CONNECT_TIMEOUT)
+        conn, defs = await self._open_and_discover(name, server_cfg)
         try:
-            assert conn.session is not None
-            defs = await self._discover_definitions(name, server_cfg, conn.session)
             registered = self._register_definitions(name, defs)
         except BaseException:
             await conn.stop()
@@ -531,6 +573,35 @@ class MCPClientManager:
             f"MCP server '{name}' connected; {len(registered)} tool(s) registered."
         )
         return registered
+
+    async def _open_and_discover(
+        self, name: str, server_cfg: Dict[str, Any]
+    ) -> Tuple[_ServerConnection, List[Tuple[str, Dict[str, Any]]]]:
+        """Connect a new session and discover its toolset. On any failure the
+        connection is torn down and the error re-raised."""
+        conn = _ServerConnection(
+            name,
+            str(server_cfg["url"]),
+            on_tools_changed=lambda: self._mark_tools_changed(name),
+        )
+        await conn.start(MCP_CONNECT_TIMEOUT)
+        try:
+            assert conn.session is not None
+            defs = await self._discover_definitions(name, server_cfg, conn.session)
+        except BaseException:
+            await conn.stop()
+            raise
+        return conn, defs
+
+    async def _teardown_server(self, name: str) -> List[str]:
+        """Stop and fully forget a server: connection, registrations, persona
+        revalidation. Caller holds ``self._lock``; config is the caller's."""
+        conn = self._connections.pop(name, None)
+        removed = self._unregister_server_tools(name)
+        self._revalidate_personas()
+        if conn is not None:
+            await conn.stop()
+        return removed
 
     async def _discover_definitions(
         self, name: str, server_cfg: Dict[str, Any], session: ClientSession
