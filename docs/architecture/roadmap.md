@@ -6,8 +6,8 @@ type: project
 
 ## Cleanup (quick wins)
 
-- [ ] Remove `DISPATCH_ENABLED` / `ZAMMAD_BOT_ENABLED` from `global_config.py` — `agents.json` `auto_start` replaces them
-- [ ] Remove `apscheduler` from `requirements.txt` — already gone from `requirements.in`
+- [x] Remove `DISPATCH_ENABLED` / `ZAMMAD_BOT_ENABLED` from `global_config.py` — `agents.json` `auto_start` replaces them. **DONE** (both gone from `global_config.py`).
+- [x] Remove `apscheduler` from `requirements.txt` — already gone from `requirements.in`. **DONE** (gone from both `requirements.txt` and `requirements.in`).
 
 ## Near-term
 
@@ -22,7 +22,7 @@ type: project
 
 - [ ] **Layered system prompt composition** — pipeline instead of monolithic prompt string
 - [ ] **Skills / instruction loading** — markdown files in `skills/`, loaded on demand into system prompt
-- [ ] **MCP client (Phase 1)** — consume existing MCP servers, expose their tools to LLM. See `plans/mcp_strategy.md` for full phased plan
+- [ ] **MCP client (Phase 1)** — consume existing MCP servers, expose their tools to LLM. See `plans/mcp_strategy.md` for full phased plan. **IN FLIGHT (DP-268):** implemented and QA_READY on branch `feature/DP-268-mcp-client` (all phases 0–3 done); NOT yet merged to master — pending PR + live smoke test + merge.
 - [ ] **Interface refactor** — Discord/Gmail should split into client/service/interface layers like Zammad
 
 ## Long-term / watch
