@@ -5,6 +5,7 @@
 # persona-revalidation trigger. The MCP transport is faked at the
 # `_open_session` seam — no network, no real server.
 
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -232,6 +233,63 @@ async def test_invalid_tool_name_skipped(tmp_path, fresh_registry, fake_transpor
     await manager.aclose()
 
 
+async def test_namespaced_name_over_provider_limit_skipped(
+        tmp_path, fresh_registry, fake_transport):
+    """A raw tool name can pass the 64-char check while the mcp__<server>__
+    prefix pushes the NAMESPACED name past the provider limit — the tool must
+    be skipped, not registered (one oversized def 400s every request)."""
+    long_name = "t" * 60  # valid raw (≤64); mcp__home__ + 60 = 71 chars
+    fake_transport["http://srv/mcp"] = FakeSession(
+        tools=[_mcp_tool(long_name), _mcp_tool("fits")]
+    )
+    manager, _ = _make_manager(tmp_path)
+    result = await manager.add_server("home", "http://srv/mcp")
+    assert result["tools_registered"] == ["mcp__home__fits"]
+    assert definitions.get_tool_definition(f"mcp__home__{long_name}") is None
+    await manager.aclose()
+
+
+async def test_add_server_save_failure_rolls_back_registration(
+        tmp_path, fresh_registry, fake_transport):
+    """A failed config persist must not leave a live-but-unpersisted server
+    (tools callable yet invisible to list_mcp_servers, gone on restart)."""
+    fake_transport["http://srv/mcp"] = FakeSession()
+    manager, tool_manager = _make_manager(tmp_path)
+
+    original_save = manager._save_config
+
+    def broken_save(config):
+        raise OSError("disk full")
+    manager._save_config = broken_save  # type: ignore[method-assign]
+
+    with pytest.raises(OSError, match="disk full"):
+        await manager.add_server("home", "http://srv/mcp")
+
+    assert definitions.get_tool_definition("mcp__home__do_thing") is None
+    assert "home" not in manager._connections
+    out = await tool_manager.execute_tool("mcp__home__do_thing")
+    assert "not found" in out["error"]
+
+    # The add is cleanly retryable once persistence works again.
+    manager._save_config = original_save  # type: ignore[method-assign]
+    result = await manager.add_server("home", "http://srv/mcp")
+    assert result["tools_registered"] == ["mcp__home__do_thing"]
+    await manager.aclose()
+
+
+async def test_add_server_rejects_malformed_servers_shape(
+        tmp_path, fresh_registry, fake_transport):
+    """{"servers": []} passes json.load but must fail validation up front,
+    not TypeError after the server is already connected and registered."""
+    (tmp_path / "mcp_servers.json").write_text(json.dumps({"servers": []}))
+    fake_transport["http://srv/mcp"] = FakeSession()
+    manager, _ = _make_manager(tmp_path)
+    with pytest.raises(RuntimeError, match="unreadable"):
+        await manager.add_server("home", "http://srv/mcp")
+    assert definitions.get_tool_definition("mcp__home__do_thing") is None
+    assert "home" not in manager._connections
+
+
 # --- call path ------------------------------------------------------------------
 
 async def test_call_tool_prefers_structured_content(
@@ -278,6 +336,30 @@ async def test_call_passes_arguments_through(tmp_path, fresh_registry, fake_tran
 
 
 # --- remove_server / list_servers ------------------------------------------------
+
+async def test_save_config_is_atomic_no_tmp_left_behind(
+        tmp_path, fresh_registry, fake_transport):
+    fake_transport["http://srv/mcp"] = FakeSession()
+    manager, _ = _make_manager(tmp_path)
+    await manager.add_server("home", "http://srv/mcp")
+    assert (tmp_path / "mcp_servers.json").exists()
+    assert not (tmp_path / "mcp_servers.json.tmp").exists()
+    await manager.aclose()
+
+
+async def test_session_task_ends_cancelled_on_external_cancel(
+        tmp_path, fresh_registry, fake_transport):
+    """_run must re-raise CancelledError so the task ends cancelled instead
+    of 'completed normally' (suppressing a requested cancellation)."""
+    fake_transport["http://srv/mcp"] = FakeSession()
+    manager, _ = _make_manager(tmp_path)
+    await manager.add_server("home", "http://srv/mcp")
+    task = manager._connections["home"]._task
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert task.cancelled()
+
 
 async def test_remove_server_unregisters_and_persists(
         tmp_path, fresh_registry, fake_transport):

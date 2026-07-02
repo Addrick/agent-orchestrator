@@ -33,8 +33,10 @@ session task exits, ``call_tool`` raises, ``ToolManager`` wraps it as
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
+import os
 import re
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -136,6 +138,10 @@ class _ServerConnection:
                 self.session = session
                 self._ready.set()
                 await self._stop.wait()
+        except asyncio.CancelledError:
+            # Never absorb a requested cancellation — the task must end
+            # cancelled, not "completed normally", or awaiters misread it.
+            raise
         except BaseException as e:  # noqa: BLE001 — anyio group errors included
             self.error = e
             if self._ready.is_set():
@@ -146,13 +152,16 @@ class _ServerConnection:
 
     async def stop(self) -> None:
         self._stop.set()
-        if self._task is not None:
-            try:
-                await asyncio.wait_for(self._task, timeout=10)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                self._task.cancel()
-            except Exception:  # already-logged session errors
-                pass
+        if self._task is None:
+            return
+        try:
+            await asyncio.wait_for(self._task, timeout=10)
+        except asyncio.TimeoutError:
+            # Transport hung on close: cancel AND drain, so no pending task
+            # (with its anyio/httpx unwind) survives into loop shutdown.
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
 
 
 class MCPClientManager:
@@ -236,8 +245,19 @@ class MCPClientManager:
                 raise ValueError(f"MCP server '{name}' is already configured.")
             server_cfg = {"url": url, "enabled": True, "tool_overrides": {}}
             registered = await self._connect_and_register(name, server_cfg)
-            config.setdefault("servers", {})[name] = server_cfg
-            self._save_config(config)
+            try:
+                config["servers"][name] = server_cfg
+                self._save_config(config)
+            except BaseException:
+                # A failed persist must not leave a live-but-unpersisted
+                # server (callable, yet invisible to list_mcp_servers and
+                # gone after restart): roll the registration back first.
+                conn = self._connections.pop(name, None)
+                self._unregister_server_tools(name)
+                self._revalidate_personas()
+                if conn is not None:
+                    await conn.stop()
+                raise
 
         logger.info(
             f"MCP server '{name}' added ({url}); registered tools: {registered}"
@@ -355,6 +375,16 @@ class MCPClientManager:
                     continue
                 definition = self._translate_tool(name, tool, overrides.get(tool.name))
                 namespaced = definition["function"]["name"]
+                if not _TOOL_NAME_RE.match(namespaced):
+                    # The raw name passed, so this is the mcp__<server>__
+                    # prefix pushing the NAMESPACED name past the 64-char
+                    # provider limit — one oversized def 400s every request.
+                    logger.warning(
+                        f"MCP server '{name}' tool '{tool.name}': namespaced "
+                        f"name '{namespaced}' exceeds the provider tool-name "
+                        "limit; skipped."
+                    )
+                    continue
                 register_tool_definition(definition)
                 self._tool_manager.register(
                     namespaced, self._make_handler(name, tool.name)
@@ -453,6 +483,8 @@ class MCPClientManager:
             if not isinstance(data, dict):
                 raise ValueError("top-level JSON must be an object")
             data.setdefault("servers", {})
+            if not isinstance(data["servers"], dict):
+                raise ValueError("'servers' must be a JSON object")
             return data
         except (json.JSONDecodeError, ValueError, OSError) as e:
             logger.error(f"Failed to load MCP config {self._config_path}: {e}")
@@ -464,6 +496,10 @@ class MCPClientManager:
             return {"servers": {}}
 
     def _save_config(self, config: Dict[str, Any]) -> None:
+        # Write-then-rename: a crash mid-write must never truncate the config
+        # (a truncated file silently drops every server at the next startup).
         self._config_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self._config_path, "w", encoding="utf-8") as f:
+        tmp_path = self._config_path.with_name(self._config_path.name + ".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2)
+        os.replace(tmp_path, self._config_path)
