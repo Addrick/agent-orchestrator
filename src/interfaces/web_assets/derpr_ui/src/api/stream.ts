@@ -135,6 +135,14 @@ async function consume(
         const block = buf.slice(0, idx)
         buf = buf.slice(idx + 2)
         dispatchBlock(block, h, sawError)
+        // An error frame terminates the turn client-side. Keep reading and a
+        // later [DONE] on this same (still-open) connection would fire onDone
+        // against whatever stream is CURRENT by then — clobbering a newly
+        // started stream's state (handlers are not generation-tagged).
+        if (sawError.v) {
+          void reader.cancel().catch(() => {})
+          return
+        }
       }
     }
     if (buf.trim()) dispatchBlock(buf, h, sawError)

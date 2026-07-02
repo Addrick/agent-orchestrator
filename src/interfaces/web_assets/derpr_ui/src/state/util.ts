@@ -1,9 +1,16 @@
 /* shared helpers — kept dumb and pure */
 
-/** Split a folded <think>…</think> block out of content → { reasoning, body }. */
+/** Split a folded <think>…</think> block out of content → { reasoning, body }.
+ *  Persisted rows carry the exact '<think>\nR\n</think>\nC' framing the adapter
+ *  reconstructs, but STREAMING deltas come straight from the model (think
+ *  templates leak the tags into content), so tolerate loose whitespace and an
+ *  open-but-unclosed block — otherwise raw reasoning renders as body text
+ *  until </think> arrives and then visually "jumps" into the fold. */
 export function splitThink(content: string): { reasoning: string | null; body: string } {
-  const m = content.match(/^<think>\n([\s\S]*?)\n<\/think>\n?([\s\S]*)$/)
+  const m = content.match(/^<think>\s*([\s\S]*?)\s*<\/think>\s*([\s\S]*)$/)
   if (m) return { reasoning: m[1], body: m[2] }
+  const open = content.match(/^<think>\s*([\s\S]*)$/)
+  if (open) return { reasoning: open[1], body: '' }
   return { reasoning: null, body: content }
 }
 
