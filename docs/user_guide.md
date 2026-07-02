@@ -571,11 +571,23 @@ Security model for discovered tools:
   (a prompt-injection surface); they are length-capped at discovery.
 
 Disabled by default. Enable with `MCP_ENABLED=true`. Config knobs:
-`MCP_SERVERS_FILE`, `MCP_CONNECT_TIMEOUT`, `MCP_CALL_TIMEOUT`. When disabled,
-the management tools return a clear "disabled" error and no configured server
-is contacted. A server that dies at runtime degrades to per-call errors
-(`restart or re-add to reconnect`); a server that is down at startup is
-skipped with a logged error and never blocks the app.
+`MCP_SERVERS_FILE`, `MCP_CONNECT_TIMEOUT`, `MCP_CALL_TIMEOUT`,
+`MCP_RECONNECT_INTERVAL`. When disabled, the management tools return a clear
+"disabled" error and no configured server is contacted.
+
+**Hot reload.** A background maintenance pass runs every
+`MCP_RECONNECT_INTERVAL` seconds (default 60; `<= 0` disables it):
+
+- A server that is down — at startup or after dying at runtime — is retried
+  automatically. While it is down its tools stay registered and return
+  per-call errors, so persona configurations don't churn during an outage;
+  the tools go live again on reconnect. A dead server never blocks startup
+  or other servers.
+- When a server announces `tools/list_changed`, its toolset is re-discovered
+  immediately (the notification wakes the pass; the interval is only the
+  fallback for servers that never signal). New tools appear with the usual
+  restrictive defaults, removed tools are unregistered, and every persona is
+  re-validated against the new toolset.
 
 ### Memory Tools (no service binding required)
 

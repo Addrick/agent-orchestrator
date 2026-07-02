@@ -436,10 +436,16 @@ PVE_MODEL_UNITS: Dict[str, str] = json.loads(
 #   like personas.json.
 # MCP_CONNECT_TIMEOUT / MCP_CALL_TIMEOUT — seconds before a server connect /
 #   a single tool call is abandoned (keeps a hung server out of the tool loop).
+# MCP_RECONNECT_INTERVAL — seconds between hot-reload maintenance passes
+#   (reconnect dead servers; re-discover toolsets after tools/list_changed —
+#   the notification wakes a pass immediately, the interval is the fallback).
+#   <= 0 disables the loop: dead servers then degrade to per-call errors
+#   until restart.
 MCP_ENABLED = os.environ.get("MCP_ENABLED", "False").lower() in ("true", "1", "yes", "on")
 MCP_SERVERS_FILE = Path(os.environ.get("MCP_SERVERS_FILE", str(DATA_DIR / "mcp_servers.json")))
 MCP_CONNECT_TIMEOUT = float(os.environ.get("MCP_CONNECT_TIMEOUT", "30"))
 MCP_CALL_TIMEOUT = float(os.environ.get("MCP_CALL_TIMEOUT", "120"))
+MCP_RECONNECT_INTERVAL = float(os.environ.get("MCP_RECONNECT_INTERVAL", "60"))
 
 # Models
 EMBEDDING_MODEL = 'gemini-embedding-001'

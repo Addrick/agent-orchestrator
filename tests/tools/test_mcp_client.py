@@ -15,7 +15,6 @@ import pytest
 from mcp import types as mcp_types
 
 from src.persona import Persona
-from src.tool_policy import ToolPolicy
 from src.tools import definitions
 from src.tools import mcp_client
 from src.tools.definitions import ToolDefinitionRegistry, ALL_TOOL_DEFINITIONS
@@ -48,6 +47,7 @@ class FakeSession:
         self.tools = tools if tools is not None else [_mcp_tool()]
         self.call_result = call_result or _text_result("ok")
         self.calls = []
+        self.message_handler = None  # captured by the fake transport
 
     async def list_tools(self):
         return SimpleNamespace(tools=self.tools)
@@ -55,6 +55,15 @@ class FakeSession:
     async def call_tool(self, name, arguments=None, read_timeout_seconds=None):
         self.calls.append((name, arguments))
         return self.call_result
+
+    async def notify_tools_changed(self):
+        """Deliver a tools/list_changed notification like a real server."""
+        assert self.message_handler is not None
+        await self.message_handler(mcp_types.ServerNotification(
+            mcp_types.ToolListChangedNotification(
+                method="notifications/tools/list_changed"
+            )
+        ))
 
 
 @pytest.fixture
@@ -71,21 +80,23 @@ def fake_transport(monkeypatch):
     sessions = {}
 
     @asynccontextmanager
-    async def fake_open_session(url):
+    async def fake_open_session(url, message_handler=None):
         session = sessions.get(url)
         if session is None:
             raise ConnectionError(f"no fake server at {url}")
+        session.message_handler = message_handler
         yield session
 
     monkeypatch.setattr(mcp_client, "_open_session", fake_open_session)
     return sessions
 
 
-def _make_manager(tmp_path, personas=None, enabled=True):
+def _make_manager(tmp_path, personas=None, enabled=True, reconnect_interval=60):
     manager = MCPClientManager(
         config_path=tmp_path / "mcp_servers.json",
         personas_provider=(lambda: personas) if personas is not None else None,
         enabled=enabled,
+        reconnect_interval=reconnect_interval,
     )
     tool_manager = ToolManager()
     MCPIntegration(manager).register_tools(tool_manager)
@@ -481,6 +492,176 @@ async def test_registration_revalidates_personas_no_wildcard_cascade(
 
     await manager.remove_server("home")
     assert not risky.is_security_blocked()
+
+
+# --- hot reload (phase 3): reconnect + tools/list_changed re-discovery -----------
+
+async def _kill_session(manager, name):
+    """Simulate a server death: the session task unwinds, session goes None."""
+    conn = manager._connections[name]
+    session = conn.session
+    conn._stop.set()
+    await conn._task
+    conn._stop = asyncio.Event()  # irrelevant post-mortem, keeps state tidy
+    assert conn.session is None
+    return session
+
+
+async def test_maintenance_reconnects_dead_server(
+        tmp_path, fresh_registry, fake_transport):
+    fake_transport["http://srv/mcp"] = FakeSession(tools=[_mcp_tool("a")])
+    manager, tool_manager = _make_manager(tmp_path)
+    await manager.add_server("home", "http://srv/mcp")
+    await _kill_session(manager, "home")
+
+    # While dead: tools stay registered but degrade to per-call errors.
+    assert definitions.get_tool_definition("mcp__home__a") is not None
+    out = await tool_manager.execute_tool("mcp__home__a")
+    assert "not connected" in out["error"]
+
+    await manager._maintain()
+    listing = await manager.list_servers()
+    assert listing[0]["connected"] is True
+    assert (await tool_manager.execute_tool("mcp__home__a")) == {"result": "ok"}
+    await manager.aclose()
+
+
+async def test_failed_reconnect_keeps_existing_registrations(
+        tmp_path, fresh_registry, fake_transport):
+    """A server that is merely down must not lose its registered tools on a
+    failed reconnect attempt — persona policies stay stable across outages."""
+    fake_transport["http://srv/mcp"] = FakeSession(tools=[_mcp_tool("a")])
+    manager, _ = _make_manager(tmp_path)
+    await manager.add_server("home", "http://srv/mcp")
+    await _kill_session(manager, "home")
+    del fake_transport["http://srv/mcp"]  # server unreachable now
+
+    await manager._maintain()  # reconnect fails, logged, no raise
+    assert definitions.get_tool_definition("mcp__home__a") is not None
+    listing = await manager.list_servers()
+    assert listing[0]["connected"] is False
+    assert listing[0]["tools"] == ["mcp__home__a"]
+
+    # Server comes back → next pass restores it.
+    fake_transport["http://srv/mcp"] = FakeSession(tools=[_mcp_tool("a")])
+    await manager._maintain()
+    assert (await manager.list_servers())[0]["connected"] is True
+    await manager.aclose()
+
+
+async def test_startup_failed_server_retried_by_maintenance(
+        tmp_path, fresh_registry, fake_transport):
+    (tmp_path / "mcp_servers.json").write_text(json.dumps({
+        "servers": {"late": {"url": "http://late/mcp", "enabled": True}},
+    }))
+    manager, _ = _make_manager(tmp_path)
+    await manager.start()  # connect fails, logged
+    assert definitions.get_tool_definition("mcp__late__do_thing") is None
+
+    fake_transport["http://late/mcp"] = FakeSession()
+    await manager._maintain()
+    assert definitions.get_tool_definition("mcp__late__do_thing") is not None
+    assert (await manager.list_servers())[0]["connected"] is True
+    await manager.aclose()
+
+
+async def test_tools_list_changed_triggers_rediscovery(
+        tmp_path, fresh_registry, fake_transport):
+    session = FakeSession(tools=[_mcp_tool("old_tool")])
+    fake_transport["http://srv/mcp"] = session
+    manager, _ = _make_manager(tmp_path)
+    await manager.add_server("home", "http://srv/mcp")
+    assert definitions.get_tool_definition("mcp__home__old_tool") is not None
+
+    # Server swaps its toolset and notifies, like a real MCP server would.
+    session.tools = [_mcp_tool("new_tool")]
+    await session.notify_tools_changed()
+    assert "home" in manager._tools_changed
+    assert manager._wake.is_set()
+
+    await manager._maintain()
+    assert definitions.get_tool_definition("mcp__home__old_tool") is None
+    assert definitions.get_tool_definition("mcp__home__new_tool") is not None
+    assert (await manager.list_servers())[0]["tools"] == ["mcp__home__new_tool"]
+    await manager.aclose()
+
+
+async def test_rediscovery_failure_keeps_old_toolset(
+        tmp_path, fresh_registry, fake_transport):
+    session = FakeSession(tools=[_mcp_tool("a")])
+    fake_transport["http://srv/mcp"] = session
+    manager, _ = _make_manager(tmp_path)
+    await manager.add_server("home", "http://srv/mcp")
+
+    async def broken_list_tools():
+        raise ConnectionError("mid-flight death")
+    session.list_tools = broken_list_tools
+    await session.notify_tools_changed()
+
+    await manager._maintain()  # logged, no raise
+    assert definitions.get_tool_definition("mcp__home__a") is not None
+    assert (await manager.list_servers())[0]["tools"] == ["mcp__home__a"]
+    await manager.aclose()
+
+
+async def test_rediscovery_revalidates_personas(
+        tmp_path, fresh_registry, fake_transport):
+    """A toolset swap must re-run composition for every persona — a tool
+    disappearing (or its metadata changing) can flip a quarantine verdict."""
+    risky = _persona("risky", allow=["web_search", "mcp__home__do_thing"])
+    session = FakeSession(tools=[_mcp_tool("do_thing")])
+    fake_transport["http://srv/mcp"] = session
+    manager, _ = _make_manager(tmp_path, personas={"risky": risky})
+    await manager.add_server("home", "http://srv/mcp")
+    assert risky.is_security_blocked()
+
+    # The offending tool vanishes server-side → re-discovery clears the block.
+    session.tools = [_mcp_tool("harmless_other")]
+    await session.notify_tools_changed()
+    await manager._maintain()
+    assert not risky.is_security_blocked()
+    await manager.aclose()
+
+
+async def test_maintenance_loop_lifecycle(tmp_path, fresh_registry, fake_transport):
+    """start() spawns the loop (when enabled, interval > 0); aclose() stops it.
+    Interval <= 0 or disabled → no loop."""
+    manager, _ = _make_manager(tmp_path)
+    await manager.start()
+    assert manager._maintenance_task is not None
+    task = manager._maintenance_task
+    await manager.aclose()
+    assert task.done()
+    assert manager._maintenance_task is None
+
+    no_loop, _ = _make_manager(tmp_path, reconnect_interval=0)
+    await no_loop.start()
+    assert no_loop._maintenance_task is None
+
+    disabled, _ = _make_manager(tmp_path, enabled=False)
+    await disabled.start()
+    assert disabled._maintenance_task is None
+
+
+async def test_maintenance_loop_wakes_on_notification(
+        tmp_path, fresh_registry, fake_transport):
+    """End-to-end through the real background loop: a notification (not the
+    periodic tick — interval is far too long) drives the re-discovery."""
+    session = FakeSession(tools=[_mcp_tool("old_tool")])
+    fake_transport["http://srv/mcp"] = session
+    manager, _ = _make_manager(tmp_path, reconnect_interval=3600)
+    await manager.start()
+    await manager.add_server("home", "http://srv/mcp")
+
+    session.tools = [_mcp_tool("new_tool")]
+    await session.notify_tools_changed()
+    for _ in range(200):  # let the loop task run; bounded wait, no sleep math
+        if definitions.get_tool_definition("mcp__home__new_tool") is not None:
+            break
+        await asyncio.sleep(0.01)
+    assert definitions.get_tool_definition("mcp__home__new_tool") is not None
+    assert definitions.get_tool_definition("mcp__home__old_tool") is None
+    await manager.aclose()
 
 
 async def test_wildcard_persona_unaffected_by_server_install(
