@@ -162,7 +162,7 @@ mypy src/ --config-file mypy.ini
 ## Documentation
 
 - [`docs/user_guide.md`](docs/user_guide.md) — user-facing behaviour: interfaces, commands, personas, modes, tools, agents, long-term memory, Hindsight bring-up. Doubles as the spec for new features (write here before implementing).
-- [`docs/architecture/`](docs/architecture) — split design notes (overview, decisions, plans, research, roadmap).
+- [`docs/architecture/`](docs/architecture) — split design notes (overview, architecture, external, research, roadmap). Decision records (ADRs) live in the private notes repo, not here.
 - [`memory/codebase/architecture.md`](memory/codebase/architecture.md) — exhaustive component reference: data flow, schemas, tables, indexes, startup sequence.
 - [`CLAUDE.md`](CLAUDE.md) — contributor rules: parallel-agent / worktree workflow, mandatory tests, memory-update protocol.
 
