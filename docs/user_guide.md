@@ -82,7 +82,7 @@ Saving from the Inference Matrix persists the `memory_mode` to the backend. The 
 
 > The portal's normal generation path is the OpenAI-style `/chat/completions` route (KoboldCPP jinja mode). The kobold-native `/api/v1/generate` and `/api/extra/generate/stream` routes are still served by the adapter for clients that prefer per-token SSE; both proxy to KoboldCPP and log user/assistant turns under `channel="web_ui"` the same way the OAI route does. Token-by-token portal usage falls on the native streaming route.
 
-**Tool-enabled personas in the portal (tool revamp v1):** A persona with `enabled_tools` set can run over the portal SSE stream — token deltas and tool calls interleave in a single linear stream with no drain-and-restart. While the model is invoking a tool, the portal renders an inline collapsible block (using kobold-lite's existing `<think>` Reflective-Process pipeline) showing the tool name, JSON arguments, and the result/error. The block is streaming-only — the database stores the resolved assistant text without it, so reload / version-chevron / retry flows stay clean. CONFIRM-mode write-tool gating is unchanged; the portal currently runs autonomous, so write tools execute immediately. The adapter also emits structured `event: derpr-tool-start` / `event: derpr-tool-result` SSE frames carrying `{tool_name, arguments, call_id}` and `{call_id, result, error}` for portal-aware listeners (`window.derprOnToolStart` / `derprOnToolResult` hooks; latest payloads accumulate in `window.derpr_tool_calls[call_id]`).
+**Tool-enabled personas in the portal (tool revamp v1):** A persona with `enabled_tools` set can run over the portal SSE stream — token deltas and tool calls interleave in a single linear stream with no drain-and-restart. While the model is invoking a tool, the portal renders an inline collapsible block (using kobold-lite's existing `<think>` Reflective-Process pipeline) showing the tool name, JSON arguments, and the result/error. The block is streaming-only — the database stores the resolved assistant text without it, so reload / version-chevron / retry flows stay clean. CONFIRM-mode write-tool gating is honored: a parked write surfaces in the bespoke portal transcript as a pending row with an inline **approve & run / deny** bar (resolved via `POST /api/v1/persona/{name}/confirm`, which streams the continuation over the same SSE protocol); a chained write re-parks with a fresh approval bar. The adapter also emits structured `event: derpr-tool-start` / `event: derpr-tool-result` SSE frames carrying `{tool_name, arguments, call_id}` and `{call_id, result, error}` for portal-aware listeners (`window.derprOnToolStart` / `derprOnToolResult` hooks; latest payloads accumulate in `window.derpr_tool_calls[call_id]`).
 
 ### Bespoke DERPR portal (`/derpr`)
 
@@ -99,6 +99,16 @@ Personas with `history_messages: 0` always render an empty transcript — the po
 **Create a persona (DP-231):** a **`+ new`** button beside the persona picker opens a create dialog. It captures the essentials — name (the routing key, lowercase `[a-z0-9_-]` only, no spaces), system prompt, model, memory mode, temperature, max tokens, and history window. Name is the only required field; a blank prompt/model falls back to the engine defaults (the prompt defaults to `you are in character as <name>`, matching the `add` dev command). On create the persona is persisted (`POST /api/v1/personas` → `personas.json`) and the portal switches to it, so the full **Inspector** — including the Tools tab for service bindings and tool policy — is immediately available to finish configuring it. A duplicate or malformed name is rejected with the engine's error shown inline.
 
 **Bulk tool toggles (DP-231):** the Inspector's **Tools** tab has a *set all tools* row (off · allow · ask) that flips every tool at once, plus per-service-group *off · allow* quick-set buttons in each group header — useful when configuring a freshly created persona that should start with most tools on (or off). Changes still save through the same `set tool_policy` path that revalidates the security composition.
+
+**Channel rail (DP-136 6b):** the left rail lists every channel the active persona has history in, grouped by originating interface (Web UI / Discord / Zammad / Gmail). Clicking a channel re-scopes the transcript and the next submit to it — a CHANNEL-memory-mode persona shows only that channel's history, a GLOBAL one merges all channels regardless. **`+ new`** points the view at a fresh `web_ui_*` tag; no row exists until the first submit, which materializes the channel in the DB (and the rail).
+
+**UI-state persistence (DP-273):** beyond the persona selection above, the portal remembers the rest of your client-side layout across reloads via browser `localStorage` — the three panel collapse toggles (nav rail / channel rail / inspector), the active Inspector tab, the advanced-sampler fold, and the **active channel per persona** (each persona restores its own last-used channel instead of resetting to the default). Every restored value is validated against what currently exists: a saved channel that no longer appears in the persona's channel list (deleted, or a `+ new` channel that was never sent to) resets gracefully to `web_ui`, and a stale Inspector tab falls back to the persona tab — no blank/error state. Sampler values and toggles are *not* stored here; they live on the persona server-side and are re-fetched on load.
+
+**Slash dev-commands:** a portal message starting with `/` is routed to the dev-command endpoint instead of the LLM — e.g. `/set temperature 0.8` or `/what models` runs the same command surface Discord uses, and the response renders as a dismissible inline row (mutating commands also refresh the Inspector). The composer hints this live (`leading / = dev-command`); there is currently no escape for sending a literal chat message that starts with `/` (the draft is trimmed before the check).
+
+**LTM recall toggle:** the composer's **LTM recall** chip controls whether long-term-memory retrieval runs for this persona (it saves through `long_term_memory` on the persona, so it persists). When on, the context panel previews the `ltm_block` the engine would inject — re-fetched as you type (debounced) so the preview mirrors the per-message recall recomputed at submit.
+
+**Voice availability:** the mic (hold-to-talk), *voice auto-send*, and *listen* (always-listening dictation) controls appear only when the browser supports audio capture **and** the engine reports `voice_web` in `GET /api/v1/capabilities` (i.e. `VOICE_WEB_ENABLED` is set and the `/voice/*` routes are mounted). With voice disabled server-side the controls are hidden rather than failing on every press.
 
 ## Commands
 
@@ -306,6 +316,8 @@ To prevent sophisticated injection attacks, the system refuses to load any perso
 - **`untrusted:read` + `network:write`**: Prevents untrusted data from being exfiltrated to a network endpoint.
 - **`pii:read` + `network:*`**: Prevents sensitive Personal Identifiable Information (PII) from being sent over the network.
 
+A `network` tool may opt out of the exfiltration rules (the last two above) with `capabilities.exfil_capable: false` when its egress carries no model-controlled payload — e.g. `set_active_model`, whose only argument is a name from a fixed config map, so nothing can ride out over its SSH. Such tools can freely combine with `untrusted:read`/`pii:read` tools. This affects only *exfiltration* accounting; any destructive effect is still gated by the write-audit (parked for confirmation). The default is `true`, so every other tool is unchanged.
+
 ### Irreversibility Flags
 Some tools are marked as **IRREVERSIBLE** (e.g., `delete_user`). Others may be dynamically flagged based on their arguments—for example, `add_note_to_ticket` is flagged as irreversible if the note is visible to a customer (`internal: false`). These flags are surfaced in the approval dialogue to highlight high-stakes actions.
 
@@ -501,6 +513,32 @@ so it never contends with the GPU serving the local LLM. Config: `VOICE_WEB_ENAB
 `VOICE_STT_MODEL` (`base`/`tiny`), `VOICE_WAKEWORD`. The inert Discord-capture
 path also reads `VOICE_ENABLED`, `VOICE_DISCORD_CHANNEL_ID`, `VOICE_VAD_SILENCE_MS`.
 All default-off.
+
+### Proxmox Tools (requires `service_bindings: ["proxmox"]`)
+
+Manage the Proxmox host that runs the stack: reboot the node or a guest, start/stop
+a guest, and swap which koboldcpp model serves `:5001` on the GPU container. Every
+action executes over SSH to the pve node (`pct`/`qm`/`systemctl`/`reboot`); all
+**destructive** tools are write tools, so they **park for your approval** before
+running (`reboot_node` is additionally flagged irreversible). Read tools run
+straight through.
+
+| Tool | Type | Description |
+|------|------|-------------|
+| `pve_status` | Read | Node uptime + `pct list` (containers) + `qm list` (VMs) with run state. Use to find guest ids before acting. |
+| `list_models` | Read | koboldcpp models for `:5001` that are **immediately available** (their model file is on disk) and which one is active. Configured units whose model file is missing are omitted — they can't be loaded. |
+| `reboot_node` | **Write (parked, irreversible)** | Reboot the metal — takes down every guest on it. Last resort. |
+| `reboot_guest` | **Write (parked)** | Reboot one guest by `vmid` + `kind` (`ct`/`vm`). |
+| `start_guest` | **Write (parked)** | Start a stopped guest. |
+| `stop_guest` | **Write (parked)** | Hard-stop a running guest (power-off, not graceful shutdown). |
+| `set_active_model` | **Write (parked)** | Swap the active model on `:5001`: disables the current unit, enables+starts the target (only one runs at a time). Pass a `name` from `list_models`. Pre-flight guard: if the target's model file isn't on disk it **refuses and leaves the current model running** (never takes `:5001` down). |
+
+Disabled by default. Enable with `PVE_TOOLS_ENABLED=true` and mount the pve SSH
+key into the container. Config knobs: `PVE_SSH_HOST`/`PVE_SSH_USER`/`PVE_SSH_KEY`/
+`PVE_SSH_TIMEOUT` (the node + how to reach it), `PVE_MODEL_HOST_VMID` (GPU
+container id whose systemd units bind `:5001`), and `PVE_MODEL_UNITS` (JSON map of
+friendly model name → systemd unit). When disabled, every tool call returns a
+clear "disabled" error instead of attempting SSH.
 
 ### Memory Tools (no service binding required)
 

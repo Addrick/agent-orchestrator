@@ -150,3 +150,52 @@ def test_persona_structured_policy():
     assert persona.get_tool_policy().ask == ["update_ticket"]
     # get_enabled_tools should return both for the engine to consider them
     assert set(persona.get_enabled_tools()) == {"web_search", "update_ticket"}
+
+
+# --- DP-263: exfil_capable opt-out --------------------------------------------
+
+def test_set_active_model_exempt_from_untrusted_read_exfil_rule():
+    """set_active_model (exfil_capable=False) must NOT trip Rule 2 even beside an
+    untrusted:read tool — its SSH carries no model-controlled payload."""
+    policy = ToolPolicy()
+    tools = _tools_by_name("web_search", "set_active_model")
+    assert policy.validate_composition(tools) == []
+
+
+def test_set_active_model_exempt_from_pii_read_exfil_rule():
+    """Rule 3 (pii:read + network egress) also must not fire on set_active_model."""
+    policy = ToolPolicy()
+    tools = _tools_by_name("search_user", "set_active_model")
+    assert policy.validate_composition(tools) == []
+
+
+def test_other_proxmox_writes_still_trip_exfil_rule():
+    """The exemption is scoped: a normal proxmox network:write (reboot_guest,
+    exfil_capable defaults True) beside an untrusted read STILL trips Rule 2."""
+    policy = ToolPolicy()
+    tools = _tools_by_name("web_search", "reboot_guest")
+    errors = policy.validate_composition(tools)
+    assert any("untrusted:read + network:write" in e for e in errors)
+
+
+def test_exfil_capable_capability_validation():
+    from src.tools.definitions import validate_tool_capabilities
+    good = {
+        "function": {"name": "x"},
+        "capabilities": {
+            "produces_untrusted": False, "irreversible": False,
+            "locality": "network", "sensitivity": "internal",
+            "exfil_capable": False,
+        },
+    }
+    validate_tool_capabilities(good)  # no raise
+    bad = {
+        "function": {"name": "x"},
+        "capabilities": {
+            "produces_untrusted": False, "irreversible": False,
+            "locality": "network", "sensitivity": "internal",
+            "exfil_capable": "no",
+        },
+    }
+    with pytest.raises(ValueError, match="exfil_capable"):
+        validate_tool_capabilities(bad)

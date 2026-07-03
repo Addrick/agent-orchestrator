@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { memo, useState } from 'react'
 import type { Chunk, ToolDef } from '../types/contracts'
 import { splitThink } from '../state/util'
+import { MessageBody } from './MessageBody'
 import { ReasoningFold } from './ReasoningFold'
 import { ToolCard } from './ToolCard'
 import { VersionChevrons } from './VersionChevrons'
@@ -18,7 +19,10 @@ interface Props {
   isLastAssistant?: boolean
 }
 
-export function MessageRow({
+// Memoized: during a stream the transcript's chunk objects and the store's
+// action callbacks are referentially stable, so per-token re-renders of the
+// tree skip every persisted row.
+export const MessageRow = memo(function MessageRow({
   chunk: c,
   tools,
   onEdit,
@@ -115,7 +119,7 @@ export function MessageRow({
                 marginTop: reasoning || (c.tool_context || []).length ? 10 : 0,
               }}
             >
-              {body}
+              <MessageBody content={body} />
             </div>
           )
         )}
@@ -183,4 +187,4 @@ export function MessageRow({
       )}
     </div>
   )
-}
+})

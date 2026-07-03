@@ -1,7 +1,7 @@
-import { useState, useRef, useCallback, useEffect } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useMicCapture } from './useMicCapture'
 import { useMicStream } from './useMicStream'
-import { transcribeVoice } from '../api/client'
+import { transcribeVoice, getVoiceWebEnabled } from '../api/client'
 
 interface Props {
   ltmOn: boolean
@@ -9,18 +9,42 @@ interface Props {
   onSend: (text: string) => void
   onAbort: () => void
   streaming: boolean
+  // Fired as the draft changes so the store can debounce-fetch the LTM preview
+  // for the real message text (DP-257). Preview-only — not the submit path.
+  onDraftChange: (text: string) => void
 }
 
 // Auto-send preference persists across reloads: off by default (dictation goes
 // into the draft so STT errors can be fixed), flip on once dictation is trusted.
 const AUTOSEND_KEY = 'derpr.voice.autoSend'
 
-export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming }: Props) {
+// Grow the textarea to fit its content, capped so long drafts scroll.
+const MAX_DRAFT_HEIGHT = 200
+function autosize(el: HTMLTextAreaElement) {
+  el.style.height = 'auto'
+  el.style.height = Math.min(el.scrollHeight, MAX_DRAFT_HEIGHT) + 'px'
+}
+
+export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming, onDraftChange }: Props) {
   const [text, setText] = useState('')
   const [autoSend, setAutoSend] = useState(
     () => localStorage.getItem(AUTOSEND_KEY) === '1',
   )
   const [micStatus, setMicStatus] = useState<string | null>(null)
+  // Whether the engine mounted the /voice/* routes (VOICE_WEB_ENABLED). Browser
+  // capability alone isn't enough: with voice disabled server-side the mic
+  // buttons would render fully functional and every press would end in a
+  // generic 404 "transcribe failed".
+  const [voiceWeb, setVoiceWeb] = useState(false)
+  useEffect(() => {
+    let live = true
+    void getVoiceWebEnabled().then((v) => {
+      if (live) setVoiceWeb(v)
+    })
+    return () => {
+      live = false
+    }
+  }, [])
   const ref = useRef<HTMLTextAreaElement>(null)
   const mic = useMicCapture()
 
@@ -29,7 +53,8 @@ export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming }: Pro
     if (!t || streaming) return
     onSend(t)
     setText('')
-    if (ref.current) ref.current.style.height = 'auto'
+    const el = ref.current
+    if (el) requestAnimationFrame(() => autosize(el)) // after the cleared value renders
   }
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -44,39 +69,32 @@ export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming }: Pro
 
   const grow = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setText(e.target.value)
-    const el = e.target
-    el.style.height = 'auto'
-    el.style.height = Math.min(el.scrollHeight, 200) + 'px'
+    onDraftChange(e.target.value)
+    autosize(e.target)
   }
 
   // Append dictated text to the draft and resize the textarea to fit.
   const appendDraft = (t: string) => {
-    setText((prev) => (prev ? prev.replace(/\s+$/, '') + ' ' : '') + t)
+    setText((prev) => {
+      const next = (prev ? prev.replace(/\s+$/, '') + ' ' : '') + t
+      // Fired from the updater so the preview sees the appended result without a
+      // second text mirror; the store debounces, so a StrictMode double-call is
+      // harmless.
+      onDraftChange(next)
+      return next
+    })
     const el = ref.current
-    if (el)
-      requestAnimationFrame(() => {
-        el.style.height = 'auto'
-        el.style.height = Math.min(el.scrollHeight, 200) + 'px'
-      })
+    if (el) requestAnimationFrame(() => autosize(el))
   }
 
   // One rule for both mic modes: auto-send (when toggled on and the engine isn't
-  // mid-stream) or drop into the draft to edit. Refs read by the streaming WS
-  // callback so it never sees a stale toggle/streaming value.
-  const autoSendRef = useRef(autoSend)
-  const streamingRef = useRef(streaming)
-  const onSendRef = useRef(onSend)
-  useEffect(() => {
-    autoSendRef.current = autoSend
-    streamingRef.current = streaming
-    onSendRef.current = onSend
-  })
-
-  const routeDictation = useCallback((t: string) => {
-    if (autoSendRef.current && !streamingRef.current) onSendRef.current(t)
+  // mid-stream) or drop into the draft to edit. Plain closure — useMicStream
+  // ref-wraps its onText argument, so staleness in the WS callback is handled
+  // there; no local ref mirror needed.
+  const routeDictation = (t: string) => {
+    if (autoSend && !streaming) onSend(t)
     else appendDraft(t)
-    // appendDraft is stable enough for this hook's purpose; deps intentionally [].
-  }, [])
+  }
 
   const stream = useMicStream(routeDictation)
 
@@ -85,14 +103,42 @@ export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming }: Pro
     localStorage.setItem(AUTOSEND_KEY, on ? '1' : '0')
   }
 
+  // Quick-tap race: mouseup can fire while mic.start() is still awaiting
+  // getUserMedia — at that point mic.recording is still false, so a naive stop
+  // bails and the deferred start then flips the mic hot with the pointer
+  // already released (recording forever). Track the pending start and honor a
+  // stop that arrived during it once the start resolves.
+  const micStartPending = useRef(false)
+  const micStopRequested = useRef(false)
+
   const micStart = async () => {
-    if (mic.recording) return
+    if (mic.recording || micStartPending.current) return
     setMicStatus(null)
-    const ok = await mic.start()
-    if (!ok) setMicStatus('mic access denied')
+    micStopRequested.current = false
+    micStartPending.current = true
+    let ok: boolean
+    try {
+      ok = await mic.start()
+    } finally {
+      micStartPending.current = false
+    }
+    if (!ok) {
+      setMicStatus('mic access denied')
+      return
+    }
+    if (micStopRequested.current) {
+      // The tap ended before the mic opened — nothing worth transcribing;
+      // just release the audio graph.
+      micStopRequested.current = false
+      void mic.stop()
+    }
   }
 
   const micStop = async () => {
+    if (micStartPending.current) {
+      micStopRequested.current = true
+      return
+    }
     if (!mic.recording) return
     const chunk = await mic.stop()
     if (!chunk) {
@@ -126,7 +172,7 @@ export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming }: Pro
           <span className="sw" />
           LTM recall
         </button>
-        {mic.supported && (
+        {voiceWeb && mic.supported && (
           <button
             className={'toggle-chip' + (autoSend ? ' on' : '')}
             onClick={() => setAutoSendPref(!autoSend)}
@@ -136,7 +182,7 @@ export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming }: Pro
             voice auto-send
           </button>
         )}
-        {stream.supported && (
+        {voiceWeb && stream.supported && (
           <button
             className={'toggle-chip' + (stream.active ? ' on' : '')}
             onClick={stream.toggle}
@@ -171,13 +217,13 @@ export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming }: Pro
           onKeyDown={onKeyDown}
           placeholder={streaming ? 'streaming… (draft your next message)' : 'message the engine, or / for a dev command'}
         />
-        {mic.supported && (
+        {voiceWeb && mic.supported && (
           <button
             className={'send mic' + (mic.recording ? ' rec' : '')}
             title='hold to talk — e.g. "set a timer for 10 minutes"'
             onMouseDown={micStart}
             onMouseUp={micStop}
-            onMouseLeave={() => mic.recording && micStop()}
+            onMouseLeave={() => (mic.recording || micStartPending.current) && micStop()}
             onTouchStart={(e) => {
               e.preventDefault()
               micStart()

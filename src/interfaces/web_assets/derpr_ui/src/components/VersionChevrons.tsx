@@ -16,6 +16,9 @@ export function VersionChevrons({ interactionId, onResync }: Props) {
   const [vers, setVers] = useState<VersionsResponse | null>(null)
   // current displayed version, 1-based; defaults to canonical (last).
   const [cur, setCur] = useState<number>(0)
+  // A select in flight — block further clicks so two swaps can't race the
+  // server (each swap mutates archive positions the next click indexes into).
+  const [busy, setBusy] = useState(false)
 
   useEffect(() => {
     let live = true
@@ -49,11 +52,21 @@ export function VersionChevrons({ interactionId, onResync }: Props) {
   const total = vers.versions.length
 
   const select = async (target1: number) => {
-    const k = target1 - 1 // 0-indexed
-    const next = await api.selectVersion(interactionId, k)
-    setVers(next)
-    setCur(target1) // selection index becomes current
-    onResync()
+    if (busy) return
+    setBusy(true)
+    try {
+      const k = target1 - 1 // 0-indexed
+      const next = await api.selectVersion(interactionId, k)
+      setVers(next)
+      setCur(target1) // selection index becomes current
+      onResync()
+    } catch (e) {
+      // Failed swap: leave cur/vers untouched so the chevrons still reflect
+      // server state instead of dying on an unhandled rejection.
+      console.error(e)
+    } finally {
+      setBusy(false)
+    }
   }
 
   return (
@@ -61,7 +74,7 @@ export function VersionChevrons({ interactionId, onResync }: Props) {
       <span className="chev">
         <button
           onClick={() => select(cur - 1)}
-          disabled={cur <= 1}
+          disabled={busy || cur <= 1}
           title="previous version"
         >
           ‹
@@ -71,7 +84,7 @@ export function VersionChevrons({ interactionId, onResync }: Props) {
         </span>
         <button
           onClick={() => select(cur + 1)}
-          disabled={cur >= total}
+          disabled={busy || cur >= total}
           title="next version"
         >
           ›

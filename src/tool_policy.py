@@ -105,7 +105,13 @@ class ToolPolicy:
             locality = caps.get("locality")
             domain = self._egress_domain(tool)
 
-            if locality == "network":
+            # A network tool may opt out of exfil accounting with
+            # exfil_capable=False: its egress carries no model-controlled payload
+            # (constrained args to trusted infra), so it is not a data-exfil
+            # vector and must not arm Rules 2/3. Destructive risk on such tools is
+            # covered separately by is_write (parked for confirmation). Default
+            # True keeps every existing tool unchanged.
+            if locality == "network" and caps.get("exfil_capable", True):
                 network_tool_domains.add(domain)
                 if is_write:
                     network_write_domains.add(domain)

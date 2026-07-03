@@ -78,14 +78,16 @@ def test_existing_base_fetch_only(tmp_path, monkeypatch):
 
 
 def test_configures_github_push_credential_helper(tmp_path, monkeypatch):
-    """prepare_base_clone points git's GitHub credential helper at `gh` so the
-    dispatched agent's `git push` / `gh pr create` authenticate via GH_TOKEN.
-    The token itself is never written — only the helper reference."""
+    """prepare_base_clone installs an inline git credential helper that emits
+    $GH_TOKEN at push time, so the dispatched agent's `git push` authenticates.
+    The helper must NOT invoke `gh` (absent in the deployed container) and must
+    reference GH_TOKEN only by env-var name, never the secret's value."""
     clone_dir = tmp_path / "fixr_clone"
     (clone_dir / ".git").mkdir(parents=True)
     source_root = tmp_path / "src_checkout"
     source_root.mkdir()
 
+    monkeypatch.setenv("GH_TOKEN", "s3cr3t-token-value")
     calls = []
     monkeypatch.setattr(
         cm.subprocess, "run",
@@ -96,9 +98,14 @@ def test_configures_github_push_credential_helper(tmp_path, monkeypatch):
 
     config_call = next(c for c in calls if c[1] == "config")
     assert config_call[2] == "credential.https://github.com.helper"
-    assert config_call[3] == "!gh auth git-credential"
-    # No raw secret anywhere in the git argv.
-    assert all("GH_TOKEN" not in str(arg) for c in calls for arg in c)
+    helper = config_call[3]
+    # Inline shell helper resolving the token from the env by NAME, not `gh`.
+    assert helper.startswith("!")
+    assert "gh auth git-credential" not in helper
+    assert "$GH_TOKEN" in helper
+    assert "x-access-token" in helper
+    # The secret's VALUE never appears in any git argv (only the var name does).
+    assert all("s3cr3t-token-value" not in str(arg) for c in calls for arg in c)
 
 
 def test_push_auth_failure_is_nonfatal(tmp_path, monkeypatch):

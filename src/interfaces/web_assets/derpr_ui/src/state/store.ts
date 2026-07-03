@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import * as api from '../api/client'
 import { streamChat, streamConfirm } from '../api/stream'
+import { readPref, writePref } from './persist'
 import type {
   Persona,
   ToolDef,
@@ -28,6 +29,15 @@ export type ViewMode = 'rendered' | 'context'
 // persisted setting, and resets on restart (intentionally not duplicated
 // server-side).
 const PERSONA_LS_KEY = 'derpr_ui_active_persona'
+
+// Per-persona last-used channel pref (DP-273). Keyed by persona so each keeps
+// its own last channel; validated against the live channel list on load and
+// reset to 'web_ui' if the saved channel no longer exists.
+const channelPrefKey = (persona: string) => `channel:${persona}`
+const readSavedChannel = (persona: string) =>
+  readPref(channelPrefKey(persona), 'web_ui', (r) =>
+    typeof r === 'string' && r ? r : 'web_ui',
+  )
 
 // A transient row representing the in-flight assistant turn (not yet persisted).
 export interface StreamState {
@@ -145,6 +155,31 @@ export function usePortalStore() {
   // approve/deny bar's busy state on the ephemeral chunk.
   const [resolvingConfirm, setResolvingConfirm] = useState<boolean>(false)
 
+  // ---- token delta batching ------------------------------------------
+  // SSE deltas arrive faster than paint; a setStream per token re-renders the
+  // whole app tree (usePortalStore lives in App) per token — visible stutter on
+  // long transcripts. Buffer deltas and flush at most once per animation frame.
+  const tokenBufRef = useRef('')
+  const tokenRafRef = useRef<number | null>(null)
+  const flushTokens = useCallback(() => {
+    if (tokenRafRef.current != null) {
+      cancelAnimationFrame(tokenRafRef.current)
+      tokenRafRef.current = null
+    }
+    const delta = tokenBufRef.current
+    if (!delta) return
+    tokenBufRef.current = ''
+    setStream((s) => ({ ...s, text: s.text + delta }))
+  }, [])
+  // Drop any pending deltas from a previous stream (new stream start / dismiss).
+  const resetTokenBuf = useCallback(() => {
+    if (tokenRafRef.current != null) {
+      cancelAnimationFrame(tokenRafRef.current)
+      tokenRafRef.current = null
+    }
+    tokenBufRef.current = ''
+  }, [])
+
   // ---- loaders -------------------------------------------------------
   // Transcript is scoped to the active channel (DP-136 6b). The engine honors
   // the persona's memory_mode: a CHANNEL-mode persona isolates per channel; a
@@ -160,6 +195,21 @@ export function usePortalStore() {
   useEffect(() => {
     activePersonaRef.current = activePersona
   }, [activePersona])
+  // Mirrors for the debounced LTM-preview callback (DP-257): the async fetch
+  // fired off a keystroke must read the current persona/toggle, not the values
+  // closed over when the debounce was armed.
+  const personaRef = useRef(persona)
+  const ltmOnRef = useRef(ltmOn)
+  useEffect(() => {
+    personaRef.current = persona
+    ltmOnRef.current = ltmOn
+  })
+  // Mirror of the channel rail for onDone's "does this channel already exist"
+  // check — the handler closure would otherwise see a stale list.
+  const channelsRef = useRef(channels)
+  useEffect(() => {
+    channelsRef.current = channels
+  }, [channels])
 
   // ---- fired-timer alarms (SSE back-channel) ------------------------
   // A timer set from the portal fires back here: the engine pushes the alarm
@@ -238,26 +288,45 @@ export function usePortalStore() {
   const loadAll = useCallback(
     async (p: string) => {
       setLoading(true)
+      // Restore this persona's last-used channel (client pref, DP-273); the
+      // transcript fetch below is scoped to it, and it's validated against the
+      // fetched channel list right after.
+      const wantChan = readSavedChannel(p)
+      setActiveChannel(wantChan)
+      activeChannelRef.current = wantChan
       try {
-        const [persObj, toolList, chanList] = await Promise.all([
+        // One parallel batch (transcript included — it doesn't depend on the
+        // persona fetch); only the LTM block waits, since whether to fetch it
+        // at all comes from persona.long_term_memory. Tools are persona-
+        // independent and loaded once at boot, not here.
+        const [persObj, chanList, cs] = await Promise.all([
           api.getPersona(p),
-          api.getTools(),
           api.getChannels(p),
+          api.getTranscript(p, undefined, wantChan),
         ])
-        setPersona(persObj)
-        setTools(toolList)
-        setChannels(chanList)
-        await refreshTranscript(p)
-
-        const isLtmOn = persObj.long_term_memory ?? true
-        setLtmOn(isLtmOn)
-
-        if (isLtmOn) {
-          const blk = await api.getLtmBlock(p, '')
-          setLtmBlock(blk)
-        } else {
-          setLtmBlock(null)
+        // A restored non-default channel that no longer appears in the persona's
+        // channel list has been deleted (or a "+ new channel" that was never
+        // sent to, so it never materialized in the DB) — fall back to web_ui and
+        // re-fetch rather than stranding the user on an empty phantom channel.
+        let resolvedChan = wantChan
+        let resolvedChunks = cs
+        if (
+          wantChan !== 'web_ui' &&
+          !chanList.some((g) => g.items.some((it) => it.channel === wantChan))
+        ) {
+          resolvedChan = 'web_ui'
+          setActiveChannel('web_ui')
+          activeChannelRef.current = 'web_ui'
+          writePref(channelPrefKey(p), 'web_ui')
+          resolvedChunks = await api.getTranscript(p, undefined, 'web_ui')
         }
+        const isLtmOn = persObj.long_term_memory ?? true
+        const blk = isLtmOn ? await api.getLtmBlock(p, '', resolvedChan) : null
+        setPersona(persObj)
+        setChannels(chanList)
+        setChunks(resolvedChunks)
+        setLtmOn(isLtmOn)
+        setLtmBlock(blk)
         setOffline(api.usingMock())
       } catch {
         setBanner(UNREACHABLE)
@@ -265,18 +334,19 @@ export function usePortalStore() {
         setLoading(false)
       }
     },
-    [refreshTranscript],
+    [],
   )
 
   // initial boot
   useEffect(() => {
     ;(async () => {
       try {
-      const [serverActive, list, models, templates] = await Promise.all([
+      const [serverActive, list, models, templates, toolList] = await Promise.all([
         api.getActivePersona(),
         api.listPersonas(),
         api.getModelList(),
         api.getChatTemplates(),
+        api.getTools(), // persona-independent catalog, fetched once
       ])
       // Persona selection is a client preference: the engine's in-memory
       // active persona resets on restart, so localStorage is the boot
@@ -284,12 +354,22 @@ export function usePortalStore() {
       // the saved persona no longer exists; push the saved pick back to the
       // engine so the kobold-native passthrough routes agree with the UI.
       const saved = localStorage.getItem(PERSONA_LS_KEY)
-      const active = saved && list.includes(saved) ? saved : serverActive
-      if (active !== serverActive) await api.setActivePersona(active)
+      let active = saved && list.includes(saved) ? saved : serverActive
+      if (active !== serverActive) {
+        try {
+          await api.setActivePersona(active)
+        } catch (e) {
+          // Engine refused the saved pick (deleted persona, guard) — fall back
+          // to its own active persona rather than desyncing UI from engine.
+          console.error(e)
+          active = serverActive
+        }
+      }
       setActivePersona(active)
       setPersonaList(list.length ? list : [active])
       setModelList(models)
       setChatTemplates(templates)
+      setTools(toolList)
       await loadAll(active)
       } catch {
         // A mixed-success boot (one call lands, a later one fails) rethrows
@@ -323,16 +403,66 @@ export function usePortalStore() {
     }
   }, [ltmOn, ltmBlock, persona])
 
+  // ---- LTM preview keyed on the composer draft (DP-257) -------------
+  // The panel/token-count otherwise show an empty-query block, which the
+  // backend resolves to "most recent history turn" — for a GLOBAL persona that
+  // drifts across channels and rarely matches what the user is about to send.
+  // As the user types we debounce-fetch the block for the real draft so the
+  // preview mirrors the per-message recall the engine recomputes at submit.
+  // Preview-only: the submit path still sends derpr_user_text untouched.
+  const ltmPreviewTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const ltmPreviewSeq = useRef(0)
+  const previewLtm = useCallback((draft: string) => {
+    if (ltmPreviewTimer.current) clearTimeout(ltmPreviewTimer.current)
+    const trimmed = draft.trim()
+    // Blank draft → leave the existing empty-query preview in place; don't fire.
+    if (!trimmed) return
+    ltmPreviewTimer.current = setTimeout(() => {
+      const p = personaRef.current
+      if (!p || !ltmOnRef.current) return
+      const seq = ++ltmPreviewSeq.current
+      const pName = p.name
+      const chan = activeChannelRef.current
+      void (async () => {
+        try {
+          const blk = await api.getLtmBlock(pName, trimmed, chan)
+          // Drop a response superseded by a newer keystroke, an LTM-off toggle,
+          // or a persona/channel switch that landed while this was in flight.
+          if (
+            seq !== ltmPreviewSeq.current ||
+            !ltmOnRef.current ||
+            personaRef.current?.name !== pName ||
+            activeChannelRef.current !== chan
+          )
+            return
+          setLtmBlock(blk)
+        } catch {
+          /* preview-only — keep the last block on a transient fetch failure */
+        }
+      })()
+    }, 400)
+  }, [])
+
   // ---- persona switch -----------------------------------------------
   const switchPersona = useCallback(
     async (name: string) => {
+      const prev = activePersonaRef.current
       setActivePersona(name)
       localStorage.setItem(PERSONA_LS_KEY, name)
-      await api.setActivePersona(name)
-      // A persona switch resets to its default channel; channel list reloads
-      // inside loadAll for the new persona.
-      setActiveChannel('web_ui')
-      activeChannelRef.current = 'web_ui'
+      try {
+        await api.setActivePersona(name)
+      } catch (e) {
+        // Engine refused the switch (unknown persona / outage). Revert — the
+        // engine still generates under the OLD persona, so advancing the UI
+        // would silently log every turn to the wrong persona.
+        console.error(e)
+        setActivePersona(prev)
+        localStorage.setItem(PERSONA_LS_KEY, prev)
+        setBanner(`Persona switch failed: ${e instanceof Error ? e.message : String(e)}`)
+        return
+      }
+      // loadAll restores the new persona's last-used channel (DP-273) and
+      // reloads its channel list — no forced web_ui reset here.
       await loadAll(name)
     },
     [loadAll],
@@ -369,6 +499,8 @@ export function usePortalStore() {
       setActiveChannel(channel)
       activeChannelRef.current = channel
       if (persona) {
+        // Remember this persona's channel choice for next reload (DP-273).
+        writePref(channelPrefKey(persona.name), channel)
         await refreshTranscript(persona.name, channel)
         try {
           if (ltmOn) setLtmBlock(await api.getLtmBlock(persona.name, '', channel))
@@ -393,16 +525,22 @@ export function usePortalStore() {
   )
 
   // Shared SSE handler set for any turn-producing stream (`/v1/chat/completions`
-  // and the `/confirm` resume — same wire protocol). `onConfirm` is a no-op on
-  // the wire: a parked write surfaces as the trailing ephemeral chunk after the
-  // authoritative `/transcript` re-sync (which the engine also re-emits), so we
-  // don't render the confirm frame directly — we just let the re-sync show it.
+  // and the `/confirm` resume — same wire protocol). The wire's `derpr-confirm`
+  // frame is ignored (in stream.ts): a parked write surfaces as the trailing
+  // ephemeral chunk after the authoritative `/transcript` re-sync (which the
+  // engine also re-emits), so we let the re-sync show it.
   // This means a CHAINED confirm (approve → another parked write) re-appears as
   // a new ephemeral chunk with a fresh token, and the approve/deny bar re-arms.
   const buildHandlers = useCallback(
     (personaName: string, channel: string) => ({
-      onToken: (delta: string) =>
-        setStream((s) => ({ ...s, text: s.text + delta })),
+      onToken: (delta: string) => {
+        tokenBufRef.current += delta
+        if (tokenRafRef.current == null)
+          tokenRafRef.current = requestAnimationFrame(() => {
+            tokenRafRef.current = null
+            flushTokens()
+          })
+      },
       onToolStart: (f: ToolStartFrame) =>
         setStream((s) => ({
           ...s,
@@ -432,11 +570,17 @@ export function usePortalStore() {
         setStream((s) => ({ ...s, responseType: f.response_type }))
       },
       onError: (msg: string) => {
+        flushTokens() // surface any tail tokens before the error treatment
         streamingRef.current = false
         abortRef.current = null
+        // A failed CONFIRM resume must re-arm the approve/deny bar — onDone
+        // never fires on this path, and leaving resolvingConfirm set keeps the
+        // bar permanently disabled ("resolving…") until a page reload.
+        setResolvingConfirm(false)
         setStream((s) => ({ ...s, active: false, errored: true, errorMsg: msg }))
       },
       onDone: async () => {
+        flushTokens()
         streamingRef.current = false
         // Authoritative re-sync: the id-frame is an optimization only. The
         // re-fetch surfaces a newly-persisted row, or the trailing ephemeral
@@ -449,10 +593,17 @@ export function usePortalStore() {
           personaName !== activePersonaRef.current ||
           channel !== activeChannelRef.current
         if (!stale) {
-          await refreshTranscript(personaName, channel)
           // A first turn on a brand-new channel materializes it in the DB;
-          // reload the channel list so it appears in the rail.
-          await refreshChannels(personaName)
+          // reload the channel list so it appears in the rail. Skipped when the
+          // channel is already in the rail — the list only changes when a new
+          // channel materializes, and the fetch is a full-history DISTINCT scan.
+          const known = channelsRef.current.some((g) =>
+            g.items.some((it) => it.channel === channel),
+          )
+          await Promise.all([
+            refreshTranscript(personaName, channel),
+            known ? Promise.resolve() : refreshChannels(personaName),
+          ])
         }
         setStream((s) => {
           // A stale turn's row belongs to the old view — clear everything.
@@ -468,7 +619,7 @@ export function usePortalStore() {
         abortRef.current = null
       },
     }),
-    [refreshTranscript, refreshChannels],
+    [refreshTranscript, refreshChannels, flushTokens],
   )
 
   // ---- send a chat turn ---------------------------------------------
@@ -484,20 +635,28 @@ export function usePortalStore() {
 
       // dev command path
       if (trimmed.startsWith('/')) {
-        const resp = await api.devCommand(persona.name, trimmed)
-        setDevRow({
-          command: trimmed,
-          response: resp.response,
-          mutated: Boolean(resp.mutated),
-        })
-        if (resp.mutated) await refreshPersona(persona.name)
-        await refreshTranscript(persona.name, activeChannel)
+        try {
+          const resp = await api.devCommand(persona.name, trimmed)
+          setDevRow({
+            command: trimmed,
+            response: resp.response,
+            mutated: Boolean(resp.mutated),
+          })
+          if (resp.mutated) await refreshPersona(persona.name)
+          await refreshTranscript(persona.name, activeChannel)
+        } catch (e) {
+          // Engine down: without this the command silently does nothing
+          // (unhandled rejection, no UI feedback).
+          console.error(e)
+          setBanner('Dev command failed — engine unreachable')
+        }
         return
       }
 
       setBanner(null)
       idFrameRef.current = null
       streamingRef.current = true
+      resetTokenBuf()
       // Echo the user turn immediately; a retry replays the last persisted
       // user turn, so it gets no new echo.
       setStream({ ...EMPTY_STREAM, active: true, userText: retry ? null : trimmed })
@@ -522,7 +681,7 @@ export function usePortalStore() {
       )
       abortRef.current = handle
     },
-    [persona, activeChannel, refreshTranscript, refreshPersona, buildHandlers],
+    [persona, activeChannel, refreshTranscript, refreshPersona, buildHandlers, resetTokenBuf],
   )
 
   // ---- resolve a parked CONFIRM write (6a) --------------------------
@@ -541,6 +700,7 @@ export function usePortalStore() {
       setBanner(null)
       idFrameRef.current = null
       streamingRef.current = true
+      resetTokenBuf()
       setResolvingConfirm(true)
       setStream({ ...EMPTY_STREAM, active: true })
       const handle = streamConfirm(
@@ -551,7 +711,7 @@ export function usePortalStore() {
       )
       abortRef.current = handle
     },
-    [persona, buildHandlers],
+    [persona, buildHandlers, resetTokenBuf],
   )
 
   const abortTurn = useCallback(async () => {
@@ -559,21 +719,26 @@ export function usePortalStore() {
     abortRef.current?.abort()
     abortRef.current = null
     streamingRef.current = false
+    flushTokens() // keep the partial text visible on the aborted row
     // The re-fetch below surfaces the persisted user row — drop the echo.
     // active:false is essential — Conversation passes stream.active as the
     // Composer `streaming` prop, so omitting it leaves the composer stuck on
     // the "■ stop" button and the StreamRow cursor blinking forever.
     setStream((s) => ({ ...s, active: false, aborted: true, userText: null }))
+    // An aborted CONFIRM resume never reaches onDone — re-arm the bar.
+    setResolvingConfirm(false)
     if (persona) await refreshTranscript(persona.name, activeChannelRef.current)
-  }, [persona, refreshTranscript])
+  }, [persona, refreshTranscript, flushTokens])
 
   // Dismiss re-syncs: an errored turn skips the onDone re-fetch, so the user
   // turn (persisted before generation) is only in the DB — surface it.
   const dismissStream = useCallback(() => {
     streamingRef.current = false
+    setResolvingConfirm(false)
+    resetTokenBuf()
     setStream(EMPTY_STREAM)
     if (persona) void refreshTranscript(persona.name, activeChannelRef.current)
-  }, [persona, refreshTranscript])
+  }, [persona, refreshTranscript, resetTokenBuf])
   const dismissDevRow = useCallback(() => setDevRow(null), [])
 
   // ---- regenerate ----------------------------------------------------
@@ -585,7 +750,16 @@ export function usePortalStore() {
   // ---- row mutations -------------------------------------------------
   const editRow = useCallback(
     async (id: number, content: string) => {
-      await api.patchInteraction(id, content)
+      // Callers are fire-and-forget (the row editor has already closed), so a
+      // rejection here would otherwise vanish — the user believes the edit
+      // persisted while the DB still holds the old content.
+      try {
+        await api.patchInteraction(id, content)
+      } catch (e) {
+        console.error(e)
+        setBanner('Edit failed — row unchanged')
+        return
+      }
       if (persona) await refreshTranscript(persona.name, activeChannelRef.current)
     },
     [persona, refreshTranscript],
@@ -593,7 +767,13 @@ export function usePortalStore() {
 
   const deleteRow = useCallback(
     async (id: number) => {
-      await api.deleteInteraction(id)
+      try {
+        await api.deleteInteraction(id)
+      } catch (e) {
+        console.error(e)
+        setBanner('Delete failed — row unchanged')
+        return
+      }
       if (persona) await refreshTranscript(persona.name, activeChannelRef.current)
     },
     [persona, refreshTranscript],
@@ -692,6 +872,7 @@ export function usePortalStore() {
     fetchAssembled,
     setViewMode,
     toggleLtm,
+    previewLtm,
     switchPersona,
     createPersona,
     switchChannel,
@@ -707,9 +888,6 @@ export function usePortalStore() {
     savePersona,
     runToolsCommand,
     refreshTranscript,
-    refreshPersona,
-    setPersona,
-    setBanner,
   }
 }
 

@@ -49,6 +49,11 @@ export const usingMock = () => _usingMock
 
 async function getJSON<T>(path: string): Promise<T> {
   const r = await fetch(BASE + path, { headers: { Accept: 'application/json' } })
+  // Any HTTP response proves an engine is answering: from here on a failure is
+  // a real outage/error, never a "no backend" dev session — so liveOr must
+  // rethrow rather than silently mixing mock fixtures into a live session
+  // (e.g. a transient 500 on one boot call racing the other boot fetches).
+  _liveSeen = true
   if (!r.ok) throw new Error(`${path} → ${r.status}`)
   return (await r.json()) as T
 }
@@ -117,17 +122,28 @@ export function getActivePersona(): Promise<string> {
 }
 
 export async function setActivePersona(name: string): Promise<void> {
+  let r: Response
   try {
-    await fetch(`${BASE}/api/v1/model`, {
+    r = await fetch(`${BASE}/api/v1/model`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: name }),
     })
-    _usingMock = false
-    _liveSeen = true
-  } catch {
-    if (!_liveSeen) _usingMock = true
+  } catch (e) {
+    // No engine at all is tolerable only in a pure-mock (build/dev) session.
+    if (!_liveSeen) {
+      _usingMock = true
+      return
+    }
+    throw e
   }
+  _usingMock = false
+  _liveSeen = true
+  // The adapter answers an unknown persona with HTTP 200 + {error}: without
+  // this check a failed switch is invisible and every subsequent turn is
+  // generated and logged under the OLD persona while the UI shows the new one.
+  const j = (await r.json().catch(() => ({}))) as { error?: string }
+  if (!r.ok || j.error) throw new Error(j.error || `set persona → ${r.status}`)
 }
 
 // Create a new user persona (POST /api/v1/personas). Body carries `name` plus
@@ -201,10 +217,7 @@ export function getChannels(activePersona: string): Promise<ChannelGroup[]> {
         const item: ChannelItem = {
           id: `${c.channel}:${c.server_id ?? ''}`,
           channel: c.channel,
-          name: c.channel,
           source: src,
-          persona: activePersona,
-          active: c.channel === 'web_ui',
           preview: c.count ? `${c.count} msgs` : 'no history yet',
         }
         const list = bySource.get(src) ?? []
@@ -332,6 +345,21 @@ export async function abort(): Promise<void> {
     await fetch(`${BASE}/api/v1/abort`, { method: 'POST' })
   } catch {
     /* best-effort */
+  }
+}
+
+// ---- capabilities ------------------------------------------------------
+// Whether the engine mounted the /voice/* routes (VOICE_WEB_ENABLED). The mic
+// buttons hide when the backend can't serve them — otherwise every press ends
+// in a generic 404 "transcribe failed" that reads as a broken feature rather
+// than a disabled one. Fails open (true) against an older adapter without the
+// route, preserving the previous always-shown behavior.
+export async function getVoiceWebEnabled(): Promise<boolean> {
+  try {
+    const j = await getJSON<{ voice_web?: boolean }>(`/api/v1/capabilities`)
+    return j.voice_web !== false
+  } catch {
+    return true
   }
 }
 
