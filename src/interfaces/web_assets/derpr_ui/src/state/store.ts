@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import * as api from '../api/client'
 import { streamChat, streamConfirm } from '../api/stream'
+import { readPref, writePref } from './persist'
 import type {
   Persona,
   ToolDef,
@@ -28,6 +29,15 @@ export type ViewMode = 'rendered' | 'context'
 // persisted setting, and resets on restart (intentionally not duplicated
 // server-side).
 const PERSONA_LS_KEY = 'derpr_ui_active_persona'
+
+// Per-persona last-used channel pref (DP-273). Keyed by persona so each keeps
+// its own last channel; validated against the live channel list on load and
+// reset to 'web_ui' if the saved channel no longer exists.
+const channelPrefKey = (persona: string) => `channel:${persona}`
+const readSavedChannel = (persona: string) =>
+  readPref(channelPrefKey(persona), 'web_ui', (r) =>
+    typeof r === 'string' && r ? r : 'web_ui',
+  )
 
 // A transient row representing the in-flight assistant turn (not yet persisted).
 export interface StreamState {
@@ -278,6 +288,12 @@ export function usePortalStore() {
   const loadAll = useCallback(
     async (p: string) => {
       setLoading(true)
+      // Restore this persona's last-used channel (client pref, DP-273); the
+      // transcript fetch below is scoped to it, and it's validated against the
+      // fetched channel list right after.
+      const wantChan = readSavedChannel(p)
+      setActiveChannel(wantChan)
+      activeChannelRef.current = wantChan
       try {
         // One parallel batch (transcript included — it doesn't depend on the
         // persona fetch); only the LTM block waits, since whether to fetch it
@@ -286,13 +302,29 @@ export function usePortalStore() {
         const [persObj, chanList, cs] = await Promise.all([
           api.getPersona(p),
           api.getChannels(p),
-          api.getTranscript(p, undefined, activeChannelRef.current),
+          api.getTranscript(p, undefined, wantChan),
         ])
+        // A restored non-default channel that no longer appears in the persona's
+        // channel list has been deleted (or a "+ new channel" that was never
+        // sent to, so it never materialized in the DB) — fall back to web_ui and
+        // re-fetch rather than stranding the user on an empty phantom channel.
+        let resolvedChan = wantChan
+        let resolvedChunks = cs
+        if (
+          wantChan !== 'web_ui' &&
+          !chanList.some((g) => g.items.some((it) => it.channel === wantChan))
+        ) {
+          resolvedChan = 'web_ui'
+          setActiveChannel('web_ui')
+          activeChannelRef.current = 'web_ui'
+          writePref(channelPrefKey(p), 'web_ui')
+          resolvedChunks = await api.getTranscript(p, undefined, 'web_ui')
+        }
         const isLtmOn = persObj.long_term_memory ?? true
-        const blk = isLtmOn ? await api.getLtmBlock(p, '') : null
+        const blk = isLtmOn ? await api.getLtmBlock(p, '', resolvedChan) : null
         setPersona(persObj)
         setChannels(chanList)
-        setChunks(cs)
+        setChunks(resolvedChunks)
         setLtmOn(isLtmOn)
         setLtmBlock(blk)
         setOffline(api.usingMock())
@@ -429,10 +461,8 @@ export function usePortalStore() {
         setBanner(`Persona switch failed: ${e instanceof Error ? e.message : String(e)}`)
         return
       }
-      // A persona switch resets to its default channel; channel list reloads
-      // inside loadAll for the new persona.
-      setActiveChannel('web_ui')
-      activeChannelRef.current = 'web_ui'
+      // loadAll restores the new persona's last-used channel (DP-273) and
+      // reloads its channel list — no forced web_ui reset here.
       await loadAll(name)
     },
     [loadAll],
@@ -469,6 +499,8 @@ export function usePortalStore() {
       setActiveChannel(channel)
       activeChannelRef.current = channel
       if (persona) {
+        // Remember this persona's channel choice for next reload (DP-273).
+        writePref(channelPrefKey(persona.name), channel)
         await refreshTranscript(persona.name)
         try {
           if (ltmOn) setLtmBlock(await api.getLtmBlock(persona.name, '', channel))

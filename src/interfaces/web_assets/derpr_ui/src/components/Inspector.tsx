@@ -2,8 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Persona, ToolDef } from '../types/contracts'
 import type { PortalStore } from '../state/store'
 import { policyLabel, estimateTokens, fmtTok } from '../state/util'
+import { readPref, writePref } from '../state/persist'
 
 type Tab = 'persona' | 'tools' | 'raw'
+const TABS: Tab[] = ['persona', 'tools', 'raw']
 
 interface Props {
   store: PortalStore
@@ -18,7 +20,16 @@ const INSP_MIN = 300
 const INSP_MAX = 720
 
 export function Inspector({ store }: Props) {
-  const [tab, setTab] = useState<Tab>('persona')
+  // Persist the active tab across reload; a stale/garbage stored value (e.g. a
+  // tab removed in a later build) coerces back to 'persona' (DP-273).
+  const [tab, setTab] = useState<Tab>(() =>
+    readPref('inspector_tab', 'persona' as Tab, (r) =>
+      TABS.includes(r as Tab) ? (r as Tab) : 'persona',
+    ),
+  )
+  useEffect(() => {
+    writePref('inspector_tab', tab)
+  }, [tab])
   const { persona, tools } = store
   const dragRef = useRef<{ startX: number; startW: number } | null>(null)
 
@@ -149,7 +160,12 @@ function PersonaPane({ store }: { store: PortalStore }) {
   const p = store.persona
   const modelList = store.modelList
   const chatTemplates = store.chatTemplates
-  const [koboldCollapsed, setKoboldCollapsed] = useState(true)
+  const [koboldCollapsed, setKoboldCollapsed] = useState<boolean>(() =>
+    readPref('kobold_collapsed', true, (r) => (typeof r === 'boolean' ? r : true)),
+  )
+  useEffect(() => {
+    writePref('kobold_collapsed', koboldCollapsed)
+  }, [koboldCollapsed])
   const [buf, setBuf] = useState<Buf>(() => (p ? buildBuffer(p) : {}))
   const [saving, setSaving] = useState(false)
   const [status, setStatus] = useState<
