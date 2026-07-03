@@ -192,7 +192,7 @@ SEMANTIC_BACKEND = os.environ.get("SEMANTIC_BACKEND", "sqlite") # Literal["sqlit
 HINDSIGHT_URL = os.environ.get("HINDSIGHT_URL", "http://10.0.0.70:8888")
 HINDSIGHT_LLM_MODEL = os.environ.get("HINDSIGHT_LLM_MODEL", "qwen2.5-32b")
 
-LOCAL_LLM_URL = os.environ.get("LOCAL_LLM_URL", "http://10.0.0.69:5001/v1")
+LOCAL_LLM_URL = os.environ.get("LOCAL_LLM_URL", "http://10.0.0.70:5001/v1")
 
 # =============================================================================
 # --- API Rate Limiting ---
