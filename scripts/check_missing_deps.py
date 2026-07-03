@@ -22,9 +22,12 @@ IMPORT_TO_PKG = {
     # Add more as discovered
 }
 
+SKIP_DIRS = {"node_modules", "dist", ".git", "__pycache__"}
+
 def get_all_imports(directory):
     imports = set()
-    for root, _, files in os.walk(directory):
+    for root, dirs, files in os.walk(directory):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
         for file in files:
             if file.endswith(".py"):
                 path = Path(root) / file
