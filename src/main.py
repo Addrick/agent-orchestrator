@@ -245,11 +245,24 @@ async def main() -> None:
     from src.proxmox import ProxmoxIntegration
     bot.register_service(ProxmoxIntegration())
 
+    # 7.4 Register the MCP client subsystem (DP-268). main.py owns the manager
+    # (sessions/lifecycle — voice precedent); the integration only registers
+    # the add/remove/list management tools behind the "mcp" binding. Registers
+    # even when MCP_ENABLED is false (wiring contract; calls short-circuit).
+    from src.tools.mcp_client import MCPClientManager
+    from src.tools.mcp_integration import MCPIntegration
+    mcp_manager = MCPClientManager(personas_provider=lambda: bot.personas)
+    bot.register_service(MCPIntegration(mcp_manager))
+
     # 8. Register interfaces
     _register_interfaces(app, bot, notification_router)
 
     # 8.1 Perform post-init startup tasks (e.g. Hindsight bank provisioning)
     await bot.startup()
+
+    # 8.2 Connect configured MCP servers and register their discovered tools
+    # (no-op when MCP_ENABLED is false; a dead server logs and is skipped).
+    await mcp_manager.start()
 
     # 9. Register background daemons — legacy SQLite L1→L2 consolidation only
     if SEMANTIC_BACKEND == "sqlite":
@@ -264,6 +277,7 @@ async def main() -> None:
     try:
         await app.start()
     finally:
+        await mcp_manager.aclose()
         await text_engine.aclose()
 
 

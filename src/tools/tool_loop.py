@@ -27,8 +27,8 @@ from src.generation_events import (
 )
 from src.persona import Persona
 from src.tools.definitions import (
-    WRITE_TOOLS, ALWAYS_CONFIRM_TOOLS,
-    get_tool_capabilities, is_irreversible, get_tool_definition
+    ALWAYS_CONFIRM_TOOLS,
+    get_tool_capabilities, is_irreversible, get_tool_definition, is_write_tool
 )
 from src.tools.tool_manager import ToolManager
 
@@ -221,8 +221,8 @@ class ToolLoop:
             conversation_history.append(
                 {"role": "assistant", "tool_calls": tool_calls_collected}
             )
-            read_calls = [c for c in tool_calls_collected if c.get("name") not in WRITE_TOOLS]
-            write_calls = [c for c in tool_calls_collected if c.get("name") in WRITE_TOOLS]
+            read_calls = [c for c in tool_calls_collected if not is_write_tool(c.get("name") or "")]
+            write_calls = [c for c in tool_calls_collected if is_write_tool(c.get("name") or "")]
 
             async for tool_ev in self._execute_calls(read_calls, conversation_history, group_id=group_id):
                 yield tool_ev

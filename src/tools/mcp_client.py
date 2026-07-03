@@ -1,0 +1,760 @@
+"""MCP client core (DP-268): consume external MCP tool servers.
+
+``MCPClientManager`` owns server sessions and their lifecycle (voice
+precedent: ``ServiceIntegration`` is registration-only, so ``main.py`` owns
+the manager and ``MCPIntegration`` only registers the management tools).
+Discovered tools are translated into derpr tool definitions and registered
+into the live catalog (``ToolDefinitionRegistry``) plus the ``ToolManager``
+as closures over ``session.call_tool``, inheriting the full security model
+(parking, taint, composition rules, per-persona policy) with no MCP-specific
+paths downstream.
+
+Security model:
+- Server-provided annotations (``readOnlyHint``/``destructiveHint``/...) are
+  hints from an untrusted party: logged for the operator, NEVER driving
+  policy. Operator config drives everything.
+- Every discovered tool defaults to the most restrictive metadata
+  (``is_write: True``; untrusted, irreversible, network, pii) unless the
+  operator downgrades it via per-tool ``tool_overrides`` in the config file.
+- ``service_binding: "mcp:<server>"`` makes each server its own egress
+  domain, so composition Rules 2/3 treat one server's read+write as a closed
+  loop and re-arm exactly when combined with foreign domains.
+- Definitions carry ``dynamic: True`` — the marker that excludes them from
+  ``['*']`` policy expansion (a new server must never silently widen or
+  quarantine-cascade wildcard personas).
+- Tool descriptions are server-authored text that enters the system prompt
+  (prompt-injection surface) → length-capped at translation.
+
+Hot reload (phase 3): a background maintenance loop reconnects dead servers
+and re-discovers a server's tools when it sends ``tools/list_changed`` (the
+periodic tick doubles as the fallback for servers that never signal). While
+a server is down its tools stay registered and degrade to per-call errors —
+the session task exits, ``call_tool`` raises, ``ToolManager`` wraps it as
+``{"error": ...}`` — so persona policies stay stable across an outage and
+the tools come back live on reconnect. ``MCP_RECONNECT_INTERVAL <= 0``
+disables the loop (v1 degrade mode: restart to re-discover).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import logging
+import os
+import re
+from contextlib import asynccontextmanager
+from datetime import timedelta
+from pathlib import Path
+from typing import (
+    TYPE_CHECKING, Any, AsyncIterator, Callable, Coroutine, Dict, List, Optional,
+    Set, Tuple,
+)
+
+from mcp import ClientSession
+from mcp import types as mcp_types
+from mcp.client.session import MessageHandlerFnT
+from mcp.client.streamable_http import streamablehttp_client
+
+from config.global_config import (
+    MCP_CALL_TIMEOUT,
+    MCP_CONNECT_TIMEOUT,
+    MCP_ENABLED,
+    MCP_RECONNECT_INTERVAL,
+    MCP_SERVERS_FILE,
+)
+from src.tools.composition import revalidate_persona_security
+from src.tools.definitions import (
+    get_tool_definition,
+    register_tool_definition,
+    unregister_tool_definition,
+)
+
+if TYPE_CHECKING:
+    from src.persona import Persona
+    from src.tools.tool_manager import ToolManager
+
+logger = logging.getLogger(__name__)
+
+# Server names become the mcp__<server>__ tool prefix and the mcp:<server>
+# binding; the double-underscore separator must stay unambiguous.
+_SERVER_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+# Provider function-calling APIs restrict tool names to [A-Za-z0-9_-], 64 chars.
+_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_DESCRIPTION_MAX_CHARS = 1024
+# Floor between maintenance passes: bounds how fast an untrusted server can
+# drive re-discovery (and persona revalidation) by spamming tools/list_changed.
+_MIN_PASS_GAP = 5.0
+
+# Most-restrictive defaults for a discovered tool. Operator ``tool_overrides``
+# (per tool, in the config file) may relax individual keys; server annotations
+# never do.
+_DEFAULT_TOOL_META: Dict[str, Any] = {
+    "is_write": True,
+    "capabilities": {
+        "produces_untrusted": True,
+        "irreversible": True,
+        "locality": "network",
+        "sensitivity": "pii",
+    },
+}
+
+
+@asynccontextmanager
+async def _open_session(
+    url: str,
+    message_handler: Optional[MessageHandlerFnT] = None,
+) -> AsyncIterator[ClientSession]:
+    """Open and initialize a streamable-HTTP MCP session. Test seam."""
+    async with streamablehttp_client(url, timeout=MCP_CONNECT_TIMEOUT) as (
+        read_stream, write_stream, _get_session_id,
+    ):
+        async with ClientSession(
+            read_stream, write_stream, message_handler=message_handler
+        ) as session:
+            await session.initialize()
+            yield session
+
+
+class _ServerConnection:
+    """One live server session, owned by a dedicated task.
+
+    The MCP transport contexts are anyio-scoped and must be entered and
+    exited by the same task, so the connection task holds them open and only
+    unwinds when ``stop()`` is requested (or the transport dies — after which
+    ``session`` is None and calls fail fast).
+    """
+
+    def __init__(
+        self,
+        name: str,
+        url: str,
+        on_tools_changed: Optional[Callable[[], None]] = None,
+    ) -> None:
+        self.name = name
+        self.url = url
+        self.session: Optional[ClientSession] = None
+        self.error: Optional[BaseException] = None
+        self._on_tools_changed = on_tools_changed
+        self._ready = asyncio.Event()
+        self._stop = asyncio.Event()
+        self._task: Optional[asyncio.Task[None]] = None
+
+    async def start(self, timeout: float) -> None:
+        """Spawn the session task and wait until connected (or fail)."""
+        self._task = asyncio.create_task(self._run(), name=f"mcp-session-{self.name}")
+        try:
+            await asyncio.wait_for(self._ready.wait(), timeout)
+        except asyncio.TimeoutError:
+            await self.stop()
+            raise RuntimeError(
+                f"MCP server '{self.name}' did not connect within {timeout}s"
+            )
+        except asyncio.CancelledError:
+            # Caller cancelled mid-connect (e.g. shutdown): the fresh session
+            # task is not registered anywhere yet — reap it here or it
+            # survives as an orphan into event-loop teardown.
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
+            raise
+        if self.session is None:
+            raise RuntimeError(
+                f"MCP server '{self.name}' connection failed: {self.error}"
+            )
+
+    async def _handle_message(self, message: Any) -> None:
+        """Session message hook: watch for ``tools/list_changed`` and flag the
+        manager to re-discover. Everything else is the SDK's business."""
+        if isinstance(message, mcp_types.ServerNotification) and isinstance(
+            message.root, mcp_types.ToolListChangedNotification
+        ):
+            if self._on_tools_changed is not None:
+                self._on_tools_changed()
+
+    async def _run(self) -> None:
+        try:
+            async with _open_session(self.url, self._handle_message) as session:
+                self.session = session
+                self._ready.set()
+                await self._stop.wait()
+        except asyncio.CancelledError:
+            # Never absorb a requested cancellation — the task must end
+            # cancelled, not "completed normally", or awaiters misread it.
+            raise
+        except BaseException as e:  # noqa: BLE001 — anyio group errors included
+            self.error = e
+            if self._ready.is_set():
+                logger.error(f"MCP server '{self.name}' session died: {e}")
+        finally:
+            self.session = None
+            self._ready.set()
+
+    async def stop(self) -> None:
+        self._stop.set()
+        if self._task is None or self._task.done():
+            return
+        try:
+            await asyncio.wait_for(self._task, timeout=10)
+        except asyncio.TimeoutError:
+            # Transport hung on close: cancel AND drain, so no pending task
+            # (with its anyio/httpx unwind) survives into loop shutdown.
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
+        except asyncio.CancelledError:
+            # Two ways to land here: our own caller is being cancelled
+            # (propagate — never absorb a requested cancellation), or the
+            # session task got cancelled externally while we waited (it is
+            # unwound; stop() succeeded and must not poison aclose/remove).
+            cur = asyncio.current_task()
+            if cur is not None and cur.cancelling():
+                raise
+
+
+class MCPClientManager:
+    """Owns MCP server config, sessions, discovery, and live (de)registration.
+
+    ``attach_tool_manager`` is called by ``MCPIntegration.register_tools``;
+    after that, ``start()`` connects every enabled configured server. Any
+    live (de)registration triggers ``revalidate_persona_security`` across all
+    personas (via ``personas_provider``) so an installed server can never
+    leave a stale quarantine verdict standing.
+    """
+
+    def __init__(
+        self,
+        config_path: Path = MCP_SERVERS_FILE,
+        personas_provider: Optional[Callable[[], Dict[str, "Persona"]]] = None,
+        enabled: bool = MCP_ENABLED,
+        reconnect_interval: float = MCP_RECONNECT_INTERVAL,
+    ) -> None:
+        self._config_path = Path(config_path)
+        self._personas_provider = personas_provider
+        self._enabled = enabled
+        self._reconnect_interval = reconnect_interval
+        self._tool_manager: Optional["ToolManager"] = None
+        self._connections: Dict[str, _ServerConnection] = {}
+        # server name -> namespaced tool names registered for it
+        self._registered_tools: Dict[str, List[str]] = {}
+        self._lock = asyncio.Lock()
+        # Hot reload (phase 3): servers that signalled tools/list_changed,
+        # the event that wakes the maintenance loop early, and the loop task.
+        self._tools_changed: Set[str] = set()
+        self._wake = asyncio.Event()
+        self._maintenance_task: Optional[asyncio.Task[None]] = None
+
+    # ------------------------------------------------------------------ wiring
+
+    def attach_tool_manager(self, tool_manager: "ToolManager") -> None:
+        self._tool_manager = tool_manager
+
+    async def start(self) -> None:
+        """Connect all enabled configured servers. Per-server failures are
+        logged and skipped — a dead server must not break startup."""
+        if not self._enabled:
+            logger.info("MCP client disabled (MCP_ENABLED=false); no servers connected.")
+            return
+        config = self._load_config(strict=False)
+        for name, server_cfg in config.get("servers", {}).items():
+            if not server_cfg.get("enabled", True):
+                logger.info(f"MCP server '{name}' disabled in config; skipping.")
+                continue
+            try:
+                async with self._lock:
+                    await self._connect_and_register(name, server_cfg)
+            except Exception as e:
+                logger.error(f"MCP server '{name}' startup connect failed: {e}")
+        if self._reconnect_interval > 0:
+            self._maintenance_task = asyncio.create_task(
+                self._maintenance_loop(), name="mcp-maintenance"
+            )
+
+    async def aclose(self) -> None:
+        if self._maintenance_task is not None:
+            self._maintenance_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._maintenance_task
+            self._maintenance_task = None
+        conns = list(self._connections.values())
+        self._connections.clear()
+        if conns:
+            # Stops are independent; run them concurrently so shutdown costs
+            # one slowest server, not the sum of every hung transport.
+            await asyncio.gather(*(conn.stop() for conn in conns))
+
+    # ----------------------------------------------------------- tool handlers
+
+    def _require_enabled(self) -> None:
+        if not self._enabled:
+            raise RuntimeError(
+                "MCP client is disabled. Set MCP_ENABLED=true to manage MCP servers."
+            )
+
+    async def add_server(self, name: str, url: str) -> Dict[str, Any]:
+        """Connect + discover + register a new server live, then persist it.
+
+        Config is only persisted after a successful connect+discovery so a
+        failed add leaves nothing half-installed.
+        """
+        self._require_enabled()
+        if not _SERVER_NAME_RE.match(name or ""):
+            raise ValueError(
+                f"Invalid MCP server name '{name}': need lowercase letters/"
+                "digits/hyphens, starting alphanumeric, max 32 chars."
+            )
+        if not str(url).startswith(("http://", "https://")):
+            raise ValueError(f"Invalid MCP server url '{url}': must be http(s).")
+
+        async with self._lock:
+            config = self._load_config()
+            if name in config.get("servers", {}):
+                raise ValueError(f"MCP server '{name}' is already configured.")
+            server_cfg = {"url": url, "enabled": True, "tool_overrides": {}}
+            registered = await self._connect_and_register(name, server_cfg)
+            try:
+                config["servers"][name] = server_cfg
+                self._save_config(config)
+            except BaseException:
+                # A failed persist must not leave a live-but-unpersisted
+                # server (callable, yet invisible to list_mcp_servers and
+                # gone after restart): roll the registration back first.
+                await self._teardown_server(name)
+                raise
+
+        logger.info(
+            f"MCP server '{name}' added ({url}); registered tools: {registered}"
+        )
+        return {
+            "server": name,
+            "url": url,
+            "tools_registered": registered,
+            "note": (
+                "Tools carry restrictive default security metadata (write/"
+                "untrusted/irreversible/pii). Personas must list them "
+                f"explicitly (no wildcard) and bind 'mcp:{name}'. Operator can "
+                "relax per-tool metadata via tool_overrides in "
+                f"{self._config_path.name}."
+            ),
+        }
+
+    async def remove_server(self, name: str) -> Dict[str, Any]:
+        """Disconnect, unregister the server's tools, delete it from config."""
+        self._require_enabled()
+        async with self._lock:
+            config = self._load_config()
+            known_in_config = name in config.get("servers", {})
+            if not known_in_config and name not in self._connections:
+                raise ValueError(f"MCP server '{name}' is not configured.")
+
+            removed = await self._teardown_server(name)
+            if known_in_config:
+                del config["servers"][name]
+                self._save_config(config)
+
+        logger.info(f"MCP server '{name}' removed; unregistered tools: {removed}")
+        return {"server": name, "tools_unregistered": removed}
+
+    async def list_servers(self) -> List[Dict[str, Any]]:
+        self._require_enabled()
+        config = self._load_config(strict=False)
+        result = []
+        for name, server_cfg in config.get("servers", {}).items():
+            conn = self._connections.get(name)
+            result.append({
+                "name": name,
+                "url": server_cfg.get("url"),
+                "enabled": server_cfg.get("enabled", True),
+                "connected": bool(conn and conn.session is not None),
+                "tools": list(self._registered_tools.get(name, [])),
+            })
+        return result
+
+    async def call_tool(
+        self, server: str, tool_name: str, arguments: Dict[str, Any]
+    ) -> Any:
+        """Invoke a discovered tool on its server session."""
+        conn = self._connections.get(server)
+        if conn is None or conn.session is None:
+            hint = (
+                "Reconnection is retried automatically; try again shortly."
+                if self._reconnect_interval > 0
+                else "Restart or re-add the server to reconnect."
+            )
+            raise RuntimeError(f"MCP server '{server}' is not connected. {hint}")
+        result = await asyncio.wait_for(
+            conn.session.call_tool(
+                tool_name,
+                arguments or {},
+                read_timeout_seconds=timedelta(seconds=MCP_CALL_TIMEOUT),
+            ),
+            timeout=MCP_CALL_TIMEOUT + 5,
+        )
+        texts = [
+            c.text for c in result.content if isinstance(c, mcp_types.TextContent)
+        ]
+        if result.isError:
+            raise RuntimeError(
+                "; ".join(texts) or f"MCP tool '{tool_name}' reported an error."
+            )
+        if result.structuredContent is not None:
+            return result.structuredContent
+        if texts:
+            return "\n".join(texts)
+        return [c.model_dump(mode="json") for c in result.content]
+
+    # -------------------------------------------------- hot reload (phase 3)
+
+    def _mark_tools_changed(self, name: str) -> None:
+        self._tools_changed.add(name)
+        self._wake.set()
+
+    async def _maintenance_loop(self) -> None:
+        """Reconnect dead servers and re-discover changed toolsets. Runs a
+        pass every ``reconnect_interval`` seconds, or as soon as a server
+        signals ``tools/list_changed``. Passes are rate-limited: a (hostile
+        or buggy) server spamming notifications must not spin this loop into
+        continuous re-discovery and persona revalidation."""
+        while True:
+            try:
+                await asyncio.wait_for(
+                    self._wake.wait(), timeout=self._reconnect_interval
+                )
+            except asyncio.TimeoutError:
+                pass
+            self._wake.clear()
+            try:
+                await self._maintain()
+            except Exception as e:
+                logger.error(f"MCP maintenance pass failed: {e}")
+            await asyncio.sleep(min(_MIN_PASS_GAP, self._reconnect_interval))
+
+    async def _maintain(self) -> None:
+        """One maintenance pass over every enabled configured server.
+
+        The lock is held only for the state snapshot — never across the
+        per-server network work (_reconnect/_rediscover re-take it for their
+        mutations). A dead server's 30s connect timeout must not block
+        add/remove_server tool calls for the whole pass.
+        """
+        async with self._lock:
+            changed, self._tools_changed = self._tools_changed, set()
+            config = self._load_config(strict=False)
+            servers = {
+                name: dict(server_cfg)
+                for name, server_cfg in config.get("servers", {}).items()
+                if isinstance(server_cfg, dict) and server_cfg.get("enabled", True)
+            }
+        for name, server_cfg in servers.items():
+            conn = self._connections.get(name)
+            if conn is None or conn.session is None:
+                try:
+                    await self._reconnect(name, server_cfg)
+                except Exception as e:
+                    logger.warning(f"MCP server '{name}' reconnect failed: {e}")
+            elif name in changed:
+                try:
+                    await self._rediscover(name, server_cfg)
+                except Exception as e:
+                    # Keep the change flagged (without waking the loop) so
+                    # the next periodic tick retries — a transient listing
+                    # failure must not strand a stale toolset forever.
+                    self._tools_changed.add(name)
+                    logger.error(f"MCP server '{name}' re-discovery failed: {e}")
+
+    async def _reconnect(self, name: str, server_cfg: Dict[str, Any]) -> None:
+        """Replace a dead (or never-established) connection.
+
+        Network work runs unlocked; existing registrations stay in place
+        until the new discovery succeeds — a server that is merely down keeps
+        degrading to per-call errors instead of having its tools vanish (and
+        persona policies churn) on every failed retry. The swap re-checks
+        state under the lock: the server may have been removed, disabled, or
+        re-added while we were connecting.
+        """
+        conn, defs = await self._open_and_discover(name, server_cfg)
+        old_conn: Optional[_ServerConnection] = None
+        registered: Optional[List[str]] = None
+        async with self._lock:
+            config = self._load_config(strict=False)
+            cfg_now = config.get("servers", {}).get(name)
+            current = self._connections.get(name)
+            if (
+                isinstance(cfg_now, dict)
+                and cfg_now.get("enabled", True)
+                and (current is None or current.session is None)
+            ):
+                old_conn = self._connections.pop(name, None)
+                self._connections[name] = conn
+                registered = self._swap_registrations(name, defs)
+        if registered is None:
+            # Removed, disabled, or replaced live while we were connecting.
+            await conn.stop()
+            return
+        if old_conn is not None:
+            await old_conn.stop()
+        logger.info(
+            f"MCP server '{name}' reconnected; {len(registered)} tool(s) registered."
+        )
+
+    async def _rediscover(self, name: str, server_cfg: Dict[str, Any]) -> None:
+        """Refresh a live server's toolset after ``tools/list_changed``.
+
+        Listing runs unlocked; on failure the old registrations stay
+        untouched and the caller re-flags the server for the next tick.
+        """
+        conn = self._connections.get(name)
+        if conn is None or conn.session is None:
+            return  # died in the meantime; the reconnect branch owns it now
+        defs = await self._discover_definitions(name, server_cfg, conn.session)
+        async with self._lock:
+            if self._connections.get(name) is not conn:
+                return  # removed or replaced while we were listing
+            registered = self._swap_registrations(name, defs)
+        logger.info(
+            f"MCP server '{name}' re-discovered; {len(registered)} tool(s) registered."
+        )
+
+    def _swap_registrations(
+        self, name: str, defs: List[Tuple[str, Dict[str, Any]]]
+    ) -> List[str]:
+        """Replace a server's registered toolset with fresh definitions and
+        revalidate personas once for the whole swap. Caller holds the lock.
+
+        An identical toolset is a no-op — a flapping server must not churn
+        persona validation or open a tools-unregistered window every pass.
+        """
+        current = self._registered_tools.get(name, [])
+        fresh = {d["function"]["name"]: d for _, d in defs}
+        if set(current) == set(fresh) and all(
+            get_tool_definition(n) == fresh[n] for n in current
+        ):
+            return current
+        self._unregister_server_tools(name)
+        try:
+            registered = self._register_definitions(name, defs)
+        except Exception as e:
+            # _register_definitions rolled back its partial work, but the old
+            # defs are already gone — flag the server for retry on the next
+            # periodic tick rather than stranding it connected-but-toolless.
+            logger.error(f"MCP server '{name}' tool re-registration failed: {e}")
+            self._tools_changed.add(name)
+            registered = []
+        self._registered_tools[name] = registered
+        self._revalidate_personas()
+        return registered
+
+    # -------------------------------------------------------------- internals
+
+    async def _connect_and_register(
+        self, name: str, server_cfg: Dict[str, Any]
+    ) -> List[str]:
+        """Connect one server, discover its tools, register defs + handlers.
+
+        Caller holds ``self._lock``. On any failure the connection is torn
+        down and nothing stays registered.
+        """
+        if self._tool_manager is None:
+            raise RuntimeError("MCPClientManager has no ToolManager attached yet.")
+        if name in self._connections:
+            raise ValueError(f"MCP server '{name}' is already connected.")
+
+        conn, defs = await self._open_and_discover(name, server_cfg)
+        try:
+            registered = self._register_definitions(name, defs)
+        except BaseException:
+            await conn.stop()
+            raise
+
+        self._connections[name] = conn
+        self._registered_tools[name] = registered
+        self._revalidate_personas()
+        logger.info(
+            f"MCP server '{name}' connected; {len(registered)} tool(s) registered."
+        )
+        return registered
+
+    async def _open_and_discover(
+        self, name: str, server_cfg: Dict[str, Any]
+    ) -> Tuple[_ServerConnection, List[Tuple[str, Dict[str, Any]]]]:
+        """Connect a new session and discover its toolset. On any failure the
+        connection is torn down and the error re-raised."""
+        conn = _ServerConnection(
+            name,
+            str(server_cfg["url"]),
+            on_tools_changed=lambda: self._mark_tools_changed(name),
+        )
+        await conn.start(MCP_CONNECT_TIMEOUT)
+        try:
+            assert conn.session is not None
+            defs = await self._discover_definitions(name, server_cfg, conn.session)
+        except BaseException:
+            await conn.stop()
+            raise
+        return conn, defs
+
+    async def _teardown_server(self, name: str) -> List[str]:
+        """Stop and fully forget a server: connection, registrations, persona
+        revalidation. Caller holds ``self._lock``; config is the caller's."""
+        conn = self._connections.pop(name, None)
+        removed = self._unregister_server_tools(name)
+        self._revalidate_personas()
+        if conn is not None:
+            await conn.stop()
+        return removed
+
+    async def _discover_definitions(
+        self, name: str, server_cfg: Dict[str, Any], session: ClientSession
+    ) -> List[Tuple[str, Dict[str, Any]]]:
+        """List a server's tools and translate them to derpr definitions.
+
+        Returns ``(raw_tool_name, definition)`` pairs; tools with invalid or
+        oversized names are skipped with a warning.
+        """
+        listing = await asyncio.wait_for(
+            session.list_tools(), timeout=MCP_CONNECT_TIMEOUT
+        )
+        overrides = server_cfg.get("tool_overrides") or {}
+        defs: List[Tuple[str, Dict[str, Any]]] = []
+        for tool in listing.tools:
+            if not _TOOL_NAME_RE.match(tool.name or ""):
+                logger.warning(
+                    f"MCP server '{name}' tool '{tool.name}' has an invalid "
+                    "name; skipped."
+                )
+                continue
+            definition = self._translate_tool(name, tool, overrides.get(tool.name))
+            namespaced = definition["function"]["name"]
+            if not _TOOL_NAME_RE.match(namespaced):
+                # The raw name passed, so this is the mcp__<server>__
+                # prefix pushing the NAMESPACED name past the 64-char
+                # provider limit — one oversized def 400s every request.
+                logger.warning(
+                    f"MCP server '{name}' tool '{tool.name}': namespaced "
+                    f"name '{namespaced}' exceeds the provider tool-name "
+                    "limit; skipped."
+                )
+                continue
+            defs.append((tool.name, definition))
+        return defs
+
+    def _register_definitions(
+        self, name: str, defs: List[Tuple[str, Dict[str, Any]]]
+    ) -> List[str]:
+        """Register translated definitions + handlers. All-or-nothing: a
+        mid-list failure rolls back what already landed, then re-raises."""
+        if self._tool_manager is None:
+            raise RuntimeError("MCPClientManager has no ToolManager attached yet.")
+        registered: List[str] = []
+        try:
+            for raw_name, definition in defs:
+                namespaced = definition["function"]["name"]
+                register_tool_definition(definition)
+                self._tool_manager.register(
+                    namespaced, self._make_handler(name, raw_name)
+                )
+                registered.append(namespaced)
+        except BaseException:
+            for tool_name in registered:
+                unregister_tool_definition(tool_name)
+                self._tool_manager.unregister(tool_name)
+            raise
+        return registered
+
+    def _translate_tool(
+        self, server: str, tool: Any, override: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """MCP tool → derpr definition with restrictive defaults + overrides.
+
+        Server annotations are logged only — an untrusted party's opinion of
+        its own tool never drives policy.
+        """
+        if tool.annotations is not None:
+            logger.info(
+                f"MCP server '{server}' tool '{tool.name}' annotations "
+                f"(hints only, not policy): {tool.annotations.model_dump(exclude_none=True)}"
+            )
+        description = tool.description or f"MCP tool '{tool.name}' on server '{server}'."
+        if len(description) > _DESCRIPTION_MAX_CHARS:
+            logger.warning(
+                f"MCP server '{server}' tool '{tool.name}' description truncated "
+                f"({len(description)} > {_DESCRIPTION_MAX_CHARS} chars)."
+            )
+            description = description[:_DESCRIPTION_MAX_CHARS] + "…"
+
+        override = override or {}
+        capabilities = dict(_DEFAULT_TOOL_META["capabilities"])
+        capabilities.update(override.get("capabilities") or {})
+        is_write = override.get("is_write", _DEFAULT_TOOL_META["is_write"])
+
+        return {
+            "type": "function",
+            "dynamic": True,
+            "is_write": bool(is_write),
+            "service_binding": f"mcp:{server}",
+            "capabilities": capabilities,
+            "function": {
+                "name": f"mcp__{server}__{tool.name}",
+                "description": description,
+                "parameters": tool.inputSchema
+                or {"type": "object", "properties": {}, "required": []},
+            },
+        }
+
+    def _make_handler(
+        self, server: str, tool_name: str
+    ) -> Callable[..., Coroutine[Any, Any, Any]]:
+        async def handler(**kwargs: Any) -> Any:
+            return await self.call_tool(server, tool_name, kwargs)
+        return handler
+
+    def _unregister_server_tools(self, name: str) -> List[str]:
+        removed = self._registered_tools.pop(name, [])
+        for tool_name in removed:
+            unregister_tool_definition(tool_name)
+            if self._tool_manager is not None:
+                self._tool_manager.unregister(tool_name)
+        return removed
+
+    def _revalidate_personas(self) -> None:
+        """Re-run composition validation for every persona after any live
+        (de)registration — the toolset just changed under their policies."""
+        if self._personas_provider is None:
+            return
+        for persona in self._personas_provider().values():
+            revalidate_persona_security(persona)
+
+    # ----------------------------------------------------------------- config
+
+    def _load_config(self, strict: bool = True) -> Dict[str, Any]:
+        """Load the persisted server config. ``strict`` (the mutation paths)
+        raises on a corrupt file so a subsequent save can never clobber
+        operator config; non-strict (startup/list) degrades to empty."""
+        if not self._config_path.exists():
+            return {"servers": {}}
+        try:
+            with open(self._config_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError("top-level JSON must be an object")
+            data.setdefault("servers", {})
+            if not isinstance(data["servers"], dict):
+                raise ValueError("'servers' must be a JSON object")
+            return data
+        except (json.JSONDecodeError, ValueError, OSError) as e:
+            logger.error(f"Failed to load MCP config {self._config_path}: {e}")
+            if strict:
+                raise RuntimeError(
+                    f"MCP config {self._config_path} is unreadable ({e}); "
+                    "fix it before adding/removing servers."
+                ) from e
+            return {"servers": {}}
+
+    def _save_config(self, config: Dict[str, Any]) -> None:
+        # Write-then-rename: a crash mid-write must never truncate the config
+        # (a truncated file silently drops every server at the next startup).
+        self._config_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self._config_path.with_name(self._config_path.name + ".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+        os.replace(tmp_path, self._config_path)

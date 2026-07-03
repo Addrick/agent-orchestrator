@@ -4,7 +4,7 @@ import asyncio
 import logging
 from typing import Any, Coroutine, Dict, List, Callable, Optional, cast
 
-from src.tools.definitions import ALL_TOOL_DEFINITIONS
+from src.tools.definitions import get_all_tool_definitions
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,13 @@ class ToolManager:
         if enricher:
             self._enrichers[name] = enricher
 
+    def unregister(self, name: str) -> None:
+        """Remove a tool handler (and its enricher). Used by runtime-registered
+        tools (DP-268 MCP) when their server is removed; unknown names are a
+        no-op."""
+        self._handlers.pop(name, None)
+        self._enrichers.pop(name, None)
+
     async def enrich_audit_action(self, tool_name: str, arguments: Dict[str, Any]) -> Optional[str]:
         """Returns a human-readable enrichment string for a tool call if an enricher is registered."""
         if tool_name in self._enrichers:
@@ -42,7 +49,7 @@ class ToolManager:
     def get_tool_definitions(self) -> List[Dict[str, Any]]:
         """Returns definitions for registered tools plus non-callable tool flags."""
         return [
-            t for t in ALL_TOOL_DEFINITIONS
+            t for t in get_all_tool_definitions()
             if t.get('function', {}).get('name') in self._handlers
             or t.get('type') != 'function'
         ]

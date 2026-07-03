@@ -152,6 +152,81 @@ def test_persona_structured_policy():
     assert set(persona.get_enabled_tools()) == {"web_search", "update_ticket"}
 
 
+# --- DP-268: wildcard never auto-includes dynamic (MCP) tools ------------------
+
+def _dynamic_tool(name, *, is_write=True):
+    return {
+        "type": "function",
+        "dynamic": True,
+        "is_write": is_write,
+        "service_binding": "mcp:srv",
+        "capabilities": {
+            "produces_untrusted": True,
+            "irreversible": True,
+            "locality": "network",
+            "sensitivity": "pii",
+        },
+        "function": {"name": name, "description": "d", "parameters": {}},
+    }
+
+
+def test_wildcard_excludes_dynamic_tools():
+    policy = ToolPolicy(default="allow", allow=["*"])
+    catalog = ALL_TOOL_DEFINITIONS + [_dynamic_tool("mcp__srv__hack")]
+    filtered = policy.filter_tools(catalog)
+    names = {t.get("function", {}).get("name") for t in filtered}
+    assert "mcp__srv__hack" not in names
+    assert len(filtered) == len(ALL_TOOL_DEFINITIONS)
+
+
+def test_wildcard_includes_explicitly_allowed_dynamic_tool():
+    policy = ToolPolicy(default="allow", allow=["*", "mcp__srv__ok"])
+    catalog = ALL_TOOL_DEFINITIONS + [
+        _dynamic_tool("mcp__srv__ok"), _dynamic_tool("mcp__srv__other"),
+    ]
+    names = {t.get("function", {}).get("name") for t in policy.filter_tools(catalog)}
+    assert "mcp__srv__ok" in names
+    assert "mcp__srv__other" not in names
+
+
+def test_wildcard_includes_ask_listed_dynamic_tool():
+    policy = ToolPolicy(default="allow", allow=["*"], ask=["mcp__srv__ok"])
+    catalog = ALL_TOOL_DEFINITIONS + [_dynamic_tool("mcp__srv__ok")]
+    names = {t.get("function", {}).get("name") for t in policy.filter_tools(catalog)}
+    assert "mcp__srv__ok" in names
+
+
+def test_explicit_allow_of_dynamic_tool_without_wildcard():
+    policy = ToolPolicy(allow=["mcp__srv__ok"])
+    catalog = ALL_TOOL_DEFINITIONS + [_dynamic_tool("mcp__srv__ok")]
+    filtered = policy.filter_tools(catalog)
+    assert len(filtered) == 1
+    assert filtered[0]["function"]["name"] == "mcp__srv__ok"
+
+
+def test_resolve_policy_tools_wildcard_excludes_dynamic(monkeypatch):
+    """composition.resolve_policy_tools must expand '*' identically to
+    filter_tools: a runtime-registered MCP tool never enters wildcard
+    composition validation → no quarantine cascade on server install."""
+    from src.tools import composition, definitions
+    from src.tools.definitions import ToolDefinitionRegistry
+
+    fresh = ToolDefinitionRegistry(ALL_TOOL_DEFINITIONS)
+    monkeypatch.setattr(definitions, "_REGISTRY", fresh)
+    definitions.register_tool_definition(_dynamic_tool("mcp__srv__evil"))
+
+    resolved = composition.resolve_policy_tools(ToolPolicy(default="allow", allow=["*"]))
+    names = {t.get("function", {}).get("name") for t in resolved}
+    assert "mcp__srv__evil" not in names
+
+    # Explicit listing brings it into composition validation.
+    resolved = composition.resolve_policy_tools(
+        ToolPolicy(default="allow", allow=["*", "mcp__srv__evil"])
+    )
+    names = {t.get("function", {}).get("name") for t in resolved}
+    assert "mcp__srv__evil" in names
+
+
 # --- DP-263: exfil_capable opt-out --------------------------------------------
 
 def test_set_active_model_exempt_from_untrusted_read_exfil_rule():
