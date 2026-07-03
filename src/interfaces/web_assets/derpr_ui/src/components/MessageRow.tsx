@@ -1,6 +1,7 @@
 import { memo, useState } from 'react'
 import type { Chunk, ToolDef } from '../types/contracts'
 import { splitThink } from '../state/util'
+import { MessageBody } from './MessageBody'
 import { ReasoningFold } from './ReasoningFold'
 import { ToolCard } from './ToolCard'
 import { VersionChevrons } from './VersionChevrons'
@@ -118,7 +119,7 @@ export const MessageRow = memo(function MessageRow({
                 marginTop: reasoning || (c.tool_context || []).length ? 10 : 0,
               }}
             >
-              {body}
+              <MessageBody content={body} />
             </div>
           )
         )}
