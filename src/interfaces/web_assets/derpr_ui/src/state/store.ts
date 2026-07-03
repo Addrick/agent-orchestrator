@@ -501,7 +501,7 @@ export function usePortalStore() {
       if (persona) {
         // Remember this persona's channel choice for next reload (DP-273).
         writePref(channelPrefKey(persona.name), channel)
-        await refreshTranscript(persona.name)
+        await refreshTranscript(persona.name, channel)
         try {
           if (ltmOn) setLtmBlock(await api.getLtmBlock(persona.name, '', channel))
         } catch {
@@ -643,7 +643,7 @@ export function usePortalStore() {
             mutated: Boolean(resp.mutated),
           })
           if (resp.mutated) await refreshPersona(persona.name)
-          await refreshTranscript(persona.name)
+          await refreshTranscript(persona.name, activeChannel)
         } catch (e) {
           // Engine down: without this the command silently does nothing
           // (unhandled rejection, no UI feedback).
@@ -727,7 +727,7 @@ export function usePortalStore() {
     setStream((s) => ({ ...s, active: false, aborted: true, userText: null }))
     // An aborted CONFIRM resume never reaches onDone — re-arm the bar.
     setResolvingConfirm(false)
-    if (persona) await refreshTranscript(persona.name)
+    if (persona) await refreshTranscript(persona.name, activeChannelRef.current)
   }, [persona, refreshTranscript, flushTokens])
 
   // Dismiss re-syncs: an errored turn skips the onDone re-fetch, so the user
@@ -737,7 +737,7 @@ export function usePortalStore() {
     setResolvingConfirm(false)
     resetTokenBuf()
     setStream(EMPTY_STREAM)
-    if (persona) void refreshTranscript(persona.name)
+    if (persona) void refreshTranscript(persona.name, activeChannelRef.current)
   }, [persona, refreshTranscript, resetTokenBuf])
   const dismissDevRow = useCallback(() => setDevRow(null), [])
 
@@ -760,7 +760,7 @@ export function usePortalStore() {
         setBanner('Edit failed — row unchanged')
         return
       }
-      if (persona) await refreshTranscript(persona.name)
+      if (persona) await refreshTranscript(persona.name, activeChannelRef.current)
     },
     [persona, refreshTranscript],
   )
@@ -774,7 +774,7 @@ export function usePortalStore() {
         setBanner('Delete failed — row unchanged')
         return
       }
-      if (persona) await refreshTranscript(persona.name)
+      if (persona) await refreshTranscript(persona.name, activeChannelRef.current)
     },
     [persona, refreshTranscript],
   )
