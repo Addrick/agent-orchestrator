@@ -217,10 +217,7 @@ export function getChannels(activePersona: string): Promise<ChannelGroup[]> {
         const item: ChannelItem = {
           id: `${c.channel}:${c.server_id ?? ''}`,
           channel: c.channel,
-          name: c.channel,
           source: src,
-          persona: activePersona,
-          active: c.channel === 'web_ui',
           preview: c.count ? `${c.count} msgs` : 'no history yet',
         }
         const list = bySource.get(src) ?? []

@@ -23,10 +23,7 @@ export function Channels({ store }: Props) {
     .map((g) => ({
       ...g,
       items: g.items.filter(
-        (it) =>
-          !filter ||
-          it.name.toLowerCase().includes(filter.toLowerCase()) ||
-          it.channel.toLowerCase().includes(filter.toLowerCase()),
+        (it) => !filter || it.channel.toLowerCase().includes(filter.toLowerCase()),
       ),
     }))
     .filter((g) => g.items.length)
@@ -60,10 +57,10 @@ export function Channels({ store }: Props) {
                 }
                 onClick={() => void switchChannel(it.channel)}
               >
-                <div className="av">{it.name.slice(0, 2).toUpperCase()}</div>
+                <div className="av">{it.channel.slice(0, 2).toUpperCase()}</div>
                 <div className="ci">
                   <div className="top">
-                    <span className="nm">{it.name}</span>
+                    <span className="nm">{it.channel}</span>
                     <span className={'src ' + it.source}>{it.source}</span>
                   </div>
                   <div className="pv">{it.preview}</div>

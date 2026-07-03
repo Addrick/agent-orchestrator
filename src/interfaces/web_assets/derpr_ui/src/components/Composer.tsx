@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useMicCapture } from './useMicCapture'
 import { useMicStream } from './useMicStream'
 import { transcribeVoice, getVoiceWebEnabled } from '../api/client'
@@ -17,6 +17,13 @@ interface Props {
 // Auto-send preference persists across reloads: off by default (dictation goes
 // into the draft so STT errors can be fixed), flip on once dictation is trusted.
 const AUTOSEND_KEY = 'derpr.voice.autoSend'
+
+// Grow the textarea to fit its content, capped so long drafts scroll.
+const MAX_DRAFT_HEIGHT = 200
+function autosize(el: HTMLTextAreaElement) {
+  el.style.height = 'auto'
+  el.style.height = Math.min(el.scrollHeight, MAX_DRAFT_HEIGHT) + 'px'
+}
 
 export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming, onDraftChange }: Props) {
   const [text, setText] = useState('')
@@ -46,7 +53,8 @@ export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming, onDra
     if (!t || streaming) return
     onSend(t)
     setText('')
-    if (ref.current) ref.current.style.height = 'auto'
+    const el = ref.current
+    if (el) requestAnimationFrame(() => autosize(el)) // after the cleared value renders
   }
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -62,9 +70,7 @@ export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming, onDra
   const grow = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setText(e.target.value)
     onDraftChange(e.target.value)
-    const el = e.target
-    el.style.height = 'auto'
-    el.style.height = Math.min(el.scrollHeight, 200) + 'px'
+    autosize(e.target)
   }
 
   // Append dictated text to the draft and resize the textarea to fit.
@@ -73,37 +79,22 @@ export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming, onDra
       const next = (prev ? prev.replace(/\s+$/, '') + ' ' : '') + t
       // Fired from the updater so the preview sees the appended result without a
       // second text mirror; the store debounces, so a StrictMode double-call is
-      // harmless. Use the ref so the stable routeDictation closure isn't stale.
-      onDraftChangeRef.current(next)
+      // harmless.
+      onDraftChange(next)
       return next
     })
     const el = ref.current
-    if (el)
-      requestAnimationFrame(() => {
-        el.style.height = 'auto'
-        el.style.height = Math.min(el.scrollHeight, 200) + 'px'
-      })
+    if (el) requestAnimationFrame(() => autosize(el))
   }
 
   // One rule for both mic modes: auto-send (when toggled on and the engine isn't
-  // mid-stream) or drop into the draft to edit. Refs read by the streaming WS
-  // callback so it never sees a stale toggle/streaming value.
-  const autoSendRef = useRef(autoSend)
-  const streamingRef = useRef(streaming)
-  const onSendRef = useRef(onSend)
-  const onDraftChangeRef = useRef(onDraftChange)
-  useEffect(() => {
-    autoSendRef.current = autoSend
-    streamingRef.current = streaming
-    onSendRef.current = onSend
-    onDraftChangeRef.current = onDraftChange
-  })
-
-  const routeDictation = useCallback((t: string) => {
-    if (autoSendRef.current && !streamingRef.current) onSendRef.current(t)
+  // mid-stream) or drop into the draft to edit. Plain closure — useMicStream
+  // ref-wraps its onText argument, so staleness in the WS callback is handled
+  // there; no local ref mirror needed.
+  const routeDictation = (t: string) => {
+    if (autoSend && !streaming) onSend(t)
     else appendDraft(t)
-    // appendDraft is stable enough for this hook's purpose; deps intentionally [].
-  }, [])
+  }
 
   const stream = useMicStream(routeDictation)
 
