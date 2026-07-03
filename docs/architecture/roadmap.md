@@ -22,7 +22,7 @@ type: project
 
 - [ ] **Layered system prompt composition** — pipeline instead of monolithic prompt string
 - [ ] **Skills / instruction loading** — markdown files in `skills/`, loaded on demand into system prompt
-- [ ] **MCP client (Phase 1)** — consume existing MCP servers, expose their tools to LLM. See `plans/mcp_strategy.md` for full phased plan. **IN FLIGHT (DP-268):** implemented and QA_READY on branch `feature/DP-268-mcp-client` (all phases 0–3 done); NOT yet merged to master — pending PR + live smoke test + merge.
+- [x] **MCP client (Phase 1)** — consume external MCP servers, expose their tools to the LLM as `mcp__<server>__<tool>`. See `plans/mcp_strategy.md` for the full phased plan. **MERGED (DP-268, PR #154, `a24996b`):** all phases 0–3 shipped (registry refactor + `MCPClientManager` + add/remove/list management tools + hot-reload maintenance loop).
 - [ ] **Interface refactor** — Discord/Gmail should split into client/service/interface layers like Zammad
 
 ## Long-term / watch
