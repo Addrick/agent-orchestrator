@@ -155,13 +155,16 @@ class Persona:
         return self._name
 
     def get_model_name(self) -> str:
-        """Effective model id used at runtime. The literal ``"default"`` is a
-        sentinel that resolves to the global ``DEFAULT_MODEL_NAME`` so personas
-        can inherit the project-wide default and move together when it changes.
+        """Effective model id used at runtime. The literals ``"default"`` and
+        ``"default_agent_model"`` are sentinels that resolve to the global
+        ``DEFAULT_MODEL_NAME`` / ``DEFAULT_AGENT_MODEL`` so personas can inherit
+        a shared default and move together when it changes.
         Persistence + UI display use ``get_raw_model_name`` to keep the sentinel
         intact (see store.save_personas_to_file, GET /api/v1/persona)."""
         if self._model_name == "default":
             return global_config.DEFAULT_MODEL_NAME
+        if self._model_name == "default_agent_model":
+            return global_config.DEFAULT_AGENT_MODEL
         return self._model_name
 
     def get_raw_model_name(self) -> str:

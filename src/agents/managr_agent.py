@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from config.global_config import (
-    MANAGR_MODEL_NAME,
     MANAGR_PLANNER_NAME,
     MANAGR_STALE_ANALYST_NAME,
     MANAGR_PATTERN_ANALYST_NAME,
@@ -285,11 +284,8 @@ class ManagrAgent(Agent):
                     "history": [{"role": "user", "content": prompt}],
                     "current_message": {"text": prompt, "image_url": None},
                 }
-            persona_config = persona.get_config_for_engine()
-            if MANAGR_MODEL_NAME:
-                persona_config["model_name"] = MANAGR_MODEL_NAME
             response, _ = await self.text_engine.generate_response(
-                persona_config=persona_config,
+                persona_config=persona.get_config_for_engine(),
                 history_object=history_object,
                 tools=None,
             )

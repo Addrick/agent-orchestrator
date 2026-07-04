@@ -17,7 +17,6 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from config.global_config import (
-    MANAGR_MODEL_NAME,
     MANAGR_PLANNER_NAME,
     MANAGR_STALE_ANALYST_NAME,
     MANAGR_PATTERN_ANALYST_NAME,
@@ -127,11 +126,9 @@ async def test_planner_prompt_includes_board_and_briefs():
     assert "#10001 Printer offline at front desk" in prompt
     assert "ANALYST BRIEF (stale):\nstale brief" in prompt
     assert "ANALYST BRIEF (patterns):\npatterns brief" in prompt
-    # Read-only agent: no tools offered to any call; and the global fleet
-    # model override wins over the persona JSON's model_name
+    # Read-only agent: no tools offered to any call
     for call in chat_system.text_engine.generate_response.await_args_list:
         assert call.kwargs["tools"] is None
-        assert call.kwargs["persona_config"]["model_name"] == MANAGR_MODEL_NAME
 
 
 @pytest.mark.asyncio
@@ -253,8 +250,6 @@ def test_system_personas_define_managr_fleet():
         assert name in by_name, f"missing system persona {name}"
         # Neutered: analysis personas must never carry tools
         assert by_name[name]["enabled_tools"] == []
-        # JSON kept in sync with the global_config fleet-model knob
-        assert by_name[name]["model_name"] == MANAGR_MODEL_NAME
 
 
 def test_managr_registered_at_startup():

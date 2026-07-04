@@ -174,7 +174,7 @@
     },
     {
       "name": "managr_stale_analyst",
-      "model_name": "agy-flash",
+      "model_name": "default_agent_model",
       "params": {
         "temperature": 0.0,
         "top_p": null,
@@ -193,7 +193,7 @@
     },
     {
       "name": "managr_pattern_analyst",
-      "model_name": "agy-flash",
+      "model_name": "default_agent_model",
       "params": {
         "temperature": 0.0,
         "top_p": null,
@@ -212,7 +212,7 @@
     },
     {
       "name": "managr_planner",
-      "model_name": "agy-flash",
+      "model_name": "default_agent_model",
       "params": {
         "temperature": 0.0,
         "top_p": null,

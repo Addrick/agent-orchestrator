@@ -123,6 +123,9 @@ ALLOWED_SENDER_LIST = [
 # =============================================================================
 DEFAULT_MODEL_NAME = "gemini-3.1-flash-lite"
 DEFAULT_ULTRAFAST_MODEL_NAME = "gemini-2.5-flash-lite"
+# Resolved by the "default_agent_model" sentinel in persona model_name —
+# the one knob that moves every agent/system persona pointed at it together.
+DEFAULT_AGENT_MODEL = "agy-flash"
 DEFAULT_PERSONA = "You are a helpful LLM assistant."
 
 # Token generation limits
@@ -186,10 +189,6 @@ REMINDER_SENT_TAG = "ai_reminder_sent"
 # =============================================================================
 # --- Managr Agent Configuration (DP-280, Phase 0: read-only) ---
 # =============================================================================
-# Base model for the whole managr persona fleet. Applied at call time, so it
-# overrides the model_name in system_personas.json for these personas — one
-# knob to move planner + analysts together. Empty string = use the JSON values.
-MANAGR_MODEL_NAME = "agy-flash"
 MANAGR_PLANNER_NAME = "managr_planner"
 MANAGR_STALE_ANALYST_NAME = "managr_stale_analyst"
 MANAGR_PATTERN_ANALYST_NAME = "managr_pattern_analyst"
