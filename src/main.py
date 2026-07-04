@@ -18,6 +18,7 @@ from src.app_manager import AppManager
 from src.agents.agent_manager import AgentManager
 from src.agents.agent_service import AgentServiceIntegration
 from src.agents.dispatch_agent import DispatchAgent
+from src.agents.managr_agent import ManagrAgent
 from src.agents.sqlite_consolidator import SqliteConsolidator
 from src.agents.zammad_bot import ZammadBot
 from src.agents.reminder_agent import ReminderAgent
@@ -167,6 +168,7 @@ def _register_agents(
         agent_manager.register("zammad_bot", ZammadBot)
         agent_manager.register("dispatch", DispatchAgent)
         agent_manager.register("reminder", ReminderAgent)
+        agent_manager.register("managr", ManagrAgent)
     else:
         logger.warning(
             "Zammad credentials missing. Zammad-dependent agents (zammad_bot, dispatch) "

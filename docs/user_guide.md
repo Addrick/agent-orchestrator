@@ -638,6 +638,32 @@ Agents are autonomous background workers that run on a schedule without user int
 3. Sends notification via configured channel (Discord DM, Zammad note, etc.)
 4. Tags the ticket as dispatched
 
+**ReminderAgent** (`auto_start: true`) — Runs daily at a configured time (`daily_at`). Polls Zammad for open tickets that haven't been updated and posts a summary nudge to the configured Discord channel.
+
+### Managr (DP-280 — Phase 0 shipped; proposals are Phase 1+, planned)
+
+Managr is a top-level planning agent for the whole ticket board. Where triage and dispatch each react to a single new ticket, managr periodically reviews *everything* — open tickets, their ages and priorities, what the other agents have done, and what happened to its own past suggestions — and produces a manager's plan. It is deliberately neutered: **managr can never write to Zammad or any other external system.** It only observes, reports, and proposes; a human approves every action before anything executes.
+
+**Cycle** (default: daily, like ReminderAgent):
+
+1. **Observe** — snapshot the board: open tickets with age/state/priority/tags, staleness, recent triage/dispatch/reminder activity, and the outcomes of managr's previous proposals (approved / denied / expired).
+2. **Orient** — fan out read-only analysis briefs to specialized system personas (e.g. a stale-ticket investigator, a per-client summarizer, a cross-ticket pattern detector). Each returns a short structured brief.
+3. **Decide** — a single planning call over the briefs produces the plan: an assessment of board health, priorities for the day, and a list of proposed actions.
+4. **Report & propose** — the plan is posted as a readable digest (Discord channel and/or Zammad internal note). Each proposed action is written to a durable **proposal queue** for human review; nothing executes on its own.
+
+**Proposals.** A proposal is a schema-validated action drawn from a fixed whitelist (e.g. `set_priority`, `add_note`, `remind`, `draft_reply`, `merge_tickets`, `escalate_to_human`). Free-text intent never becomes a proposal — only actions that validate against a known schema do. Each proposal records the proposing agent, the action and its arguments, the rationale, and taint provenance (which ticket content motivated it). Unreviewed proposals expire.
+
+**Approval.** Proposals are reviewed through joy (or any persona with the proposal tools): "list proposals", "approve proposal 12", "deny proposal 13". `approve_proposal` is itself a write tool, so it flows through the existing universal write-audit gate — all execution funnels through the one existing approval surface. Approved actions are executed by the proposal executor, not by managr.
+
+**Graduated autonomy.** Per-action-type acceptance rates are tracked. When a low-blast action type (e.g. `add_note`) sustains near-100% unmodified approval, it can be explicitly promoted to auto-execute in config — autonomy is earned per action type, with data, never assumed. **Customer-facing actions (outbound replies, emails) are the last tier and remain human-approved indefinitely**; internal-only actions (notes, priorities, reminders) graduate first.
+
+**Hard boundaries (all phases):**
+- Managr has no write access to Zammad, agent configs, personas, or tool assignments — proposing is its only output channel.
+- Proposal arguments are re-validated against the action schema at execution time, not just when the LLM emits them.
+- Ticket content is treated as adversarial input; plans and proposals derived from it carry taint provenance into the audit record.
+
+**Phases:** (0) read-only manager's report only — no proposal infrastructure; (1) proposal queue + approval via joy/Discord for internal low-blast actions; (2) acceptance tracking + config-gated auto-execution of proven internal action types; (3) managr can commission deep-dive focus subagents (fixr-pattern) for investigations — research an error across ticket history, draft a KB article, prepare a client-facing summary (which still lands as a proposal).
+
 ### Managing Agents
 
 Personas with `service_bindings: ["agents"]` and the relevant tools enabled can:

@@ -182,6 +182,23 @@ DISPATCH_PERSONA_NAME = "dispatch_analyst"
 REMINDER_POLL_INTERVAL = 3600  # Default to 1 hour
 REMINDER_STALE_THRESHOLD_HOURS = 24
 REMINDER_SENT_TAG = "ai_reminder_sent"
+
+# =============================================================================
+# --- Managr Agent Configuration (DP-280, Phase 0: read-only) ---
+# =============================================================================
+# Base model for the whole managr persona fleet. Applied at call time, so it
+# overrides the model_name in system_personas.json for these personas — one
+# knob to move planner + analysts together. Empty string = use the JSON values.
+MANAGR_MODEL_NAME = "agy-flash"
+MANAGR_PLANNER_NAME = "managr_planner"
+MANAGR_STALE_ANALYST_NAME = "managr_stale_analyst"
+MANAGR_PATTERN_ANALYST_NAME = "managr_pattern_analyst"
+MANAGR_BOARD_TICKET_LIMIT = 50
+MANAGR_MAX_BOARD_CHARS = 12000   # cap on the board snapshot fed to personas
+MANAGR_MAX_BRIEF_CHARS = 4000    # cap on each analyst brief fed to the planner
+# Peer agents whose recent actions are summarized into the board snapshot
+MANAGR_PEER_AGENTS = ("zammad_bot", "dispatch", "reminder")
+MANAGR_PEER_ACTION_LIMIT = 5
 # =============================================================================
 # --- Long-Term Memory Configuration ---
 # =============================================================================

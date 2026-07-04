@@ -1,0 +1,272 @@
+# tests/agents/test_managr_agent.py
+"""Unit tests for ManagrAgent (DP-280 Phase 0 — read-only manager's report).
+
+Everything mocked: no network, no DB. The Phase 0 contract under test:
+- a cycle = board snapshot -> analyst briefs -> planner report -> digest
+- the agent has NO write path: the only outbound side effect is
+  notification_router.send
+- degraded modes (empty board, missing personas, failed notification) resolve
+  to explicit outcomes instead of raising
+"""
+
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from config.global_config import (
+    MANAGR_MODEL_NAME,
+    MANAGR_PLANNER_NAME,
+    MANAGR_STALE_ANALYST_NAME,
+    MANAGR_PATTERN_ANALYST_NAME,
+)
+from src.agents.managr_agent import ManagrAgent
+from src.persona import Persona
+
+CONFIG_DIR = Path(__file__).parent.parent.parent / "config"
+
+TICKETS = [
+    {"id": 1, "number": "10001", "title": "Printer offline at front desk",
+     "created_at": "2026-07-01T10:00:00Z", "updated_at": "2026-07-02T10:00:00Z"},
+    {"id": 2, "number": "10002", "title": "VPN drops every hour",
+     "created_at": "2026-06-20T10:00:00Z", "updated_at": "2026-06-21T10:00:00Z"},
+]
+
+
+def _text(content):
+    return ({"type": "text", "content": content}, {})
+
+
+def _make_personas():
+    return {
+        name: Persona(persona_name=name, model_name="mock", prompt=f"{name} prompt")
+        for name in (MANAGR_PLANNER_NAME, MANAGR_STALE_ANALYST_NAME,
+                     MANAGR_PATTERN_ANALYST_NAME)
+    }
+
+
+def _make_agent(tickets=TICKETS, personas=None, send_result=True, agent_config=None):
+    chat_system = MagicMock()
+    chat_system.text_engine = MagicMock()
+    chat_system.memory_manager = MagicMock()
+    chat_system.memory_manager.log_agent_action = MagicMock(return_value=1)
+    chat_system.memory_manager.get_relevant_agent_actions = MagicMock(return_value=[])
+
+    zammad = MagicMock()
+    zammad.search_tickets = MagicMock(return_value=tickets)
+
+    router = MagicMock()
+    router.send = AsyncMock(return_value=send_result)
+
+    if agent_config is None:
+        agent_config = {
+            "notification_targets": [{"channel": "discord_dm", "recipient": "adrich"}],
+            "_recipients": {"adrich": {"discord_user_id": "321"}},
+        }
+
+    with patch("src.agents.base.load_system_personas_from_file", return_value={}):
+        agent = ManagrAgent(chat_system, zammad, router, agent_config=agent_config)
+
+    chat_system.personas = personas if personas is not None else _make_personas()
+    # Retain bridging is exercised in the integration test; here it would
+    # trip over MagicMock rows.
+    agent._retain_action_series = AsyncMock()
+    return agent, chat_system, zammad, router
+
+
+def _final_outcome(agent):
+    """(outcome, payload) of the last update_agent_action_outcome on the root."""
+    calls = agent.memory_manager.update_agent_action_outcome.call_args_list
+    assert calls, "no outcome was finalized"
+    args = calls[-1].args
+    payload = json.loads(args[2]) if args[2] else {}
+    return args[1], payload
+
+
+@pytest.mark.asyncio
+async def test_deploy_happy_path_sends_plan_digest():
+    agent, chat_system, zammad, router = _make_agent()
+    chat_system.text_engine.generate_response = AsyncMock(side_effect=[
+        _text("stale brief"), _text("patterns brief"), _text("THE PLAN"),
+    ])
+    agent.text_engine = chat_system.text_engine
+
+    await agent.deploy()
+
+    # Two analyst calls + one planner call
+    assert chat_system.text_engine.generate_response.await_count == 3
+    # Digest went out with the plan as the body, to the resolved discord id
+    router.send.assert_awaited_once()
+    kwargs = router.send.await_args.kwargs
+    assert kwargs["body"] == "THE PLAN"
+    assert kwargs["channel"] == "discord_dm"
+    assert kwargs["recipient"] == "321"
+    assert "Manager's Report" in kwargs["subject"]
+
+    outcome, payload = _final_outcome(agent)
+    assert outcome == "success"
+    assert payload["plan_excerpt"] == "THE PLAN"
+    assert payload["briefs"] == ["patterns", "stale"]
+    agent._retain_action_series.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_planner_prompt_includes_board_and_briefs():
+    agent, chat_system, zammad, router = _make_agent()
+    chat_system.text_engine.generate_response = AsyncMock(side_effect=[
+        _text("stale brief"), _text("patterns brief"), _text("THE PLAN"),
+    ])
+    agent.text_engine = chat_system.text_engine
+
+    await agent.deploy()
+
+    planner_call = chat_system.text_engine.generate_response.await_args_list[-1]
+    prompt = planner_call.kwargs["history_object"]["message_history"][-1]["content"]
+    assert "#10001 Printer offline at front desk" in prompt
+    assert "ANALYST BRIEF (stale):\nstale brief" in prompt
+    assert "ANALYST BRIEF (patterns):\npatterns brief" in prompt
+    # Read-only agent: no tools offered to any call; and the global fleet
+    # model override wins over the persona JSON's model_name
+    for call in chat_system.text_engine.generate_response.await_args_list:
+        assert call.kwargs["tools"] is None
+        assert call.kwargs["persona_config"]["model_name"] == MANAGR_MODEL_NAME
+
+
+@pytest.mark.asyncio
+async def test_no_open_tickets_skips_cycle():
+    agent, chat_system, zammad, router = _make_agent(tickets=[])
+    chat_system.text_engine.generate_response = AsyncMock()
+    agent.text_engine = chat_system.text_engine
+
+    await agent.deploy()
+
+    chat_system.text_engine.generate_response.assert_not_awaited()
+    router.send.assert_not_awaited()
+    outcome, payload = _final_outcome(agent)
+    assert outcome == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_missing_planner_persona_fails_without_digest():
+    personas = _make_personas()
+    del personas[MANAGR_PLANNER_NAME]
+    agent, chat_system, zammad, router = _make_agent(personas=personas)
+    chat_system.text_engine.generate_response = AsyncMock(side_effect=[
+        _text("stale brief"), _text("patterns brief"),
+    ])
+    agent.text_engine = chat_system.text_engine
+
+    await agent.deploy()
+
+    router.send.assert_not_awaited()
+    outcome, _ = _final_outcome(agent)
+    assert outcome == "failed"
+
+
+@pytest.mark.asyncio
+async def test_missing_analyst_still_produces_plan():
+    personas = _make_personas()
+    del personas[MANAGR_STALE_ANALYST_NAME]
+    agent, chat_system, zammad, router = _make_agent(personas=personas)
+    chat_system.text_engine.generate_response = AsyncMock(side_effect=[
+        _text("patterns brief"), _text("THE PLAN"),
+    ])
+    agent.text_engine = chat_system.text_engine
+
+    await agent.deploy()
+
+    router.send.assert_awaited_once()
+    outcome, payload = _final_outcome(agent)
+    assert outcome == "success"
+    assert payload["briefs"] == ["patterns"]
+
+
+@pytest.mark.asyncio
+async def test_notification_failure_is_surfaced():
+    agent, chat_system, zammad, router = _make_agent(send_result=False)
+    chat_system.text_engine.generate_response = AsyncMock(side_effect=[
+        _text("stale brief"), _text("patterns brief"), _text("THE PLAN"),
+    ])
+    agent.text_engine = chat_system.text_engine
+
+    await agent.deploy()
+
+    outcome, _ = _final_outcome(agent)
+    assert outcome == "notification_failed"
+
+
+@pytest.mark.asyncio
+async def test_no_notification_targets_config_key():
+    """Old config files without notification_targets must not crash the cycle."""
+    agent, chat_system, zammad, router = _make_agent(agent_config={})
+    chat_system.text_engine.generate_response = AsyncMock(side_effect=[
+        _text("stale brief"), _text("patterns brief"), _text("THE PLAN"),
+    ])
+    agent.text_engine = chat_system.text_engine
+
+    await agent.deploy()
+
+    router.send.assert_not_awaited()
+    outcome, _ = _final_outcome(agent)
+    assert outcome == "notification_failed"
+
+
+def test_format_ticket_line_is_defensive():
+    agent, *_ = _make_agent()
+    now = datetime(2026, 7, 4, 12, 0, tzinfo=timezone.utc)
+    # Full search payloads carry expanded state/priority; bare ones don't.
+    full = agent._format_ticket_line(
+        {"number": "1", "title": "T", "state": "open", "priority": "3 high",
+         "created_at": "2026-07-01T12:00:00Z", "updated_at": "2026-07-04T09:00:00Z"},
+        now,
+    )
+    assert full == "- #1 T | state=open | priority=3 high | age=3d | last_update=3h"
+    bare = agent._format_ticket_line({"id": 7}, now)
+    assert bare == "- #7 No Title"
+
+
+def test_resolve_recipient_mappings():
+    agent, *_ = _make_agent()
+    assert agent._resolve_recipient("discord_dm", "adrich") == "321"
+    assert agent._resolve_recipient("discord_dm", "12345") == "12345"
+    assert agent._resolve_recipient("discord_dm", "unknown") == "unknown"
+
+
+# --- Config contract guards ---
+
+def test_agents_json_has_managr_entry():
+    config = json.loads((CONFIG_DIR / "agents.json").read_text())
+    managr = config["agents"]["managr"]
+    assert managr["persona"] == MANAGR_PLANNER_NAME
+    assert managr["auto_start"] is False, "Phase 0 must not auto-start"
+    assert "daily_at" in managr["schedule"]
+    assert managr["notification_targets"], "digest needs at least one target"
+
+
+def test_system_personas_define_managr_fleet():
+    config = json.loads((CONFIG_DIR / "system_personas.json").read_text())
+    by_name = {p["name"]: p for p in config["personas"]}
+    for name in (MANAGR_PLANNER_NAME, MANAGR_STALE_ANALYST_NAME,
+                 MANAGR_PATTERN_ANALYST_NAME):
+        assert name in by_name, f"missing system persona {name}"
+        # Neutered: analysis personas must never carry tools
+        assert by_name[name]["enabled_tools"] == []
+        # JSON kept in sync with the global_config fleet-model knob
+        assert by_name[name]["model_name"] == MANAGR_MODEL_NAME
+
+
+def test_managr_registered_at_startup():
+    """CLAUDE.md startup-registration rule: the agent must actually be wired."""
+    from src.main import _register_agents
+
+    manager = MagicMock()
+    _register_agents(manager, zammad_client=MagicMock())
+    registered = {c.args[0]: c.args[1] for c in manager.register.call_args_list}
+    assert registered.get("managr") is ManagrAgent
+
+    manager_no_zammad = MagicMock()
+    _register_agents(manager_no_zammad, zammad_client=None)
+    names = {c.args[0] for c in manager_no_zammad.register.call_args_list}
+    assert "managr" not in names

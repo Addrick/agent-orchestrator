@@ -41,6 +41,16 @@
                 {"channel": "discord_channel", "recipient": "client-tix"}
             ],
             "description": "Polls Zammad for open tickets that haven't been updated and sends a summary nudge to Discord."
+        },
+        "managr": {
+            "persona": "managr_planner",
+            "schedule": {"daily_at": "07:30"},
+            "action_history_limit": 5,
+            "auto_start": false,
+            "notification_targets": [
+                {"channel": "discord_dm", "recipient": "adrich"}
+            ],
+            "description": "Daily board-level Manager's Report: snapshots the whole ticket board, gathers analyst briefs, and posts a plan digest. Read-only — no write path (DP-280 Phase 0)."
         }
     },
 
