@@ -127,7 +127,10 @@ class KoboldEngineAdapter:
 
     def __init__(self, chat_system: ChatSystem, host: Optional[str] = None, port: int = 5003):
         self.chat_system = chat_system
-        # DP-277: loopback default; LAN exposure is an explicit env opt-in.
+        # DP-277: host from KOBOLD_ADAPTER_HOST (default 0.0.0.0 — the app runs
+        # containerized and is reached via Docker port publishing + the Caddy
+        # TLS front, so the bind is not the network boundary; the operator
+        # token gate protects the surface). See global_config for the rationale.
         self.host = host or global_config.KOBOLD_ADAPTER_HOST
         self.port = port
         self.active_persona: Optional[str] = None

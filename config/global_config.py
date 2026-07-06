@@ -106,10 +106,14 @@ DISCORD_DEBUG_CHANNEL = int(os.environ.get("DISCORD_DEBUG_CHANNEL", "0"))
 # this value into any prompt, persona, or tool result.
 DERPR_CONTROL_TOKEN = os.environ.get("DERPR_CONTROL_TOKEN", "")
 
-# DP-277: bind address for the kobold engine adapter (:5003). Loopback by
-# default — remote/LAN exposure is an explicit opt-in (set 0.0.0.0 behind
-# tailscale/reverse proxy).
-KOBOLD_ADAPTER_HOST = os.environ.get("KOBOLD_ADAPTER_HOST", "127.0.0.1")
+# DP-277: bind address for the kobold engine adapter (:5003). Defaults to
+# 0.0.0.0 because in the prod deploy the app runs INSIDE a container and its
+# port is reached via Docker publishing (`-p 5004:5003`) from the Caddy TLS
+# front — a container-loopback bind would make the published port unreachable
+# (see memory infrastructure/derpr-caddy-voice-https-5003-5004). The network
+# boundary here is Docker port publishing + Caddy, not the app bind. Override
+# to 127.0.0.1 only for a bare-metal/loopback-fronted deploy.
+KOBOLD_ADAPTER_HOST = os.environ.get("KOBOLD_ADAPTER_HOST", "0.0.0.0")
 
 # DP-277: Discord origins allowed to run control-plane dev commands
 # (add/delete/set/trust/untrust/remember/update_models). Entry format:

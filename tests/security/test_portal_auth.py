@@ -59,7 +59,16 @@ def _auth(token=TOKEN):
 # Loopback + docs hardening (Phase 4)
 # ---------------------------------------------------------------------------
 
-def test_default_bind_is_loopback(monkeypatch):
+def test_bind_host_from_config():
+    """The adapter binds KOBOLD_ADAPTER_HOST. Default is 0.0.0.0 because the
+    prod deploy reaches it via Docker port publishing + the Caddy TLS front
+    (the token gate, not the bind, is the security boundary) — see
+    global_config. A loopback deploy can still override the env var."""
+    adapter, _, _ = _make_adapter()
+    assert adapter.host == global_config.KOBOLD_ADAPTER_HOST
+
+
+def test_bind_host_override(monkeypatch):
     monkeypatch.setattr(global_config, "KOBOLD_ADAPTER_HOST", "127.0.0.1", raising=False)
     adapter, _, _ = _make_adapter()
     assert adapter.host == "127.0.0.1"
