@@ -622,9 +622,12 @@ class Persona:
         prior_overrides = self._tool_policy.explicit_overrides
         if isinstance(policy, dict):
             self._tool_policy = ToolPolicy.from_dict(policy)
-            self._tool_policy.explicit_overrides = prior_overrides
         else:
             self._tool_policy = policy
+        # Both branches: a policy replacement never changes the overrides —
+        # a ToolPolicy instance built with its own overrides would otherwise
+        # bypass the gated setter (or silently drop a grandfathered grant).
+        self._tool_policy.explicit_overrides = prior_overrides
         # Update legacy list for compatibility
         self._enabled_tools = self._tool_policy.allow
         logger.info(f"Persona '{self._name}' tool policy updated.")

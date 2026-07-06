@@ -92,6 +92,18 @@ def test_set_enabled_tools_preserves_existing_overrides():
     assert p.get_explicit_overrides() == ["network_read_local_write"]
 
 
+def test_set_tool_policy_instance_cannot_carry_overrides():
+    """A ToolPolicy INSTANCE built with its own overrides must not smuggle
+    them past the gated setter — replacement preserves the persona's prior
+    overrides in the instance branch too, not just the dict branch."""
+    p = make_persona(explicit_overrides=["network_read_local_write"])
+    p.set_tool_policy(ToolPolicy(
+        default="deny", allow=["web_search"],
+        explicit_overrides=["pii_read_network_any"],
+    ))
+    assert p.get_explicit_overrides() == ["network_read_local_write"]
+
+
 def test_set_explicit_overrides_applies_and_returns_prior():
     p = make_persona()
     prior = p.set_explicit_overrides(["network_read_local_write"])

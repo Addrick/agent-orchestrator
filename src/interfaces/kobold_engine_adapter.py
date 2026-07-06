@@ -123,6 +123,11 @@ class KoboldEngineAdapter:
         "/api/extra/tokencount",
         "/chat/completions",
         "/v1/chat/completions",
+        # Voice STT uploads (DP-238) mount on this same app via
+        # register_voice_web — dictation is data plane like generation; the
+        # SPA mic and the /voice PTT page send no operator token.
+        "/voice/transcribe",
+        "/voice/utterance",
     })
 
     def __init__(self, chat_system: ChatSystem, host: Optional[str] = None, port: int = 5003):
@@ -140,6 +145,12 @@ class KoboldEngineAdapter:
             docs_url=None, redoc_url=None, openapi_url=None,
         )
 
+        # Auth first, CORS second: Starlette's add_middleware puts the LAST
+        # addition outermost, and CORS must wrap the auth gate so its 401
+        # responses still carry CORS headers (a cross-origin caller must be
+        # able to read the 401, not get an opaque network error).
+        self._setup_control_plane_auth()
+
         # CORS open — required for lite.koboldai.net to reach a local instance.
         # allow_credentials must stay False with wildcard origins (DP-277):
         # auth is a bearer token the calling page must know, never an
@@ -151,7 +162,6 @@ class KoboldEngineAdapter:
             allow_methods=["*"],
             allow_headers=["*"],
         )
-        self._setup_control_plane_auth()
 
         self._http = httpx.AsyncClient(timeout=None)
         self._setup_routes()
@@ -163,7 +173,7 @@ class KoboldEngineAdapter:
         auth = request.headers.get("authorization", "")
         if auth.lower().startswith("bearer "):
             return auth[7:].strip()
-        return request.headers.get("x-derpr-token", "")
+        return request.headers.get("x-derpr-token", "").strip()
 
     @staticmethod
     def _valid_control_token(supplied: str) -> bool:
@@ -172,7 +182,11 @@ class KoboldEngineAdapter:
         configured = global_config.DERPR_CONTROL_TOKEN
         if not configured:
             return False
-        return secrets.compare_digest(supplied, configured)
+        # Compare bytes: compare_digest raises TypeError on non-ASCII str
+        # (headers are latin-1), which would turn a bad token into a 500.
+        return secrets.compare_digest(
+            supplied.encode("utf-8"), configured.encode("utf-8")
+        )
 
     def _setup_control_plane_auth(self) -> None:
         """DP-277 deny-by-default operator gate for the portal control plane.
@@ -248,16 +262,19 @@ class KoboldEngineAdapter:
         """Command layer — dev_command preprocessing (`set`/`what` commands)."""
         return self.chat_system.bot_logic
 
-    def _audit_control_change(self, event_type: str, target: str,
-                              new_state: Dict[str, Any],
-                              metadata: Optional[Dict[str, Any]] = None) -> None:
+    async def _audit_control_change(self, event_type: str, target: str,
+                                    new_state: Dict[str, Any],
+                                    metadata: Optional[Dict[str, Any]] = None) -> None:
         """DP-277 Phase 7: append a control-plane mutation to Audit_Log.
 
         Best-effort — an audit failure must never fail the operator's edit
         (log_audit_event already swallows sqlite errors). operator_id is the
-        generic "operator" under the single-shared-token model."""
+        generic "operator" under the single-shared-token model. Runs the
+        sqlite write via to_thread like every other MemoryManager call here —
+        never blocking the event loop under the streaming routes."""
         try:
-            self._memory_manager.log_audit_event(
+            await asyncio.to_thread(
+                self._memory_manager.log_audit_event,
                 event_type=event_type,
                 operator_id="operator",
                 new_state=json.dumps(new_state, default=str),
@@ -904,7 +921,7 @@ class KoboldEngineAdapter:
                 self._personas.pop(raw_name, None)
                 logger.error(f"Persona create save failed for {raw_name}: {e}")
                 return JSONResponse(status_code=500, content={"error": "save_failed", "detail": str(e)})
-            self._audit_control_change(
+            await self._audit_control_change(
                 "persona_create", raw_name,
                 {"fields": sorted(set(data.keys()) - {"name"} - set(unknown))},
                 {"rejected": rejected, "unknown": unknown},
@@ -950,7 +967,7 @@ class KoboldEngineAdapter:
                     content={"error": "save_failed", "detail": str(e), "rejected_fields": rejected, "unknown_fields": unknown},
                 )
             logger.info(f"Updated and saved persona settings for {name} (rejected={rejected}, unknown={unknown})")
-            self._audit_control_change(
+            await self._audit_control_change(
                 "persona_patch", name,
                 {"fields": sorted(set(data.keys()) - set(unknown))},
                 {"rejected": rejected, "unknown": unknown},

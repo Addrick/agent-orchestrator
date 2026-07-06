@@ -168,8 +168,8 @@ def test_reads_stay_open_without_token(token_set):
 
 
 def test_data_plane_post_paths_not_gated():
-    """Allowlist is exactly the generation/abort/tokencount surface — the
-    drift guard: anything else non-GET is gated by construction."""
+    """Allowlist is exactly the generation/abort/tokencount/voice-STT surface
+    — the drift guard: anything else non-GET is gated by construction."""
     assert KoboldAdapter.DATA_PLANE_POST_PATHS == frozenset({
         "/api/v1/generate",
         "/api/extra/generate/stream",
@@ -179,7 +179,20 @@ def test_data_plane_post_paths_not_gated():
         "/api/extra/tokencount",
         "/chat/completions",
         "/v1/chat/completions",
+        "/voice/transcribe",
+        "/voice/utterance",
     })
+
+
+def test_voice_stt_uploads_not_gated(token_set):
+    """The voice STT uploads (mounted on this app by register_voice_web) are
+    data plane — the SPA mic and the /voice PTT page send no token. Routes
+    aren't registered on this bare adapter, so the middleware must let the
+    request through to a 404 rather than answer 401 itself."""
+    adapter, _, _ = _make_adapter()
+    with TestClient(adapter.app) as client:
+        assert client.post("/voice/transcribe", content=b"\x00\x00").status_code == 404
+        assert client.post("/voice/utterance", content=b"\x00\x00").status_code == 404
 
 
 def test_abort_open_without_token(token_set):
@@ -205,3 +218,42 @@ def test_cors_credentials_disabled():
             assert m.kwargs.get("allow_credentials") is False
             return
     pytest.fail("CORS middleware not found")
+
+
+def test_gate_401_carries_cors_headers(token_set):
+    """CORS must wrap the auth gate (CORS added last = outermost), so a
+    cross-origin browser can READ the 401 instead of hitting an opaque
+    CORS-blocked network error."""
+    adapter, _, _ = _make_adapter()
+    with TestClient(adapter.app) as client:
+        r = client.patch(
+            "/api/v1/persona/p", json={"prompt": "x"},
+            headers={"Origin": "https://lite.koboldai.net"},
+        )
+    assert r.status_code == 401
+    assert r.headers.get("access-control-allow-origin") == "*"
+
+
+def test_non_ascii_token_rejected_not_500(token_set):
+    """A latin-1 (non-ASCII) supplied token must fail as 401, not crash
+    compare_digest with a TypeError (str comparison requires ASCII)."""
+    adapter, _, _ = _make_adapter()
+    with TestClient(adapter.app) as client:
+        r = client.patch(
+            "/api/v1/persona/p", json={"prompt": "x"},
+            headers={"Authorization": "Bearer s\xe9cret".encode("latin-1")},
+        )
+    assert r.status_code == 401
+
+
+def test_x_derpr_token_whitespace_stripped(token_set):
+    """A pasted token with stray whitespace still authenticates via the
+    X-Derpr-Token header (parity with the Bearer path, which strips)."""
+    adapter, _, _ = _make_adapter()
+    with TestClient(adapter.app) as client:
+        r = client.post(
+            "/api/v1/persona/p/dev_command",
+            json={"command": "what prompt"},
+            headers={"X-Derpr-Token": f" {TOKEN} "},
+        )
+    assert r.status_code == 200
