@@ -727,6 +727,22 @@ def test_patch_persona_updates_memory_mode():
     mm.close()
 
 
+def test_patch_persona_writes_audit_event():
+    """DP-277 Phase 7: a portal persona edit lands in Audit_Log."""
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    with TestClient(adapter.app) as client:
+        r = client.patch("/api/v1/persona/test_persona", json={"prompt": "new prompt"})
+    assert r.status_code == 200
+    conn = mm._get_connection()
+    rows = conn.execute(
+        "SELECT event_type, new_state, metadata FROM Audit_Log WHERE event_type = 'persona_patch'"
+    ).fetchall()
+    assert len(rows) == 1
+    assert "prompt" in rows[0]["new_state"]
+    assert "test_persona" in rows[0]["metadata"]
+    mm.close()
+
+
 def test_patch_persona_unknown_mode_does_not_crash():
     # set_memory_mode logs a warning and keeps old mode on invalid input
     adapter, mm, persona = _make_adapter_with_seeded_db()

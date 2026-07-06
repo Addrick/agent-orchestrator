@@ -245,6 +245,25 @@ class KoboldEngineAdapter:
         """Command layer — dev_command preprocessing (`set`/`what` commands)."""
         return self.chat_system.bot_logic
 
+    def _audit_control_change(self, event_type: str, target: str,
+                              new_state: Dict[str, Any],
+                              metadata: Optional[Dict[str, Any]] = None) -> None:
+        """DP-277 Phase 7: append a control-plane mutation to Audit_Log.
+
+        Best-effort — an audit failure must never fail the operator's edit
+        (log_audit_event already swallows sqlite errors). operator_id is the
+        generic "operator" under the single-shared-token model."""
+        try:
+            self._memory_manager.log_audit_event(
+                event_type=event_type,
+                operator_id="operator",
+                new_state=json.dumps(new_state, default=str),
+                reason=f"portal control plane: {event_type}",
+                metadata={"persona": target, **(metadata or {})},
+            )
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(f"audit log for {event_type} on {target} failed: {e}")
+
     @property
     def _confirmations(self) -> "ConfirmationManager":
         """CONFIRM-mode park store — pending map keyed by (user, persona)."""
@@ -882,6 +901,11 @@ class KoboldEngineAdapter:
                 self._personas.pop(raw_name, None)
                 logger.error(f"Persona create save failed for {raw_name}: {e}")
                 return JSONResponse(status_code=500, content={"error": "save_failed", "detail": str(e)})
+            self._audit_control_change(
+                "persona_create", raw_name,
+                {"fields": sorted(set(data.keys()) - {"name"} - set(unknown))},
+                {"rejected": rejected, "unknown": unknown},
+            )
             logger.info(f"Created persona '{raw_name}' (rejected={rejected}, unknown={unknown})")
             return JSONResponse(
                 status_code=201,
@@ -923,6 +947,11 @@ class KoboldEngineAdapter:
                     content={"error": "save_failed", "detail": str(e), "rejected_fields": rejected, "unknown_fields": unknown},
                 )
             logger.info(f"Updated and saved persona settings for {name} (rejected={rejected}, unknown={unknown})")
+            self._audit_control_change(
+                "persona_patch", name,
+                {"fields": sorted(set(data.keys()) - set(unknown))},
+                {"rejected": rejected, "unknown": unknown},
+            )
             return {"result": "success", "rejected_fields": rejected, "unknown_fields": unknown}
 
         @self.app.get("/api/v1/info/version")
