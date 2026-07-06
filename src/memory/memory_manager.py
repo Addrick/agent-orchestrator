@@ -264,6 +264,28 @@ class MemoryManager:
             );
             CREATE INDEX IF NOT EXISTS idx_audit_event ON Audit_Log (event_type, timestamp);
             CREATE INDEX IF NOT EXISTS idx_audit_target ON Audit_Log (target_id);
+
+            CREATE TABLE IF NOT EXISTS Proposals (
+                proposal_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TIMESTAMP NOT NULL,
+                expires_at TIMESTAMP,
+                agent_name TEXT NOT NULL,
+                action_type TEXT NOT NULL,
+                action_args TEXT NOT NULL,
+                rationale TEXT,
+                taint TEXT,
+                source_action_id INTEGER,
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(status IN ('pending', 'approved', 'denied', 'expired',
+                                     'executed', 'execution_failed')),
+                reviewed_at TIMESTAMP,
+                reviewer TEXT,
+                review_note TEXT,
+                executed_at TIMESTAMP,
+                execution_result TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_proposal_status ON Proposals (status, created_at);
+            CREATE INDEX IF NOT EXISTS idx_proposal_acceptance ON Proposals (agent_name, action_type, status);
             """
             conn.executescript(schema_sql)
             conn.commit()
@@ -1234,6 +1256,104 @@ class MemoryManager:
             except sqlite3.Error as e:
                 logger.error(f"Failed to log audit event {event_type}: {e}")
                 conn.rollback()
+
+    # --- Proposal queue (DP-282, managr Phase 1) ---
+
+    def create_proposal(self, agent_name: str, action_type: str, action_args: Dict[str, Any],
+                        rationale: Optional[str] = None, taint: Optional[Dict[str, Any]] = None,
+                        source_action_id: Optional[int] = None,
+                        expires_at: Optional[datetime] = None) -> int:
+        """Insert a pending proposal row. action_args/taint are stored as JSON."""
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                """INSERT INTO Proposals (created_at, expires_at, agent_name, action_type,
+                                          action_args, rationale, taint, source_action_id, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')""",
+                (datetime.now(timezone.utc), expires_at, agent_name, action_type,
+                 json.dumps(action_args), rationale,
+                 json.dumps(taint) if taint is not None else None, source_action_id),
+            )
+            conn.commit()
+            return cast(int, cursor.lastrowid)
+
+    def get_proposal(self, proposal_id: int) -> Optional[Dict[str, Any]]:
+        """Fetch one proposal with action_args/taint decoded from JSON."""
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM Proposals WHERE proposal_id = ?", (proposal_id,))
+            row = cursor.fetchone()
+            return self._decode_proposal(dict(row)) if row else None
+
+    def list_proposals(self, status: Optional[str] = "pending", limit: int = 25) -> List[Dict[str, Any]]:
+        """List proposals, newest first. status=None lists all statuses."""
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            if status is None:
+                cursor.execute(
+                    "SELECT * FROM Proposals ORDER BY created_at DESC LIMIT ?", (limit,))
+            else:
+                cursor.execute(
+                    "SELECT * FROM Proposals WHERE status = ? ORDER BY created_at DESC LIMIT ?",
+                    (status, limit))
+            return [self._decode_proposal(dict(row)) for row in cursor.fetchall()]
+
+    def review_proposal(self, proposal_id: int, status: str, reviewer: str,
+                        review_note: Optional[str] = None) -> bool:
+        """Move a PENDING proposal to approved/denied. Returns False if the
+        proposal is missing or not pending (already reviewed/expired) — the
+        WHERE clause makes double-review a no-op rather than an overwrite."""
+        if status not in ("approved", "denied"):
+            raise ValueError(f"Invalid review status: {status}")
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                """UPDATE Proposals SET status = ?, reviewed_at = ?, reviewer = ?, review_note = ?
+                   WHERE proposal_id = ? AND status = 'pending'""",
+                (status, datetime.now(timezone.utc), reviewer, review_note, proposal_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def mark_proposal_executed(self, proposal_id: int, success: bool, result: str) -> None:
+        """Record execution outcome of an approved proposal."""
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                """UPDATE Proposals SET status = ?, executed_at = ?, execution_result = ?
+                   WHERE proposal_id = ? AND status = 'approved'""",
+                ("executed" if success else "execution_failed",
+                 datetime.now(timezone.utc), result[:2000], proposal_id),
+            )
+            conn.commit()
+
+    def expire_stale_proposals(self) -> int:
+        """Mark pending proposals past their expires_at as expired. Returns count."""
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                """UPDATE Proposals SET status = 'expired'
+                   WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < ?""",
+                (datetime.now(timezone.utc),),
+            )
+            conn.commit()
+            return cursor.rowcount
+
+    @staticmethod
+    def _decode_proposal(row: Dict[str, Any]) -> Dict[str, Any]:
+        for key in ("action_args", "taint"):
+            if row.get(key):
+                try:
+                    row[key] = json.loads(row[key])
+                except (TypeError, json.JSONDecodeError):
+                    pass
+        return row
 
     def mark_trusted(self, summary_id: int, operator_id: str, reason: str) -> bool:
         """Mark a memory summary as trusted (untrusted=0)."""

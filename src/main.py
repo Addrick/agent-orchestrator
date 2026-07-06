@@ -256,6 +256,16 @@ async def main() -> None:
     mcp_manager = MCPClientManager(personas_provider=lambda: bot.personas)
     bot.register_service(MCPIntegration(mcp_manager))
 
+    # 7.5 Register the proposal queue review surface (DP-282). Needs Zammad —
+    # the executor is the sole component that turns an approved proposal into
+    # an external write. Without Zammad there is nothing to execute against,
+    # so (like ZammadIntegration) it simply doesn't register.
+    if zammad_client is not None:
+        from src.proposals import ProposalExecutor, ProposalIntegration
+        bot.register_service(
+            ProposalIntegration(memory_manager, ProposalExecutor(zammad_client))
+        )
+
     # 8. Register interfaces
     _register_interfaces(app, bot, notification_router)
 

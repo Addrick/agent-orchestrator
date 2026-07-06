@@ -226,6 +226,9 @@ MANAGR_MAX_BRIEF_CHARS = 4000    # cap on each analyst brief fed to the planner
 # Peer agents whose recent actions are summarized into the board snapshot
 MANAGR_PEER_AGENTS = ("zammad_bot", "dispatch", "reminder")
 MANAGR_PEER_ACTION_LIMIT = 5
+# Phase 1 proposal queue (DP-282)
+MANAGR_PROPOSAL_TTL_DAYS = 7          # pending proposals expire after this
+MANAGR_MAX_PROPOSALS_PER_CYCLE = 10   # cap on proposals stored per planning cycle
 # =============================================================================
 # --- Long-Term Memory Configuration ---
 # =============================================================================

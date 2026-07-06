@@ -40,7 +40,7 @@ def wired_system():
             persona_name="test_persona", model_name="gemini-2.5-flash",
             prompt="test", enabled_tools=["*"],
             memory_mode=MemoryMode.CHANNEL_ISOLATED, history_messages=10,
-            service_bindings=["zammad", "agents", "fixr", "voice", "proxmox", "mcp"],
+            service_bindings=["zammad", "agents", "fixr", "voice", "proxmox", "mcp", "proposals"],
         ),
     }
 
@@ -73,6 +73,12 @@ def wired_system():
     from src.tools.mcp_integration import MCPIntegration
     chat_system.register_service(
         MCPIntegration(MCPClientManager(personas_provider=lambda: chat_system.personas))
+    )
+
+    # DP-282 proposal queue review surface (tools behind the "proposals" binding)
+    from src.proposals import ProposalExecutor, ProposalIntegration
+    chat_system.register_service(
+        ProposalIntegration(memory_manager, ProposalExecutor(mock_zammad))
     )
 
     try:

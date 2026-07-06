@@ -265,3 +265,167 @@ def test_managr_registered_at_startup():
     _register_agents(manager_no_zammad, zammad_client=None)
     names = {c.args[0] for c in manager_no_zammad.register.call_args_list}
     assert "managr" not in names
+
+
+# --- Phase 1: proposal extraction (DP-282) ---
+
+def _tool_calls(proposals):
+    return ({"type": "tool_calls",
+             "calls": [{"name": "submit_proposals",
+                        "arguments": {"proposals": proposals}}]}, {})
+
+
+def _proposals_config():
+    return {
+        "proposals_enabled": True,
+        "notification_targets": [{"channel": "discord_dm", "recipient": "adrich"}],
+        "_recipients": {"adrich": {"discord_user_id": "321"}},
+    }
+
+
+@pytest.mark.asyncio
+async def test_proposals_off_when_config_key_absent():
+    """Old agents.json without proposals_enabled: Phase 0 behavior exactly —
+    three LLM calls, no proposal rows, plain plan digest."""
+    agent, chat_system, zammad, router = _make_agent()
+    chat_system.text_engine.generate_response = AsyncMock(side_effect=[
+        _text("stale brief"), _text("patterns brief"), _text("THE PLAN"),
+    ])
+    agent.text_engine = chat_system.text_engine
+
+    await agent.deploy()
+
+    assert chat_system.text_engine.generate_response.await_count == 3
+    agent.memory_manager.create_proposal.assert_not_called()
+    assert router.send.await_args.kwargs["body"] == "THE PLAN"
+
+
+@pytest.mark.asyncio
+async def test_proposal_extraction_queues_valid_drops_invalid():
+    agent, chat_system, zammad, router = _make_agent(agent_config=_proposals_config())
+    agent.memory_manager.create_proposal = MagicMock(side_effect=[11, 12])
+    chat_system.text_engine.generate_response = AsyncMock(side_effect=[
+        _text("stale brief"), _text("patterns brief"), _text("THE PLAN"),
+        _tool_calls([
+            {"action_type": "set_priority",
+             "args": {"ticket_number": 10002, "priority": "3 high"},
+             "rationale": "stale VPN ticket"},
+            {"action_type": "add_note",
+             "args": {"ticket_number": 10001, "body": "check the printer"},
+             "rationale": "needs follow-up"},
+            # invalid enum value -> dropped in code, never stored
+            {"action_type": "set_priority",
+             "args": {"ticket_number": 10001, "priority": "urgent"},
+             "rationale": "bad"},
+            # non-whitelisted action -> dropped
+            {"action_type": "close_ticket",
+             "args": {"ticket_number": 10001}, "rationale": "bad"},
+        ]),
+    ])
+    agent.text_engine = chat_system.text_engine
+
+    await agent.deploy()
+
+    # Extraction call carries ONLY the agent-internal submission schema
+    extract_call = chat_system.text_engine.generate_response.await_args_list[-1]
+    tool_names = [t["function"]["name"] for t in extract_call.kwargs["tools"]]
+    assert tool_names == ["submit_proposals"]
+
+    assert agent.memory_manager.create_proposal.call_count == 2
+    first = agent.memory_manager.create_proposal.call_args_list[0].kwargs
+    assert first["agent_name"] == "managr"
+    assert first["action_type"] == "set_priority"
+    assert first["action_args"] == {"ticket_number": 10002, "priority": "3 high"}
+    assert first["taint"]["source"] == "zammad_board_snapshot"
+    assert first["taint"]["ticket_number"] == 10002
+    assert first["expires_at"] is not None
+
+    # Digest = plan + proposals section with queue ids
+    body = router.send.await_args.kwargs["body"]
+    assert body.startswith("THE PLAN")
+    assert "PROPOSED ACTIONS (2 queued" in body
+    assert "[11] set_priority" in body
+
+    outcome, payload = _final_outcome(agent)
+    assert outcome == "success"
+    assert payload["proposals_queued"] == 2
+
+
+@pytest.mark.asyncio
+async def test_no_usable_proposal_call_sends_plain_digest():
+    agent, chat_system, zammad, router = _make_agent(agent_config=_proposals_config())
+    chat_system.text_engine.generate_response = AsyncMock(side_effect=[
+        _text("stale brief"), _text("patterns brief"), _text("THE PLAN"),
+        _text("I have no proposals today."),  # model ignored the tool
+    ])
+    agent.text_engine = chat_system.text_engine
+
+    await agent.deploy()
+
+    agent.memory_manager.create_proposal.assert_not_called()
+    assert router.send.await_args.kwargs["body"] == "THE PLAN"
+    outcome, payload = _final_outcome(agent)
+    assert outcome == "success"
+    assert payload["proposals_queued"] == 0
+
+
+@pytest.mark.asyncio
+async def test_proposal_count_capped_per_cycle():
+    from config.global_config import MANAGR_MAX_PROPOSALS_PER_CYCLE
+    surplus = [
+        {"action_type": "add_note",
+         "args": {"ticket_number": 10001, "body": f"note {i}"},
+         "rationale": "r"}
+        for i in range(MANAGR_MAX_PROPOSALS_PER_CYCLE + 5)
+    ]
+    agent, chat_system, zammad, router = _make_agent(agent_config=_proposals_config())
+    agent.memory_manager.create_proposal = MagicMock(
+        side_effect=range(1, MANAGR_MAX_PROPOSALS_PER_CYCLE + 1))
+    chat_system.text_engine.generate_response = AsyncMock(side_effect=[
+        _text("stale brief"), _text("patterns brief"), _text("THE PLAN"),
+        _tool_calls(surplus),
+    ])
+    agent.text_engine = chat_system.text_engine
+
+    await agent.deploy()
+
+    assert agent.memory_manager.create_proposal.call_count == MANAGR_MAX_PROPOSALS_PER_CYCLE
+
+
+@pytest.mark.asyncio
+async def test_prior_proposal_outcomes_in_board_snapshot():
+    """Observe step: the planner sees what happened to past proposals."""
+    agent, chat_system, zammad, router = _make_agent(agent_config=_proposals_config())
+    agent.memory_manager.list_proposals = MagicMock(return_value=[
+        {"proposal_id": 7, "agent_name": "managr", "action_type": "set_priority",
+         "action_args": {"ticket_number": 10002, "priority": "3 high"},
+         "status": "denied", "review_note": "priority is fine"},
+        {"proposal_id": 8, "agent_name": "other_agent", "action_type": "add_note",
+         "action_args": {}, "status": "pending", "review_note": None},
+    ])
+    chat_system.text_engine.generate_response = AsyncMock(side_effect=[
+        _text("stale brief"), _text("patterns brief"), _text("THE PLAN"),
+        _text("no proposals"),
+    ])
+    agent.text_engine = chat_system.text_engine
+
+    await agent.deploy()
+
+    planner_call = chat_system.text_engine.generate_response.await_args_list[2]
+    prompt = planner_call.kwargs["history_object"]["message_history"][-1]["content"]
+    assert "[7] set_priority(ticket_number=10002, priority=3 high) -> denied — priority is fine" in prompt
+    # Other agents' proposals are not attributed to managr
+    assert "[8] add_note" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_proposal_outcomes_skipped_when_disabled():
+    agent, chat_system, zammad, router = _make_agent()  # no proposals_enabled
+    chat_system.text_engine.generate_response = AsyncMock(side_effect=[
+        _text("stale brief"), _text("patterns brief"), _text("THE PLAN"),
+    ])
+    agent.text_engine = chat_system.text_engine
+
+    await agent.deploy()
+
+    agent.memory_manager.list_proposals.assert_not_called()
