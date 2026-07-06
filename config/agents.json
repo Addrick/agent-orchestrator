@@ -47,7 +47,7 @@
             "schedule": {"daily_at": "07:30"},
             "action_history_limit": 5,
             "proposals_enabled": true,
-            "auto_start": false,
+            "auto_start": true,
             "notification_targets": [
                 {"channel": "discord_dm", "recipient": "adrich"}
             ],

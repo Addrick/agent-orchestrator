@@ -237,7 +237,10 @@ def test_agents_json_has_managr_entry():
     config = json.loads((CONFIG_DIR / "agents.json").read_text())
     managr = config["agents"]["managr"]
     assert managr["persona"] == MANAGR_PLANNER_NAME
-    assert managr["auto_start"] is False, "Phase 0 must not auto-start"
+    # Live smoketest posture (Adam, 2026-07-06): managr is propose-only, so
+    # it auto-starts — one cycle at container startup, then daily. Writes
+    # still require human approval via the proposal queue.
+    assert managr["auto_start"] is True, "managr should auto-start for the daily report"
     assert "daily_at" in managr["schedule"]
     assert managr["notification_targets"], "digest needs at least one target"
 
