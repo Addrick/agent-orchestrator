@@ -1,3 +1,5 @@
+import { useState } from 'react'
+import { getControlToken, setControlToken, hasControlToken } from '../api/control_token'
 import type { PortalStore } from '../state/store'
 
 interface Props {
@@ -5,6 +7,45 @@ interface Props {
   collapsed: { rail: boolean; chan: boolean; insp: boolean }
   toggle: (k: 'rail' | 'chan' | 'insp') => void
   onNewPersona: () => void
+}
+
+// DP-277: operator token control. The token gates every control-plane route
+// server-side; entering it here (kept in localStorage, never shown to the
+// model) is what lets this browser create/edit personas and run dev commands.
+function OperatorToken() {
+  const [editing, setEditing] = useState(false)
+  const [value, setValue] = useState(getControlToken())
+  const active = hasControlToken()
+  if (!editing) {
+    return (
+      <button
+        className="stat"
+        title={active ? 'operator token set — click to change' : 'set operator token to enable persona/config edits'}
+        onClick={() => { setValue(getControlToken()); setEditing(true) }}
+      >
+        <span className="dot" style={active ? undefined : { background: 'var(--write)', boxShadow: '0 0 7px var(--write)' }} />
+        {active ? 'operator ✓' : 'operator: locked'}
+      </button>
+    )
+  }
+  return (
+    <span className="stat" style={{ gap: 4 }}>
+      <input
+        type="password"
+        autoFocus
+        placeholder="control token"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') { setControlToken(value); setEditing(false) }
+          if (e.key === 'Escape') setEditing(false)
+        }}
+        style={{ width: 120, background: 'transparent', border: '1px solid var(--line)', color: 'inherit', font: 'inherit', padding: '1px 4px' }}
+      />
+      <button className="cbtn" title="save token" onClick={() => { setControlToken(value); setEditing(false) }}>✓</button>
+      <button className="cbtn" title="clear token" onClick={() => { setControlToken(''); setValue(''); setEditing(false) }}>✕</button>
+    </span>
+  )
 }
 
 export function TopBar({ store, collapsed, toggle, onNewPersona }: Props) {
@@ -49,6 +90,7 @@ export function TopBar({ store, collapsed, toggle, onNewPersona }: Props) {
           <span className="dot" />
           engine route · /v1/chat/completions
         </span>
+        <OperatorToken />
       </div>
 
       <div className="collapse-btns">

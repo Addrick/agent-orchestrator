@@ -11,6 +11,7 @@ import logging
 import mimetypes
 import os
 import re
+import secrets
 import time
 
 from src.request_builder import AssembledRequest
@@ -110,25 +111,91 @@ class KoboldEngineAdapter:
     See decisions/2026-04-28-portal-engine-as-source-of-truth.md.
     """
 
-    def __init__(self, chat_system: ChatSystem, host: str = "0.0.0.0", port: int = 5003):
+    # DP-277: POST paths that ARE the data plane (generation, aborts, token
+    # counting). Everything else non-GET requires the operator token — new
+    # mutating routes are born gated, not born open.
+    DATA_PLANE_POST_PATHS = frozenset({
+        "/api/v1/generate",
+        "/api/extra/generate/stream",
+        "/api/extra/generate/check",
+        "/api/v1/abort",
+        "/api/extra/abort",
+        "/api/extra/tokencount",
+        "/chat/completions",
+        "/v1/chat/completions",
+    })
+
+    def __init__(self, chat_system: ChatSystem, host: Optional[str] = None, port: int = 5003):
         self.chat_system = chat_system
-        self.host = host
+        # DP-277: loopback default; LAN exposure is an explicit env opt-in.
+        self.host = host or global_config.KOBOLD_ADAPTER_HOST
         self.port = port
         self.active_persona: Optional[str] = None
-        self.app: FastAPI = FastAPI(title="DERPR Kobold Engine Adapter")
+        # DP-277: auto-docs advertise the whole route surface — off.
+        self.app: FastAPI = FastAPI(
+            title="DERPR Kobold Engine Adapter",
+            docs_url=None, redoc_url=None, openapi_url=None,
+        )
 
         # CORS open — required for lite.koboldai.net to reach a local instance.
+        # allow_credentials must stay False with wildcard origins (DP-277):
+        # auth is a bearer token the calling page must know, never an
+        # ambient browser credential a foreign origin could ride.
         self.app.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],
-            allow_credentials=True,
+            allow_credentials=False,
             allow_methods=["*"],
             allow_headers=["*"],
         )
+        self._setup_control_plane_auth()
 
         self._http = httpx.AsyncClient(timeout=None)
         self._setup_routes()
         self._setup_portal()
+
+    @staticmethod
+    def _extract_control_token(request: Request) -> str:
+        """The operator token supplied on a request, or ''."""
+        auth = request.headers.get("authorization", "")
+        if auth.lower().startswith("bearer "):
+            return auth[7:].strip()
+        return request.headers.get("x-derpr-token", "")
+
+    @staticmethod
+    def _valid_control_token(supplied: str) -> bool:
+        """Constant-time check against DERPR_CONTROL_TOKEN. An empty
+        configured token validates nothing (control plane locked)."""
+        configured = global_config.DERPR_CONTROL_TOKEN
+        if not configured:
+            return False
+        return secrets.compare_digest(supplied, configured)
+
+    def _setup_control_plane_auth(self) -> None:
+        """DP-277 deny-by-default operator gate for the portal control plane.
+
+        Every non-GET route outside DATA_PLANE_POST_PATHS requires the static
+        operator token (DERPR_CONTROL_TOKEN). No token configured = the whole
+        control plane answers 401 (fail closed) until the operator sets one.
+        Reads stay open; OPTIONS passes for CORS preflight.
+        """
+        @self.app.middleware("http")
+        async def control_plane_auth(request: Request, call_next: Any) -> Any:
+            if request.method in ("GET", "HEAD", "OPTIONS"):
+                return await call_next(request)
+            if request.url.path in self.DATA_PLANE_POST_PATHS:
+                return await call_next(request)
+            if not global_config.DERPR_CONTROL_TOKEN:
+                return JSONResponse(
+                    status_code=401,
+                    content={"error": "control plane locked: DERPR_CONTROL_TOKEN is not configured"},
+                )
+            if not self._valid_control_token(self._extract_control_token(request)):
+                return JSONResponse(
+                    status_code=401,
+                    content={"error": "operator token required (Authorization: Bearer <DERPR_CONTROL_TOKEN>)"},
+                )
+            return await call_next(request)
 
     # ------------------------------------------------------------------
     # Engine dependency surface (DP-205).
@@ -1055,6 +1122,19 @@ class KoboldEngineAdapter:
             # engine's DB stays the source of truth for history.
             msgs_in = data.get("messages") or []
 
+            # DP-277 chat-box command routing: chat is data-plane (anonymous
+            # callers get operator=False and control commands are refused),
+            # but a valid operator token on the request elevates the origin so
+            # typed dev commands keep working from the operator's own portal.
+            # channel/user_identifier above are caller-supplied and carry no
+            # authority; only the token does.
+            origin = Origin(
+                transport="portal",
+                channel_id=channel,
+                author_id=user_identifier,
+                operator=self._valid_control_token(self._extract_control_token(request)),
+            )
+
             # Extract sampling parameters from the OAI request for the local engine
             local_inference_config = {
                 "temperature": data.get("temperature"),
@@ -1087,6 +1167,7 @@ class KoboldEngineAdapter:
                     is_retry=is_retry,
                     local_inference_config=local_inference_config,
                     client_messages=msgs_in or None,
+                    origin=origin,
                 ):
                     if isinstance(ev, DoneEvent):
                         full_text = ev.text
@@ -1173,6 +1254,7 @@ class KoboldEngineAdapter:
                         is_retry=is_retry,
                         local_inference_config=local_inference_config,
                         client_messages=None,  # Explicitly None to force DB history rebuild
+                        origin=origin,
                     ):
 
                         now = time.monotonic()

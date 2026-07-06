@@ -97,6 +97,20 @@ INGEST_CACHE_DIR: Path = Path(os.environ.get("INGEST_CACHE_DIR", str(DATA_DIR / 
 # Channel ID for specific debug outputs (loaded from env for security)
 DISCORD_DEBUG_CHANNEL = int(os.environ.get("DISCORD_DEBUG_CHANNEL", "0"))
 
+# DP-277: static operator token for the portal's control plane (persona
+# PATCH/create, dev_command, confirm, interaction edits — every non-GET
+# adapter route outside the data-plane allowlist). Presented as
+# "Authorization: Bearer <token>" (or X-Derpr-Token). Compared with
+# secrets.compare_digest. EMPTY = control plane LOCKED (fail closed): set
+# this env var to enable portal-side configuration at all. Never inject
+# this value into any prompt, persona, or tool result.
+DERPR_CONTROL_TOKEN = os.environ.get("DERPR_CONTROL_TOKEN", "")
+
+# DP-277: bind address for the kobold engine adapter (:5003). Loopback by
+# default — remote/LAN exposure is an explicit opt-in (set 0.0.0.0 behind
+# tailscale/reverse proxy).
+KOBOLD_ADAPTER_HOST = os.environ.get("KOBOLD_ADAPTER_HOST", "127.0.0.1")
+
 # DP-277: Discord origins allowed to run control-plane dev commands
 # (add/delete/set/trust/untrust/remember/update_models). Entry format:
 # "server_id[/channel_id[/author_id]]", comma-separated; missing or "*"

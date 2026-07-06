@@ -29,6 +29,18 @@ from src.persona import Persona, ExecutionMode
 from tests.helpers import make_chat_system
 from tests.provider_stream_mocks import google_stream
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _bypass_control_plane_auth(monkeypatch):
+    """DP-277: these tests exercise route behavior, not the operator gate.
+    Treat every control-plane request as authenticated so they test what they
+    mean to; the gate itself is covered in tests/security/test_portal_auth.py.
+    """
+    monkeypatch.setattr(KoboldAdapter, "_valid_control_token", lambda self, tok: True)
+    monkeypatch.setattr(global_config, "DERPR_CONTROL_TOKEN", "test-token", raising=False)
+
 
 def _make_adapter_with_seeded_db(persona_name: str = "test_persona",
                                  context_length: int = 10,

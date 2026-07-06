@@ -17,6 +17,7 @@ import {
   MOCK_VERSIONS_1042,
   MOCK_ASSEMBLED,
 } from './mock'
+import { withAuth } from './control_token'
 import type {
   Persona,
   ToolDef,
@@ -126,7 +127,7 @@ export async function setActivePersona(name: string): Promise<void> {
   try {
     r = await fetch(`${BASE}/api/v1/model`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: withAuth({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ model: name }),
     })
   } catch (e) {
@@ -156,7 +157,7 @@ export async function createPersona(
 ): Promise<CreatePersonaResult> {
   const r = await fetch(`${BASE}/api/v1/personas`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: withAuth({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(body),
   })
   if (!r.ok) {
@@ -178,7 +179,7 @@ export async function patchPersona(
 ): Promise<PatchPersonaResult> {
   const r = await fetch(`${BASE}/api/v1/persona/${encodeURIComponent(name)}`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
+    headers: withAuth({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(body),
   })
   if (!r.ok) throw new Error(`patch persona → ${r.status}`)
@@ -283,6 +284,7 @@ export function getVersions(id: number): Promise<VersionsResponse> {
 export async function selectVersion(id: number, k: number): Promise<VersionsResponse> {
   const r = await fetch(`${BASE}/api/v1/interaction/${id}/select_version/${k}`, {
     method: 'POST',
+    headers: withAuth(),
   })
   if (!r.ok) throw new Error(`select_version → ${r.status}`)
   return (await r.json()) as VersionsResponse
@@ -292,7 +294,7 @@ export async function selectVersion(id: number, k: number): Promise<VersionsResp
 export async function patchInteraction(id: number, content: string): Promise<void> {
   const r = await fetch(`${BASE}/api/v1/interaction/${id}`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
+    headers: withAuth({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ content }),
   })
   if (!r.ok) throw new Error(`patch interaction → ${r.status}`)
@@ -301,7 +303,7 @@ export async function patchInteraction(id: number, content: string): Promise<voi
 export async function deleteInteraction(
   id: number,
 ): Promise<{ result: string; already_suppressed: boolean }> {
-  const r = await fetch(`${BASE}/api/v1/interaction/${id}`, { method: 'DELETE' })
+  const r = await fetch(`${BASE}/api/v1/interaction/${id}`, { method: 'DELETE', headers: withAuth() })
   if (!r.ok) throw new Error(`delete interaction → ${r.status}`)
   return (await r.json()) as { result: string; already_suppressed: boolean }
 }
@@ -313,7 +315,7 @@ export async function devCommand(
 ): Promise<DevCommandResponse> {
   const r = await fetch(`${BASE}/api/v1/persona/${encodeURIComponent(persona)}/dev_command`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: withAuth({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ command }),
   })
   // 400 returns { response: "Not a dev command" } — still JSON.
