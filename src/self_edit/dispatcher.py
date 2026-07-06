@@ -278,8 +278,11 @@ class Dispatcher:
             raise DispatcherError("Claude Code 'claude' binary not found on PATH.")
         argv = self._build_argv(prompt, system_prompt, resume_session)
         # Force the dispatched agent onto the Claude subscription (strip the
-        # inherited ANTHROPIC_API_KEY so `-p` mode doesn't silently bill the API).
-        env = build_claude_cli_env()
+        # inherited ANTHROPIC_API_KEY so `-p` mode doesn't silently bill the API)
+        # and scrub derpr's machine secrets (DP-277). fixr keeps GH_TOKEN — it is
+        # the one route that must push its branch to open a PR (the git
+        # credential helper in clone_manager reads it from this child env).
+        env = build_claude_cli_env(keep_gh_token=True)
         # Append-mode so a resume continues the same audit trail.
         log_fh = open(raw_log, "a", encoding="utf-8")
         try:
