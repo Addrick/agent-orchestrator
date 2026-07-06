@@ -114,6 +114,8 @@ Personas with `history_messages: 0` always render an empty transcript — the po
 
 All commands are entered as the message body when addressing a persona. Commands are case-insensitive.
 
+**Operator gating (DP-277):** commands that reconfigure a persona or the system — `set`, `add`, `delete`, `remember`, `trust`, `untrust`, `update_models` — are **control-plane** and only honored from an authenticated operator origin: an allowlisted Discord server/channel/user (`OPERATOR_ALLOWLIST`, matched against gateway-asserted ids) or the portal's operator-authenticated control surface. From any other origin (unlisted Discord channels, email, ticket bodies, anonymous portal chat) they are refused with `Refused: '<command>' is an operator command…` — this is the structural defense against injected instructions trying to reconfigure an agent. Read and lifecycle commands (`what`, `detail`, `help`, `dump_last`, `dump_history`, `hello`, `goodbye`) stay open to everyone.
+
 ### Conversation Control
 
 | Command | Description |
@@ -159,6 +161,7 @@ All commands are entered as the message body when addressing a persona. Commands
 | `display_name <on\|off>` | on/off | Whether persona name prefixes chat responses |
 | `execution_mode <mode>` | autonomous, confirm | Tool execution approval behavior |
 | `tools <spec>` | all, none, tool_name, or `all -excluded` | Enable/disable tools. Supports exclusion syntax: `set tools all -web_search` |
+| `explicit_overrides <spec>` | Override names, JSON list, or `none` | **Privileged (DP-277):** the only way to suppress a tool-composition security rule. Audit-logged; not settable via `set tool_policy` or the persona API. See [Tool Security](#tool-security). |
 | `memory_mode <mode>` | See Memory Modes below | History retrieval scope |
 | `service_bindings <list\|none>` | Comma-separated service names | e.g., `set service_bindings zammad,agents` |
 | `max_context_tokens <integer>` | Integer >= 100 | Total context budget — prompt + reserved response (matches kobold-lite's `max_context_length` slider). Effective prompt prune budget = this minus `tokens`. Oldest non-system messages drop until prompt fits; system messages and the latest user message are always preserved. Default 131072. |
@@ -318,6 +321,13 @@ To prevent sophisticated injection attacks, the system refuses to load any perso
 
 A `network` tool may opt out of the exfiltration rules (the last two above) with `capabilities.exfil_capable: false` when its egress carries no model-controlled payload — e.g. `set_active_model`, whose only argument is a name from a fixed config map, so nothing can ride out over its SSH. Such tools can freely combine with `untrusted:read`/`pii:read` tools. This affects only *exfiltration* accounting; any destructive effect is still gated by the write-audit (parked for confirmation). The default is `true`, so every other tool is unchanged.
 
+### Explicit Overrides (privileged, DP-277)
+A composition rule can be deliberately suppressed for a persona with an **explicit override** (`network_read_local_write`, `untrusted_read_network_write`, `pii_read_network_any`). Because overrides are the kill switch for the whole composition framework, they are a **privileged field with a single mutation path**:
+- `set explicit_overrides <name ...|json list|none>` is the only command that changes them; every change is audit-logged (operator, prior, and new value) and immediately re-runs the security validation.
+- `set tool_policy <json>` and the persona PATCH/create API **ignore** `explicit_overrides` inside a policy dict — a caller-supplied policy can never disable the composition rules.
+- `what explicit_overrides` shows the active overrides. In the portal's Tools tab, override checkboxes save through the dedicated command automatically.
+- Overrides survive `set tools` / `set tool_policy` edits (they are persona-level, not part of the policy dict) and persist as a top-level `explicit_overrides` key in the persona save file; legacy files that stored them inside `tool_policy` are migrated on load.
+
 ### Irreversibility Flags
 Some tools are marked as **IRREVERSIBLE** (e.g., `delete_user`). Others may be dynamically flagged based on their arguments—for example, `add_note_to_ticket` is flagged as irreversible if the note is visible to a customer (`internal: false`). These flags are surfaced in the approval dialogue to highlight high-stakes actions.
 
@@ -328,6 +338,15 @@ Machine secrets — provider API keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `G
 - **Shape-based fallback.** Beyond known values, the scrubber also redacts strings that *look* like secrets (e.g. `sk-…` API keys, `Token token=…` headers, bearer tokens), so an unregistered credential that leaks into a tool result is still caught.
 
 This is defense-in-depth: today's curated tool surface means no tool returns secrets, but the guarantee holds automatically the moment a more powerful tool (e.g. shell execution) or a bring-your-own-credentials mode is added.
+
+### Portal Control Plane (DP-277)
+The web portal (`:5003`) is the capability control surface — its persona/tools/policy panes reconfigure agents — so its mutating routes are authenticated:
+- **Operator token.** Every non-GET route except the generation/abort/token-count data plane requires the operator token (`DERPR_CONTROL_TOKEN`), presented as `Authorization: Bearer <token>` (or `X-Derpr-Token`). This covers persona create/edit (`POST /personas`, `PATCH /persona/{name}`), `dev_command`, **the `/confirm` HITL-approval endpoint**, active-persona switch (`PUT /model`), history reset, and interaction edits/deletes. Reads stay open. **If `DERPR_CONTROL_TOKEN` is unset the control plane is locked** (every mutating route answers 401) — set it to enable portal-side configuration. The token compares in constant time and is never surfaced to the model, a persona, or any tool result. In the portal UI, paste it once via the **operator** control in the top bar (stored in the browser, sent automatically thereafter).
+- **Deny-by-default routing.** New mutating routes are gated the moment they are added — the allowlist enumerates the *data plane* (generation, abort, token count), not the protected surface, so nothing is accidentally left open.
+- **Chat elevation.** Commands typed into the portal chat box are refused for anonymous callers (chat is data-plane), but a valid operator token on the request elevates the origin so the operator's own typed dev commands keep working.
+- **Network posture.** The adapter binds `KOBOLD_ADAPTER_HOST` (default `0.0.0.0`). In the containerized deploy the app is reached via Docker port publishing behind a Caddy TLS front, so the app's bind address is not the network boundary — the operator token gate is what protects the surface (including the plaintext host port that sits behind Caddy). Auto-generated API docs (`/docs`, `/openapi.json`) are disabled, and CORS no longer advertises `allow_credentials` with a wildcard origin (auth is a bearer token, not an ambient browser credential).
+
+Discord control commands use the separate `OPERATOR_ALLOWLIST` (see [Commands](#commands)); the two operator surfaces feed the same authorization gate, differing only in how each transport authenticates the origin.
 
 ## Memory Modes
 

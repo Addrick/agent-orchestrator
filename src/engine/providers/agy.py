@@ -27,6 +27,7 @@ from aiolimiter import AsyncLimiter
 
 from config import global_config
 from src.llm_errors import LLMCommunicationError
+from src.utils.claude_cli_env import build_agy_cli_env
 from src.text_tool_protocol import (
     TOOL_CALL_OPEN,
     TOOL_CALL_CLOSE,
@@ -141,11 +142,16 @@ async def run_agy_cli(engine: "TextEngine", prompt: str, timeout: float = AGY_CA
     if global_config.AGY_SANDBOX:
         args = ["--sandbox", *args]
 
+    # DP-277: strip derpr's machine secrets from the child env — agy runs
+    # untrusted content and authenticates with its own harness OAuth, not our
+    # provider/portal creds.
+    env = build_agy_cli_env()
+
     workspace_dir = engine._resolve_agy_workspace(persona_name)
     if workspace_dir is None:
         temp_dir = tempfile.mkdtemp()
         try:
-            return await engine._exec_agy(binary, args, temp_dir, timeout)
+            return await engine._exec_agy(binary, args, temp_dir, timeout, env=env)
         finally:
             # The CLI leaves symlinks under .antigravitycli pointing at files
             # outside the temp dir; remove the targets so rmtree doesn't strand
@@ -157,7 +163,7 @@ async def run_agy_cli(engine: "TextEngine", prompt: str, timeout: float = AGY_CA
     os.makedirs(workspace_dir, exist_ok=True)
     lock = engine._agy_workspace_locks.setdefault(workspace_dir, asyncio.Lock())
     async with lock:
-        return await engine._exec_agy(binary, args, workspace_dir, timeout)
+        return await engine._exec_agy(binary, args, workspace_dir, timeout, env=env)
 
 
 async def generate_agy(

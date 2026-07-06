@@ -26,6 +26,7 @@ from src.generation_events import (
     ToolCallStartEvent as ToolCallStartEvent,
 )
 from src.message_handler import BotLogic
+from src.origin import ANONYMOUS, Origin
 from src.persona import Persona
 from src.request_builder import AssembledRequest, RequestBuilder, RequestContext
 from src.tools.tool_loop import ToolLoop, _ApiPayloadEvent, _LoopFinishedEvent
@@ -221,6 +222,7 @@ class ChatSystem:
             is_retry: bool = False,
             client_messages: Optional[List[Dict[str, Any]]] = None,
             resume: Optional[_ResumeState] = None,
+            origin: Optional[Origin] = None,
     ) -> AsyncGenerator[GenerationEvent, None]:
         """Shared streaming kernel — single source of truth for the request
         pipeline. Yields TokenEvent for each text delta, terminal DoneEvent
@@ -235,9 +237,11 @@ class ChatSystem:
         """
         # 1. Dev command preprocessing — short-circuits before any LLM call.
         #    Skipped on resume: there is no fresh user message to interpret.
+        #    DP-277: callers that don't assert an authenticated origin get
+        #    ANONYMOUS (operator=False) — control-plane commands are refused.
         if resume is None:
             command_result: Optional[Dict[str, Any]] = await self.bot_logic.preprocess_message(
-                persona_name, user_identifier, message
+                origin or ANONYMOUS, persona_name, user_identifier, message
             )
             if command_result:
                 if command_result.get("mutated", False):
@@ -525,6 +529,7 @@ class ChatSystem:
             timestamp: Optional[datetime] = None,
             local_inference_config: Optional[Dict[str, Any]] = None,
             client_messages: Optional[List[Dict[str, Any]]] = None,
+            origin: Optional[Origin] = None,
     ) -> AsyncIterator[GenerationEvent]:
         """Portal-facing streaming entry. Yields TokenEvent /
         ToolCallStartEvent / ToolCallResultEvent / DoneEvent / ErrorEvent.
@@ -550,6 +555,7 @@ class ChatSystem:
             timestamp=timestamp,
             local_inference_config=local_inference_config,
             client_messages=client_messages,
+            origin=origin,
         )) as agen:
             async for ev in agen:
                 yield ev
@@ -566,7 +572,8 @@ class ChatSystem:
             user_display_name: Optional[str] = None,
             platform_message_id: Optional[str] = None,
             timestamp: Optional[datetime] = None,
-            local_inference_config: Optional[Dict[str, Any]] = None
+            local_inference_config: Optional[Dict[str, Any]] = None,
+            origin: Optional[Origin] = None,
     ) -> Tuple[str, ResponseType, Optional[int], Optional[int]]:
         """Non-streaming surface — drains the orchestration kernel into the
         existing 4-tuple. Phase C made this a collect-stream wrapper so
@@ -591,6 +598,7 @@ class ChatSystem:
             platform_message_id=platform_message_id,
             timestamp=timestamp,
             local_inference_config=local_inference_config,
+            origin=origin,
         )) as agen:
             async for ev in agen:
                 if isinstance(ev, TokenEvent):

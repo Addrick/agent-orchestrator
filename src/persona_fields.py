@@ -28,6 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type
 
 from config.global_config import DEFAULT_PERSONA
 from src.persona import ExecutionMode, MemoryMode, Persona
+from src.tool_policy import KNOWN_OVERRIDES
 
 # `what <field>` renderer: persona -> response text.
 WhatFn = Callable[[Persona], str]
@@ -273,6 +274,39 @@ def _set_tool_policy(args: List[str], persona: Persona) -> Tuple[Optional[str], 
         return "Error: Invalid JSON string for tool policy.", False
     except ValueError as e:
         return f"Error: {e}", False
+
+
+def _set_explicit_overrides(args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
+    """`set explicit_overrides <name ...|json list|none>` — the DP-277 gated
+    path for the composition-invariant overrides. Deliberately NOT patchable
+    and NOT accepted inside `set tool_policy` JSON; this dedicated command is
+    the only mutation surface (control-plane, operator-gated at dispatch)."""
+    if len(args) < 2:
+        return (
+            "Usage: set explicit_overrides <name ...|json list|none>. "
+            f"Valid overrides: {', '.join(sorted(KNOWN_OVERRIDES))}.",
+            False,
+        )
+    raw = ' '.join(args[1:]).strip()
+    overrides: List[str]
+    if raw.lower() in ('none', 'clear', 'null', '[]'):
+        overrides = []
+    elif raw.startswith('['):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return "Error: Invalid JSON list for explicit_overrides.", False
+        if not isinstance(parsed, list) or not all(isinstance(x, str) for x in parsed):
+            return "Error: explicit_overrides must be a JSON list of strings.", False
+        overrides = parsed
+    else:
+        overrides = raw.split()
+    try:
+        persona.set_explicit_overrides(overrides)
+    except ValueError as e:
+        return f"Error: {e}", False
+    shown = ', '.join(persona.get_explicit_overrides()) or 'none'
+    return f"Explicit overrides for {persona.get_name()} set to: {shown}.", True
 
 
 def _mission_setter(
@@ -612,6 +646,17 @@ PERSONA_FIELDS: List[PersonaField] = [
             f"Tool policy for '{p.get_name()}': {json.dumps(p.get_tool_policy().to_dict(), indent=2)}"
         ),
         set_cli=_set_tool_policy,
+    ),
+    PersonaField(
+        # DP-277: privileged field — no patch_key on purpose; the PATCH route
+        # must never carry the composition-invariant kill switch.
+        name='explicit_overrides',
+        describe=lambda p: (
+            f"Explicit overrides for '{p.get_name()}': "
+            + (', '.join(p.get_explicit_overrides()) if p.get_explicit_overrides() else 'none')
+            + f". Valid: {', '.join(sorted(KNOWN_OVERRIDES))}."
+        ),
+        set_cli=_set_explicit_overrides,
     ),
 ]
 

@@ -13,6 +13,7 @@
      data: {"error":{...}}                → error frame
      data: [DONE]                         → finalize
    ============================================================ */
+import { withAuth } from './control_token'
 import type {
   DerprIdFrame,
   ToolStartFrame,
@@ -154,7 +155,10 @@ function openSse(
   const ctrl = new AbortController()
   fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+    // DP-277: attach the operator token when set. Required for /confirm (a
+    // control-plane route, 401 without it) and it elevates chat so typed dev
+    // commands work; anonymous chat still streams (data plane).
+    headers: withAuth({ 'Content-Type': 'application/json', Accept: 'text/event-stream' }),
     body: JSON.stringify(body),
     signal: ctrl.signal,
   })

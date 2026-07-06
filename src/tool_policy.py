@@ -7,6 +7,14 @@ from typing import List, Dict, Any, Optional, Set
 
 logger = logging.getLogger(__name__)
 
+# The composition-invariant names that validate_composition honors as
+# overrides. Anything else in explicit_overrides is inert (fails closed).
+KNOWN_OVERRIDES = frozenset({
+    "network_read_local_write",
+    "untrusted_read_network_write",
+    "pii_read_network_any",
+})
+
 
 class ToolPolicy:
     """
@@ -38,22 +46,32 @@ class ToolPolicy:
         return cls(default="deny", allow=enabled_tools)
 
     def to_dict(self) -> Dict[str, Any]:
+        # explicit_overrides deliberately absent: it is a privileged persona
+        # field with its own gated setter/persistence (DP-277), never part of
+        # the generic policy dict that PATCH bodies / `set tool_policy` carry.
         return {
             "default": self.default,
             "allow": self.allow,
             "ask": self.ask,
             "capabilities_required": self.capabilities_required,
-            "explicit_overrides": self.explicit_overrides
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ToolPolicy":
+        # explicit_overrides in a generic policy dict is IGNORED (DP-277): it
+        # is the kill switch for the composition invariants, so it must not be
+        # settable via any caller-supplied dict (PATCH body, `set tool_policy`).
+        # Legacy saved values are migrated by the persona store, not here.
+        if "explicit_overrides" in data:
+            logger.warning(
+                "Ignoring 'explicit_overrides' in generic tool_policy dict — "
+                "overrides require the dedicated operator setter (DP-277)."
+            )
         return cls(
             default=data.get("default", "deny"),
             allow=data.get("allow"),
             ask=data.get("ask"),
             capabilities_required=data.get("capabilities_required"),
-            explicit_overrides=data.get("explicit_overrides")
         )
 
     @staticmethod

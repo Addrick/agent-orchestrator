@@ -29,6 +29,18 @@ from src.persona import Persona, ExecutionMode
 from tests.helpers import make_chat_system
 from tests.provider_stream_mocks import google_stream
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _bypass_control_plane_auth(monkeypatch):
+    """DP-277: these tests exercise route behavior, not the operator gate.
+    Treat every control-plane request as authenticated so they test what they
+    mean to; the gate itself is covered in tests/security/test_portal_auth.py.
+    """
+    monkeypatch.setattr(KoboldAdapter, "_valid_control_token", lambda self, tok: True)
+    monkeypatch.setattr(global_config, "DERPR_CONTROL_TOKEN", "test-token", raising=False)
+
 
 def _make_adapter_with_seeded_db(persona_name: str = "test_persona",
                                  context_length: int = 10,
@@ -715,6 +727,22 @@ def test_patch_persona_updates_memory_mode():
     mm.close()
 
 
+def test_patch_persona_writes_audit_event():
+    """DP-277 Phase 7: a portal persona edit lands in Audit_Log."""
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    with TestClient(adapter.app) as client:
+        r = client.patch("/api/v1/persona/test_persona", json={"prompt": "new prompt"})
+    assert r.status_code == 200
+    conn = mm._get_connection()
+    rows = conn.execute(
+        "SELECT event_type, new_state, metadata FROM Audit_Log WHERE event_type = 'persona_patch'"
+    ).fetchall()
+    assert len(rows) == 1
+    assert "prompt" in rows[0]["new_state"]
+    assert "test_persona" in rows[0]["metadata"]
+    mm.close()
+
+
 def test_patch_persona_unknown_mode_does_not_crash():
     # set_memory_mode logs a warning and keeps old mode on invalid input
     adapter, mm, persona = _make_adapter_with_seeded_db()
@@ -1325,8 +1353,12 @@ def test_persona_extended_includes_enabled_tools():
 
 def test_persona_extended_includes_tool_policy():
     adapter, mm, persona = _make_adapter_with_seeded_db()
-    # Use real ToolPolicy to_dict result
-    expected_policy = persona.get_tool_policy().to_dict()
+    # DP-277: the served policy block re-attaches explicit_overrides for the
+    # portal display, even though ToolPolicy.to_dict no longer carries it.
+    expected_policy = {
+        **persona.get_tool_policy().to_dict(),
+        "explicit_overrides": persona.get_explicit_overrides(),
+    }
 
     with TestClient(adapter.app) as client:
         r = client.get("/api/v1/persona/test_persona")
@@ -1946,7 +1978,13 @@ def test_dev_command_happy_path_mutates_and_saves():
 
     assert r.status_code == 200
     assert r.json() == {"response": "Tools set to none.", "mutated": True}
-    chat_system.bot_logic.preprocess_message.assert_awaited_once_with("test_persona", "portal", "set tools none")
+    # DP-277: the route forwards an operator Origin (the route itself is the
+    # operator-gated control surface).
+    from src.origin import Origin
+    chat_system.bot_logic.preprocess_message.assert_awaited_once_with(
+        Origin(transport="portal", channel_id="portal", operator=True),
+        "test_persona", "portal", "set tools none",
+    )
     mock_save.assert_called_once_with(chat_system.personas, chat_system.system_persona_names)
     mm.close()
 

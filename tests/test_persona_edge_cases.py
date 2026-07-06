@@ -403,20 +403,29 @@ def test_persona_provider_extras_serialized(base_args, tmp_path):
 
 
 def test_persona_tool_policy_round_trip(base_args, tmp_path):
+    """DP-277: explicit_overrides in a generic policy dict is IGNORED — the
+    gated `explicit_overrides` ctor kwarg / setter is the only way in. The
+    override still round-trips (as a top-level persona key, not in the
+    policy dict)."""
     policy_dict = {
         "default": "deny",
         "allow": ["search", "summarize"],
         "ask": ["delete_message"],
         "capabilities_required": [],
-        "explicit_overrides": ["network_read_local_write"],
+        "explicit_overrides": ["network_read_local_write"],  # must be dropped
     }
     p = Persona(**base_args, tool_policy=policy_dict)
+    assert p.get_explicit_overrides() == []
+
+    p.set_explicit_overrides(["network_read_local_write"])
     loaded = _roundtrip({"tester": p}, tmp_path)
     pol = loaded["tester"].get_tool_policy()
     assert pol.default == "deny"
     assert sorted(pol.allow) == ["search", "summarize"]
     assert pol.ask == ["delete_message"]
-    assert pol.explicit_overrides == ["network_read_local_write"]
+    assert loaded["tester"].get_explicit_overrides() == ["network_read_local_write"]
+    # the serialized policy dict itself must NOT carry the override
+    assert "explicit_overrides" not in pol.to_dict()
 
 
 def test_persona_modes_round_trip(base_args, tmp_path):

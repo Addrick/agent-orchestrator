@@ -10,6 +10,7 @@ from config.global_config import (
     TOOL_SELECTOR_PERSONA_NAME
 )
 
+from src.origin import Origin
 from src.persona import Persona
 from src.persona_fields import cli_set_handlers, cli_what_handlers
 from src.tools.composition import revalidate_persona_security
@@ -92,8 +93,18 @@ class BotLogic:
             'tools': self._set_tools,
         }
 
+    # DP-277: commands that reconfigure a persona or the system — the control
+    # plane. Deny-by-default at DISPATCH for non-operator origins: the whole
+    # command is gated (all of `set`, not an enumerated field list — that list
+    # rots). Reads + conversation lifecycle (help/what/detail/dump_*/hello/
+    # goodbye) stay open to every origin.
+    CONTROL_PLANE_COMMANDS = frozenset({
+        'add', 'delete', 'set', 'trust', 'untrust', 'remember', 'update_models',
+    })
+
     async def preprocess_message(
             self,
+            origin: Origin,
             persona_name: str,
             user_identifier: str,
             message: str
@@ -114,6 +125,23 @@ class BotLogic:
         handler: Any = self.command_handlers.get(command)
         if not handler:
             return None
+
+        # DP-277 control-plane gate. Refuse (don't fall through to the LLM —
+        # an injected command must not become prompt content either).
+        if command in self.CONTROL_PLANE_COMMANDS and not origin.operator:
+            logger.warning(
+                f"Refused control-plane command '{command}' from non-operator "
+                f"origin (transport={origin.transport}, server={origin.server_id}, "
+                f"channel={origin.channel_id}, author={origin.author_id}, "
+                f"user={user_identifier})."
+            )
+            return {
+                "response": (
+                    f"Refused: '{command}' is an operator command and this "
+                    "channel is not an authenticated operator origin."
+                ),
+                "mutated": False,
+            }
 
         current_persona: Optional[Persona] = self.personas().get(persona_name)
         if not current_persona:
@@ -464,6 +492,13 @@ class BotLogic:
         set_handler: Any = self.set_handlers.get(sub_command)
 
         if set_handler:
+            # DP-277: the explicit_overrides mutation is audited (operator +
+            # prior/new state) — capture the prior value at the edit boundary.
+            prior_overrides: Optional[List[str]] = (
+                persona.get_explicit_overrides()
+                if sub_command == 'explicit_overrides' else None
+            )
+
             result: Tuple[Optional[str], bool]
             if sub_command in ('model', 'tools'):
                 result = await set_handler(args, persona)
@@ -475,7 +510,16 @@ class BotLogic:
             # here — the operator-edit boundary — rather than in the pure setters,
             # which internal callers use for many non-policy reasons.
             message, mutated = result
-            if mutated and sub_command in ('tools', 'tool_policy'):
+            if mutated and sub_command == 'explicit_overrides':
+                self.memory_manager.log_audit_event(
+                    event_type="explicit_overrides_change",
+                    operator_id=user_identifier,
+                    prior_state=json.dumps(prior_overrides),
+                    new_state=json.dumps(persona.get_explicit_overrides()),
+                    reason="dev command: set explicit_overrides",
+                    metadata={"persona": persona.get_name()},
+                )
+            if mutated and sub_command in ('tools', 'tool_policy', 'explicit_overrides'):
                 if revalidate_persona_security(persona):
                     reasons = "; ".join(persona.get_security_block_reasons())
                     message = (

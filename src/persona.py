@@ -6,7 +6,7 @@ from typing import Optional, Dict, Any, List, Type, TypeVar, Union
 
 from config import global_config
 from src.generation_params import GenerationParams
-from src.tool_policy import ToolPolicy
+from src.tool_policy import KNOWN_OVERRIDES, ToolPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +56,7 @@ class Persona:
             params: Any = None,
             chat_template: Optional[str] = None,
             tool_policy: Optional[Union[Dict[str, Any], ToolPolicy]] = None,
+            explicit_overrides: Optional[List[str]] = None,
             meta_visible: bool = False,
             ingest_bank: Optional[str] = None,
             security_block_reasons: Optional[List[str]] = None,
@@ -139,6 +140,8 @@ class Persona:
             self._tool_policy = ToolPolicy.from_dict(tool_policy)
         else:
             self._tool_policy = ToolPolicy.from_legacy_list(self._enabled_tools)
+
+        self._grandfather_overrides(explicit_overrides)
 
         # Security quarantine: a non-empty list means the persona's tool
         # composition failed validation at load. It is kept (so it stays
@@ -234,6 +237,13 @@ class Persona:
     def get_tool_policy(self) -> ToolPolicy:
         """Returns the persona's structured tool security policy."""
         return self._tool_policy
+
+    def get_explicit_overrides(self) -> List[str]:
+        """The composition-invariant overrides active on this persona (DP-277).
+
+        Privileged field: settable only via ``set_explicit_overrides`` (the
+        gated operator path), never via the generic tool_policy dict."""
+        return list(self._tool_policy.explicit_overrides)
 
     def get_service_bindings(self) -> List[str]:
         """Returns the list of service integrations this persona is bound to."""
@@ -354,6 +364,22 @@ class Persona:
         return True
 
     # --- Private Helpers ---
+
+    def _grandfather_overrides(self, explicit_overrides: Optional[List[str]]) -> None:
+        """DP-277: explicit_overrides is a privileged persona-level field, not
+        part of the generic tool_policy dict (ToolPolicy.from_dict ignores
+        it). The constructor honors this kwarg so the store can grandfather
+        saved values; unknown names are kept but inert (validate_composition
+        only honors KNOWN_OVERRIDES, so a typo fails closed)."""
+        if not explicit_overrides:
+            return
+        unknown = set(explicit_overrides) - KNOWN_OVERRIDES
+        if unknown:
+            logger.warning(
+                f"Persona '{self._name}' loaded with unknown explicit_overrides "
+                f"{sorted(unknown)} (inert — composition rules still enforced)."
+            )
+        self._tool_policy.explicit_overrides = list(explicit_overrides)
 
     _DISPOSITION_KEYS = ("skepticism", "literalism", "empathy")
 
@@ -577,19 +603,56 @@ class Persona:
         edit can clear or trip the quarantine; see BotLogic._handle_set (DP-128).
         """
         self._enabled_tools = new_tools
+        # DP-277: overrides are persona-level and survive a policy rebuild —
+        # otherwise a benign `set tools` edit would silently drop a
+        # grandfathered override and quarantine the persona.
+        prior_overrides = self._tool_policy.explicit_overrides
         self._tool_policy = ToolPolicy.from_legacy_list(new_tools)
+        self._tool_policy.explicit_overrides = prior_overrides
         logger.info(f"Persona '{self._name}' enabled tools set to: {self._enabled_tools}")
 
     def set_tool_policy(self, policy: Union[Dict[str, Any], ToolPolicy]) -> None:
         """Sets the structured tool security policy. Pure mutator — see
-        ``set_enabled_tools`` re: live re-validation (DP-128)."""
+        ``set_enabled_tools`` re: live re-validation (DP-128).
+
+        DP-277: ``explicit_overrides`` in a dict is ignored (from_dict drops
+        it) and the persona's current overrides are preserved across the
+        replacement; only ``set_explicit_overrides`` changes them.
+        """
+        prior_overrides = self._tool_policy.explicit_overrides
         if isinstance(policy, dict):
             self._tool_policy = ToolPolicy.from_dict(policy)
         else:
             self._tool_policy = policy
+        # Both branches: a policy replacement never changes the overrides —
+        # a ToolPolicy instance built with its own overrides would otherwise
+        # bypass the gated setter (or silently drop a grandfathered grant).
+        self._tool_policy.explicit_overrides = prior_overrides
         # Update legacy list for compatibility
         self._enabled_tools = self._tool_policy.allow
         logger.info(f"Persona '{self._name}' tool policy updated.")
+
+    def set_explicit_overrides(self, overrides: List[str]) -> List[str]:
+        """Gated setter for the composition-invariant overrides (DP-277).
+
+        The ONLY mutation path for ``explicit_overrides``. Callers are the
+        operator-only edit surfaces (`set explicit_overrides` dev command);
+        raises ValueError on unknown override names so a typo cannot silently
+        widen or narrow the grant. Returns the prior value for audit logging.
+        """
+        unknown = set(overrides) - KNOWN_OVERRIDES
+        if unknown:
+            raise ValueError(
+                f"Unknown override(s) {sorted(unknown)}. "
+                f"Valid: {sorted(KNOWN_OVERRIDES)}"
+            )
+        prior = self._tool_policy.explicit_overrides
+        self._tool_policy.explicit_overrides = list(overrides)
+        logger.info(
+            f"Persona '{self._name}' explicit_overrides set to "
+            f"{self._tool_policy.explicit_overrides} (was {prior})."
+        )
+        return prior
 
     def set_max_context_tokens(self, new_value: Any) -> int:
         """Sets the total context budget. Falls back to default on invalid input."""

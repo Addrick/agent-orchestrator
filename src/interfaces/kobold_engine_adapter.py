@@ -11,6 +11,7 @@ import logging
 import mimetypes
 import os
 import re
+import secrets
 import time
 
 from src.request_builder import AssembledRequest
@@ -44,6 +45,7 @@ from src.chat_system import (
     ToolCallStartEvent,
 )
 from src.interfaces.kobold_export import build_kobold_savefile, build_transcript, _parse_tool_context
+from src.origin import Origin
 from src.stream_engine import CHAT_TEMPLATES
 from src.interfaces.portal_render import render_portal_html
 from src.personas.store import save_personas_to_file
@@ -109,18 +111,54 @@ class KoboldEngineAdapter:
     See decisions/2026-04-28-portal-engine-as-source-of-truth.md.
     """
 
-    def __init__(self, chat_system: ChatSystem, host: str = "0.0.0.0", port: int = 5003):
+    # DP-277: POST paths that ARE the data plane (generation, aborts, token
+    # counting). Everything else non-GET requires the operator token — new
+    # mutating routes are born gated, not born open.
+    DATA_PLANE_POST_PATHS = frozenset({
+        "/api/v1/generate",
+        "/api/extra/generate/stream",
+        "/api/extra/generate/check",
+        "/api/v1/abort",
+        "/api/extra/abort",
+        "/api/extra/tokencount",
+        "/chat/completions",
+        "/v1/chat/completions",
+        # Voice STT uploads (DP-238) mount on this same app via
+        # register_voice_web — dictation is data plane like generation; the
+        # SPA mic and the /voice PTT page send no operator token.
+        "/voice/transcribe",
+        "/voice/utterance",
+    })
+
+    def __init__(self, chat_system: ChatSystem, host: Optional[str] = None, port: int = 5003):
         self.chat_system = chat_system
-        self.host = host
+        # DP-277: host from KOBOLD_ADAPTER_HOST (default 0.0.0.0 — the app runs
+        # containerized and is reached via Docker port publishing + the Caddy
+        # TLS front, so the bind is not the network boundary; the operator
+        # token gate protects the surface). See global_config for the rationale.
+        self.host = host or global_config.KOBOLD_ADAPTER_HOST
         self.port = port
         self.active_persona: Optional[str] = None
-        self.app: FastAPI = FastAPI(title="DERPR Kobold Engine Adapter")
+        # DP-277: auto-docs advertise the whole route surface — off.
+        self.app: FastAPI = FastAPI(
+            title="DERPR Kobold Engine Adapter",
+            docs_url=None, redoc_url=None, openapi_url=None,
+        )
+
+        # Auth first, CORS second: Starlette's add_middleware puts the LAST
+        # addition outermost, and CORS must wrap the auth gate so its 401
+        # responses still carry CORS headers (a cross-origin caller must be
+        # able to read the 401, not get an opaque network error).
+        self._setup_control_plane_auth()
 
         # CORS open — required for lite.koboldai.net to reach a local instance.
+        # allow_credentials must stay False with wildcard origins (DP-277):
+        # auth is a bearer token the calling page must know, never an
+        # ambient browser credential a foreign origin could ride.
         self.app.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],
-            allow_credentials=True,
+            allow_credentials=False,
             allow_methods=["*"],
             allow_headers=["*"],
         )
@@ -128,6 +166,53 @@ class KoboldEngineAdapter:
         self._http = httpx.AsyncClient(timeout=None)
         self._setup_routes()
         self._setup_portal()
+
+    @staticmethod
+    def _extract_control_token(request: Request) -> str:
+        """The operator token supplied on a request, or ''."""
+        auth = request.headers.get("authorization", "")
+        if auth.lower().startswith("bearer "):
+            return auth[7:].strip()
+        return request.headers.get("x-derpr-token", "").strip()
+
+    @staticmethod
+    def _valid_control_token(supplied: str) -> bool:
+        """Constant-time check against DERPR_CONTROL_TOKEN. An empty
+        configured token validates nothing (control plane locked)."""
+        configured = global_config.DERPR_CONTROL_TOKEN
+        if not configured:
+            return False
+        # Compare bytes: compare_digest raises TypeError on non-ASCII str
+        # (headers are latin-1), which would turn a bad token into a 500.
+        return secrets.compare_digest(
+            supplied.encode("utf-8"), configured.encode("utf-8")
+        )
+
+    def _setup_control_plane_auth(self) -> None:
+        """DP-277 deny-by-default operator gate for the portal control plane.
+
+        Every non-GET route outside DATA_PLANE_POST_PATHS requires the static
+        operator token (DERPR_CONTROL_TOKEN). No token configured = the whole
+        control plane answers 401 (fail closed) until the operator sets one.
+        Reads stay open; OPTIONS passes for CORS preflight.
+        """
+        @self.app.middleware("http")
+        async def control_plane_auth(request: Request, call_next: Any) -> Any:
+            if request.method in ("GET", "HEAD", "OPTIONS"):
+                return await call_next(request)
+            if request.url.path in self.DATA_PLANE_POST_PATHS:
+                return await call_next(request)
+            if not global_config.DERPR_CONTROL_TOKEN:
+                return JSONResponse(
+                    status_code=401,
+                    content={"error": "control plane locked: DERPR_CONTROL_TOKEN is not configured"},
+                )
+            if not self._valid_control_token(self._extract_control_token(request)):
+                return JSONResponse(
+                    status_code=401,
+                    content={"error": "operator token required (Authorization: Bearer <DERPR_CONTROL_TOKEN>)"},
+                )
+            return await call_next(request)
 
     # ------------------------------------------------------------------
     # Engine dependency surface (DP-205).
@@ -176,6 +261,28 @@ class KoboldEngineAdapter:
     def _bot_logic(self) -> "BotLogic":
         """Command layer — dev_command preprocessing (`set`/`what` commands)."""
         return self.chat_system.bot_logic
+
+    async def _audit_control_change(self, event_type: str, target: str,
+                                    new_state: Dict[str, Any],
+                                    metadata: Optional[Dict[str, Any]] = None) -> None:
+        """DP-277 Phase 7: append a control-plane mutation to Audit_Log.
+
+        Best-effort — an audit failure must never fail the operator's edit
+        (log_audit_event already swallows sqlite errors). operator_id is the
+        generic "operator" under the single-shared-token model. Runs the
+        sqlite write via to_thread like every other MemoryManager call here —
+        never blocking the event loop under the streaming routes."""
+        try:
+            await asyncio.to_thread(
+                self._memory_manager.log_audit_event,
+                event_type=event_type,
+                operator_id="operator",
+                new_state=json.dumps(new_state, default=str),
+                reason=f"portal control plane: {event_type}",
+                metadata={"persona": target, **(metadata or {})},
+            )
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(f"audit log for {event_type} on {target} failed: {e}")
 
     @property
     def _confirmations(self) -> "ConfirmationManager":
@@ -233,7 +340,14 @@ class KoboldEngineAdapter:
             "instruct_tags": p.get_provider_extra("kobold", "instruct_tags"),
             "kobold_extras": get_kobold_extras_for_get(p),
             "enabled_tools": p.get_enabled_tools(),
-            "tool_policy": p.get_tool_policy().to_dict(),
+            # READ-path display compat: overrides are re-attached to the served
+            # policy block for the portal UI, but ToolPolicy.to_dict/from_dict
+            # no longer carry them — writes go through the dedicated
+            # `set explicit_overrides` command only (DP-277).
+            "tool_policy": {
+                **p.get_tool_policy().to_dict(),
+                "explicit_overrides": p.get_explicit_overrides(),
+            },
             "service_bindings": p.get_service_bindings(),
             "security_blocked": p.is_security_blocked(),
             "security_block_reasons": p.get_security_block_reasons(),
@@ -491,8 +605,13 @@ class KoboldEngineAdapter:
                                     content={"error": f"Persona '{name}' not found"})
             body = await request.json()
             command = body.get("command", "")
+            # DP-277: dev_command is a control surface — the route itself is
+            # operator-gated (require_operator), so the Origin it forwards
+            # asserts operator. Anonymous chat traffic never reaches here; it
+            # flows through /v1/chat/completions with a non-operator Origin.
+            origin = Origin(transport="portal", channel_id="portal", operator=True)
             try:
-                result = await self._bot_logic.preprocess_message(name, "portal", command)
+                result = await self._bot_logic.preprocess_message(origin, name, "portal", command)
             except Exception as e:
                 return {"response": str(e), "mutated": False}
             if result is None:
@@ -802,6 +921,11 @@ class KoboldEngineAdapter:
                 self._personas.pop(raw_name, None)
                 logger.error(f"Persona create save failed for {raw_name}: {e}")
                 return JSONResponse(status_code=500, content={"error": "save_failed", "detail": str(e)})
+            await self._audit_control_change(
+                "persona_create", raw_name,
+                {"fields": sorted(set(data.keys()) - {"name"} - set(unknown))},
+                {"rejected": rejected, "unknown": unknown},
+            )
             logger.info(f"Created persona '{raw_name}' (rejected={rejected}, unknown={unknown})")
             return JSONResponse(
                 status_code=201,
@@ -843,6 +967,11 @@ class KoboldEngineAdapter:
                     content={"error": "save_failed", "detail": str(e), "rejected_fields": rejected, "unknown_fields": unknown},
                 )
             logger.info(f"Updated and saved persona settings for {name} (rejected={rejected}, unknown={unknown})")
+            await self._audit_control_change(
+                "persona_patch", name,
+                {"fields": sorted(set(data.keys()) - set(unknown))},
+                {"rejected": rejected, "unknown": unknown},
+            )
             return {"result": "success", "rejected_fields": rejected, "unknown_fields": unknown}
 
         @self.app.get("/api/v1/info/version")
@@ -1042,6 +1171,19 @@ class KoboldEngineAdapter:
             # engine's DB stays the source of truth for history.
             msgs_in = data.get("messages") or []
 
+            # DP-277 chat-box command routing: chat is data-plane (anonymous
+            # callers get operator=False and control commands are refused),
+            # but a valid operator token on the request elevates the origin so
+            # typed dev commands keep working from the operator's own portal.
+            # channel/user_identifier above are caller-supplied and carry no
+            # authority; only the token does.
+            origin = Origin(
+                transport="portal",
+                channel_id=channel,
+                author_id=user_identifier,
+                operator=self._valid_control_token(self._extract_control_token(request)),
+            )
+
             # Extract sampling parameters from the OAI request for the local engine
             local_inference_config = {
                 "temperature": data.get("temperature"),
@@ -1074,6 +1216,7 @@ class KoboldEngineAdapter:
                     is_retry=is_retry,
                     local_inference_config=local_inference_config,
                     client_messages=msgs_in or None,
+                    origin=origin,
                 ):
                     if isinstance(ev, DoneEvent):
                         full_text = ev.text
@@ -1160,6 +1303,7 @@ class KoboldEngineAdapter:
                         is_retry=is_retry,
                         local_inference_config=local_inference_config,
                         client_messages=None,  # Explicitly None to force DB history rebuild
+                        origin=origin,
                     ):
 
                         now = time.monotonic()
