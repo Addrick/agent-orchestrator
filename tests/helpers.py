@@ -19,7 +19,14 @@ from src.chat_system import ChatSystem
 from src.engine import TextEngine
 from src.memory.memory_manager import MemoryManager
 from src.message_handler import BotLogic
+from src.origin import Origin
 from src.persona import Persona
+
+# DP-277: canonical origins for exercising the control-plane gate. Tests that
+# drive dev commands as "the operator" pass OPERATOR_ORIGIN; gate tests pass
+# ANON_ORIGIN (or build a specific Origin) to assert refusal.
+OPERATOR_ORIGIN = Origin(transport="test", operator=True)
+ANON_ORIGIN = Origin(transport="test", operator=False)
 
 
 def make_chat_system(

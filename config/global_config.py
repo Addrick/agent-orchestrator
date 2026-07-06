@@ -97,6 +97,16 @@ INGEST_CACHE_DIR: Path = Path(os.environ.get("INGEST_CACHE_DIR", str(DATA_DIR / 
 # Channel ID for specific debug outputs (loaded from env for security)
 DISCORD_DEBUG_CHANNEL = int(os.environ.get("DISCORD_DEBUG_CHANNEL", "0"))
 
+# DP-277: Discord origins allowed to run control-plane dev commands
+# (add/delete/set/trust/untrust/remember/update_models). Entry format:
+# "server_id[/channel_id[/author_id]]", comma-separated; missing or "*"
+# components match anything at that level. Parsed by
+# src.origin.parse_operator_allowlist; matched against gateway-asserted ids
+# (unforgeable), never message content. Default is the operator's home server
+# (whole-server grant approved 2026-07-04, see memory task DP-277); set
+# OPERATOR_ALLOWLIST="" to lock Discord control commands off entirely.
+OPERATOR_ALLOWLIST = os.environ.get("OPERATOR_ALLOWLIST", "347812763093172225")
+
 # Channels where the bot passively logs content but does not reply unless prompted
 AMBIENT_LOGGING_CHANNELS = ["general", "random", "development"]
 

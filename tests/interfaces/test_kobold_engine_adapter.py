@@ -1950,7 +1950,13 @@ def test_dev_command_happy_path_mutates_and_saves():
 
     assert r.status_code == 200
     assert r.json() == {"response": "Tools set to none.", "mutated": True}
-    chat_system.bot_logic.preprocess_message.assert_awaited_once_with("test_persona", "portal", "set tools none")
+    # DP-277: the route forwards an operator Origin (the route itself is the
+    # operator-gated control surface).
+    from src.origin import Origin
+    chat_system.bot_logic.preprocess_message.assert_awaited_once_with(
+        Origin(transport="portal", channel_id="portal", operator=True),
+        "test_persona", "portal", "set tools none",
+    )
     mock_save.assert_called_once_with(chat_system.personas, chat_system.system_persona_names)
     mm.close()
 

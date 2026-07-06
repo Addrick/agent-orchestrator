@@ -114,6 +114,8 @@ Personas with `history_messages: 0` always render an empty transcript — the po
 
 All commands are entered as the message body when addressing a persona. Commands are case-insensitive.
 
+**Operator gating (DP-277):** commands that reconfigure a persona or the system — `set`, `add`, `delete`, `remember`, `trust`, `untrust`, `update_models` — are **control-plane** and only honored from an authenticated operator origin: an allowlisted Discord server/channel/user (`OPERATOR_ALLOWLIST`, matched against gateway-asserted ids) or the portal's operator-authenticated control surface. From any other origin (unlisted Discord channels, email, ticket bodies, anonymous portal chat) they are refused with `Refused: '<command>' is an operator command…` — this is the structural defense against injected instructions trying to reconfigure an agent. Read and lifecycle commands (`what`, `detail`, `help`, `dump_last`, `dump_history`, `hello`, `goodbye`) stay open to everyone.
+
 ### Conversation Control
 
 | Command | Description |

@@ -44,6 +44,7 @@ from src.chat_system import (
     ToolCallStartEvent,
 )
 from src.interfaces.kobold_export import build_kobold_savefile, build_transcript, _parse_tool_context
+from src.origin import Origin
 from src.stream_engine import CHAT_TEMPLATES
 from src.interfaces.portal_render import render_portal_html
 from src.personas.store import save_personas_to_file
@@ -498,8 +499,13 @@ class KoboldEngineAdapter:
                                     content={"error": f"Persona '{name}' not found"})
             body = await request.json()
             command = body.get("command", "")
+            # DP-277: dev_command is a control surface — the route itself is
+            # operator-gated (require_operator), so the Origin it forwards
+            # asserts operator. Anonymous chat traffic never reaches here; it
+            # flows through /v1/chat/completions with a non-operator Origin.
+            origin = Origin(transport="portal", channel_id="portal", operator=True)
             try:
-                result = await self._bot_logic.preprocess_message(name, "portal", command)
+                result = await self._bot_logic.preprocess_message(origin, name, "portal", command)
             except Exception as e:
                 return {"response": str(e), "mutated": False}
             if result is None:

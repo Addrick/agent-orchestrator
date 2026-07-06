@@ -23,7 +23,7 @@ from unittest.mock import MagicMock
 from src.persona import Persona
 from src.personas.store import load_personas_from_file, save_personas_to_file
 from src.tool_policy import KNOWN_OVERRIDES, ToolPolicy
-from tests.helpers import make_bot_logic
+from tests.helpers import make_bot_logic, OPERATOR_ORIGIN
 
 
 ALL_OVERRIDES = sorted(KNOWN_OVERRIDES)
@@ -239,10 +239,11 @@ def bot_logic(chat_state):
 @pytest.mark.asyncio
 async def test_set_tool_policy_command_cannot_grant_overrides(bot_logic, chat_state):
     """The exact escalation payload from the DP-277 task file: full grant with
-    all rules overridden. The overrides are dropped and the wildcard
-    composition trips quarantine instead of validating clean."""
+    all rules overridden. Even from an OPERATOR origin (the strongest caller),
+    the overrides are dropped and the wildcard composition trips quarantine
+    instead of validating clean."""
     payload = json.dumps({"default": "allow", "allow": ["*"], "explicit_overrides": ALL_OVERRIDES})
-    result = await bot_logic.preprocess_message("derpr", "attacker", f"set tool_policy {payload}")
+    result = await bot_logic.preprocess_message(OPERATOR_ORIGIN, "derpr", "operator", f"set tool_policy {payload}")
     persona = chat_state.personas["derpr"]
     assert persona.get_explicit_overrides() == []
     assert persona.is_security_blocked()
@@ -251,7 +252,7 @@ async def test_set_tool_policy_command_cannot_grant_overrides(bot_logic, chat_st
 
 @pytest.mark.asyncio
 async def test_set_explicit_overrides_command_applies_and_audits(bot_logic, chat_state):
-    result = await bot_logic.preprocess_message(
+    result = await bot_logic.preprocess_message(OPERATOR_ORIGIN, 
         "derpr", "operator", "set explicit_overrides network_read_local_write"
     )
     persona = chat_state.personas["derpr"]
@@ -269,7 +270,7 @@ async def test_set_explicit_overrides_command_applies_and_audits(bot_logic, chat
 
 @pytest.mark.asyncio
 async def test_set_explicit_overrides_rejects_unknown_name(bot_logic, chat_state):
-    result = await bot_logic.preprocess_message(
+    result = await bot_logic.preprocess_message(OPERATOR_ORIGIN, 
         "derpr", "operator", "set explicit_overrides disable_everything"
     )
     persona = chat_state.personas["derpr"]
@@ -284,12 +285,12 @@ async def test_set_explicit_overrides_clears_quarantine(bot_logic, chat_state):
     """Adding the matching override re-validates and lifts the quarantine."""
     persona = chat_state.personas["derpr"]
     persona.set_tool_policy({"default": "deny", "allow": _RULE1_TOOLS})
-    await bot_logic.preprocess_message("derpr", "op", "set tool_policy " + json.dumps(
+    await bot_logic.preprocess_message(OPERATOR_ORIGIN, "derpr", "op", "set tool_policy " + json.dumps(
         {"default": "deny", "allow": _RULE1_TOOLS}
     ))
     assert persona.is_security_blocked()
 
-    result = await bot_logic.preprocess_message(
+    result = await bot_logic.preprocess_message(OPERATOR_ORIGIN, 
         "derpr", "op", "set explicit_overrides network_read_local_write"
     )
     assert result is not None and result["mutated"] is True
@@ -299,11 +300,11 @@ async def test_set_explicit_overrides_clears_quarantine(bot_logic, chat_state):
 @pytest.mark.asyncio
 async def test_set_explicit_overrides_json_list_and_clear(bot_logic, chat_state):
     persona = chat_state.personas["derpr"]
-    await bot_logic.preprocess_message(
+    await bot_logic.preprocess_message(OPERATOR_ORIGIN, 
         "derpr", "op", 'set explicit_overrides ["network_read_local_write","pii_read_network_any"]'
     )
     assert sorted(persona.get_explicit_overrides()) == [
         "network_read_local_write", "pii_read_network_any",
     ]
-    await bot_logic.preprocess_message("derpr", "op", "set explicit_overrides none")
+    await bot_logic.preprocess_message(OPERATOR_ORIGIN, "derpr", "op", "set explicit_overrides none")
     assert persona.get_explicit_overrides() == []

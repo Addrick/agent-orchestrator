@@ -9,7 +9,8 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Optional, List
 
 from config.global_config import DISCORD_CHAR_LIMIT, DISCORD_STATUS_LIMIT, DISCORD_DEBUG_CHANNEL, \
-    AMBIENT_LOGGING_CHANNELS, GLOBAL_HISTORY_MESSAGES, PENDING_CONFIRMATION_TIMEOUT
+    AMBIENT_LOGGING_CHANNELS, GLOBAL_HISTORY_MESSAGES, PENDING_CONFIRMATION_TIMEOUT, OPERATOR_ALLOWLIST
+from src.origin import Origin, is_discord_operator, parse_operator_allowlist
 from src.utils.message_utils import split_string_by_limit
 from src.personas.store import save_personas_to_file
 from src.chat_system import ChatSystem, ResponseType
@@ -18,6 +19,10 @@ from src.self_edit.dispatcher import DispatcherError
 
 # THE FIX: Initialize the logger at the top of the module.
 logger = logging.getLogger(__name__)
+
+# DP-277: parsed once at import; entries match gateway-asserted
+# (server, channel, author) ids — see src/origin.py.
+_OPERATOR_ALLOWLIST = parse_operator_allowlist(OPERATOR_ALLOWLIST)
 
 
 class ReconnectLogHandler(logging.Handler):
@@ -348,10 +353,26 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
             try:
                 server_id: Optional[str] = str(message.guild.id) if message.guild else None
 
+                # DP-277: origin facts come from the gateway (unforgeable ids),
+                # never message content; operator is an allowlist match. Any
+                # user in a mutual guild can *address* a persona — only
+                # allowlisted origins may run control-plane commands.
+                channel_id = str(message.channel.id)
+                author_id = str(message.author.id)
+                origin = Origin(
+                    transport="discord",
+                    server_id=server_id,
+                    channel_id=channel_id,
+                    author_id=author_id,
+                    operator=is_discord_operator(
+                        _OPERATOR_ALLOWLIST, server_id, channel_id, author_id
+                    ),
+                )
+
                 # Handle dev commands before entering typing context since they
                 # resolve instantly and typing can only be cleared by a channel message.
                 command_result = await chat_system.bot_logic.preprocess_message(
-                    active_persona_name, str(message.author.id), cleaned_message
+                    origin, active_persona_name, author_id, cleaned_message
                 )
                 if command_result:
                     mutated = command_result.get("mutated", False)
@@ -383,7 +404,8 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                         history_limit=GLOBAL_HISTORY_MESSAGES,
                         user_display_name=message.author.display_name,
                         platform_message_id=str(message.id),
-                        timestamp=message.created_at
+                        timestamp=message.created_at,
+                        origin=origin,
                     )
 
                 if response_text and response_text.startswith("FILE_RESPONSE::"):

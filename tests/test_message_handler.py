@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, AsyncMock, patch
 
 from src.message_handler import BotLogic
 from src.persona import Persona
-from tests.helpers import make_bot_logic
+from tests.helpers import make_bot_logic, OPERATOR_ORIGIN
 
 
 @pytest.fixture
@@ -40,7 +40,7 @@ def bot_logic(mock_chat_system_with_state):
 async def test_handle_add_persona_success(bot_logic, mock_chat_system_with_state):
     """Tests that the 'add' command successfully adds a new persona to the chat system's state."""
     assert "new_persona" not in mock_chat_system_with_state.personas
-    result = await bot_logic.preprocess_message("derpr", "user1", "add new_persona")
+    result = await bot_logic.preprocess_message(OPERATOR_ORIGIN, "derpr", "user1", "add new_persona")
     assert "new_persona" in mock_chat_system_with_state.personas
     assert isinstance(mock_chat_system_with_state.personas["new_persona"], Persona)
     assert result is not None and result["mutated"] is True and "Added 'new_persona'" in result["response"]
@@ -50,7 +50,7 @@ async def test_handle_add_persona_success(bot_logic, mock_chat_system_with_state
 async def test_handle_add_persona_already_exists(bot_logic, mock_chat_system_with_state):
     """Tests that adding a persona that already exists returns an error and does not mutate state."""
     initial_persona_count = len(mock_chat_system_with_state.personas)
-    result = await bot_logic.preprocess_message("derpr", "user1", "add derpr")
+    result = await bot_logic.preprocess_message(OPERATOR_ORIGIN, "derpr", "user1", "add derpr")
     assert len(mock_chat_system_with_state.personas) == initial_persona_count
     assert result is not None and result["mutated"] is False and "already exists" in result["response"]
 
@@ -59,7 +59,7 @@ async def test_handle_add_persona_already_exists(bot_logic, mock_chat_system_wit
 async def test_handle_delete_persona_success(bot_logic, mock_chat_system_with_state):
     """Tests that the 'delete' command successfully removes a persona from the chat system's state."""
     assert "testbot" in mock_chat_system_with_state.personas
-    result = await bot_logic.preprocess_message("derpr", "user1", "delete testbot")
+    result = await bot_logic.preprocess_message(OPERATOR_ORIGIN, "derpr", "user1", "delete testbot")
     assert "testbot" not in mock_chat_system_with_state.personas
     assert result is not None and result["mutated"] is True and "Deleted persona 'testbot'" in result["response"]
 
@@ -68,7 +68,7 @@ async def test_handle_delete_persona_success(bot_logic, mock_chat_system_with_st
 async def test_handle_delete_persona_not_found(bot_logic, mock_chat_system_with_state):
     """Tests that deleting a non-existent persona returns an error and does not mutate state."""
     initial_persona_count = len(mock_chat_system_with_state.personas)
-    result = await bot_logic.preprocess_message("derpr", "user1", "delete fake_persona")
+    result = await bot_logic.preprocess_message(OPERATOR_ORIGIN, "derpr", "user1", "delete fake_persona")
     assert len(mock_chat_system_with_state.personas) == initial_persona_count
     assert result is not None and result["mutated"] is False and "not found" in result["response"]
 
@@ -76,14 +76,14 @@ async def test_handle_delete_persona_not_found(bot_logic, mock_chat_system_with_
 @pytest.mark.asyncio
 async def test_command_fall_through_on_bad_syntax(bot_logic):
     """Tests that a command with incorrect syntax returns None, allowing it to be processed by the LLM."""
-    assert await bot_logic.preprocess_message("derpr", "user1", "add") is None
-    assert await bot_logic.preprocess_message("derpr", "user1", "set") is None
+    assert await bot_logic.preprocess_message(OPERATOR_ORIGIN, "derpr", "user1", "add") is None
+    assert await bot_logic.preprocess_message(OPERATOR_ORIGIN, "derpr", "user1", "set") is None
 
 
 @pytest.mark.asyncio
 async def test_non_mutating_command(bot_logic):
     """Tests that a read-only command like 'detail' does not set the mutated flag."""
-    result = await bot_logic.preprocess_message("derpr", "user1", "detail")
+    result = await bot_logic.preprocess_message(OPERATOR_ORIGIN, "derpr", "user1", "detail")
     assert result is not None and result["mutated"] is False
 
 
@@ -559,7 +559,7 @@ async def test_set_tool_policy_clears_quarantine_live(bot_logic, mock_chat_syste
     persona._security_block_reasons = ["Insecure composition: network:read + local:write"]
     assert persona.is_security_blocked() is True
 
-    result = await bot_logic.preprocess_message(
+    result = await bot_logic.preprocess_message(OPERATOR_ORIGIN, 
         "derpr", "user1", 'set tool_policy {"default":"deny","allow":[]}')
 
     assert persona.is_security_blocked() is False
@@ -572,7 +572,7 @@ async def test_set_tool_policy_allow_all_trips_quarantine_live(bot_logic, mock_c
     persona = mock_chat_system_with_state.personas["derpr"]
     assert persona.is_security_blocked() is False
 
-    result = await bot_logic.preprocess_message(
+    result = await bot_logic.preprocess_message(OPERATOR_ORIGIN, 
         "derpr", "user1", 'set tool_policy {"default":"allow","allow":["*"]}')
 
     assert persona.is_security_blocked() is True
@@ -628,7 +628,7 @@ def bot_logic_with_tools(mock_chat_system_with_state):
 @pytest.mark.asyncio
 async def test_set_tools_all(bot_logic_with_tools, mock_chat_system_with_state):
     persona = mock_chat_system_with_state.personas["derpr"]
-    result = await bot_logic_with_tools.preprocess_message("derpr", "user1", "set tools all")
+    result = await bot_logic_with_tools.preprocess_message(OPERATOR_ORIGIN, "derpr", "user1", "set tools all")
     assert result["mutated"] is True
     assert persona.get_enabled_tools() == ['*']
 
@@ -637,7 +637,7 @@ async def test_set_tools_all(bot_logic_with_tools, mock_chat_system_with_state):
 async def test_set_tools_none(bot_logic_with_tools, mock_chat_system_with_state):
     persona = mock_chat_system_with_state.personas["derpr"]
     persona.set_enabled_tools(['*'])
-    result = await bot_logic_with_tools.preprocess_message("derpr", "user1", "set tools none")
+    result = await bot_logic_with_tools.preprocess_message(OPERATOR_ORIGIN, "derpr", "user1", "set tools none")
     assert result["mutated"] is True
     assert persona.get_enabled_tools() == []
 
@@ -645,7 +645,7 @@ async def test_set_tools_none(bot_logic_with_tools, mock_chat_system_with_state)
 @pytest.mark.asyncio
 async def test_set_tools_exact_names(bot_logic_with_tools, mock_chat_system_with_state):
     persona = mock_chat_system_with_state.personas["derpr"]
-    result = await bot_logic_with_tools.preprocess_message("derpr", "user1", "set tools web_search create_ticket")
+    result = await bot_logic_with_tools.preprocess_message(OPERATOR_ORIGIN, "derpr", "user1", "set tools web_search create_ticket")
     assert result["mutated"] is True
     assert persona.get_enabled_tools() == ["create_ticket", "web_search"]
 
@@ -654,7 +654,7 @@ async def test_set_tools_exact_names(bot_logic_with_tools, mock_chat_system_with
 async def test_set_tools_invalid_name_returns_error(bot_logic_with_tools, mock_chat_system_with_state):
     """An unresolvable tool name should return an error."""
     with patch.object(bot_logic_with_tools, '_query_llm_for_tool_selection', new_callable=AsyncMock, return_value=None):
-        result = await bot_logic_with_tools.preprocess_message("derpr", "user1", "set tools nonexistent_tool")
+        result = await bot_logic_with_tools.preprocess_message(OPERATOR_ORIGIN, "derpr", "user1", "set tools nonexistent_tool")
     assert result["mutated"] is False
     assert "Could not match" in result["response"]
 
@@ -662,7 +662,7 @@ async def test_set_tools_invalid_name_returns_error(bot_logic_with_tools, mock_c
 @pytest.mark.asyncio
 async def test_set_tools_all_with_excludes(bot_logic_with_tools, mock_chat_system_with_state):
     persona = mock_chat_system_with_state.personas["derpr"]
-    result = await bot_logic_with_tools.preprocess_message(
+    result = await bot_logic_with_tools.preprocess_message(OPERATOR_ORIGIN, 
         "derpr", "user1", "set tools all -google_grounding_search -web_search"
     )
     assert result["mutated"] is True
@@ -675,7 +675,7 @@ async def test_set_tools_all_with_excludes(bot_logic_with_tools, mock_chat_syste
 
 @pytest.mark.asyncio
 async def test_set_tools_exclude_without_all_returns_error(bot_logic_with_tools, mock_chat_system_with_state):
-    result = await bot_logic_with_tools.preprocess_message("derpr", "user1", "set tools -web_search")
+    result = await bot_logic_with_tools.preprocess_message(OPERATOR_ORIGIN, "derpr", "user1", "set tools -web_search")
     assert result["mutated"] is False
     assert "requires 'all'" in result["response"]
 
@@ -686,7 +686,7 @@ async def test_set_tools_fuzzy_match(bot_logic_with_tools, mock_chat_system_with
     persona = mock_chat_system_with_state.personas["derpr"]
     with patch.object(bot_logic_with_tools, '_query_llm_for_tool_selection',
                       new_callable=AsyncMock, return_value="google_grounding_search"):
-        result = await bot_logic_with_tools.preprocess_message("derpr", "user1", "set tools grounding")
+        result = await bot_logic_with_tools.preprocess_message(OPERATOR_ORIGIN, "derpr", "user1", "set tools grounding")
     assert result["mutated"] is True
     assert persona.get_enabled_tools() == ["google_grounding_search"]
     assert "fuzzy" in result["response"]
@@ -698,7 +698,7 @@ async def test_set_tools_all_with_fuzzy_exclude(bot_logic_with_tools, mock_chat_
     persona = mock_chat_system_with_state.personas["derpr"]
     with patch.object(bot_logic_with_tools, '_query_llm_for_tool_selection',
                       new_callable=AsyncMock, return_value="google_grounding_search"):
-        result = await bot_logic_with_tools.preprocess_message("derpr", "user1", "set tools all -grounding")
+        result = await bot_logic_with_tools.preprocess_message(OPERATOR_ORIGIN, "derpr", "user1", "set tools all -grounding")
     assert result["mutated"] is True
     enabled = persona.get_enabled_tools()
     assert "google_grounding_search" not in enabled
@@ -709,7 +709,7 @@ async def test_set_tools_all_with_fuzzy_exclude(bot_logic_with_tools, mock_chat_
 @pytest.mark.asyncio
 async def test_set_tools_bare_name_after_all_returns_error(bot_logic_with_tools, mock_chat_system_with_state):
     """Bare names after 'all' (without '-') should return a usage error."""
-    result = await bot_logic_with_tools.preprocess_message("derpr", "user1", "set tools all web_search")
+    result = await bot_logic_with_tools.preprocess_message(OPERATOR_ORIGIN, "derpr", "user1", "set tools all web_search")
     assert result["mutated"] is False
     assert "'-' prefix" in result["response"]
 
@@ -862,7 +862,7 @@ def test_all_persona_getters_have_what_commands(bot_logic):
 @pytest.mark.asyncio
 async def test_detail_shows_all_properties(bot_logic):
     """The detail command output must mention every user-facing persona property."""
-    result = await bot_logic.preprocess_message("derpr", "user1", "detail")
+    result = await bot_logic.preprocess_message(OPERATOR_ORIGIN, "derpr", "user1", "detail")
     detail_text = result["response"].lower()
 
     # Each entry is a substring that must appear in the detail output.
@@ -1046,7 +1046,7 @@ async def test_selection_engine_exception_returns_none(bot_logic_with_selector, 
 
 @pytest.mark.asyncio
 async def test_set_dotted_path_int_value(bot_logic, mock_chat_system_with_state):
-    result = await bot_logic.preprocess_message("derpr", "user1", "set kobold.mirostat 2")
+    result = await bot_logic.preprocess_message(OPERATOR_ORIGIN, "derpr", "user1", "set kobold.mirostat 2")
     assert result is not None and result["mutated"] is True
     persona = mock_chat_system_with_state.personas["derpr"]
     assert persona.get_provider_extra("kobold", "mirostat") == 2
@@ -1054,7 +1054,7 @@ async def test_set_dotted_path_int_value(bot_logic, mock_chat_system_with_state)
 
 @pytest.mark.asyncio
 async def test_set_dotted_path_float_value(bot_logic, mock_chat_system_with_state):
-    result = await bot_logic.preprocess_message("derpr", "user1", "set kobold.rep_pen 1.15")
+    result = await bot_logic.preprocess_message(OPERATOR_ORIGIN, "derpr", "user1", "set kobold.rep_pen 1.15")
     assert result is not None and result["mutated"] is True
     persona = mock_chat_system_with_state.personas["derpr"]
     assert persona.get_provider_extra("kobold", "rep_pen") == 1.15
@@ -1062,7 +1062,7 @@ async def test_set_dotted_path_float_value(bot_logic, mock_chat_system_with_stat
 
 @pytest.mark.asyncio
 async def test_set_dotted_path_bool_value(bot_logic, mock_chat_system_with_state):
-    result = await bot_logic.preprocess_message("derpr", "user1", "set kobold.use_default_badwordsids true")
+    result = await bot_logic.preprocess_message(OPERATOR_ORIGIN, "derpr", "user1", "set kobold.use_default_badwordsids true")
     assert result is not None and result["mutated"] is True
     persona = mock_chat_system_with_state.personas["derpr"]
     assert persona.get_provider_extra("kobold", "use_default_badwordsids") is True
@@ -1070,7 +1070,7 @@ async def test_set_dotted_path_bool_value(bot_logic, mock_chat_system_with_state
 
 @pytest.mark.asyncio
 async def test_set_dotted_path_string_fallback(bot_logic, mock_chat_system_with_state):
-    result = await bot_logic.preprocess_message("derpr", "user1", "set kobold.sampler_order topk")
+    result = await bot_logic.preprocess_message(OPERATOR_ORIGIN, "derpr", "user1", "set kobold.sampler_order topk")
     assert result is not None and result["mutated"] is True
     persona = mock_chat_system_with_state.personas["derpr"]
     assert persona.get_provider_extra("kobold", "sampler_order") == "topk"
@@ -1080,34 +1080,34 @@ async def test_set_dotted_path_string_fallback(bot_logic, mock_chat_system_with_
 async def test_set_dotted_path_clear_with_none(bot_logic, mock_chat_system_with_state):
     persona = mock_chat_system_with_state.personas["derpr"]
     persona.set_provider_extra("kobold", "mirostat", 2)
-    result = await bot_logic.preprocess_message("derpr", "user1", "set kobold.mirostat none")
+    result = await bot_logic.preprocess_message(OPERATOR_ORIGIN, "derpr", "user1", "set kobold.mirostat none")
     assert result is not None and result["mutated"] is True
     assert persona.get_provider_extra("kobold", "mirostat") is None
 
 
 @pytest.mark.asyncio
 async def test_set_dotted_path_clear_unset_not_mutated(bot_logic, mock_chat_system_with_state):
-    result = await bot_logic.preprocess_message("derpr", "user1", "set kobold.never_set none")
+    result = await bot_logic.preprocess_message(OPERATOR_ORIGIN, "derpr", "user1", "set kobold.never_set none")
     assert result is not None and result["mutated"] is False
 
 
 @pytest.mark.asyncio
 async def test_set_dotted_path_missing_value(bot_logic):
-    result = await bot_logic.preprocess_message("derpr", "user1", "set kobold.mirostat")
+    result = await bot_logic.preprocess_message(OPERATOR_ORIGIN, "derpr", "user1", "set kobold.mirostat")
     assert result is not None and result["mutated"] is False
     assert "Usage" in result["response"]
 
 
 @pytest.mark.asyncio
 async def test_set_dotted_path_empty_key(bot_logic):
-    result = await bot_logic.preprocess_message("derpr", "user1", "set kobold. 2")
+    result = await bot_logic.preprocess_message(OPERATOR_ORIGIN, "derpr", "user1", "set kobold. 2")
     assert result is not None and result["mutated"] is False
     assert "Invalid dotted path" in result["response"]
 
 
 @pytest.mark.asyncio
 async def test_unknown_set_subcommand_without_dot_returns_error(bot_logic):
-    result = await bot_logic.preprocess_message("derpr", "user1", "set bogus 1")
+    result = await bot_logic.preprocess_message(OPERATOR_ORIGIN, "derpr", "user1", "set bogus 1")
     assert result is not None and result["mutated"] is False
     assert "Unknown 'set' command" in result["response"]
 
@@ -1116,7 +1116,7 @@ async def test_unknown_set_subcommand_without_dot_returns_error(bot_logic):
 async def test_what_dotted_path_returns_value(bot_logic, mock_chat_system_with_state):
     persona = mock_chat_system_with_state.personas["derpr"]
     persona.set_provider_extra("kobold", "mirostat", 2)
-    result = await bot_logic.preprocess_message("derpr", "user1", "what kobold.mirostat")
+    result = await bot_logic.preprocess_message(OPERATOR_ORIGIN, "derpr", "user1", "what kobold.mirostat")
     assert result is not None and result["mutated"] is False
     assert "kobold.mirostat" in result["response"]
     assert "2" in result["response"]
@@ -1124,7 +1124,7 @@ async def test_what_dotted_path_returns_value(bot_logic, mock_chat_system_with_s
 
 @pytest.mark.asyncio
 async def test_what_dotted_path_unset(bot_logic):
-    result = await bot_logic.preprocess_message("derpr", "user1", "what kobold.mirostat")
+    result = await bot_logic.preprocess_message(OPERATOR_ORIGIN, "derpr", "user1", "what kobold.mirostat")
     assert result is not None and result["mutated"] is False
     assert "not set" in result["response"]
 
@@ -1137,14 +1137,14 @@ async def test_what_dotted_path_unset(bot_logic):
 
 @pytest.mark.asyncio
 async def test_set_prompt_preserves_value_case(bot_logic, mock_chat_system_with_state):
-    res = await bot_logic.preprocess_message("derpr", "u", "set prompt You are a HELPFUL Bot.")
+    res = await bot_logic.preprocess_message(OPERATOR_ORIGIN, "derpr", "u", "set prompt You are a HELPFUL Bot.")
     assert res["mutated"] is True
     assert mock_chat_system_with_state.personas["derpr"].get_prompt() == "You are a HELPFUL Bot."
 
 
 @pytest.mark.asyncio
 async def test_uppercase_command_and_subcommand_still_dispatch(bot_logic, mock_chat_system_with_state):
-    res = await bot_logic.preprocess_message("derpr", "u", "SET PROMPT Mixed Case Value")
+    res = await bot_logic.preprocess_message(OPERATOR_ORIGIN, "derpr", "u", "SET PROMPT Mixed Case Value")
     assert res is not None and res["mutated"] is True
     assert mock_chat_system_with_state.personas["derpr"].get_prompt() == "Mixed Case Value"
 
@@ -1153,7 +1153,7 @@ async def test_uppercase_command_and_subcommand_still_dispatch(bot_logic, mock_c
 async def test_set_tool_policy_json_preserves_case(bot_logic, mock_chat_system_with_state):
     # the JSON (incl. a mixed-case tool name) must not be lowercased in transit
     cmd = 'set tool_policy {"default":"deny","allow":["Foo_Bar"],"ask":[]}'
-    res = await bot_logic.preprocess_message("derpr", "u", cmd)
+    res = await bot_logic.preprocess_message(OPERATOR_ORIGIN, "derpr", "u", cmd)
     assert res["mutated"] is True
     assert mock_chat_system_with_state.personas["derpr"].get_tool_policy().allow == ["Foo_Bar"]
 
@@ -1161,13 +1161,13 @@ async def test_set_tool_policy_json_preserves_case(bot_logic, mock_chat_system_w
 @pytest.mark.asyncio
 async def test_set_memory_mode_remains_case_insensitive(bot_logic, mock_chat_system_with_state):
     for val in ("global", "GLOBAL", "GloBal"):
-        res = await bot_logic.preprocess_message("derpr", "u", f"set memory_mode {val}")
+        res = await bot_logic.preprocess_message(OPERATOR_ORIGIN, "derpr", "u", f"set memory_mode {val}")
         assert res["mutated"] is True
         assert mock_chat_system_with_state.personas["derpr"].get_memory_mode().name == "GLOBAL"
 
 
 @pytest.mark.asyncio
 async def test_add_persona_lowercases_name_but_keeps_prompt_case(bot_logic, mock_chat_system_with_state):
-    await bot_logic.preprocess_message("derpr", "u", "add NewBot You are New")
+    await bot_logic.preprocess_message(OPERATOR_ORIGIN, "derpr", "u", "add NewBot You are New")
     assert "newbot" in mock_chat_system_with_state.personas
     assert mock_chat_system_with_state.personas["newbot"].get_prompt() == "You are New"
