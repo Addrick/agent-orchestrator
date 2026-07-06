@@ -663,7 +663,7 @@ Agents are autonomous background workers that run on a schedule without user int
 
 Managr is a top-level planning agent for the whole ticket board. Where triage and dispatch each react to a single new ticket, managr periodically reviews *everything* — open tickets, their ages and priorities, what the other agents have done, and what happened to its own past suggestions — and produces a manager's plan. It is deliberately neutered: **managr can never write to Zammad or any other external system.** It only observes, reports, and proposes; a human approves every action before anything executes.
 
-**Cycle** (default: daily, like ReminderAgent):
+**Cycle** (`auto_start: true` — one cycle at startup, then daily at `daily_at`, like ReminderAgent):
 
 1. **Observe** — snapshot the board: open tickets with age/state/priority/tags, staleness, recent triage/dispatch/reminder activity, and the outcomes of managr's previous proposals (approved / denied / expired).
 2. **Orient** — fan out read-only analysis briefs to specialized system personas (e.g. a stale-ticket investigator, a per-client summarizer, a cross-ticket pattern detector). Each returns a short structured brief.
