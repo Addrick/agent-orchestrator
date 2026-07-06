@@ -741,6 +741,8 @@ _SETTER_TO_COMMAND = {
     'set_max_context_tokens': 'max_context_tokens',
     'set_chat_template': 'chat_template',
     'set_tool_policy': 'tool_policy',
+    # DP-277: gated field — dedicated command, never part of tool_policy JSON.
+    'set_explicit_overrides': 'explicit_overrides',
     'set_inject_timestamp': 'inject_timestamp',
     # DP-255: per-persona Hindsight retain-tuning knobs.
     'set_retain_mission': 'retain_mission',
@@ -786,6 +788,8 @@ _GETTER_TO_COMMAND = {
     'get_max_context_tokens': 'max_context_tokens',
     'get_chat_template': 'chat_template',
     'get_tool_policy': 'tool_policy',
+    # DP-277: gated field — queryable via its own what command.
+    'get_explicit_overrides': 'explicit_overrides',
     'get_security_block_reasons': 'security',
     'get_inject_timestamp': 'inject_timestamp',
     # DP-255: per-persona Hindsight retain-tuning knobs.

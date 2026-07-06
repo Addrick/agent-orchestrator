@@ -159,6 +159,7 @@ All commands are entered as the message body when addressing a persona. Commands
 | `display_name <on\|off>` | on/off | Whether persona name prefixes chat responses |
 | `execution_mode <mode>` | autonomous, confirm | Tool execution approval behavior |
 | `tools <spec>` | all, none, tool_name, or `all -excluded` | Enable/disable tools. Supports exclusion syntax: `set tools all -web_search` |
+| `explicit_overrides <spec>` | Override names, JSON list, or `none` | **Privileged (DP-277):** the only way to suppress a tool-composition security rule. Audit-logged; not settable via `set tool_policy` or the persona API. See [Tool Security](#tool-security). |
 | `memory_mode <mode>` | See Memory Modes below | History retrieval scope |
 | `service_bindings <list\|none>` | Comma-separated service names | e.g., `set service_bindings zammad,agents` |
 | `max_context_tokens <integer>` | Integer >= 100 | Total context budget — prompt + reserved response (matches kobold-lite's `max_context_length` slider). Effective prompt prune budget = this minus `tokens`. Oldest non-system messages drop until prompt fits; system messages and the latest user message are always preserved. Default 131072. |
@@ -317,6 +318,13 @@ To prevent sophisticated injection attacks, the system refuses to load any perso
 - **`pii:read` + `network:*`**: Prevents sensitive Personal Identifiable Information (PII) from being sent over the network.
 
 A `network` tool may opt out of the exfiltration rules (the last two above) with `capabilities.exfil_capable: false` when its egress carries no model-controlled payload — e.g. `set_active_model`, whose only argument is a name from a fixed config map, so nothing can ride out over its SSH. Such tools can freely combine with `untrusted:read`/`pii:read` tools. This affects only *exfiltration* accounting; any destructive effect is still gated by the write-audit (parked for confirmation). The default is `true`, so every other tool is unchanged.
+
+### Explicit Overrides (privileged, DP-277)
+A composition rule can be deliberately suppressed for a persona with an **explicit override** (`network_read_local_write`, `untrusted_read_network_write`, `pii_read_network_any`). Because overrides are the kill switch for the whole composition framework, they are a **privileged field with a single mutation path**:
+- `set explicit_overrides <name ...|json list|none>` is the only command that changes them; every change is audit-logged (operator, prior, and new value) and immediately re-runs the security validation.
+- `set tool_policy <json>` and the persona PATCH/create API **ignore** `explicit_overrides` inside a policy dict — a caller-supplied policy can never disable the composition rules.
+- `what explicit_overrides` shows the active overrides. In the portal's Tools tab, override checkboxes save through the dedicated command automatically.
+- Overrides survive `set tools` / `set tool_policy` edits (they are persona-level, not part of the policy dict) and persist as a top-level `explicit_overrides` key in the persona save file; legacy files that stored them inside `tool_policy` are migrated on load.
 
 ### Irreversibility Flags
 Some tools are marked as **IRREVERSIBLE** (e.g., `delete_user`). Others may be dynamically flagged based on their arguments—for example, `add_note_to_ticket` is flagged as irreversible if the note is visible to a customer (`internal: false`). These flags are surfaced in the approval dialogue to highlight high-stakes actions.

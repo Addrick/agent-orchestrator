@@ -464,6 +464,13 @@ class BotLogic:
         set_handler: Any = self.set_handlers.get(sub_command)
 
         if set_handler:
+            # DP-277: the explicit_overrides mutation is audited (operator +
+            # prior/new state) — capture the prior value at the edit boundary.
+            prior_overrides: Optional[List[str]] = (
+                persona.get_explicit_overrides()
+                if sub_command == 'explicit_overrides' else None
+            )
+
             result: Tuple[Optional[str], bool]
             if sub_command in ('model', 'tools'):
                 result = await set_handler(args, persona)
@@ -475,7 +482,16 @@ class BotLogic:
             # here — the operator-edit boundary — rather than in the pure setters,
             # which internal callers use for many non-policy reasons.
             message, mutated = result
-            if mutated and sub_command in ('tools', 'tool_policy'):
+            if mutated and sub_command == 'explicit_overrides':
+                self.memory_manager.log_audit_event(
+                    event_type="explicit_overrides_change",
+                    operator_id=user_identifier,
+                    prior_state=json.dumps(prior_overrides),
+                    new_state=json.dumps(persona.get_explicit_overrides()),
+                    reason="dev command: set explicit_overrides",
+                    metadata={"persona": persona.get_name()},
+                )
+            if mutated and sub_command in ('tools', 'tool_policy', 'explicit_overrides'):
                 if revalidate_persona_security(persona):
                     reasons = "; ".join(persona.get_security_block_reasons())
                     message = (

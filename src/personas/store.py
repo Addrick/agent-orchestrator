@@ -133,6 +133,12 @@ def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
             "meta_visible": persona.get_meta_visible(),
             "inject_timestamp": persona.get_inject_timestamp(),
         }
+        # DP-277: explicit_overrides persists as a TOP-LEVEL persona key, not
+        # inside tool_policy (ToolPolicy.to_dict omits it so the generic dict
+        # callers can PATCH never carries the kill switch). Written only when
+        # non-empty so untouched personas keep their on-disk shape.
+        if persona.get_explicit_overrides():
+            persona_json["explicit_overrides"] = persona.get_explicit_overrides()
         # DP-255: Hindsight retain-tuning knobs. Only persist when set so old
         # save files (and personas that never tuned them) stay compact and
         # round-trip to the same on-disk shape.
@@ -148,6 +154,22 @@ def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
             persona_json["disposition"] = persona.get_disposition()
         persona_list.append(persona_json)
     return persona_list
+
+
+def _resolve_explicit_overrides(entry: Dict[str, Any]) -> List[str]:
+    """DP-277: the top-level `explicit_overrides` persona key is canonical.
+
+    Legacy save files carried the overrides INSIDE the tool_policy dict;
+    ToolPolicy.from_dict now ignores that location (it is the caller-supplied
+    kill switch), so this migrates the saved value into the gated field
+    instead of dropping it — a persona relying on a grandfathered override
+    must not quarantine on the next restart. Returns [] when absent."""
+    overrides = entry.get("explicit_overrides")
+    if overrides is None:
+        policy_data = entry.get("tool_policy")
+        if isinstance(policy_data, dict):
+            overrides = policy_data.get("explicit_overrides")
+    return list(overrides) if overrides else []
 
 
 def _resolve_params_kwargs(entry: Dict[str, Any]) -> Dict[str, Any]:
@@ -207,6 +229,8 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
             # --- Composition Validation ---
             policy_data = new_persona.get("tool_policy")
             temp_policy = ToolPolicy.from_dict(policy_data) if policy_data else ToolPolicy.from_legacy_list(new_persona.get("enabled_tools", []))
+            explicit_overrides = _resolve_explicit_overrides(new_persona)
+            temp_policy.explicit_overrides = explicit_overrides
 
             # DP-128: a persona that fails composition validation is no longer
             # dropped — it loads *quarantined* (security_block_reasons set) so it
@@ -234,6 +258,7 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
                 long_term_memory=new_persona.get("long_term_memory", True),
                 max_context_tokens=new_persona.get("max_context_tokens"),
                 tool_policy=new_persona.get("tool_policy"),
+                explicit_overrides=explicit_overrides,
                 meta_visible=new_persona.get("meta_visible", False),
                 ingest_bank=new_persona.get("ingest_bank"),
                 security_block_reasons=validation_errors,
@@ -287,6 +312,8 @@ def load_system_personas_from_file() -> Dict[str, Any]:
             # --- Composition Validation ---
             policy_data = new_persona.get("tool_policy")
             temp_policy = ToolPolicy.from_dict(policy_data) if policy_data else ToolPolicy.from_legacy_list(new_persona.get("enabled_tools", []))
+            explicit_overrides = _resolve_explicit_overrides(new_persona)
+            temp_policy.explicit_overrides = explicit_overrides
 
             # DP-128: quarantine instead of drop (see the user-persona path above).
             validation_errors = validate_policy_composition(temp_policy)
@@ -311,6 +338,7 @@ def load_system_personas_from_file() -> Dict[str, Any]:
                 long_term_memory=new_persona.get("long_term_memory", True),
                 max_context_tokens=new_persona.get("max_context_tokens"),
                 tool_policy=new_persona.get("tool_policy"),
+                explicit_overrides=explicit_overrides,
                 meta_visible=new_persona.get("meta_visible", False),
                 ingest_bank=new_persona.get("ingest_bank"),
                 security_block_reasons=validation_errors,

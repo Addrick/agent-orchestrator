@@ -1325,8 +1325,12 @@ def test_persona_extended_includes_enabled_tools():
 
 def test_persona_extended_includes_tool_policy():
     adapter, mm, persona = _make_adapter_with_seeded_db()
-    # Use real ToolPolicy to_dict result
-    expected_policy = persona.get_tool_policy().to_dict()
+    # DP-277: the served policy block re-attaches explicit_overrides for the
+    # portal display, even though ToolPolicy.to_dict no longer carries it.
+    expected_policy = {
+        **persona.get_tool_policy().to_dict(),
+        "explicit_overrides": persona.get_explicit_overrides(),
+    }
 
     with TestClient(adapter.app) as client:
         r = client.get("/api/v1/persona/test_persona")

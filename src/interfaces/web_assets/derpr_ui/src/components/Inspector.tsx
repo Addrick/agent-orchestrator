@@ -534,7 +534,9 @@ function draftToPolicy(
     default: draft.default,
     allow,
     ask,
-    explicit_overrides: [...draft.overrides],
+    // explicit_overrides deliberately absent: the engine ignores it in a
+    // generic policy dict (DP-277); override edits go through the dedicated
+    // `set explicit_overrides` dev_command in onSave.
     capabilities_required: persona?.tool_policy?.capabilities_required || [],
   }
 }
@@ -547,7 +549,6 @@ function sameSet(a: Set<string>, b: Set<string>): boolean {
 
 function policyChanged(a: PolicyDraft, b: PolicyDraft): boolean {
   if (a.default !== b.default) return true
-  if (!sameSet(a.overrides, b.overrides)) return true
   const keys = new Set([...Object.keys(a.states), ...Object.keys(b.states)])
   for (const k of keys) if (a.states[k] !== b.states[k]) return true
   return false
@@ -613,7 +614,13 @@ function ToolsPane({
     () => !sameSet(draft.bindings, baseline.bindings),
     [draft, baseline],
   )
-  const dirty = policyDirty || bindingsDirty
+  // overrides ride a separate dev_command (DP-277 gated field), so their
+  // dirtiness is tracked apart from the tool_policy dict
+  const overridesDirty = useMemo(
+    () => !sameSet(draft.overrides, baseline.overrides),
+    [draft, baseline],
+  )
+  const dirty = policyDirty || bindingsDirty || overridesDirty
 
   const setToolState = (name: string, s: ToolState) =>
     setDraft((d) => ({ ...d, states: { ...d.states, [name]: s } }))
@@ -725,6 +732,13 @@ function ToolsPane({
         const policy = draftToPolicy(draft, tools, persona)
         // compact JSON (no spaces) survives the dev-command whitespace tokenizer
         last = await store.runToolsCommand(`set tool_policy ${JSON.stringify(policy)}`)
+      }
+      if (overridesDirty) {
+        // DP-277: overrides are a privileged field with their own command;
+        // a JSON list survives the whitespace tokenizer ('[]' clears)
+        last = await store.runToolsCommand(
+          `set explicit_overrides ${JSON.stringify([...draft.overrides])}`,
+        )
       }
       if (last.mutated) {
         // a now-quarantined persona comes back in the response text + the banner
