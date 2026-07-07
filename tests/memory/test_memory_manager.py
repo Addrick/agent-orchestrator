@@ -2246,3 +2246,182 @@ def test_migration_untrusted_new_features_work(legacy_mem_manager_with_summaries
     cursor = conn.cursor()
     cursor.execute("SELECT untrusted FROM Memory_Summaries WHERE summary_id = ?", (sum_id,))
     assert cursor.fetchone()['untrusted'] == 1
+
+
+# --- Proposal queue (DP-282) ---
+
+def _queue_proposal(manager, action_type="set_priority", args=None, **kwargs):
+    return manager.create_proposal(
+        agent_name="managr",
+        action_type=action_type,
+        action_args=args or {"ticket_number": 10001, "priority": "3 high"},
+        rationale="stale ticket needs attention",
+        taint={"source": "zammad_board_snapshot", "cycle_action_id": 42,
+               "ticket_number": 10001},
+        source_action_id=42,
+        **kwargs,
+    )
+
+
+def test_proposal_create_and_get_roundtrip(mem_manager):
+    pid = _queue_proposal(mem_manager)
+    row = mem_manager.get_proposal(pid)
+    assert row["proposal_id"] == pid
+    assert row["status"] == "pending"
+    assert row["agent_name"] == "managr"
+    # JSON columns decode back to dicts
+    assert row["action_args"] == {"ticket_number": 10001, "priority": "3 high"}
+    assert row["taint"]["source"] == "zammad_board_snapshot"
+    assert row["source_action_id"] == 42
+    assert mem_manager.get_proposal(9999) is None
+
+
+def test_proposal_list_filters_by_status(mem_manager):
+    p1 = _queue_proposal(mem_manager)
+    p2 = _queue_proposal(mem_manager, action_type="add_note",
+                         args={"ticket_number": 10002, "body": "note"})
+    mem_manager.review_proposal(p1, "denied", "operator", "not needed")
+
+    pending = mem_manager.list_proposals(status="pending")
+    assert [p["proposal_id"] for p in pending] == [p2]
+    denied = mem_manager.list_proposals(status="denied")
+    assert [p["proposal_id"] for p in denied] == [p1]
+    everything = mem_manager.list_proposals(status=None)
+    assert len(everything) == 2
+
+
+def test_proposal_review_only_moves_pending(mem_manager):
+    pid = _queue_proposal(mem_manager)
+    assert mem_manager.review_proposal(pid, "approved", "operator", "ok") is True
+    row = mem_manager.get_proposal(pid)
+    assert row["status"] == "approved"
+    assert row["reviewer"] == "operator"
+    assert row["review_note"] == "ok"
+    assert row["reviewed_at"] is not None
+    # Double-review is a no-op, not an overwrite
+    assert mem_manager.review_proposal(pid, "denied", "operator", "changed mind") is False
+    assert mem_manager.get_proposal(pid)["status"] == "approved"
+    # Unknown id
+    assert mem_manager.review_proposal(9999, "approved", "operator") is False
+    with pytest.raises(ValueError):
+        mem_manager.review_proposal(pid, "executed", "operator")
+
+
+def test_proposal_mark_executed_requires_approval(mem_manager):
+    pid = _queue_proposal(mem_manager)
+    # Not approved yet: no-op
+    mem_manager.mark_proposal_executed(pid, True, "done")
+    assert mem_manager.get_proposal(pid)["status"] == "pending"
+
+    mem_manager.review_proposal(pid, "approved", "operator")
+    mem_manager.mark_proposal_executed(pid, True, "priority set")
+    row = mem_manager.get_proposal(pid)
+    assert row["status"] == "executed"
+    assert row["execution_result"] == "priority set"
+    assert row["executed_at"] is not None
+
+
+def test_proposal_mark_executed_failure_status(mem_manager):
+    pid = _queue_proposal(mem_manager)
+    mem_manager.review_proposal(pid, "approved", "operator")
+    mem_manager.mark_proposal_executed(pid, False, "zammad 500")
+    assert mem_manager.get_proposal(pid)["status"] == "execution_failed"
+
+
+def test_proposal_expiry_sweep(mem_manager):
+    from datetime import timedelta
+    now = datetime.now(timezone.utc)
+    stale = _queue_proposal(mem_manager, expires_at=now - timedelta(days=1))
+    fresh = _queue_proposal(mem_manager, expires_at=now + timedelta(days=7))
+    no_ttl = _queue_proposal(mem_manager, expires_at=None)
+
+    assert mem_manager.expire_stale_proposals() == 1
+    assert mem_manager.get_proposal(stale)["status"] == "expired"
+    assert mem_manager.get_proposal(fresh)["status"] == "pending"
+    assert mem_manager.get_proposal(no_ttl)["status"] == "pending"
+    # Expired proposals can no longer be reviewed
+    assert mem_manager.review_proposal(stale, "approved", "operator") is False
+    # Sweep is idempotent
+    assert mem_manager.expire_stale_proposals() == 0
+
+
+def test_proposal_list_filters_by_agent_and_status_sequence(mem_manager):
+    """agent_name + multi-status filtering happens in SQL, so pending rows
+    from other agents can't consume the limit (managr feedback loop)."""
+    mine = _queue_proposal(mem_manager)
+    mem_manager.review_proposal(mine, "denied", "operator", "no")
+    _queue_proposal(mem_manager)  # own, still pending
+    other = mem_manager.create_proposal(
+        agent_name="other_agent", action_type="add_note",
+        action_args={"ticket_number": 1, "body": "x"})
+    mem_manager.review_proposal(other, "approved", "operator")
+
+    reviewed = mem_manager.list_proposals(
+        status=("approved", "denied", "expired", "executed", "execution_failed"),
+        agent_name="managr")
+    assert [p["proposal_id"] for p in reviewed] == [mine]
+    # Sequence status without agent filter spans agents
+    assert len(mem_manager.list_proposals(status=("approved", "denied"))) == 2
+
+
+def test_proposal_zero_microsecond_timestamps_readable(mem_manager):
+    """Regression: binding tz-aware datetimes into TIMESTAMP columns made
+    zero-microsecond rows unreadable under PARSE_DECLTYPES (the default
+    converter chokes on isoformat offsets). Timestamps are stored as
+    second-precision UTC strings instead."""
+    from datetime import timedelta
+    exact_second = datetime.now(timezone.utc).replace(microsecond=0)
+    pid = _queue_proposal(mem_manager, expires_at=exact_second + timedelta(days=7))
+    row = mem_manager.get_proposal(pid)  # crashed before the fix
+    assert row["status"] == "pending"
+    assert row["expires_at"] is not None
+    mem_manager.review_proposal(pid, "approved", "operator")
+    mem_manager.mark_proposal_executed(pid, True, "done")
+    row = mem_manager.get_proposal(pid)
+    assert row["reviewed_at"] is not None and row["executed_at"] is not None
+    # Sweep comparisons stay format-consistent with stored expires_at
+    stale = _queue_proposal(mem_manager, expires_at=exact_second - timedelta(days=1))
+    assert mem_manager.expire_stale_proposals() == 1
+    assert mem_manager.get_proposal(stale)["status"] == "expired"
+
+
+# --- Proposals table migration (DP-282) ---
+
+def test_migration_creates_proposals_table(legacy_mem_manager):
+    """create_schema() on a legacy DB (no Proposals table) creates it."""
+    legacy_mem_manager.create_schema()
+    conn = legacy_mem_manager._get_connection()
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(Proposals)")
+    columns = {row['name'] for row in cursor.fetchall()}
+    assert {'proposal_id', 'created_at', 'expires_at', 'agent_name', 'action_type',
+            'action_args', 'rationale', 'taint', 'source_action_id', 'status',
+            'reviewed_at', 'reviewer', 'review_note', 'executed_at',
+            'execution_result'} == columns
+
+
+def test_migration_proposals_indexes_created(legacy_mem_manager):
+    legacy_mem_manager.create_schema()
+    conn = legacy_mem_manager._get_connection()
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA index_list(Proposals)")
+    names = {row['name'] for row in cursor.fetchall()}
+    assert 'idx_proposal_status' in names
+    assert 'idx_proposal_acceptance' in names
+
+
+def test_migration_proposals_usable_and_data_preserved(legacy_mem_manager):
+    """Proposal CRUD works on a migrated DB and legacy rows survive."""
+    legacy_mem_manager.create_schema()
+    pid = _queue_proposal(legacy_mem_manager)
+    assert legacy_mem_manager.get_proposal(pid)["status"] == "pending"
+    # Pre-existing Agent_Actions rows are untouched
+    actions = legacy_mem_manager.get_agent_actions("dispatch")
+    assert len(actions) == 2
+
+
+def test_migration_proposals_idempotent(legacy_mem_manager):
+    legacy_mem_manager.create_schema()
+    pid = _queue_proposal(legacy_mem_manager)
+    legacy_mem_manager.create_schema()  # second run must not drop the table/rows
+    assert legacy_mem_manager.get_proposal(pid) is not None

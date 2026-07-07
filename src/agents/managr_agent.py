@@ -1,8 +1,9 @@
 # src/agents/managr_agent.py
 
 import asyncio
+import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from config.global_config import (
@@ -14,8 +15,11 @@ from config.global_config import (
     MANAGR_MAX_BRIEF_CHARS,
     MANAGR_PEER_AGENTS,
     MANAGR_PEER_ACTION_LIMIT,
+    MANAGR_PROPOSAL_TTL_DAYS,
+    MANAGR_MAX_PROPOSALS_PER_CYCLE,
 )
 from src.agents.base import Agent
+from src.proposals.schemas import build_submission_tool_schema, validate_proposal_args
 from src.chat_system import ChatSystem
 from src.clients.notification import NotificationRouter
 from src.clients.zammad_client import ZammadClient
@@ -26,18 +30,20 @@ logger = logging.getLogger(__name__)
 
 class ManagrAgent(Agent):
     """
-    Board-level planning agent (DP-280, Phase 0: read-only).
+    Board-level planning agent (DP-280 Phase 0 + DP-282 Phase 1).
 
     Where triage/dispatch react to a single ticket, managr reviews the whole
     board on a slow cadence and posts a "Manager's Report" digest. It is
     deliberately neutered: it holds no write path to Zammad or anywhere else —
-    its only externally visible output is the digest sent via the
-    NotificationRouter. Proposal/approval infrastructure is Phase 1.
+    its externally visible outputs are the digest sent via the
+    NotificationRouter and (when proposals_enabled) rows in the durable
+    proposal queue, which only a human review via joy can turn into writes.
 
     Pipeline (per cycle):
       1. [Hardcoded] Snapshot the board: open tickets + recent peer-agent activity
       2. [LLM fleet]  Read-only analyst briefs (stale tickets, cross-ticket patterns)
       3. [LLM]        Planner persona produces the Manager's Report
+      3b.[LLM+code]  Extract whitelist-validated proposals into the queue (Phase 1)
       4. [Hardcoded] Send digest to configured notification targets
     """
 
@@ -88,13 +94,21 @@ class ManagrAgent(Agent):
                 await self._retain_action_series(action_id)
                 return
 
-            sent_count = await self._send_digest(action_id, plan)
+            proposal_summary, proposals_queued = None, 0
+            if self.agent_config.get("proposals_enabled", False):
+                proposal_summary, proposals_queued = await self._extract_proposals(
+                    action_id, plan,
+                )
+
+            digest = f"{plan}\n\n{proposal_summary}" if proposal_summary else plan
+            sent_count = await self._send_digest(action_id, digest)
             self._finalize_action(
                 action_id,
                 "success" if sent_count > 0 else "notification_failed",
                 {
                     "sent_targets": sent_count,
                     "briefs": sorted(briefs.keys()),
+                    "proposals_queued": proposals_queued,
                     # Excerpt feeds next cycle's action-history injection, so
                     # the planner sees what it reported last time.
                     "plan_excerpt": plan[:1500],
@@ -136,6 +150,12 @@ class ManagrAgent(Agent):
             lines.append("")
             lines.append("RECENT AUTOMATION ACTIVITY:")
             lines.extend(peer_lines)
+
+        proposal_lines = self._recent_proposal_outcomes()
+        if proposal_lines:
+            lines.append("")
+            lines.append("YOUR RECENT PROPOSALS (review outcomes — learn from denials):")
+            lines.extend(proposal_lines)
 
         board = "\n".join(lines)
         if len(board) > MANAGR_MAX_BOARD_CHARS:
@@ -202,6 +222,36 @@ class ManagrAgent(Agent):
                     f"- [{ts}] {peer}: {a.get('action_type', '?')} "
                     f"{a.get('trigger_context') or ''} -> {a.get('outcome', '?')}"
                 )
+        return lines
+
+    def _recent_proposal_outcomes(self) -> List[str]:
+        """Compact lines for what happened to this agent's recent proposals,
+        so the planner sees which suggestions were approved/denied/expired.
+        Only meaningful once proposals_enabled; empty list on any failure."""
+        if not self.agent_config.get("proposals_enabled", False):
+            return []
+        try:
+            # Reviewed outcomes only, filtered in SQL: a full cycle of still-
+            # pending rows must not consume the limit and crowd out the
+            # denials the planner is supposed to learn from.
+            rows = self.memory_manager.list_proposals(
+                status=("approved", "denied", "expired", "executed", "execution_failed"),
+                agent_name=self.agent_name,
+                limit=10,
+            )
+        except Exception as e:
+            logger.warning(f"Could not fetch recent proposal outcomes: {e}")
+            return []
+        lines: List[str] = []
+        for row in rows:
+            args = row.get("action_args") or {}
+            arg_str = ", ".join(f"{k}={v}" for k, v in args.items()) \
+                if isinstance(args, dict) else str(args)
+            line = f"- [{row.get('proposal_id')}] {row.get('action_type')}({arg_str}) -> {row.get('status')}"
+            note = row.get("review_note")
+            if note:
+                line += f" — {str(note)[:200]}"
+            lines.append(line)
         return lines
 
     # --- 2. Orient ---
@@ -274,6 +324,22 @@ class ManagrAgent(Agent):
         outcomes) via the base-class history builder, giving the planner
         continuity across cycles.
         """
+        response = await self._call_persona_raw(persona, prompt, with_history=with_history)
+        if not response or response.get("type") != "text":
+            return None
+        content = str(response.get("content", "")).strip()
+        return content or None
+
+    async def _call_persona_raw(
+        self, persona: Persona, prompt: str, with_history: bool = False,
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Single-shot LLM call returning the raw engine response (or None).
+
+        `tools` takes agent-internal schemas passed straight to the engine —
+        never routed through ToolManager (sqlite_consolidator pattern), so
+        managr gains no runtime tool surface from them.
+        """
         try:
             if with_history:
                 history_object = self._build_history_object(persona, prompt)
@@ -287,15 +353,113 @@ class ManagrAgent(Agent):
             response, _ = await self.text_engine.generate_response(
                 persona_config=persona.get_config_for_engine(),
                 history_object=history_object,
-                tools=None,
+                tools=tools,
             )
-            if response.get("type") != "text":
-                return None
-            content = str(response.get("content", "")).strip()
-            return content or None
+            return response
         except Exception as e:
             logger.warning(f"Persona call failed ({persona.get_name()}): {e}")
             return None
+
+    # --- 3b. Propose (DP-282, Phase 1) ---
+
+    async def _extract_proposals(
+        self, action_id: int, plan: str,
+    ) -> Tuple[Optional[str], int]:
+        """Convert the report's suggested actions into durable proposal rows.
+
+        A second LLM call on the planner persona emits structured actions via
+        the agent-internal submit_proposals schema. Every action is validated
+        in code against the fixed whitelist before a row is written — invalid
+        or surplus actions are dropped and logged, never stored. Returns
+        (digest section, queued count).
+        """
+        persona = self.chat_system.personas.get(MANAGR_PLANNER_NAME)
+        if not persona:
+            logger.error(f"System persona '{MANAGR_PLANNER_NAME}' not found; skipping proposals.")
+            return None, 0
+
+        prompt = (
+            f"MANAGER'S REPORT:\n{plan}\n\n"
+            "Convert the report's SUGGESTED ACTIONS into concrete proposals by calling "
+            "submit_proposals. Only emit actions of the allowed types; skip any suggestion "
+            "that does not fit an allowed action. Use ticket numbers exactly as they appear "
+            "in the report. If nothing fits, call submit_proposals with an empty list."
+        )
+        step_id = self._log_step(
+            action_id, "llm_step",
+            action_payload={"persona": MANAGR_PLANNER_NAME, "purpose": "extract_proposals"},
+            outcome="pending",
+        )
+        response = await self._call_persona_raw(
+            persona, prompt, tools=[build_submission_tool_schema()],
+        )
+        candidates = self._parse_submitted_proposals(response)
+        if candidates is None:
+            self._finalize_action(step_id, "failed", {"reason": "no submit_proposals call"})
+            return None, 0
+
+        expires_at = datetime.now(timezone.utc) + timedelta(days=MANAGR_PROPOSAL_TTL_DAYS)
+        lines: List[str] = []
+        dropped = 0
+        for candidate in candidates[:MANAGR_MAX_PROPOSALS_PER_CYCLE]:
+            action_type = candidate.get("action_type", "")
+            args = candidate.get("args", {})
+            rationale = str(candidate.get("rationale", ""))[:500]
+            errors = validate_proposal_args(action_type, args)
+            if errors:
+                dropped += 1
+                logger.warning(f"Dropping invalid proposal ({action_type}): {'; '.join(errors)}")
+                continue
+            proposal_id = self.memory_manager.create_proposal(
+                agent_name=self.agent_name,
+                action_type=action_type,
+                action_args=args,
+                rationale=rationale,
+                taint={
+                    "source": "zammad_board_snapshot",
+                    "cycle_action_id": action_id,
+                    "ticket_number": args.get("ticket_number"),
+                },
+                source_action_id=action_id,
+                expires_at=expires_at,
+            )
+            arg_str = ", ".join(f"{k}={v}" for k, v in args.items())
+            lines.append(f"- [{proposal_id}] {action_type}({arg_str}) — {rationale}")
+        dropped += max(0, len(candidates) - MANAGR_MAX_PROPOSALS_PER_CYCLE)
+
+        self._finalize_action(
+            step_id, "success",
+            {"queued": len(lines), "dropped": dropped},
+        )
+        if not lines:
+            return None, 0
+        section = (
+            f"PROPOSED ACTIONS ({len(lines)} queued for review — "
+            "ask joy to list/approve/deny proposals):\n" + "\n".join(lines)
+        )
+        return section, len(lines)
+
+    @staticmethod
+    def _parse_submitted_proposals(
+        response: Optional[Dict[str, Any]],
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Pull the proposals array out of a submit_proposals tool call.
+        Returns None when the model made no usable call."""
+        if not response or response.get("type") != "tool_calls":
+            return None
+        for call in response.get("calls", []):
+            if call.get("name") != "submit_proposals":
+                continue
+            args = call.get("arguments", {})
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError:
+                    return None
+            proposals = args.get("proposals")
+            if isinstance(proposals, list):
+                return [p for p in proposals if isinstance(p, dict)]
+        return None
 
     # --- 4. Report ---
 
