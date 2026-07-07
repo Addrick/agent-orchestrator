@@ -192,11 +192,13 @@ class ZammadToolHandler:
             self.zammad_client.update_ticket, ticket_id=ticket_id, payload=payload
         )
 
-    async def _add_note_to_ticket(self, ticket_id: int, body: str, internal: bool = False) -> Dict[str, Any]:
+    async def _add_note_to_ticket(self, ticket_id: int, body: str) -> Dict[str, Any]:
+        # Internal notes only — a customer-visible article (outbound email)
+        # would be egress and needs its own tool, with exfil_capable to match.
         logger.info(f"Executing tool: add_note_to_ticket on ticket_id={ticket_id}")
         return await asyncio.to_thread(
             self.zammad_client.add_article_to_ticket,
-            ticket_id=ticket_id, body=body, internal=internal
+            ticket_id=ticket_id, body=body, internal=True
         )
 
     async def _search_tickets(self, query: str) -> List[Dict[str, Any]]:

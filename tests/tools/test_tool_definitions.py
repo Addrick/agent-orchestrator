@@ -228,12 +228,12 @@ def test_module_unregister_accessor_routes_through_registry(monkeypatch):
     assert definitions.get_tool_definition("mcp__srv__dyn") is None
 
 
-def test_add_note_classifier_internal_is_reversible():
-    from src.tools.classifiers import add_note_irreversible_check
-    assert add_note_irreversible_check({"internal": True}) is False
-
-
-def test_add_note_classifier_customer_visible_is_irreversible():
-    from src.tools.classifiers import add_note_irreversible_check
-    assert add_note_irreversible_check({"internal": False}) is True
-    assert add_note_irreversible_check({}) is True  # default visible
+def test_add_note_def_is_internal_only_and_not_exfil_capable():
+    # The internal-only clamp and the exfil_capable=False classification are
+    # one decision: the def must not re-expose a customer-visible knob while
+    # claiming the tool can't exfiltrate.
+    tool = next(t for t in ALL_TOOL_DEFINITIONS
+                if t["function"]["name"] == "add_note_to_ticket")
+    assert tool["capabilities"]["exfil_capable"] is False
+    assert "irreversible_if" not in tool["capabilities"]
+    assert "internal" not in tool["function"]["parameters"]["properties"]
