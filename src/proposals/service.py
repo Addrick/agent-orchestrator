@@ -94,7 +94,14 @@ class ProposalToolHandler:
             metadata={"action_type": proposal["action_type"], "args": proposal["action_args"]},
         )
 
-        success, result = await self.executor.execute(proposal)
+        try:
+            success, result = await self.executor.execute(proposal)
+        except Exception as e:
+            # An exception here must still land in mark_proposal_executed —
+            # otherwise the row is stranded in 'approved' (not pending, never
+            # executed) with no retry path short of editing the DB.
+            logger.error(f"Proposal {proposal_id} executor raised: {e}", exc_info=True)
+            success, result = False, f"executor error: {e}"
         self.memory_manager.mark_proposal_executed(proposal_id, success, result)
         self.memory_manager.log_audit_event(
             event_type="proposal_executed" if success else "proposal_execution_failed",

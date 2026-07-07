@@ -102,6 +102,22 @@ async def test_approve_execution_failure_recorded(handler, mem_manager):
 
 
 @pytest.mark.asyncio
+async def test_approve_survives_raising_executor(handler, mem_manager):
+    """A raising executor must not strand the row in 'approved': the failure
+    is recorded on the proposal and audited like any execution failure."""
+    handler.executor.execute = AsyncMock(side_effect=RuntimeError("boom"))
+    pid = _queue(mem_manager)
+    result = await handler._approve_proposal(pid)
+
+    assert result["executed"] is False
+    assert "executor error" in result["result"]
+    row = mem_manager.get_proposal(pid)
+    assert row["status"] == "execution_failed"
+    assert "boom" in row["execution_result"]
+    assert ("proposal_execution_failed", pid) in _audit_events(mem_manager)
+
+
+@pytest.mark.asyncio
 async def test_approve_rejects_non_pending_and_missing(handler, mem_manager):
     pid = _queue(mem_manager)
     mem_manager.review_proposal(pid, "denied", "operator", "no")

@@ -231,14 +231,19 @@ class ManagrAgent(Agent):
         if not self.agent_config.get("proposals_enabled", False):
             return []
         try:
-            rows = self.memory_manager.list_proposals(status=None, limit=10)
+            # Reviewed outcomes only, filtered in SQL: a full cycle of still-
+            # pending rows must not consume the limit and crowd out the
+            # denials the planner is supposed to learn from.
+            rows = self.memory_manager.list_proposals(
+                status=("approved", "denied", "expired", "executed", "execution_failed"),
+                agent_name=self.agent_name,
+                limit=10,
+            )
         except Exception as e:
             logger.warning(f"Could not fetch recent proposal outcomes: {e}")
             return []
         lines: List[str] = []
         for row in rows:
-            if row.get("agent_name") != self.agent_name:
-                continue
             args = row.get("action_args") or {}
             arg_str = ", ".join(f"{k}={v}" for k, v in args.items()) \
                 if isinstance(args, dict) else str(args)

@@ -2345,6 +2345,46 @@ def test_proposal_expiry_sweep(mem_manager):
     assert mem_manager.expire_stale_proposals() == 0
 
 
+def test_proposal_list_filters_by_agent_and_status_sequence(mem_manager):
+    """agent_name + multi-status filtering happens in SQL, so pending rows
+    from other agents can't consume the limit (managr feedback loop)."""
+    mine = _queue_proposal(mem_manager)
+    mem_manager.review_proposal(mine, "denied", "operator", "no")
+    _queue_proposal(mem_manager)  # own, still pending
+    other = mem_manager.create_proposal(
+        agent_name="other_agent", action_type="add_note",
+        action_args={"ticket_number": 1, "body": "x"})
+    mem_manager.review_proposal(other, "approved", "operator")
+
+    reviewed = mem_manager.list_proposals(
+        status=("approved", "denied", "expired", "executed", "execution_failed"),
+        agent_name="managr")
+    assert [p["proposal_id"] for p in reviewed] == [mine]
+    # Sequence status without agent filter spans agents
+    assert len(mem_manager.list_proposals(status=("approved", "denied"))) == 2
+
+
+def test_proposal_zero_microsecond_timestamps_readable(mem_manager):
+    """Regression: binding tz-aware datetimes into TIMESTAMP columns made
+    zero-microsecond rows unreadable under PARSE_DECLTYPES (the default
+    converter chokes on isoformat offsets). Timestamps are stored as
+    second-precision UTC strings instead."""
+    from datetime import timedelta
+    exact_second = datetime.now(timezone.utc).replace(microsecond=0)
+    pid = _queue_proposal(mem_manager, expires_at=exact_second + timedelta(days=7))
+    row = mem_manager.get_proposal(pid)  # crashed before the fix
+    assert row["status"] == "pending"
+    assert row["expires_at"] is not None
+    mem_manager.review_proposal(pid, "approved", "operator")
+    mem_manager.mark_proposal_executed(pid, True, "done")
+    row = mem_manager.get_proposal(pid)
+    assert row["reviewed_at"] is not None and row["executed_at"] is not None
+    # Sweep comparisons stay format-consistent with stored expires_at
+    stale = _queue_proposal(mem_manager, expires_at=exact_second - timedelta(days=1))
+    assert mem_manager.expire_stale_proposals() == 1
+    assert mem_manager.get_proposal(stale)["status"] == "expired"
+
+
 # --- Proposals table migration (DP-282) ---
 
 def test_migration_creates_proposals_table(legacy_mem_manager):

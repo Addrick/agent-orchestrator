@@ -6,7 +6,8 @@ import logging
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Coroutine, Dict, List, Callable, Optional, Set, cast, Tuple, Generator
+from typing import (Any, Coroutine, Dict, List, Callable, Optional, Sequence, Set, Union, cast,
+                    Tuple, Generator)
 from pathlib import Path
 
 # --- NEW: Import the global embedding model variable ---
@@ -1259,6 +1260,17 @@ class MemoryManager:
 
     # --- Proposal queue (DP-282, managr Phase 1) ---
 
+    @staticmethod
+    def _utc_stamp(dt: datetime) -> str:
+        """Format a datetime for TIMESTAMP columns (CURRENT_TIMESTAMP style,
+        UTC, second precision). The connection uses PARSE_DECLTYPES, whose
+        default converter can't parse isoformat offsets — a bound datetime
+        object with tzinfo makes the row unreadable when microsecond == 0.
+        Never bind datetime objects into TIMESTAMP columns directly."""
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+
     def create_proposal(self, agent_name: str, action_type: str, action_args: Dict[str, Any],
                         rationale: Optional[str] = None, taint: Optional[Dict[str, Any]] = None,
                         source_action_id: Optional[int] = None,
@@ -1271,7 +1283,8 @@ class MemoryManager:
                 """INSERT INTO Proposals (created_at, expires_at, agent_name, action_type,
                                           action_args, rationale, taint, source_action_id, status)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')""",
-                (datetime.now(timezone.utc), expires_at, agent_name, action_type,
+                (self._utc_stamp(datetime.now(timezone.utc)),
+                 self._utc_stamp(expires_at) if expires_at else None, agent_name, action_type,
                  json.dumps(action_args), rationale,
                  json.dumps(taint) if taint is not None else None, source_action_id),
             )
@@ -1287,18 +1300,29 @@ class MemoryManager:
             row = cursor.fetchone()
             return self._decode_proposal(dict(row)) if row else None
 
-    def list_proposals(self, status: Optional[str] = "pending", limit: int = 25) -> List[Dict[str, Any]]:
-        """List proposals, newest first. status=None lists all statuses."""
+    def list_proposals(self, status: Optional[Union[str, Sequence[str]]] = "pending",
+                       limit: int = 25,
+                       agent_name: Optional[str] = None) -> List[Dict[str, Any]]:
+        """List proposals, newest first. status accepts a single status, a
+        sequence of statuses, or None for all; agent_name optionally filters
+        to one proposing agent (filtered in SQL so the limit isn't consumed
+        by other agents' rows)."""
+        clauses: List[str] = []
+        params: List[Any] = []
+        if status is not None:
+            statuses = [status] if isinstance(status, str) else list(status)
+            clauses.append(f"status IN ({', '.join('?' * len(statuses))})")
+            params.extend(statuses)
+        if agent_name is not None:
+            clauses.append("agent_name = ?")
+            params.append(agent_name)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
-            if status is None:
-                cursor.execute(
-                    "SELECT * FROM Proposals ORDER BY created_at DESC LIMIT ?", (limit,))
-            else:
-                cursor.execute(
-                    "SELECT * FROM Proposals WHERE status = ? ORDER BY created_at DESC LIMIT ?",
-                    (status, limit))
+            cursor.execute(
+                f"SELECT * FROM Proposals{where} ORDER BY created_at DESC LIMIT ?",
+                (*params, limit))
             return [self._decode_proposal(dict(row)) for row in cursor.fetchall()]
 
     def review_proposal(self, proposal_id: int, status: str, reviewer: str,
@@ -1314,7 +1338,8 @@ class MemoryManager:
             cursor.execute(
                 """UPDATE Proposals SET status = ?, reviewed_at = ?, reviewer = ?, review_note = ?
                    WHERE proposal_id = ? AND status = 'pending'""",
-                (status, datetime.now(timezone.utc), reviewer, review_note, proposal_id),
+                (status, self._utc_stamp(datetime.now(timezone.utc)), reviewer, review_note,
+                 proposal_id),
             )
             conn.commit()
             return cursor.rowcount > 0
@@ -1328,7 +1353,7 @@ class MemoryManager:
                 """UPDATE Proposals SET status = ?, executed_at = ?, execution_result = ?
                    WHERE proposal_id = ? AND status = 'approved'""",
                 ("executed" if success else "execution_failed",
-                 datetime.now(timezone.utc), result[:2000], proposal_id),
+                 self._utc_stamp(datetime.now(timezone.utc)), result[:2000], proposal_id),
             )
             conn.commit()
 
@@ -1340,7 +1365,7 @@ class MemoryManager:
             cursor.execute(
                 """UPDATE Proposals SET status = 'expired'
                    WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < ?""",
-                (datetime.now(timezone.utc),),
+                (self._utc_stamp(datetime.now(timezone.utc)),),
             )
             conn.commit()
             return cursor.rowcount

@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from src.clients.zammad_client import ZammadClient
 from src.proposals.schemas import validate_proposal_args
@@ -36,38 +36,51 @@ class ProposalExecutor:
             ticket = await self._resolve_ticket(args["ticket_number"])
         except ValueError as e:
             return False, str(e)
-        ticket_id = ticket["id"]
+        except Exception as e:
+            logger.error(f"Ticket resolution failed ({action_type} #{args['ticket_number']}): {e}")
+            return False, f"ticket resolution failed: {e}"
+        ticket_id = ticket.get("id")
+        if not ticket_id:
+            return False, f"ticket #{args['ticket_number']} search hit has no id"
         number = ticket.get("number", args["ticket_number"])
 
         try:
-            if action_type == "add_note":
-                # internal=True is hard-forced: Phase 1 proposals are never
-                # customer-visible regardless of what the row says.
-                await asyncio.to_thread(
-                    self._client.add_article_to_ticket,
-                    ticket_id=ticket_id, body=args["body"], internal=True,
-                )
-                return True, f"internal note added to ticket #{number}"
-            if action_type == "set_priority":
-                await asyncio.to_thread(
-                    self._client.update_ticket,
-                    ticket_id=ticket_id, payload={"priority": args["priority"]},
-                )
-                return True, f"ticket #{number} priority set to {args['priority']}"
-            if action_type == "remind":
-                await asyncio.to_thread(
-                    self._client.update_ticket,
-                    ticket_id=ticket_id,
-                    payload={"state": "pending reminder",
-                             "pending_time": f"{args['pending_until']}T09:00:00Z"},
-                )
-                return True, f"ticket #{number} parked until {args['pending_until']}"
+            result = await self._dispatch(action_type, ticket_id, number, args)
         except Exception as e:
             logger.error(f"Proposal execution failed ({action_type} on #{number}): {e}")
             return False, f"zammad call failed: {e}"
-
+        if result is not None:
+            return True, result
         # Unreachable while validate_proposal_args shares PROPOSAL_ACTIONS
         return False, f"no executor dispatch for action_type '{action_type}'"
+
+    async def _dispatch(self, action_type: str, ticket_id: int, number: Any,
+                        args: Dict[str, Any]) -> Optional[str]:
+        """Run one whitelisted action; returns the success message, or None
+        for an action_type with no dispatch branch."""
+        if action_type == "add_note":
+            # internal=True is hard-forced: Phase 1 proposals are never
+            # customer-visible regardless of what the row says.
+            await asyncio.to_thread(
+                self._client.add_article_to_ticket,
+                ticket_id=ticket_id, body=args["body"], internal=True,
+            )
+            return f"internal note added to ticket #{number}"
+        if action_type == "set_priority":
+            await asyncio.to_thread(
+                self._client.update_ticket,
+                ticket_id=ticket_id, payload={"priority": args["priority"]},
+            )
+            return f"ticket #{number} priority set to {args['priority']}"
+        if action_type == "remind":
+            await asyncio.to_thread(
+                self._client.update_ticket,
+                ticket_id=ticket_id,
+                payload={"state": "pending reminder",
+                         "pending_time": f"{args['pending_until']}T09:00:00Z"},
+            )
+            return f"ticket #{number} parked until {args['pending_until']}"
+        return None
 
     async def _resolve_ticket(self, ticket_number: int) -> Dict[str, Any]:
         """Resolve a user-facing ticket number to the ticket dict (internal id)."""

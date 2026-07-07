@@ -403,8 +403,6 @@ async def test_prior_proposal_outcomes_in_board_snapshot():
         {"proposal_id": 7, "agent_name": "managr", "action_type": "set_priority",
          "action_args": {"ticket_number": 10002, "priority": "3 high"},
          "status": "denied", "review_note": "priority is fine"},
-        {"proposal_id": 8, "agent_name": "other_agent", "action_type": "add_note",
-         "action_args": {}, "status": "pending", "review_note": None},
     ])
     chat_system.text_engine.generate_response = AsyncMock(side_effect=[
         _text("stale brief"), _text("patterns brief"), _text("THE PLAN"),
@@ -417,8 +415,13 @@ async def test_prior_proposal_outcomes_in_board_snapshot():
     planner_call = chat_system.text_engine.generate_response.await_args_list[2]
     prompt = planner_call.kwargs["history_object"]["message_history"][-1]["content"]
     assert "[7] set_priority(ticket_number=10002, priority=3 high) -> denied — priority is fine" in prompt
-    # Other agents' proposals are not attributed to managr
-    assert "[8] add_note" not in prompt
+    # Filtering happens in SQL: only this agent's reviewed outcomes are
+    # fetched, so pending rows can't consume the limit and crowd them out
+    fetch = agent.memory_manager.list_proposals.call_args.kwargs
+    assert fetch["agent_name"] == "managr"
+    assert "pending" not in fetch["status"]
+    assert set(fetch["status"]) == {"approved", "denied", "expired",
+                                    "executed", "execution_failed"}
 
 
 @pytest.mark.asyncio
