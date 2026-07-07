@@ -49,6 +49,17 @@ sqlite3.register_converter("timestamp", convert_timestamp_iso)
 DB_DIR: Path = Path(__file__).resolve().parent
 DATABASE_FILE: Path = DB_DIR / "user_memory.db"
 
+# --- Standing orders (DP-281) ---
+# The store-level trust boundary: rows in Standing_Orders are injected
+# verbatim into planner prompts, so writes are only accepted from
+# authenticated operator surfaces (the single shared operator identity per
+# DP-277 — matches OPERATOR_ID in src/proposals/service.py). Never add a
+# model-facing or ticket-derived source here: that would open a prompt
+# injection lane straight into the planner.
+ALLOWED_STANDING_ORDER_SOURCES: "frozenset[str]" = frozenset({"operator"})
+# Hard page cap for list_standing_orders; the table is never pruned.
+MAX_STANDING_ORDER_PAGE = 200
+
 
 class MemoryManager:
     def __init__(
@@ -292,13 +303,13 @@ class MemoryManager:
                 order_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_at TIMESTAMP NOT NULL,
                 source TEXT NOT NULL,
+                agent TEXT NOT NULL DEFAULT 'managr',
                 order_text TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'active'
                     CHECK(status IN ('active', 'retired')),
                 retired_at TIMESTAMP,
                 retire_note TEXT
             );
-            CREATE INDEX IF NOT EXISTS idx_standing_order_status ON Standing_Orders (status, created_at);
             """
             conn.executescript(schema_sql)
             conn.commit()
@@ -310,6 +321,19 @@ class MemoryManager:
             if 'parent_id' not in agent_actions_cols:
                 conn.execute("ALTER TABLE Agent_Actions ADD COLUMN parent_id INTEGER")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_parent ON Agent_Actions (parent_id)")
+
+            # Standing_Orders migrations (DP-281): agent scope column so a
+            # second planner never needs a schema change, and the index is
+            # rebuilt to cover the per-agent injection query.
+            cursor.execute("PRAGMA table_info(Standing_Orders)")
+            standing_order_cols = {row['name'] for row in cursor.fetchall()}
+            if 'agent' not in standing_order_cols:
+                conn.execute("ALTER TABLE Standing_Orders ADD COLUMN agent TEXT NOT NULL DEFAULT 'managr'")
+            conn.execute("DROP INDEX IF EXISTS idx_standing_order_status")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_standing_order_agent_status "
+                "ON Standing_Orders (agent, status, created_at)"
+            )
 
             # Memory_Segments migrations
             cursor.execute("PRAGMA table_info(Memory_Segments)")
@@ -1392,26 +1416,49 @@ class MemoryManager:
                     pass
         return row
 
-    def add_standing_order(self, order_text: str, source: str) -> int:
+    def add_standing_order(self, order_text: str, source: str,
+                           agent: str = "managr") -> int:
         """Insert an active standing order (DP-281). `source` records the
         operator surface it entered through — orders must only ever originate
-        from authenticated operator surfaces, never from model output."""
+        from authenticated operator surfaces, never from model output. That
+        trust boundary is enforced here at the store, not just at the tool
+        handler: an unrecognized source is rejected so no future caller can
+        silently turn model output into planner guidance."""
+        if source not in ALLOWED_STANDING_ORDER_SOURCES:
+            raise ValueError(
+                f"Standing order source '{source}' is not an authenticated "
+                f"operator surface (allowed: {sorted(ALLOWED_STANDING_ORDER_SOURCES)})."
+            )
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
             cursor.execute(
-                """INSERT INTO Standing_Orders (created_at, source, order_text, status)
-                   VALUES (?, ?, ?, 'active')""",
-                (self._utc_stamp(datetime.now(timezone.utc)), source, order_text),
+                """INSERT INTO Standing_Orders (created_at, source, agent, order_text, status)
+                   VALUES (?, ?, ?, ?, 'active')""",
+                (self._utc_stamp(datetime.now(timezone.utc)), source, agent, order_text),
             )
             conn.commit()
             return cast(int, cursor.lastrowid)
 
     def list_standing_orders(self, status: Optional[str] = "active",
-                             limit: int = 50) -> List[Dict[str, Any]]:
-        """List standing orders, newest first. status=None returns all."""
-        where = " WHERE status = ?" if status is not None else ""
-        params: List[Any] = [status] if status is not None else []
+                             limit: int = 50,
+                             agent: Optional[str] = None) -> List[Dict[str, Any]]:
+        """List standing orders, newest first. status=None returns all
+        statuses; agent=None returns all agents' orders. Rejects a
+        non-positive limit (SQLite reads LIMIT -1 as unbounded) and caps it,
+        since orders are never deleted and the table grows monotonically."""
+        if limit < 1:
+            raise ValueError(f"limit must be >= 1, got {limit}")
+        limit = min(limit, MAX_STANDING_ORDER_PAGE)
+        clauses: List[str] = []
+        params: List[Any] = []
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        if agent is not None:
+            clauses.append("agent = ?")
+            params.append(agent)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()

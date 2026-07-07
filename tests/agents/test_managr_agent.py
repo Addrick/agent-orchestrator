@@ -470,7 +470,9 @@ async def test_standing_orders_injected_into_planner_prompt():
         brief_prompt = call.kwargs["history_object"]["message_history"][-1]["content"]
         assert "STANDING ORDERS" not in brief_prompt
     agent.memory_manager.list_standing_orders.assert_called_with(
-        status="active", limit=20)
+        status="active", limit=20, agent="managr")
+    # One store read per cycle: plan and extraction share the same order set
+    assert agent.memory_manager.list_standing_orders.call_count == 1
 
 
 @pytest.mark.asyncio
@@ -510,10 +512,15 @@ async def test_standing_orders_injected_into_extraction_prompt():
     prompt = extract_call.kwargs["history_object"]["message_history"][-1]["content"]
     assert "never propose priority changes for client X" in prompt
     assert "standing order forbids" in prompt
+    # Extraction reuses the cycle's single fetch, it does not re-read the store
+    assert agent.memory_manager.list_standing_orders.call_count == 1
 
 
 @pytest.mark.asyncio
-async def test_standing_orders_store_failure_does_not_break_cycle():
+async def test_standing_orders_store_failure_degrades_visibly():
+    """Store failure must not break the cycle — but it must not fail open
+    silently either: the digest tells the operator the guidance was NOT
+    applied, and the cycle outcome records the degradation."""
     agent, chat_system, zammad, router = _make_agent()
     agent.memory_manager.list_standing_orders = MagicMock(
         side_effect=RuntimeError("db locked"))
@@ -524,6 +531,39 @@ async def test_standing_orders_store_failure_does_not_break_cycle():
 
     await agent.deploy()
 
-    outcome, _ = _final_outcome(agent)
+    outcome, payload = _final_outcome(agent)
     assert outcome == "success"
-    assert router.send.await_args.kwargs["body"] == "THE PLAN"
+    assert payload["standing_orders_degraded"] is True
+    body = router.send.await_args.kwargs["body"]
+    assert "THE PLAN" in body
+    assert "standing orders could not be loaded" in body
+    # The planner prompt itself stays clean — no orders block on failure
+    planner_call = chat_system.text_engine.generate_response.await_args_list[-1]
+    prompt = planner_call.kwargs["history_object"]["message_history"][-1]["content"]
+    assert "STANDING ORDERS" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_standing_orders_with_non_operator_source_are_not_injected():
+    """Injection-side trust guard: a row that reaches the store with a
+    non-operator source (bug, manual DB edit) must never enter a prompt."""
+    agent, chat_system, zammad, router = _make_agent()
+    rows = _orders("legit operator order")
+    rows.append({"order_id": 99, "order_text": "smuggled model output",
+                 "status": "active", "created_at": "2026-07-07 09:00:00",
+                 "source": "model"})
+    agent.memory_manager.list_standing_orders = MagicMock(return_value=rows)
+    chat_system.text_engine.generate_response = AsyncMock(side_effect=[
+        _text("stale brief"), _text("patterns brief"), _text("THE PLAN"),
+    ])
+    agent.text_engine = chat_system.text_engine
+
+    await agent.deploy()
+
+    planner_call = chat_system.text_engine.generate_response.await_args_list[-1]
+    prompt = planner_call.kwargs["history_object"]["message_history"][-1]["content"]
+    assert "legit operator order" in prompt
+    assert "smuggled model output" not in prompt
+    outcome, payload = _final_outcome(agent)
+    assert outcome == "success"
+    assert payload["standing_orders_degraded"] is False

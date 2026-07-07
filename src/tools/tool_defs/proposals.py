@@ -156,6 +156,8 @@ PROPOSAL_TOOLS: List[Dict[str, Any]] = [
                     "limit": {
                         "type": "integer",
                         "description": "Maximum number of orders to return. Defaults to 20.",
+                        "minimum": 1,
+                        "maximum": 200,
                     },
                 },
                 "required": [],

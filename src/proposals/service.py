@@ -19,6 +19,13 @@ logger = logging.getLogger(__name__)
 OPERATOR_ID = "operator"
 
 
+def _expand_status(status: str) -> Optional[str]:
+    """Map the tool-surface 'all' sentinel to the store's None (no filter).
+    Shared by every listing tool on the proposals binding so the sentinel
+    cannot drift between them."""
+    return None if status == "all" else status
+
+
 class ProposalIntegration(ServiceIntegration):
     """
     Service integration for the proposal queue (DP-282).
@@ -39,6 +46,7 @@ class ProposalIntegration(ServiceIntegration):
 
     def register_tools(self, tool_manager: "ToolManager") -> None:
         ProposalToolHandler(self._memory_manager, self._executor).register(tool_manager)
+        StandingOrderToolHandler(self._memory_manager).register(tool_manager)
 
 
 class ProposalToolHandler:
@@ -52,15 +60,11 @@ class ProposalToolHandler:
         manager.register("list_proposals", self._list_proposals)
         manager.register("approve_proposal", self._approve_proposal)
         manager.register("deny_proposal", self._deny_proposal)
-        manager.register("add_standing_order", self._add_standing_order)
-        manager.register("list_standing_orders", self._list_standing_orders)
-        manager.register("retire_standing_order", self._retire_standing_order)
 
     async def _list_proposals(self, status: str = "pending", limit: int = 10) -> Dict[str, Any]:
         logger.info(f"Executing tool: list_proposals status={status} limit={limit}")
         expired = self.memory_manager.expire_stale_proposals()
-        list_status: Optional[str] = None if status == "all" else status
-        rows = self.memory_manager.list_proposals(status=list_status, limit=limit)
+        rows = self.memory_manager.list_proposals(status=_expand_status(status), limit=limit)
         proposals: List[Dict[str, Any]] = [
             {
                 "proposal_id": row["proposal_id"],
@@ -142,7 +146,22 @@ class ProposalToolHandler:
         )
         return {"proposal_id": proposal_id, "status": "denied", "reason": reason}
 
-    # --- Standing orders (DP-281) ---
+
+class StandingOrderToolHandler:
+    """Registers the standing-order tools (DP-281) with a ToolManager.
+
+    Separate from ProposalToolHandler: operator-guidance management needs
+    only the store, never the ProposalExecutor, so it must not drag the
+    proposal execution stack into construction. Both handlers ride the same
+    'proposals' service binding (one operator surface, one grant)."""
+
+    def __init__(self, memory_manager: "MemoryManager") -> None:
+        self.memory_manager = memory_manager
+
+    def register(self, manager: "ToolManager") -> None:
+        manager.register("add_standing_order", self._add_standing_order)
+        manager.register("list_standing_orders", self._list_standing_orders)
+        manager.register("retire_standing_order", self._retire_standing_order)
 
     async def _add_standing_order(self, order_text: str) -> Dict[str, Any]:
         logger.info("Executing tool: add_standing_order")
@@ -162,8 +181,8 @@ class ProposalToolHandler:
 
     async def _list_standing_orders(self, status: str = "active", limit: int = 20) -> Dict[str, Any]:
         logger.info(f"Executing tool: list_standing_orders status={status} limit={limit}")
-        list_status: Optional[str] = None if status == "all" else status
-        rows = self.memory_manager.list_standing_orders(status=list_status, limit=limit)
+        rows = self.memory_manager.list_standing_orders(
+            status=_expand_status(status), limit=limit)
         orders = [
             {
                 "order_id": row["order_id"],

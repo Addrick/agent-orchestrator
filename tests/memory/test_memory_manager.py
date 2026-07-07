@@ -2435,11 +2435,11 @@ def test_migration_creates_standing_orders_table(legacy_mem_manager):
     cursor = conn.cursor()
     cursor.execute("PRAGMA table_info(Standing_Orders)")
     columns = {row['name'] for row in cursor.fetchall()}
-    assert {'order_id', 'created_at', 'source', 'order_text', 'status',
-            'retired_at', 'retire_note'} == columns
+    assert {'order_id', 'created_at', 'source', 'agent', 'order_text',
+            'status', 'retired_at', 'retire_note'} == columns
     cursor.execute("PRAGMA index_list(Standing_Orders)")
     names = {row['name'] for row in cursor.fetchall()}
-    assert 'idx_standing_order_status' in names
+    assert 'idx_standing_order_agent_status' in names
 
 
 def test_migration_standing_orders_usable_and_data_preserved(legacy_mem_manager):
@@ -2463,6 +2463,49 @@ def test_migration_standing_orders_idempotent(legacy_mem_manager):
     assert legacy_mem_manager.list_standing_orders()[0]["order_id"] == order_id
 
 
+def test_migration_standing_orders_adds_agent_column():
+    """A DB created by the first DP-281 schema (Standing_Orders without the
+    agent column, old index name) is migrated in place: column added with
+    the 'managr' default on existing rows, index swapped, idempotent."""
+    manager = MemoryManager(db_path=":memory:")
+    try:
+        conn = manager._get_connection()
+        conn.execute("""
+            CREATE TABLE Standing_Orders (
+                order_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TIMESTAMP NOT NULL,
+                source TEXT NOT NULL,
+                order_text TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active'
+                    CHECK(status IN ('active', 'retired')),
+                retired_at TIMESTAMP,
+                retire_note TEXT
+            )""")
+        conn.execute(
+            "CREATE INDEX idx_standing_order_status ON Standing_Orders (status, created_at)")
+        conn.execute(
+            "INSERT INTO Standing_Orders (created_at, source, order_text) "
+            "VALUES ('2026-07-07 08:00:00', 'operator', 'pre-migration order')")
+        conn.commit()
+
+        manager.create_schema()
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(Standing_Orders)")
+        assert 'agent' in {row['name'] for row in cursor.fetchall()}
+        cursor.execute("PRAGMA index_list(Standing_Orders)")
+        names = {row['name'] for row in cursor.fetchall()}
+        assert 'idx_standing_order_agent_status' in names
+        assert 'idx_standing_order_status' not in names
+        rows = manager.list_standing_orders(agent="managr")
+        assert [r["order_text"] for r in rows] == ["pre-migration order"]
+        assert rows[0]["agent"] == "managr"
+
+        manager.create_schema()  # idempotent
+        assert len(manager.list_standing_orders()) == 1
+    finally:
+        manager.close()
+
+
 def test_standing_orders_newest_first_and_limit():
     manager = MemoryManager(db_path=":memory:")
     manager.create_schema()
@@ -2473,5 +2516,50 @@ def test_standing_orders_newest_first_and_limit():
         # Same-second timestamps: order_id DESC tiebreak keeps newest first
         assert [r["order_id"] for r in rows] == [ids[2], ids[1]]
         assert manager.list_standing_orders(status=None, limit=10)[0]["order_id"] == ids[2]
+    finally:
+        manager.close()
+
+
+def test_add_standing_order_rejects_unlisted_source():
+    """The trust boundary lives in the store: only authenticated operator
+    surfaces may write orders, so model output can never become guidance."""
+    manager = MemoryManager(db_path=":memory:")
+    manager.create_schema()
+    try:
+        with pytest.raises(ValueError, match="not an authenticated"):
+            manager.add_standing_order("smuggled instruction", source="model")
+        assert manager.list_standing_orders(status=None) == []
+    finally:
+        manager.close()
+
+
+def test_list_standing_orders_rejects_and_caps_limit():
+    """SQLite reads LIMIT -1 as unbounded; the store refuses non-positive
+    limits and caps oversized ones so the never-pruned table can't be
+    dumped wholesale into a tool response."""
+    manager = MemoryManager(db_path=":memory:")
+    manager.create_schema()
+    try:
+        manager.add_standing_order("order", source="operator")
+        with pytest.raises(ValueError, match="limit"):
+            manager.list_standing_orders(limit=-1)
+        with pytest.raises(ValueError, match="limit"):
+            manager.list_standing_orders(limit=0)
+        assert len(manager.list_standing_orders(limit=10 ** 9)) == 1
+    finally:
+        manager.close()
+
+
+def test_standing_orders_scoped_by_agent():
+    manager = MemoryManager(db_path=":memory:")
+    manager.create_schema()
+    try:
+        managr_id = manager.add_standing_order("managr rule", source="operator")
+        other_id = manager.add_standing_order(
+            "other planner rule", source="operator", agent="planner2")
+        assert [r["order_id"] for r in manager.list_standing_orders(agent="managr")] == [managr_id]
+        assert [r["order_id"] for r in manager.list_standing_orders(agent="planner2")] == [other_id]
+        # agent=None (the operator's list tool) still sees everything
+        assert len(manager.list_standing_orders()) == 2
     finally:
         manager.close()
