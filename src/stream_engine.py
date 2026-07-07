@@ -23,6 +23,7 @@ from src.text_tool_protocol import (
     TOOL_CALL_SYNTAX,
     decode_tool_call_payload,
 )
+from src.utils.model_utils import get_chat_template_for_model, get_current_kobold_model
 
 logger = logging.getLogger(__name__)
 
@@ -309,12 +310,41 @@ class StreamEngine:
 
     @staticmethod
     def _resolve_template_name(persona_config: Dict[str, Any]) -> str:
-        return (
-            persona_config.get("chat_template")
-            or os.environ.get("KOBOLD_CHAT_TEMPLATE")
-            or getattr(global_config, "KOBOLD_CHAT_TEMPLATE", "chatml")
-            or "chatml"
+        """Resolve the chat template name with fallbacks and model-aware detection.
+
+        Priority (highest to lowest):
+        1. Persona's explicit chat_template setting
+        2. KOBOLD_CHAT_TEMPLATE environment variable
+        3. KOBOLD_CHAT_TEMPLATE global config setting
+        4. Auto-detection from currently loaded model (if model="local")
+        5. Default "chatml" fallback
+        """
+        # Priority 1: explicit persona setting
+        explicit = persona_config.get("chat_template")
+        if explicit:
+            return explicit
+
+        # Priority 2-3: environment or config
+        env_or_config = (
+            os.environ.get("KOBOLD_CHAT_TEMPLATE")
+            or getattr(global_config, "KOBOLD_CHAT_TEMPLATE", None)
         )
+        if env_or_config:
+            return env_or_config
+
+        # Priority 4: auto-detect from loaded model if this persona uses "local"
+        if persona_config.get("model_name") == "local":
+            current_model = get_current_kobold_model()
+            if current_model:
+                auto_template = get_chat_template_for_model(current_model)
+                if auto_template:
+                    logger.info(
+                        f"Auto-detected chat template '{auto_template}' for model '{current_model}'"
+                    )
+                    return auto_template
+
+        # Priority 5: default fallback
+        return "chatml"
 
     @staticmethod
     def _params_from_legacy_dicts(

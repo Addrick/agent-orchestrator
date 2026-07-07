@@ -2,7 +2,9 @@
 
 import logging
 import os
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
+
+import httpx
 
 from src.personas import store as persona_store
 
@@ -177,3 +179,92 @@ def check_model_available(model_to_check: str) -> bool:
 
     logger.info(f"Model '{model_to_check}' not found in available models.")
     return False
+
+
+# --- Model-to-Chat-Template Lookup ---
+# Maps model name patterns (case-insensitive) to the correct chat template.
+# This ensures that when a local model is served via koboldcpp, the correct
+# tagging scheme is used (e.g., Gemma uses <start_of_turn>, not ChatML tags).
+# Patterns are checked in order; first match wins. More specific patterns must
+# come before their less-specific counterparts.
+MODEL_TO_CHAT_TEMPLATE: List[Tuple[str, str]] = [
+    # Gemma 4 models (26B/31B with thinking, E2B/E4B without)
+    ("gemma-4-31b-it", "gemma4-think"),
+    ("gemma-4-26b-a4b-it", "gemma4-think"),
+    ("gemma-4-e2b", "gemma4-e-nothink"),
+    ("gemma-4-e4b", "gemma4-e-nothink"),
+    ("gemma-4", "gemma4-think"),
+    # Gemma 2 and 3 models
+    ("gemma-2", "gemma"),
+    ("gemma-3", "gemma"),
+    ("gemma", "gemma"),
+    # Qwen models use ChatML
+    ("qwen", "chatml"),
+    # Llama 3 and 4 models
+    ("llama-3", "llama3"),
+    ("llama-4", "llama4"),
+    ("llama2", "llama2"),
+    # ChatML family (Mistral, Hermes, etc.)
+    ("chatml", "chatml"),
+    ("mistral", "chatml"),
+    ("hermes", "chatml"),
+]
+
+
+def get_chat_template_for_model(model_name: Optional[str]) -> Optional[str]:
+    """Determine the appropriate chat template for a given model name.
+
+    Args:
+        model_name: The name of the model to check (case-insensitive, can be None).
+
+    Returns:
+        The template name (e.g., "gemma", "chatml", "llama3") or None if no match.
+    """
+    if not model_name:
+        return None
+
+    model_lower = model_name.lower()
+    for pattern, template in MODEL_TO_CHAT_TEMPLATE:
+        if pattern in model_lower:
+            return template
+
+    return None
+
+
+def get_current_kobold_model() -> Optional[str]:
+    """Query koboldcpp to get the currently loaded model name.
+
+    Uses the /api/extra/version endpoint to retrieve model metadata.
+    Returns None on failure (no connection, no model loaded, etc.).
+
+    This is best-effort: the return value is logged but failures are silent
+    so they don't interrupt initialization.
+    """
+    from config import global_config
+
+    try:
+        raw = os.environ.get("LOCAL_LLM_URL", global_config.LOCAL_LLM_URL).rstrip("/")
+        if raw.endswith("/v1"):
+            raw = raw[:-3]
+        url = f"{raw}/api/extra/version"
+
+        # Short timeout: this is a quick bootstrap check, not a critical path.
+        # Failure means we just don't auto-assign the template.
+        response = httpx.get(url, timeout=2.0)
+        if response.status_code == 200:
+            data = response.json()
+            # KoboldCPP's /api/extra/version returns various fields depending on
+            # server version. Common names: "model" (newer) or just the name in
+            # other metadata. We try the most common first.
+            model_name = (
+                data.get("model") or
+                data.get("title") or
+                data.get("current_model")
+            )
+            if model_name:
+                logger.debug(f"Detected koboldcpp model: {model_name}")
+                return model_name
+    except Exception as e:
+        logger.debug(f"Could not query koboldcpp model: {e}")
+
+    return None

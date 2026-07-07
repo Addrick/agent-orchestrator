@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 from src.utils import model_utils
 
 
@@ -109,3 +109,79 @@ def test_check_model_available(mock_get_list):
 def test_get_model_prefix(model_name, expected):
     """The agy family must resolve so routing/registration recognise it."""
     assert model_utils.get_model_prefix(model_name) == expected
+
+
+@pytest.mark.parametrize("model_name,expected_template", [
+    # Gemma 4 models
+    ("gemma-4-31b-it", "gemma4-think"),
+    ("GEMMA-4-31B-IT", "gemma4-think"),
+    ("gemma-4-26b-a4b-it", "gemma4-think"),
+    ("gemma-4-e2b", "gemma4-e-nothink"),
+    ("gemma-4-e4b", "gemma4-e-nothink"),
+    ("gemma-4", "gemma4-think"),
+    # Gemma 2 and 3 models
+    ("gemma-2-9b", "gemma"),
+    ("gemma-3-9b", "gemma"),
+    ("gemma", "gemma"),
+    # Qwen models
+    ("qwen", "chatml"),
+    ("qwen-32b", "chatml"),
+    # Llama models
+    ("llama-3-70b", "llama3"),
+    ("llama-4-70b", "llama4"),
+    ("llama2-70b", "llama2"),
+    # ChatML family
+    ("mistral-7b", "chatml"),
+    ("hermes-2", "chatml"),
+    ("chatml-test", "chatml"),
+    # No match
+    ("unknown-model", None),
+    (None, None),
+    ("", None),
+])
+def test_get_chat_template_for_model(model_name, expected_template):
+    """Model name pattern matching returns correct chat templates."""
+    assert model_utils.get_chat_template_for_model(model_name) == expected_template
+
+
+def test_get_current_kobold_model_connection_failure():
+    """get_current_kobold_model returns None when koboldcpp is unreachable."""
+    with patch('src.utils.model_utils.httpx.get') as mock_get:
+        mock_get.side_effect = Exception("Connection refused")
+        result = model_utils.get_current_kobold_model()
+        assert result is None
+
+
+def test_get_current_kobold_model_no_model():
+    """get_current_kobold_model returns None when no model field in response."""
+    with patch('src.utils.model_utils.httpx.get') as mock_get:
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"version": "1.70"}  # No model field
+        mock_get.return_value = mock_response
+        result = model_utils.get_current_kobold_model()
+        assert result is None
+
+
+@patch('src.utils.model_utils.httpx.get')
+def test_get_current_kobold_model_success(mock_get):
+    """get_current_kobold_model returns the model name from /api/extra/version."""
+    from unittest.mock import Mock
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {"model": "gemma-4-31b-it", "version": "1.70"}
+    mock_get.return_value = mock_response
+    result = model_utils.get_current_kobold_model()
+    assert result == "gemma-4-31b-it"
+
+
+@patch('src.utils.model_utils.httpx.get')
+def test_get_current_kobold_model_fallback_field(mock_get):
+    """get_current_kobold_model uses fallback fields if 'model' is not present."""
+    from unittest.mock import Mock
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {"title": "gemma-4-31b-it", "version": "1.70"}
+    mock_get.return_value = mock_response
+    result = model_utils.get_current_kobold_model()
+    assert result == "gemma-4-31b-it"
