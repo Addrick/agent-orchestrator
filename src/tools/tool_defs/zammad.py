@@ -12,6 +12,7 @@ ZAMMAD_TOOLS: List[Dict[str, Any]] = [
             "produces_untrusted": True,
             "irreversible": False,
             "locality": "network",
+            "exfil_capable": False,
             "sensitivity": "internal",
         },
         "function": {
@@ -37,6 +38,7 @@ ZAMMAD_TOOLS: List[Dict[str, Any]] = [
             "produces_untrusted": False,
             "irreversible": False,
             "locality": "network",
+            "exfil_capable": False,
             "sensitivity": "internal",
         },
         "function": {
@@ -80,13 +82,14 @@ ZAMMAD_TOOLS: List[Dict[str, Any]] = [
         "capabilities": {
             "produces_untrusted": False,
             "irreversible": False,
-            "irreversible_if": "src.tools.classifiers:add_note_irreversible_check",
             "locality": "network",
+            "exfil_capable": False,
             "sensitivity": "internal",
         },
         "function": {
             "name": "add_note_to_ticket",
-            "description": "Adds a new article (a note or comment) to an existing Zammad ticket. Requires the ticket's internal ID and the note's body.",
+            "description": "Writes an internal note (agent-only article, never customer-visible) on an "
+                           "existing Zammad ticket. Requires the ticket's internal ID and the note's body.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -97,11 +100,6 @@ ZAMMAD_TOOLS: List[Dict[str, Any]] = [
                     "body": {
                         "type": "string",
                         "description": "The content of the note to be added.",
-                    },
-                    "internal": {
-                        "type": "boolean",
-                        "description": "Set to true if the note is for internal agents only, false if it's visible to the customer. Defaults to false.",
-                        "default": False,
                     },
                 },
                 "required": ["ticket_id", "body"],
@@ -116,6 +114,7 @@ ZAMMAD_TOOLS: List[Dict[str, Any]] = [
             "produces_untrusted": True,
             "irreversible": False,
             "locality": "network",
+            "exfil_capable": False,
             "sensitivity": "internal",
         },
         "function": {
@@ -141,6 +140,7 @@ ZAMMAD_TOOLS: List[Dict[str, Any]] = [
             "produces_untrusted": False,
             "irreversible": True,
             "locality": "network",
+            "exfil_capable": False,
             "sensitivity": "internal",
         },
         "function": {
@@ -174,6 +174,7 @@ ZAMMAD_TOOLS: List[Dict[str, Any]] = [
             "produces_untrusted": False,
             "irreversible": False,
             "locality": "network",
+            "exfil_capable": False,
             "sensitivity": "pii",
         },
         "function": {
@@ -199,6 +200,7 @@ ZAMMAD_TOOLS: List[Dict[str, Any]] = [
             "produces_untrusted": False,
             "irreversible": False,
             "locality": "network",
+            "exfil_capable": False,
             "sensitivity": "pii",
         },
         "function": {
@@ -224,6 +226,7 @@ ZAMMAD_TOOLS: List[Dict[str, Any]] = [
             "produces_untrusted": False,
             "irreversible": False,
             "locality": "network",
+            "exfil_capable": False,
             "sensitivity": "pii",
         },
         "function": {
@@ -251,6 +254,7 @@ ZAMMAD_TOOLS: List[Dict[str, Any]] = [
             "produces_untrusted": False,
             "irreversible": True,
             "locality": "network",
+            "exfil_capable": False,
             "sensitivity": "pii",
         },
         "function": {
@@ -273,6 +277,7 @@ ZAMMAD_TOOLS: List[Dict[str, Any]] = [
             "produces_untrusted": False,
             "irreversible": True,
             "locality": "network",
+            "exfil_capable": False,
             "sensitivity": "internal",
         },
         "function": {

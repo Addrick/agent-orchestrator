@@ -51,6 +51,7 @@ PROPOSAL_TOOLS: List[Dict[str, Any]] = [
             "produces_untrusted": False,
             "irreversible": False,
             "locality": "network",
+            "exfil_capable": False,
             "sensitivity": "internal",
         },
         "function": {

@@ -33,10 +33,10 @@ def test_composition_rule_network_read_local_write():
 
 def test_composition_rule_untrusted_read_network_write():
     policy = ToolPolicy()
-    # web_search is untrusted:read, update_ticket is network:write
+    # web_search is untrusted:read, add_mcp_server is network:write
     tools = [
         next(t for t in ALL_TOOL_DEFINITIONS if t["function"]["name"] == "web_search"),
-        next(t for t in ALL_TOOL_DEFINITIONS if t["function"]["name"] == "update_ticket"),
+        next(t for t in ALL_TOOL_DEFINITIONS if t["function"]["name"] == "add_mcp_server"),
     ]
     
     errors = policy.validate_composition(tools)
@@ -91,12 +91,22 @@ def test_same_origin_breaks_when_foreign_egress_added():
 
 def test_local_untrusted_read_plus_network_write_is_foreign():
     # recall_memory is a local untrusted read (domain "local"); a poisoned
-    # memory hit driving a zammad write is cross-domain (local -> zammad) and
+    # memory hit driving an MCP write is cross-domain (local -> mcp) and
     # must trip Rule 2 — provenance is domain-tagged even for local reads.
     policy = ToolPolicy()
-    tools = _tools_by_name("recall_memory", "update_ticket")
+    tools = _tools_by_name("recall_memory", "add_mcp_server")
     errors = policy.validate_composition(tools)
-    assert any("untrusted:read + network:write" in e and "zammad" in e for e in errors)
+    assert any("untrusted:read + network:write" in e and "mcp" in e for e in errors)
+
+
+def test_zammad_writes_opted_out_of_exfil_accounting():
+    # All zammad tools are exfil_capable=False (internal-only instance, no
+    # customer-facing output): a foreign untrusted read + a zammad write must
+    # NOT trip Rule 2, because the zammad egress carries nothing outside
+    # trusted infra.
+    policy = ToolPolicy()
+    tools = _tools_by_name("web_search", "update_ticket", "add_note_to_ticket")
+    assert policy.validate_composition(tools) == []
 
 
 def test_triage_websearch_only_is_clean():

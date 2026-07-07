@@ -329,7 +329,7 @@ A composition rule can be deliberately suppressed for a persona with an **explic
 - Overrides survive `set tools` / `set tool_policy` edits (they are persona-level, not part of the policy dict) and persist as a top-level `explicit_overrides` key in the persona save file; legacy files that stored them inside `tool_policy` are migrated on load.
 
 ### Irreversibility Flags
-Some tools are marked as **IRREVERSIBLE** (e.g., `delete_user`). Others may be dynamically flagged based on their arguments—for example, `add_note_to_ticket` is flagged as irreversible if the note is visible to a customer (`internal: false`). These flags are surfaced in the approval dialogue to highlight high-stakes actions.
+Some tools are marked as **IRREVERSIBLE** (e.g., `delete_user`). Tools can also be dynamically flagged based on their arguments via an `irreversible_if` classifier (currently unused — `add_note_to_ticket` used one while it could write customer-visible notes; it is now internal-only). These flags are surfaced in the approval dialogue to highlight high-stakes actions.
 
 ### Credential Scoping
 Machine secrets — provider API keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVEAI_API_KEY`) and the Zammad API token — are kept out of the LLM's reach by design:
@@ -387,7 +387,7 @@ Tools are capabilities the LLM can invoke during a conversation. Available tools
 |------|-------------|
 | `create_ticket` | Create a new support ticket |
 | `update_ticket` | Modify ticket state, priority, owner, tags |
-| `add_note_to_ticket` | Append internal or public note |
+| `add_note_to_ticket` | Write an internal note (never customer-visible; a customer-facing reply tool will come later, classified as egress) |
 | `create_user` | Register a new customer |
 | `update_user` | Modify user details |
 | `delete_user` | Remove a user (irreversible) |

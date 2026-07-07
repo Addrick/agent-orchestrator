@@ -89,7 +89,6 @@ async def test_tool_create_and_update_lifecycle(tool_manager, zammad_client):
             "add_note_to_ticket",
             ticket_id=ticket_id,
             body="Follow-up Note",
-            internal=True
         )
         assert 'result' in response
         assert response['result']['ticket_id'] == ticket_id
