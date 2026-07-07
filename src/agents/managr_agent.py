@@ -17,6 +17,7 @@ from config.global_config import (
     MANAGR_PEER_ACTION_LIMIT,
     MANAGR_PROPOSAL_TTL_DAYS,
     MANAGR_MAX_PROPOSALS_PER_CYCLE,
+    MANAGR_STANDING_ORDERS_LIMIT,
 )
 from src.agents.base import Agent
 from src.proposals.schemas import build_submission_tool_schema, validate_proposal_args
@@ -254,6 +255,29 @@ class ManagrAgent(Agent):
             lines.append(line)
         return lines
 
+    def _standing_orders_section(self) -> Optional[str]:
+        """STANDING ORDERS block for LLM prompts (DP-281), newest first.
+
+        Deterministic context: operator guidance from the durable store, not
+        recall-dependent. Orders only ever enter that store through joy's
+        gated write tools (authenticated operator surface) — never from
+        ticket content — so injecting them verbatim is safe. Returns None
+        when there are no active orders (or on any store failure)."""
+        try:
+            rows = self.memory_manager.list_standing_orders(
+                status="active", limit=MANAGR_STANDING_ORDERS_LIMIT,
+            )
+            if not rows:
+                return None
+            lines = [f"- [{row['order_id']}] {row['order_text']}" for row in rows]
+        except Exception as e:
+            logger.warning(f"Could not fetch standing orders: {e}")
+            return None
+        return (
+            "STANDING ORDERS (operator guidance — these override your own "
+            "judgement; newest first):\n" + "\n".join(lines)
+        )
+
     # --- 2. Orient ---
 
     async def _gather_briefs(self, action_id: int, board: str) -> Dict[str, str]:
@@ -296,10 +320,23 @@ class ManagrAgent(Agent):
             )
             return None
 
-        sections = [f"BOARD SNAPSHOT:\n{board}"]
+        orders_section = self._standing_orders_section()
+        sections = []
+        if orders_section:
+            sections.append(orders_section)
+        sections.append(f"BOARD SNAPSHOT:\n{board}")
         for label, text in sorted(briefs.items()):
             sections.append(f"ANALYST BRIEF ({label}):\n{text}")
-        sections.append("Produce today's Manager's Report.")
+        instruction = "Produce today's Manager's Report."
+        if orders_section:
+            # Self-correction visibility: the operator verifies a correction
+            # took by reading this line in the next report.
+            instruction += (
+                " If any standing order changed what you would otherwise have "
+                "reported or proposed, add a short 'FEEDBACK APPLIED' line "
+                "saying which order and how."
+            )
+        sections.append(instruction)
         prompt = "\n\n".join(sections)
 
         step_id = self._log_step(
@@ -378,12 +415,18 @@ class ManagrAgent(Agent):
             logger.error(f"System persona '{MANAGR_PLANNER_NAME}' not found; skipping proposals.")
             return None, 0
 
+        # Orders constrain extraction too ("never propose priority changes
+        # for client X" must hold even when the report suggests one).
+        orders_section = self._standing_orders_section()
+        orders_block = f"{orders_section}\n\n" if orders_section else ""
         prompt = (
+            f"{orders_block}"
             f"MANAGER'S REPORT:\n{plan}\n\n"
             "Convert the report's SUGGESTED ACTIONS into concrete proposals by calling "
             "submit_proposals. Only emit actions of the allowed types; skip any suggestion "
-            "that does not fit an allowed action. Use ticket numbers exactly as they appear "
-            "in the report. If nothing fits, call submit_proposals with an empty list."
+            "that does not fit an allowed action or that a standing order forbids. Use "
+            "ticket numbers exactly as they appear in the report. If nothing fits, call "
+            "submit_proposals with an empty list."
         )
         step_id = self._log_step(
             action_id, "llm_step",

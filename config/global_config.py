@@ -229,6 +229,8 @@ MANAGR_PEER_ACTION_LIMIT = 5
 # Phase 1 proposal queue (DP-282)
 MANAGR_PROPOSAL_TTL_DAYS = 7          # pending proposals expire after this
 MANAGR_MAX_PROPOSALS_PER_CYCLE = 10   # cap on proposals stored per planning cycle
+# Standing orders (DP-281)
+MANAGR_STANDING_ORDERS_LIMIT = 20     # newest active orders injected per planning cycle
 # =============================================================================
 # --- Long-Term Memory Configuration ---
 # =============================================================================

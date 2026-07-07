@@ -52,6 +52,7 @@ def _make_agent(tickets=TICKETS, personas=None, send_result=True, agent_config=N
     chat_system.memory_manager = MagicMock()
     chat_system.memory_manager.log_agent_action = MagicMock(return_value=1)
     chat_system.memory_manager.get_relevant_agent_actions = MagicMock(return_value=[])
+    chat_system.memory_manager.list_standing_orders = MagicMock(return_value=[])
 
     zammad = MagicMock()
     zammad.search_tickets = MagicMock(return_value=tickets)
@@ -435,3 +436,94 @@ async def test_proposal_outcomes_skipped_when_disabled():
     await agent.deploy()
 
     agent.memory_manager.list_proposals.assert_not_called()
+
+
+# --- Standing orders injection (DP-281) ---
+
+def _orders(*texts):
+    return [{"order_id": i + 1, "order_text": t, "status": "active",
+             "created_at": "2026-07-07 08:00:00", "source": "operator"}
+            for i, t in enumerate(texts)]
+
+
+@pytest.mark.asyncio
+async def test_standing_orders_injected_into_planner_prompt():
+    agent, chat_system, zammad, router = _make_agent()
+    agent.memory_manager.list_standing_orders = MagicMock(
+        return_value=_orders("client Y tickets are always low priority"))
+    chat_system.text_engine.generate_response = AsyncMock(side_effect=[
+        _text("stale brief"), _text("patterns brief"), _text("THE PLAN"),
+    ])
+    agent.text_engine = chat_system.text_engine
+
+    await agent.deploy()
+
+    planner_call = chat_system.text_engine.generate_response.await_args_list[-1]
+    prompt = planner_call.kwargs["history_object"]["message_history"][-1]["content"]
+    assert "STANDING ORDERS" in prompt
+    assert "[1] client Y tickets are always low priority" in prompt
+    # Orders precede the board snapshot and arm the feedback-visibility line
+    assert prompt.index("STANDING ORDERS") < prompt.index("BOARD SNAPSHOT")
+    assert "FEEDBACK APPLIED" in prompt
+    # Analyst briefs must NOT get the orders (they analyze, they don't plan)
+    for call in chat_system.text_engine.generate_response.await_args_list[:2]:
+        brief_prompt = call.kwargs["history_object"]["message_history"][-1]["content"]
+        assert "STANDING ORDERS" not in brief_prompt
+    agent.memory_manager.list_standing_orders.assert_called_with(
+        status="active", limit=20)
+
+
+@pytest.mark.asyncio
+async def test_no_standing_orders_leaves_prompt_unchanged():
+    agent, chat_system, zammad, router = _make_agent()
+    chat_system.text_engine.generate_response = AsyncMock(side_effect=[
+        _text("stale brief"), _text("patterns brief"), _text("THE PLAN"),
+    ])
+    agent.text_engine = chat_system.text_engine
+
+    await agent.deploy()
+
+    planner_call = chat_system.text_engine.generate_response.await_args_list[-1]
+    prompt = planner_call.kwargs["history_object"]["message_history"][-1]["content"]
+    assert "STANDING ORDERS" not in prompt
+    assert "FEEDBACK APPLIED" not in prompt
+    assert prompt.endswith("Produce today's Manager's Report.")
+
+
+@pytest.mark.asyncio
+async def test_standing_orders_injected_into_extraction_prompt():
+    agent, chat_system, zammad, router = _make_agent(agent_config=_proposals_config())
+    agent.memory_manager.list_standing_orders = MagicMock(
+        return_value=_orders("never propose priority changes for client X"))
+    agent.memory_manager.create_proposal = MagicMock(return_value=11)
+    chat_system.text_engine.generate_response = AsyncMock(side_effect=[
+        _text("stale brief"), _text("patterns brief"), _text("THE PLAN"),
+        _tool_calls([{"action_type": "add_note",
+                      "args": {"ticket_number": 10001, "body": "check the printer"},
+                      "rationale": "needs follow-up"}]),
+    ])
+    agent.text_engine = chat_system.text_engine
+
+    await agent.deploy()
+
+    extract_call = chat_system.text_engine.generate_response.await_args_list[-1]
+    prompt = extract_call.kwargs["history_object"]["message_history"][-1]["content"]
+    assert "never propose priority changes for client X" in prompt
+    assert "standing order forbids" in prompt
+
+
+@pytest.mark.asyncio
+async def test_standing_orders_store_failure_does_not_break_cycle():
+    agent, chat_system, zammad, router = _make_agent()
+    agent.memory_manager.list_standing_orders = MagicMock(
+        side_effect=RuntimeError("db locked"))
+    chat_system.text_engine.generate_response = AsyncMock(side_effect=[
+        _text("stale brief"), _text("patterns brief"), _text("THE PLAN"),
+    ])
+    agent.text_engine = chat_system.text_engine
+
+    await agent.deploy()
+
+    outcome, _ = _final_outcome(agent)
+    assert outcome == "success"
+    assert router.send.await_args.kwargs["body"] == "THE PLAN"

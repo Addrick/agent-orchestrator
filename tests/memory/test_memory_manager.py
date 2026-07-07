@@ -2425,3 +2425,53 @@ def test_migration_proposals_idempotent(legacy_mem_manager):
     pid = _queue_proposal(legacy_mem_manager)
     legacy_mem_manager.create_schema()  # second run must not drop the table/rows
     assert legacy_mem_manager.get_proposal(pid) is not None
+
+# --- Standing_Orders table migration (DP-281) ---
+
+def test_migration_creates_standing_orders_table(legacy_mem_manager):
+    """create_schema() on a legacy DB (no Standing_Orders table) creates it."""
+    legacy_mem_manager.create_schema()
+    conn = legacy_mem_manager._get_connection()
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(Standing_Orders)")
+    columns = {row['name'] for row in cursor.fetchall()}
+    assert {'order_id', 'created_at', 'source', 'order_text', 'status',
+            'retired_at', 'retire_note'} == columns
+    cursor.execute("PRAGMA index_list(Standing_Orders)")
+    names = {row['name'] for row in cursor.fetchall()}
+    assert 'idx_standing_order_status' in names
+
+
+def test_migration_standing_orders_usable_and_data_preserved(legacy_mem_manager):
+    """Standing-order CRUD works on a migrated DB and legacy rows survive."""
+    legacy_mem_manager.create_schema()
+    order_id = legacy_mem_manager.add_standing_order(
+        "client Y tickets are always low priority", source="operator")
+    rows = legacy_mem_manager.list_standing_orders()
+    assert [r["order_id"] for r in rows] == [order_id]
+    assert legacy_mem_manager.retire_standing_order(order_id, "obsolete") is True
+    assert legacy_mem_manager.retire_standing_order(order_id) is False
+    # Pre-existing Agent_Actions rows are untouched
+    actions = legacy_mem_manager.get_agent_actions("dispatch")
+    assert len(actions) == 2
+
+
+def test_migration_standing_orders_idempotent(legacy_mem_manager):
+    legacy_mem_manager.create_schema()
+    order_id = legacy_mem_manager.add_standing_order("keep it", source="operator")
+    legacy_mem_manager.create_schema()  # second run must not drop the table/rows
+    assert legacy_mem_manager.list_standing_orders()[0]["order_id"] == order_id
+
+
+def test_standing_orders_newest_first_and_limit():
+    manager = MemoryManager(db_path=":memory:")
+    manager.create_schema()
+    try:
+        ids = [manager.add_standing_order(f"order {i}", source="operator")
+               for i in range(3)]
+        rows = manager.list_standing_orders(limit=2)
+        # Same-second timestamps: order_id DESC tiebreak keeps newest first
+        assert [r["order_id"] for r in rows] == [ids[2], ids[1]]
+        assert manager.list_standing_orders(status=None, limit=10)[0]["order_id"] == ids[2]
+    finally:
+        manager.close()

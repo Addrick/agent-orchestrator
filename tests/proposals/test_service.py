@@ -51,7 +51,9 @@ def test_integration_registers_all_proposal_tools(mem_manager):
     tool_manager = MagicMock()
     integration.register_tools(tool_manager)
     registered = {call.args[0] for call in tool_manager.register.call_args_list}
-    assert registered == {"list_proposals", "approve_proposal", "deny_proposal"}
+    assert registered == {"list_proposals", "approve_proposal", "deny_proposal",
+                          "add_standing_order", "list_standing_orders",
+                          "retire_standing_order"}
 
 
 @pytest.mark.asyncio
@@ -156,3 +158,61 @@ async def test_expired_proposal_cannot_be_approved(handler, mem_manager):
     with pytest.raises(ValueError, match="not pending"):
         await handler._approve_proposal(pid)
     handler.executor.execute.assert_not_awaited()
+
+
+# --- Standing orders (DP-281) ---
+
+
+@pytest.mark.asyncio
+async def test_add_standing_order_records_and_audits(handler, mem_manager):
+    result = await handler._add_standing_order("client Y tickets are always low priority")
+
+    assert result["status"] == "active"
+    order_id = result["order_id"]
+    rows = mem_manager.list_standing_orders()
+    assert len(rows) == 1
+    assert rows[0]["order_text"] == "client Y tickets are always low priority"
+    assert rows[0]["source"] == "operator"
+    assert _audit_events(mem_manager) == [("standing_order_added", order_id)]
+
+
+@pytest.mark.asyncio
+async def test_add_standing_order_rejects_empty_text(handler, mem_manager):
+    with pytest.raises(ValueError, match="empty"):
+        await handler._add_standing_order("   ")
+    assert mem_manager.list_standing_orders() == []
+
+
+@pytest.mark.asyncio
+async def test_list_standing_orders_filters_and_all(handler, mem_manager):
+    active = (await handler._add_standing_order("keep flagging stale tickets"))["order_id"]
+    retired = (await handler._add_standing_order("old rule"))["order_id"]
+    await handler._retire_standing_order(retired)
+
+    default = await handler._list_standing_orders()
+    assert [o["order_id"] for o in default["orders"]] == [active]
+
+    everything = await handler._list_standing_orders(status="all")
+    assert everything["count"] == 2
+
+    retired_only = await handler._list_standing_orders(status="retired")
+    assert [o["order_id"] for o in retired_only["orders"]] == [retired]
+
+
+@pytest.mark.asyncio
+async def test_retire_standing_order_audits_and_rejects_double(handler, mem_manager):
+    order_id = (await handler._add_standing_order("stop flagging ticket #123"))["order_id"]
+
+    result = await handler._retire_standing_order(order_id, note="ticket closed")
+    assert result["status"] == "retired"
+    rows = mem_manager.list_standing_orders(status="retired")
+    assert rows[0]["retire_note"] == "ticket closed"
+    assert _audit_events(mem_manager) == [
+        ("standing_order_added", order_id),
+        ("standing_order_retired", order_id),
+    ]
+
+    with pytest.raises(ValueError, match="No active standing order"):
+        await handler._retire_standing_order(order_id)
+    with pytest.raises(ValueError, match="No active standing order"):
+        await handler._retire_standing_order(9999)

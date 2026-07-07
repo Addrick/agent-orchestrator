@@ -287,6 +287,18 @@ class MemoryManager:
             );
             CREATE INDEX IF NOT EXISTS idx_proposal_status ON Proposals (status, created_at);
             CREATE INDEX IF NOT EXISTS idx_proposal_acceptance ON Proposals (agent_name, action_type, status);
+
+            CREATE TABLE IF NOT EXISTS Standing_Orders (
+                order_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TIMESTAMP NOT NULL,
+                source TEXT NOT NULL,
+                order_text TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active'
+                    CHECK(status IN ('active', 'retired')),
+                retired_at TIMESTAMP,
+                retire_note TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_standing_order_status ON Standing_Orders (status, created_at);
             """
             conn.executescript(schema_sql)
             conn.commit()
@@ -1379,6 +1391,49 @@ class MemoryManager:
                 except (TypeError, json.JSONDecodeError):
                     pass
         return row
+
+    def add_standing_order(self, order_text: str, source: str) -> int:
+        """Insert an active standing order (DP-281). `source` records the
+        operator surface it entered through — orders must only ever originate
+        from authenticated operator surfaces, never from model output."""
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                """INSERT INTO Standing_Orders (created_at, source, order_text, status)
+                   VALUES (?, ?, ?, 'active')""",
+                (self._utc_stamp(datetime.now(timezone.utc)), source, order_text),
+            )
+            conn.commit()
+            return cast(int, cursor.lastrowid)
+
+    def list_standing_orders(self, status: Optional[str] = "active",
+                             limit: int = 50) -> List[Dict[str, Any]]:
+        """List standing orders, newest first. status=None returns all."""
+        where = " WHERE status = ?" if status is not None else ""
+        params: List[Any] = [status] if status is not None else []
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                f"SELECT * FROM Standing_Orders{where} ORDER BY created_at DESC, order_id DESC LIMIT ?",
+                (*params, limit))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def retire_standing_order(self, order_id: int, note: Optional[str] = None) -> bool:
+        """Retire an ACTIVE standing order. Returns False when the order is
+        missing or already retired. Orders are never deleted — the retired
+        row (with note) keeps the operator-guidance history auditable."""
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                """UPDATE Standing_Orders SET status = 'retired', retired_at = ?, retire_note = ?
+                   WHERE order_id = ? AND status = 'active'""",
+                (self._utc_stamp(datetime.now(timezone.utc)), note, order_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
 
     def mark_trusted(self, summary_id: int, operator_id: str, reason: str) -> bool:
         """Mark a memory summary as trusted (untrusted=0)."""
