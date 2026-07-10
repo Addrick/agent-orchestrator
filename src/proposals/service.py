@@ -19,6 +19,13 @@ logger = logging.getLogger(__name__)
 OPERATOR_ID = "operator"
 
 
+def _expand_status(status: str) -> Optional[str]:
+    """Map the tool-surface 'all' sentinel to the store's None (no filter).
+    Shared by every listing tool on the proposals binding so the sentinel
+    cannot drift between them."""
+    return None if status == "all" else status
+
+
 class ProposalIntegration(ServiceIntegration):
     """
     Service integration for the proposal queue (DP-282).
@@ -39,6 +46,7 @@ class ProposalIntegration(ServiceIntegration):
 
     def register_tools(self, tool_manager: "ToolManager") -> None:
         ProposalToolHandler(self._memory_manager, self._executor).register(tool_manager)
+        StandingOrderToolHandler(self._memory_manager).register(tool_manager)
 
 
 class ProposalToolHandler:
@@ -56,8 +64,7 @@ class ProposalToolHandler:
     async def _list_proposals(self, status: str = "pending", limit: int = 10) -> Dict[str, Any]:
         logger.info(f"Executing tool: list_proposals status={status} limit={limit}")
         expired = self.memory_manager.expire_stale_proposals()
-        list_status: Optional[str] = None if status == "all" else status
-        rows = self.memory_manager.list_proposals(status=list_status, limit=limit)
+        rows = self.memory_manager.list_proposals(status=_expand_status(status), limit=limit)
         proposals: List[Dict[str, Any]] = [
             {
                 "proposal_id": row["proposal_id"],
@@ -138,3 +145,66 @@ class ProposalToolHandler:
             metadata={"action_type": proposal["action_type"], "args": proposal["action_args"]},
         )
         return {"proposal_id": proposal_id, "status": "denied", "reason": reason}
+
+
+class StandingOrderToolHandler:
+    """Registers the standing-order tools (DP-281) with a ToolManager.
+
+    Separate from ProposalToolHandler: operator-guidance management needs
+    only the store, never the ProposalExecutor, so it must not drag the
+    proposal execution stack into construction. Both handlers ride the same
+    'proposals' service binding (one operator surface, one grant)."""
+
+    def __init__(self, memory_manager: "MemoryManager") -> None:
+        self.memory_manager = memory_manager
+
+    def register(self, manager: "ToolManager") -> None:
+        manager.register("add_standing_order", self._add_standing_order)
+        manager.register("list_standing_orders", self._list_standing_orders)
+        manager.register("retire_standing_order", self._retire_standing_order)
+
+    async def _add_standing_order(self, order_text: str) -> Dict[str, Any]:
+        logger.info("Executing tool: add_standing_order")
+        text = order_text.strip()
+        if not text:
+            raise ValueError("Standing order text must not be empty.")
+        order_id = self.memory_manager.add_standing_order(text, source=OPERATOR_ID)
+        self.memory_manager.log_audit_event(
+            event_type="standing_order_added",
+            target_id=order_id,
+            operator_id=OPERATOR_ID,
+            prior_state=None,
+            new_state="active",
+            reason=text[:500],
+        )
+        return {"order_id": order_id, "status": "active", "order_text": text}
+
+    async def _list_standing_orders(self, status: str = "active", limit: int = 20) -> Dict[str, Any]:
+        logger.info(f"Executing tool: list_standing_orders status={status} limit={limit}")
+        rows = self.memory_manager.list_standing_orders(
+            status=_expand_status(status), limit=limit)
+        orders = [
+            {
+                "order_id": row["order_id"],
+                "created_at": str(row.get("created_at", "")),
+                "status": row["status"],
+                "order_text": row["order_text"],
+                "retire_note": row.get("retire_note"),
+            }
+            for row in rows
+        ]
+        return {"count": len(orders), "orders": orders}
+
+    async def _retire_standing_order(self, order_id: int, note: Optional[str] = None) -> Dict[str, Any]:
+        logger.info(f"Executing tool: retire_standing_order id={order_id}")
+        if not self.memory_manager.retire_standing_order(order_id, note):
+            raise ValueError(f"No active standing order with id {order_id}.")
+        self.memory_manager.log_audit_event(
+            event_type="standing_order_retired",
+            target_id=order_id,
+            operator_id=OPERATOR_ID,
+            prior_state="active",
+            new_state="retired",
+            reason=note,
+        )
+        return {"order_id": order_id, "status": "retired", "note": note}

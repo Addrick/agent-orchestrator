@@ -17,8 +17,10 @@ from config.global_config import (
     MANAGR_PEER_ACTION_LIMIT,
     MANAGR_PROPOSAL_TTL_DAYS,
     MANAGR_MAX_PROPOSALS_PER_CYCLE,
+    MANAGR_STANDING_ORDERS_LIMIT,
 )
 from src.agents.base import Agent
+from src.memory.memory_manager import ALLOWED_STANDING_ORDER_SOURCES
 from src.proposals.schemas import build_submission_tool_schema, validate_proposal_args
 from src.chat_system import ChatSystem
 from src.clients.notification import NotificationRouter
@@ -26,6 +28,14 @@ from src.clients.zammad_client import ZammadClient
 from src.persona import Persona
 
 logger = logging.getLogger(__name__)
+
+# Prepended to the digest when the standing-orders store could not be read:
+# the operator must see that their corrections were NOT applied this cycle,
+# not discover it from a re-flagged ticket.
+STANDING_ORDERS_DEGRADED_NOTICE = (
+    "WARNING: standing orders could not be loaded this cycle; the report "
+    "below was produced WITHOUT operator guidance."
+)
 
 
 class ManagrAgent(Agent):
@@ -86,7 +96,11 @@ class ManagrAgent(Agent):
                 return
 
             briefs = await self._gather_briefs(action_id, board)
-            plan = await self._make_plan(action_id, board, briefs)
+            # One read for the whole cycle: plan and extraction must see the
+            # same order set (the calls straddle LLM awaits, and joy's
+            # add/retire tools run concurrently on the same store).
+            orders_section, orders_degraded = self._standing_orders_section()
+            plan = await self._make_plan(action_id, board, briefs, orders_section)
             if plan is None:
                 self._finalize_action(
                     action_id, "failed", {"reason": "planner returned no report"},
@@ -97,10 +111,15 @@ class ManagrAgent(Agent):
             proposal_summary, proposals_queued = None, 0
             if self.agent_config.get("proposals_enabled", False):
                 proposal_summary, proposals_queued = await self._extract_proposals(
-                    action_id, plan,
+                    action_id, plan, orders_section,
                 )
 
             digest = f"{plan}\n\n{proposal_summary}" if proposal_summary else plan
+            if orders_degraded:
+                # The degraded cycle must be operator-visible, not just a log
+                # line: the operator otherwise believes their corrections were
+                # in force. (No audit row here — the same store just failed.)
+                digest = f"{STANDING_ORDERS_DEGRADED_NOTICE}\n\n{digest}"
             sent_count = await self._send_digest(action_id, digest)
             self._finalize_action(
                 action_id,
@@ -109,6 +128,7 @@ class ManagrAgent(Agent):
                     "sent_targets": sent_count,
                     "briefs": sorted(briefs.keys()),
                     "proposals_queued": proposals_queued,
+                    "standing_orders_degraded": orders_degraded,
                     # Excerpt feeds next cycle's action-history injection, so
                     # the planner sees what it reported last time.
                     "plan_excerpt": plan[:1500],
@@ -254,6 +274,46 @@ class ManagrAgent(Agent):
             lines.append(line)
         return lines
 
+    def _standing_orders_section(self) -> Tuple[Optional[str], bool]:
+        """STANDING ORDERS block for LLM prompts (DP-281), newest first.
+
+        Deterministic context: operator guidance from the durable store, not
+        recall-dependent. Orders only ever enter that store through joy's
+        gated write tools (authenticated operator surface) — never from
+        ticket content — and rows whose source is not on the operator
+        allowlist are skipped here too, so a row smuggled past the store
+        guard still never reaches a prompt. Fetched once per cycle in
+        deploy(): the plan and the proposal extraction must be constrained
+        by the same order set, and an add/retire landing between two reads
+        would silently split them.
+
+        Returns (section, degraded): section is None when there are no
+        injectable orders; degraded is True when the store could not be
+        read, so the cycle can tell the operator the guidance was NOT
+        applied instead of failing open silently."""
+        try:
+            rows = self.memory_manager.list_standing_orders(
+                status="active", limit=MANAGR_STANDING_ORDERS_LIMIT,
+                agent=self.agent_name,
+            )
+        except Exception as e:
+            logger.warning(f"Could not fetch standing orders: {e}")
+            return None, True
+        injectable = [r for r in rows if r.get("source") in ALLOWED_STANDING_ORDER_SOURCES]
+        for row in rows:
+            if row.get("source") not in ALLOWED_STANDING_ORDER_SOURCES:
+                logger.error(
+                    f"Standing order {row.get('order_id')} has non-operator "
+                    f"source '{row.get('source')}'; refusing to inject it."
+                )
+        if not injectable:
+            return None, False
+        lines = [f"- [{row['order_id']}] {row['order_text']}" for row in injectable]
+        return (
+            "STANDING ORDERS (operator guidance — these override your own "
+            "judgement; newest first):\n" + "\n".join(lines)
+        ), False
+
     # --- 2. Orient ---
 
     async def _gather_briefs(self, action_id: int, board: str) -> Dict[str, str]:
@@ -283,6 +343,7 @@ class ManagrAgent(Agent):
 
     async def _make_plan(
         self, action_id: int, board: str, briefs: Dict[str, str],
+        orders_section: Optional[str] = None,
     ) -> Optional[str]:
         """Single planning call over the snapshot + briefs."""
         persona = self.chat_system.personas.get(MANAGR_PLANNER_NAME)
@@ -296,10 +357,22 @@ class ManagrAgent(Agent):
             )
             return None
 
-        sections = [f"BOARD SNAPSHOT:\n{board}"]
+        sections = []
+        if orders_section:
+            sections.append(orders_section)
+        sections.append(f"BOARD SNAPSHOT:\n{board}")
         for label, text in sorted(briefs.items()):
             sections.append(f"ANALYST BRIEF ({label}):\n{text}")
-        sections.append("Produce today's Manager's Report.")
+        instruction = "Produce today's Manager's Report."
+        if orders_section:
+            # Self-correction visibility: the operator verifies a correction
+            # took by reading this line in the next report.
+            instruction += (
+                " If any standing order changed what you would otherwise have "
+                "reported or proposed, add a short 'FEEDBACK APPLIED' line "
+                "saying which order and how."
+            )
+        sections.append(instruction)
         prompt = "\n\n".join(sections)
 
         step_id = self._log_step(
@@ -364,6 +437,7 @@ class ManagrAgent(Agent):
 
     async def _extract_proposals(
         self, action_id: int, plan: str,
+        orders_section: Optional[str] = None,
     ) -> Tuple[Optional[str], int]:
         """Convert the report's suggested actions into durable proposal rows.
 
@@ -378,13 +452,21 @@ class ManagrAgent(Agent):
             logger.error(f"System persona '{MANAGR_PLANNER_NAME}' not found; skipping proposals.")
             return None, 0
 
-        prompt = (
-            f"MANAGER'S REPORT:\n{plan}\n\n"
+        # Orders constrain extraction too ("never propose priority changes
+        # for client X" must hold even when the report suggests one). The
+        # section is the same object _make_plan saw — one fetch per cycle.
+        sections = []
+        if orders_section:
+            sections.append(orders_section)
+        sections.append(f"MANAGER'S REPORT:\n{plan}")
+        sections.append(
             "Convert the report's SUGGESTED ACTIONS into concrete proposals by calling "
             "submit_proposals. Only emit actions of the allowed types; skip any suggestion "
-            "that does not fit an allowed action. Use ticket numbers exactly as they appear "
-            "in the report. If nothing fits, call submit_proposals with an empty list."
+            "that does not fit an allowed action or that a standing order forbids. Use "
+            "ticket numbers exactly as they appear in the report. If nothing fits, call "
+            "submit_proposals with an empty list."
         )
+        prompt = "\n\n".join(sections)
         step_id = self._log_step(
             action_id, "llm_step",
             action_payload={"persona": MANAGR_PLANNER_NAME, "purpose": "extract_proposals"},
