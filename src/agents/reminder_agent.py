@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+from config.global_config import QUARANTINE_TAGS
 from src.agents.base import Agent
 from src.chat_system import ChatSystem
 from src.clients.notification import NotificationRouter
@@ -69,11 +70,12 @@ class ReminderAgent(Agent):
             for ticket in tickets:
                 requester_name, user_link = await self._get_user_info(ticket.get('customer_id'))
                 time_str = self._calculate_time_diff(ticket.get('updated_at'), now_utc)
-                
+
                 base_url = self.zammad_client.api_url.rstrip('/')
                 ticket_link = f"{base_url}/#ticket/zoom/{ticket['id']}"
-                
-                line = f"• [**#{ticket.get('number')}** {ticket.get('title')}]({ticket_link}) — [{requester_name}]({user_link}) (Updated {time_str})"
+
+                title = await self._safe_title(ticket)
+                line = f"• [**#{ticket.get('number')}** {title}]({ticket_link}) — [{requester_name}]({user_link}) (Updated {time_str})"
                 reminder_lines.append(line)
                 ticket_ids.append(ticket['id'])
 
@@ -101,6 +103,23 @@ class ReminderAgent(Agent):
 
         except Exception as e:
             logger.error(f"Failed to process summary: {e}", exc_info=True)
+
+    async def _safe_title(self, ticket: Dict[str, Any]) -> str:
+        """Ticket title for the outbound summary, with quarantined tickets'
+        titles masked (DP-288): a quarantined title is customer-controlled
+        phishing bait and must not be relayed to notification channels.
+        Search results carry no tags, so this fetches them; an unknown tag
+        state fails closed (title withheld, ticket still listed)."""
+        try:
+            tags = await asyncio.to_thread(
+                self.zammad_client.get_tags, ticket_id=ticket['id'])
+        except Exception as e:
+            logger.warning(f"Could not fetch tags for ticket {ticket.get('id')}: {e}")
+            return "[title withheld: tag state unknown]"
+        quarantined = [t for t in (tags or []) if t in QUARANTINE_TAGS]
+        if quarantined:
+            return f"[CONTENT QUARANTINED: {'/'.join(quarantined)} — security item]"
+        return str(ticket.get('title', 'No Title'))
 
     async def _dispatch_to_target(self, target: Dict[str, str], subject: str, body: str, ticket_id: int) -> bool:
         """Helper to send notification to a specific target (channel + recipient)."""

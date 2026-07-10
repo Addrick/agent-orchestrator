@@ -219,11 +219,15 @@ def test_format_ticket_line_is_defensive():
     full = agent._format_ticket_line(
         {"number": "1", "title": "T", "state": "open", "priority": "3 high",
          "created_at": "2026-07-01T12:00:00Z", "updated_at": "2026-07-04T09:00:00Z"},
-        now,
+        now, tags=[],
     )
     assert full == "- #1 T | state=open | priority=3 high | age=3d | last_update=3h"
-    bare = agent._format_ticket_line({"id": 7}, now)
+    bare = agent._format_ticket_line({"id": 7}, now, tags=[])
     assert bare == "- #7 No Title"
+    # tags omitted/None = tag state unknown = title withheld (fail-closed)
+    unknown = agent._format_ticket_line({"id": 7, "title": "bait"}, now)
+    assert "bait" not in unknown
+    assert "title withheld" in unknown
 
 
 def test_resolve_recipient_mappings():
@@ -616,9 +620,10 @@ async def test_untagged_tickets_render_with_tags_and_title():
 
 
 @pytest.mark.asyncio
-async def test_tag_fetch_failure_falls_back_to_untagged_line():
-    """A dead tags API must not kill the report cycle; the affected line
-    falls back to normal rendering (failure is logged loudly)."""
+async def test_tag_fetch_failure_fails_closed_withholding_titles():
+    """A dead tags API must not kill the report cycle, but it must not expose
+    titles either: unknown tag state = quarantine unverifiable = title
+    withheld for the cycle (fail-closed)."""
     agent, chat_system, zammad, router = _make_agent()
     zammad.get_tags = MagicMock(side_effect=RuntimeError("api down"))
     chat_system.text_engine.generate_response = AsyncMock(side_effect=[
@@ -632,4 +637,7 @@ async def test_tag_fetch_failure_falls_back_to_untagged_line():
     assert outcome == "success"
     planner_call = chat_system.text_engine.generate_response.await_args_list[-1]
     prompt = planner_call.kwargs["history_object"]["message_history"][-1]["content"]
-    assert "#10001 Printer offline at front desk" in prompt
+    assert "Printer offline at front desk" not in prompt
+    assert "title withheld: tag state unknown" in prompt
+    # Ticket numbers survive so the report can still reference the tickets
+    assert "#10001" in prompt

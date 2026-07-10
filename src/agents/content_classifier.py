@@ -128,15 +128,17 @@ def parse_classification(response: Optional[Dict[str, Any]]) -> Optional[Classif
     rejected outright, never coerced."""
     if not response or response.get("type") != "tool_calls":
         return None
-    for call in response.get("calls", []):
-        if call.get("name") != "submit_classification":
+    for call in response.get("calls") or []:
+        if not isinstance(call, dict) or call.get("name") != "submit_classification":
             continue
-        args = call.get("arguments", {})
+        args = call.get("arguments") or {}
         if isinstance(args, str):
             try:
                 args = json.loads(args)
             except json.JSONDecodeError:
-                return None
+                continue  # malformed call; a later one may still be usable
+        if not isinstance(args, dict):
+            continue
         label = args.get("label")
         if label not in CLASSIFICATION_LABELS:
             logger.warning(f"Classifier emitted unknown label {label!r}; rejecting.")
@@ -168,6 +170,12 @@ class ContentClassifier:
         """Classify ticket content. Returns None when no verdict could be
         produced (missing persona, engine failure, unusable response) — the
         caller proceeds unclassified, matching pre-DP-288 behavior."""
+        # Rough clamp before any regex/split work: a pathological multi-MB
+        # body must not burn CPU/RAM in pre-signal scanning. 2x the prompt
+        # budget keeps forwarded-mail markers beyond the final clip visible
+        # to detect_pre_signals.
+        title = (title or "")[:500]
+        body = (body or "")[:CLASSIFIER_MAX_CONTENT_CHARS * 2]
         signals = detect_pre_signals(title, body)
         short_circuit = classify_from_pre_signals(signals)
         if short_circuit:

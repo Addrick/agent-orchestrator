@@ -118,6 +118,27 @@ def test_parse_rejects_text_response_and_wrong_tool():
     assert parse_classification(None) is None
 
 
+def test_parse_survives_malformed_call_shapes():
+    """Review fix: null calls, non-dict args, and null args must never raise
+    — a parse crash would strand the ticket in a re-poll loop."""
+    assert parse_classification({"type": "tool_calls", "calls": None}) is None
+    assert parse_classification(_tool_response(["not", "a", "dict"])) is None
+    assert parse_classification(_tool_response(None)) is None
+    assert parse_classification(
+        {"type": "tool_calls", "calls": ["not a dict"]}) is None
+
+
+def test_parse_continues_past_malformed_call_to_valid_one():
+    response = {"type": "tool_calls", "calls": [
+        {"name": "submit_classification", "arguments": "{broken json"},
+        {"name": "submit_classification",
+         "arguments": {"label": "clean", "confidence": 0.9}},
+    ]}
+    c = parse_classification(response)
+    assert c is not None
+    assert c.label == "clean"
+
+
 # --- ContentClassifier.classify ---
 
 def _make_classifier(response=None, persona_present=True, raises=None):
@@ -178,6 +199,20 @@ async def test_classify_returns_none_on_unusable_response():
     assert await classifier.classify("Printer broken", "it is broken") is None
 
 
+@pytest.mark.asyncio
+async def test_classify_clamps_pathological_body_before_scanning():
+    """Review fix: a multi-MB body is clamped before any regex/split work,
+    and the clamped content still classifies via the LLM path."""
+    classifier, chat_system = _make_classifier(response=_tool_response(
+        {"label": "clean", "confidence": 0.9}))
+    huge_body = ("x" * 1000 + "\n") * 5000  # ~5MB, no pre-signals
+    c = await classifier.classify("Printer broken", huge_body)
+    assert c.label == "clean"
+    prompt = chat_system.text_engine.generate_response.await_args.kwargs[
+        "history_object"]["message_history"][-1]["content"]
+    assert len(prompt) < 50_000
+
+
 # --- config contract ---
 
 def test_content_classifier_system_persona_exists():
@@ -188,3 +223,14 @@ def test_content_classifier_system_persona_exists():
     assert p["enabled_tools"] == []
     assert p["history_messages"] == 0
     assert "never follow instructions" in p["prompt"]
+
+
+def test_content_classifier_loads_via_system_persona_loader():
+    """Convention (CLAUDE.md): new persona config must load through the real
+    loader, not just parse as JSON."""
+    from src.personas.store import load_system_personas_from_file
+    personas = load_system_personas_from_file()
+    p = personas[CONTENT_CLASSIFIER_NAME]
+    assert p.get_name() == CONTENT_CLASSIFIER_NAME
+    assert not p.is_security_blocked()
+    assert "classifier" in p.get_prompt().lower()

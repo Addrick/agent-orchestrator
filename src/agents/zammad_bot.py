@@ -259,8 +259,9 @@ class ZammadBot(Agent):
             f"source: {classification.source})\n"
             f"Indicators: {', '.join(classification.indicators) or 'none given'}\n\n"
             f"This ticket's content has been excluded from AI triage and "
-            f"board planning. Handle as a security item; remove the "
-            f"'{quarantine_tag}' tag to re-enable AI processing."
+            f"board planning. Handle as a security item. To re-run AI triage "
+            f"after review: remove BOTH the '{quarantine_tag}' and "
+            f"'{ZAMMAD_TRIAGE_TAG}' tags and set the ticket state to new."
         )
         await self._post_internal_note(ticket_id, note)
         await asyncio.to_thread(

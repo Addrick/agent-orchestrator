@@ -166,7 +166,7 @@ class ManagrAgent(Agent):
         lines = [f"OPEN TICKETS ({len(tickets)}):"]
         for t in tickets:
             lines.append(self._format_ticket_line(
-                t, now, tags=tags_by_id.get(t.get("id"), []),
+                t, now, tags=tags_by_id.get(t.get("id")),
             ))
 
         peer_lines = self._recent_peer_activity()
@@ -186,23 +186,27 @@ class ManagrAgent(Agent):
             board = board[:MANAGR_MAX_BOARD_CHARS] + "\n...[snapshot truncated]"
         return board
 
-    async def _fetch_ticket_tags(self, tickets: List[Dict[str, Any]]) -> Dict[Any, List[str]]:
-        """Tags per ticket id (concurrent). A failed fetch yields [] for that
-        ticket — its line falls back to un-tagged rendering (and its title is
-        exposed), so the failure is logged loudly rather than swallowed."""
-        async def fetch(ticket: Dict[str, Any]) -> Tuple[Any, List[str]]:
+    async def _fetch_ticket_tags(
+        self, tickets: List[Dict[str, Any]],
+    ) -> Dict[Any, Optional[List[str]]]:
+        """Tags per ticket id (concurrent, throttled). A failed fetch yields
+        None — "tag state unknown" — which _format_ticket_line renders
+        fail-closed (title withheld): the quarantine guarantee must not
+        evaporate on a transient tags-API error."""
+        semaphore = asyncio.Semaphore(8)
+
+        async def fetch(ticket: Dict[str, Any]) -> Tuple[Any, Optional[List[str]]]:
             ticket_id = ticket.get("id")
             if ticket_id is None:
-                return None, []
-            try:
-                tags = await asyncio.to_thread(
-                    self.zammad_client.get_tags, ticket_id=ticket_id)
-                return ticket_id, list(tags or [])
-            except Exception as e:
-                logger.error(
-                    f"Could not fetch tags for ticket {ticket_id}: {e} — "
-                    f"quarantine cannot be applied to this ticket's line.")
-                return ticket_id, []
+                return None, None
+            async with semaphore:
+                try:
+                    tags = await asyncio.to_thread(
+                        self.zammad_client.get_tags, ticket_id=ticket_id)
+                    return ticket_id, list(tags or [])
+                except Exception as e:
+                    logger.error(f"Could not fetch tags for ticket {ticket_id}: {e}")
+                    return ticket_id, None
         results = await asyncio.gather(*(fetch(t) for t in tickets))
         return dict(results)
 
@@ -217,11 +221,17 @@ class ManagrAgent(Agent):
         Quarantined tickets (DP-288): the title is customer-controlled bait
         text, so it is REPLACED in code — the planner learns the ticket
         exists and needs security handling, never what the bait says.
+        `tags=None` means the tag state is UNKNOWN (fetch failed): the title
+        is withheld too, so the guarantee fails closed.
         """
-        tags = tags or []
         number = ticket.get("number", ticket.get("id", "?"))
-        quarantined = [t for t in tags if t in QUARANTINE_TAGS]
-        if quarantined:
+        quarantined = [t for t in (tags or []) if t in QUARANTINE_TAGS]
+        if tags is None:
+            parts = [
+                f"#{number} [title withheld: tag state unknown — quarantine "
+                f"could not be verified this cycle]"
+            ]
+        elif quarantined:
             parts = [
                 f"#{number} [CONTENT QUARANTINED: {'/'.join(quarantined)} — "
                 f"reported/suspected phishing; do NOT treat as a service "

@@ -76,7 +76,7 @@ Saving from the Inference Matrix persists the `memory_mode` to the backend. The 
 
 **Version chevrons (Phase 2.3b):** The `<` / `>` chevrons on the most recent assistant message navigate between regeneration attempts. Every attempt is persisted — retries no longer overwrite history — and the L0 embedding travels with the content so retrieval reflects whichever version is currently canonical. There is **no client-side undo limit**; the full regen history is retained in the database for as long as the interaction exists. The chevrons are inert on the first generation (no regens yet). On each stream, the adapter emits an SSE `event: derpr` frame immediately before `[DONE]` carrying the canonical `assistant_id`; the portal uses it to fetch the version list and rebuild the chevron stacks.
 
-**Editing and deleting messages (Phase 2.4):** Editing a portal turn from the inline edit UI propagates the new content to the DERPR DB via `PATCH /api/v1/interaction/{id}`. The L0 embedding is invalidated on edit so the next batch from `MemoryAgent` re-encodes against the updated text; the row is also re-queued for L1 summarization (`parent_summary_id` is cleared). Saving an empty edit deletes the message: a soft-suppression flag is recorded server-side via `DELETE /api/v1/interaction/{id}`, after which the row no longer appears in subsequent `kobold_export`s, sliding-window history, or LTM retrieval. Reply chains are left intact (no nulling of `reply_to_id`); orphaned assistant turns whose paired user row was deleted still segment cleanly. Toggling the chevrons back and forth between two contents does not grow the archive — repeat-content swaps reuse the existing archive row instead of inserting a duplicate.
+**Editing and deleting messages (Phase 2.4):** Editing a portal turn from the inline edit UI propagates the new content to the DERPR DB via `PATCH /api/v1/interaction/{id}`. The L0 embedding is invalidated on edit so the next batch from `SqliteConsolidator` re-encodes against the updated text; the row is also re-queued for L1 summarization (`parent_summary_id` is cleared). Saving an empty edit deletes the message: a soft-suppression flag is recorded server-side via `DELETE /api/v1/interaction/{id}`, after which the row no longer appears in subsequent `kobold_export`s, sliding-window history, or LTM retrieval. Reply chains are left intact (no nulling of `reply_to_id`); orphaned assistant turns whose paired user row was deleted still segment cleanly. Toggling the chevrons back and forth between two contents does not grow the archive — repeat-content swaps reuse the existing archive row instead of inserting a duplicate.
 
 **History contract (Phase 4.1):** Every turn on the `/chat/completions` stream now ends with a server-authored `event: derpr` frame carrying `{user_id, assistant_id, response_type, ephemeral_chunk_id}` — emitted even when a turn parks a write for confirmation (`assistant_id` is `null`, with a stable `ephemeral_chunk_id` for the pending-approval text), runs tools only, or produces no text. A companion `GET /api/v1/session/{persona}/transcript` returns the ordered conversation as identity-addressed chunks (each carries an `interaction_id`, or `ephemeral: true` for a not-yet-saved parked confirmation). Together these let a client address each message by its server identity instead of its position in the story, so edit/delete reliably target the right row even after a parked-write or tool-only turn. (This release is server-side only; the kobold-lite portal's own edit/delete still uses the older positional mapping until the Phase 4.2 stopgap re-syncs it from `/transcript`.)
 
@@ -290,7 +290,7 @@ Defined in `config/system_personas.json`. Not directly user-accessible — used 
 - **triage_filter** — Relevance scoring between historical and new tickets
 - **triage_summarizer** — Ticket content compression
 - **dispatch_analyst** — Priority assignment and dispatch notification generation
-- **memory_summarizer** — Extracts observations from conversation segments for long-term recall; used by MemoryAgent
+- **memory_summarizer** — Extracts observations from conversation segments for long-term recall; used by SqliteConsolidator
 
 ## Execution Modes
 
@@ -620,7 +620,7 @@ Disabled by default. Enable with `MCP_ENABLED=true`. Config knobs:
 
 ### Memory Tools (no service binding required)
 
-Available to any persona with `enabled_tools: ["*"]` (e.g., `joy`, `it-help`). These tools interact with the long-term memory store built by MemoryAgent.
+Available to any persona with `enabled_tools: ["*"]` (e.g., `joy`, `it-help`). These tools interact with the long-term memory store built by SqliteConsolidator.
 
 | Tool | Type | Description |
 |------|------|-------------|
@@ -632,7 +632,7 @@ Available to any persona with `enabled_tools: ["*"]` (e.g., `joy`, `it-help`). T
 
 | Tool | Used by | Description |
 |------|---------|-------------|
-| `submit_memory_summary` | memory_summarizer (MemoryAgent) | Records extracted observations and keywords from a conversation segment; identifies thematic outliers for re-queueing |
+| `submit_memory_summary` | memory_summarizer (SqliteConsolidator) | Records extracted observations and keywords from a conversation segment; identifies thematic outliers for re-queueing |
 | `submit_core_profile` | Consolidator | Merges clustered episodic summaries into a structured core profile with nested concepts |
 
 ## Agents
@@ -699,10 +699,11 @@ Tickets frequently *contain* adversarial text — above all forwarded phishing m
 
 - **Classification at triage.** ZammadBot's triage pipeline (the one agent that already reads full ticket bodies on every new ticket) gains a classification stage: a new `content_classifier` system persona makes a single-shot, forced-tool-schema call (`submit_classification`) over the ticket content, wrapped explicitly as data-to-classify. Output: label ∈ {`phishing_report` (user is reporting phishing), `phishing_suspect` (the ticket itself may be a phish), `spam`, `clean`}, confidence, and the indicators that drove the verdict.
 - **Deterministic pre-signals** feed the classifier prompt and can short-circuit it: the reporter's own marker ("phish…" in the title or the first lines of the body) classifies as `phishing_report` with no LLM call at all — the highest-value case never depends on model judgement, and keeps working even with the LLM down. Forwarded-mail structure is a signal (not a short-circuit). An operator manually applying a quarantine tag is always respected without re-judging. (Header-authentication signals are a future deepening behind the same persona.)
-- **Verdict handling:** `phishing_report` always quarantines; `phishing_suspect` quarantines at or above `PHISHING_SUSPECT_MIN_CONFIDENCE` (default 0.6) and below it posts an advisory note but lets triage proceed; `spam`/`clean` proceed normally. Classification failure fails open — the pipeline runs unclassified, exactly as before DP-288. A quarantined ticket is also tagged as triaged so the poller stops re-selecting it; removing the quarantine tag re-enables AI processing.
+- **Verdict handling:** `phishing_report` always quarantines; `phishing_suspect` quarantines at or above `PHISHING_SUSPECT_MIN_CONFIDENCE` (default 0.6) and below it posts an advisory note but lets triage proceed; `spam`/`clean` proceed normally. Classification failure fails open — the pipeline runs unclassified, exactly as before DP-288. A quarantined ticket is also tagged as triaged so the poller stops re-selecting it; to re-run AI triage after review, remove **both** the quarantine tag and the triage tag and set the ticket state back to new (the quarantine note spells this out).
 - **Containment posture:** the classifier persona has no write tools and no conversation state; a successful injection against it can at worst produce a wrong label — which the human review gate downstream still catches. Classification techniques (URL extraction, header checks, reputation services) can deepen behind this one persona later without touching any consumer, because consumers only ever read the tag. No ticket content leaves the system: external reputation APIs are out of scope (open-egress line).
 - **Verdict persistence:** a Zammad tag (`security-report` for reported phishing, `phishing-suspect` for suspected) plus an internal note recording label/confidence/indicators. Tags are the contract; everything downstream keys off them.
-- **Quarantine in managr:** the board-snapshot formatter (code, not LLM) renders tagged tickets as flagged security items — `[CONTENT QUARANTINED: user-reported phishing]` in place of any content — so the planner knows the ticket exists and needs security handling but never sees the bait text. Standing orders can then reliably reference the tag.
+- **Quarantine in managr:** the board-snapshot formatter (code, not LLM) renders tagged tickets as flagged security items — `[CONTENT QUARANTINED: user-reported phishing]` in place of any content — so the planner knows the ticket exists and needs security handling but never sees the bait text. Standing orders can then reliably reference the tag. Tag lookups fail **closed**: if a ticket's tags can't be fetched, its title is withheld for that cycle rather than risking bait exposure.
+- **Quarantine in dispatch and reminder:** DispatchAgent excludes quarantined tickets in its selector query *and* re-checks tags per ticket before any content reaches the dispatch persona (unknown tag state skips the ticket). ReminderAgent masks quarantined tickets' titles in the daily Discord summary — the ticket is still listed (it needs human attention), but the bait title is not relayed to the channel.
 
 **Phase 2 — board-snapshot enrichment (managr sees content):** today managr plans from title-lines only, which is too thin to do its job. With quarantine in place, the snapshot is enriched:
 
@@ -732,7 +733,7 @@ The bot automatically builds a long-term memory store from conversations in the 
 
 1. **Embedding** — Each message logged to the database is embedded using the Gemini Embedding API (`gemini-embedding-001`). Embeddings are stored in the `Message_Embeddings` table.
 
-2. **Segmentation** (MemoryAgent, every 15 min) — Unprocessed embedded messages are grouped into topically coherent segments using centroid-based cosine similarity. Q/A pairs (a user message immediately followed by an assistant reply) are never split across segments. Minimum segment size is configurable (default: 2 messages).
+2. **Segmentation** (SqliteConsolidator, every 15 min) — Unprocessed embedded messages are grouped into topically coherent segments using centroid-based cosine similarity. Q/A pairs (a user message immediately followed by an assistant reply) are never split across segments. Minimum segment size is configurable (default: 2 messages).
 
 3. **Summarization** — Each segment is sent to the `memory_summarizer` system persona, which extracts discrete observations (facts, preferences, decisions, solutions) and thematic keywords via the `submit_memory_summary` tool. Messages that don't fit the segment's theme are flagged as outliers and re-queued for the next batch.
 
@@ -742,7 +743,7 @@ The bot automatically builds a long-term memory store from conversations in the 
 
 ### Scope
 
-Long-term memory retrieval is filtered by channel, persona, and embedding model. Memory built in one channel is not surfaced in another (same scoping rules as `CHANNEL_ISOLATED` history). Currently only channels listed under `allowed_channels` in `agents.json` are processed by MemoryAgent.
+Long-term memory retrieval is filtered by channel, persona, and embedding model. Memory built in one channel is not surfaced in another (same scoping rules as `CHANNEL_ISOLATED` history). Currently only channels listed under `allowed_channels` in `agents.json` are processed by SqliteConsolidator.
 
 ### User-visible effects
 
