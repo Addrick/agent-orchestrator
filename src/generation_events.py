@@ -8,9 +8,56 @@ ChatSystem. chat_system re-exports the names so existing call sites
 continue to work unchanged.
 """
 
+import uuid
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+
+
+def format_internal_error(
+    exc: BaseException,
+    *,
+    scrub: Optional[Callable[[str], object]] = None,
+    max_detail: int = 160,
+) -> Tuple[str, str]:
+    """Build a diagnosable user-facing error string + a correlation id.
+
+    An opaque "internal error" tells neither the operator nor fixr anything.
+    We surface the exception *class*, a truncated single-line message, and a
+    short ref id. Log the same ref id alongside the full traceback so the two
+    can be tied together after the fact — the ref is the only bridge when the
+    full trace lives in a log the reader can't reach yet.
+
+    These sites are terminal — the turn ends here, so the message goes to the
+    user directly (no LLM left in the loop to mediate it). We therefore also
+    nudge the user to rephrase/retry: the [class]/ref is for whoever diagnoses,
+    the nudge is for whoever's stuck.
+
+    Security (DP-225): the exception string reaches an external channel
+    (Discord/Zammad), so a provider SDK error can leak an auth header or a
+    key-in-URL. This module is a hard leaf (no ``src.*`` imports — enforced by
+    tests/test_module_boundaries), so the caller injects the secret scrubber
+    via ``scrub`` (pass ``get_scrubber().scrub``); it redacts registered vault
+    secrets plus unregistered key shapes and never raises. Omitting ``scrub``
+    surfaces the raw detail — only safe when the exception can't carry secrets.
+
+    Returns ``(err_id, message)``. The caller logs with ``err_id`` and yields
+    an ``ErrorEvent(message=message)``.
+    """
+    err_id = uuid.uuid4().hex[:8]
+    raw = str(exc)
+    if scrub is not None:
+        raw = str(scrub(raw))
+    detail = " ".join(raw.split())
+    if len(detail) > max_detail:
+        detail = detail[: max_detail - 1] + "…"
+    cls = type(exc).__name__
+    if detail:
+        message = f"Internal error [{cls}] (ref {err_id}): {detail}"
+    else:
+        message = f"Internal error [{cls}] (ref {err_id})"
+    message += " — you may want to rephrase and try again."
+    return err_id, message
 
 
 class ResponseType(Enum):

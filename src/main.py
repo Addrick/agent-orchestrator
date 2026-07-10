@@ -4,6 +4,7 @@ import asyncio
 import os
 import sys
 import logging
+from logging.handlers import RotatingFileHandler
 from typing import Optional, Dict, Any
 
 from src.bootstrap import create_chat_system
@@ -29,11 +30,13 @@ from src.clients.notification import (
     ZammadNotifier
 )
 
+from src.security.log_scrub import ScrubbingFormatter
 from src.interfaces.discord_bot import create_discord_bot
 from src.interfaces.gmail_bot import create_gmail_bot
 from src.interfaces.kobold_engine_adapter import create_kobold_engine_adapter
 from config.global_config import (
     CHAT_LOG_LOCATION,
+    LOGS_DIR,
     DISCORD_BOT,
     GMAIL_BOT,
     WEB_INTERFACE,
@@ -61,13 +64,38 @@ class NoReconnectTracebackFilter(logging.Filter):
         return True
 
 
+_LOG_FORMAT = '%(asctime)s [%(levelname)s][%(name)s:%(lineno)d]: %(message)s'
+_LOG_DATEFMT = '[%Y-%m-%d] %H:%M:%S'
+
 logging.basicConfig(level=logging.INFO,
                     stream=sys.stdout,
-                    format='%(asctime)s [%(levelname)s][%(name)s:%(lineno)d]: %(message)s',
-                    datefmt='[%Y-%m-%d] %H:%M:%S')
+                    format=_LOG_FORMAT,
+                    datefmt=_LOG_DATEFMT)
 
+# DP-284: also persist to a rotating file. stdout alone is trapped inside the
+# ct100 container's `docker logs`, which a fixr-dispatched agent can't reach —
+# so tracebacks (incl. the `[err <id>]` refs surfaced to users) had nowhere a
+# reader could tail. LOGS_DIR is a mounted volume; the file bridges that gap.
 root_logger = logging.getLogger()
+try:
+    _file_handler = RotatingFileHandler(
+        LOGS_DIR / "derpr.log",
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    root_logger.addHandler(_file_handler)
+except OSError as _log_exc:  # never let a bad log path kill startup
+    logger_bootstrap = logging.getLogger(__name__)
+    logger_bootstrap.warning("Could not open rotating log file: %s", _log_exc)
+
+# DP-284: scrub registered secrets (provider API keys, vault entries) from the
+# formatted output — message AND exc_info traceback — before it hits ANY sink.
+# derpr.log is permanent + fixr-tailable, so a key in a logged provider error
+# must not persist there. Applied to every root handler (stdout + file).
+_scrub_formatter = ScrubbingFormatter(_LOG_FORMAT, datefmt=_LOG_DATEFMT)
 for handler in root_logger.handlers:
+    handler.setFormatter(_scrub_formatter)
     handler.addFilter(NoReconnectTracebackFilter())
 
 logging.getLogger('google_genai').setLevel(logging.WARNING)
