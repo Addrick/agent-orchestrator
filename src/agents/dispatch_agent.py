@@ -9,6 +9,7 @@ from config.global_config import (
     DISPATCH_TRIAGE_TAG,
     DISPATCH_DISPATCHED_TAG,
     DISPATCH_PERSONA_NAME,
+    QUARANTINE_TAGS,
 )
 from src.agents.base import Agent
 from src.chat_system import ChatSystem
@@ -49,8 +50,16 @@ class DispatchAgent(Agent):
         self.agent_config = agent_config or {}
 
     async def deploy(self) -> None:
-        """Find triaged-but-not-dispatched tickets and process each."""
-        query = f"tags:{DISPATCH_TRIAGE_TAG} AND NOT tags:{DISPATCH_DISPATCHED_TAG} AND state.name:new"
+        """Find triaged-but-not-dispatched tickets and process each.
+
+        Quarantined tickets (DP-288) carry the triage tag too (so the triage
+        poller stops re-selecting them) but must never reach the dispatch LLM
+        — their titles and article bodies are the bait. Excluded in the query,
+        and re-checked per ticket in _dispatch_ticket as a belt.
+        """
+        quarantine_filter = "".join(f" AND NOT tags:{t}" for t in QUARANTINE_TAGS)
+        query = (f"tags:{DISPATCH_TRIAGE_TAG} AND NOT tags:{DISPATCH_DISPATCHED_TAG} "
+                 f"AND state.name:new{quarantine_filter}")
         try:
             tickets: List[Dict[str, Any]] = await asyncio.to_thread(
                 self.zammad_client.search_tickets, query=query, limit=10
@@ -74,6 +83,26 @@ class DispatchAgent(Agent):
         )
 
         try:
+            # 0. Quarantine belt (DP-288): the deploy() query already excludes
+            # quarantined tickets, but query semantics are Zammad's — verify
+            # per ticket before any content is fetched into an LLM prompt.
+            try:
+                tags = await asyncio.to_thread(
+                    self.zammad_client.get_tags, ticket_id=ticket_id)
+            except Exception as e:
+                logger.warning(f"Could not fetch tags for ticket {ticket_id}: {e}")
+                tags = None
+            if tags is None or any(t in QUARANTINE_TAGS for t in tags):
+                # Unknown tag state fails closed: skip this cycle rather than
+                # risk piping quarantined bait into the dispatch persona.
+                reason = ("quarantined" if tags else "tag state unknown")
+                logger.warning(
+                    f"Skipping dispatch for ticket {ticket_id}: {reason}.")
+                self._finalize_action(
+                    action_id, "skipped", {"reason": reason, "ticket_id": ticket_id})
+                await self._retain_action_series(action_id)
+                return
+
             # 1. Fetch ticket and triage note
             ticket = await asyncio.to_thread(self.zammad_client.get_ticket, ticket_id=ticket_id)
             title = ticket.get('title', 'No Title')

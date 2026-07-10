@@ -10,7 +10,7 @@ An async, provider-agnostic LLM orchestration engine for chatbot automation: IT 
 - **Multi-interface.** Discord bot (primary), Gmail (PoC), Zammad agents, and a FastAPI portal serving a customised kobold-lite at `/portal` with persona CRUD, DB-as-source history, version chevrons for regenerations, and engine-side prompt/budget management on the OAI route.
 - **Persona system.** Stateful LLM configs with `ExecutionMode` (AUTONOMOUS / CONFIRM) and `MemoryMode` (CHANNEL_ISOLATED, SERVER_WIDE, PERSONAL, GLOBAL, TICKET_ISOLATED). Runtime-mutable through `set` commands; persisted to `data/personas.json`.
 - **Tool loop.** JSON-schema tools dispatched via `ToolManager`, capped at 5 iterations per request, with read/write classification, service-binding gating, and CONFIRM-mode approval flows on Discord.
-- **Autonomous agents.** Background workers on interval schedules: `ZammadBot` (multi-stage triage via system personas), `DispatchAgent` (priority + notification routing), `MemoryAgent` (segment + summarize + embed), `MemoryConsolidator` (cluster L1 summaries into L2 core profiles).
+- **Autonomous agents.** Background workers on interval schedules: `ZammadBot` (multi-stage triage via system personas), `DispatchAgent` (priority + notification routing), `SqliteConsolidator` (segment + summarize + embed), `MemoryConsolidator` (cluster L1 summaries into L2 core profiles).
 - **Tiered memory.** Sliding-window history from SQLite plus semantic recall via either `SqliteSemanticBackend` (default, sqlite-vec) or `HindsightBackend` (alpha, REST to a Dockerised hindsight + pgvector). Engine-side recall is routed through the `MemoryBackend` ABC; transcript layer (logging, suppression, edit/version history, audit) stays on `MemoryManager`.
 
 ## Architecture
@@ -20,7 +20,7 @@ flowchart TB
     IF["<b>Interfaces</b><br/>Discord · Gmail · Portal · Zammad"]
     CORE["<b>ChatSystem</b> — orchestration kernel<br/>streaming · tool loop · personas"]
     EXEC["<b>TextEngine</b> → LLM providers<br/><b>ToolManager</b> → Zammad · Web · Memory"]
-    DATA["<b>Memory</b> &nbsp;·&nbsp; <b>Background Agents</b><br/>SQLite + sqlite-vec / Hindsight &nbsp;·&nbsp; MemoryAgent · Triage · Dispatch"]
+    DATA["<b>Memory</b> &nbsp;·&nbsp; <b>Background Agents</b><br/>SQLite + sqlite-vec / Hindsight &nbsp;·&nbsp; SqliteConsolidator · Triage · Dispatch"]
 
     IF   --> CORE
     CORE --> EXEC
@@ -68,7 +68,7 @@ src/
   memory/                MemoryManager, backend ABC, SQLite + Hindsight impls,
                          consolidation, context budget, router
   agents/                Agent ABC, AgentManager, ZammadBot, DispatchAgent,
-                         MemoryAgent, AgentServiceIntegration
+                         SqliteConsolidator, AgentServiceIntegration
   interfaces/            discord_bot, gmail_bot, kobold_adapter (FastAPI portal),
                          kobold_export
   clients/               ZammadClient + ZammadIntegration, NotificationRouter,

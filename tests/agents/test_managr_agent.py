@@ -56,6 +56,7 @@ def _make_agent(tickets=TICKETS, personas=None, send_result=True, agent_config=N
 
     zammad = MagicMock()
     zammad.search_tickets = MagicMock(return_value=tickets)
+    zammad.get_tags = MagicMock(return_value=[])
 
     router = MagicMock()
     router.send = AsyncMock(return_value=send_result)
@@ -218,11 +219,15 @@ def test_format_ticket_line_is_defensive():
     full = agent._format_ticket_line(
         {"number": "1", "title": "T", "state": "open", "priority": "3 high",
          "created_at": "2026-07-01T12:00:00Z", "updated_at": "2026-07-04T09:00:00Z"},
-        now,
+        now, tags=[],
     )
     assert full == "- #1 T | state=open | priority=3 high | age=3d | last_update=3h"
-    bare = agent._format_ticket_line({"id": 7}, now)
+    bare = agent._format_ticket_line({"id": 7}, now, tags=[])
     assert bare == "- #7 No Title"
+    # tags omitted/None = tag state unknown = title withheld (fail-closed)
+    unknown = agent._format_ticket_line({"id": 7, "title": "bait"}, now)
+    assert "bait" not in unknown
+    assert "title withheld" in unknown
 
 
 def test_resolve_recipient_mappings():
@@ -567,3 +572,72 @@ async def test_standing_orders_with_non_operator_source_are_not_injected():
     outcome, payload = _final_outcome(agent)
     assert outcome == "success"
     assert payload["standing_orders_degraded"] is False
+
+
+# --- DP-288 Phase 1: phishing quarantine in the board snapshot ---
+
+@pytest.mark.asyncio
+async def test_quarantined_ticket_title_never_reaches_planner():
+    """The quarantine contract: a tagged ticket's title is customer bait and
+    must be replaced IN CODE before any persona sees the snapshot."""
+    from config.global_config import SECURITY_REPORT_TAG
+    agent, chat_system, zammad, router = _make_agent()
+    zammad.get_tags = MagicMock(
+        side_effect=lambda ticket_id: [SECURITY_REPORT_TAG] if ticket_id == 1 else [])
+    chat_system.text_engine.generate_response = AsyncMock(side_effect=[
+        _text("stale brief"), _text("patterns brief"), _text("THE PLAN"),
+    ])
+    agent.text_engine = chat_system.text_engine
+
+    await agent.deploy()
+
+    # Every persona call (analysts + planner) sees the quarantine marker,
+    # never the bait title
+    for call in chat_system.text_engine.generate_response.await_args_list:
+        prompt = call.kwargs["history_object"]["message_history"][-1]["content"]
+        assert "Printer offline at front desk" not in prompt
+        assert "CONTENT QUARANTINED" in prompt
+        assert SECURITY_REPORT_TAG in prompt
+        # The clean ticket renders normally
+        assert "#10002 VPN drops every hour" in prompt
+
+
+@pytest.mark.asyncio
+async def test_untagged_tickets_render_with_tags_and_title():
+    agent, chat_system, zammad, router = _make_agent()
+    zammad.get_tags = MagicMock(return_value=["vip", "hardware"])
+    chat_system.text_engine.generate_response = AsyncMock(side_effect=[
+        _text("stale brief"), _text("patterns brief"), _text("THE PLAN"),
+    ])
+    agent.text_engine = chat_system.text_engine
+
+    await agent.deploy()
+
+    planner_call = chat_system.text_engine.generate_response.await_args_list[-1]
+    prompt = planner_call.kwargs["history_object"]["message_history"][-1]["content"]
+    assert "#10001 Printer offline at front desk" in prompt
+    assert "tags=vip,hardware" in prompt
+
+
+@pytest.mark.asyncio
+async def test_tag_fetch_failure_fails_closed_withholding_titles():
+    """A dead tags API must not kill the report cycle, but it must not expose
+    titles either: unknown tag state = quarantine unverifiable = title
+    withheld for the cycle (fail-closed)."""
+    agent, chat_system, zammad, router = _make_agent()
+    zammad.get_tags = MagicMock(side_effect=RuntimeError("api down"))
+    chat_system.text_engine.generate_response = AsyncMock(side_effect=[
+        _text("stale brief"), _text("patterns brief"), _text("THE PLAN"),
+    ])
+    agent.text_engine = chat_system.text_engine
+
+    await agent.deploy()
+
+    outcome, _ = _final_outcome(agent)
+    assert outcome == "success"
+    planner_call = chat_system.text_engine.generate_response.await_args_list[-1]
+    prompt = planner_call.kwargs["history_object"]["message_history"][-1]["content"]
+    assert "Printer offline at front desk" not in prompt
+    assert "title withheld: tag state unknown" in prompt
+    # Ticket numbers survive so the report can still reference the tickets
+    assert "#10001" in prompt

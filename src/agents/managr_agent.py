@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from config.global_config import (
+    QUARANTINE_TAGS,
     MANAGR_PLANNER_NAME,
     MANAGR_STALE_ANALYST_NAME,
     MANAGR_PATTERN_ANALYST_NAME,
@@ -160,10 +161,13 @@ class ManagrAgent(Agent):
         if not tickets:
             return None
 
+        tags_by_id = await self._fetch_ticket_tags(tickets)
         now = datetime.now(timezone.utc)
         lines = [f"OPEN TICKETS ({len(tickets)}):"]
         for t in tickets:
-            lines.append(self._format_ticket_line(t, now))
+            lines.append(self._format_ticket_line(
+                t, now, tags=tags_by_id.get(t.get("id")),
+            ))
 
         peer_lines = self._recent_peer_activity()
         if peer_lines:
@@ -182,13 +186,62 @@ class ManagrAgent(Agent):
             board = board[:MANAGR_MAX_BOARD_CHARS] + "\n...[snapshot truncated]"
         return board
 
-    def _format_ticket_line(self, ticket: Dict[str, Any], now: datetime) -> str:
+    async def _fetch_ticket_tags(
+        self, tickets: List[Dict[str, Any]],
+    ) -> Dict[Any, Optional[List[str]]]:
+        """Tags per ticket id (concurrent, throttled). A failed fetch yields
+        None — "tag state unknown" — which _format_ticket_line renders
+        fail-closed (title withheld): the quarantine guarantee must not
+        evaporate on a transient tags-API error."""
+        semaphore = asyncio.Semaphore(8)
+
+        async def fetch(ticket: Dict[str, Any]) -> Tuple[Any, Optional[List[str]]]:
+            ticket_id = ticket.get("id")
+            if ticket_id is None:
+                return None, None
+            async with semaphore:
+                try:
+                    tags = await asyncio.to_thread(
+                        self.zammad_client.get_tags, ticket_id=ticket_id)
+                    return ticket_id, list(tags or [])
+                except Exception as e:
+                    logger.error(f"Could not fetch tags for ticket {ticket_id}: {e}")
+                    return ticket_id, None
+        results = await asyncio.gather(*(fetch(t) for t in tickets))
+        return dict(results)
+
+    def _format_ticket_line(
+        self, ticket: Dict[str, Any], now: datetime,
+        tags: Optional[List[str]] = None,
+    ) -> str:
         """One compact line per ticket. Search results only guarantee
         id/number/title/timestamps; state/priority appear only on expanded
-        payloads, so both are optional here."""
+        payloads, so both are optional here.
+
+        Quarantined tickets (DP-288): the title is customer-controlled bait
+        text, so it is REPLACED in code — the planner learns the ticket
+        exists and needs security handling, never what the bait says.
+        `tags=None` means the tag state is UNKNOWN (fetch failed): the title
+        is withheld too, so the guarantee fails closed.
+        """
         number = ticket.get("number", ticket.get("id", "?"))
-        title = str(ticket.get("title", "No Title"))[:120]
-        parts = [f"#{number} {title}"]
+        quarantined = [t for t in (tags or []) if t in QUARANTINE_TAGS]
+        if tags is None:
+            parts = [
+                f"#{number} [title withheld: tag state unknown — quarantine "
+                f"could not be verified this cycle]"
+            ]
+        elif quarantined:
+            parts = [
+                f"#{number} [CONTENT QUARANTINED: {'/'.join(quarantined)} — "
+                f"reported/suspected phishing; do NOT treat as a service "
+                f"request, handle as a security item]"
+            ]
+        else:
+            title = str(ticket.get("title", "No Title"))[:120]
+            parts = [f"#{number} {title}"]
+            if tags:
+                parts.append(f"tags={','.join(str(t)[:40] for t in tags[:8])}")
 
         state = ticket.get("state")
         if isinstance(state, str):
