@@ -95,14 +95,26 @@ def build_claude_cli_env(
     return env
 
 
+#: Anthropic credentials the agy child must never inherit (DP-287). For cc these
+#: are conditional: the API-key vars are the billing strip (subscription mode
+#: only) and the OAuth token is the child's OWN credential. agy authenticates
+#: with its own harness OAuth instead, so for it ALL of these are just more
+#: derpr-host secrets — an inherited CLAUDE_CODE_OAUTH_TOKEN exfiltrated through
+#: reply text is a subscription hijack.
+_AGY_ANTHROPIC_VARS = (*_API_AUTH_VARS, "CLAUDE_CODE_OAUTH_TOKEN")
+
+
 def build_agy_cli_env(base: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     """Return the env dict for a headless ``agy`` (Antigravity) subprocess.
 
     The agy route clamps tools off (text-only), but still runs untrusted
     content, so it gets the same DP-277 secret scrub. agy authenticates with its
-    own harness OAuth, not derpr's provider keys; the Anthropic billing strip is
-    cc-specific and deliberately not applied here.
+    own harness OAuth, not derpr's provider keys, so the Anthropic credentials
+    are stripped too — unconditionally, unlike cc's subscription-gated billing
+    strip (DP-287).
     """
     env = dict(os.environ if base is None else base)
     _scrub_derpr_secrets(env)
+    for var in _AGY_ANTHROPIC_VARS:
+        env.pop(var, None)
     return env
