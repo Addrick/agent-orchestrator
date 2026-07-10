@@ -18,7 +18,8 @@ def test_includes_class_ref_and_detail():
 def test_detail_is_single_line_and_truncated():
     exc = ValueError("line one\nline two   with    spaces\n" + "x" * 500)
     _, msg = format_internal_error(exc, max_detail=40)
-    detail = msg.split("): ", 1)[1]
+    # detail sits between "): " and the trailing retry nudge
+    detail = msg.split("): ", 1)[1].split(" — you may want", 1)[0]
     assert "\n" not in detail
     assert len(detail) <= 40
     assert detail.endswith("…")
@@ -26,7 +27,13 @@ def test_detail_is_single_line_and_truncated():
 
 def test_empty_message_omits_detail_suffix():
     err_id, msg = format_internal_error(RuntimeError())
-    assert msg == f"Internal error [RuntimeError] (ref {err_id})"
+    assert msg.startswith(f"Internal error [RuntimeError] (ref {err_id})")
+    assert "): " not in msg  # no detail separator when the exception is empty
+
+
+def test_message_nudges_user_to_retry():
+    _, msg = format_internal_error(ValueError("boom"))
+    assert "rephrase and try again" in msg
 
 
 def test_ids_are_unique_per_call():

@@ -23,6 +23,11 @@ def format_internal_error(exc: BaseException, *, max_detail: int = 160) -> Tuple
     can be tied together after the fact — the ref is the only bridge when the
     full trace lives in a log the reader can't reach yet.
 
+    These sites are terminal — the turn ends here, so the message goes to the
+    user directly (no LLM left in the loop to mediate it). We therefore also
+    nudge the user to rephrase/retry: the [class]/ref is for whoever diagnoses,
+    the nudge is for whoever's stuck.
+
     Returns ``(err_id, message)``. The caller logs with ``err_id`` and yields
     an ``ErrorEvent(message=message)``.
     """
@@ -35,6 +40,7 @@ def format_internal_error(exc: BaseException, *, max_detail: int = 160) -> Tuple
         message = f"Internal error [{cls}] (ref {err_id}): {detail}"
     else:
         message = f"Internal error [{cls}] (ref {err_id})"
+    message += " — you may want to rephrase and try again."
     return err_id, message
 
 
