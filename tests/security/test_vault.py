@@ -105,6 +105,61 @@ def test_fake_source_does_not_touch_real_env():
     assert vault.get("PATH") is None
 
 
+# --- sanitized_env() ----------------------------------------------------------
+
+
+def test_sanitized_env_drops_all_known_refs(monkeypatch):
+    vault = CredentialVault(source=_fake_source({}))
+    for ref in vault.known_refs():
+        monkeypatch.setenv(ref, f"{ref.lower()}_secret_value")
+    monkeypatch.setenv("UNRELATED_VAR", "keep-me")
+
+    env = vault.sanitized_env()
+
+    for ref in vault.known_refs():
+        assert ref not in env
+    assert env["UNRELATED_VAR"] == "keep-me"
+
+
+def test_sanitized_env_drops_extra_refs(monkeypatch):
+    vault = CredentialVault(source=_fake_source({}))
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-secret")
+
+    env = vault.sanitized_env(extra_refs=("CLAUDE_CODE_OAUTH_TOKEN",))
+
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+
+
+def test_sanitized_env_does_not_mutate_parent_env(monkeypatch):
+    vault = CredentialVault(source=_fake_source({}))
+    monkeypatch.setenv("OPENAI_API_KEY", "still-here-after")
+
+    vault.sanitized_env()
+
+    import os
+
+    assert os.environ["OPENAI_API_KEY"] == "still-here-after"
+
+
+def test_sanitized_env_respects_explicit_base():
+    vault = CredentialVault(source=_fake_source({}))
+    base = {"OPENAI_API_KEY": "secretval1", "PATH": "/usr/bin"}
+
+    env = vault.sanitized_env(base=base)
+
+    assert "OPENAI_API_KEY" not in env
+    assert env["PATH"] == "/usr/bin"
+    # The base dict itself is untouched.
+    assert base["OPENAI_API_KEY"] == "secretval1"
+
+
+def test_sanitized_env_missing_refs_are_fine():
+    vault = CredentialVault(source=_fake_source({}))
+    # No known refs present in base at all — must not raise.
+    env = vault.sanitized_env(base={"HOME": "/home/x"})
+    assert env == {"HOME": "/home/x"}
+
+
 # --- get_vault() / reset_vault() singleton behavior ---------------------------
 
 

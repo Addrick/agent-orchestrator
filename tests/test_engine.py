@@ -1197,6 +1197,46 @@ class TestAgyCliInvocation:
         await text_engine._run_agy_cli("hi", timeout=5)
         assert "--sandbox" not in captured["args"]
 
+    @pytest.mark.asyncio
+    async def test_run_agy_cli_strips_secrets_from_env(self, text_engine, monkeypatch):
+        """DP-286: subprocess env hygiene — _run_agy_cli hands _exec_agy an env
+        with every vault-known credential (and the Claude auth tokens) removed,
+        matching the cc-* route's scrubbed-env posture. agy authenticates with
+        its own account creds and must not inherit derpr's secrets."""
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-secret")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret")
+        monkeypatch.setenv("GOOGLE_GENERATIVEAI_API_KEY", "google-secret")
+        monkeypatch.setenv("ZAMMAD_API_KEY", "zammad-secret")
+        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "auth-secret")
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-secret")
+        monkeypatch.setenv("AGY_HARMLESS_TEST_VAR", "keep-me")
+        monkeypatch.setenv("ANTIGRAVITY_HARNESS_PATH", "/usr/bin/agy")
+        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
+        monkeypatch.setattr(text_engine, "_resolve_agy_workspace", lambda *a, **k: None)
+
+        captured = {}
+
+        async def fake_exec(binary, args, workspace_dir, timeout, label="agy", env=None):
+            captured["env"] = env
+            return "ok"
+
+        monkeypatch.setattr(text_engine, "_exec_agy", fake_exec)
+
+        out = await text_engine._run_agy_cli("say hi", timeout=5)
+        assert out == "ok"
+        env = captured["env"]
+        assert env is not None
+        for secret_var in (
+            "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_GENERATIVEAI_API_KEY",
+            "ZAMMAD_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+        ):
+            assert secret_var not in env
+        # Non-secret vars still flow through to the child.
+        assert env["AGY_HARMLESS_TEST_VAR"] == "keep-me"
+        # The parent env is untouched.
+        import os as _os
+        assert _os.environ["ANTHROPIC_API_KEY"] == "sk-ant-secret"
+
     def test_agy_unsupported_on_windows_raises_clear_error(self, text_engine, monkeypatch):
         import src.engine as engine_mod
 

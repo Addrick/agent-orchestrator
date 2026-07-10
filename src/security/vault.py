@@ -10,7 +10,7 @@ Secret values are never logged or printed.
 from __future__ import annotations
 
 import os
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 from src.security.scrubber import SecretScrubber
 
@@ -46,6 +46,25 @@ class CredentialVault:
     def known_refs(self) -> Tuple[str, ...]:
         """Return the credential refs this vault manages."""
         return self.KNOWN_REFS
+
+    def sanitized_env(
+        self,
+        base: Optional[Dict[str, str]] = None,
+        extra_refs: Iterable[str] = (),
+    ) -> Dict[str, str]:
+        """Return a child-process env copy with every known credential removed.
+
+        Subprocess providers must never inherit the parent's secrets (a spawned
+        CLI has no business seeing derpr's API keys — and an inherited
+        ``ANTHROPIC_API_KEY`` once silently rebilled cc-* runs onto the metered
+        API). Drops ``KNOWN_REFS`` plus any ``extra_refs`` the caller names from
+        a copy of ``base`` (default: the current ``os.environ``); the parent
+        process env is never mutated.
+        """
+        env = dict(os.environ if base is None else base)
+        for ref in (*self.KNOWN_REFS, *extra_refs):
+            env.pop(ref, None)
+        return env
 
     def register_into(self, scrubber: SecretScrubber) -> int:
         """Register every resolved known secret value into ``scrubber``.

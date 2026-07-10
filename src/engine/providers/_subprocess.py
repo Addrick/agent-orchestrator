@@ -75,7 +75,8 @@ async def exec_cli(binary: str, args: List[str], workspace_dir: str, timeout: fl
     # `label` names the provider in error messages — this CLI runner is shared
     # by the agy and cc (Claude Code) routes, so a failure must point at the
     # route the caller actually invoked. `env` overrides the child environment
-    # (cc passes a subscription-scrubbed env; agy passes None = inherit unchanged).
+    # (cc passes a subscription-scrubbed env; agy passes a vault-sanitized env
+    # with all known credentials stripped — DP-286).
     proc = None
     try:
         proc = await asyncio.create_subprocess_exec(

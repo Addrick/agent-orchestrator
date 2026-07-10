@@ -27,6 +27,7 @@ from aiolimiter import AsyncLimiter
 
 from config import global_config
 from src.llm_errors import LLMCommunicationError
+from src.security.vault import get_vault
 from src.text_tool_protocol import (
     TOOL_CALL_OPEN,
     TOOL_CALL_CLOSE,
@@ -43,6 +44,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 AGY_CALL_TIMEOUT_SECONDS = 120.0
+
+#: Secret-bearing env vars outside the vault's KNOWN_REFS that the agy child
+#: also must not inherit (agy authenticates with its own Google account creds;
+#: none of derpr's credentials are its business).
+AGY_EXTRA_ENV_DROPS = ("ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
 
 
 def render_agy_tool_protocol(tools: Optional[List[Dict[str, Any]]]) -> str:
@@ -141,11 +147,17 @@ async def run_agy_cli(engine: "TextEngine", prompt: str, timeout: float = AGY_CA
     if global_config.AGY_SANDBOX:
         args = ["--sandbox", *args]
 
+    # DP-286: subprocess env hygiene — never inherit the parent's secrets.
+    # agy authenticates via its own account creds, so every vault-known API key
+    # (plus the Claude auth tokens) is stripped from the child env, matching
+    # the cc-* route's scrubbed-env posture.
+    agy_env = get_vault().sanitized_env(extra_refs=AGY_EXTRA_ENV_DROPS)
+
     workspace_dir = engine._resolve_agy_workspace(persona_name)
     if workspace_dir is None:
         temp_dir = tempfile.mkdtemp()
         try:
-            return await engine._exec_agy(binary, args, temp_dir, timeout)
+            return await engine._exec_agy(binary, args, temp_dir, timeout, env=agy_env)
         finally:
             # The CLI leaves symlinks under .antigravitycli pointing at files
             # outside the temp dir; remove the targets so rmtree doesn't strand
@@ -157,7 +169,7 @@ async def run_agy_cli(engine: "TextEngine", prompt: str, timeout: float = AGY_CA
     os.makedirs(workspace_dir, exist_ok=True)
     lock = engine._agy_workspace_locks.setdefault(workspace_dir, asyncio.Lock())
     async with lock:
-        return await engine._exec_agy(binary, args, workspace_dir, timeout)
+        return await engine._exec_agy(binary, args, workspace_dir, timeout, env=agy_env)
 
 
 async def generate_agy(
