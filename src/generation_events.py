@@ -8,9 +8,34 @@ ChatSystem. chat_system re-exports the names so existing call sites
 continue to work unchanged.
 """
 
+import uuid
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+
+def format_internal_error(exc: BaseException, *, max_detail: int = 160) -> Tuple[str, str]:
+    """Build a diagnosable user-facing error string + a correlation id.
+
+    An opaque "internal error" tells neither the operator nor fixr anything.
+    We surface the exception *class*, a truncated single-line message, and a
+    short ref id. Log the same ref id alongside the full traceback so the two
+    can be tied together after the fact — the ref is the only bridge when the
+    full trace lives in a log the reader can't reach yet.
+
+    Returns ``(err_id, message)``. The caller logs with ``err_id`` and yields
+    an ``ErrorEvent(message=message)``.
+    """
+    err_id = uuid.uuid4().hex[:8]
+    detail = " ".join(str(exc).split())
+    if len(detail) > max_detail:
+        detail = detail[: max_detail - 1] + "…"
+    cls = type(exc).__name__
+    if detail:
+        message = f"Internal error [{cls}] (ref {err_id}): {detail}"
+    else:
+        message = f"Internal error [{cls}] (ref {err_id})"
+    return err_id, message
 
 
 class ResponseType(Enum):

@@ -24,6 +24,7 @@ from src.security.scrubber import get_scrubber
 from src.generation_events import (
     ErrorEvent, ResponseType, TokenEvent,
     ToolCallResultEvent, ToolCallStartEvent,
+    format_internal_error,
 )
 from src.persona import Persona
 from src.tools.definitions import (
@@ -188,13 +189,13 @@ class ToolLoop:
                 yield ErrorEvent(message=err_msg)
                 return
             except Exception as e:
+                err_id, err_msg = format_internal_error(e)
                 logger.error(
-                    f"Unexpected error during stream_messages (iter {iter_idx}): {e}",
+                    f"[err {err_id}] Unexpected error during stream_messages "
+                    f"(iter {iter_idx}): {e}",
                     exc_info=True,
                 )
-                yield ErrorEvent(
-                    message="An internal error occurred while processing your request."
-                )
+                yield ErrorEvent(message=err_msg)
                 return
 
             if api_payload:

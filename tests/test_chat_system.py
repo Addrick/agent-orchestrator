@@ -3,6 +3,7 @@
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 import json
+import re
 
 from src.confirmations import ConfirmationManager
 from tests.helpers import make_chat_system, route_stream_through_generate_response
@@ -170,7 +171,12 @@ async def test_generate_response_handles_generic_exception(chat_system_with_mock
     system, memory_manager, _, _, _ = chat_system_with_mocks
     memory_manager.get_channel_history.side_effect = Exception("DB is locked")
     response, _, _ , _ = await system.generate_response("test_persona", "user", "channel", "test")
-    assert "An internal error occurred" in response
+    # DP-280: opaque "internal error" gave no signal. The surfaced message now
+    # carries the exception class, a correlation ref, and the short detail.
+    assert "Internal error" in response
+    assert "[Exception]" in response
+    assert "DB is locked" in response
+    assert re.search(r"ref [0-9a-f]{8}", response)
 
 
 @pytest.mark.asyncio
