@@ -195,6 +195,14 @@ TRIAGE_ANALYST_NAME = "triage_analyst"
 TRIAGE_FILTER_NAME = "triage_filter"
 
 
+# DP-288 Phase 1: content classification + phishing quarantine
+CONTENT_CLASSIFIER_NAME = "content_classifier"
+CLASSIFIER_MAX_CONTENT_CHARS = 8000
+SECURITY_REPORT_TAG = "security-report"      # user-reported phishing
+PHISHING_SUSPECT_TAG = "phishing-suspect"    # ticket itself may be a phish
+QUARANTINE_TAGS = (SECURITY_REPORT_TAG, PHISHING_SUSPECT_TAG)
+PHISHING_SUSPECT_MIN_CONFIDENCE = 0.6  # below this a suspect verdict is note-only
+
 ZAMMAD_BOT_EMAIL = "autotriage@bot.local"
 ZAMMAD_BOT_FIRSTNAME = "autotriage"
 ZAMMAD_BOT_LASTNAME = "LLM"

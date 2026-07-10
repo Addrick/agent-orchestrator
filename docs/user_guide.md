@@ -641,7 +641,7 @@ Agents are autonomous background workers that run on a schedule without user int
 
 ### Current Agents
 
-**MemoryAgent** (`auto_start: true`) — Runs every 15 minutes. Segments recent conversations by topic, extracts observations via LLM, and stores embedded summaries for long-term recall. See [Long-term Memory](#long-term-memory) below for the full pipeline description. Config in `agents.json` under `"memory"`.
+**SqliteConsolidator (memory)** (`auto_start: true`) — Runs every 15 minutes (only when `SEMANTIC_BACKEND=sqlite`). Segments recent conversations by topic, extracts observations via LLM, and stores embedded summaries for long-term recall. See [Long-term Memory](#long-term-memory) below for the full pipeline description. Config in `agents.json` under `"sqlite_consolidator"`.
 
 **ZammadBot (triage)** — Polls for new, untagged Zammad tickets and runs a multi-stage AI triage pipeline:
 1. Extracts search keywords from the ticket
@@ -663,9 +663,11 @@ Agents are autonomous background workers that run on a schedule without user int
 
 Managr is a top-level planning agent for the whole ticket board. Where triage and dispatch each react to a single new ticket, managr periodically reviews *everything* — open tickets, their ages and priorities, what the other agents have done, and what happened to its own past suggestions — and produces a manager's plan. It is deliberately neutered: **managr can never write to Zammad or any other external system.** It only observes, reports, and proposes; a human approves every action before anything executes.
 
+**Managr is not a chattable persona.** "Managr" is the scheduled agent; the `managr_planner` / `managr_*_analyst` entries in `system_personas.json` are internal, tool-less system personas the agent invokes once per cycle — they hold no conversation state, and talking to them would not affect the next cycle. All operator interaction (reviewing proposals, adding/retiring standing orders) happens through a *conversational* persona that has `service_bindings: ["proposals"]` with the proposal tools enabled — intended to be joy, but any persona granted the binding works, including a dedicated user persona named e.g. `managr` if you prefer a "speak to the manager" front desk. Feedback loops back to the agent through data: standing orders and proposal-denial reasons are injected into its next planning cycle.
+
 **Cycle** (`auto_start: true` — one cycle at startup, then daily at `daily_at`, like ReminderAgent):
 
-1. **Observe** — snapshot the board: open tickets with age/state/priority/tags, staleness, recent triage/dispatch/reminder activity, and the outcomes of managr's previous proposals (approved / denied / expired).
+1. **Observe** — snapshot the board: open tickets with age/state/priority/tags, staleness, recent triage/dispatch/reminder activity, and the outcomes of managr's previous proposals (approved / denied / expired). Quarantined tickets (see below) are flagged in code and their titles withheld. *Article content lands with DP-288 Phase 2.*
 2. **Orient** — fan out read-only analysis briefs to specialized system personas (e.g. a stale-ticket investigator, a per-client summarizer, a cross-ticket pattern detector). Each returns a short structured brief.
 3. **Decide** — a single planning call over the briefs produces the plan: an assessment of board health, priorities for the day, and a list of proposed actions.
 4. **Report & propose** — the plan is posted as a readable digest (Discord channel and/or Zammad internal note). Each proposed action is written to a durable **proposal queue** for human review; nothing executes on its own.
@@ -688,6 +690,28 @@ Every planning cycle, the newest active orders (up to `MANAGR_STANDING_ORDERS_LI
 - Ticket content is treated as adversarial input; plans and proposals derived from it carry taint provenance into the audit record.
 
 **Phases:** (0, shipped) read-only manager's report only — no proposal infrastructure; (1, shipped) proposal queue + approval via joy/Discord for internal low-blast actions; (2) acceptance tracking + config-gated auto-execution of proven internal action types; (3) managr can commission deep-dive focus subagents (fixr-pattern) for investigations — research an error across ticket history, draft a KB article, prepare a client-facing summary (which still lands as a proposal).
+
+### Content classification & phishing quarantine (DP-288 Phase 1 shipped; Phase 2 planned)
+
+Tickets frequently *contain* adversarial text — above all forwarded phishing mail that a user reports ("phishing" note at the top, forwarded bait below). The bait is written to read like a legitimate request, so any LLM that consumes the raw body can be steered by it (incident 2026-07-10: managr proposed treating a reported-phishing ticket as a genuine request). The defense is deterministic, not "be more vigilant" prompting: classify content once at ingest, persist the verdict as data, and have every downstream consumer quarantine flagged content in code before it ever reaches a model prompt.
+
+**Phase 1 — classifier + quarantine (the security fix — shipped):**
+
+- **Classification at triage.** ZammadBot's triage pipeline (the one agent that already reads full ticket bodies on every new ticket) gains a classification stage: a new `content_classifier` system persona makes a single-shot, forced-tool-schema call (`submit_classification`) over the ticket content, wrapped explicitly as data-to-classify. Output: label ∈ {`phishing_report` (user is reporting phishing), `phishing_suspect` (the ticket itself may be a phish), `spam`, `clean`}, confidence, and the indicators that drove the verdict.
+- **Deterministic pre-signals** feed the classifier prompt and can short-circuit it: the reporter's own marker ("phish…" in the title or the first lines of the body) classifies as `phishing_report` with no LLM call at all — the highest-value case never depends on model judgement, and keeps working even with the LLM down. Forwarded-mail structure is a signal (not a short-circuit). An operator manually applying a quarantine tag is always respected without re-judging. (Header-authentication signals are a future deepening behind the same persona.)
+- **Verdict handling:** `phishing_report` always quarantines; `phishing_suspect` quarantines at or above `PHISHING_SUSPECT_MIN_CONFIDENCE` (default 0.6) and below it posts an advisory note but lets triage proceed; `spam`/`clean` proceed normally. Classification failure fails open — the pipeline runs unclassified, exactly as before DP-288. A quarantined ticket is also tagged as triaged so the poller stops re-selecting it; removing the quarantine tag re-enables AI processing.
+- **Containment posture:** the classifier persona has no write tools and no conversation state; a successful injection against it can at worst produce a wrong label — which the human review gate downstream still catches. Classification techniques (URL extraction, header checks, reputation services) can deepen behind this one persona later without touching any consumer, because consumers only ever read the tag. No ticket content leaves the system: external reputation APIs are out of scope (open-egress line).
+- **Verdict persistence:** a Zammad tag (`security-report` for reported phishing, `phishing-suspect` for suspected) plus an internal note recording label/confidence/indicators. Tags are the contract; everything downstream keys off them.
+- **Quarantine in managr:** the board-snapshot formatter (code, not LLM) renders tagged tickets as flagged security items — `[CONTENT QUARANTINED: user-reported phishing]` in place of any content — so the planner knows the ticket exists and needs security handling but never sees the bait text. Standing orders can then reliably reference the tag.
+
+**Phase 2 — board-snapshot enrichment (managr sees content):** today managr plans from title-lines only, which is too thin to do its job. With quarantine in place, the snapshot is enriched:
+
+- **Every ticket line** gains its tags — shipped early with Phase 1 (the quarantine needed the tag fetch anyway).
+- **A detail tier** — up to `MANAGR_DETAIL_TICKET_LIMIT` (default 20) tickets, prioritized stale-first / most-recently-updated — gets an expanded fetch: the first article (the original request) and the last two articles (current state), each clipped to `MANAGR_MAX_ARTICLE_CHARS` (default 600).
+- Quarantined tickets are excluded from the detail tier unconditionally — the tag decides, in code.
+- Budgets are sized for a large-context planner model (agy-flash class), not token-starved: `MANAGR_MAX_BOARD_CHARS` rises from 12,000 (an undiscussed Phase-0 guess) to 60,000, `MANAGR_MAX_BRIEF_CHARS` from 4,000 to 8,000. All remain config values; model choice and budget tuning are an efficiency pass for later, after the workflow is proven.
+
+**Order matters:** Phase 1 ships first — enrichment without the quarantine would pipe bait text straight into the planner and *widen* the attack surface the classifier exists to close.
 
 ### Managing Agents
 

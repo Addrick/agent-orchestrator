@@ -15,9 +15,14 @@ from config.global_config import (
     TRIAGE_MAX_CONTEXT_CHARS,
     ZAMMAD_BOT_EMAIL,
     ZAMMAD_BOT_FIRSTNAME,
-    ZAMMAD_BOT_LASTNAME
+    ZAMMAD_BOT_LASTNAME,
+    SECURITY_REPORT_TAG,
+    PHISHING_SUSPECT_TAG,
+    QUARANTINE_TAGS,
+    PHISHING_SUSPECT_MIN_CONFIDENCE,
 )
 from src.agents.base import Agent
+from src.agents.content_classifier import ContentClassifier
 from src.chat_system import ChatSystem
 from src.clients.zammad_client import ZammadClient
 
@@ -31,6 +36,7 @@ class ZammadBot(Agent):
     def __init__(self, chat_system: ChatSystem, zammad_client: ZammadClient) -> None:
         super().__init__(chat_system)
         self.zammad_client = zammad_client
+        self.classifier = ContentClassifier(chat_system)
 
     async def _on_start(self) -> None:
         """
@@ -176,6 +182,96 @@ class ZammadBot(Agent):
 
         return f"{text[:head_limit]}\n\n... [TRUNCATED INTELLIGENTLY] ...\n\n{text[-tail_limit:]}"
 
+    async def _post_internal_note(self, ticket_id: int, body: str) -> None:
+        """Post an internal note as the bot identity, falling back to the
+        API-token identity when impersonation is not permitted."""
+        try:
+            await asyncio.to_thread(
+                self.zammad_client.add_article_to_ticket,
+                ticket_id=ticket_id,
+                body=body,
+                internal=True,
+                impersonate_email=ZAMMAD_BOT_EMAIL
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to post note as {ZAMMAD_BOT_EMAIL}: {e}. Falling back to API token identity.")
+            await asyncio.to_thread(
+                self.zammad_client.add_article_to_ticket,
+                ticket_id=ticket_id,
+                body=body,
+                internal=True
+            )
+
+    async def _classification_gate(self, ticket_id: int, title: str, body: str) -> bool:
+        """Classify ticket content and quarantine phishing (DP-288 Phase 1).
+
+        Returns True when the ticket was quarantined (caller must stop the
+        triage pipeline — the content is bait and must not reach any further
+        LLM prompt). Classification failure returns False: the pipeline
+        proceeds unclassified, matching pre-DP-288 behavior, while the
+        deterministic reporter-marker path inside the classifier keeps
+        working even with the LLM down.
+        """
+        # A quarantine tag already on the ticket (operator-applied, or a
+        # re-poll of a previously quarantined ticket) is always respected.
+        try:
+            existing_tags = await asyncio.to_thread(
+                self.zammad_client.get_tags, ticket_id=ticket_id)
+        except Exception as e:
+            logger.warning(f"Could not fetch tags for ticket {ticket_id}: {e}")
+            existing_tags = []
+        already_tagged = [t for t in existing_tags if t in QUARANTINE_TAGS]
+        if already_tagged:
+            logger.info(
+                f"Ticket {ticket_id} already quarantined ({already_tagged}); skipping triage.")
+            await asyncio.to_thread(
+                self.zammad_client.add_tag, ticket_id=ticket_id, tag=ZAMMAD_TRIAGE_TAG)
+            return True
+
+        classification = await self.classifier.classify(title, body)
+        if classification is None:
+            return False
+
+        if classification.label == "phishing_report":
+            quarantine_tag = SECURITY_REPORT_TAG
+        elif (classification.label == "phishing_suspect"
+              and classification.confidence >= PHISHING_SUSPECT_MIN_CONFIDENCE):
+            quarantine_tag = PHISHING_SUSPECT_TAG
+        else:
+            # clean / spam / low-confidence suspect: proceed with normal
+            # triage. A low-confidence suspect verdict still gets recorded
+            # for the human agent, but does not block the pipeline.
+            if classification.label == "phishing_suspect":
+                await self._post_internal_note(
+                    ticket_id,
+                    f"[ AI CONTENT CLASSIFIER ]\n"
+                    f"Verdict: phishing_suspect (LOW CONFIDENCE "
+                    f"{classification.confidence:.2f} — not quarantined)\n"
+                    f"Indicators: {', '.join(classification.indicators) or 'none given'}"
+                )
+            return False
+
+        note = (
+            f"[ AI CONTENT CLASSIFIER — QUARANTINED ]\n"
+            f"Verdict: {classification.label} "
+            f"(confidence {classification.confidence:.2f}, "
+            f"source: {classification.source})\n"
+            f"Indicators: {', '.join(classification.indicators) or 'none given'}\n\n"
+            f"This ticket's content has been excluded from AI triage and "
+            f"board planning. Handle as a security item; remove the "
+            f"'{quarantine_tag}' tag to re-enable AI processing."
+        )
+        await self._post_internal_note(ticket_id, note)
+        await asyncio.to_thread(
+            self.zammad_client.add_tag, ticket_id=ticket_id, tag=quarantine_tag)
+        await asyncio.to_thread(
+            self.zammad_client.add_tag, ticket_id=ticket_id, tag=ZAMMAD_TRIAGE_TAG)
+        logger.info(
+            f"Ticket {ticket_id} quarantined as {classification.label} "
+            f"(tag '{quarantine_tag}'); triage pipeline skipped.")
+        return True
+
     async def _process_ticket(self, ticket_id: int) -> None:
         """
         Adaptive Triage Pipeline using System Personas.
@@ -194,6 +290,13 @@ class ZammadBot(Agent):
             title = ticket.get('title', 'No Title')
             articles = await asyncio.to_thread(self.zammad_client.get_ticket_articles, ticket_id=ticket_id)
             new_ticket_body = "\n---\n".join([a.get('body', '') for a in articles]) if articles else "No content"
+
+            # 1b. Content classification gate (DP-288 Phase 1). Runs BEFORE
+            # any triage persona sees the body: quarantined content must never
+            # reach the scout/analyst prompts. A manually applied quarantine
+            # tag is always respected without re-judging it.
+            if await self._classification_gate(ticket_id, title, new_ticket_body):
+                return
 
             # 2. Keyword Scout
             search_keywords = await self._get_search_keywords(title, new_ticket_body)
@@ -334,23 +437,7 @@ class ZammadBot(Agent):
                 )
 
                 # 9. Post Internal Note (With Fallback)
-                try:
-                    await asyncio.to_thread(
-                        self.zammad_client.add_article_to_ticket,
-                        ticket_id=ticket_id,
-                        body=final_note_body,
-                        internal=True,
-                        impersonate_email=ZAMMAD_BOT_EMAIL
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to post note as {ZAMMAD_BOT_EMAIL}: {e}. Falling back to API token identity.")
-                    await asyncio.to_thread(
-                        self.zammad_client.add_article_to_ticket,
-                        ticket_id=ticket_id,
-                        body=final_note_body,
-                        internal=True
-                    )
+                await self._post_internal_note(ticket_id, final_note_body)
 
                 # 10. Tag Ticket
                 await asyncio.to_thread(
