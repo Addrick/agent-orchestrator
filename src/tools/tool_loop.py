@@ -189,7 +189,7 @@ class ToolLoop:
                 yield ErrorEvent(message=err_msg)
                 return
             except Exception as e:
-                err_id, err_msg = format_internal_error(e)
+                err_id, err_msg = format_internal_error(e, scrub=get_scrubber().scrub)
                 logger.error(
                     f"[err {err_id}] Unexpected error during stream_messages "
                     f"(iter {iter_idx}): {e}",

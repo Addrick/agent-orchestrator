@@ -36,6 +36,25 @@ def test_message_nudges_user_to_retry():
     assert "rephrase and try again" in msg
 
 
+def test_registered_secret_is_scrubbed_from_message():
+    """DP-225: an API key embedded in the exception must not reach the user."""
+    from src.security.scrubber import get_scrubber
+
+    scrubber = get_scrubber()
+    secret = "sk-supersecretapikey1234567890"
+    scrubber.register(secret, "TEST_KEY")
+    try:
+        _, msg = format_internal_error(
+            RuntimeError(f"401 auth failed for key {secret}"),
+            scrub=scrubber.scrub,
+            max_detail=500,
+        )
+    finally:
+        scrubber.clear()
+    assert secret not in msg
+    assert "[REDACTED:TEST_KEY]" in msg
+
+
 def test_ids_are_unique_per_call():
     id1, _ = format_internal_error(Exception("boom"))
     id2, _ = format_internal_error(Exception("boom"))

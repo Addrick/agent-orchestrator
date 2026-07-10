@@ -30,6 +30,7 @@ from src.message_handler import BotLogic
 from src.origin import ANONYMOUS, Origin
 from src.persona import Persona
 from src.request_builder import AssembledRequest, RequestBuilder, RequestContext
+from src.security.scrubber import get_scrubber
 from src.tools.tool_loop import ToolLoop, _ApiPayloadEvent, _LoopFinishedEvent
 from src.turn_persistence import TurnPersistence
 from src.tools.tool_manager import ToolManager
@@ -313,7 +314,7 @@ class ChatSystem:
                 try:
                     await self.request_builder.prepare_request(ctx, is_retry=is_retry)
                 except Exception as e:
-                    err_id, err_msg = format_internal_error(e)
+                    err_id, err_msg = format_internal_error(e, scrub=get_scrubber().scrub)
                     logger.error(
                         f"[err {err_id}] prepare_request failed for "
                         f"{user_identifier}: {e}", exc_info=True,
@@ -363,7 +364,7 @@ class ChatSystem:
                         turn_tainted=ctx.turn_tainted,
                     )
                 except Exception as e:
-                    err_id, err_msg = format_internal_error(e)
+                    err_id, err_msg = format_internal_error(e, scrub=get_scrubber().scrub)
                     logger.error(
                         f"[err {err_id}] Error resuming pending confirmation for "
                         f"{user_identifier}: {e}",

@@ -11,10 +11,15 @@ continue to work unchanged.
 import uuid
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 
-def format_internal_error(exc: BaseException, *, max_detail: int = 160) -> Tuple[str, str]:
+def format_internal_error(
+    exc: BaseException,
+    *,
+    scrub: Optional[Callable[[str], object]] = None,
+    max_detail: int = 160,
+) -> Tuple[str, str]:
     """Build a diagnosable user-facing error string + a correlation id.
 
     An opaque "internal error" tells neither the operator nor fixr anything.
@@ -28,11 +33,22 @@ def format_internal_error(exc: BaseException, *, max_detail: int = 160) -> Tuple
     nudge the user to rephrase/retry: the [class]/ref is for whoever diagnoses,
     the nudge is for whoever's stuck.
 
+    Security (DP-225): the exception string reaches an external channel
+    (Discord/Zammad), so a provider SDK error can leak an auth header or a
+    key-in-URL. This module is a hard leaf (no ``src.*`` imports — enforced by
+    tests/test_module_boundaries), so the caller injects the secret scrubber
+    via ``scrub`` (pass ``get_scrubber().scrub``); it redacts registered vault
+    secrets plus unregistered key shapes and never raises. Omitting ``scrub``
+    surfaces the raw detail — only safe when the exception can't carry secrets.
+
     Returns ``(err_id, message)``. The caller logs with ``err_id`` and yields
     an ``ErrorEvent(message=message)``.
     """
     err_id = uuid.uuid4().hex[:8]
-    detail = " ".join(str(exc).split())
+    raw = str(exc)
+    if scrub is not None:
+        raw = str(scrub(raw))
+    detail = " ".join(raw.split())
     if len(detail) > max_detail:
         detail = detail[: max_detail - 1] + "…"
     cls = type(exc).__name__
