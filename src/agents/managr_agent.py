@@ -18,6 +18,7 @@ from config.global_config import (
     MANAGR_PEER_ACTION_LIMIT,
     MANAGR_PROPOSAL_TTL_DAYS,
     MANAGR_MAX_PROPOSALS_PER_CYCLE,
+    MANAGR_PENDING_PROPOSAL_LIMIT,
     MANAGR_STANDING_ORDERS_LIMIT,
 )
 from src.agents.base import Agent
@@ -488,22 +489,119 @@ class ManagrAgent(Agent):
 
     # --- 3b. Propose (DP-282, Phase 1) ---
 
+    def _pending_proposals(self) -> List[Dict[str, Any]]:
+        """This agent's still-pending rows for the reflective disposition
+        pass (DP-290). Sweeps expiry first so GC'd rows are never offered
+        back for reaffirmation. Empty list on any failure — the cycle then
+        degrades to new-proposals-only, exactly the pre-DP-290 behavior."""
+        try:
+            self.memory_manager.expire_stale_proposals()
+            return self.memory_manager.list_proposals(
+                status="pending", agent_name=self.agent_name,
+                limit=MANAGR_PENDING_PROPOSAL_LIMIT,
+            )
+        except Exception as e:
+            logger.warning(f"Could not fetch pending proposals: {e}")
+            return []
+
+    @staticmethod
+    def _pending_proposal_lines(pending: List[Dict[str, Any]]) -> List[str]:
+        """Compact prompt lines for the agent's own pending queue."""
+        lines: List[str] = []
+        for row in pending:
+            args = row.get("action_args") or {}
+            arg_str = ", ".join(f"{k}={v}" for k, v in args.items()) \
+                if isinstance(args, dict) else str(args)
+            line = (f"- [{row.get('proposal_id')}] {row.get('action_type')}({arg_str})"
+                    f" — queued {str(row.get('created_at', ''))[:16]}")
+            rationale = row.get("rationale")
+            if rationale:
+                line += f" — {str(rationale)[:200]}"
+            lines.append(line)
+        return lines
+
+    def _apply_dispositions(
+        self, action_id: int, dispositions: List[Dict[str, Any]],
+        pending_by_id: Dict[int, Dict[str, Any]], expires_at: datetime,
+    ) -> Dict[str, List[int]]:
+        """Execute reaffirm/revise/withdraw decisions against the queue.
+
+        Trust posture: proposal_id must be one of the pending rows THIS cycle
+        injected (never a model-supplied arbitrary id), revise args re-run
+        the same whitelist validation as new proposals, and every store call
+        is additionally scoped to this agent's own pending rows. A row the
+        model does not mention is left untouched — a flaky extraction call
+        must never destroy a pending proposal."""
+        applied: Dict[str, List[int]] = {"reaffirmed": [], "revised": [], "withdrawn": []}
+        seen: set[int] = set()
+        for disp in dispositions:
+            proposal_id = disp.get("proposal_id")
+            decision = disp.get("decision")
+            if proposal_id not in pending_by_id or proposal_id in seen:
+                logger.warning(f"Ignoring disposition for unknown/duplicate "
+                               f"proposal id {proposal_id!r}")
+                continue
+            seen.add(proposal_id)
+            reason = str(disp.get("reason", ""))[:200]
+            if decision == "reaffirm":
+                if self.memory_manager.reaffirm_proposal(
+                        proposal_id, self.agent_name, expires_at=expires_at):
+                    applied["reaffirmed"].append(proposal_id)
+            elif decision == "withdraw":
+                if self.memory_manager.withdraw_proposal(
+                        proposal_id, self.agent_name, note=reason or None):
+                    applied["withdrawn"].append(proposal_id)
+            elif decision == "revise":
+                row = pending_by_id[proposal_id]
+                args = disp.get("args")
+                errors = validate_proposal_args(str(row.get("action_type")), args)
+                if errors or not isinstance(args, dict):
+                    logger.warning(f"Dropping invalid revision for proposal "
+                                   f"{proposal_id}: {'; '.join(errors)}")
+                    continue
+                revised = self.memory_manager.revise_proposal(
+                    proposal_id, self.agent_name, action_args=args,
+                    rationale=reason or row.get("rationale"),
+                    taint={
+                        "source": "zammad_board_snapshot",
+                        "cycle_action_id": action_id,
+                        "ticket_number": args.get("ticket_number"),
+                    },
+                    expires_at=expires_at,
+                )
+                if revised:
+                    applied["revised"].append(proposal_id)
+                else:
+                    logger.warning(f"Revision of proposal {proposal_id} rejected "
+                                   f"(gone or dedup-key collision); row left as-is.")
+            else:
+                logger.warning(f"Ignoring unknown disposition decision {decision!r} "
+                               f"for proposal {proposal_id}")
+        return applied
+
     async def _extract_proposals(
         self, action_id: int, plan: str,
         orders_section: Optional[str] = None,
     ) -> Tuple[Optional[str], int]:
-        """Convert the report's suggested actions into durable proposal rows.
+        """Convert the report's suggested actions into durable proposal rows,
+        and let the planner maintain its own pending queue (DP-290).
 
         A second LLM call on the planner persona emits structured actions via
         the agent-internal submit_proposals schema. Every action is validated
         in code against the fixed whitelist before a row is written — invalid
-        or surplus actions are dropped and logged, never stored. Returns
+        or surplus actions are dropped and logged, never stored. The same
+        single call also dispositions the agent's still-pending proposals
+        (reaffirm/revise/withdraw) — no extra LLM call. Returns
         (digest section, queued count).
         """
         persona = self.chat_system.personas.get(MANAGR_PLANNER_NAME)
         if not persona:
             logger.error(f"System persona '{MANAGR_PLANNER_NAME}' not found; skipping proposals.")
             return None, 0
+
+        pending = self._pending_proposals()
+        pending_by_id = {row["proposal_id"]: row for row in pending
+                         if isinstance(row.get("proposal_id"), int)}
 
         # Orders constrain extraction too ("never propose priority changes
         # for client X" must hold even when the report suggests one). The
@@ -512,13 +610,25 @@ class ManagrAgent(Agent):
         if orders_section:
             sections.append(orders_section)
         sections.append(f"MANAGER'S REPORT:\n{plan}")
-        sections.append(
+        if pending_by_id:
+            sections.append(
+                "YOUR PENDING PROPOSALS (queued in prior cycles, still awaiting "
+                "operator review):\n" + "\n".join(self._pending_proposal_lines(pending)))
+        instruction = (
             "Convert the report's SUGGESTED ACTIONS into concrete proposals by calling "
             "submit_proposals. Only emit actions of the allowed types; skip any suggestion "
             "that does not fit an allowed action or that a standing order forbids. Use "
             "ticket numbers exactly as they appear in the report. If nothing fits, call "
             "submit_proposals with an empty list."
         )
+        if pending_by_id:
+            instruction += (
+                " For each entry under YOUR PENDING PROPOSALS, include a disposition in "
+                "the same call: reaffirm it if it still stands, revise it (with full "
+                "corrected args) if the situation changed, or withdraw it if it is no "
+                "longer needed. Do not re-submit a pending proposal as a new proposal."
+            )
+        sections.append(instruction)
         prompt = "\n\n".join(sections)
         step_id = self._log_step(
             action_id, "llm_step",
@@ -526,14 +636,21 @@ class ManagrAgent(Agent):
             outcome="pending",
         )
         response = await self._call_persona_raw(
-            persona, prompt, tools=[build_submission_tool_schema()],
+            persona, prompt,
+            tools=[build_submission_tool_schema(
+                pending_ids=list(pending_by_id) or None)],
         )
-        candidates = self._parse_submitted_proposals(response)
-        if candidates is None:
+        parsed = self._parse_submitted_proposals(response)
+        if parsed is None:
             self._finalize_action(step_id, "failed", {"reason": "no submit_proposals call"})
             return None, 0
+        candidates, dispositions = parsed
 
         expires_at = datetime.now(timezone.utc) + timedelta(days=MANAGR_PROPOSAL_TTL_DAYS)
+        # Dispositions run BEFORE new inserts so a withdraw frees its dedup
+        # key for any replacement proposal emitted in the same call.
+        applied = self._apply_dispositions(
+            action_id, dispositions, pending_by_id, expires_at)
         lines: List[str] = []
         dropped = 0
         for candidate in candidates[:MANAGR_MAX_PROPOSALS_PER_CYCLE]:
@@ -564,22 +681,31 @@ class ManagrAgent(Agent):
 
         self._finalize_action(
             step_id, "success",
-            {"queued": len(lines), "dropped": dropped},
+            {"queued": len(lines), "dropped": dropped,
+             "reaffirmed": applied["reaffirmed"],
+             "revised": applied["revised"],
+             "withdrawn": applied["withdrawn"]},
         )
-        if not lines:
+        maintenance = "; ".join(
+            f"{label} {ids}" for label, ids in applied.items() if ids)
+        if not lines and not maintenance:
             return None, 0
-        section = (
-            f"PROPOSED ACTIONS ({len(lines)} queued for review — "
-            "ask joy to list/approve/deny proposals):\n" + "\n".join(lines)
-        )
-        return section, len(lines)
+        parts = []
+        if lines:
+            parts.append(
+                f"PROPOSED ACTIONS ({len(lines)} queued for review — "
+                "ask joy to list/approve/deny proposals):\n" + "\n".join(lines))
+        if maintenance:
+            parts.append(f"QUEUE MAINTENANCE: {maintenance}")
+        return "\n\n".join(parts), len(lines)
 
     @staticmethod
     def _parse_submitted_proposals(
         response: Optional[Dict[str, Any]],
-    ) -> Optional[List[Dict[str, Any]]]:
-        """Pull the proposals array out of a submit_proposals tool call.
-        Returns None when the model made no usable call."""
+    ) -> Optional[Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]]:
+        """Pull the (proposals, dispositions) arrays out of a submit_proposals
+        tool call. Returns None when the model made no usable call; either
+        array may be empty."""
         if not response or response.get("type") != "tool_calls":
             return None
         for call in response.get("calls", []):
@@ -592,8 +718,14 @@ class ManagrAgent(Agent):
                 except json.JSONDecodeError:
                     return None
             proposals = args.get("proposals")
-            if isinstance(proposals, list):
-                return [p for p in proposals if isinstance(p, dict)]
+            dispositions = args.get("dispositions")
+            if isinstance(proposals, list) or isinstance(dispositions, list):
+                return (
+                    [p for p in (proposals or []) if isinstance(p, dict)]
+                    if isinstance(proposals, list) else [],
+                    [d for d in (dispositions or []) if isinstance(d, dict)]
+                    if isinstance(dispositions, list) else [],
+                )
         return None
 
     # --- 4. Report ---

@@ -235,8 +235,13 @@ MANAGR_MAX_BRIEF_CHARS = 4000    # cap on each analyst brief fed to the planner
 MANAGR_PEER_AGENTS = ("zammad_bot", "dispatch", "reminder")
 MANAGR_PEER_ACTION_LIMIT = 5
 # Phase 1 proposal queue (DP-282)
-MANAGR_PROPOSAL_TTL_DAYS = 7          # pending proposals expire after this
+MANAGR_PROPOSAL_TTL_DAYS = 7          # GC for pending rows managr stops reaffirming (DP-290)
 MANAGR_MAX_PROPOSALS_PER_CYCLE = 10   # cap on proposals stored per planning cycle
+# Self-managing queue (DP-290): pending proposals injected into the
+# proposal-extraction call for reaffirm/revise/withdraw dispositions.
+# Separate budget from the reviewed-outcomes section so pending rows never
+# crowd out the denials the planner learns from.
+MANAGR_PENDING_PROPOSAL_LIMIT = 15
 # Standing orders (DP-281)
 MANAGR_STANDING_ORDERS_LIMIT = 20     # newest active orders injected per planning cycle
 # =============================================================================

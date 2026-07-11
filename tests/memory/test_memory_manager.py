@@ -2250,27 +2250,37 @@ def test_migration_untrusted_new_features_work(legacy_mem_manager_with_summaries
 
 # --- Proposal queue (DP-282) ---
 
+_TICKET_SEQ = iter(range(20001, 30000))
+
+
 def _queue_proposal(manager, action_type="set_priority", args=None, **kwargs):
+    # Unique ticket per call by default: same-key pending proposals now
+    # SUPERSEDE instead of duplicating (DP-290) — tests that want the
+    # dedup behavior pass an explicit args dict.
+    if args is None:
+        args = {"ticket_number": next(_TICKET_SEQ), "priority": "3 high"}
     return manager.create_proposal(
         agent_name="managr",
         action_type=action_type,
-        action_args=args or {"ticket_number": 10001, "priority": "3 high"},
+        action_args=args,
         rationale="stale ticket needs attention",
         taint={"source": "zammad_board_snapshot", "cycle_action_id": 42,
-               "ticket_number": 10001},
+               "ticket_number": args.get("ticket_number")},
         source_action_id=42,
         **kwargs,
     )
 
 
 def test_proposal_create_and_get_roundtrip(mem_manager):
-    pid = _queue_proposal(mem_manager)
+    pid = _queue_proposal(mem_manager, args={"ticket_number": 10001, "priority": "3 high"})
     row = mem_manager.get_proposal(pid)
     assert row["proposal_id"] == pid
     assert row["status"] == "pending"
     assert row["agent_name"] == "managr"
     # JSON columns decode back to dicts
     assert row["action_args"] == {"ticket_number": 10001, "priority": "3 high"}
+    # DP-290: the dedup key is derived at insert
+    assert row["ticket_number"] == 10001
     assert row["taint"]["source"] == "zammad_board_snapshot"
     assert row["source_action_id"] == 42
     assert mem_manager.get_proposal(9999) is None
@@ -2395,8 +2405,8 @@ def test_migration_creates_proposals_table(legacy_mem_manager):
     cursor.execute("PRAGMA table_info(Proposals)")
     columns = {row['name'] for row in cursor.fetchall()}
     assert {'proposal_id', 'created_at', 'expires_at', 'agent_name', 'action_type',
-            'action_args', 'rationale', 'taint', 'source_action_id', 'status',
-            'reviewed_at', 'reviewer', 'review_note', 'executed_at',
+            'action_args', 'ticket_number', 'rationale', 'taint', 'source_action_id',
+            'status', 'reviewed_at', 'reviewer', 'review_note', 'executed_at',
             'execution_result'} == columns
 
 
@@ -2425,6 +2435,265 @@ def test_migration_proposals_idempotent(legacy_mem_manager):
     pid = _queue_proposal(legacy_mem_manager)
     legacy_mem_manager.create_schema()  # second run must not drop the table/rows
     assert legacy_mem_manager.get_proposal(pid) is not None
+
+# --- DP-290: self-managing proposal queue (dedup / dispositions) ---
+
+def test_create_proposal_supersedes_same_pending_key(mem_manager):
+    """Same (agent, action_type, ticket): the pending row is superseded in
+    place — stable id, newest content, fresh expiry. No dup ever lands."""
+    from datetime import timedelta
+    now = datetime.now(timezone.utc)
+    first = mem_manager.create_proposal(
+        agent_name="managr", action_type="set_priority",
+        action_args={"ticket_number": 777, "priority": "2 normal"},
+        rationale="old reasoning", expires_at=now + timedelta(days=1))
+    second = mem_manager.create_proposal(
+        agent_name="managr", action_type="set_priority",
+        action_args={"ticket_number": 777, "priority": "3 high"},
+        rationale="new reasoning", expires_at=now + timedelta(days=7))
+    assert second == first
+    row = mem_manager.get_proposal(first)
+    assert row["status"] == "pending"
+    assert row["action_args"] == {"ticket_number": 777, "priority": "3 high"}
+    assert row["rationale"] == "new reasoning"
+    assert len(mem_manager.list_proposals(status="pending")) == 1
+
+
+def test_create_proposal_distinct_keys_do_not_collide(mem_manager):
+    base = _queue_proposal(mem_manager, args={"ticket_number": 777, "priority": "3 high"})
+    other_ticket = _queue_proposal(mem_manager, args={"ticket_number": 778, "priority": "3 high"})
+    other_action = _queue_proposal(mem_manager, action_type="add_note",
+                                   args={"ticket_number": 777, "body": "note"})
+    other_agent = mem_manager.create_proposal(
+        agent_name="dispatch", action_type="set_priority",
+        action_args={"ticket_number": 777, "priority": "3 high"})
+    assert len({base, other_ticket, other_action, other_agent}) == 4
+    assert len(mem_manager.list_proposals(status="pending")) == 4
+
+
+def test_create_proposal_only_pending_rows_are_superseded(mem_manager):
+    """Terminal rows keep full history: a reviewed proposal never blocks or
+    absorbs a fresh submission for the same ticket."""
+    args = {"ticket_number": 777, "priority": "3 high"}
+    reviewed = _queue_proposal(mem_manager, args=args)
+    mem_manager.review_proposal(reviewed, "denied", "operator", "not now")
+    fresh = _queue_proposal(mem_manager, args=args)
+    assert fresh != reviewed
+    assert mem_manager.get_proposal(reviewed)["status"] == "denied"
+    assert mem_manager.get_proposal(fresh)["status"] == "pending"
+
+
+def test_create_proposal_without_ticket_number_never_dedups(mem_manager):
+    a = mem_manager.create_proposal(agent_name="managr", action_type="add_note",
+                                    action_args={"body": "no ticket"})
+    b = mem_manager.create_proposal(agent_name="managr", action_type="add_note",
+                                    action_args={"body": "no ticket"})
+    assert a != b
+    # bool must not masquerade as a ticket int (schema posture everywhere)
+    assert mem_manager._proposal_ticket_number({"ticket_number": True}) is None
+    assert mem_manager._proposal_ticket_number({"ticket_number": "777"}) is None
+    assert mem_manager._proposal_ticket_number({"ticket_number": 777}) == 777
+
+
+def test_withdraw_proposal_transitions_and_scopes(mem_manager):
+    pid = _queue_proposal(mem_manager)
+    # another agent can never retire someone else's row
+    assert mem_manager.withdraw_proposal(pid, "dispatch", "mine now") is False
+    assert mem_manager.withdraw_proposal(pid, "managr", "ticket resolved") is True
+    row = mem_manager.get_proposal(pid)
+    assert row["status"] == "withdrawn"
+    assert row["reviewer"] == "managr"
+    assert row["review_note"] == "ticket resolved"
+    assert row["reviewed_at"] is not None
+    # terminal: cannot be withdrawn twice nor reviewed afterwards
+    assert mem_manager.withdraw_proposal(pid, "managr") is False
+    assert mem_manager.review_proposal(pid, "approved", "operator") is False
+    # visible under an explicit filter and under 'all', not under pending
+    assert mem_manager.list_proposals(status="pending") == []
+    assert [r["proposal_id"] for r in mem_manager.list_proposals(status="withdrawn")] == [pid]
+    assert [r["proposal_id"] for r in mem_manager.list_proposals(status=None)] == [pid]
+
+
+def test_reaffirm_proposal_resets_expiry(mem_manager):
+    from datetime import timedelta
+    now = datetime.now(timezone.utc)
+    pid = _queue_proposal(mem_manager, expires_at=now - timedelta(hours=1))
+    assert mem_manager.reaffirm_proposal(pid, "dispatch", now + timedelta(days=7)) is False
+    assert mem_manager.reaffirm_proposal(pid, "managr", now + timedelta(days=7)) is True
+    # the reset clock survives the sweep that would have expired the old one
+    assert mem_manager.expire_stale_proposals() == 0
+    assert mem_manager.get_proposal(pid)["status"] == "pending"
+    assert mem_manager.reaffirm_proposal(9999, "managr", now) is False
+
+
+def test_revise_proposal_updates_args_and_dedup_key(mem_manager):
+    pid = _queue_proposal(mem_manager, args={"ticket_number": 777, "priority": "2 normal"})
+    assert mem_manager.revise_proposal(
+        pid, "managr", action_args={"ticket_number": 779, "priority": "3 high"},
+        rationale="situation escalated",
+        taint={"source": "zammad_board_snapshot", "ticket_number": 779}) is True
+    row = mem_manager.get_proposal(pid)
+    assert row["action_args"] == {"ticket_number": 779, "priority": "3 high"}
+    assert row["rationale"] == "situation escalated"
+    assert row["ticket_number"] == 779
+    # revised key participates in dedup: same-key create now supersedes it
+    again = _queue_proposal(mem_manager, args={"ticket_number": 779, "priority": "1 low"})
+    assert again == pid
+
+
+def test_revise_proposal_rejects_dedup_key_collision(mem_manager):
+    keep = _queue_proposal(mem_manager, args={"ticket_number": 777, "priority": "2 normal"})
+    other = _queue_proposal(mem_manager, args={"ticket_number": 778, "priority": "2 normal"})
+    # revising `other` onto `keep`'s key would create the very dup the index
+    # forbids: rejected, both rows untouched
+    assert mem_manager.revise_proposal(
+        other, "managr", action_args={"ticket_number": 777, "priority": "3 high"}) is False
+    assert mem_manager.get_proposal(other)["action_args"]["ticket_number"] == 778
+    assert mem_manager.get_proposal(keep)["status"] == "pending"
+    # scoping: not the agent's row / not pending -> False
+    assert mem_manager.revise_proposal(
+        keep, "dispatch", action_args={"ticket_number": 900, "priority": "1 low"}) is False
+
+
+# --- Proposals table migration (DP-290: dedup key + withdrawn status) ---
+
+@pytest.fixture
+def legacy_proposals_mem_manager(tmp_path):
+    """DB with the pre-DP-290 Proposals schema (no ticket_number column, no
+    'withdrawn' in the status CHECK), seeded with the prod failure shape:
+    duplicate pending rows for the same (agent, action, ticket) plus a
+    reviewed row and a unique pending row that must survive untouched."""
+    import sqlite3
+
+    db_path = str(tmp_path / "legacy_proposals.db")
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE Proposals (
+            proposal_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TIMESTAMP NOT NULL,
+            expires_at TIMESTAMP,
+            agent_name TEXT NOT NULL,
+            action_type TEXT NOT NULL,
+            action_args TEXT NOT NULL,
+            rationale TEXT,
+            taint TEXT,
+            source_action_id INTEGER,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending', 'approved', 'denied', 'expired',
+                                 'executed', 'execution_failed')),
+            reviewed_at TIMESTAMP,
+            reviewer TEXT,
+            review_note TEXT,
+            executed_at TIMESTAMP,
+            execution_result TEXT
+        );
+        CREATE INDEX idx_proposal_status ON Proposals (status, created_at);
+        CREATE INDEX idx_proposal_acceptance ON Proposals (agent_name, action_type, status);
+
+        INSERT INTO Proposals (proposal_id, created_at, expires_at, agent_name,
+                               action_type, action_args, rationale, status,
+                               reviewed_at, reviewer, review_note)
+        VALUES (1, '2026-07-01 08:00:00', '2026-07-08 08:00:00', 'managr',
+                'set_priority', '{"ticket_number": 555, "priority": "3 high"}',
+                'old reviewed row', 'denied',
+                '2026-07-02 08:00:00', 'operator', 'priority is fine');
+
+        INSERT INTO Proposals (proposal_id, created_at, expires_at, agent_name,
+                               action_type, action_args, rationale, status)
+        VALUES (2, '2026-07-08 08:00:00', '2026-07-15 08:00:00', 'managr',
+                'set_priority', '{"ticket_number": 777, "priority": "2 normal"}',
+                'first pass', 'pending');
+
+        INSERT INTO Proposals (proposal_id, created_at, expires_at, agent_name,
+                               action_type, action_args, rationale, status)
+        VALUES (3, '2026-07-08 08:05:00', '2026-07-15 08:05:00', 'managr',
+                'add_note', '{"ticket_number": 888, "body": "check backups"}',
+                'unique pending row', 'pending');
+
+        INSERT INTO Proposals (proposal_id, created_at, expires_at, agent_name,
+                               action_type, action_args, rationale, status)
+        VALUES (4, '2026-07-09 08:00:00', '2026-07-16 08:00:00', 'managr',
+                'set_priority', '{"ticket_number": 777, "priority": "3 high"}',
+                'restart re-fired the cycle', 'pending');
+    """)
+    conn.close()
+
+    manager = MemoryManager(db_path=db_path)
+    yield manager
+    manager.close()
+
+
+def test_dp290_migration_rebuilds_schema(legacy_proposals_mem_manager):
+    """Table rebuilt: ticket_number column, 'withdrawn' in the CHECK, dedup
+    index present (partial, unique), plain indexes recreated."""
+    legacy_proposals_mem_manager.create_schema()
+    conn = legacy_proposals_mem_manager._get_connection()
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(Proposals)")
+    assert 'ticket_number' in {row['name'] for row in cursor.fetchall()}
+    cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='Proposals'")
+    assert "'withdrawn'" in cursor.fetchone()["sql"]
+    cursor.execute("PRAGMA index_list(Proposals)")
+    indexes = {row['name']: row for row in cursor.fetchall()}
+    assert 'idx_proposal_status' in indexes
+    assert 'idx_proposal_acceptance' in indexes
+    assert indexes['idx_proposal_pending_key']['unique'] == 1
+    assert indexes['idx_proposal_pending_key']['partial'] == 1
+
+
+def test_dp290_migration_backfills_ticket_number(legacy_proposals_mem_manager):
+    legacy_proposals_mem_manager.create_schema()
+    assert legacy_proposals_mem_manager.get_proposal(1)["ticket_number"] == 555
+    assert legacy_proposals_mem_manager.get_proposal(3)["ticket_number"] == 888
+
+
+def test_dp290_migration_collapses_duplicate_pending_rows(legacy_proposals_mem_manager):
+    """The dup group (rows 2 and 4, same key) collapses to the OLDEST id
+    carrying the NEWEST content — what upsert-supersede would have done."""
+    legacy_proposals_mem_manager.create_schema()
+    keeper = legacy_proposals_mem_manager.get_proposal(2)
+    assert keeper["status"] == "pending"
+    assert keeper["action_args"] == {"ticket_number": 777, "priority": "3 high"}
+    assert keeper["rationale"] == "restart re-fired the cycle"
+    assert str(keeper["created_at"])[:10] == "2026-07-08"  # identity preserved
+    shadow = legacy_proposals_mem_manager.get_proposal(4)
+    assert shadow["status"] == "withdrawn"
+    assert "superseded" in shadow["review_note"]
+    assert "2" in shadow["review_note"]  # points at the surviving row
+    # untouched neighbors
+    assert legacy_proposals_mem_manager.get_proposal(1)["status"] == "denied"
+    assert legacy_proposals_mem_manager.get_proposal(3)["status"] == "pending"
+
+
+def test_dp290_migration_enables_new_features(legacy_proposals_mem_manager):
+    """Dedup + withdraw are fully usable on the migrated DB."""
+    import sqlite3
+    legacy_proposals_mem_manager.create_schema()
+    # upsert supersedes the migrated keeper row
+    pid = legacy_proposals_mem_manager.create_proposal(
+        agent_name="managr", action_type="set_priority",
+        action_args={"ticket_number": 777, "priority": "1 low"})
+    assert pid == 2
+    # the unique index enforces the guarantee even against raw INSERTs
+    conn = legacy_proposals_mem_manager._get_connection()
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            """INSERT INTO Proposals (created_at, agent_name, action_type,
+                                      action_args, ticket_number, status)
+               VALUES ('2026-07-10 00:00:00', 'managr', 'set_priority',
+                       '{"ticket_number": 777}', 777, 'pending')""")
+    assert legacy_proposals_mem_manager.withdraw_proposal(2, "managr", "done") is True
+
+
+def test_dp290_migration_idempotent(legacy_proposals_mem_manager):
+    legacy_proposals_mem_manager.create_schema()
+    legacy_proposals_mem_manager.create_schema()  # must not rebuild again
+    assert legacy_proposals_mem_manager.get_proposal(2)["status"] == "pending"
+    assert legacy_proposals_mem_manager.get_proposal(4)["status"] == "withdrawn"
+    # still exactly the two pending rows (2 and 3)
+    pending = legacy_proposals_mem_manager.list_proposals(status="pending")
+    assert sorted(r["proposal_id"] for r in pending) == [2, 3]
+
 
 # --- Standing_Orders table migration (DP-281) ---
 

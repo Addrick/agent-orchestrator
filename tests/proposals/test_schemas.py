@@ -2,6 +2,7 @@
 """Unit tests for the proposal action whitelist (DP-282)."""
 
 from src.proposals.schemas import (
+    DISPOSITION_DECISIONS,
     PROPOSAL_ACTIONS,
     build_submission_tool_schema,
     validate_proposal_args,
@@ -57,3 +58,28 @@ def test_submission_tool_schema_tracks_whitelist():
     # every whitelisted action is described to the model
     for name in PROPOSAL_ACTIONS:
         assert name in schema["function"]["description"]
+
+
+# --- DP-290: reflective disposition schema ---
+
+def test_schema_has_no_dispositions_without_pending_ids():
+    for schema in (build_submission_tool_schema(),
+                   build_submission_tool_schema(pending_ids=None)):
+        props = schema["function"]["parameters"]["properties"]
+        assert "dispositions" not in props
+        assert schema["function"]["parameters"]["required"] == ["proposals"]
+
+
+def test_schema_dispositions_enum_pinned_to_pending_ids():
+    schema = build_submission_tool_schema(pending_ids=[25, 26, 34])
+    props = schema["function"]["parameters"]["properties"]
+    disp = props["dispositions"]["items"]["properties"]
+    # ids the model may address are exactly the injected pending rows
+    assert disp["proposal_id"]["enum"] == [25, 26, 34]
+    # decisions are a closed enum — no free-form queue operations
+    assert disp["decision"]["enum"] == DISPOSITION_DECISIONS
+    assert set(props["dispositions"]["items"]["required"]) == {"proposal_id", "decision"}
+    # dispositions are optional: an omitted row is left untouched, never destroyed
+    assert schema["function"]["parameters"]["required"] == ["proposals"]
+    # the new-proposals surface is unchanged
+    assert "proposals" in props

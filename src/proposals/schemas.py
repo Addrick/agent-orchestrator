@@ -14,9 +14,15 @@
 # not represented in this schema at all.
 
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 ZAMMAD_PRIORITIES = ["1 low", "2 normal", "3 high"]
+
+# DP-290 reflective queue: what the planner may do with one of its own
+# still-pending proposals. Deliberately a closed enum — dispositions carry
+# ids + a decision + (for revise) whitelist-validated args, never free text
+# that could smuggle instructions from tainted ticket content.
+DISPOSITION_DECISIONS = ["reaffirm", "revise", "withdraw"]
 
 PROPOSAL_ACTIONS: Dict[str, Dict[str, Any]] = {
     "add_note": {
@@ -92,10 +98,17 @@ def _validate_value(key: str, value: Any, rules: Dict[str, Any]) -> List[str]:
     return errors
 
 
-def build_submission_tool_schema() -> Dict[str, Any]:
+def build_submission_tool_schema(
+    pending_ids: Optional[List[int]] = None,
+) -> Dict[str, Any]:
     """Agent-internal tool schema for the proposal-extraction LLM call
     (passed straight to the engine, never routed through ToolManager).
-    Derived from PROPOSAL_ACTIONS so the whitelist has one source of truth."""
+    Derived from PROPOSAL_ACTIONS so the whitelist has one source of truth.
+
+    pending_ids (DP-290): ids of the caller's own still-pending proposals.
+    When given, the schema grows a `dispositions` array so the same single
+    call can also reaffirm/revise/withdraw them — proposal_id is enum-pinned
+    to exactly those ids, so the model cannot address anyone else's rows."""
     action_lines = []
     for name, action in PROPOSAL_ACTIONS.items():
         arg_desc = ", ".join(
@@ -106,6 +119,34 @@ def build_submission_tool_schema() -> Dict[str, Any]:
     description = ("Queue proposed board actions for human review. "
                    "Allowed action types:\n" + "\n".join(action_lines))
 
+    properties: Dict[str, Any] = {}
+    if pending_ids:
+        properties["dispositions"] = {
+            "type": "array",
+            "description": (
+                "One entry per proposal listed under YOUR PENDING PROPOSALS: "
+                "reaffirm it if it still stands, revise it (full replacement "
+                "args, same rules as a new proposal of that action type) if "
+                "the situation changed, or withdraw it if no longer needed."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "proposal_id": {"type": "integer", "enum": list(pending_ids)},
+                    "decision": {"type": "string", "enum": DISPOSITION_DECISIONS},
+                    "args": {
+                        "type": "object",
+                        "description": "revise only: full replacement arguments.",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "revise/withdraw: one short sentence why.",
+                    },
+                },
+                "required": ["proposal_id", "decision"],
+            },
+        }
+
     return {
         "type": "function",
         "function": {
@@ -114,6 +155,7 @@ def build_submission_tool_schema() -> Dict[str, Any]:
             "parameters": {
                 "type": "object",
                 "properties": {
+                    **properties,
                     "proposals": {
                         "type": "array",
                         "items": {
