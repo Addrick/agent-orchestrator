@@ -422,8 +422,9 @@ async def test_prior_proposal_outcomes_in_board_snapshot():
     prompt = planner_call.kwargs["history_object"]["message_history"][-1]["content"]
     assert "[7] set_priority(ticket_number=10002, priority=3 high) -> denied — priority is fine" in prompt
     # Filtering happens in SQL: only this agent's reviewed outcomes are
-    # fetched, so pending rows can't consume the limit and crowd them out
-    fetch = agent.memory_manager.list_proposals.call_args.kwargs
+    # fetched, so pending rows can't consume the limit and crowd them out.
+    # (The extraction step makes its own separate pending fetch — DP-290.)
+    fetch = agent.memory_manager.list_proposals.call_args_list[0].kwargs
     assert fetch["agent_name"] == "managr"
     assert "pending" not in fetch["status"]
     assert set(fetch["status"]) == {"approved", "denied", "expired",
@@ -441,6 +442,220 @@ async def test_proposal_outcomes_skipped_when_disabled():
     await agent.deploy()
 
     agent.memory_manager.list_proposals.assert_not_called()
+
+
+# --- DP-290: self-managing proposal queue (reflective dispositions) ---
+
+def _pending_rows():
+    return [
+        {"proposal_id": 25, "agent_name": "managr", "action_type": "set_priority",
+         "action_args": {"ticket_number": 10002, "priority": "3 high"},
+         "status": "pending", "rationale": "stale VPN ticket",
+         "created_at": "2026-07-09 08:00:00"},
+        {"proposal_id": 26, "agent_name": "managr", "action_type": "add_note",
+         "action_args": {"ticket_number": 10001, "body": "check the printer"},
+         "status": "pending", "rationale": "needs follow-up",
+         "created_at": "2026-07-09 08:00:00"},
+        {"proposal_id": 27, "agent_name": "managr", "action_type": "remind",
+         "action_args": {"ticket_number": 10003, "pending_until": "2026-07-20"},
+         "status": "pending", "rationale": "vendor ETA",
+         "created_at": "2026-07-09 08:00:00"},
+    ]
+
+
+def _wire_pending(agent, rows):
+    """list_proposals returns `rows` for the extraction step's pending fetch
+    and nothing for the board snapshot's reviewed-outcomes fetch."""
+    def list_side(status=None, **kwargs):
+        return rows if status == "pending" else []
+    agent.memory_manager.list_proposals = MagicMock(side_effect=list_side)
+
+
+def _tool_calls_with_dispositions(proposals, dispositions):
+    return ({"type": "tool_calls",
+             "calls": [{"name": "submit_proposals",
+                        "arguments": {"proposals": proposals,
+                                      "dispositions": dispositions}}]}, {})
+
+
+@pytest.mark.asyncio
+async def test_pending_proposals_dispositioned_in_extraction_call():
+    """The reflective loop: pending rows are injected into the SAME extraction
+    call (no extra LLM call), addressed via an id-pinned schema, and each
+    disposition lands as the matching store call."""
+    agent, chat_system, zammad, router = _make_agent(agent_config=_proposals_config())
+    _wire_pending(agent, _pending_rows())
+    agent.memory_manager.create_proposal = MagicMock(return_value=41)
+    agent.memory_manager.reaffirm_proposal = MagicMock(return_value=True)
+    agent.memory_manager.withdraw_proposal = MagicMock(return_value=True)
+    agent.memory_manager.revise_proposal = MagicMock(return_value=True)
+    chat_system.text_engine.generate_response = AsyncMock(side_effect=[
+        _text("stale brief"), _text("patterns brief"), _text("THE PLAN"),
+        _tool_calls_with_dispositions(
+            proposals=[{"action_type": "add_note",
+                        "args": {"ticket_number": 10009, "body": "new note"},
+                        "rationale": "fresh finding"}],
+            dispositions=[
+                {"proposal_id": 25, "decision": "reaffirm"},
+                {"proposal_id": 26, "decision": "withdraw", "reason": "ticket resolved"},
+                {"proposal_id": 27, "decision": "revise",
+                 "args": {"ticket_number": 10003, "pending_until": "2026-07-25"},
+                 "reason": "vendor slipped a week"},
+            ]),
+    ])
+    agent.text_engine = chat_system.text_engine
+
+    await agent.deploy()
+
+    # Prompt carries the pending queue; schema pins ids to exactly those rows
+    extract_call = chat_system.text_engine.generate_response.await_args_list[-1]
+    prompt = extract_call.kwargs["history_object"]["message_history"][-1]["content"]
+    assert "YOUR PENDING PROPOSALS" in prompt
+    assert "[25] set_priority(ticket_number=10002, priority=3 high)" in prompt
+    assert "reaffirm" in prompt and "withdraw" in prompt
+    schema = extract_call.kwargs["tools"][0]["function"]["parameters"]
+    disp_schema = schema["properties"]["dispositions"]["items"]["properties"]
+    assert disp_schema["proposal_id"]["enum"] == [25, 26, 27]
+
+    agent.memory_manager.reaffirm_proposal.assert_called_once()
+    assert agent.memory_manager.reaffirm_proposal.call_args.args[:2] == (25, "managr")
+    agent.memory_manager.withdraw_proposal.assert_called_once_with(
+        26, "managr", note="ticket resolved")
+    revise = agent.memory_manager.revise_proposal.call_args
+    assert revise.args[:2] == (27, "managr")
+    assert revise.kwargs["action_args"] == {"ticket_number": 10003,
+                                            "pending_until": "2026-07-25"}
+    assert revise.kwargs["taint"]["ticket_number"] == 10003
+    # New proposal queued as before
+    assert agent.memory_manager.create_proposal.call_count == 1
+
+    # Digest reports both the addition and the queue maintenance
+    body = router.send.await_args.kwargs["body"]
+    assert "PROPOSED ACTIONS (1 queued" in body
+    assert "QUEUE MAINTENANCE:" in body
+    assert "reaffirmed [25]" in body
+    assert "revised [27]" in body
+    assert "withdrawn [26]" in body
+    outcome, payload = _final_outcome(agent)
+    assert outcome == "success"
+    assert payload["proposals_queued"] == 1  # dispositions are not new rows
+
+
+@pytest.mark.asyncio
+async def test_dispositions_validated_and_omissions_left_untouched():
+    """Trust posture: unknown ids ignored, duplicate dispositions ignored,
+    invalid revise args dropped (row untouched) — and a row the model simply
+    never mentions is left exactly as it was."""
+    agent, chat_system, zammad, router = _make_agent(agent_config=_proposals_config())
+    _wire_pending(agent, _pending_rows())
+    agent.memory_manager.reaffirm_proposal = MagicMock(return_value=True)
+    agent.memory_manager.withdraw_proposal = MagicMock(return_value=True)
+    agent.memory_manager.revise_proposal = MagicMock(return_value=True)
+    chat_system.text_engine.generate_response = AsyncMock(side_effect=[
+        _text("stale brief"), _text("patterns brief"), _text("THE PLAN"),
+        _tool_calls_with_dispositions(
+            proposals=[],
+            dispositions=[
+                # not one of the injected pending ids -> ignored
+                {"proposal_id": 99, "decision": "withdraw", "reason": "bogus"},
+                # invalid revise args (bad enum) -> dropped, row untouched
+                {"proposal_id": 25, "decision": "revise",
+                 "args": {"ticket_number": 10002, "priority": "urgent"}},
+                # second disposition for an already-handled id -> ignored
+                {"proposal_id": 25, "decision": "withdraw", "reason": "changed my mind"},
+                # unknown decision -> ignored
+                {"proposal_id": 26, "decision": "escalate"},
+                # proposal 27 never mentioned -> left untouched
+            ]),
+    ])
+    agent.text_engine = chat_system.text_engine
+
+    await agent.deploy()
+
+    agent.memory_manager.reaffirm_proposal.assert_not_called()
+    agent.memory_manager.withdraw_proposal.assert_not_called()
+    agent.memory_manager.revise_proposal.assert_not_called()
+    # Nothing new, nothing maintained: plain plan digest
+    assert router.send.await_args.kwargs["body"] == "THE PLAN"
+
+
+@pytest.mark.asyncio
+async def test_queue_maintenance_alone_still_reaches_digest():
+    """A cycle that only maintains the queue (no new proposals) must still
+    tell the operator what changed."""
+    agent, chat_system, zammad, router = _make_agent(agent_config=_proposals_config())
+    _wire_pending(agent, _pending_rows()[:1])
+    agent.memory_manager.reaffirm_proposal = MagicMock(return_value=True)
+    chat_system.text_engine.generate_response = AsyncMock(side_effect=[
+        _text("stale brief"), _text("patterns brief"), _text("THE PLAN"),
+        _tool_calls_with_dispositions(
+            proposals=[], dispositions=[{"proposal_id": 25, "decision": "reaffirm"}]),
+    ])
+    agent.text_engine = chat_system.text_engine
+
+    await agent.deploy()
+
+    body = router.send.await_args.kwargs["body"]
+    assert "THE PLAN" in body
+    assert "QUEUE MAINTENANCE: reaffirmed [25]" in body
+    outcome, payload = _final_outcome(agent)
+    assert payload["proposals_queued"] == 0
+
+
+@pytest.mark.asyncio
+async def test_no_pending_rows_keeps_pre_dp290_shape():
+    """Empty pending queue: no YOUR PENDING PROPOSALS section, no dispositions
+    in the schema — the extraction call looks exactly like Phase 1. The expiry
+    sweep still runs so GC'd rows are never offered for reaffirmation."""
+    agent, chat_system, zammad, router = _make_agent(agent_config=_proposals_config())
+    _wire_pending(agent, [])
+    agent.memory_manager.create_proposal = MagicMock(return_value=11)
+    chat_system.text_engine.generate_response = AsyncMock(side_effect=[
+        _text("stale brief"), _text("patterns brief"), _text("THE PLAN"),
+        _tool_calls([{"action_type": "add_note",
+                      "args": {"ticket_number": 10001, "body": "check the printer"},
+                      "rationale": "needs follow-up"}]),
+    ])
+    agent.text_engine = chat_system.text_engine
+
+    await agent.deploy()
+
+    extract_call = chat_system.text_engine.generate_response.await_args_list[-1]
+    prompt = extract_call.kwargs["history_object"]["message_history"][-1]["content"]
+    assert "YOUR PENDING PROPOSALS" not in prompt
+    schema = extract_call.kwargs["tools"][0]["function"]["parameters"]
+    assert "dispositions" not in schema["properties"]
+    agent.memory_manager.expire_stale_proposals.assert_called_once()
+    # pending fetch used the DP-290 injection budget, scoped to this agent
+    from config.global_config import MANAGR_PENDING_PROPOSAL_LIMIT
+    pending_fetch = [c for c in agent.memory_manager.list_proposals.call_args_list
+                     if c.kwargs.get("status") == "pending"]
+    assert len(pending_fetch) == 1
+    assert pending_fetch[0].kwargs["agent_name"] == "managr"
+    assert pending_fetch[0].kwargs["limit"] == MANAGR_PENDING_PROPOSAL_LIMIT
+
+
+@pytest.mark.asyncio
+async def test_pending_fetch_failure_degrades_to_new_proposals_only():
+    agent, chat_system, zammad, router = _make_agent(agent_config=_proposals_config())
+    agent.memory_manager.expire_stale_proposals = MagicMock(
+        side_effect=RuntimeError("db locked"))
+    agent.memory_manager.create_proposal = MagicMock(return_value=11)
+    chat_system.text_engine.generate_response = AsyncMock(side_effect=[
+        _text("stale brief"), _text("patterns brief"), _text("THE PLAN"),
+        _tool_calls([{"action_type": "add_note",
+                      "args": {"ticket_number": 10001, "body": "check the printer"},
+                      "rationale": "needs follow-up"}]),
+    ])
+    agent.text_engine = chat_system.text_engine
+
+    await agent.deploy()
+
+    # Cycle survives; the new proposal still lands
+    assert agent.memory_manager.create_proposal.call_count == 1
+    outcome, payload = _final_outcome(agent)
+    assert outcome == "success"
+    assert payload["proposals_queued"] == 1
 
 
 # --- Standing orders injection (DP-281) ---

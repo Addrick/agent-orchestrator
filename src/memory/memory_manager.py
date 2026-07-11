@@ -284,12 +284,13 @@ class MemoryManager:
                 agent_name TEXT NOT NULL,
                 action_type TEXT NOT NULL,
                 action_args TEXT NOT NULL,
+                ticket_number INTEGER,
                 rationale TEXT,
                 taint TEXT,
                 source_action_id INTEGER,
                 status TEXT NOT NULL DEFAULT 'pending'
                     CHECK(status IN ('pending', 'approved', 'denied', 'expired',
-                                     'executed', 'execution_failed')),
+                                     'executed', 'execution_failed', 'withdrawn')),
                 reviewed_at TIMESTAMP,
                 reviewer TEXT,
                 review_note TEXT,
@@ -334,6 +335,121 @@ class MemoryManager:
                 "CREATE INDEX IF NOT EXISTS idx_standing_order_agent_status "
                 "ON Standing_Orders (agent, status, created_at)"
             )
+
+            # Proposals migrations (DP-290): self-managing queue needs the
+            # dedup key column (ticket_number, extracted from action_args) and
+            # the 'withdrawn' status. The status lives in a CHECK constraint,
+            # which SQLite cannot ALTER — pre-DP-290 tables are rebuilt
+            # (rename / copy / drop), same pattern as Memory_Summaries v2.
+            cursor.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='Proposals'")
+            proposals_sql = (cursor.fetchone() or {"sql": ""})["sql"] or ""
+            if proposals_sql and ("ticket_number" not in proposals_sql
+                                  or "'withdrawn'" not in proposals_sql):
+                logger.info("Migrating Proposals to the DP-290 schema...")
+                conn.execute("ALTER TABLE Proposals RENAME TO Proposals_old")
+                conn.execute("""
+                    CREATE TABLE Proposals (
+                        proposal_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        created_at TIMESTAMP NOT NULL,
+                        expires_at TIMESTAMP,
+                        agent_name TEXT NOT NULL,
+                        action_type TEXT NOT NULL,
+                        action_args TEXT NOT NULL,
+                        ticket_number INTEGER,
+                        rationale TEXT,
+                        taint TEXT,
+                        source_action_id INTEGER,
+                        status TEXT NOT NULL DEFAULT 'pending'
+                            CHECK(status IN ('pending', 'approved', 'denied', 'expired',
+                                             'executed', 'execution_failed', 'withdrawn')),
+                        reviewed_at TIMESTAMP,
+                        reviewer TEXT,
+                        review_note TEXT,
+                        executed_at TIMESTAMP,
+                        execution_result TEXT
+                    )
+                """)
+                conn.execute("""
+                    INSERT INTO Proposals
+                        (proposal_id, created_at, expires_at, agent_name, action_type,
+                         action_args, rationale, taint, source_action_id, status,
+                         reviewed_at, reviewer, review_note, executed_at, execution_result)
+                    SELECT proposal_id, created_at, expires_at, agent_name, action_type,
+                           action_args, rationale, taint, source_action_id, status,
+                           reviewed_at, reviewer, review_note, executed_at, execution_result
+                    FROM Proposals_old
+                """)
+                conn.execute("DROP TABLE Proposals_old")
+                # The rename dragged the indexes to Proposals_old and DROP
+                # TABLE took them with it; this cycle's executescript already
+                # ran, so recreate them here.
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_proposal_status "
+                             "ON Proposals (status, created_at)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_proposal_acceptance "
+                             "ON Proposals (agent_name, action_type, status)")
+
+            # Backfill the dedup key from action_args (deterministic pull in
+            # code — same extraction create_proposal uses; no JSON1 reliance).
+            cursor.execute(
+                "SELECT proposal_id, action_args FROM Proposals WHERE ticket_number IS NULL")
+            for row in cursor.fetchall():
+                try:
+                    args = json.loads(row["action_args"] or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                ticket_number = self._proposal_ticket_number(
+                    args if isinstance(args, dict) else None)
+                if ticket_number is not None:
+                    conn.execute(
+                        "UPDATE Proposals SET ticket_number = ? WHERE proposal_id = ?",
+                        (ticket_number, row["proposal_id"]))
+
+            # Collapse pre-existing duplicate pending rows before the unique
+            # index can exist: keep the OLDEST row (stable id the operator may
+            # already have seen) carrying the NEWEST duplicate's content —
+            # exactly what upsert-supersede would have produced.
+            cursor.execute("""
+                SELECT agent_name, action_type, ticket_number FROM Proposals
+                WHERE status = 'pending' AND ticket_number IS NOT NULL
+                GROUP BY agent_name, action_type, ticket_number HAVING COUNT(*) > 1
+            """)
+            for dup in cursor.fetchall():
+                dup_cursor = conn.execute(
+                    """SELECT proposal_id, action_args, rationale, taint,
+                              source_action_id, expires_at
+                       FROM Proposals
+                       WHERE status = 'pending' AND agent_name = ?
+                         AND action_type = ? AND ticket_number = ?
+                       ORDER BY proposal_id""",
+                    (dup["agent_name"], dup["action_type"], dup["ticket_number"]))
+                rows = [dict(r) for r in dup_cursor.fetchall()]
+                keeper, newest = rows[0], rows[-1]
+                conn.execute(
+                    """UPDATE Proposals SET action_args = ?, rationale = ?, taint = ?,
+                           source_action_id = ?, expires_at = ?
+                       WHERE proposal_id = ?""",
+                    (newest["action_args"], newest["rationale"], newest["taint"],
+                     newest["source_action_id"], newest["expires_at"],
+                     keeper["proposal_id"]))
+                for stale_row in rows[1:]:
+                    conn.execute(
+                        """UPDATE Proposals SET status = 'withdrawn', reviewed_at = ?,
+                               reviewer = ?, review_note = ?
+                           WHERE proposal_id = ?""",
+                        (self._utc_stamp(datetime.now(timezone.utc)),
+                         dup["agent_name"],
+                         f"superseded by duplicate pending proposal "
+                         f"{keeper['proposal_id']} (DP-290 dedup migration)",
+                         stale_row["proposal_id"]))
+
+            # The storage-layer dedup guarantee: at most one pending proposal
+            # per (agent, action_type, ticket). Partial so terminal rows keep
+            # full history and keyless actions stay unconstrained.
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_proposal_pending_key "
+                "ON Proposals (agent_name, action_type, ticket_number) "
+                "WHERE status = 'pending' AND ticket_number IS NOT NULL")
 
             # Memory_Segments migrations
             cursor.execute("PRAGMA table_info(Memory_Segments)")
@@ -1307,25 +1423,124 @@ class MemoryManager:
             dt = dt.astimezone(timezone.utc)
         return dt.strftime("%Y-%m-%d %H:%M:%S")
 
+    @staticmethod
+    def _proposal_ticket_number(action_args: Optional[Dict[str, Any]]) -> Optional[int]:
+        """Deterministic dedup-key extraction (DP-290): the ticket_number arg
+        when it is a real int, else None (no key — the row dedups by nothing).
+        bool is excluded like everywhere else in the proposal schema."""
+        value = (action_args or {}).get("ticket_number")
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+        return None
+
     def create_proposal(self, agent_name: str, action_type: str, action_args: Dict[str, Any],
                         rationale: Optional[str] = None, taint: Optional[Dict[str, Any]] = None,
                         source_action_id: Optional[int] = None,
                         expires_at: Optional[datetime] = None) -> int:
-        """Insert a pending proposal row. action_args/taint are stored as JSON."""
+        """Insert a pending proposal row. action_args/taint are stored as JSON.
+
+        DP-290 dedup: if a pending row with the same (agent_name, action_type,
+        ticket_number) already exists, that row is SUPERSEDED in place — it
+        keeps its proposal_id and created_at but takes the new args, rationale,
+        taint and expiry. One durable row per (ticket, action), always carrying
+        the latest reasoning, regardless of how often a cycle re-fires."""
+        ticket_number = self._proposal_ticket_number(action_args)
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
             cursor.execute(
                 """INSERT INTO Proposals (created_at, expires_at, agent_name, action_type,
-                                          action_args, rationale, taint, source_action_id, status)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')""",
+                                          action_args, ticket_number, rationale, taint,
+                                          source_action_id, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+                   ON CONFLICT (agent_name, action_type, ticket_number)
+                   WHERE status = 'pending' AND ticket_number IS NOT NULL
+                   DO UPDATE SET action_args = excluded.action_args,
+                                 rationale = excluded.rationale,
+                                 taint = excluded.taint,
+                                 source_action_id = excluded.source_action_id,
+                                 expires_at = excluded.expires_at""",
                 (self._utc_stamp(datetime.now(timezone.utc)),
                  self._utc_stamp(expires_at) if expires_at else None, agent_name, action_type,
-                 json.dumps(action_args), rationale,
+                 json.dumps(action_args), ticket_number, rationale,
                  json.dumps(taint) if taint is not None else None, source_action_id),
             )
             conn.commit()
-            return cast(int, cursor.lastrowid)
+            if ticket_number is None:
+                return cast(int, cursor.lastrowid)
+            # lastrowid is meaningless after DO UPDATE; the dedup key is
+            # unique among pending rows, so this lookup is exact either way.
+            cursor.execute(
+                """SELECT proposal_id FROM Proposals
+                   WHERE agent_name = ? AND action_type = ? AND ticket_number = ?
+                     AND status = 'pending'""",
+                (agent_name, action_type, ticket_number))
+            return int(cursor.fetchone()["proposal_id"])
+
+    def reaffirm_proposal(self, proposal_id: int, agent_name: str,
+                          expires_at: Optional[datetime] = None) -> bool:
+        """Reset a pending proposal's expiry (DP-290 'reaffirm'): the agent
+        confirmed it still stands, so the TTL clock restarts. Scoped to the
+        agent's own pending rows; returns False when nothing matched."""
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                """UPDATE Proposals SET expires_at = ?
+                   WHERE proposal_id = ? AND status = 'pending' AND agent_name = ?""",
+                (self._utc_stamp(expires_at) if expires_at else None,
+                 proposal_id, agent_name),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def revise_proposal(self, proposal_id: int, agent_name: str,
+                        action_args: Dict[str, Any], rationale: Optional[str] = None,
+                        taint: Optional[Dict[str, Any]] = None,
+                        expires_at: Optional[datetime] = None) -> bool:
+        """Replace a pending proposal's args/rationale in place (DP-290
+        'revise'), re-deriving the dedup key from the new args. Returns False
+        when the row is not the agent's own pending row, or when the revision
+        would collide with a DIFFERENT pending row on the dedup key — the
+        caller keeps the original row untouched in that case."""
+        ticket_number = self._proposal_ticket_number(action_args)
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    """UPDATE Proposals SET action_args = ?, ticket_number = ?,
+                           rationale = ?, taint = ?, expires_at = ?
+                       WHERE proposal_id = ? AND status = 'pending' AND agent_name = ?""",
+                    (json.dumps(action_args), ticket_number, rationale,
+                     json.dumps(taint) if taint is not None else None,
+                     self._utc_stamp(expires_at) if expires_at else None,
+                     proposal_id, agent_name),
+                )
+            except sqlite3.IntegrityError:
+                conn.rollback()
+                return False
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def withdraw_proposal(self, proposal_id: int, agent_name: str,
+                          note: Optional[str] = None) -> bool:
+        """Move a PENDING proposal to 'withdrawn' (DP-290): the proposing
+        agent retracting its own suggestion — deliberately distinct from
+        operator 'denied' so denial-learning stays an operator-only signal.
+        Scoped to the agent's own rows; returns False when nothing matched."""
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                """UPDATE Proposals SET status = 'withdrawn', reviewed_at = ?,
+                       reviewer = ?, review_note = ?
+                   WHERE proposal_id = ? AND status = 'pending' AND agent_name = ?""",
+                (self._utc_stamp(datetime.now(timezone.utc)), agent_name, note,
+                 proposal_id, agent_name),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
 
     def get_proposal(self, proposal_id: int) -> Optional[Dict[str, Any]]:
         """Fetch one proposal with action_args/taint decoded from JSON."""
