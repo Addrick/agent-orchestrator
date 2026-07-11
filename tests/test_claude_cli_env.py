@@ -94,12 +94,31 @@ def test_fixr_keeps_gh_token_only(monkeypatch):
 
 
 def test_agy_env_strips_derpr_secrets_and_gh_token(monkeypatch):
-    # agy never pushes — GH_TOKEN goes too; and the Anthropic billing strip is
-    # cc-specific, so ANTHROPIC_API_KEY is NOT the concern here.
+    # agy never pushes — GH_TOKEN goes too.
     env = build_agy_cli_env(_secret_base())
     for var in _DERPR_SECRET_VARS:
         assert var not in env, f"{var} leaked into agy child env"
     assert env["PATH"] == "/usr/bin"
+
+
+def test_agy_env_strips_anthropic_credentials():
+    """DP-287: agy authenticates with its own harness OAuth, so for it the
+    Anthropic credentials — including the Claude subscription token cc's child
+    legitimately keeps — are just more derpr-host secrets. cc strips the API-key
+    vars only under CC_USE_SUBSCRIPTION; for agy the strip is unconditional."""
+    base = {
+        "ANTHROPIC_API_KEY": "sk-ant-secret",
+        "ANTHROPIC_AUTH_TOKEN": "bearer-secret",
+        "CLAUDE_CODE_OAUTH_TOKEN": "oauth-secret",
+        "PATH": "/usr/bin",
+    }
+    env = build_agy_cli_env(base)
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "ANTHROPIC_AUTH_TOKEN" not in env
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+    assert env["PATH"] == "/usr/bin"
+    # caller's dict untouched
+    assert base["ANTHROPIC_API_KEY"] == "sk-ant-secret"
 
 
 def test_vault_known_refs_are_all_scrubbed():
@@ -107,7 +126,9 @@ def test_vault_known_refs_are_all_scrubbed():
     in the cli-env denylist (the 'list rots' failure DP-277 warns about)."""
     for ref in CredentialVault.KNOWN_REFS:
         if ref == "ANTHROPIC_API_KEY":
-            continue  # handled by the subscription strip, tested above
+            # cc: subscription strip (conditional, tested above); agy:
+            # unconditional strip (DP-287, test_agy_env_strips_anthropic_credentials).
+            continue
         assert ref in _DERPR_SECRET_VARS, (
             f"vault secret {ref} is not scrubbed from spawned-agent env"
         )
