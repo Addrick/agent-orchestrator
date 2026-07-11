@@ -105,9 +105,13 @@ To support multiple agents working concurrently, the following rules are mandato
 - **MUST** use Git Worktrees — for *all* DP-XXX work, including solo single-task
   sessions, not just when agents run concurrently. The main repo directory is a
   shared mutable surface and may already hold another task's uncommitted edits.
-- **Start every DP-XXX by creating its worktree off a clean `master`:**
-  `git worktree add worktrees/DP-XXX -b bugfix/DP-XXX-slug master`. Do all
-  editing, testing, and committing inside that worktree.
+- **⚠️ Always `git fetch` first, then branch off `origin/master` — never local
+  `master`.** Local `master` drifts stale between sessions; cutting a worktree
+  from it has produced duplicate DP-IDs and rework against an old base
+  (DP-286). Fetching first also means open/unmerged PRs and stray local
+  branches can't pollute your starting point:
+  `git fetch origin && git worktree add worktrees/DP-XXX -b bugfix/DP-XXX-slug origin/master`.
+  Do all editing, testing, and committing inside that worktree.
 - **Never stage or commit from the main repo directory.** Before any
   `git add`/`git commit`, confirm you are inside `worktrees/DP-XXX/` and that
   `git status` shows only files *you* changed. If `git status` lists another
