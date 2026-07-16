@@ -709,7 +709,7 @@ derpr detects reported and suspected phishing automatically and **quarantines** 
 - The ticket carries a `security-report` (reported phishing) or `phishing-suspect` (suspected) tag plus an internal note. You can rely on those tags in standing orders.
 - A human still approves every action, so a misclassification at worst *mislabels* a ticket — it never acts on its own.
 
-Detection runs during triage, before any agent reads the body. managr will plan from richer ticket content (article text, not just titles) in a later phase, once quarantine is in place. Design and configuration detail live in the DP-288 task notes.
+Detection runs during triage, before any agent reads the body. With quarantine in place, managr now plans from richer ticket content: alongside the title-lines, the stalest open tickets get a detail tier — their first and last two articles, each clipped — so the planner reasons over the actual request and its current state. Quarantined tickets are excluded from the detail tier entirely, so enriching the snapshot never reopens the bait-exposure path. Design and configuration detail live in the DP-288 task notes.
 
 ### Managing Agents
 

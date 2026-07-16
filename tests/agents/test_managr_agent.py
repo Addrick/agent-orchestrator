@@ -57,6 +57,9 @@ def _make_agent(tickets=TICKETS, personas=None, send_result=True, agent_config=N
     zammad = MagicMock()
     zammad.search_tickets = MagicMock(return_value=tickets)
     zammad.get_tags = MagicMock(return_value=[])
+    # Detail tier (DP-288 Phase 2): default to no articles so the snapshot is
+    # title-lines only unless a test opts into content.
+    zammad.get_ticket_articles = MagicMock(return_value=[])
 
     router = MagicMock()
     router.send = AsyncMock(return_value=send_result)
@@ -856,3 +859,120 @@ async def test_tag_fetch_failure_fails_closed_withholding_titles():
     assert "title withheld: tag state unknown" in prompt
     # Ticket numbers survive so the report can still reference the tickets
     assert "#10001" in prompt
+
+
+# --- Detail tier (DP-288 Phase 2) ---------------------------------------
+
+
+def _articles(*bodies, sender="Customer"):
+    return [{"body": b, "sender": sender} for b in bodies]
+
+
+def test_select_detail_articles_first_plus_last_two():
+    arts = [{"body": f"a{i}"} for i in range(5)]
+    chosen = ManagrAgent._select_detail_articles(arts)
+    assert [a["body"] for a in chosen] == ["a0", "a3", "a4"]
+    # Short threads collapse without duplication
+    assert ManagrAgent._select_detail_articles(arts[:1]) == [arts[0]]
+    assert ManagrAgent._select_detail_articles(arts[:2]) == arts[:2]
+    assert ManagrAgent._select_detail_articles([]) == []
+
+
+def test_detail_block_clips_body_to_max():
+    from config.global_config import MANAGR_MAX_ARTICLE_CHARS
+    agent, *_ = _make_agent()
+    long_body = "x" * (MANAGR_MAX_ARTICLE_CHARS + 500)
+    block = agent._format_detail_block(
+        {"number": "10001", "id": 1}, _articles(long_body))
+    body_line = block[-1]
+    assert body_line.endswith("…")
+    assert len(body_line) < MANAGR_MAX_ARTICLE_CHARS + 100  # clipped, not full
+
+
+@pytest.mark.asyncio
+async def test_detail_tier_puts_article_content_in_planner_prompt():
+    agent, chat_system, zammad, router = _make_agent()
+    zammad.get_ticket_articles = MagicMock(
+        return_value=_articles("Original request body", "Latest reply body"))
+    chat_system.text_engine.generate_response = AsyncMock(side_effect=[
+        _text("stale brief"), _text("patterns brief"), _text("THE PLAN"),
+    ])
+    agent.text_engine = chat_system.text_engine
+
+    await agent.deploy()
+
+    planner_call = chat_system.text_engine.generate_response.await_args_list[-1]
+    prompt = planner_call.kwargs["history_object"]["message_history"][-1]["content"]
+    assert "TICKET DETAIL" in prompt
+    assert "Original request body" in prompt
+    assert "Latest reply body" in prompt
+
+
+@pytest.mark.asyncio
+async def test_detail_tier_excludes_quarantined_ticket_content():
+    """The Phase-2 enrichment must not reopen the bait-exposure path Phase 1
+    closed: a quarantined ticket's articles are never even fetched."""
+    from config.global_config import SECURITY_REPORT_TAG
+    agent, chat_system, zammad, router = _make_agent()
+    zammad.get_tags = MagicMock(
+        side_effect=lambda ticket_id: [SECURITY_REPORT_TAG] if ticket_id == 1 else [])
+    zammad.get_ticket_articles = MagicMock(
+        side_effect=lambda tid: _articles("PHISHING BAIT wire the money now")
+        if tid == 1 else _articles("ordinary printer question"))
+    chat_system.text_engine.generate_response = AsyncMock(side_effect=[
+        _text("stale brief"), _text("patterns brief"), _text("THE PLAN"),
+    ])
+    agent.text_engine = chat_system.text_engine
+
+    await agent.deploy()
+
+    # Articles were fetched only for the clean ticket, never the quarantined one
+    fetched_ids = [c.args[0] for c in zammad.get_ticket_articles.call_args_list]
+    assert 1 not in fetched_ids
+    assert 2 in fetched_ids
+    for call in chat_system.text_engine.generate_response.await_args_list:
+        prompt = call.kwargs["history_object"]["message_history"][-1]["content"]
+        assert "PHISHING BAIT" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_detail_tier_skips_tickets_with_unknown_tag_state():
+    """Tag fetch failure = quarantine unverifiable → the detail tier must not
+    fetch that ticket's articles (same fail-closed rule as the title line)."""
+    agent, chat_system, zammad, router = _make_agent()
+    zammad.get_tags = MagicMock(side_effect=RuntimeError("api down"))
+    zammad.get_ticket_articles = MagicMock(return_value=_articles("body"))
+    chat_system.text_engine.generate_response = AsyncMock(side_effect=[
+        _text("stale brief"), _text("patterns brief"), _text("THE PLAN"),
+    ])
+    agent.text_engine = chat_system.text_engine
+
+    await agent.deploy()
+
+    zammad.get_ticket_articles.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_detail_tier_is_stale_first_and_capped():
+    """Only MANAGR_DETAIL_TICKET_LIMIT tickets get the expanded fetch, and the
+    stalest (oldest last_update) are the ones chosen."""
+    tickets = [
+        {"id": i, "number": f"{i}", "title": f"t{i}",
+         "created_at": "2026-07-01T10:00:00Z",
+         # ticket i updated i days into July → higher id = more recent
+         "updated_at": f"2026-07-{i:02d}T10:00:00Z"}
+        for i in range(1, 6)
+    ]
+    agent, chat_system, zammad, router = _make_agent(tickets=tickets)
+    zammad.get_ticket_articles = MagicMock(return_value=_articles("body"))
+    chat_system.text_engine.generate_response = AsyncMock(side_effect=[
+        _text("stale brief"), _text("patterns brief"), _text("THE PLAN"),
+    ])
+    agent.text_engine = chat_system.text_engine
+
+    with patch("src.agents.managr_agent.MANAGR_DETAIL_TICKET_LIMIT", 3):
+        await agent.deploy()
+
+    fetched_ids = sorted(c.args[0] for c in zammad.get_ticket_articles.call_args_list)
+    # The 3 oldest-updated tickets (ids 1,2,3), not the 2 most recent (4,5)
+    assert fetched_ids == [1, 2, 3]

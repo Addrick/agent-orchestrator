@@ -14,6 +14,8 @@ from config.global_config import (
     MANAGR_BOARD_TICKET_LIMIT,
     MANAGR_MAX_BOARD_CHARS,
     MANAGR_MAX_BRIEF_CHARS,
+    MANAGR_DETAIL_TICKET_LIMIT,
+    MANAGR_MAX_ARTICLE_CHARS,
     MANAGR_PEER_AGENTS,
     MANAGR_PEER_ACTION_LIMIT,
     MANAGR_PROPOSAL_TTL_DAYS,
@@ -170,6 +172,13 @@ class ManagrAgent(Agent):
                 t, now, tags=tags_by_id.get(t.get("id")),
             ))
 
+        detail_lines = await self._detail_tier(action_id, tickets, tags_by_id)
+        if detail_lines:
+            lines.append("")
+            lines.append("TICKET DETAIL (expanded content for the highest-"
+                         "priority open tickets; quarantined tickets omitted):")
+            lines.extend(detail_lines)
+
         peer_lines = self._recent_peer_activity()
         if peer_lines:
             lines.append("")
@@ -258,6 +267,123 @@ class ManagrAgent(Agent):
         if updated:
             parts.append(f"last_update={updated}")
         return "- " + " | ".join(parts)
+
+    # --- 1b. Detail tier (DP-288 Phase 2) ---
+
+    def _detail_eligible(
+        self, tickets: List[Dict[str, Any]],
+        tags_by_id: Dict[Any, Optional[List[str]]],
+    ) -> List[Dict[str, Any]]:
+        """Open tickets eligible for the expanded content fetch, stale-first.
+
+        Quarantined tickets AND tickets whose tag state is unknown (fetch
+        failed → None) are excluded unconditionally: the detail tier pulls
+        full article bodies, so an unverified ticket must never enter it —
+        the same fail-closed guarantee _format_ticket_line makes for titles.
+        Ordered oldest-last_update first so the stalest tickets get content
+        first; the limit then bounds the extra API calls per cycle.
+        """
+        eligible: List[Dict[str, Any]] = []
+        for t in tickets:
+            if t.get("id") is None:
+                continue
+            tags = tags_by_id.get(t.get("id"))
+            if tags is None:  # unknown tag state → fail closed
+                continue
+            if any(tag in QUARANTINE_TAGS for tag in tags):
+                continue
+            eligible.append(t)
+        eligible.sort(key=self._update_sort_key)
+        return eligible[:MANAGR_DETAIL_TICKET_LIMIT]
+
+    @staticmethod
+    def _update_sort_key(ticket: Dict[str, Any]) -> float:
+        """Epoch seconds of updated_at; missing/unparseable sort last so
+        tickets with a known stale timestamp are prioritized."""
+        ts = ticket.get("updated_at")
+        if not ts:
+            return float("inf")
+        try:
+            return datetime.fromisoformat(
+                str(ts).replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return float("inf")
+
+    async def _detail_tier(
+        self, action_id: int, tickets: List[Dict[str, Any]],
+        tags_by_id: Dict[Any, Optional[List[str]]],
+    ) -> List[str]:
+        """Fetch first + last two articles for the stalest eligible tickets
+        and render them as clipped prompt lines. Best-effort: a per-ticket
+        fetch failure drops that ticket's detail (its title line already
+        stands), never the whole snapshot."""
+        eligible = self._detail_eligible(tickets, tags_by_id)
+        if not eligible:
+            return []
+        semaphore = asyncio.Semaphore(8)
+
+        async def fetch(
+            ticket: Dict[str, Any],
+        ) -> Tuple[Dict[str, Any], Optional[List[Dict[str, Any]]]]:
+            async with semaphore:
+                try:
+                    # _detail_eligible guarantees a non-None id
+                    arts = await asyncio.to_thread(
+                        self.zammad_client.get_ticket_articles, ticket["id"])
+                    return ticket, list(arts or [])
+                except Exception as e:
+                    logger.error(
+                        f"Could not fetch articles for ticket {ticket.get('id')}: {e}")
+                    return ticket, None
+
+        results = await asyncio.gather(*(fetch(t) for t in eligible))
+        lines: List[str] = []
+        detailed = 0
+        for ticket, arts in results:
+            if arts is None:
+                continue
+            block = self._format_detail_block(ticket, arts)
+            if block:
+                lines.extend(block)
+                detailed += 1
+        self._log_step(
+            action_id, "detail_tier",
+            action_payload={"eligible": len(eligible)},
+            outcome="success",
+            outcome_payload={"detailed": detailed},
+        )
+        return lines
+
+    @staticmethod
+    def _select_detail_articles(
+        articles: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """First article (the original request) + the last two (current
+        state), order-preserved and de-duplicated by position. Fewer than
+        four articles collapse naturally."""
+        n = len(articles)
+        if n == 0:
+            return []
+        idxs = sorted({0, max(0, n - 2), n - 1})
+        return [articles[i] for i in idxs]
+
+    def _format_detail_block(
+        self, ticket: Dict[str, Any], articles: List[Dict[str, Any]],
+    ) -> List[str]:
+        """Render one ticket's selected articles as clipped, whitespace-
+        normalized prompt lines. Returns [] if nothing renderable."""
+        number = ticket.get("number", ticket.get("id", "?"))
+        block = [f"  #{number} — {len(articles)} article(s):"]
+        for a in self._select_detail_articles(articles):
+            body = " ".join(str(a.get("body", "")).split())
+            if not body:
+                continue
+            clipped = body[:MANAGR_MAX_ARTICLE_CHARS]
+            if len(body) > MANAGR_MAX_ARTICLE_CHARS:
+                clipped += "…"
+            sender = str(a.get("sender", "?"))[:40]
+            block.append(f"    [{sender}] {clipped}")
+        return block if len(block) > 1 else []
 
     @staticmethod
     def _age_str(timestamp_str: Optional[str], now: datetime) -> str:
