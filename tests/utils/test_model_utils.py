@@ -126,10 +126,12 @@ def test_get_model_prefix(model_name, expected):
     # Qwen models
     ("qwen", "chatml"),
     ("qwen-32b", "chatml"),
-    # Llama models
+    # Llama models — both hyphenated GGUF names and the unhyphenated spelling
     ("llama-3-70b", "llama3"),
     ("llama-4-70b", "llama4"),
     ("llama2-70b", "llama2"),
+    ("llama-2-7b-chat", "llama2"),  # the common GGUF form must not fall to chatml
+    ("Llama-2-13B", "llama2"),      # case-insensitive
     # ChatML family
     ("mistral-7b", "chatml"),
     ("hermes-2", "chatml"),
@@ -216,3 +218,53 @@ async def test_get_current_kobold_model_cached():
     second = await model_utils.get_current_kobold_model(client, base)
     assert first == second == "koboldcpp/qwen3-40b"
     assert len(client.calls) == 1  # cache hit on the second call
+
+
+@pytest.mark.asyncio
+async def test_get_current_kobold_model_negative_result_short_ttl(monkeypatch):
+    """A None (failure) result caches only for the short negative TTL, so a
+    transient outage does not pin the default template for the full 60s."""
+    model_utils._KOBOLD_MODEL_CACHE.clear()
+    base = "http://kobold-neg:5001"
+
+    fake_now = {"t": 1000.0}
+    monkeypatch.setattr(model_utils.time, "monotonic", lambda: fake_now["t"])
+
+    # First call fails → None cached at t=1000.
+    failing = _FakeGetClient(exc=Exception("Connection refused"))
+    assert await model_utils.get_current_kobold_model(failing, base) is None
+    assert len(failing.calls) == 1
+
+    # Within the negative TTL → served from cache, no re-query.
+    fake_now["t"] = 1000.0 + model_utils._KOBOLD_MODEL_CACHE_NEG_TTL - 0.1
+    assert await model_utils.get_current_kobold_model(failing, base) is None
+    assert len(failing.calls) == 1
+
+    # Past the negative TTL (but well within the 60s success TTL) → re-query,
+    # and kobold is now up so detection recovers.
+    fake_now["t"] = 1000.0 + model_utils._KOBOLD_MODEL_CACHE_NEG_TTL + 0.1
+    recovered = _FakeGetClient(payload={"result": "koboldcpp/gemma-4-31b-it"})
+    assert (
+        await model_utils.get_current_kobold_model(recovered, base)
+        == "koboldcpp/gemma-4-31b-it"
+    )
+    assert len(recovered.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_current_kobold_model_success_holds_full_ttl(monkeypatch):
+    """A successful detection stays cached for the full (long) TTL — the short
+    negative TTL must not shorten successful entries."""
+    model_utils._KOBOLD_MODEL_CACHE.clear()
+    base = "http://kobold-pos:5001"
+
+    fake_now = {"t": 2000.0}
+    monkeypatch.setattr(model_utils.time, "monotonic", lambda: fake_now["t"])
+
+    client = _FakeGetClient(payload={"result": "koboldcpp/qwen3-40b"})
+    assert await model_utils.get_current_kobold_model(client, base) == "koboldcpp/qwen3-40b"
+
+    # Past the negative TTL but before the success TTL → still cached.
+    fake_now["t"] = 2000.0 + model_utils._KOBOLD_MODEL_CACHE_NEG_TTL + 1.0
+    assert await model_utils.get_current_kobold_model(client, base) == "koboldcpp/qwen3-40b"
+    assert len(client.calls) == 1  # no re-query

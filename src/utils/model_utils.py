@@ -204,9 +204,16 @@ MODEL_TO_CHAT_TEMPLATE: List[Tuple[str, str]] = [
     # Llama 3 and 4 models
     ("llama-3", "llama3"),
     ("llama-4", "llama4"),
+    # Llama 2 — match both the hyphenated GGUF form ("llama-2-7b-chat", the
+    # common one) and the unhyphenated "llama2" spelling.
+    ("llama-2", "llama2"),
     ("llama2", "llama2"),
-    # ChatML family (Mistral, Hermes, etc.)
+    # ChatML family (Hermes and other ChatML finetunes).
     ("chatml", "chatml"),
+    # NOTE: base Mistral-Instruct actually uses [INST]...[/INST], not ChatML,
+    # and no [INST] template exists in CHAT_TEMPLATES. chatml is the least-bad
+    # fallback and is correct for the common Mistral-based ChatML finetunes
+    # (OpenHermes-Mistral, etc.); raw Mistral-Instruct is not well supported.
     ("mistral", "chatml"),
     ("hermes", "chatml"),
 ]
@@ -236,8 +243,14 @@ def get_chat_template_for_model(model_name: Optional[str]) -> Optional[str]:
 # changes (a systemctl swap on the inference host), so we cache to avoid an
 # HTTP round-trip on every message. Short TTL so a model swap is picked up
 # within the window without a restart.
+#
+# Successful detections cache for _KOBOLD_MODEL_CACHE_TTL. Failures (None)
+# cache for the much shorter _KOBOLD_MODEL_CACHE_NEG_TTL: a transient outage
+# or a still-loading kobold at startup would otherwise pin every local persona
+# to the chatml default for a full 60s after kobold recovers.
 _KOBOLD_MODEL_CACHE: Dict[str, Tuple[float, Optional[str]]] = {}
 _KOBOLD_MODEL_CACHE_TTL = 60.0
+_KOBOLD_MODEL_CACHE_NEG_TTL = 5.0
 
 
 async def get_current_kobold_model(
@@ -262,12 +275,20 @@ async def get_current_kobold_model(
     """
     now = time.monotonic()
     cached = _KOBOLD_MODEL_CACHE.get(base_url)
-    if cached is not None and now - cached[0] < _KOBOLD_MODEL_CACHE_TTL:
-        return cached[1]
+    if cached is not None:
+        ttl = _KOBOLD_MODEL_CACHE_TTL if cached[1] else _KOBOLD_MODEL_CACHE_NEG_TTL
+        if now - cached[0] < ttl:
+            return cached[1]
 
     result: Optional[str] = None
     try:
-        response = await client.get(f"{base_url}/api/v1/model", timeout=2.0)
+        # Bound the connect leg tightly: a cold/expired cache puts this GET on
+        # the generation-start path, so an unreachable kobold must fail fast
+        # rather than stall the first token by the full request budget.
+        response = await client.get(
+            f"{base_url}/api/v1/model",
+            timeout=httpx.Timeout(2.0, connect=1.0),
+        )
         if response.status_code == 200:
             raw = response.json().get("result")
             if raw:
