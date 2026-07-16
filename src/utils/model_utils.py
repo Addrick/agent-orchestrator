@@ -263,7 +263,7 @@ def get_current_kobold_model() -> Optional[str]:
             )
             if model_name:
                 logger.debug(f"Detected koboldcpp model: {model_name}")
-                return model_name
+                return str(model_name)
     except Exception as e:
         logger.debug(f"Could not query koboldcpp model: {e}")
 

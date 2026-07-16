@@ -322,7 +322,7 @@ class StreamEngine:
         # Priority 1: explicit persona setting
         explicit = persona_config.get("chat_template")
         if explicit:
-            return explicit
+            return str(explicit)
 
         # Priority 2-3: environment or config
         env_or_config = (
