@@ -161,6 +161,8 @@ Background (MemoryConsolidator, hourly daemon via app.register_task):
 - `vec_Memory_Summaries` -- sqlite-vec virtual table for KNN search on summary embeddings (float[3072])
 - `Agent_Actions` -- id, parent_id, agent_name, action_type, trigger_context, action_payload, outcome, outcome_payload, timestamp
 - `Agent_Action_Contexts` -- action_id + context_type + context_value (multi-dimensional retrieval)
+- `Audit_Log` -- security/write-audit trail (event_type, target_id, timestamp; indexes idx_audit_event, idx_audit_target) backing `log_audit_event` / `mark_trusted` / `mark_untrusted`
+- `Proposals` (DP-282, self-managing queue DP-290) -- proposal_id (PK), created_at, expires_at, agent_name, action_type, action_args, rationale, taint, source_action_id, ticket_number, status (CHECK: pending|approved|denied|expired|executed|execution_failed|withdrawn), reviewed_at, reviewer, review_note, executed_at, execution_result. Indexes: idx_proposal_status, idx_proposal_acceptance, idx_proposal_pending_key (partial UNIQUE on agent/action_type/ticket_number WHERE pending — dedup)
 
 Note: On startup `create_schema()` validates both vec table dimensions against `EMBEDDING_DIMENSION` and auto-syncs any rows missing from the virtual tables.
 
@@ -432,6 +434,7 @@ Human-approval gating primitive for autonomous-agent writes (replaces Confirmati
 9.2 Register VoiceIntegration service (voice timer tools, DP-238 — needs NotificationRouter; Discord/web capture late-bound after the interfaces exist) [main.py step 7.2]
 9.3 Register ProxmoxIntegration service (proxmox management tools, DP-262 — registration-only, always registers) [main.py step 7.3]
 9.4 Register MCPIntegration service (MCP management tools, DP-268 — registration-only, always registers; constructs the main.py-owned `MCPClientManager` with `personas_provider`) [main.py step 7.4]; later `await mcp_manager.start()` connects configured servers and registers their discovered tools (no-op when `MCP_ENABLED` is false), and `mcp_manager.aclose()` runs at shutdown [main.py step 8.2]
+9.5 Register ProposalIntegration service (proposal-queue review tools, DP-282 — only if Zammad available; wraps `ProposalExecutor(zammad_client)`) [main.py step 7.5]
 10. Register interface tasks (Discord bot, Gmail bot)
 11. Register MemoryConsolidator as hourly background daemon (`app.register_task("memory_consolidator", consolidator.start_daemon(check_interval_seconds=3600))`)
 12. Optional model list refresh on startup

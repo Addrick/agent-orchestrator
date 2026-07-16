@@ -28,7 +28,7 @@ Async, provider-agnostic LLM orchestration engine for chatbot automation (IT sup
 
 **MCP client (DP-268):** `src/tools/mcp_client.py` + `mcp_integration.py` — consume external MCP tool servers (streamable-HTTP); `MCPClientManager` (main.py-owned) + `MCPIntegration` (ServiceIntegration `"mcp"`, always registered) exposes `add`/`remove`/`list_mcp_servers`, discovering each server's tools into the live `ToolDefinitionRegistry` as `mcp__<server>__<tool>` with restrictive default security metadata.
 
-**Storage:** SQLite — User_Interactions (conversations), Suppressed_Interactions, Agent_Actions + Agent_Action_Contexts. All async via to_thread().
+**Storage:** SQLite — User_Interactions (conversations), Suppressed_Interactions, Agent_Actions + Agent_Action_Contexts, Audit_Log, Proposals (DP-282). All async via to_thread().
 
 **Config:** global_config.py (limits, rate limits), default_personas.json + system_personas.json (git-tracked), data/personas.json (local override), agents.json.
 
