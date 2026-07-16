@@ -229,8 +229,15 @@ MANAGR_PLANNER_NAME = "managr_planner"
 MANAGR_STALE_ANALYST_NAME = "managr_stale_analyst"
 MANAGR_PATTERN_ANALYST_NAME = "managr_pattern_analyst"
 MANAGR_BOARD_TICKET_LIMIT = 50
-MANAGR_MAX_BOARD_CHARS = 12000   # cap on the board snapshot fed to personas
-MANAGR_MAX_BRIEF_CHARS = 4000    # cap on each analyst brief fed to the planner
+MANAGR_MAX_BOARD_CHARS = 60000   # cap on the board snapshot fed to personas
+MANAGR_MAX_BRIEF_CHARS = 8000    # cap on each analyst brief fed to the planner
+# Detail tier (DP-288 Phase 2): a subset of open tickets gets an expanded
+# fetch (first article + last two) so the planner reasons over real content,
+# not just title-lines. Prioritized stale-first (oldest last_update). Tickets
+# under any QUARANTINE_TAGS tag are excluded unconditionally — bait text must
+# never reach the planner prompt (the whole point of Phase 1).
+MANAGR_DETAIL_TICKET_LIMIT = 20  # open tickets given the expanded content fetch
+MANAGR_MAX_ARTICLE_CHARS = 600   # per-article clip within the detail tier
 # Peer agents whose recent actions are summarized into the board snapshot
 MANAGR_PEER_AGENTS = ("zammad_bot", "dispatch", "reminder")
 MANAGR_PEER_ACTION_LIMIT = 5
