@@ -308,6 +308,9 @@ Multi-stage AI triage pipeline for new, untagged tickets. Uses 4 system personas
 5. `triage_analyst` → full analysis with context → internal note posted to ticket
 Tags ticket as triaged. No tools used — all LLM calls are read-only.
 
+**`managr_agent.py` -- ManagrAgent** (`agent_name="managr"`, DP-280/282/290)
+Autonomous Zammad ticket-triage manager. Per cycle: builds a board snapshot, fans it out to read-only analyst personas for briefs, then a planner persona (`MANAGR_PLANNER_NAME`) produces the Manager's Report. When `proposals_enabled`, a second planner call (`tools=[submit_proposals]`) emits proposed writes into the `src/proposals/` queue instead of writing directly (see that section) — human approves via the portal. DP-290 also gives it reflective dispositions: it can reaffirm/revise/withdraw its own still-pending proposals from a prior cycle. Uses `content_classifier.py` (`ContentClassifier`/`Classification`) to pre-signal-classify ticket content before triage.
+
 **`sqlite_consolidator.py` -- SqliteConsolidator** (formerly `MemoryAgent`; `agent_name="memory"`)
 Batch agent that segments conversations by topic, extracts observations via LLM, and stores embedded summaries. **Registered only when `SEMANTIC_BACKEND=="sqlite"`** — the Hindsight backend drives consolidation upstream, and registering this agent under it would crash `deploy()` on the first cycle (legacy SQL ops raise `NotImplementedError`). Two-phase pipeline per channel:
 
@@ -406,6 +409,15 @@ Consume external MCP tool servers (streamable-HTTP transport). Discovered tools 
 - Live catalog: `ToolDefinitionRegistry` (`definitions.py`) holds discovered defs; `ToolManager.unregister` drops their handlers; discovered-tool handlers are closures over `MCPClientManager.call_tool`.
 - Config (`global_config.py`): `MCP_ENABLED` (default off), `MCP_SERVERS_FILE` (default `DATA_DIR/mcp_servers.json`), `MCP_CONNECT_TIMEOUT` (30s), `MCP_CALL_TIMEOUT` (120s), `MCP_RECONNECT_INTERVAL` (60s). Dependency: `mcp` SDK.
 
+### `src/proposals/` -- durable proposal queue (DP-282, managr Phase 1; self-managing queue DP-290)
+Human-approval gating primitive for autonomous-agent writes (replaces ConfirmationManager for this shape — that one is in-memory, one-pending-per-(user,persona), chat-turn-bound). `ManagrAgent` proposes; a human approves via the portal; a separate executor writes. Documented in full in `docs/user_guide.md`.
+- `schemas.py` — `PROPOSAL_ACTIONS` whitelist (`add_note` internal-only / `set_priority` / `remind`) + `validate_proposal_args` (required/type/enum/max_length/date, rejects unknown actions and unexpected keys). `build_submission_tool_schema()` derives the agent-internal `submit_proposals` tool from the whitelist.
+- `executor.py` — `ProposalExecutor(zammad_client).execute(proposal) -> (bool, str)`. Re-validates args at execution time, resolves `ticket_number` → internal id via search, dispatches to the relevant Zammad write (add note / update priority / update state+pending_time). Errors returned, not raised.
+- `service.py` — `ProposalIntegration(ServiceIntegration)`, `name="proposals"`; registers `list_proposals` (read), `approve_proposal`/`deny_proposal` (`is_write:True` → write gate). Approve reviews the row, audits, executes immediately, marks executed. Deny requires a reason. Lazy `expire_stale_proposals()` sweep on list/approve/deny. Registered in `main.py` only when Zammad is configured.
+- Store: `Proposals` table in `memory_manager.py` — status pending/approved/denied/expired/executed/execution_failed/withdrawn; partial UNIQUE index on (agent, action_type, ticket_number) WHERE pending enforces dedup.
+- Self-managing queue (DP-290): same-key pending proposal is UPSERTed in place instead of duplicated; `ManagrAgent` can also `reaffirm`/`revise`/`withdraw` its own pending proposals each cycle (reflective dispositions) — TTL acts as a GC backstop, not the primary lifecycle.
+- Emission (in `ManagrAgent`): config-gated `proposals_enabled`; a second planner call with `tools=[submit_proposals]`; every candidate code-validated before insert, capped at `MANAGR_MAX_PROPOSALS_PER_CYCLE`.
+
 ### `src/main.py` -- Startup Sequence
 1. MemoryManager (SQLite) + schema migration
 2. TextEngine (LLM API router)
@@ -413,7 +425,7 @@ Consume external MCP tool servers (streamable-HTTP transport). Discovered tools 
 4. EmbeddingService (GeminiEmbeddingProvider) — shared by ChatSystem and SqliteConsolidator
 5. ChatSystem (DI hub, injected with memory + engine + embedding_service)
 6. Register ZammadIntegration service (if Zammad available)
-7. AgentManager + register agent classes (`SqliteConsolidator` only when `SEMANTIC_BACKEND=="sqlite"`; `ZammadBot` + `DispatchAgent` + `ReminderAgent` only if Zammad available)
+7. AgentManager + register agent classes (`SqliteConsolidator` only when `SEMANTIC_BACKEND=="sqlite"`; `ZammadBot` + `DispatchAgent` + `ReminderAgent` + `ManagrAgent` only if Zammad available)
 8. Register AgentServiceIntegration service (agent tools)
 9. AppManager + NotificationRouter (Discord/Zammad notifiers)
 9.1 Register FixrIntegration service (fixr dispatch tools, DP-227 — needs ChatSystem + NotificationRouter) [main.py step 7.1]
