@@ -10,7 +10,7 @@ import logging
 import os
 import random
 import re
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+from typing import Any, AsyncGenerator, AsyncIterator, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -308,16 +308,19 @@ class StreamEngine:
         messages.extend(history)
         return messages
 
-    @staticmethod
-    def _resolve_template_name(persona_config: Dict[str, Any]) -> str:
+    async def _resolve_template_name(self, persona_config: Dict[str, Any]) -> str:
         """Resolve the chat template name with fallbacks and model-aware detection.
 
         Priority (highest to lowest):
         1. Persona's explicit chat_template setting
         2. KOBOLD_CHAT_TEMPLATE environment variable
         3. KOBOLD_CHAT_TEMPLATE global config setting
-        4. Auto-detection from currently loaded model (if model="local")
+        4. Auto-detection from the model currently loaded in koboldcpp
         5. Default "chatml" fallback
+
+        Async because tier 4 queries koboldcpp over the shared async client;
+        it must run inside the event loop (see stream_messages), never as a
+        blocking call on the message hot path.
         """
         # Priority 1: explicit persona setting
         explicit = persona_config.get("chat_template")
@@ -330,18 +333,23 @@ class StreamEngine:
             or getattr(global_config, "KOBOLD_CHAT_TEMPLATE", None)
         )
         if env_or_config:
-            return env_or_config
+            return str(env_or_config)
 
-        # Priority 4: auto-detect from loaded model if this persona uses "local"
-        if persona_config.get("model_name") == "local":
-            current_model = get_current_kobold_model()
-            if current_model:
-                auto_template = get_chat_template_for_model(current_model)
-                if auto_template:
-                    logger.info(
-                        f"Auto-detected chat template '{auto_template}' for model '{current_model}'"
-                    )
-                    return auto_template
+        # Priority 4: auto-detect from the loaded model. StreamEngine only ever
+        # serves local requests (supports() is local-only), so we detect
+        # unconditionally rather than gating on model_name — this also covers
+        # the "default" sentinel that store.py keeps in model_name for
+        # default-model personas (gating on == "local" silently skipped those).
+        base_url = self._kobold_base_url()
+        client = await self._get_http_client()
+        current_model = await get_current_kobold_model(client, base_url)
+        if current_model:
+            auto_template = get_chat_template_for_model(current_model)
+            if auto_template:
+                logger.info(
+                    f"Auto-detected chat template '{auto_template}' for model '{current_model}'"
+                )
+                return auto_template
 
         # Priority 5: default fallback
         return "chatml"
@@ -441,7 +449,7 @@ class StreamEngine:
         payload: Dict[str, Any],
         dump_payload: Dict[str, Any],
         genkey: str,
-    ) -> AsyncIterator[Dict[str, Any]]:
+    ) -> AsyncGenerator[Dict[str, Any], None]:
         """Run the kobold native SSE stream and emit the unified event shape."""
         yield {"type": "api_payload", "payload": dump_payload}
 
@@ -562,11 +570,11 @@ class StreamEngine:
     ) -> AsyncIterator[Dict[str, Any]]:
         """Phase B entry — render OAI-style messages via the persona's chat
         template and stream from kobold native. Tool list folds into the
-        system prompt as a `<tool_call>` instruction block."""
-        # Returns the underlying _kobold_stream generator directly — wrapping
-        # in another `async def` would block aclose() from reaching the
-        # native stream's finally (the abort POST). See test
-        # test_stream_local_aborts_upstream_when_caller_breaks_early.
+        system prompt as a `<tool_call>` instruction block.
+
+        Template resolution can query koboldcpp over the async client (to
+        auto-detect the loaded model), so it happens inside the async
+        generator `_resolve_render_and_stream`, not in this sync preamble."""
         tool_list = [t for t in (tools or []) if t.get("function") or t.get("name")]
         rendered_messages = list(messages)
         if tool_list and rendered_messages and rendered_messages[0].get("role") == "system":
@@ -575,7 +583,26 @@ class StreamEngine:
                 "content": (rendered_messages[0].get("content") or "")
                     + _format_tools_instruction(tool_list),
             }
-        template_name = self._resolve_template_name(persona_config)
+        return self._resolve_render_and_stream(
+            persona_config, rendered_messages, params, tool_list
+        )
+
+    async def _resolve_render_and_stream(
+        self,
+        persona_config: Dict[str, Any],
+        rendered_messages: List[Dict[str, Any]],
+        params: GenerationParams,
+        tool_list: List[Dict[str, Any]],
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Resolve the chat template (may query kobold over the async client),
+        render the prompt, build the payload, then delegate to _kobold_stream.
+
+        The explicit `finally: await inner.aclose()` is load-bearing: without
+        it, a caller aclose()-ing this outer generator would NOT reach
+        _kobold_stream's own finally (the abort POST), because `async for`
+        does not auto-close the inner iterator on GeneratorExit. See
+        test_stream_local_aborts_upstream_when_caller_breaks_early."""
+        template_name = await self._resolve_template_name(persona_config)
         kobold_extras = params.get_provider_extras("kobold")
         prompt, stop_seqs = _render_prompt(rendered_messages, template_name, kobold_extras)
 
@@ -588,7 +615,12 @@ class StreamEngine:
             tools_advertised=[(t.get("function") or t).get("name", "unknown")
                               for t in tool_list],
         )
-        return self._kobold_stream(payload, dump_payload, genkey)
+        inner = self._kobold_stream(payload, dump_payload, genkey)
+        try:
+            async for ev in inner:
+                yield ev
+        finally:
+            await inner.aclose()
 
     def stream_prompt(
         self,

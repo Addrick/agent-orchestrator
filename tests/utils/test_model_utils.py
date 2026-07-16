@@ -144,44 +144,75 @@ def test_get_chat_template_for_model(model_name, expected_template):
     assert model_utils.get_chat_template_for_model(model_name) == expected_template
 
 
-def test_get_current_kobold_model_connection_failure():
-    """get_current_kobold_model returns None when koboldcpp is unreachable."""
-    with patch('src.utils.model_utils.httpx.get') as mock_get:
-        mock_get.side_effect = Exception("Connection refused")
-        result = model_utils.get_current_kobold_model()
-        assert result is None
+# --- get_current_kobold_model (async, /api/v1/model, cached) ---------------
+# These mock the REAL endpoint /api/v1/model whose shape is
+# {"result": "koboldcpp/<name>"}. The retired implementation queried
+# /api/extra/version (which carries no model field) and always returned None —
+# the feature was dead. Each test clears the per-base-URL cache first.
+
+class _FakeGetClient:
+    """Minimal httpx.AsyncClient stand-in exposing only .get()."""
+
+    def __init__(self, *, status=200, payload=None, exc=None):
+        self._status = status
+        self._payload = payload if payload is not None else {}
+        self._exc = exc
+        self.calls = []
+
+    async def get(self, url, timeout=None):
+        self.calls.append(url)
+        if self._exc is not None:
+            raise self._exc
+        resp = Mock()
+        resp.status_code = self._status
+        resp.json.return_value = self._payload
+        return resp
 
 
-def test_get_current_kobold_model_no_model():
-    """get_current_kobold_model returns None when no model field in response."""
-    with patch('src.utils.model_utils.httpx.get') as mock_get:
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"version": "1.70"}  # No model field
-        mock_get.return_value = mock_response
-        result = model_utils.get_current_kobold_model()
-        assert result is None
+@pytest.mark.asyncio
+async def test_get_current_kobold_model_success():
+    """Reads data['result'] from /api/v1/model; koboldcpp/ prefix kept intact."""
+    model_utils._KOBOLD_MODEL_CACHE.clear()
+    client = _FakeGetClient(payload={"result": "koboldcpp/gemma-4-31b-it"})
+    result = await model_utils.get_current_kobold_model(client, "http://kobold:5001")
+    assert result == "koboldcpp/gemma-4-31b-it"
+    assert client.calls == ["http://kobold:5001/api/v1/model"]
 
 
-@patch('src.utils.model_utils.httpx.get')
-def test_get_current_kobold_model_success(mock_get):
-    """get_current_kobold_model returns the model name from /api/extra/version."""
-    from unittest.mock import Mock
-    mock_response = Mock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = {"model": "gemma-4-31b-it", "version": "1.70"}
-    mock_get.return_value = mock_response
-    result = model_utils.get_current_kobold_model()
-    assert result == "gemma-4-31b-it"
+@pytest.mark.asyncio
+async def test_get_current_kobold_model_missing_result():
+    """200 with no 'result' field → None."""
+    model_utils._KOBOLD_MODEL_CACHE.clear()
+    client = _FakeGetClient(payload={"version": "1.115.2"})
+    result = await model_utils.get_current_kobold_model(client, "http://kobold:5001")
+    assert result is None
 
 
-@patch('src.utils.model_utils.httpx.get')
-def test_get_current_kobold_model_fallback_field(mock_get):
-    """get_current_kobold_model uses fallback fields if 'model' is not present."""
-    from unittest.mock import Mock
-    mock_response = Mock()
-    mock_response.status_code = 200
-    mock_response.json.return_value = {"title": "gemma-4-31b-it", "version": "1.70"}
-    mock_get.return_value = mock_response
-    result = model_utils.get_current_kobold_model()
-    assert result == "gemma-4-31b-it"
+@pytest.mark.asyncio
+async def test_get_current_kobold_model_connection_failure():
+    """Transport error → None (best-effort, swallowed)."""
+    model_utils._KOBOLD_MODEL_CACHE.clear()
+    client = _FakeGetClient(exc=Exception("Connection refused"))
+    result = await model_utils.get_current_kobold_model(client, "http://kobold:5001")
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_get_current_kobold_model_non_200():
+    """Non-200 response → None."""
+    model_utils._KOBOLD_MODEL_CACHE.clear()
+    client = _FakeGetClient(status=404, payload={"result": "nope"})
+    result = await model_utils.get_current_kobold_model(client, "http://kobold:5001")
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_get_current_kobold_model_cached():
+    """Second call within TTL is served from cache — no second HTTP round-trip."""
+    model_utils._KOBOLD_MODEL_CACHE.clear()
+    client = _FakeGetClient(payload={"result": "koboldcpp/qwen3-40b"})
+    base = "http://kobold-cache:5001"
+    first = await model_utils.get_current_kobold_model(client, base)
+    second = await model_utils.get_current_kobold_model(client, base)
+    assert first == second == "koboldcpp/qwen3-40b"
+    assert len(client.calls) == 1  # cache hit on the second call

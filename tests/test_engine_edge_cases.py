@@ -551,21 +551,32 @@ class TestProviderExtras:
         kobold = params.get_provider_extras("kobold")
         assert kobold["instruct_tags"]["instruct_starttag"] == "REQUEST_USER:"
 
-    def test_chat_template_resolution_precedence(self, monkeypatch):
-        """persona_config['chat_template'] > env var > global default."""
+    @pytest.mark.asyncio
+    async def test_chat_template_resolution_precedence(self, monkeypatch):
+        """persona_config['chat_template'] > env var > auto-detect > default."""
+        from unittest.mock import MagicMock
         from src.stream_engine import StreamEngine
+        from src.utils import model_utils
+
+        model_utils._KOBOLD_MODEL_CACHE.clear()
+        engine = StreamEngine()
+
+        # Fake async client whose /api/v1/model returns no model → auto-detect
+        # yields None, so the final assertion lands on the chatml default.
+        class _NoModelClient:
+            async def get(self, url, timeout=None, **kw):
+                r = MagicMock()
+                r.status_code = 200
+                r.json.return_value = {"result": None}
+                return r
+
+        engine._http_client = _NoModelClient()
 
         monkeypatch.setenv("KOBOLD_CHAT_TEMPLATE", "llama3")
         # Persona setting wins.
-        assert (
-            StreamEngine._resolve_template_name({"chat_template": "gemma"})
-            == "gemma"
-        )
+        assert await engine._resolve_template_name({"chat_template": "gemma"}) == "gemma"
         # No persona value → env var.
-        assert (
-            StreamEngine._resolve_template_name({"chat_template": None})
-            == "llama3"
-        )
-        # No persona, no env → falls back to chatml default.
+        assert await engine._resolve_template_name({"chat_template": None}) == "llama3"
+        # No persona, no env, no detectable model → chatml default.
         monkeypatch.delenv("KOBOLD_CHAT_TEMPLATE", raising=False)
-        assert StreamEngine._resolve_template_name({}) == "chatml"
+        assert await engine._resolve_template_name({}) == "chatml"

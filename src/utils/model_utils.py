@@ -2,6 +2,7 @@
 
 import logging
 import os
+import time
 from typing import List, Dict, Any, Optional, Tuple
 
 import httpx
@@ -231,40 +232,49 @@ def get_chat_template_for_model(model_name: Optional[str]) -> Optional[str]:
     return None
 
 
-def get_current_kobold_model() -> Optional[str]:
-    """Query koboldcpp to get the currently loaded model name.
+# Per-base-URL cache of the detected model name. The loaded model rarely
+# changes (a systemctl swap on the inference host), so we cache to avoid an
+# HTTP round-trip on every message. Short TTL so a model swap is picked up
+# within the window without a restart.
+_KOBOLD_MODEL_CACHE: Dict[str, Tuple[float, Optional[str]]] = {}
+_KOBOLD_MODEL_CACHE_TTL = 60.0
 
-    Uses the /api/extra/version endpoint to retrieve model metadata.
-    Returns None on failure (no connection, no model loaded, etc.).
 
-    This is best-effort: the return value is logged but failures are silent
-    so they don't interrupt initialization.
+async def get_current_kobold_model(
+    client: httpx.AsyncClient, base_url: str
+) -> Optional[str]:
+    """Query koboldcpp for the currently loaded model name (async, cached).
+
+    Hits ``{base_url}/api/v1/model``, whose response is
+    ``{"result": "koboldcpp/<modelname>"}`` — the ``koboldcpp/`` prefix is
+    harmless for the substring matching in `get_chat_template_for_model`.
+    (The older `/api/extra/version` endpoint carries NO model field — it
+    returns ``{"result": "KoboldCpp", "version": ...}`` — so it must not be
+    used for detection.)
+
+    Best-effort: any failure (unreachable, non-200, missing field) returns
+    None so the caller falls back to its default template. Results — including
+    None — are cached per ``base_url`` for ``_KOBOLD_MODEL_CACHE_TTL`` seconds
+    to keep this off the per-message hot path.
+
+    Takes the caller's ``httpx.AsyncClient`` so we never block the event loop
+    with a synchronous request and never spin up a second client.
     """
-    from config import global_config
+    now = time.monotonic()
+    cached = _KOBOLD_MODEL_CACHE.get(base_url)
+    if cached is not None and now - cached[0] < _KOBOLD_MODEL_CACHE_TTL:
+        return cached[1]
 
+    result: Optional[str] = None
     try:
-        raw = os.environ.get("LOCAL_LLM_URL", global_config.LOCAL_LLM_URL).rstrip("/")
-        if raw.endswith("/v1"):
-            raw = raw[:-3]
-        url = f"{raw}/api/extra/version"
-
-        # Short timeout: this is a quick bootstrap check, not a critical path.
-        # Failure means we just don't auto-assign the template.
-        response = httpx.get(url, timeout=2.0)
+        response = await client.get(f"{base_url}/api/v1/model", timeout=2.0)
         if response.status_code == 200:
-            data = response.json()
-            # KoboldCPP's /api/extra/version returns various fields depending on
-            # server version. Common names: "model" (newer) or just the name in
-            # other metadata. We try the most common first.
-            model_name = (
-                data.get("model") or
-                data.get("title") or
-                data.get("current_model")
-            )
-            if model_name:
-                logger.debug(f"Detected koboldcpp model: {model_name}")
-                return str(model_name)
+            raw = response.json().get("result")
+            if raw:
+                result = str(raw)
+                logger.debug(f"Detected koboldcpp model: {result}")
     except Exception as e:
         logger.debug(f"Could not query koboldcpp model: {e}")
 
-    return None
+    _KOBOLD_MODEL_CACHE[base_url] = (now, result)
+    return result

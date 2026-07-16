@@ -576,3 +576,85 @@ async def test_stream_prompt_skips_template_rendering():
     assert payload["prompt"] == f"<{len(raw)} chars, template=<caller>>"
     # Real prompt was forwarded verbatim to kobold.
     assert client.last_stream["json"]["prompt"] == raw
+
+
+# --------------------------------------------------------------------------
+# SYS-MOD-001 — auto-detect chat template from the loaded kobold model
+# --------------------------------------------------------------------------
+
+class _ModelQueryClient(_FakeClient):
+    """_FakeClient plus a .get() answering /api/v1/model, so we can prove the
+    template resolver uses the async client (never a blocking httpx.get)."""
+
+    def __init__(self, resp: _FakeResp, *, model_result: Optional[str]) -> None:
+        super().__init__(resp)
+        self._model_result = model_result
+        self.get_calls: List[str] = []
+
+    async def get(self, url: str, timeout=None, **kw):
+        self.get_calls.append(url)
+        r = MagicMock()
+        r.status_code = 200
+        r.json.return_value = {"result": self._model_result}
+        return r
+
+
+@pytest.fixture(autouse=True)
+def _clear_kobold_model_cache(monkeypatch):
+    # Isolate auto-detect tests from each other and from env/config overrides.
+    from src.utils import model_utils
+    from config import global_config
+    model_utils._KOBOLD_MODEL_CACHE.clear()
+    monkeypatch.delenv("KOBOLD_CHAT_TEMPLATE", raising=False)
+    monkeypatch.setattr(global_config, "KOBOLD_CHAT_TEMPLATE", None, raising=False)
+
+
+@pytest.mark.asyncio
+async def test_resolve_template_autodetects_default_sentinel():
+    # A default-model persona keeps the "default" sentinel in model_name and
+    # has no explicit chat_template. The old `== "local"` gate skipped these;
+    # the resolver must now auto-detect regardless of model_name.
+    engine = StreamEngine()
+    engine._http_client = _ModelQueryClient(
+        _FakeResp(), model_result="koboldcpp/gemma-4-31b-it"
+    )
+    persona = {"model_name": "default"}  # no chat_template
+    tpl = await engine._resolve_template_name(persona)
+    assert tpl == "gemma4-think"
+    # Proved it went through the async client, hitting the correct endpoint.
+    assert engine._http_client.get_calls
+    assert engine._http_client.get_calls[0].endswith("/api/v1/model")
+
+
+@pytest.mark.asyncio
+async def test_resolve_template_qwen_maps_to_chatml():
+    engine = StreamEngine()
+    engine._http_client = _ModelQueryClient(
+        _FakeResp(), model_result="koboldcpp/Qwen3.6-40B-Deck-Q4_K_M"
+    )
+    tpl = await engine._resolve_template_name({"model_name": "local"})
+    assert tpl == "chatml"
+
+
+@pytest.mark.asyncio
+async def test_resolve_template_explicit_skips_model_query():
+    # Explicit persona chat_template wins outright — no kobold query at all.
+    engine = StreamEngine()
+    engine._http_client = _ModelQueryClient(_FakeResp(), model_result="koboldcpp/gemma-4")
+    tpl = await engine._resolve_template_name({"chat_template": "llama3"})
+    assert tpl == "llama3"
+    assert engine._http_client.get_calls == []
+
+
+@pytest.mark.asyncio
+async def test_resolve_template_falls_back_to_chatml_when_kobold_down():
+    engine = StreamEngine()
+    # get() raising simulates kobold unreachable → detection yields None.
+    engine._http_client = _ModelQueryClient(_FakeResp(), model_result=None)
+
+    async def _boom(url, timeout=None, **kw):
+        raise httpx.ConnectError("down")
+
+    engine._http_client.get = _boom  # type: ignore[assignment]
+    tpl = await engine._resolve_template_name({"model_name": "local"})
+    assert tpl == "chatml"
