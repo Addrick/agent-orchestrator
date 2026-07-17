@@ -22,6 +22,18 @@ def test_dispatch_prompt_has_sandbox_scope_self_abort():
     assert "proxy" in p
 
 
+def test_dispatch_prompt_mandates_pull_request():
+    """DP-291: a live run committed but never opened a PR — the deliverable
+    silently vanished. The prompt must make the PR non-optional and forbid a
+    DONE sentinel without a PR URL."""
+    p = DISPATCH_AGENT_PROMPT
+    assert "gh pr create" in p
+    assert "git push" in p
+    assert "THE PULL REQUEST IS YOUR DELIVERABLE" in p
+    assert "never report success without a PR URL" in p
+    assert "without a PR URL is a" in p  # DONE-sentinel guard
+
+
 def test_fixr_persona_prompt_warns_against_dispatching_infra():
     with open(global_config.DEFAULT_PERSONA_SAVE_FILE, encoding="utf-8") as f:
         data = json.load(f)  # also guards: my edit kept the JSON valid
