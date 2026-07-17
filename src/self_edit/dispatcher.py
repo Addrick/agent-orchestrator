@@ -78,7 +78,7 @@ class Dispatcher:
         self._on_wake = on_wake
         self._on_event = on_event
         self._platform = platform
-        self._model_arg = model_arg or "sonnet"
+        self._model_arg = model_arg or "opus"
         self._clone_dir = clone_dir
         self._procs: Dict[str, asyncio.subprocess.Process] = {}
         self._bridges: Dict[str, "asyncio.Task[None]"] = {}

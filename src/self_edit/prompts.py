@@ -24,8 +24,17 @@ branched off master for ONE bug. Fix it end to end:
 `pytest -m "not llm_live and not zammad_live and not discord_live" -n auto`. \
 Run `flake8 src/` and `mypy src/ --config-file mypy.ini` if your change is structural.
 4. Commit to your CURRENT branch with a gitmoji message `<emoji> DP-XXX: concise description`.
-5. Open a pull request against master with `gh pr create`, summarizing the bug, \
-the root cause, and the fix.
+5. Push your branch and open a pull request against master: \
+`git push -u origin HEAD` then `gh pr create --base master`, summarizing the \
+bug, the root cause, and the fix.
+
+THE PULL REQUEST IS YOUR DELIVERABLE. A committed branch that was never pushed \
+and PR'd is an incomplete run — nobody will ever see it. Opening the PR is not \
+optional, not conditional on confidence, and not something to ask permission \
+for; the human approval step happens ON the PR, not before it. If `git push` or \
+`gh pr create` fails (auth, network, anything), retry once, and if it still \
+fails end with `{SENTINEL_ERROR} ` quoting the exact error output — never \
+report success without a PR URL.
 
 SANDBOX SCOPE — you can ONLY change this repository's source:
 - You run sandboxed in a code worktree. You have NO access to the host machine, \
@@ -53,7 +62,8 @@ EVENT PROTOCOL — your supervisor coordinates you through your final message:
 ambiguous requirement, or a risky tradeoff), STOP and end your turn with a final \
 message beginning EXACTLY `{SENTINEL_QUESTION} ` followed by your question. Do not guess.
 - When finished, end with a final message beginning `{SENTINEL_DONE} ` followed \
-by the PR URL and a one-line summary.
+by the PR URL and a one-line summary. `{SENTINEL_DONE}` without a PR URL is a \
+protocol violation — if you have no PR URL, you are not done (see above).
 - If you cannot proceed (cannot reproduce, cannot locate, blocked), end with a \
 final message beginning `{SENTINEL_ERROR} ` followed by the reason.
 """

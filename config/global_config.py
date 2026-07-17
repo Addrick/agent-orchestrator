@@ -393,7 +393,7 @@ CC_FIXR_BASE_REF = os.environ.get("CC_FIXR_BASE_REF", "origin/master")
 # CC_FIXR_DISCORD_CHANNEL — default recipient id for fixr's send_discord tool.
 CC_FIXR_PERSONA = os.environ.get("CC_FIXR_PERSONA", "fixr")
 CC_FIXR_CHANNEL = os.environ.get("CC_FIXR_CHANNEL", "fixr")
-CC_FIXR_MODEL_ARG = os.environ.get("CC_FIXR_MODEL_ARG", "sonnet")
+CC_FIXR_MODEL_ARG = os.environ.get("CC_FIXR_MODEL_ARG", "opus")
 CC_FIXR_DISCORD_CHANNEL = os.environ.get("CC_FIXR_DISCORD_CHANNEL", "")
 
 # Direct subagent ↔ Discord channel (DP-230). Each dispatched agent gets its own
