@@ -1,6 +1,6 @@
-# DERPR — LLM Orchestration Engine
+LLM Orchestration Engine
 
-An async, provider-agnostic LLM orchestration engine for chatbot automation: IT support, ticketing, and conversational AI. The same engine runs across Discord, Gmail, a self-hosted web portal (kobold-lite), and a Zammad triage pipeline, with a tiered long-term memory system built on top of SQLite + a vector store.
+An async, provider-agnostic LLM orchestration engine for chatbot automation: IT support, ticketing, and conversational AI. The same engine runs across Discord, Gmail, a self-hosted web portal, and a Zammad triage pipeline, with a tiered long-term memory system built on top of SQLite + a vector store.
 
 > **Status:** active development, no public release. Multiple subsystems (Hindsight memory backend, tool-security framework, portal Phase D) are mid-rollout. Treat configuration and module layout as moving targets — pin commits, not branches.
 
