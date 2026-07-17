@@ -2,7 +2,10 @@
 
 import logging
 import os
-from typing import List, Dict, Any, Optional
+import time
+from typing import List, Dict, Any, Optional, Tuple
+
+import httpx
 
 from src.personas import store as persona_store
 
@@ -177,3 +180,122 @@ def check_model_available(model_to_check: str) -> bool:
 
     logger.info(f"Model '{model_to_check}' not found in available models.")
     return False
+
+
+# --- Model-to-Chat-Template Lookup ---
+# Maps model name patterns (case-insensitive) to the correct chat template.
+# This ensures that when a local model is served via koboldcpp, the correct
+# tagging scheme is used (e.g., Gemma uses <start_of_turn>, not ChatML tags).
+# Patterns are checked in order; first match wins. More specific patterns must
+# come before their less-specific counterparts.
+MODEL_TO_CHAT_TEMPLATE: List[Tuple[str, str]] = [
+    # Gemma 4 models (26B/31B with thinking, E2B/E4B without)
+    ("gemma-4-31b-it", "gemma4-think"),
+    ("gemma-4-26b-a4b-it", "gemma4-think"),
+    ("gemma-4-e2b", "gemma4-e-nothink"),
+    ("gemma-4-e4b", "gemma4-e-nothink"),
+    ("gemma-4", "gemma4-think"),
+    # Gemma 2 and 3 models
+    ("gemma-2", "gemma"),
+    ("gemma-3", "gemma"),
+    ("gemma", "gemma"),
+    # Qwen models use ChatML
+    ("qwen", "chatml"),
+    # Llama 3 and 4 models
+    ("llama-3", "llama3"),
+    ("llama-4", "llama4"),
+    # Llama 2 — match both the hyphenated GGUF form ("llama-2-7b-chat", the
+    # common one) and the unhyphenated "llama2" spelling.
+    ("llama-2", "llama2"),
+    ("llama2", "llama2"),
+    # ChatML family (Hermes and other ChatML finetunes).
+    ("chatml", "chatml"),
+    # NOTE: base Mistral-Instruct actually uses [INST]...[/INST], not ChatML,
+    # and no [INST] template exists in CHAT_TEMPLATES. chatml is the least-bad
+    # fallback and is correct for the common Mistral-based ChatML finetunes
+    # (OpenHermes-Mistral, etc.); raw Mistral-Instruct is not well supported.
+    ("mistral", "chatml"),
+    ("hermes", "chatml"),
+]
+
+
+def get_chat_template_for_model(model_name: Optional[str]) -> Optional[str]:
+    """Determine the appropriate chat template for a given model name.
+
+    Args:
+        model_name: The name of the model to check (case-insensitive, can be None).
+
+    Returns:
+        The template name (e.g., "gemma", "chatml", "llama3") or None if no match.
+    """
+    if not model_name:
+        return None
+
+    model_lower = model_name.lower()
+    for pattern, template in MODEL_TO_CHAT_TEMPLATE:
+        if pattern in model_lower:
+            return template
+
+    return None
+
+
+# Per-base-URL cache of the detected model name. The loaded model rarely
+# changes (a systemctl swap on the inference host), so we cache to avoid an
+# HTTP round-trip on every message. Short TTL so a model swap is picked up
+# within the window without a restart.
+#
+# Successful detections cache for _KOBOLD_MODEL_CACHE_TTL. Failures (None)
+# cache for the much shorter _KOBOLD_MODEL_CACHE_NEG_TTL: a transient outage
+# or a still-loading kobold at startup would otherwise pin every local persona
+# to the chatml default for a full 60s after kobold recovers.
+_KOBOLD_MODEL_CACHE: Dict[str, Tuple[float, Optional[str]]] = {}
+_KOBOLD_MODEL_CACHE_TTL = 60.0
+_KOBOLD_MODEL_CACHE_NEG_TTL = 5.0
+
+
+async def get_current_kobold_model(
+    client: httpx.AsyncClient, base_url: str
+) -> Optional[str]:
+    """Query koboldcpp for the currently loaded model name (async, cached).
+
+    Hits ``{base_url}/api/v1/model``, whose response is
+    ``{"result": "koboldcpp/<modelname>"}`` — the ``koboldcpp/`` prefix is
+    harmless for the substring matching in `get_chat_template_for_model`.
+    (The older `/api/extra/version` endpoint carries NO model field — it
+    returns ``{"result": "KoboldCpp", "version": ...}`` — so it must not be
+    used for detection.)
+
+    Best-effort: any failure (unreachable, non-200, missing field) returns
+    None so the caller falls back to its default template. Results — including
+    None — are cached per ``base_url`` for ``_KOBOLD_MODEL_CACHE_TTL`` seconds
+    to keep this off the per-message hot path.
+
+    Takes the caller's ``httpx.AsyncClient`` so we never block the event loop
+    with a synchronous request and never spin up a second client.
+    """
+    now = time.monotonic()
+    cached = _KOBOLD_MODEL_CACHE.get(base_url)
+    if cached is not None:
+        ttl = _KOBOLD_MODEL_CACHE_TTL if cached[1] else _KOBOLD_MODEL_CACHE_NEG_TTL
+        if now - cached[0] < ttl:
+            return cached[1]
+
+    result: Optional[str] = None
+    try:
+        # Bound the connect leg tightly: a cold/expired cache puts this GET on
+        # the generation-start path, so an unreachable kobold must fail fast
+        # rather than stall the first token by the full request budget.
+        response = await client.get(
+            f"{base_url}/api/v1/model",
+            timeout=httpx.Timeout(2.0, connect=1.0),
+        )
+        if response.status_code == 200:
+            raw = response.json().get("result")
+            if raw:
+                result = str(raw)
+                logger.debug(f"Detected koboldcpp model: {result}")
+    except Exception as e:
+        logger.debug(f"Could not query koboldcpp model: {e}")
+
+    _KOBOLD_MODEL_CACHE[base_url] = (now, result)
+    return result
