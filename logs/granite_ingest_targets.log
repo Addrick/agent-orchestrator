@@ -1,0 +1,30 @@
+Loading m...
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\Users\adama\PycharmProjects\derpr-python\eval_harnesses\suites\memory_recall\lme_ingest_queue.py", line 553, in <module>
+    raise SystemExit(asyncio.run(main(
+                     ~~~~~~~~~~~^^^^^^
+        args.tier, qlist, args.bank_prefix, args.overlap_threshold,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+        llm_model=args.llm_model,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^
+    )))
+    ^^
+  File "C:\Users\adama\AppData\Local\Programs\Python\Python314\Lib\asyncio\runners.py", line 204, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "C:\Users\adama\AppData\Local\Programs\Python\Python314\Lib\asyncio\runners.py", line 127, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Users\adama\AppData\Local\Programs\Python\Python314\Lib\asyncio\base_events.py", line 719, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "C:\Users\adama\PycharmProjects\derpr-python\eval_harnesses\suites\memory_recall\lme_ingest_queue.py", line 432, in main
+    data = json.loads(src.read_text(encoding="utf-8"))
+                      ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^
+  File "C:\Users\adama\AppData\Local\Programs\Python\Python314\Lib\pathlib\__init__.py", line 788, in read_text
+    return f.read()
+           ~~~~~~^^
+MemoryError

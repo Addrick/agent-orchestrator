@@ -1,0 +1,186 @@
+Loading m...
+hindsight: http://10.0.0.70:8890  | model tag: granite
+history: empty (file: .eval_cache\granite_hist.jsonl)
+
+=== queue: 12 banks to ingest ===
+   1. 1c549ce4 [multi-session] -> lme_m_1c549ce4_granite (~4.9M chars)
+   2. 8fb83627 [knowledge-update] -> lme_m_8fb83627_granite (~5.1M chars)
+   3. 91b15a6e [multi-session] -> lme_m_91b15a6e_granite (~4.7M chars)
+   4. c9f37c46 [temporal-reasoning] -> lme_m_c9f37c46_granite (~4.7M chars)
+   5. 69fee5aa [knowledge-update] -> lme_m_69fee5aa_granite (~4.9M chars)
+   6. affe2881 [knowledge-update] -> lme_m_affe2881_granite (~4.9M chars)
+   7. 1192316e [multi-session] -> lme_m_1192316e_granite (~4.9M chars)
+   8. 078150f1 [multi-session] -> lme_m_078150f1_granite (~4.9M chars)
+   9. 6613b389 [temporal-reasoning] -> lme_m_6613b389_granite (~4.9M chars)
+  10. 577d4d32 [single-session-user] -> lme_m_577d4d32_granite (~4.9M chars)
+  11. 545bd2b5 [single-session-user] -> lme_m_545bd2b5_granite (~4.9M chars)
+  12. 6cb6f249 [multi-session] -> lme_m_6cb6f249_granite (~4.9M chars)
+
+=== qid=1c549ce4 [multi-session] bank=lme_m_1c549ce4_granite ===
+  [1c549ce4] skipping aretain (bank has 80 ops already queued); resuming poll
+  [1c549ce4] ops: 38 done / 80 busy (80p+0r) | docs: 150 | facts: 3156 | elapsed 0s | rate 38000.0/m | eta bank 0s | eta total 2s~ (eta 2026-05-24 05:09)
+  [1c549ce4] ops: 39 done / 79 busy (79p+0r) | docs: 154 | facts: 3248 | elapsed 15s | rate 154.5/m | eta bank 31s | eta total 8.9m~ (eta 2026-05-24 05:19)
+  [1c549ce4] ops: 40 done / 78 busy (78p+0r) | docs: 155 | facts: 3259 | elapsed 30s | rate 79.3/m | eta bank 59s | eta total 17.3m~ (eta 2026-05-24 05:27)
+  [1c549ce4] ops: 40 done / 78 busy (78p+0r) | docs: 158 | facts: 3331 | elapsed 1.5m | rate 26.5/m | eta bank 2.9m | eta total 52.0m~ (eta 2026-05-24 06:03)
+  [1c549ce4] ops: 40 done / 78 busy (78p+0r) | docs: 162 | facts: 3419 | elapsed 2.5m | rate 15.8/m | eta bank 4.9m | eta total 1.4h~ (eta 2026-05-24 06:39)
+  [1c549ce4] ops: 42 done / 76 busy (76p+0r) | docs: 170 | facts: 3551 | elapsed 3.5m | rate 11.9/m | eta bank 6.4m | eta total 1.9h~ (eta 2026-05-24 07:09)
+  [1c549ce4] ops: 44 done / 74 busy (74p+0r) | docs: 173 | facts: 3594 | elapsed 3.8m | rate 11.6/m | eta bank 6.4m | eta total 2.0h~ (eta 2026-05-24 07:11)
+  [1c549ce4] ops: 45 done / 73 busy (73p+0r) | docs: 177 | facts: 3692 | elapsed 4.9m | rate 9.3/m | eta bank 7.9m | eta total 2.5h~ (eta 2026-05-24 07:42)
+  [1c549ce4] ops: 46 done / 72 busy (72p+0r) | docs: 181 | facts: 3767 | elapsed 5.1m | rate 9.0/m | eta bank 8.0m | eta total 2.5h~ (eta 2026-05-24 07:47)
+  [1c549ce4] ops: 47 done / 71 busy (71p+0r) | docs: 186 | facts: 3883 | elapsed 5.9m | rate 8.0/m | eta bank 8.9m | eta total 2.8h~ (eta 2026-05-24 08:06)
+  [1c549ce4] ops: 47 done / 71 busy (71p+0r) | docs: 190 | facts: 3959 | elapsed 6.9m | rate 6.8/m | eta bank 10.4m | eta total 3.3h~ (eta 2026-05-24 08:37)
+  [1c549ce4] ops: 48 done / 70 busy (70p+0r) | docs: 195 | facts: 4067 | elapsed 7.4m | rate 6.5/m | eta bank 10.8m | eta total 3.5h~ (eta 2026-05-24 08:47)
+  [1c549ce4] ops: 48 done / 70 busy (70p+0r) | docs: 201 | facts: 4164 | elapsed 8.4m | rate 5.7/m | eta bank 12.2m | eta total 4.0h~ (eta 2026-05-24 09:17)
+  [1c549ce4] ops: 49 done / 69 busy (69p+0r) | docs: 201 | facts: 4178 | elapsed 8.6m | rate 5.7/m | eta bank 12.2m | eta total 4.0h~ (eta 2026-05-24 09:19)
+  [1c549ce4] ops: 52 done / 66 busy (66p+0r) | docs: 205 | facts: 4241 | elapsed 8.9m | rate 5.8/m | eta bank 11.3m | eta total 3.9h~ (eta 2026-05-24 09:12)
+  [1c549ce4] ops: 53 done / 65 busy (65p+0r) | docs: 208 | facts: 4295 | elapsed 9.4m | rate 5.6/m | eta bank 11.5m | eta total 4.0h~ (eta 2026-05-24 09:21)
+  [1c549ce4] ops: 53 done / 65 busy (65p+0r) | docs: 215 | facts: 4387 | elapsed 10.4m | rate 5.1/m | eta bank 12.8m | eta total 4.5h~ (eta 2026-05-24 09:48)
+  [1c549ce4] ops: 54 done / 64 busy (64p+0r) | docs: 220 | facts: 4494 | elapsed 11.2m | rate 4.8/m | eta bank 13.2m | eta total 4.7h~ (eta 2026-05-24 10:02)
+  [1c549ce4] ops: 55 done / 63 busy (63p+0r) | docs: 223 | facts: 4577 | elapsed 11.9m | rate 4.6/m | eta bank 13.7m | eta total 4.9h~ (eta 2026-05-24 10:16)
+  [1c549ce4] ops: 55 done / 63 busy (63p+0r) | docs: 225 | facts: 4633 | elapsed 12.9m | rate 4.3/m | eta bank 14.8m | eta total 5.3h~ (eta 2026-05-24 10:42)
+  [1c549ce4] ops: 56 done / 62 busy (62p+0r) | docs: 225 | facts: 4635 | elapsed 13.2m | rate 4.2/m | eta bank 14.6m | eta total 5.3h~ (eta 2026-05-24 10:43)
+  [1c549ce4] ops: 57 done / 62 busy (62p+0r) | docs: 227 | facts: 4680 | elapsed 13.4m | rate 4.2/m | eta bank 14.6m | eta total 5.4h~ (eta 2026-05-24 10:46)
+  [1c549ce4] ops: 59 done / 60 busy (60p+0r) | docs: 231 | facts: 4799 | elapsed 13.9m | rate 4.2/m | eta bank 14.2m | eta total 5.4h~ (eta 2026-05-24 10:47)
+  [1c549ce4] ops: 60 done / 59 busy (59p+0r) | docs: 235 | facts: 4873 | elapsed 14.4m | rate 4.2/m | eta bank 14.2m | eta total 5.5h~ (eta 2026-05-24 10:53)
+  [1c549ce4] ops: 60 done / 59 busy (59p+0r) | docs: 238 | facts: 4966 | elapsed 15.5m | rate 3.9/m | eta bank 15.2m | eta total 5.9h~ (eta 2026-05-24 11:17)
+  [1c549ce4] ops: 61 done / 58 busy (58p+0r) | docs: 239 | facts: 4975 | elapsed 15.7m | rate 3.9/m | eta bank 14.9m | eta total 5.9h~ (eta 2026-05-24 11:17)
+  [1c549ce4] ops: 62 done / 57 busy (57p+0r) | docs: 244 | facts: 5099 | elapsed 16.7m | rate 3.7/m | eta bank 15.4m | eta total 6.1h~ (eta 2026-05-24 11:34)
+  [1c549ce4] ops: 63 done / 56 busy (56p+0r) | docs: 249 | facts: 5221 | elapsed 17.7m | rate 3.6/m | eta bank 15.8m | eta total 6.4h~ (eta 2026-05-24 11:51)
+  [1c549ce4] ops: 65 done / 54 busy (54p+0r) | docs: 255 | facts: 5428 | elapsed 18.8m | rate 3.5/m | eta bank 15.6m | eta total 6.6h~ (eta 2026-05-24 12:02)
+  [1c549ce4] ops: 65 done / 54 busy (54p+0r) | docs: 259 | facts: 5524 | elapsed 19.8m | rate 3.3/m | eta bank 16.4m | eta total 6.9h~ (eta 2026-05-24 12:24)
+  [1c549ce4] ops: 66 done / 53 busy (53p+0r) | docs: 262 | facts: 5588 | elapsed 20.3m | rate 3.3/m | eta bank 16.3m | eta total 7.0h~ (eta 2026-05-24 12:28)
+  [1c549ce4] ops: 68 done / 51 busy (51p+0r) | docs: 267 | facts: 5689 | elapsed 21.0m | rate 3.2/m | eta bank 15.8m | eta total 7.0h~ (eta 2026-05-24 12:31)
+  [1c549ce4] ops: 69 done / 50 busy (50p+0r) | docs: 268 | facts: 5707 | elapsed 21.3m | rate 3.2/m | eta bank 15.4m | eta total 7.0h~ (eta 2026-05-24 12:30)
+  [1c549ce4] ops: 70 done / 49 busy (49p+0r) | docs: 270 | facts: 5765 | elapsed 21.6m | rate 3.2/m | eta bank 15.1m | eta total 7.0h~ (eta 2026-05-24 12:29)
+  [1c549ce4] ops: 72 done / 47 busy (47p+0r) | docs: 275 | facts: 5871 | elapsed 22.1m | rate 3.3/m | eta bank 14.4m | eta total 6.9h~ (eta 2026-05-24 12:27)
+  [1c549ce4] ops: 73 done / 46 busy (46p+0r) | docs: 277 | facts: 5920 | elapsed 22.6m | rate 3.2/m | eta bank 14.2m | eta total 7.0h~ (eta 2026-05-24 12:31)
+  [1c549ce4] ops: 73 done / 46 busy (46p+0r) | docs: 283 | facts: 6011 | elapsed 23.6m | rate 3.1/m | eta bank 14.9m | eta total 7.3h~ (eta 2026-05-24 12:51)
+  [1c549ce4] ops: 73 done / 46 busy (46p+0r) | docs: 286 | facts: 6095 | elapsed 24.6m | rate 3.0/m | eta bank 15.5m | eta total 7.6h~ (eta 2026-05-24 13:10)
+  [1c549ce4] ops: 74 done / 45 busy (45p+0r) | docs: 287 | facts: 6127 | elapsed 25.3m | rate 2.9/m | eta bank 15.4m | eta total 7.7h~ (eta 2026-05-24 13:19)
+  [1c549ce4] ops: 75 done / 44 busy (44p+0r) | docs: 289 | facts: 6200 | elapsed 25.7m | rate 2.9/m | eta bank 15.0m | eta total 7.7h~ (eta 2026-05-24 13:18)
+  [1c549ce4] ops: 76 done / 43 busy (43p+0r) | docs: 291 | facts: 6239 | elapsed 26.2m | rate 2.9/m | eta bank 14.8m | eta total 7.8h~ (eta 2026-05-24 13:21)
+  [1c549ce4] ops: 77 done / 42 busy (42p+0r) | docs: 293 | facts: 6338 | elapsed 26.9m | rate 2.9/m | eta bank 14.7m | eta total 7.9h~ (eta 2026-05-24 13:29)
+  [1c549ce4] ops: 80 done / 39 busy (39p+0r) | docs: 301 | facts: 6539 | elapsed 27.9m | rate 2.9/m | eta bank 13.6m | eta total 7.8h~ (eta 2026-05-24 13:28)
+  [1c549ce4] ops: 80 done / 39 busy (39p+0r) | docs: 303 | facts: 6584 | elapsed 28.9m | rate 2.8/m | eta bank 14.1m | eta total 8.1h~ (eta 2026-05-24 13:46)
+  [1c549ce4] ops: 81 done / 38 busy (38p+0r) | docs: 307 | facts: 6683 | elapsed 29.5m | rate 2.7/m | eta bank 13.8m | eta total 8.2h~ (eta 2026-05-24 13:49)
+  [1c549ce4] ops: 82 done / 37 busy (37p+0r) | docs: 311 | facts: 6731 | elapsed 30.2m | rate 2.7/m | eta bank 13.6m | eta total 8.3h~ (eta 2026-05-24 13:56)
+  [1c549ce4] ops: 82 done / 37 busy (37p+0r) | docs: 314 | facts: 6801 | elapsed 31.3m | rate 2.6/m | eta bank 14.1m | eta total 8.6h~ (eta 2026-05-24 14:14)
+  [1c549ce4] ops: 83 done / 36 busy (36p+0r) | docs: 317 | facts: 6912 | elapsed 31.8m | rate 2.6/m | eta bank 13.8m | eta total 8.6h~ (eta 2026-05-24 14:17)
+  [1c549ce4] ops: 84 done / 35 busy (35p+0r) | docs: 321 | facts: 6962 | elapsed 32.6m | rate 2.6/m | eta bank 13.6m | eta total 8.7h~ (eta 2026-05-24 14:23)
+  [1c549ce4] ops: 85 done / 34 busy (34p+0r) | docs: 323 | facts: 7011 | elapsed 33.3m | rate 2.6/m | eta bank 13.3m | eta total 8.8h~ (eta 2026-05-24 14:29)
+  [1c549ce4] ops: 86 done / 34 busy (34p+0r) | docs: 326 | facts: 7153 | elapsed 34.1m | rate 2.5/m | eta bank 13.5m | eta total 8.9h~ (eta 2026-05-24 14:40)
+  [1c549ce4] ops: 87 done / 33 busy (33p+0r) | docs: 328 | facts: 7181 | elapsed 34.3m | rate 2.5/m | eta bank 13.0m | eta total 8.9h~ (eta 2026-05-24 14:38)
+  [1c549ce4] ops: 88 done / 32 busy (32p+0r) | docs: 329 | facts: 7192 | elapsed 34.8m | rate 2.5/m | eta bank 12.7m | eta total 8.9h~ (eta 2026-05-24 14:40)
+  [1c549ce4] ops: 89 done / 31 busy (31p+0r) | docs: 334 | facts: 7350 | elapsed 35.6m | rate 2.5/m | eta bank 12.4m | eta total 9.0h~ (eta 2026-05-24 14:46)
+  [1c549ce4] ops: 90 done / 30 busy (30p+0r) | docs: 337 | facts: 7388 | elapsed 36.4m | rate 2.5/m | eta bank 12.1m | eta total 9.1h~ (eta 2026-05-24 14:51)
+  [1c549ce4] ops: 91 done / 29 busy (29p+0r) | docs: 339 | facts: 7464 | elapsed 36.9m | rate 2.5/m | eta bank 11.8m | eta total 9.1h~ (eta 2026-05-24 14:53)
+  [1c549ce4] ops: 93 done / 28 busy (28p+0r) | docs: 341 | facts: 7512 | elapsed 37.1m | rate 2.5/m | eta bank 11.2m | eta total 9.0h~ (eta 2026-05-24 14:49)
+  [1c549ce4] ops: 94 done / 26 busy (26p+0r) | docs: 344 | facts: 7603 | elapsed 37.9m | rate 2.5/m | eta bank 10.5m | eta total 9.0h~ (eta 2026-05-24 14:50)
+  [1c549ce4] ops: 94 done / 26 busy (26p+0r) | docs: 348 | facts: 7708 | elapsed 38.9m | rate 2.4/m | eta bank 10.8m | eta total 9.3h~ (eta 2026-05-24 15:05)
+  [1c549ce4] ops: 95 done / 25 busy (25p+0r) | docs: 350 | facts: 7795 | elapsed 39.7m | rate 2.4/m | eta bank 10.4m | eta total 9.4h~ (eta 2026-05-24 15:11)
+  [1c549ce4] ops: 95 done / 25 busy (25p+0r) | docs: 352 | facts: 7829 | elapsed 40.7m | rate 2.3/m | eta bank 10.7m | eta total 9.6h~ (eta 2026-05-24 15:26)
+  [1c549ce4] ops: 95 done / 25 busy (25p+0r) | docs: 361 | facts: 7980 | elapsed 41.7m | rate 2.3/m | eta bank 11.0m | eta total 9.8h~ (eta 2026-05-24 15:41)
+  [1c549ce4] ops: 97 done / 23 busy (23p+0r) | docs: 366 | facts: 8115 | elapsed 42.2m | rate 2.3/m | eta bank 10.0m | eta total 9.7h~ (eta 2026-05-24 15:36)
+  [1c549ce4] ops: 98 done / 22 busy (22p+0r) | docs: 370 | facts: 8195 | elapsed 43.0m | rate 2.3/m | eta bank 9.6m | eta total 9.8h~ (eta 2026-05-24 15:41)
+  [1c549ce4] ops: 100 done / 20 busy (20p+0r) | docs: 373 | facts: 8249 | elapsed 43.2m | rate 2.3/m | eta bank 8.6m | eta total 9.7h~ (eta 2026-05-24 15:32)
+  [1c549ce4] ops: 102 done / 18 busy (18p+0r) | docs: 379 | facts: 8316 | elapsed 44.0m | rate 2.3/m | eta bank 7.8m | eta total 9.6h~ (eta 2026-05-24 15:30)
+  [1c549ce4] ops: 102 done / 18 busy (18p+0r) | docs: 384 | facts: 8466 | elapsed 45.0m | rate 2.3/m | eta bank 7.9m | eta total 9.8h~ (eta 2026-05-24 15:45)
+  [1c549ce4] ops: 102 done / 18 busy (18p+0r) | docs: 392 | facts: 8575 | elapsed 46.0m | rate 2.2/m | eta bank 8.1m | eta total 10.1h~ (eta 2026-05-24 15:59)
+  [1c549ce4] ops: 103 done / 17 busy (17p+0r) | docs: 394 | facts: 8598 | elapsed 46.3m | rate 2.2/m | eta bank 7.6m | eta total 10.0h~ (eta 2026-05-24 15:56)
+  [1c549ce4] ops: 104 done / 16 busy (16p+0r) | docs: 396 | facts: 8613 | elapsed 46.5m | rate 2.2/m | eta bank 7.2m | eta total 10.0h~ (eta 2026-05-24 15:53)
+  [1c549ce4] ops: 105 done / 15 busy (15p+0r) | docs: 399 | facts: 8675 | elapsed 47.3m | rate 2.2/m | eta bank 6.8m | eta total 10.0h~ (eta 2026-05-24 15:58)
+  [1c549ce4] ops: 105 done / 15 busy (15p+0r) | docs: 402 | facts: 8744 | elapsed 48.3m | rate 2.2/m | eta bank 6.9m | eta total 10.2h~ (eta 2026-05-24 16:12)
+  [1c549ce4] ops: 106 done / 14 busy (14p+0r) | docs: 407 | facts: 8828 | elapsed 48.8m | rate 2.2/m | eta bank 6.4m | eta total 10.2h~ (eta 2026-05-24 16:12)
+  [1c549ce4] ops: 107 done / 13 busy (13p+0r) | docs: 409 | facts: 8865 | elapsed 49.0m | rate 2.2/m | eta bank 6.0m | eta total 10.2h~ (eta 2026-05-24 16:09)
+  [1c549ce4] ops: 108 done / 12 busy (12p+0r) | docs: 413 | facts: 8898 | elapsed 49.3m | rate 2.2/m | eta bank 5.5m | eta total 10.1h~ (eta 2026-05-24 16:07)
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\Users\adama\PycharmProjects\derpr-python\eval_harnesses\suites\memory_recall\lme_ingest_queue.py", line 553, in <module>
+    raise SystemExit(asyncio.run(main(
+                     ~~~~~~~~~~~^^^^^^
+        args.tier, qlist, args.bank_prefix, args.overlap_threshold,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+        llm_model=args.llm_model,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^
+    )))
+    ^^
+  File "C:\Users\adama\AppData\Local\Programs\Python\Python314\Lib\asyncio\runners.py", line 204, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "C:\Users\adama\AppData\Local\Programs\Python\Python314\Lib\as  [1c549ce4] ops: 108 done / 12 busy (12p+0r) | docs: 413 | facts: 8898 | elapsed 51.7m | rate 2.1/m | eta bank 5.7m | eta total 58.9h (eta 2026-05-26 16:54)
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\Users\adama\PycharmProjects\derpr-python\eval_harnesses\suites\memory_recall\lme_ingest_queue.py", line 553, in <module>
+    raise SystemExit(asyncio.run(main(
+                     ~~~~~~~~~~~^^^^^^
+        args.tier, qlist, args.bank_prefix, args.overlap_threshold,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<6 lines>...
+        llm_model=args.llm_model,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^
+    )))
+    ^^
+  File "C:\Users\adama\AppData\Local\Programs\Python\Python314\Lib\asyncio\runners.py", line 204, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "C:\Users\adama\AppData\Local\Programs\Python\Python314\Lib\asyncio\runners.py", line 127, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Users\adama\AppData\Local\Programs\Python\Python314\Lib\asyncio\base_events.py", line 719, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "C:\Users\adama\PycharmProjects\derpr-python\eval_harnesses\suites\memory_recall\lme_ingest_queue.py", line 504, in main
+    await _ingest_one(
+    ...<11 lines>...
+    )
+  File "C:\Users\adama\PycharmProjects\derpr-python\eval_harnesses\suites\memory_recall\lme_ingest_queue.py", line 363, in _ingest_one
+    print(
+    ~~~~~^
+        f"  [{qid}] near-drain (busy={busy} \u2264 {overlap_threshold}); "
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        f"firing next [{nq['question_id']}]",
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        flush=True,
+        ^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\adama\AppData\Local\Programs\Python\Python314\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\u2264' in position 33: character maps to <undefined>
+Loading m...
+hindsight: http://10.0.0.70:8890  | model tag: granite
+history: empty (file: .eval_cache\granite_hist.jsonl)
+
+=== queue: 12 banks to ingest ===
+   1. 1c549ce4 [multi-session] -> lme_m_1c549ce4_granite (~4.9M chars)
+   2. 8fb83627 [knowledge-update] -> lme_m_8fb83627_granite (~5.1M chars)
+   3. 91b15a6e [multi-session] -> lme_m_91b15a6e_granite (~4.7M chars)
+   4. c9f37c46 [temporal-reasoning] -> lme_m_c9f37c46_granite (~4.7M chars)
+   5. 69fee5aa [knowledge-update] -> lme_m_69fee5aa_granite (~4.9M chars)
+   6. affe2881 [knowledge-update] -> lme_m_affe2881_granite (~4.9M chars)
+   7. 1192316e [multi-session] -> lme_m_1192316e_granite (~4.9M chars)
+   8. 078150f1 [multi-session] -> lme_m_078150f1_granite (~4.9M chars)
+   9. 6613b389 [temporal-reasoning] -> lme_m_6613b389_granite (~4.9M chars)
+  10. 577d4d32 [single-session-user] -> lme_m_577d4d32_granite (~4.9M chars)
+  11. 545bd2b5 [single-session-user] -> lme_m_545bd2b5_granite (~4.9M chars)
+  12. 6cb6f249 [multi-session] -> lme_m_6cb6f249_granite (~4.9M chars)
+
+=== qid=1c549ce4 [multi-session] bank=lme_m_1c549ce4_granite ===
+  [1c549ce4] skipping aretain (bank has 4 ops already queued); resuming poll
+  [1c549ce4] ops: 117 done / 4 busy (4p+0r) | docs: 444 | facts: 9549 | elapsed 0s | rate 117000.0/m | eta bank 0s | eta total 0s~ (eta 2026-05-24 06:05)
+  [1c549ce4] near-drain (busy=4 ≤ 12); firing next [8fb83627]
+  [8fb83627] patched bank 'lme_m_8fb83627_granite'
+  [8fb83627] mission verified on lme_m_8fb83627_granite
+  [8fb83627] deduped 2 repeated session_ids
+  [8fb83627] retained 474 sessions (~5.1M chars, ~1272k tokens)
+  [1c549ce4] ops: 118 done / 3 busy (3p+0r) | docs: 448 | facts: 9668 | elapsed 20s | rate 360.5/m | eta bank 0s | eta total 3.7m~ (eta 2026-05-24 06:09)
+  [1c549ce4] ops: 119 done / 2 busy (2p+0r) | docs: 449 | facts: 9672 | elapsed 35s | rate 204.4/m | eta bank 1s | eta total 6.5m~ (eta 2026-05-24 06:12)
+  [1c549ce4] ops: 119 done / 2 busy (2p+0r) | docs: 451 | facts: 9709 | elapsed 1.6m | rate 74.7/m | eta bank 2s | eta total 17.9m~ (eta 2026-05-24 06:24)
+  [1c549ce4] ops: 120 done / 2 busy (2p+0r) | docs: 456 | facts: 9848 | elapsed 2.6m | rate 46.0/m | eta bank 3s | eta total 29.2m~ (eta 2026-05-24 06:37)
+  [1c549ce4] ops: 121 done / 2 busy (2p+0r) | docs: 459 | facts: 9950 | elapsed 2.9m | rate 42.3/m | eta bank 3s | eta total 32.1m~ (eta 2026-05-24 06:40)
+  [1c549ce4] ops: 122 done / 2 busy (2p+0r) | docs: 460 | facts: 9969 | elapsed 3.1m | rate 39.1/m | eta bank 3s | eta total 34.9m~ (eta 2026-05-24 06:43)
+  [1c549ce4] ops: 123 done / 2 busy (2p+0r) | docs: 464 | facts: 10056 | elapsed 3.6m | rate 33.9/m | eta bank 4s | eta total 40.6m~ (eta 2026-05-24 06:49)

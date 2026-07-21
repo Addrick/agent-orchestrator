@@ -1,0 +1,135 @@
+Loading m...
+hindsight: http://127.0.0.1:8888  | model tag: granite-4.1-8b-Q5_K_S.gguf
+history: empty (file: .eval_cache\lme_ingest_history.jsonl)
+
+=== queue: 1 banks to ingest ===
+   1. 7161e7e2 [single-session-assistant] -> lme_m_7161e7e2_granite (~5.1M chars)
+
+=== qid=7161e7e2 [single-session-assistant] bank=lme_m_7161e7e2_granite ===
+  [7161e7e2] patched bank 'lme_m_7161e7e2_granite'
+  [7161e7e2] mission verified on lme_m_7161e7e2_granite
+  [7161e7e2] retained 482 sessions (~5.1M chars, ~1283k tokens)
+  [7161e7e2] ops: 0 done / 128 busy (128p+0r) | facts: 0 | elapsed 1.0m | rate 0.0/m | eta bank 213.3h | eta total 213.3h~ (eta 2026-05-31 15:38)
+  [7161e7e2] ops: 1 done / 128 busy (128p+0r) | facts: 0 | elapsed 1.3m | rate 0.8/m | eta bank 2.7h | eta total 2.7h~ (eta 2026-05-22 20:59)
+  [7161e7e2] ops: 1 done / 128 busy (128p+0r) | facts: 0 | elapsed 2.3m | rate 0.4/m | eta bank 4.8h | eta total 4.8h~ (eta 2026-05-22 23:08)
+  [7161e7e2] ops: 1 done / 128 busy (128p+0r) | facts: 0 | elapsed 3.3m | rate 0.3/m | eta bank 6.9h | eta total 6.9h~ (eta 2026-05-23 01:17)
+Loading m...
+hindsight: http://127.0.0.1:8888  | model tag: granite-4.1-8b-Q5_K_S.gguf
+history: empty (file: .eval_cache\lme_ingest_history.jsonl)
+
+=== queue: 1 banks to ingest ===
+   1. 7161e7e2 [single-session-assistant] -> lme_m_7161e7e2_granite (~5.1M chars)
+
+=== qid=7161e7e2 [single-session-assistant] bank=lme_m_7161e7e2_granite ===
+  [7161e7e2] skipping aretain (bank has 128 ops already queued); resuming poll
+  [7161e7e2] ops: 1 done / 128 busy (128p+0r) | facts: 0 | elapsed 0s | rate 1000.0/m | eta bank 8s | eta total 8s~ (eta 2026-05-22 18:23)
+  [7161e7e2] ops: 1 done / 128 busy (128p+0r) | facts: 0 | elapsed 1.0m | rate 1.0/m | eta bank 2.1h | eta total 2.1h~ (eta 2026-05-22 20:32)
+  [7161e7e2] ops: 1 done / 128 busy (128p+0r) | facts: 0 | elapsed 2.0m | rate 0.5/m | eta bank 4.3h | eta total 4.3h~ (eta 2026-05-22 22:41)
+  [7161e7e2] ops: 1 done / 128 busy (128p+0r) | facts: 0 | elapsed 3.0m | rate 0.3/m | eta bank 6.4h | eta total 6.4h~ (eta 2026-05-23 00:50)
+  [7161e7e2] ops: 1 done / 128 busy (128p+0r) | facts: 0 | elapsed 4.0m | rate 0.2/m | eta bank 8.6h | eta total 8.6h~ (eta 2026-05-23 03:00)
+  [7161e7e2] ops: 1 done / 128 busy (128p+0r) | facts: 0 | elapsed 5.0m | rate 0.2/m | eta bank 10.7h | eta total 10.7h~ (eta 2026-05-23 05:09)
+  [7161e7e2] ops: 1 done / 128 busy (128p+0r) | facts: 0 | elapsed 6.0m | rate 0.2/m | eta bank 12.8h | eta total 12.8h~ (eta 2026-05-23 07:18)
+  [7161e7e2] ops: 1 done / 128 busy (128p+0r) | facts: 0 | elapsed 7.0m | rate 0.1/m | eta bank 15.0h | eta total 15.0h~ (eta 2026-05-23 09:27)
+  [7161e7e2] ops: 1 done / 128 busy (128p+0r) | facts: 0 | elapsed 8.0m | rate 0.1/m | eta bank 17.1h | eta total 17.1h~ (eta 2026-05-23 11:37)
+  [7161e7e2] ops: 1 done / 128 busy (128p+0r) | facts: 0 | elapsed 9.0m | rate 0.1/m | eta bank 19.2h | eta total 19.2h~ (eta 2026-05-23 13:46)
+  [7161e7e2] ops: 1 done / 128 busy (128p+0r) | facts: 0 | elapsed 10.0m | rate 0.1/m | eta bank 21.4h | eta total 21.4h~ (eta 2026-05-23 15:55)
+Loading m...
+hindsight: http://127.0.0.1:8888  | model tag: granite-4.1-8b-Q5_K_S.gguf
+history: empty (file: .eval_cache\lme_ingest_history.jsonl)
+
+=== queue: 1 banks to ingest ===
+   1. 7161e7e2 [single-session-assistant] -> lme_m_7161e7e2_granite (~5.1M chars)
+
+=== qid=7161e7e2 [single-session-assistant] bank=lme_m_7161e7e2_granite ===
+  [7161e7e2] skipping aretain (bank has 128 ops already queued); resuming poll
+  [7161e7e2] ops: 1 done / 128 busy (128p+0r) | facts: 0 | elapsed 0s | rate 1000.0/m | eta bank 8s | eta total 8s~ (eta 2026-05-22 18:36)
+  [7161e7e2] ops: 1 done / 128 busy (128p+0r) | facts: 0 | elapsed 1.0m | rate 1.0/m | eta bank 2.1h | eta total 2.1h~ (eta 2026-05-22 20:45)
+  [7161e7e2] ops: 1 done / 128 busy (128p+0r) | facts: 0 | elapsed 2.0m | rate 0.5/m | eta bank 4.3h | eta total 4.3h~ (eta 2026-05-22 22:55)
+  [7161e7e2] ops: 1 done / 128 busy (128p+0r) | facts: 0 | elapsed 3.0m | rate 0.3/m | eta bank 6.4h | eta total 6.4h~ (eta 2026-05-23 01:04)
+Loading m...
+hindsight: http://127.0.0.1:8888  | model tag: granite-4.1-8b-Q5_K_S.gguf
+history: empty (file: .eval_cache\lme_ingest_history.jsonl)
+
+=== queue: 1 banks to ingest ===
+   1. 7161e7e2 [single-session-assistant] -> lme_m_7161e7e2_granite (~5.1M chars)
+
+=== qid=7161e7e2 [single-session-assistant] bank=lme_m_7161e7e2_granite ===
+  [7161e7e2] skipping aretain (bank has 128 ops already queued); resuming poll
+  [7161e7e2] ops: 1 done / 128 busy (128p+0r) | facts: 0 | elapsed 0s | rate 1000.0/m | eta bank 8s | eta total 8s~ (eta 2026-05-22 18:42)
+Loading m...
+hindsight: http://10.0.0.70:8890  | model tag: granite-4.1-8b-Q5_K_S.gguf
+history: empty (file: .eval_cache\lme_ingest_history.jsonl)
+
+=== queue: 1 banks to ingest ===
+   1. 7161e7e2 [single-session-assistant] -> lme_m_7161e7e2_granite (~5.1M chars)
+
+=== qid=7161e7e2 [single-session-assistant] bank=lme_m_7161e7e2_granite ===
+  [7161e7e2] patched bank 'lme_m_7161e7e2_granite'
+  [7161e7e2] mission verified on lme_m_7161e7e2_granite
+  [7161e7e2] retained 482 sessions (~5.1M chars, ~1283k tokens)
+  [7161e7e2] ops: 0 done / 120 busy (120p+0r) | facts: 0 | elapsed 1.0m | rate 0.0/m | eta bank 200.0h | eta total 200.0h~ (eta 2026-05-31 02:53)
+  [7161e7e2] ops: 0 done / 120 busy (120p+0r) | facts: 0 | elapsed 2.0m | rate 0.0/m | eta bank 200.0h | eta total 200.0h~ (eta 2026-05-31 02:54)
+Loading m...
+hindsight: http://10.0.0.70:8890  | model tag: granite-4.1-8b-Q5_K_S.gguf
+history: empty (file: .eval_cache\lme_ingest_history.jsonl)
+
+=== queue: 1 banks to ingest ===
+   1. 7161e7e2 [single-session-assistant] -> lme_m_7161e7e2_granite (~5.1M chars)
+
+=== qid=7161e7e2 [single-session-assistant] bank=lme_m_7161e7e2_granite ===
+  [7161e7e2] skipping aretain (bank has 112 ops already queued); resuming poll
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 1.0m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 13:37)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 2.0m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 13:38)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 3.0m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 13:39)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 4.0m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 13:40)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 5.0m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 13:41)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 6.0m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 13:42)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 7.0m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 13:43)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 8.0m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 13:44)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 9.0m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 13:45)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 10.0m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 13:46)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 11.0m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 13:47)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 12.0m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 13:48)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 13.0m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 13:49)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 14.1m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 13:50)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 15.1m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 13:51)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 16.1m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 13:52)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 17.1m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 13:53)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 18.1m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 13:54)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 19.1m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 13:55)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 20.1m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 13:56)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 21.1m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 13:57)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 22.1m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 13:58)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 23.1m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 13:59)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 24.1m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 14:00)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 25.1m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 14:01)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 26.1m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 14:02)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 27.1m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 14:03)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 28.1m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 14:04)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 29.1m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 14:05)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 30.1m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 14:06)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 31.1m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 14:07)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 32.1m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 14:08)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 33.1m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 14:09)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | facts: 0 | elapsed 34.1m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 14:10)
+Loading m...
+hindsight: http://10.0.0.70:8890  | model tag: granite-4.1-8b-Q5_K_S.gguf
+history: empty (file: .eval_cache\lme_ingest_history.jsonl)
+
+=== queue: 1 banks to ingest ===
+   1. 7161e7e2 [single-session-assistant] -> lme_m_7161e7e2_granite (~5.1M chars)
+
+=== qid=7161e7e2 [single-session-assistant] bank=lme_m_7161e7e2_granite ===
+  [7161e7e2] skipping aretain (bank has 112 ops already queued); resuming poll
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | docs: 8 | facts: 61 | elapsed 1.0m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 14:12)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | docs: 8 | facts: 61 | elapsed 2.0m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 14:13)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | docs: 8 | facts: 61 | elapsed 3.0m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 14:14)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | docs: 8 | facts: 61 | elapsed 4.0m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 14:15)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | docs: 11 | facts: 64 | elapsed 5.0m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 14:16)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | docs: 11 | facts: 64 | elapsed 6.0m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 14:17)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | docs: 11 | facts: 64 | elapsed 7.0m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 14:18)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | docs: 11 | facts: 64 | elapsed 8.0m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 14:19)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | docs: 11 | facts: 64 | elapsed 9.0m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 14:20)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | docs: 11 | facts: 64 | elapsed 10.0m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 14:21)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | docs: 11 | facts: 64 | elapsed 11.0m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 14:22)
+  [7161e7e2] ops: 0 done / 112 busy (112p+0r) | docs: 11 | facts: 64 | elapsed 12.0m | rate 0.0/m | eta bank 186.7h | eta total 186.7h~ (eta 2026-05-30 14:23)

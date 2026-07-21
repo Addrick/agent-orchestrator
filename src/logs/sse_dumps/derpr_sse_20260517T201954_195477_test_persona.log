@@ -1,0 +1,146 @@
+=== REQUEST ===
+{
+  "ts": "20260517T201954_195477",
+  "persona": "test_persona",
+  "is_retry": true,
+  "is_stream": true,
+  "user_text": "",
+  "derpr_user_text_sidecar": null,
+  "msg_count": 1,
+  "roles": [
+    "assistant"
+  ],
+  "local_inference_config": {
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 40,
+    "max_tokens": null,
+    "stop_sequence": null,
+    "rep_pen": 1.05,
+    "rep_pen_range": 360,
+    "rep_pen_slope": 0.7,
+    "min_p": 0,
+    "typical": 1,
+    "tfs": 1,
+    "max_context_length": 131072
+  },
+  "raw_body": {
+    "n": 1,
+    "max_context_length": 131072,
+    "max_length": 4096,
+    "rep_pen": 1.05,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 40,
+    "top_a": 0,
+    "typical": 1,
+    "tfs": 1,
+    "rep_pen_range": 360,
+    "rep_pen_slope": 0.7,
+    "sampler_order": [
+      6,
+      0,
+      1,
+      3,
+      4,
+      2,
+      5
+    ],
+    "trim_stop": true,
+    "genkey": "KCPP2260",
+    "min_p": 0,
+    "dynatemp_range": 0,
+    "dynatemp_exponent": 1,
+    "smoothing_factor": 0,
+    "smoothing_curve": 1,
+    "nsigma": 0,
+    "banned_tokens": [],
+    "render_special": false,
+    "logprobs": false,
+    "presence_penalty": 0,
+    "logit_bias": {},
+    "adaptive_target": -1,
+    "adaptive_decay": 0.9,
+    "stop_sequence": [
+      "<|im_end|>\n<|im_start|>user",
+      "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>"
+    ],
+    "use_default_badwordsids": false,
+    "bypass_eos": false,
+    "messages": [
+      {
+        "role": "assistant",
+        "content": "<|im_start|>system\nYou are a test persona.\nLooks like I've successfully tested all my tools! Here's a breakdown of what happened:\n\n1. web_search: This tool searches the web for information about a given query. When I called it with \"best pizza in Chicago,\" it returned three results with titles, URLs, and summaries. The search found articles from Eater, Reddit, and Appetites Abroad discussing Chicago's best pizza spots.\n\n2. recall_memory: This tool searches my long-term memory bank for relevant facts. When I asked about what test_persona thinks about LLMs, it found two memories explaining that test_persona believes LLMs solve riddles through pattern matching rather than logical thinking.\n\n3. drill_down_memory: This tool fetches raw episodic memories under a specific profile. I attempted to call it with parent_summary_id 0, but it returned an empty result,[Author's note: <memory>\nThe following are relevant facts from previous conversations:\n\n[#web_ui, ID:6d72ef4f-2410-4854-8cea-86e8d29df616, 33 minutes ago]\ntest_persona requested a test call of each tool to describe what happens.\n\n[#web_ui, ID:66cb82a0-2da9-4a55-a86b-da38b8f4038e, 33 minutes ago]\ntest_persona requested a test call of each tool to describe what happens | When: 2026-05-17 | Involving: test_persona\n\n[#web_ui, ID:b9cae809-5743-46a6-b02b-bc1e93c80674, 2 months ago]\nadrich is questioning the utility of Thunderbird's 'File > Send Later' option, expecting a scheduling tool but finding it just dumps emails into the outbox. | When: 2026-02-27 | Involving: adrich\n\n[#web_ui, ID:f005278b-61cc-4558-92c4-31c7164b6397, 2 months ago]\nadrich asked about the search tool used for the BrowseComp benchmark, noting that Gemini has built-in search but others might not. | When: 2026-03-09 | Involving: adrich, arbitr\n\n[#web_ui, ID:b8f664cf-f26a-4a17-bcc8-4d9285d7bfa8, 20 hours ago]\ndrill_down_memory tool returned empty result for parent_summary_id 0.\n\n</memory>] which suggests there might not be any detailed memories associated with that ID or it doesn't exist.\n\nAll tools worked as expected, providing different types of information retrieval capabilities!<|im_start|>user\nyou have tools? you gotta do a test call of each one and describe what happens."
+      }
+    ],
+    "continue_assistant_turn": true,
+    "stream": true,
+    "derpr_retry": true
+  }
+}
+
+=== SSE STREAM ===
+--- ToolCallStartEvent ---
+event: derpr-tool-start
+data: {"tool_name": "web_search", "arguments": {"query": "what does the duckduckgo search API return", "max_results": 3}, "call_id": "call_web_search_0", "group_id": "iter0_ce678404"}
+
+--- ToolCallResultEvent ---
+event: derpr-tool-result
+data: {"call_id": "call_web_search_0", "tool_name": "web_search", "result": "{\"result\": [{\"title\": \"DuckDuckGo Search Engine Results API - SerpApi\", \"url\": \"https://serpapi.com/duckduckgo-search-api\", \"summary\": \"Scrape DuckDuckGo search results in JSON format automatically, using custom parameters. Search for keywords by region, date, and more with SerpApi.\"}, {\"title\": \"Understand DuckDuckGo Search API: A Practical Guide with step-by-step ...\", \"url\": \"https://medium.com/@prateek.vyas/10-must-know-python-code-snippets-for-leveraging-llms-b152fb450ff5\", \"summary\": \"Nov 21, 2024 \\u00b7 DuckDuckGo's search API is a robust tool for integrating search functionalities into your applications, offering privacy-focused and ad-free ...\"}, {\"title\": \"DuckDuckGo API Documentation\", \"url\": \"https://www.searchapi.io/docs/duckduckgo-api\", \"summary\": \"DuckDuckGo Search API parses organic results, ads, AI overview, knowledge graph, top stories, inline images, inline videos, and related searches.\"}]}", "error": null, "group_id": "iter0_ce678404"}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "Okay, web_sea"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "rch "}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "worked! It ret"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "urned so"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "me results"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": " about"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": " the "}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "Duck"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "DuckG"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "o API."}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": " Now"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": " let's tr"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "y **rec"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "al"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "l_memory**"}}]}
+
+--- DoneEvent ---
+{"assistant_id": 5644, "user_interaction_id": null, "response_type": "LLM_GENERATION", "final_text_len": 107, "final_text_preview": "Okay, web_search worked! It returned some results about the DuckDuckGo API. Now let's try **recall_memory**"}
+--- derpr-id-frame ---
+event: derpr
+data: {"assistant_id": 5644, "user_id": null}
+
+--- DONE ---
+data: [DONE]
+
+
+=== END ===

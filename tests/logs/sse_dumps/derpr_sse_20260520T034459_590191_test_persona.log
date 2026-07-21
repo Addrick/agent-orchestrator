@@ -1,0 +1,44 @@
+=== REQUEST ===
+{
+  "ts": "20260520T034459_590191",
+  "persona": "test_persona",
+  "is_retry": false,
+  "is_stream": true,
+  "user_text": "hi",
+  "derpr_user_text_sidecar": null,
+  "msg_count": 2,
+  "roles": [
+    "user",
+    "assistant"
+  ],
+  "local_inference_config": {
+    "temperature": null,
+    "top_p": null,
+    "top_k": null,
+    "max_tokens": null,
+    "stop_sequence": null
+  },
+  "raw_body": {
+    "messages": [
+      {
+        "role": "user",
+        "content": "hi"
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "prefix": true
+      }
+    ],
+    "stream": true
+  }
+}
+
+=== SSE STREAM ===
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "partial "}}]}
+
+--- CANCELLED ---
+client disconnected / asyncio.CancelledError
+
+=== END ===

@@ -1,0 +1,460 @@
+=== REQUEST ===
+{
+  "ts": "20260519T063906_401188",
+  "persona": "test_persona",
+  "is_retry": true,
+  "is_stream": true,
+  "user_text": "please do another, different web search",
+  "derpr_user_text_sidecar": null,
+  "msg_count": 5,
+  "roles": [
+    "assistant",
+    "assistant",
+    "user",
+    "assistant",
+    "user"
+  ],
+  "local_inference_config": {
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 40,
+    "max_tokens": null,
+    "stop_sequence": null,
+    "rep_pen": 1.05,
+    "rep_pen_range": 360,
+    "rep_pen_slope": 0.7,
+    "min_p": 0,
+    "typical": 1,
+    "tfs": 1,
+    "max_context_length": 131072
+  },
+  "raw_body": {
+    "n": 1,
+    "max_context_length": 131072,
+    "max_length": 4096,
+    "rep_pen": 1.05,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 40,
+    "top_a": 0,
+    "typical": 1,
+    "tfs": 1,
+    "rep_pen_range": 360,
+    "rep_pen_slope": 0.7,
+    "sampler_order": [
+      6,
+      0,
+      1,
+      3,
+      4,
+      2,
+      5
+    ],
+    "trim_stop": true,
+    "genkey": "KCPP6076",
+    "min_p": 0,
+    "dynatemp_range": 0,
+    "dynatemp_exponent": 1,
+    "smoothing_factor": 0,
+    "smoothing_curve": 1,
+    "nsigma": 0,
+    "banned_tokens": [],
+    "render_special": false,
+    "logprobs": false,
+    "presence_penalty": 0,
+    "logit_bias": {},
+    "adaptive_target": -1,
+    "adaptive_decay": 0.9,
+    "stop_sequence": [
+      "<|im_end|>\n<|im_start|>user",
+      "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>"
+    ],
+    "use_default_badwordsids": false,
+    "bypass_eos": false,
+    "messages": [
+      {
+        "role": "assistant",
+        "content": "<|im_start|>system\nYou are a test persona.\n<|im_start|>user\nyou seem to have just ended the request instead of using the tool"
+      },
+      {
+        "role": "assistant",
+        "content": "Looks like I've successfully tested all my tools! Here's a breakdown of what happened:\n\n1. web_search: This tool searches the web for information about a given query. When I called it with \"best pizza in Chicago,\" it returned three results with titles, URLs, and summaries. The search found articles from Eater, Reddit, and Appetites Abroad discussing Chicago's best pizza spots.\n\n2. recall_memory: This tool searches my long-term memory bank for relevant facts. When I asked about what test_persona thinks about LLMs, it found two memories explaining that test_persona believes LLMs solve riddles through pattern matching rather than logical thinking.\n\n3. drill_down_memory: This tool fetches raw episodic memories under a specific profile. I attempted to call it with parent_summary_id 0, but it returned an empty result, which suggests there might not be any detailed memories associated with that ID or it doesn't exist.\n[Author's note: <memory>\nThe following are relevant facts from previous conversations:\n\n[#web_ui, ID:bc8de749-131b-424d-a69c-235a82566a30, 1 day ago]\nweb_search tool tested with query 'best pizza in Chicago' returned 3 results from Eater, Reddit, and Appetites Abroad.\n\n[#web_ui, ID:b3912208-a08c-4906-bd94-0cc02fe53051, 1 day ago]\nweb_search tool tested with query 'best pizza in Chicago', returned 3 results from Eater, Reddit, and Appetites Abroad | When: Monday, May 18, 2026 | Involving: test_persona\n\n[#web_ui, ID:f005278b-61cc-4558-92c4-31c7164b6397, 2 months ago]\nadrich asked about the search tool used for the BrowseComp benchmark, noting that Gemini has built-in search but others might not. | When: 2026-03-09 | Involving: adrich, arbitr\n\n[#web_ui, ID:037a87ad-e6d3-4c43-94cd-6ab5e56417fd, 4 months ago]\nCostco warehouses frequently carry different laptop models than those listed on the Costco website. Online inventory often supplements in-warehouse selections. Additionally, prices for identical laptops may differ between the website and physical stores, with in-store prices sometimes being lower due to the exclusion of shipping and handling fees. | When: 2026-01-10\n\n[#web_ui, ID:85e1e8ee-0ca0-43c3-ba81-fa66a2931275, 1 month ago]\nNumerous Reddit clients function on Android. Current options include RedReader (open-source, ad-free, accessibility-focused), Relay for Reddit (subscription-based, clean interface), Infinity for Reddit (ad-free, clean UI, free and paid versions), Continuum (an Infinity fork), Slide (a Slide for Reddit fork), RiM (Reddit in Motion), Atom for Reddit (simplistic interface, customization, data saver), Now for Reddit (beautiful interface, theme options, color-coded comments), Nara for Reddit, RDX for Reddit (primarily for browsing), Geddit (primarily for browsing), Stealth for Reddit (primarily for browsing), Boost for Reddit (customizable, material design, widget support, in-app media previews), Joey for Reddit (video downloads, text-to-speech), Sync for Reddit (full-featured, material design transitions).\n\n</memory>]\nAll tools worked as expected, providing different types of information retrieval capabilities!"
+      },
+      {
+        "role": "user",
+        "content": "please do another, different web search"
+      },
+      {
+        "role": "assistant",
+        "content": "Now I'll test web_search again with a completely different query:"
+      },
+      {
+        "role": "user",
+        "content": "please do another, different web search"
+      }
+    ],
+    "continue_assistant_turn": true,
+    "stream": true,
+    "derpr_retry": true
+  }
+}
+
+=== SSE STREAM ===
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "I"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "'m c"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "alling "}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "web_se"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "arch "}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "agai"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "n with y"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "et another diffe"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "r"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "ent query:"}}]}
+
+--- ToolCallStartEvent ---
+event: derpr-tool-start
+data: {"tool_name": "web_search", "arguments": {"query": "latest advancements in quantum computing"}, "call_id": "call_web_search_0", "group_id": "iter0_f00420a4"}
+
+--- ToolCallResultEvent ---
+event: derpr-tool-result
+data: {"call_id": "call_web_search_0", "tool_name": "web_search", "result": "{\"result\": [{\"title\": \"Quantum Computing Advancements: Latest Breakthroughs\", \"url\": \"https://www.motocms.com/blog/en/quantum-computing-advancements-latest-breakthroughs/\", \"summary\": \"What are quantum computing advancements? Learn about its achievements, usefulness, development challenges & prospects, industry insights and more!\"}, {\"title\": \"Latest Breakthroughs in Quantum Computing 2024 - Flute Journal\", \"url\": \"https://flutejournal.com/latest-breakthroughs-in-quantum-computing-2024/\", \"summary\": \"In this blog post, we \\u2019 ll delve into the latest breakthroughs in quantum computing for 2024. ... energy industry may harness quantum computing ...\"}, {\"title\": \"Latest Advances in AI, Quantum Computing, and Space Exploration\", \"url\": \"https://cybernative.ai/t/latest-advances-in-ai-quantum-computing-and-space-exploration-september-2025/27324\", \"summary\": \"Latest Advances in AI, Quantum Computing, and Space Exploration - September 2025 ... Advancing Quantum Computation and Information Processing ...\"}, {\"title\": \"Recent Advancements In Quantum Computing And Their Implications\", \"url\": \"https://www.analyticssteps.com/blogs/recent-advancements-quantum-computing-and-their-implications\", \"summary\": \"Overall, recent advancements in quantum computing represent a major step forward in realizing the potential of this promising technology.\"}, {\"title\": \"Recent Advances in Quantum Computing: Groundbreaking\", \"url\": \"https://techtobard.com/recent-advances-in-quantum-computing/\", \"summary\": \"As I explore the latest trends and developments in quantum computing, it becomes clear that we are standing at the edge of a major technological ...\"}]}", "error": null, "group_id": "iter0_f00420a4"}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "Grea"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "t! The "}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "web_s"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "earch t"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "ool worked"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": " perfe"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "c"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "tly a"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "ga"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "in. H"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "er"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "e's wh"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "at I f"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "ound abo"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "ut quantum"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": " computing ad"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "va"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "ncements"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": ":\\\n\n\\\n\n"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "The searc"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "h "}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "returned "}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "5 releva"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "nt results "}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "discuss"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "ing recent br"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "eakt"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "hroughs "}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "in quantum"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": " "}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "comp"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "uting. Th"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "e arti"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "cles co"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "ver t"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "o"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "pic"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "s like:"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "\n\n- Latest ac"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "hiev"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "ements and de"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "vel"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "opments "}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "in quantum"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": " c"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "omputing\n"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "- Industr"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "y in"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "sights and"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": " p"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "rospects\n- "}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "Cha"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "llenges in d"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "ev"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "elopment\n- Ap"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "plicati"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "ons acro"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "ss vario"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "us sectors"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": " includ"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "in"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "g en"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "ergy\n- Im"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "pli"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "cation"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "s of these ad"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "vance"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "ments\n\nT"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "he sourc"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "es inc"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "l"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "ude blogs"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": ","}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": " jou"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "rnals"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": ", and tech pu"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "blica"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "tions th"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "at provide com"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "prehensiv"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "e c"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "overage "}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "of quantum"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": " computin"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "g"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": " prog"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "ress. This de"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "monst"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "rate"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "s tha"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "t the tool su"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "ccessfully"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": " retriev"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "es current i"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "nfo"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "rmation "}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "on vari"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "ous t"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "opics "}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "when given"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": " differe"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "n"}}]}
+
+--- TokenEvent ---
+data: {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "t queries."}}]}
+
+--- DoneEvent ---
+{"assistant_id": 5648, "user_interaction_id": null, "response_type": "LLM_GENERATION", "final_text_len": 703, "final_text_preview": "Great! The web_search tool worked perfectly again. Here's what I found about quantum computing advancements:\\\n\n\\\n\nThe search returned 5 relevant results discussing recent breakthroughs in quantum computing. The articles cover topics like:\n\n- Latest achievements and developments in quantum computing\n- Industry insights and prospects\n- Challenges in development\n- Applications across various sectors including energy\n- Implications of these advancements\n\nThe sources include blogs, journals, and tech"}
+--- derpr-id-frame ---
+event: derpr
+data: {"assistant_id": 5648, "user_id": null}
+
+--- DONE ---
+data: [DONE]
+
+
+=== END ===

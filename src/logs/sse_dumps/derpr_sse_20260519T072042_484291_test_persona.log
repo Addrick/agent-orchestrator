@@ -1,0 +1,115 @@
+=== REQUEST ===
+{
+  "ts": "20260519T072042_484291",
+  "persona": "test_persona",
+  "is_retry": true,
+  "is_stream": true,
+  "user_text": "help",
+  "derpr_user_text_sidecar": null,
+  "msg_count": 6,
+  "roles": [
+    "assistant",
+    "user",
+    "assistant",
+    "user",
+    "assistant",
+    "user"
+  ],
+  "local_inference_config": {
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 40,
+    "max_tokens": null,
+    "stop_sequence": null,
+    "rep_pen": 1.05,
+    "rep_pen_range": 360,
+    "rep_pen_slope": 0.7,
+    "min_p": 0,
+    "typical": 1,
+    "tfs": 1,
+    "max_context_length": 131072
+  },
+  "raw_body": {
+    "n": 1,
+    "max_context_length": 131072,
+    "max_length": 4096,
+    "rep_pen": 1.05,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 40,
+    "top_a": 0,
+    "typical": 1,
+    "tfs": 1,
+    "rep_pen_range": 360,
+    "rep_pen_slope": 0.7,
+    "sampler_order": [
+      6,
+      0,
+      1,
+      3,
+      4,
+      2,
+      5
+    ],
+    "trim_stop": true,
+    "genkey": "KCPP2022",
+    "min_p": 0,
+    "dynatemp_range": 0,
+    "dynatemp_exponent": 1,
+    "smoothing_factor": 0,
+    "smoothing_curve": 1,
+    "nsigma": 0,
+    "banned_tokens": [],
+    "render_special": false,
+    "logprobs": false,
+    "replace_instruct_placeholders": true,
+    "presence_penalty": 0,
+    "logit_bias": {},
+    "adaptive_target": -1,
+    "adaptive_decay": 0.9,
+    "stop_sequence": [
+      "{{[INPUT]}}",
+      "{{[OUTPUT]}}"
+    ],
+    "use_default_badwordsids": false,
+    "bypass_eos": false,
+    "messages": [
+      {
+        "role": "assistant",
+        "content": "{{[SYSTEM]}}You are a test persona.\n"
+      },
+      {
+        "role": "user",
+        "content": "please do another, different web search"
+      },
+      {
+        "role": "assistant",
+        "content": "Now I'll test web_search again with a completely different query:"
+      },
+      {
+        "role": "user",
+        "content": "please do another, different web search"
+      },
+      {
+        "role": "assistant",
+        "content": "Great! The web_search tool worked perfectly again. Here's what I found about quantum computing advancements:\\\n\n\\\n\nThe search returned 5 relevant results discussing recent breakthroughs in quantum computing. The articles cover topics like:\n\n- Latest achievements and developments in quantum computing\n- Industry insights and prospects\n- Challenges in development\n- Applications across various sectors including energy\n[Author's note: <memory>\nThe following are relevant facts from previous conversations:\n\n[#web_ui, ID:6a323706-daed-4848-a430-e80d959ab4f5, 3 months ago]\nUser configures firewall exceptions for Input Director and its helper executable.\n\n[#web_ui, ID:afd4c9ca-8300-4bf8-a52f-9f18676bc9a0, 3 months ago]\narbitr advised adrich to increase ambient humidity to 40-50%, use natural fiber bedding, wipe cat with damp cloth, use grounding surfaces, and use metal combs to help cat discharge static | When: 2026-02-03 | Involving: adrich (user), arbitr (AI agent) | to mitigate static charge accumulation in animals\n\n[#web_ui, ID:a897c773-3ad6-434e-a204-66bf93873976, 3 months ago]\nadrich asked arbitr how to help their cat discharge static electricity | When: 2026-02-03 | Involving: adrich (user), arbitr (AI agent) | cat has insane static electricity\n\n[#web_ui, ID:85d0ef37-89d0-4899-8ffc-36b63c216cec, 4 months ago]\nUser configures firewall exceptions for Input Director and its helper executable. | Involving: user\n\n[#web_ui, ID:f79e182d-29d2-4184-a2da-d8ea2614ca50, 1 month ago]\ntest_persona wanted to build a project, explain how it should be set up, and help start the first step.\n\n</memory>]- Implications of these advancements\n\nThe sources include blogs, journals, and tech publications that provide comprehensive coverage of quantum computing progress. This demonstrates that the tool successfully retrieves current information on various topics when given different queries."
+      },
+      {
+        "role": "user",
+        "content": "help"
+      }
+    ],
+    "continue_assistant_turn": true,
+    "stream": true,
+    "derpr_retry": true
+  }
+}
+
+=== SSE STREAM ===
+--- DoneEvent ---
+{"assistant_id": null, "user_interaction_id": null, "response_type": "DEV_COMMAND", "final_text_len": 971, "final_text_preview": "Talk to a specific persona by starting your message with their name. \n \nCurrently active personas: \ntest_persona, capped_persona, model_selector, tool_selector, triage_analyst, triage_scout, triage_filter, triage_summarizer, dispatch_analyst, memory_summarizer\n\nBot commands: \nhello (start new conversation), \ngoodbye (end conversation), \nremember <+prompt>, \nwhat prompt/model/models/personas/history/tokens/temp/top_p/top_k/execution_mode/tools/memory_mode/service_bindings/display_name/long_term_m"}
+--- DONE ---
+data: [DONE]
+
+
+=== END ===

@@ -4,8 +4,9 @@
 # sweep stack (docker-compose.hindsight.sweep.yml). Different container
 # names, separate data volume, separate host ports, own network.
 #
-# Granite extraction LLM is reached over the LAN at 10.0.0.69:5002 (OAI-
-# compatible /v1). The hindsight container needs egress for this, so we
+# Granite extraction LLM is reached via the granite-proxy nginx LB, which
+# least_conn-balances over the LAN kcpp workers (10.0.0.69:5002 +
+# 10.0.0.67:5002 — see granite-lb.conf). The proxy needs LAN egress, so we
 # do NOT mark the internal network `internal: true` (unlike sweep).
 #
 # Up — local (.67) default ports:
@@ -32,11 +33,18 @@ services:
     image: ghcr.io/vectorize-io/hindsight@sha256:2b92c62863a0841e2a153907462987f6d6f1d7bf9ae07a8ad3d07430eb175217
     container_name: hindsight-granite-memory
     restart: unless-stopped
+    # Embedded pg0 requests large shared-memory segments (parallel query /
+    # hash work) on big banks — default 64M /dev/shm yields "No space left on
+    # device" (observed 533MB request, 2026-05-24). Match the pgvector-restore
+    # requirement. Prod/sweep stacks need the same if they ingest m-tier.
+    shm_size: "2gb"
+    depends_on:
+      - granite-proxy
     networks:
       - hindsight-granite-net
     environment:
       - HINDSIGHT_API_LLM_PROVIDER=openai
-      - HINDSIGHT_API_LLM_BASE_URL=http://10.0.0.69:5002/v1
+      - HINDSIGHT_API_LLM_BASE_URL=http://granite-proxy:5002/v1
       - HINDSIGHT_API_LLM_MODEL=${GRANITE_MODEL_ID:-granite}
       - HINDSIGHT_API_LLM_API_KEY=unused
       - HINDSIGHT_API_LLM_MAX_CONCURRENT=${GRANITE_LLM_CONCURRENCY:-20}
@@ -61,6 +69,34 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  # nginx LB over the LAN granite kcpp workers. Reached by the hindsight
+  # container as http://granite-proxy:5002/v1. Pool lives in granite-lb.conf;
+  # edit + `docker exec hindsight-granite-proxy nginx -s reload` to change.
+  granite-proxy:
+    # Unprivileged variant: runs rootless, no startup chown — works under
+    # cap_drop ALL + no-new-privileges (stock nginx crash-loops there).
+    image: nginxinc/nginx-unprivileged:1.27-alpine
+    container_name: hindsight-granite-proxy
+    restart: unless-stopped
+    networks:
+      - hindsight-granite-net
+    volumes:
+      # Host-side conf (like prod kobold-lb.conf) so pool edits need no redeploy:
+      #   edit C:\Server\Hindsight\granite-lb.conf, then
+      #   docker exec hindsight-granite-proxy nginx -t && ... -s reload
+      - C:\Server\Hindsight\granite-lb.conf:/etc/nginx/conf.d/default.conf:ro
+    healthcheck:
+      # 127.0.0.1 not localhost: nginx binds IPv4 only; localhost→::1 = false unhealthy.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:5002/v1/models"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     cap_drop:
       - ALL
     security_opt:

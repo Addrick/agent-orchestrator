@@ -1,0 +1,63 @@
+=== REQUEST ===
+{
+  "ts": "20260519T072129_896743",
+  "persona": "test_persona",
+  "is_retry": true,
+  "is_stream": true,
+  "user_text": "please do another, different web search",
+  "derpr_user_text_sidecar": null,
+  "msg_count": 4,
+  "roles": [
+    "user",
+    "assistant",
+    "user",
+    "assistant"
+  ],
+  "local_inference_config": {
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": null,
+    "max_tokens": 4096,
+    "stop_sequence": [
+      "### Instruction:",
+      "### Response:"
+    ]
+  },
+  "raw_body": {
+    "max_tokens": 4096,
+    "model": "gpt-3.5-turbo-instruct",
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "stop": [
+      "### Instruction:",
+      "### Response:"
+    ],
+    "presence_penalty": 0.050000000000000044,
+    "messages": [
+      {
+        "role": "user",
+        "content": "You are a test persona.\n\nplease do another, different web search"
+      },
+      {
+        "role": "assistant",
+        "content": "Now I'll test web_search again with a completely different query:"
+      },
+      {
+        "role": "user",
+        "content": "please do another, different web search"
+      },
+      {
+        "role": "assistant",
+        "content": "Great! The web_search tool worked perfectly again. Here's what I found about quantum computing advancements:\\\n\n\\\n\nThe search returned 5 relevant results discussing recent breakthroughs in quantum computing. The articles cover topics like:\n\n- Latest achievements and developments in quantum computing\n- Industry insights and prospects\n- Challenges in development\n- Applications across [Author's note: <memory>\nThe following are relevant facts from previous conversations:\n\n[#web_ui, ID:6a323706-daed-4848-a430-e80d959ab4f5, 3 months ago]\nUser configures firewall exceptions for Input Director and its helper executable.\n\n[#web_ui, ID:afd4c9ca-8300-4bf8-a52f-9f18676bc9a0, 3 months ago]\narbitr advised adrich to increase ambient humidity to 40-50%, use natural fiber bedding, wipe cat with damp cloth, use grounding surfaces, and use metal combs to help cat discharge static | When: 2026-02-03 | Involving: adrich (user), arbitr (AI agent) | to mitigate static charge accumulation in animals\n\n[#web_ui, ID:a897c773-3ad6-434e-a204-66bf93873976, 3 months ago]\nadrich asked arbitr how to help their cat discharge static electricity | When: 2026-02-03 | Involving: adrich (user), arbitr (AI agent) | cat has insane static electricity\n\n[#web_ui, ID:85d0ef37-89d0-4899-8ffc-36b63c216cec, 4 months ago]\nUser configures firewall exceptions for Input Director and its helper executable. | Involving: user\n\n[#web_ui, ID:f79e182d-29d2-4184-a2da-d8ea2614ca50, 1 month ago]\ntest_persona wanted to build a project, explain how it should be set up, and help start the first step.\n\n</memory>]various sectors including energy\n- Implications of these advancements\n\nThe sources include blogs, journals, and tech publications that provide comprehensive coverage of quantum computing progress. This demonstrates that the tool successfully retrieves current information on various topics when given different queries."
+      }
+    ],
+    "stream": true,
+    "derpr_retry": true
+  }
+}
+
+=== SSE STREAM ===
+--- CANCELLED ---
+client disconnected / asyncio.CancelledError
+
+=== END ===

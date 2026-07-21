@@ -466,7 +466,8 @@ async def main(
         bank = f"{bank_prefix}_{qid}{bank_suffix}"
         if skip_existing and await _bank_exists(client, bank):
             stats = await _bank_stats(client, bank)
-            facts = sum((stats.get("node_counts") or {}).values())
+            # HS current schema: total_nodes is authoritative; legacy node_counts is gone.
+            facts = stats.get("total_nodes") or sum((stats.get("nodes_by_fact_type") or {}).values())
             ops = await _ops_counts(client, bank)
             if facts > 0 and ops["pending"] + ops["running"] == 0:
                 print(f"skip {qid}: bank exists with {facts} facts (idle)", flush=True)

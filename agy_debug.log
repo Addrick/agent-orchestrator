@@ -1,0 +1,23 @@
+I0519 15:48:11.945183 27976 server.go:1295] Starting language server process with pid 27976
+I0519 15:48:11.946763 27976 server.go:471] Language server will attempt to listen on host localhost
+I0519 15:48:11.958369 27976 server.go:485] Language server listening on random port at 50927 for HTTPS (gRPC)
+I0519 15:48:11.958904 27976 server.go:492] Language server listening on random port at 50928 for HTTP
+W0519 15:48:12.096253 27976 launchmanager.go:68] Entering local chrome mode! This is WRONG unless you are running tests or in eval mode on Linux.
+E0519 15:48:12.099553 27976 log.go:398] Failed to poll ListExperiments: error getting token source: You are not logged into Antigravity.
+W0519 15:48:12.100101 27976 log_context.go:117] Cache(loadCodeAssistResponse): Singleflight refresh failed: error getting token source: You are not logged into Antigravity.
+W0519 15:48:12.100101 27976 log_context.go:117] Cache(availableModels): Singleflight refresh failed: failed to get load code assist response: error getting token source: You are not logged into Antigravity.
+E0519 15:48:12.100101 27976 log.go:398] Failed to poll FetchAvailableModels: failed to get load code assist response: error getting token source: You are not logged into Antigravity.
+I0519 15:48:12.100654 27976 server.go:2240] Auth succeeded, refreshing features and managers
+E0519 15:48:12.100654 27976 log.go:398] Failed to poll ListExperiments: error getting token source: You are not logged into Antigravity.
+W0519 15:48:12.100654 27976 log_context.go:117] Cache(loadCodeAssistResponse): Singleflight refresh failed: error getting token source: You are not logged into Antigravity.
+W0519 15:48:12.100654 27976 log_context.go:117] Cache(availableModels): Singleflight refresh failed: failed to get load code assist response: error getting token source: You are not logged into Antigravity.
+E0519 15:48:12.100654 27976 log.go:398] Failed to poll FetchAvailableModels: failed to get load code assist response: error getting token source: You are not logged into Antigravity.
+I0519 15:48:12.100654 27976 server.go:2246] State refresh took 0ms
+I0519 15:48:12.109542 27976 server.go:1904] initialized server successfully in 163.2941ms
+I0519 15:48:12.110633 27976 auto_updater.go:207] Last check was less than 15 minutes ago, skipping update
+I0519 15:48:12.111185 27976 common.go:103] Launching CLI mode
+I0519 15:48:12.111185 27976 project.go:162] project: no project found from C:\Users\adama\PycharmProjects\derpr-python, creating new project
+W0519 15:48:12.115323 27976 log_context.go:117] Cache(loadCodeAssistResponse): Singleflight refresh failed: error getting token source: You are not logged into Antigravity.
+W0519 15:48:12.115323 27976 log_context.go:117] Cache(userInfo): Singleflight refresh failed: failed to get load code assist response: error getting token source: You are not logged into Antigravity.
+E0519 15:48:12.115323 27976 server.go:604] Failed to get OAuth token: error getting token source from auth provider: You are not logged into Antigravity.
+W0519 15:48:12.115323 27976 client.go:81] failed to set auth token
