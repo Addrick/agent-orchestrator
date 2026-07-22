@@ -2534,6 +2534,7 @@ def test_adapter_engine_surface_is_enumerated():
         "system_persona_names": "_system_persona_names",
         "models_available": "_models_available",
         "memory_manager": "_memory_manager",
+        "memory_backend": "_memory_backend",
         "tool_manager": "_tool_manager",
         "bot_logic": "_bot_logic",
         "confirmations": "_confirmations",

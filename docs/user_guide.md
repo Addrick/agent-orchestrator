@@ -110,6 +110,22 @@ Personas with `history_messages: 0` always render an empty transcript — the po
 
 **Voice availability:** the mic (hold-to-talk), *voice auto-send*, and *listen* (always-listening dictation) controls appear only when the browser supports audio capture **and** the engine reports `voice_web` in `GET /api/v1/capabilities` (i.e. `VOICE_WEB_ENABLED` is set and the `/voice/*` routes are mounted). With voice disabled server-side the controls are hidden rather than failing on every press.
 
+### Memory imports panel (DP-292)
+
+The nav rail's **`◈ MEMORY`** dock opens a full-page **Imports** panel for managing the documents in a Hindsight memory bank. It is an **operator tool**, not a chat surface: reads (bank list, document list, operation status) are open, but every mutation (upload, ingest, delete) requires the operator control token set in the top bar — without it the panel is read-only and mutating actions show a "control token required" notice.
+
+- **Bank picker:** select which Hindsight bank to work in (personas map to banks). The dropdown shows each bank's fact count.
+- **Add documents — three sources:**
+  - **Upload** `.md` / `.txt` files (multiple at once). Other file types and non-UTF-8 content are rejected per-file with a reason; PDF is deferred. Each file is keyed by its filename, so re-uploading the same name **replaces** that document rather than duplicating it.
+  - **Fetch URL** — the engine fetches the URL server-side and ingests the body text, keyed by the URL.
+  - **Ingest server path** — walk a file or directory on the engine host by glob (default `**/*.md`). Unchanged files are skipped via a per-bank content hash; re-run is idempotent.
+- **Documents table:** lists the bank's documents with derived-unit counts and last-updated time; the **✕** button deletes a document and its derived memory units (with a confirm prompt).
+- **Operations monitor:** shows recent async ingest/consolidation operations for the bank with status and any error — Hindsight processes uploads asynchronously, so a freshly-added document appears here as a pending operation before its units are extracted. Use **Refresh** to re-poll.
+
+Documents ingested here are **automatically chunked and extracted by Hindsight** (server-side) using the bank's retain mission — the panel just declares the bank and hands over the content. Operator uploads are tagged trusted. When the engine runs on the SQLite memory backend (no Hindsight), the panel reports the backend has no import surface (HTTP 501) rather than silently doing nothing.
+
+> Content-date extraction from document bodies (so a doc's facts anchor to the dates it mentions, not its upload time) is a planned follow-up; today ingested documents anchor to upload/mtime.
+
 ## Commands
 
 All commands are entered as the message body when addressing a persona. Commands are case-insensitive.

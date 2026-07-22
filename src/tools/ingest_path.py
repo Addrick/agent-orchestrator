@@ -65,19 +65,37 @@ class IngestPathHandler:
             return {"status": "error", "reason": "no active turn context"}
 
         resolved_bank = self._resolve_bank(ctx.persona_name, bank)
-
         root = Path(path).expanduser().resolve()
+        return await self.ingest_root(resolved_bank, root, glob, force)
+
+    async def ingest_root(
+        self,
+        bank_id: str,
+        root: Path,
+        glob: str = "**/*.md",
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        """Walk `root`, retain matching files into `bank_id`.
+
+        Turn-context-free core shared by the model-callable `_ingest_path`
+        (which resolves bank + root first) and the DP-292 operator import
+        panel (control-token gated, explicit bank + path). Idempotent via the
+        per-bank sha256 cache — unchanged files are skipped unless `force`.
+        Does NOT check INGEST_PATH_ENABLED: that flag gates the model tool;
+        the operator path is authorized by DERPR_CONTROL_TOKEN instead.
+        """
         if not root.exists():
             return {"status": "error", "reason": f"path not found: {root}"}
 
         candidates = self._collect_candidates(root, glob)
         if not candidates:
             return {
-                "status": "ok", "bank": resolved_bank,
+                "status": "ok", "bank": bank_id,
                 "ingested": 0, "skipped": 0, "failed": 0,
                 "reason": "no files matched glob",
             }
 
+        resolved_bank = bank_id
         cache_path = self.cache_dir / f"{resolved_bank}.json"
         cache = self._load_cache(cache_path)
 
