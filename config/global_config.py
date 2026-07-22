@@ -209,6 +209,11 @@ PHISHING_SUSPECT_MIN_CONFIDENCE = 0.6  # below this a suspect verdict is note-on
 DATE_TAGGER_NAME = "date_tagger"
 DATE_TAGGER_ENABLED: bool = os.environ.get("DATE_TAGGER_ENABLED", "1").lower() in ("1", "true", "yes", "on")
 DATE_EXTRACTION_MAX_CHARS = 20000  # body head scanned for dates / sent to tagger
+# Persisted set of already-reported unmatched date-format shapes, so the tagger
+# DMs the operator once per novel format (not once per document).
+DATE_FORMAT_REPORTS_FILE: Path = Path(
+    os.environ.get("DATE_FORMAT_REPORTS_FILE", str(DATA_DIR / "date_format_reports.json"))
+)
 
 ZAMMAD_BOT_EMAIL = "autotriage@bot.local"
 ZAMMAD_BOT_FIRSTNAME = "autotriage"

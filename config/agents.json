@@ -52,6 +52,15 @@
                 {"channel": "discord_dm", "recipient": "adrich"}
             ],
             "description": "Daily board-level Manager's Report: snapshots the whole ticket board, gathers analyst briefs, posts a plan digest, and queues whitelist-validated action proposals for human review (DP-280 Phase 0 + DP-282 Phase 1). No direct write path."
+        },
+        "date_tagger": {
+            "persona": "date_tagger",
+            "report_unmatched_formats": true,
+            "notification_defaults": {
+                "channel": "discord_dm",
+                "recipient": "adrich"
+            },
+            "description": "Single-shot inference agent (DP-292): LLM fallback for document-ingest date extraction when regex finds no date. On success it DMs the operator the verbatim date format regex missed. Not scheduled; built via AgentManager.register_inference_agent."
         }
     },
 

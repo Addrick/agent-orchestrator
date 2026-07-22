@@ -136,6 +136,8 @@ On every ingest (upload, URL fetch, server path) the engine extracts a **single 
 
 Each ingested document is tagged `date:<YYYY-MM-DD>` and `date_source:<regex|llm|fallback>`, and the same values are stored in its metadata, so you can see in the documents table and in recall which anchor was used and how it was derived. Anchoring is **per document** (one document → one date); Hindsight stamps every memory unit it extracts from that document with that one anchor. A document whose content genuinely spans weeks (a long chat log) anchors to its most recent dated line, which keeps it correctly ranked for recency in recall.
 
+**Format-gap notifications.** Every time the LLM fallback succeeds, it means the regex missed a date format that a real document actually used. To close that gap over time, the date-tagger sends the operator a Discord DM naming the **verbatim date string** it read (e.g. `"3rd quarter '26"`) plus the ISO date it resolved — a prompt to extend the regex so that format stops needing the LLM. Notifications are **deduplicated by format shape** (digit-masked), so bulk-ingesting many documents that share one unmatched format produces a single DM, not one per document. A reported string is only sent if it genuinely appears in the document body (guards against a hallucinated date). The DM target is the `date_tagger` agent's `notification_defaults` in `agents.json` (default: DM to `adrich`); with Discord disabled the report degrades to a log line.
+
 ## Commands
 
 All commands are entered as the message body when addressing a persona. Commands are case-insensitive.
