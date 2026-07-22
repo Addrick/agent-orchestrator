@@ -124,7 +124,17 @@ The nav rail's **`◈ MEMORY`** dock opens a full-page **Imports** panel for man
 
 Documents ingested here are **automatically chunked and extracted by Hindsight** (server-side) using the bank's retain mission — the panel just declares the bank and hands over the content. Operator uploads are tagged trusted. When the engine runs on the SQLite memory backend (no Hindsight), the panel reports the backend has no import surface (HTTP 501) rather than silently doing nothing.
 
-> Content-date extraction from document bodies (so a doc's facts anchor to the dates it mentions, not its upload time) is a planned follow-up; today ingested documents anchor to upload/mtime.
+#### Content-date anchoring (DP-292 phase 2)
+
+Every extracted memory in Hindsight is stamped with an **anchor date** (the `mentioned_at` / `event_date` that recall uses for recency and time-range queries). Hindsight derives that date **entirely from the `timestamp` the engine sends on the retain request** — the extraction LLM does *not* read dates out of the prose. So for a document to anchor to *when its content is actually about* (rather than the moment you uploaded it), the engine has to find that date itself before handing the document over.
+
+On every ingest (upload, URL fetch, server path) the engine extracts a **single anchor date** from the document body:
+
+1. **Regex pass (always runs).** Scans the body for machine-readable dates — ISO (`2026-03-12`, `2026-03-12T10:00`), `2026/03/12`, and named-month forms (`March 12, 2026`, `12 March 2026`). Locale-ambiguous bare-numeric forms (`03/12/2026`) are **deliberately ignored** — they cause more wrong anchors than they fix. Of the dates found, the engine picks the **latest one that isn't in the future**; future-dated values (e.g. a document that says "as of 2099") are dropped. This is the path for chat logs and dated notes, where the date sits in line headers.
+2. **LLM fallback (optional, only when the regex finds nothing).** A single-shot, sealed **date-tagger** reads the body purely as data and returns one ISO date or "none". It exists to catch prose-only dates ("we met last March", "the Q2 review"). Its output is validated and future-clamped exactly like the regex result — it can only *propose* a plausible past date, never inject instructions, reach a tool, or push the anchor past now. Disabled with `DATE_TAGGER_ENABLED=0`, in which case ingest is regex-only.
+3. **Fallback.** If neither finds a usable date, the document anchors to its previous default — file mtime for server-path ingest, upload/fetch time for uploads and URLs.
+
+Each ingested document is tagged `date:<YYYY-MM-DD>` and `date_source:<regex|llm|fallback>`, and the same values are stored in its metadata, so you can see in the documents table and in recall which anchor was used and how it was derived. Anchoring is **per document** (one document → one date); Hindsight stamps every memory unit it extracts from that document with that one anchor. A document whose content genuinely spans weeks (a long chat log) anchors to its most recent dated line, which keeps it correctly ranked for recency in recall.
 
 ## Commands
 

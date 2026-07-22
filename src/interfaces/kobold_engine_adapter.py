@@ -45,6 +45,7 @@ from src.chat_system import (
     ToolCallStartEvent,
 )
 from src.interfaces.kobold_export import build_kobold_savefile, build_transcript, _parse_tool_context
+from src.memory.date_extraction import resolve_ingest_anchor
 from src.origin import Origin
 from src.stream_engine import CHAT_TEMPLATES
 from src.interfaces.portal_render import render_portal_html
@@ -297,6 +298,15 @@ class KoboldEngineAdapter:
                 status_code=502,
                 content={"error": f"memory backend unreachable: {e}"},
             )
+
+    def _ingest_date_tagger(self) -> "Optional[Callable[[str], Awaitable[Optional[str]]]]":
+        """The LLM date-tagger fallback callable for document ingest (DP-292
+        phase 2), or None when disabled. Regex extraction always runs; this is
+        consulted only when the body has no machine-readable date."""
+        if not global_config.DATE_TAGGER_ENABLED:
+            return None
+        from src.memory.date_tagger import DateTagger
+        return DateTagger(self.chat_system).tag
 
     async def _audit_control_change(self, event_type: str, target: str,
                                     new_state: Dict[str, Any],
@@ -1444,6 +1454,7 @@ class KoboldEngineAdapter:
             # files/retain deferred. Operator uploads are trusted.
             base_tags = [t for t in (tags or "").split(",") if t] or ["ingest", "upload"]
             now = datetime.now(timezone.utc)
+            tagger = self._ingest_date_tagger()
             results: List[Dict[str, Any]] = []
             for f in files:
                 name = f.filename or "untitled"
@@ -1459,16 +1470,26 @@ class KoboldEngineAdapter:
                     results.append({"file": name, "status": "rejected",
                                     "reason": "not valid utf-8"})
                     continue
-                metadata = {"source": "upload", "filename": name, "untrusted": "false"}
+                # Anchor to the date the content is about (upload time is the
+                # fallback when the body carries no date). DP-292 phase 2.
+                ts, date_tags, date_meta = await resolve_ingest_anchor(
+                    content, fallback_ts=now, clamp_now=now, llm_tagger=tagger,
+                )
+                metadata = {"source": "upload", "filename": name,
+                            "untrusted": "false", **date_meta}
                 res = await self._run_backend(
                     self._memory_backend.retain_document(
                         bank_id, document_id=name, content=content,
-                        tags=list(base_tags), metadata=metadata, timestamp=now,
+                        tags=list(base_tags) + date_tags, metadata=metadata,
+                        timestamp=ts,
                     )
                 )
                 if isinstance(res, JSONResponse):
                     return res  # backend error (e.g. SQLite 501) — surface it
-                results.append({"file": name, "status": "accepted", "document_id": name})
+                results.append({"file": name, "status": "accepted",
+                                "document_id": name,
+                                "content_date": date_meta["content_date"],
+                                "date_source": date_meta["content_date_source"]})
             return {"bank": bank_id, "results": results}
 
         @self.app.post("/api/v1/memory/banks/{bank_id}/ingest_url")
@@ -1485,17 +1506,24 @@ class KoboldEngineAdapter:
                 return JSONResponse(status_code=502, content={"error": f"fetch failed: {e}"})
             content = resp.text
             now = datetime.now(timezone.utc)
-            metadata = {"source": "url", "url": url, "untrusted": "false"}
+            ts, date_tags, date_meta = await resolve_ingest_anchor(
+                content, fallback_ts=now, clamp_now=now,
+                llm_tagger=self._ingest_date_tagger(),
+            )
+            metadata = {"source": "url", "url": url,
+                        "untrusted": "false", **date_meta}
             res = await self._run_backend(
                 self._memory_backend.retain_document(
                     bank_id, document_id=url, content=content,
-                    tags=list(tags), metadata=metadata, timestamp=now,
+                    tags=list(tags) + date_tags, metadata=metadata, timestamp=ts,
                 )
             )
             if isinstance(res, JSONResponse):
                 return res
             return {"bank": bank_id, "document_id": url,
-                    "status": "accepted", "bytes": len(content)}
+                    "status": "accepted", "bytes": len(content),
+                    "content_date": date_meta["content_date"],
+                    "date_source": date_meta["content_date_source"]}
 
         @self.app.post("/api/v1/memory/banks/{bank_id}/ingest_path")
         async def memory_ingest_path(bank_id: str, request: Request) -> Any:
@@ -1510,6 +1538,7 @@ class KoboldEngineAdapter:
             handler = IngestPathHandler(
                 self._memory_backend,
                 cache_dir=global_config.INGEST_CACHE_DIR,
+                date_tagger=self._ingest_date_tagger(),
             )
             root = _Path(path).expanduser().resolve()
             return await self._run_backend(
