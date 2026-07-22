@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 from config.global_config import DATE_TAGGER_NAME
 
 CONFIG_DIR = Path(__file__).parent.parent.parent / "config"
-from src.memory.date_tagger import (
+from src.agents.date_tagger import (
     DateTagger,
     build_date_tool_schema,
     parse_date_answer,

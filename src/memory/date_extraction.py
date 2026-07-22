@@ -10,7 +10,7 @@ upload time, the engine must find that date itself and pass it as ``timestamp``.
 
 This module owns the deterministic core. A regex pass over the body extracts
 machine-readable dates and picks the latest non-future one; an optional,
-injected LLM tagger (``src/memory/date_tagger.py``) is consulted only when the
+injected LLM tagger (``src/agents/date_tagger.py``) is consulted only when the
 regex finds nothing. The LLM's answer is validated and future-clamped through
 the same ``pick_anchor`` gate, so it can only ever propose a plausible past
 date — never steer the pipeline.

@@ -45,7 +45,7 @@ from src.chat_system import (
     ToolCallStartEvent,
 )
 from src.interfaces.kobold_export import build_kobold_savefile, build_transcript, _parse_tool_context
-from src.memory.date_extraction import resolve_ingest_anchor
+from src.memory.date_extraction import LlmTagger, resolve_ingest_anchor
 from src.origin import Origin
 from src.stream_engine import CHAT_TEMPLATES
 from src.interfaces.portal_render import render_portal_html
@@ -132,8 +132,14 @@ class KoboldEngineAdapter:
         "/voice/utterance",
     })
 
-    def __init__(self, chat_system: ChatSystem, host: Optional[str] = None, port: int = 5003):
+    def __init__(self, chat_system: ChatSystem, host: Optional[str] = None, port: int = 5003,
+                 date_tagger: Optional[LlmTagger] = None):
         self.chat_system = chat_system
+        # DP-292: injected LLM date-tagger fallback for document ingest (built +
+        # DI'd by the composition root from AgentManager; None = regex-only).
+        # Injected as a plain callable so this interface never imports the agent
+        # class (interfaces -> agents is a forbidden module boundary).
+        self._date_tagger = date_tagger
         # DP-277: host from KOBOLD_ADAPTER_HOST (default 0.0.0.0 — the app runs
         # containerized and is reached via Docker port publishing + the Caddy
         # TLS front, so the bind is not the network boundary; the operator
@@ -298,15 +304,6 @@ class KoboldEngineAdapter:
                 status_code=502,
                 content={"error": f"memory backend unreachable: {e}"},
             )
-
-    def _ingest_date_tagger(self) -> "Optional[Callable[[str], Awaitable[Optional[str]]]]":
-        """The LLM date-tagger fallback callable for document ingest (DP-292
-        phase 2), or None when disabled. Regex extraction always runs; this is
-        consulted only when the body has no machine-readable date."""
-        if not global_config.DATE_TAGGER_ENABLED:
-            return None
-        from src.memory.date_tagger import DateTagger
-        return DateTagger(self.chat_system).tag
 
     async def _audit_control_change(self, event_type: str, target: str,
                                     new_state: Dict[str, Any],
@@ -1454,7 +1451,7 @@ class KoboldEngineAdapter:
             # files/retain deferred. Operator uploads are trusted.
             base_tags = [t for t in (tags or "").split(",") if t] or ["ingest", "upload"]
             now = datetime.now(timezone.utc)
-            tagger = self._ingest_date_tagger()
+            tagger = self._date_tagger
             results: List[Dict[str, Any]] = []
             for f in files:
                 name = f.filename or "untitled"
@@ -1508,7 +1505,7 @@ class KoboldEngineAdapter:
             now = datetime.now(timezone.utc)
             ts, date_tags, date_meta = await resolve_ingest_anchor(
                 content, fallback_ts=now, clamp_now=now,
-                llm_tagger=self._ingest_date_tagger(),
+                llm_tagger=self._date_tagger,
             )
             metadata = {"source": "url", "url": url,
                         "untrusted": "false", **date_meta}
@@ -1538,7 +1535,7 @@ class KoboldEngineAdapter:
             handler = IngestPathHandler(
                 self._memory_backend,
                 cache_dir=global_config.INGEST_CACHE_DIR,
-                date_tagger=self._ingest_date_tagger(),
+                date_tagger=self._date_tagger,
             )
             root = _Path(path).expanduser().resolve()
             return await self._run_backend(
@@ -1874,5 +1871,8 @@ class KoboldEngineAdapter:
             await self._http.aclose()
 
 
-def create_kobold_engine_adapter(chat_system: ChatSystem) -> KoboldEngineAdapter:
-    return KoboldEngineAdapter(chat_system)
+def create_kobold_engine_adapter(
+    chat_system: ChatSystem,
+    date_tagger: Optional[LlmTagger] = None,
+) -> KoboldEngineAdapter:
+    return KoboldEngineAdapter(chat_system, date_tagger=date_tagger)

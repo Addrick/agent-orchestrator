@@ -27,9 +27,9 @@ def _bypass_control_plane_auth(monkeypatch):
     # covered in tests/security/test_portal_auth.py.
     monkeypatch.setattr(KoboldAdapter, "_valid_control_token", lambda self, tok: True)
     monkeypatch.setattr(global_config, "DERPR_CONTROL_TOKEN", "test-token", raising=False)
-    # Default to regex-only ingest so the base route tests are deterministic
-    # (no LLM fallback). Date-behavior tests re-enable / stub the tagger.
-    monkeypatch.setattr(global_config, "DATE_TAGGER_ENABLED", False, raising=False)
+    # The adapter reads its injected `self._date_tagger` (None by default here),
+    # so base route tests are regex-only without touching any global flag. The
+    # LLM-path test injects a stub tagger explicitly.
 
 
 def _adapter_with_backend():
@@ -266,6 +266,23 @@ def test_upload_injected_future_date_is_not_used(monkeypatch):
     assert result["date_source"] == "fallback"
     _, kwargs = backend.retain_document.call_args
     assert kwargs["timestamp"].year != 2099
+    mm.close()
+
+
+def test_upload_uses_injected_llm_tagger_when_regex_misses():
+    """When regex finds no date, the adapter's injected date-tagger callable is
+    used and its (validated) date anchors the retain."""
+    adapter, mm, backend = _adapter_with_backend()
+    adapter._date_tagger = AsyncMock(return_value="2024-05-05")
+    with TestClient(adapter.app) as client:
+        r = client.post(
+            "/api/v1/memory/banks/alice/upload",
+            files={"files": ("prose.md", b"we shipped it in spring", "text/markdown")},
+        )
+    result = r.json()["results"][0]
+    assert result["content_date"] == "2024-05-05"
+    assert result["date_source"] == "llm"
+    adapter._date_tagger.assert_awaited_once()
     mm.close()
 
 

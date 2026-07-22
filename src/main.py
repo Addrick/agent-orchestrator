@@ -23,6 +23,7 @@ from src.agents.managr_agent import ManagrAgent
 from src.agents.sqlite_consolidator import SqliteConsolidator
 from src.agents.zammad_bot import ZammadBot
 from src.agents.reminder_agent import ReminderAgent
+from src.agents.date_tagger import DateTagger
 from src.clients.notification import (
     NotificationRouter,
     DiscordNotifier,
@@ -44,6 +45,8 @@ from config.global_config import (
     MEMORY_DATABASE_FILE,
     SEMANTIC_BACKEND,
     UPDATE_MODELS_ON_STARTUP,
+    DATE_TAGGER_ENABLED,
+    DATE_TAGGER_NAME,
 )
 from dotenv import load_dotenv
 from src.utils.model_utils import get_model_list
@@ -130,8 +133,13 @@ def _register_interfaces(
     app: AppManager,
     bot: ChatSystem,
     notification_router: NotificationRouter,
+    date_tagger: Optional[Any] = None,
 ) -> None:
-    """Register long-running interface tasks (Discord, Gmail)."""
+    """Register long-running interface tasks (Discord, Gmail).
+
+    `date_tagger` is the DP-292 LLM date-tagger callable (or None), injected
+    into the engine adapter for document-ingest date anchoring.
+    """
     if DISCORD_BOT:
         logger.info("Initializing Discord bot...")
         discord_bot = create_discord_bot(bot)
@@ -169,7 +177,7 @@ def _register_interfaces(
         # the engine adapter keeps its established :KOBOLD_PORT+1 (5003) port.
         engine_port = KOBOLD_PORT + 1
         logger.info(f"Initializing Kobold Engine API on port {engine_port}...")
-        engine_adapter = create_kobold_engine_adapter(bot)
+        engine_adapter = create_kobold_engine_adapter(bot, date_tagger=date_tagger)
         engine_adapter.port = engine_port
         # DP-238 web: mount the browser/phone push-to-talk voice capture on the
         # engine adapter's FastAPI app (GET /voice). No-op unless VOICE_WEB_ENABLED.
@@ -202,6 +210,11 @@ def _register_agents(
             "Zammad credentials missing. Zammad-dependent agents (zammad_bot, dispatch) "
             "will not be registered."
         )
+
+    # Single-shot inference agent (DP-292): DI-built on lookup, never looped.
+    # Registered unconditionally; the ingest paths use it only when
+    # DATE_TAGGER_ENABLED and regex found no date.
+    agent_manager.register_inference_agent(DATE_TAGGER_NAME, DateTagger)
 
 
 async def main() -> None:
@@ -295,7 +308,13 @@ async def main() -> None:
         )
 
     # 8. Register interfaces
-    _register_interfaces(app, bot, notification_router)
+    # DP-292: build the date-tagger callable from AgentManager (convention-DI)
+    # and inject it into the engine adapter. Regex-only ingest when disabled.
+    date_tagger_callable = None
+    if DATE_TAGGER_ENABLED:
+        _dt = agent_manager.get_inference_agent(DATE_TAGGER_NAME)
+        date_tagger_callable = _dt.tag if _dt is not None else None
+    _register_interfaces(app, bot, notification_router, date_tagger=date_tagger_callable)
 
     # 8.1 Perform post-init startup tasks (e.g. Hindsight bank provisioning)
     await bot.startup()

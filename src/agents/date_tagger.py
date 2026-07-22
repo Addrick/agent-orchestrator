@@ -1,5 +1,12 @@
-# src/memory/date_tagger.py
+# src/agents/date_tagger.py
 """LLM date-tagger fallback for document ingest (DP-292 phase 2).
+
+Single-shot inference agent (not a scheduled-loop `Agent`): synchronous, one
+LLM call, returns a verdict. Registered with `AgentManager` via
+`register_inference_agent` so it gets the same convention-DI as every other
+agent (and a single lookup point) rather than being constructed ad-hoc from
+`chat_system` by its caller. Its `.tag` callable is injected across the
+memory-ingest boundary (interfaces/tools may not import `src.agents`).
 
 The deterministic regex pass in ``src/memory/date_extraction.py`` handles the
 common case (ISO / named-month dates in chat logs and notes). This module is
