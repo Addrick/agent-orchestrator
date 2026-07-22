@@ -455,3 +455,73 @@ class MemoryBackend(ABC):
         Sprint 1 stub — Hindsight backend (Sprint 2) implements; SQLite raises.
         """
         raise NotImplementedError("delete_bank lands in Sprint 2 (HindsightBackend)")
+
+    # ===== Read / list surface (DP-292 import panel) =====
+    # Operator-driven inventory reads backing the web import panel. Hindsight
+    # implements against the upstream bank/document/operation endpoints; other
+    # backends (SQLite) have no equivalent and raise.
+
+    async def list_banks(self) -> List[Dict[str, Any]]:
+        """List all banks with summary stats (new-shape).
+
+        Returns a list of bank dicts (upstream BankListItem shape:
+        bank_id, name, fact_count, last_document_at, ...).
+        """
+        raise NotImplementedError("list_banks not implemented on this backend")
+
+    async def list_documents(
+        self,
+        bank_id: str,
+        *,
+        q: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        tags_match: Optional[str] = None,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """List documents in a bank (paginated).
+
+        Returns the upstream ListDocumentsResponse shape:
+        {items: [...], total, limit, offset}.
+        """
+        raise NotImplementedError("list_documents not implemented on this backend")
+
+    async def get_document(self, bank_id: str, document_id: str) -> Dict[str, Any]:
+        """Fetch a single document (upstream DocumentResponse shape)."""
+        raise NotImplementedError("get_document not implemented on this backend")
+
+    async def delete_document(self, bank_id: str, document_id: str) -> Dict[str, Any]:
+        """Delete a document and its derived memory units.
+
+        Returns the upstream DeleteDocumentResponse shape:
+        {success, message, document_id, memory_units_deleted}.
+        """
+        raise NotImplementedError("delete_document not implemented on this backend")
+
+    async def list_operations(
+        self,
+        bank_id: str,
+        *,
+        status: Optional[str] = None,
+        op_type: Optional[str] = None,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+        exclude_parents: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """List async operations for a bank (ops monitor).
+
+        Operations are bank-scoped upstream — there is no global collection.
+        Returns the OperationsListResponse shape:
+        {bank_id, total, limit, offset, operations: [...]}.
+        """
+        raise NotImplementedError("list_operations not implemented on this backend")
+
+    async def get_operation(
+        self,
+        bank_id: str,
+        operation_id: str,
+        *,
+        include_payload: bool = False,
+    ) -> Dict[str, Any]:
+        """Fetch one operation's status (upstream OperationStatusResponse)."""
+        raise NotImplementedError("get_operation not implemented on this backend")
