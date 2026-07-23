@@ -20,7 +20,7 @@ from config.global_config import (
     SECURITY_REPORT_TAG,
     PHISHING_SUSPECT_TAG,
 )
-from src.agents.content_classifier import Classification
+from src.agents.content_classifier import Classification, ContentClassifier
 from src.agents.zammad_bot import ZammadBot
 from src.persona import Persona
 
@@ -44,7 +44,10 @@ def _make_bot():
     zammad.add_article_to_ticket = MagicMock()
     zammad.search_tickets = MagicMock(return_value=[])
     with patch("src.agents.base.load_system_personas_from_file", return_value={}):
-        bot = ZammadBot(chat_system, zammad)
+        # The classifier is now a DI-injected single-shot inference agent
+        # (DP-294); tests supply it explicitly, mirroring what AgentManager
+        # convention-DI does in production.
+        bot = ZammadBot(chat_system, zammad, ContentClassifier(chat_system))
     return bot, chat_system, zammad
 
 

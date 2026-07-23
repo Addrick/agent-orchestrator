@@ -9,6 +9,7 @@ import time
 from unittest.mock import MagicMock, patch
 from src.clients.zammad_client import ZammadClient
 from src.agents.zammad_bot import ZammadBot
+from src.agents.content_classifier import ContentClassifier
 from src.bootstrap import create_chat_system
 from src.engine import TextEngine
 from config.global_config import (
@@ -128,7 +129,7 @@ async def test_zammad_bot_end_to_end_real_flow(zammad_client: ZammadClient, mana
         memory_manager = MagicMock()
         text_engine = TextEngine()
         chat_system = create_chat_system(memory_manager, text_engine)
-        bot = ZammadBot(chat_system, zammad_client)
+        bot = ZammadBot(chat_system, zammad_client, ContentClassifier(chat_system))
 
         async def mock_e2e_generate(persona_config, history_object, tools=None):
             if 'keyword extraction' in history_object.get('persona_prompt', ''):
@@ -167,7 +168,7 @@ async def test_zammad_bot_clean_slate(zammad_client: ZammadClient, managed_test_
         memory_manager = MagicMock()
         text_engine = TextEngine()
         chat_system = create_chat_system(memory_manager, text_engine)
-        bot = ZammadBot(chat_system, zammad_client)
+        bot = ZammadBot(chat_system, zammad_client, ContentClassifier(chat_system))
 
         with patch.object(text_engine, 'generate_response', side_effect=_mock_llm_generate):
             await bot._process_ticket(new_ticket_id)
@@ -204,7 +205,7 @@ async def test_zammad_bot_adaptive_compression(zammad_client: ZammadClient, mana
         memory_manager = MagicMock()
         text_engine = TextEngine()
         chat_system = create_chat_system(memory_manager, text_engine)
-        bot = ZammadBot(chat_system, zammad_client)
+        bot = ZammadBot(chat_system, zammad_client, ContentClassifier(chat_system))
 
         with patch.object(text_engine, 'generate_response', side_effect=_mock_llm_generate):
             with patch('src.agents.zammad_bot.TRIAGE_MAX_CONTEXT_CHARS', 1000):
@@ -237,7 +238,7 @@ async def test_zammad_bot_idempotency(zammad_client: ZammadClient, managed_test_
         memory_manager = MagicMock()
         text_engine = TextEngine()
         chat_system = create_chat_system(memory_manager, text_engine)
-        bot = ZammadBot(chat_system, zammad_client)
+        bot = ZammadBot(chat_system, zammad_client, ContentClassifier(chat_system))
 
         with patch.object(text_engine, 'generate_response', side_effect=_mock_llm_generate):
             await bot._process_ticket(new_ticket_id)
@@ -274,7 +275,7 @@ async def test_zammad_bot_impersonation_fallback(zammad_client: ZammadClient, ma
         memory_manager = MagicMock()
         text_engine = TextEngine()
         chat_system = create_chat_system(memory_manager, text_engine)
-        bot = ZammadBot(chat_system, zammad_client)
+        bot = ZammadBot(chat_system, zammad_client, ContentClassifier(chat_system))
 
         with patch.object(text_engine, 'generate_response', side_effect=_mock_llm_generate):
             with patch("src.agents.zammad_bot.ZAMMAD_BOT_EMAIL", "nonexistent_ghost@example.com"):
@@ -316,7 +317,7 @@ async def test_zammad_bot_filtering_logic(zammad_client: ZammadClient, managed_t
         memory_manager = MagicMock()
         text_engine = TextEngine()
         chat_system = create_chat_system(memory_manager, text_engine)
-        bot = ZammadBot(chat_system, zammad_client)
+        bot = ZammadBot(chat_system, zammad_client, ContentClassifier(chat_system))
 
         async def mock_filter_generate(persona_config, history_object, tools=None):
             sys_prompt = history_object.get('persona_prompt', '')

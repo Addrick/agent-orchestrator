@@ -412,6 +412,7 @@ class TestTriageDispatchMockedLLM:
         from src.engine import TextEngine
         from tests.helpers import make_chat_system
         from src.agents.zammad_bot import ZammadBot
+        from src.agents.content_classifier import ContentClassifier
         from src.agents.dispatch_agent import DispatchAgent
         from config.global_config import TEST_MEMORY_DATABASE_FILE
 
@@ -433,7 +434,7 @@ class TestTriageDispatchMockedLLM:
         notification_router.register("zammad", ZammadNotifier(zammad_client))
         notification_router.register("log", LogNotifier())
 
-        triage_bot = ZammadBot(chat_system, zammad_client)
+        triage_bot = ZammadBot(chat_system, zammad_client, ContentClassifier(chat_system))
         dispatch_agent = DispatchAgent(
             chat_system=chat_system,
             zammad_client=zammad_client,
