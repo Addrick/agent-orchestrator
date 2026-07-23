@@ -1491,6 +1491,7 @@ class KoboldEngineAdapter:
                 # fallback when the body carries no date). DP-292 phase 2.
                 ts, date_tags, date_meta = await resolve_ingest_anchor(
                     content, fallback_ts=now, clamp_now=now, llm_tagger=tagger,
+                    max_chars=global_config.DATE_EXTRACTION_MAX_CHARS,
                 )
                 metadata = {"source": "upload", "filename": name,
                             "untrusted": "false", **date_meta}
@@ -1529,6 +1530,7 @@ class KoboldEngineAdapter:
             ts, date_tags, date_meta = await resolve_ingest_anchor(
                 content, fallback_ts=now, clamp_now=now,
                 llm_tagger=self._date_tagger,
+                max_chars=global_config.DATE_EXTRACTION_MAX_CHARS,
             )
             metadata = {"source": "url", "url": url,
                         "untrusted": "false", **date_meta}

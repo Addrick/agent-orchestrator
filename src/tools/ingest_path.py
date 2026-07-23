@@ -144,6 +144,7 @@ class IngestPathHandler:
             # when the body carries no date (DP-292 phase 2).
             ts, date_tags, date_meta = await resolve_ingest_anchor(
                 content, fallback_ts=mtime, llm_tagger=self._date_tagger,
+                max_chars=global_config.DATE_EXTRACTION_MAX_CHARS,
             )
             metadata: Dict[str, str] = {
                 "source_path": relpath,
