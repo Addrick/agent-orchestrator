@@ -323,3 +323,46 @@ def test_hindsight_api_error_passthrough():
     assert r.status_code == 404
     assert r.json()["error"] == "bank not found"
     mm.close()
+
+
+# ---------- SQLite ingest guard (upload/URL must 501, not fake success) ----------
+# retain_document on the SQLite backend is a silent no-op returning None, so the
+# ingest routes must reject up front rather than reporting `accepted` while
+# storing nothing. The guard matches on the concrete backend class name.
+
+class SqliteSemanticBackend:
+    """Stub whose class name matches the real SQLite backend the guard checks.
+    Its retain_document no-ops (returns None) like the production one — proving
+    the route now 501s instead of faking success on that None."""
+    def __init__(self) -> None:
+        self.retain_document = AsyncMock(return_value=None)
+
+
+def test_upload_on_sqlite_backend_maps_to_501():
+    adapter, mm, backend = _adapter_with_backend()
+    sqlite_backend = SqliteSemanticBackend()
+    adapter.chat_system.memory_backend = sqlite_backend
+    with TestClient(adapter.app) as client:
+        r = client.post(
+            "/api/v1/memory/banks/alice/upload",
+            files={"files": ("note.md", b"# hello", "text/markdown")},
+        )
+    assert r.status_code == 501
+    assert "hindsight" in r.json()["error"].lower()
+    sqlite_backend.retain_document.assert_not_awaited()  # no fake "accepted"
+    mm.close()
+
+
+def test_ingest_url_on_sqlite_backend_maps_to_501():
+    adapter, mm, backend = _adapter_with_backend()
+    sqlite_backend = SqliteSemanticBackend()
+    adapter.chat_system.memory_backend = sqlite_backend
+    with TestClient(adapter.app) as client:
+        r = client.post(
+            "/api/v1/memory/banks/alice/ingest_url",
+            json={"url": "https://example.com/doc.md"},
+        )
+    assert r.status_code == 501
+    assert "hindsight" in r.json()["error"].lower()
+    sqlite_backend.retain_document.assert_not_awaited()
+    mm.close()

@@ -305,6 +305,23 @@ class KoboldEngineAdapter:
                 content={"error": f"memory backend unreachable: {e}"},
             )
 
+    def _import_surface_501(self) -> Optional[JSONResponse]:
+        """501 guard for the ingest routes when the active backend has no
+        import surface. Unlike the read routes (which raise NotImplementedError
+        → 501 via _run_backend), retain_document on the SQLite backend is a
+        silent no-op that returns None — so upload/ingest_url would otherwise
+        report `accepted` while storing nothing. Mirror the documented "SQLite
+        → 501" contract by rejecting up front. (ingest_path keeps its own
+        noop-note contract via IngestPathHandler.) Returns a JSONResponse to
+        surface, or None when the backend can retain."""
+        if self._memory_backend.__class__.__name__ == "SqliteSemanticBackend":
+            return JSONResponse(
+                status_code=501,
+                content={"error": "memory backend has no import surface "
+                                  "(set MEMORY_BACKEND=hindsight)"},
+            )
+        return None
+
     async def _audit_control_change(self, event_type: str, target: str,
                                     new_state: Dict[str, Any],
                                     metadata: Optional[Dict[str, Any]] = None) -> None:
@@ -1449,6 +1466,9 @@ class KoboldEngineAdapter:
             # Phase 1: md/txt only (no server-side conversion needed → decode
             # here + retain_document, filename-keyed idempotency). PDF/native
             # files/retain deferred. Operator uploads are trusted.
+            guard = self._import_surface_501()
+            if guard is not None:
+                return guard  # SQLite backend: no-op retain would fake success
             base_tags = [t for t in (tags or "").split(",") if t] or ["ingest", "upload"]
             now = datetime.now(timezone.utc)
             tagger = self._date_tagger
@@ -1491,6 +1511,9 @@ class KoboldEngineAdapter:
 
         @self.app.post("/api/v1/memory/banks/{bank_id}/ingest_url")
         async def memory_ingest_url(bank_id: str, request: Request) -> Any:
+            guard = self._import_surface_501()
+            if guard is not None:
+                return guard  # SQLite backend: no-op retain would fake success
             body = await request.json()
             url = (body.get("url") or "").strip()
             if not url:
