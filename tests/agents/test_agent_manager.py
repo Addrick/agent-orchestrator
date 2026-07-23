@@ -114,3 +114,35 @@ def test_inference_agent_not_started_as_task():
     mgr.get_inference_agent("infer")
     # Registering/building an inference agent must not launch a loop task.
     assert "infer" not in mgr._running
+
+
+# ---------- DP-293: agent_config injection must not mutate shared config ----------
+
+class _ConfigAgent(Agent):
+    """Agent whose __init__ requests agent_config (triggers the DI merge)."""
+
+    def __init__(self, chat_system, agent_config=None):
+        super().__init__(chat_system, inject_personas=False)
+        self.agent_config = agent_config
+
+    async def deploy(self) -> None:  # pragma: no cover
+        return None
+
+
+def test_agent_config_injection_does_not_mutate_shared_config():
+    """`_recipients` must be added to a COPY, not the live `self._config`
+    block — otherwise the recipients map leaks into every later read of that
+    agent's config and re-accumulates on each rebuild."""
+    mgr = _make_manager()
+    mgr.register("cfg", _ConfigAgent)
+    mgr._config = {
+        "agents": {"cfg": {"persona": "p"}},
+        "recipients": {"adrich": {"discord_user_id": "123"}},
+    }
+
+    inst = mgr._build_agent_instance("cfg", _ConfigAgent, {})
+    # The injected config sees the recipients...
+    assert inst.agent_config["_recipients"] == {"adrich": {"discord_user_id": "123"}}
+    # ...but the shared source block is untouched.
+    assert "_recipients" not in mgr._config["agents"]["cfg"]
+    assert mgr._config["agents"]["cfg"] == {"persona": "p"}
