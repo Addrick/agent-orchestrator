@@ -212,6 +212,18 @@ class AgentManager:
             agent_cfg["_recipients"] = self._config.get("recipients", {})
             kwargs["agent_config"] = agent_cfg
 
+        # Inject any registered single-shot inference agent whose registered
+        # name matches a constructor param (e.g. ZammadBot(content_classifier=…)).
+        # This is how a scheduled agent consumes a sibling inference agent by DI
+        # instead of constructing it ad-hoc from chat_system — the same seam the
+        # composition root uses to inject date_tagger across the interfaces
+        # boundary. Built lazily and cached by get_inference_agent, so every
+        # consumer shares one instance. Inference agents never name each other,
+        # so the get_inference_agent → _di_kwargs recursion terminates.
+        for param in params:
+            if param in self._inference_registry and param not in kwargs:
+                kwargs[param] = self.get_inference_agent(param)
+
         return kwargs
 
     def _build_agent_instance(

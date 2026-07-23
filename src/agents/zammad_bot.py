@@ -22,7 +22,6 @@ from config.global_config import (
     PHISHING_SUSPECT_MIN_CONFIDENCE,
 )
 from src.agents.base import Agent
-from src.agents.content_classifier import ContentClassifier
 from src.chat_system import ChatSystem
 from src.clients.zammad_client import ZammadClient
 
@@ -33,10 +32,18 @@ class ZammadBot(Agent):
 
     agent_name: str = "zammad_bot"
 
-    def __init__(self, chat_system: ChatSystem, zammad_client: ZammadClient) -> None:
+    def __init__(
+        self,
+        chat_system: ChatSystem,
+        zammad_client: ZammadClient,
+        content_classifier: Any,
+    ) -> None:
         super().__init__(chat_system)
         self.zammad_client = zammad_client
-        self.classifier = ContentClassifier(chat_system)
+        # Single-shot inference agent, injected by AgentManager convention-DI
+        # (registered as CONTENT_CLASSIFIER_NAME). No longer constructed ad-hoc
+        # from chat_system — see the DP-292 single-shot-agent decision.
+        self.classifier = content_classifier
 
     async def _on_start(self) -> None:
         """
@@ -450,7 +457,3 @@ class ZammadBot(Agent):
 
         except Exception as e:
             logger.error(f"Error processing ticket {ticket_id}: {e}", exc_info=True)
-
-
-def create_zammad_bot(chat_system: ChatSystem, zammad_client: ZammadClient) -> ZammadBot:
-    return ZammadBot(chat_system, zammad_client)

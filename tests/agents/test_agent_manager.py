@@ -146,3 +146,37 @@ def test_agent_config_injection_does_not_mutate_shared_config():
     # ...but the shared source block is untouched.
     assert "_recipients" not in mgr._config["agents"]["cfg"]
     assert mgr._config["agents"]["cfg"] == {"persona": "p"}
+
+
+# ---------- DP-294: inference-agent injection by matching param name ----------
+
+class _ConsumerAgent(Agent):
+    """A scheduled agent whose __init__ names a registered inference agent —
+    DP-294's ZammadBot(content_classifier=…) pattern in miniature."""
+
+    def __init__(self, chat_system, infer=None):
+        super().__init__(chat_system, inject_personas=False)
+        self.infer = infer
+
+    async def deploy(self) -> None:  # pragma: no cover - never iterates
+        return None
+
+
+def test_scheduled_agent_gets_registered_inference_agent_by_di():
+    """A scheduled agent whose __init__ names a registered inference agent
+    receives the shared, cached instance via convention-DI (DP-294) — no ad-hoc
+    construction, and the same object get_inference_agent hands out."""
+    mgr = _make_manager()
+    mgr.register_inference_agent("infer", _RouterlessAgent)
+    kwargs = mgr._di_kwargs("consumer", _ConsumerAgent, {})
+    assert isinstance(kwargs["infer"], _RouterlessAgent)
+    assert kwargs["infer"] is mgr.get_inference_agent("infer")
+
+
+def test_unregistered_inference_param_is_not_injected():
+    """A param that isn't a registered inference agent is left alone (the
+    consumer's own default applies) — the injection is name-scoped to the
+    inference registry, not any param."""
+    mgr = _make_manager()
+    kwargs = mgr._di_kwargs("consumer", _ConsumerAgent, {})
+    assert "infer" not in kwargs

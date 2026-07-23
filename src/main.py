@@ -24,6 +24,7 @@ from src.agents.sqlite_consolidator import SqliteConsolidator
 from src.agents.zammad_bot import ZammadBot
 from src.agents.reminder_agent import ReminderAgent
 from src.agents.date_tagger import DateTagger
+from src.agents.content_classifier import ContentClassifier
 from src.clients.notification import (
     NotificationRouter,
     DiscordNotifier,
@@ -47,6 +48,7 @@ from config.global_config import (
     UPDATE_MODELS_ON_STARTUP,
     DATE_TAGGER_ENABLED,
     DATE_TAGGER_NAME,
+    CONTENT_CLASSIFIER_NAME,
 )
 from dotenv import load_dotenv
 from src.utils.model_utils import get_model_list
@@ -211,10 +213,16 @@ def _register_agents(
             "will not be registered."
         )
 
-    # Single-shot inference agent (DP-292): DI-built on lookup, never looped.
-    # Registered unconditionally; the ingest paths use it only when
-    # DATE_TAGGER_ENABLED and regex found no date.
+    # Single-shot inference agents (DP-292): DI-built on lookup, never looped.
+    # Registered unconditionally.
+    #  - date_tagger: the ingest paths use it only when DATE_TAGGER_ENABLED and
+    #    regex found no date.
+    #  - content_classifier (DP-294): injected into ZammadBot by convention-DI
+    #    (its __init__ names `content_classifier`), so it must register before
+    #    ZammadBot is built by auto_start.
     agent_manager.register_inference_agent(DATE_TAGGER_NAME, DateTagger)
+    agent_manager.register_inference_agent(
+        CONTENT_CLASSIFIER_NAME, ContentClassifier)
 
 
 async def main() -> None:
