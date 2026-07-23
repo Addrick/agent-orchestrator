@@ -19,6 +19,7 @@ from typing import Any, Callable, Dict, Optional
 
 from config import global_config
 from src.memory.backend.base import MemoryBackend, MemoryBackendError
+from src.memory.date_extraction import LlmTagger, resolve_ingest_anchor
 from src.tools.tool_manager import ToolManager
 from src.tools.turn_context import get_turn_context
 
@@ -38,12 +39,16 @@ class IngestPathHandler:
         memory_backend: MemoryBackend,
         cache_dir: Path,
         persona_lookup: Optional[Callable[[str], Any]] = None,
+        date_tagger: Optional["LlmTagger"] = None,
     ) -> None:
         self.memory_backend = memory_backend
         self.cache_dir = cache_dir
         # persona_lookup(persona_name) -> Persona | None. Optional so unit tests
         # can wire a stub; production passes chat_system.personas.get.
         self._persona_lookup = persona_lookup
+        # Optional LLM date-tagger fallback (DP-292 phase 2). None → regex-only
+        # content-date extraction, file mtime as the fallback anchor.
+        self._date_tagger = date_tagger
 
     def register(self, manager: ToolManager) -> None:
         manager.register("ingest_path", self._ingest_path)
@@ -65,19 +70,37 @@ class IngestPathHandler:
             return {"status": "error", "reason": "no active turn context"}
 
         resolved_bank = self._resolve_bank(ctx.persona_name, bank)
-
         root = Path(path).expanduser().resolve()
+        return await self.ingest_root(resolved_bank, root, glob, force)
+
+    async def ingest_root(
+        self,
+        bank_id: str,
+        root: Path,
+        glob: str = "**/*.md",
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        """Walk `root`, retain matching files into `bank_id`.
+
+        Turn-context-free core shared by the model-callable `_ingest_path`
+        (which resolves bank + root first) and the DP-292 operator import
+        panel (control-token gated, explicit bank + path). Idempotent via the
+        per-bank sha256 cache — unchanged files are skipped unless `force`.
+        Does NOT check INGEST_PATH_ENABLED: that flag gates the model tool;
+        the operator path is authorized by DERPR_CONTROL_TOKEN instead.
+        """
         if not root.exists():
             return {"status": "error", "reason": f"path not found: {root}"}
 
         candidates = self._collect_candidates(root, glob)
         if not candidates:
             return {
-                "status": "ok", "bank": resolved_bank,
+                "status": "ok", "bank": bank_id,
                 "ingested": 0, "skipped": 0, "failed": 0,
                 "reason": "no files matched glob",
             }
 
+        resolved_bank = bank_id
         cache_path = self.cache_dir / f"{resolved_bank}.json"
         cache = self._load_cache(cache_path)
 
@@ -117,12 +140,19 @@ class IngestPathHandler:
                 continue
 
             mtime = datetime.fromtimestamp(fpath.stat().st_mtime, tz=timezone.utc)
+            # Anchor to the date the content is about; mtime is the fallback
+            # when the body carries no date (DP-292 phase 2).
+            ts, date_tags, date_meta = await resolve_ingest_anchor(
+                content, fallback_ts=mtime, llm_tagger=self._date_tagger,
+                max_chars=global_config.DATE_EXTRACTION_MAX_CHARS,
+            )
             metadata: Dict[str, str] = {
                 "source_path": relpath,
                 "sha256": sha,
                 "file_mtime": mtime.isoformat(),
+                **date_meta,
             }
-            tags = ["ingest", "notes"]
+            tags = ["ingest", "notes"] + date_tags
 
             success = await self._retain_with_retry(
                 bank_id=resolved_bank,
@@ -130,7 +160,7 @@ class IngestPathHandler:
                 content=content,
                 tags=tags,
                 metadata=metadata,
-                timestamp=mtime,
+                timestamp=ts,
             )
             if success is False:
                 failed += 1

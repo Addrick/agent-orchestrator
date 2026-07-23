@@ -7,6 +7,9 @@ import { Channels } from './components/Channels'
 import { Conversation } from './components/Conversation'
 import { Inspector } from './components/Inspector'
 import { NewPersonaModal } from './components/NewPersonaModal'
+import { MemoryPanel } from './components/MemoryPanel'
+
+export type PortalView = 'chat' | 'memory'
 
 interface Collapsed {
   rail: boolean
@@ -29,6 +32,7 @@ export default function App() {
     readPref('collapsed', COLLAPSED_DEFAULT, validateCollapsed),
   )
   const [newPersonaOpen, setNewPersonaOpen] = useState(false)
+  const [view, setView] = useState<PortalView>('chat')
 
   // The grid collapse rules in theme.css key off classes on <body>. Persist the
   // panel folds so the layout survives a reload (DP-273).
@@ -52,10 +56,16 @@ export default function App() {
         onNewPersona={() => setNewPersonaOpen(true)}
       />
       <div className="body">
-        <NavRail />
-        <Channels store={store} />
-        <Conversation store={store} />
-        <Inspector store={store} />
+        <NavRail view={view} onNavigate={setView} />
+        {view === 'chat' ? (
+          <>
+            <Channels store={store} />
+            <Conversation store={store} />
+            <Inspector store={store} />
+          </>
+        ) : (
+          <MemoryPanel />
+        )}
       </div>
       {newPersonaOpen && (
         <NewPersonaModal store={store} onClose={() => setNewPersonaOpen(false)} />

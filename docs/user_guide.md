@@ -110,6 +110,34 @@ Personas with `history_messages: 0` always render an empty transcript — the po
 
 **Voice availability:** the mic (hold-to-talk), *voice auto-send*, and *listen* (always-listening dictation) controls appear only when the browser supports audio capture **and** the engine reports `voice_web` in `GET /api/v1/capabilities` (i.e. `VOICE_WEB_ENABLED` is set and the `/voice/*` routes are mounted). With voice disabled server-side the controls are hidden rather than failing on every press.
 
+### Memory imports panel (DP-292)
+
+The nav rail's **`◈ MEMORY`** dock opens a full-page **Imports** panel for managing the documents in a Hindsight memory bank. It is an **operator tool**, not a chat surface: reads (bank list, document list, operation status) are open, but every mutation (upload, ingest, delete) requires the operator control token set in the top bar — without it the panel is read-only and mutating actions show a "control token required" notice.
+
+- **Bank picker:** select which Hindsight bank to work in (personas map to banks). The dropdown shows each bank's fact count.
+- **Add documents — three sources:**
+  - **Upload** `.md` / `.txt` files (multiple at once). Other file types and non-UTF-8 content are rejected per-file with a reason; PDF is deferred. Each file is keyed by its filename, so re-uploading the same name **replaces** that document rather than duplicating it.
+  - **Fetch URL** — the engine fetches the URL server-side and ingests the body text, keyed by the URL.
+  - **Ingest server path** — walk a file or directory on the engine host by glob (default `**/*.md`). Unchanged files are skipped via a per-bank content hash; re-run is idempotent.
+- **Documents table:** lists the bank's documents with derived-unit counts and last-updated time; the **✕** button deletes a document and its derived memory units (with a confirm prompt).
+- **Operations monitor:** shows recent async ingest/consolidation operations for the bank with status and any error — Hindsight processes uploads asynchronously, so a freshly-added document appears here as a pending operation before its units are extracted. Use **Refresh** to re-poll.
+
+Documents ingested here are **automatically chunked and extracted by Hindsight** (server-side) using the bank's retain mission — the panel just declares the bank and hands over the content. Operator uploads are tagged trusted. When the engine runs on the SQLite memory backend (no Hindsight), the panel reports the backend has no import surface (HTTP 501) rather than silently doing nothing.
+
+#### Content-date anchoring (DP-292 phase 2)
+
+Every extracted memory in Hindsight is stamped with an **anchor date** (the `mentioned_at` / `event_date` that recall uses for recency and time-range queries). Hindsight derives that date **entirely from the `timestamp` the engine sends on the retain request** — the extraction LLM does *not* read dates out of the prose. So for a document to anchor to *when its content is actually about* (rather than the moment you uploaded it), the engine has to find that date itself before handing the document over.
+
+On every ingest (upload, URL fetch, server path) the engine extracts a **single anchor date** from the document body:
+
+1. **Regex pass (always runs).** Scans the body for machine-readable dates — ISO (`2026-03-12`, `2026-03-12T10:00`), `2026/03/12`, and named-month forms (`March 12, 2026`, `12 March 2026`). Locale-ambiguous bare-numeric forms (`03/12/2026`) are **deliberately ignored** — they cause more wrong anchors than they fix. Of the dates found, the engine picks the **latest one that isn't in the future**; future-dated values (e.g. a document that says "as of 2099") are dropped. This is the path for chat logs and dated notes, where the date sits in line headers.
+2. **LLM fallback (optional, only when the regex finds nothing).** A single-shot, sealed **date-tagger** reads the body purely as data and returns one ISO date or "none". It exists to catch prose-only dates ("we met last March", "the Q2 review"). Its output is validated and future-clamped exactly like the regex result — it can only *propose* a plausible past date, never inject instructions, reach a tool, or push the anchor past now. Disabled with `DATE_TAGGER_ENABLED=0`, in which case ingest is regex-only.
+3. **Fallback.** If neither finds a usable date, the document anchors to its previous default — file mtime for server-path ingest, upload/fetch time for uploads and URLs.
+
+Each ingested document is tagged `date:<YYYY-MM-DD>` and `date_source:<regex|llm|fallback>`, and the same values are stored in its metadata, so you can see in the documents table and in recall which anchor was used and how it was derived. Anchoring is **per document** (one document → one date); Hindsight stamps every memory unit it extracts from that document with that one anchor. A document whose content genuinely spans weeks (a long chat log) anchors to its most recent dated line, which keeps it correctly ranked for recency in recall.
+
+**Format-gap notifications.** Every time the LLM fallback succeeds, it means the regex missed a date format that a real document actually used. To close that gap over time, the date-tagger sends the operator a Discord DM naming the **verbatim date string** it read (e.g. `"3rd quarter '26"`) plus the ISO date it resolved — a prompt to extend the regex so that format stops needing the LLM. Notifications are **deduplicated by format shape** (digit-masked), so bulk-ingesting many documents that share one unmatched format produces a single DM, not one per document. A reported string is only sent if it genuinely appears in the document body (guards against a hallucinated date). The DM target is the `date_tagger` agent's `notification_defaults` in `agents.json` (default: DM to `adrich`); with Discord disabled the report degrades to a log line.
+
 ## Commands
 
 All commands are entered as the message body when addressing a persona. Commands are case-insensitive.

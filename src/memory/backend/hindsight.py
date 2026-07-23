@@ -164,6 +164,99 @@ class HindsightRESTClient:
             json={"updates": config},
         )
 
+    # ---------- Read / list surface (DP-292 import panel) ----------
+    # Route shapes verified against the live prod OpenAPI (.70:8888,
+    # 2026-07-22). Operations are BANK-SCOPED — there is no global
+    # /operations collection. GET responses pass through verbatim; callers
+    # (HindsightBackend) unwrap the collection keys.
+
+    async def alist_banks(self) -> Dict[str, Any]:
+        # GET /v1/default/banks -> BankListResponse {banks: [BankListItem...]}
+        return await self._request("GET", f"{HINDSIGHT_API_PREFIX}/banks")
+
+    async def alist_documents(
+        self,
+        bank_id: str,
+        *,
+        q: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        tags_match: Optional[str] = None,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        # GET .../documents -> ListDocumentsResponse {items, total, limit, offset}
+        params: Dict[str, Any] = {}
+        if q is not None:
+            params["q"] = q
+        if tags:
+            params["tags"] = tags
+        if tags_match is not None:
+            params["tags_match"] = tags_match
+        if limit is not None:
+            params["limit"] = limit
+        if offset is not None:
+            params["offset"] = offset
+        return await self._request(
+            "GET", f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}/documents",
+            params=params or None,
+        )
+
+    async def aget_document(self, bank_id: str, document_id: str) -> Dict[str, Any]:
+        # GET .../documents/{id} -> DocumentResponse
+        return await self._request(
+            "GET", f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}/documents/{document_id}"
+        )
+
+    async def adelete_document(self, bank_id: str, document_id: str) -> Dict[str, Any]:
+        # DELETE .../documents/{id} -> DeleteDocumentResponse
+        # {success, message, document_id, memory_units_deleted}
+        return await self._request(
+            "DELETE", f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}/documents/{document_id}"
+        )
+
+    async def alist_operations(
+        self,
+        bank_id: str,
+        *,
+        status: Optional[str] = None,
+        op_type: Optional[str] = None,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+        exclude_parents: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        # GET .../operations -> OperationsListResponse
+        # {bank_id, total, limit, offset, operations: [OperationResponse...]}
+        # NOTE the query param is `type`, not `op_type`.
+        params: Dict[str, Any] = {}
+        if status is not None:
+            params["status"] = status
+        if op_type is not None:
+            params["type"] = op_type
+        if limit is not None:
+            params["limit"] = limit
+        if offset is not None:
+            params["offset"] = offset
+        if exclude_parents is not None:
+            params["exclude_parents"] = exclude_parents
+        return await self._request(
+            "GET", f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}/operations",
+            params=params or None,
+        )
+
+    async def aget_operation(
+        self,
+        bank_id: str,
+        operation_id: str,
+        *,
+        include_payload: bool = False,
+    ) -> Dict[str, Any]:
+        # GET .../operations/{id} -> OperationStatusResponse
+        params = {"include_payload": include_payload} if include_payload else None
+        return await self._request(
+            "GET", f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}/operations/{operation_id}",
+            params=params,
+        )
+
 
 def _untrusted_tag(untrusted: bool) -> str:
     return UNTRUSTED_TAG if untrusted else TRUSTED_TAG
@@ -805,6 +898,68 @@ class HindsightBackend(MemoryBackend):
     async def delete_bank(self, bank_id: str) -> None:
         client = self._get_client()
         await client.adelete_bank(bank_id=bank_id)
+
+    # ---------- Read / list surface (DP-292 import panel) ----------
+    # Operator-driven, control-token-gated UI reads. Unlike recall/reflect
+    # (user-facing, fail-soft to empty), these propagate HindsightAPIError so
+    # the FastAPI route can surface the upstream failure to the operator.
+
+    async def list_banks(self) -> List[Dict[str, Any]]:
+        client = self._get_client()
+        result = await client.alist_banks()
+        return cast(List[Dict[str, Any]], result.get("banks", []))
+
+    async def list_documents(
+        self,
+        bank_id: str,
+        *,
+        q: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        tags_match: Optional[str] = None,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        client = self._get_client()
+        return await client.alist_documents(
+            bank_id, q=q, tags=tags, tags_match=tags_match,
+            limit=limit, offset=offset,
+        )
+
+    async def get_document(self, bank_id: str, document_id: str) -> Dict[str, Any]:
+        client = self._get_client()
+        return await client.aget_document(bank_id, document_id)
+
+    async def delete_document(self, bank_id: str, document_id: str) -> Dict[str, Any]:
+        client = self._get_client()
+        return await client.adelete_document(bank_id, document_id)
+
+    async def list_operations(
+        self,
+        bank_id: str,
+        *,
+        status: Optional[str] = None,
+        op_type: Optional[str] = None,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+        exclude_parents: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        client = self._get_client()
+        return await client.alist_operations(
+            bank_id, status=status, op_type=op_type, limit=limit,
+            offset=offset, exclude_parents=exclude_parents,
+        )
+
+    async def get_operation(
+        self,
+        bank_id: str,
+        operation_id: str,
+        *,
+        include_payload: bool = False,
+    ) -> Dict[str, Any]:
+        client = self._get_client()
+        return await client.aget_operation(
+            bank_id, operation_id, include_payload=include_payload,
+        )
 
     def _flip(self, bank_id: str, hit_id: str, untrusted: bool,
               operator_id: str, reason: str) -> None:

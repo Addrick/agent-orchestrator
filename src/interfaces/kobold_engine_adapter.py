@@ -30,7 +30,7 @@ from typing import (
 )
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -45,6 +45,7 @@ from src.chat_system import (
     ToolCallStartEvent,
 )
 from src.interfaces.kobold_export import build_kobold_savefile, build_transcript, _parse_tool_context
+from src.memory.date_extraction import LlmTagger, resolve_ingest_anchor
 from src.origin import Origin
 from src.stream_engine import CHAT_TEMPLATES
 from src.interfaces.portal_render import render_portal_html
@@ -58,6 +59,7 @@ from src.interfaces._persona_patch import (
 if TYPE_CHECKING:
     from src.confirmations import ConfirmationManager
     from src.memory.memory_manager import MemoryManager
+    from src.memory.backend.base import MemoryBackend
     from src.message_handler import BotLogic
     from src.persona import Persona
     from src.tools.tool_manager import ToolManager
@@ -130,8 +132,14 @@ class KoboldEngineAdapter:
         "/voice/utterance",
     })
 
-    def __init__(self, chat_system: ChatSystem, host: Optional[str] = None, port: int = 5003):
+    def __init__(self, chat_system: ChatSystem, host: Optional[str] = None, port: int = 5003,
+                 date_tagger: Optional[LlmTagger] = None):
         self.chat_system = chat_system
+        # DP-292: injected LLM date-tagger fallback for document ingest (built +
+        # DI'd by the composition root from AgentManager; None = regex-only).
+        # Injected as a plain callable so this interface never imports the agent
+        # class (interfaces -> agents is a forbidden module boundary).
+        self._date_tagger = date_tagger
         # DP-277: host from KOBOLD_ADAPTER_HOST (default 0.0.0.0 — the app runs
         # containerized and is reached via Docker port publishing + the Caddy
         # TLS front, so the bind is not the network boundary; the operator
@@ -261,6 +269,58 @@ class KoboldEngineAdapter:
     def _bot_logic(self) -> "BotLogic":
         """Command layer — dev_command preprocessing (`set`/`what` commands)."""
         return self.chat_system.bot_logic
+
+    @property
+    def _memory_backend(self) -> "MemoryBackend":
+        """Pluggable semantic/episodic backend — drives the DP-292 import panel
+        (bank/document/operation reads + operator ingest). Hindsight implements
+        the read/list surface; SQLite raises NotImplementedError, which
+        `_run_backend` maps to 501."""
+        return self.chat_system.memory_backend
+
+    @staticmethod
+    async def _run_backend(coro: Awaitable[Any]) -> Any:
+        """Await a memory-backend coroutine, mapping backend failures to clean
+        JSON errors instead of 500s (DP-292 import panel).
+
+        - NotImplementedError → 501: the active backend (SQLite) has no
+          document/operation surface; the operator must switch to Hindsight.
+        - HindsightAPIError    → the upstream status code, verbatim message.
+        - httpx transport error → 502: Hindsight/kobold unreachable.
+        """
+        from src.memory.backend.hindsight import HindsightAPIError
+        try:
+            return await coro
+        except NotImplementedError as e:
+            return JSONResponse(
+                status_code=501,
+                content={"error": f"memory backend has no import surface: {e} "
+                                  "(set MEMORY_BACKEND=hindsight)"},
+            )
+        except HindsightAPIError as e:
+            return JSONResponse(status_code=e.status_code, content={"error": e.message})
+        except httpx.RequestError as e:
+            return JSONResponse(
+                status_code=502,
+                content={"error": f"memory backend unreachable: {e}"},
+            )
+
+    def _import_surface_501(self) -> Optional[JSONResponse]:
+        """501 guard for the ingest routes when the active backend has no
+        import surface. Unlike the read routes (which raise NotImplementedError
+        → 501 via _run_backend), retain_document on the SQLite backend is a
+        silent no-op that returns None — so upload/ingest_url would otherwise
+        report `accepted` while storing nothing. Mirror the documented "SQLite
+        → 501" contract by rejecting up front. (ingest_path keeps its own
+        noop-note contract via IngestPathHandler.) Returns a JSONResponse to
+        surface, or None when the backend can retain."""
+        if self._memory_backend.__class__.__name__ == "SqliteSemanticBackend":
+            return JSONResponse(
+                status_code=501,
+                content={"error": "memory backend has no import surface "
+                                  "(set MEMORY_BACKEND=hindsight)"},
+            )
+        return None
 
     async def _audit_control_change(self, event_type: str, target: str,
                                     new_state: Dict[str, Any],
@@ -1349,6 +1409,164 @@ class KoboldEngineAdapter:
                 },
             )
 
+        # ---------- DP-292 memory import panel ----------
+        # Operator inventory + ingest for Hindsight banks. Reads are open
+        # (GET); mutations (DELETE/POST) pass the control-plane auth middleware
+        # (DERPR_CONTROL_TOKEN). Backend failures map through _run_backend
+        # (501 on SQLite, upstream code on HindsightAPIError, 502 on transport).
+
+        @self.app.get("/api/v1/memory/banks")
+        async def memory_list_banks() -> Any:
+            return await self._run_backend(self._memory_backend.list_banks())
+
+        @self.app.get("/api/v1/memory/banks/{bank_id}/documents")
+        async def memory_list_documents(
+            bank_id: str,
+            q: Optional[str] = None,
+            tags: Optional[str] = None,
+            limit: Optional[int] = None,
+            offset: Optional[int] = None,
+        ) -> Any:
+            tag_list = [t for t in tags.split(",") if t] if tags else None
+            return await self._run_backend(
+                self._memory_backend.list_documents(
+                    bank_id, q=q, tags=tag_list, limit=limit, offset=offset,
+                )
+            )
+
+        @self.app.get("/api/v1/memory/banks/{bank_id}/operations")
+        async def memory_list_operations(
+            bank_id: str,
+            status: Optional[str] = None,
+            type: Optional[str] = None,
+            limit: Optional[int] = None,
+            offset: Optional[int] = None,
+        ) -> Any:
+            # `type` shadows the builtin only in this route's local scope; it is
+            # the upstream query-param name (client maps it to op_type).
+            return await self._run_backend(
+                self._memory_backend.list_operations(
+                    bank_id, status=status, op_type=type, limit=limit, offset=offset,
+                )
+            )
+
+        @self.app.delete("/api/v1/memory/banks/{bank_id}/documents/{document_id:path}")
+        async def memory_delete_document(bank_id: str, document_id: str) -> Any:
+            # {document_id:path} — relpath keys from ingest_path contain slashes.
+            return await self._run_backend(
+                self._memory_backend.delete_document(bank_id, document_id)
+            )
+
+        @self.app.post("/api/v1/memory/banks/{bank_id}/upload")
+        async def memory_upload(
+            bank_id: str,
+            files: List[UploadFile] = File(...),
+            tags: Optional[str] = Form(None),
+        ) -> Any:
+            # Phase 1: md/txt only (no server-side conversion needed → decode
+            # here + retain_document, filename-keyed idempotency). PDF/native
+            # files/retain deferred. Operator uploads are trusted.
+            guard = self._import_surface_501()
+            if guard is not None:
+                return guard  # SQLite backend: no-op retain would fake success
+            base_tags = [t for t in (tags or "").split(",") if t] or ["ingest", "upload"]
+            now = datetime.now(timezone.utc)
+            tagger = self._date_tagger
+            results: List[Dict[str, Any]] = []
+            for f in files:
+                name = f.filename or "untitled"
+                ext = os.path.splitext(name)[1].lower()
+                if ext not in (".md", ".txt"):
+                    results.append({"file": name, "status": "rejected",
+                                    "reason": "only .md/.txt supported"})
+                    continue
+                raw = await f.read()
+                try:
+                    content = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    results.append({"file": name, "status": "rejected",
+                                    "reason": "not valid utf-8"})
+                    continue
+                # Anchor to the date the content is about (upload time is the
+                # fallback when the body carries no date). DP-292 phase 2.
+                ts, date_tags, date_meta = await resolve_ingest_anchor(
+                    content, fallback_ts=now, clamp_now=now, llm_tagger=tagger,
+                    max_chars=global_config.DATE_EXTRACTION_MAX_CHARS,
+                )
+                metadata = {"source": "upload", "filename": name,
+                            "untrusted": "false", **date_meta}
+                res = await self._run_backend(
+                    self._memory_backend.retain_document(
+                        bank_id, document_id=name, content=content,
+                        tags=list(base_tags) + date_tags, metadata=metadata,
+                        timestamp=ts,
+                    )
+                )
+                if isinstance(res, JSONResponse):
+                    return res  # backend error (e.g. SQLite 501) — surface it
+                results.append({"file": name, "status": "accepted",
+                                "document_id": name,
+                                "content_date": date_meta["content_date"],
+                                "date_source": date_meta["content_date_source"]})
+            return {"bank": bank_id, "results": results}
+
+        @self.app.post("/api/v1/memory/banks/{bank_id}/ingest_url")
+        async def memory_ingest_url(bank_id: str, request: Request) -> Any:
+            guard = self._import_surface_501()
+            if guard is not None:
+                return guard  # SQLite backend: no-op retain would fake success
+            body = await request.json()
+            url = (body.get("url") or "").strip()
+            if not url:
+                return JSONResponse(status_code=400, content={"error": "url required"})
+            tags = body.get("tags") or ["ingest", "url"]
+            try:
+                resp = await self._http.get(url, timeout=30.0, follow_redirects=True)
+                resp.raise_for_status()
+            except httpx.HTTPError as e:
+                return JSONResponse(status_code=502, content={"error": f"fetch failed: {e}"})
+            content = resp.text
+            now = datetime.now(timezone.utc)
+            ts, date_tags, date_meta = await resolve_ingest_anchor(
+                content, fallback_ts=now, clamp_now=now,
+                llm_tagger=self._date_tagger,
+                max_chars=global_config.DATE_EXTRACTION_MAX_CHARS,
+            )
+            metadata = {"source": "url", "url": url,
+                        "untrusted": "false", **date_meta}
+            res = await self._run_backend(
+                self._memory_backend.retain_document(
+                    bank_id, document_id=url, content=content,
+                    tags=list(tags) + date_tags, metadata=metadata, timestamp=ts,
+                )
+            )
+            if isinstance(res, JSONResponse):
+                return res
+            return {"bank": bank_id, "document_id": url,
+                    "status": "accepted", "bytes": len(content),
+                    "content_date": date_meta["content_date"],
+                    "date_source": date_meta["content_date_source"]}
+
+        @self.app.post("/api/v1/memory/banks/{bank_id}/ingest_path")
+        async def memory_ingest_path(bank_id: str, request: Request) -> Any:
+            from pathlib import Path as _Path
+            from src.tools.ingest_path import IngestPathHandler
+            body = await request.json()
+            path = (body.get("path") or "").strip()
+            if not path:
+                return JSONResponse(status_code=400, content={"error": "path required"})
+            glob = body.get("glob") or "**/*.md"
+            force = bool(body.get("force", False))
+            handler = IngestPathHandler(
+                self._memory_backend,
+                cache_dir=global_config.INGEST_CACHE_DIR,
+                date_tagger=self._date_tagger,
+            )
+            root = _Path(path).expanduser().resolve()
+            return await self._run_backend(
+                handler.ingest_root(bank_id, root, glob, force)
+            )
+
     @staticmethod
     def _event_to_sse(ev: GenerationEvent) -> List[Tuple[str, bytes]]:
         """Transcode one generation event into labelled SSE wire frames.
@@ -1678,5 +1896,8 @@ class KoboldEngineAdapter:
             await self._http.aclose()
 
 
-def create_kobold_engine_adapter(chat_system: ChatSystem) -> KoboldEngineAdapter:
-    return KoboldEngineAdapter(chat_system)
+def create_kobold_engine_adapter(
+    chat_system: ChatSystem,
+    date_tagger: Optional[LlmTagger] = None,
+) -> KoboldEngineAdapter:
+    return KoboldEngineAdapter(chat_system, date_tagger=date_tagger)

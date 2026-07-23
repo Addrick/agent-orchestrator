@@ -231,3 +231,49 @@ export interface AssembledRequest {
   params: Record<string, unknown>
   messages: AssembledMessage[]
 }
+
+// ---- DP-292 memory import panel ----
+export interface MemoryBank {
+  bank_id: string
+  name?: string | null
+  fact_count?: number
+  last_document_at?: string | null
+}
+export interface MemoryDocument {
+  // ListDocumentsResponse.items are open objects upstream; these are the
+  // fields the panel reads. document_id is the delete/inspect key.
+  document_id?: string
+  id?: string
+  original_text?: string
+  content_hash?: string | null
+  created_at?: string
+  updated_at?: string
+  memory_unit_count?: number
+  tags?: string[]
+  [k: string]: unknown
+}
+export interface MemoryDocumentList {
+  items: MemoryDocument[]
+  total?: number
+  limit?: number
+  offset?: number
+}
+export interface MemoryOperation {
+  id: string
+  task_type?: string
+  status: string
+  document_id?: string | null
+  items_count?: number
+  created_at?: string
+  error_message?: string | null
+  retry_count?: number | null
+}
+export interface MemoryOperationList {
+  bank_id: string
+  total?: number
+  operations: MemoryOperation[]
+}
+export interface UploadResult {
+  bank: string
+  results: { file: string; status: string; reason?: string; document_id?: string }[]
+}

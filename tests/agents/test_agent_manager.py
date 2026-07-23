@@ -62,3 +62,55 @@ async def test_legacy_poll_interval_is_ignored():
     finally:
         await mgr.stop_agent("noop")
         await asyncio.gather(mgr._running["noop"].task, return_exceptions=True)
+
+
+# ---------- single-shot inference agents (DP-292) ----------
+
+class _InferenceAgent:
+    """Minimal single-shot agent: takes chat_system, optionally a router."""
+
+    def __init__(self, chat_system, notification_router=None):
+        self.chat_system = chat_system
+        self.notification_router = notification_router
+
+    async def tag(self, body):
+        return "ok"
+
+
+class _RouterlessAgent:
+    def __init__(self, chat_system):
+        self.chat_system = chat_system
+
+
+def test_register_and_get_inference_agent_builds_and_caches():
+    mgr = _make_manager()
+    mgr.register_inference_agent("infer", _RouterlessAgent)
+    a = mgr.get_inference_agent("infer")
+    assert isinstance(a, _RouterlessAgent)
+    assert a.chat_system is mgr._chat_system
+    # Cached: same instance on second lookup.
+    assert mgr.get_inference_agent("infer") is a
+
+
+def test_get_unregistered_inference_agent_returns_none():
+    mgr = _make_manager()
+    assert mgr.get_inference_agent("nope") is None
+
+
+def test_inference_agent_receives_convention_di():
+    """A single-shot agent whose __init__ wants notification_router gets it —
+    the same DI path scheduled agents use (this is what unblocks the DM feature)."""
+    mgr = _make_manager()
+    router = MagicMock()
+    mgr.notification_router = router
+    mgr.register_inference_agent("infer", _InferenceAgent)
+    a = mgr.get_inference_agent("infer")
+    assert a.notification_router is router
+
+
+def test_inference_agent_not_started_as_task():
+    mgr = _make_manager()
+    mgr.register_inference_agent("infer", _RouterlessAgent)
+    mgr.get_inference_agent("infer")
+    # Registering/building an inference agent must not launch a loop task.
+    assert "infer" not in mgr._running

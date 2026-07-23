@@ -496,6 +496,145 @@ async def test_aretain_uses_async_field_not_retain_async() -> None:
     assert captured["json"]["items"] == [{"content": "hi", "tags": []}]
 
 
+# ---------- Read / list surface (DP-292 import panel) ----------
+# Wire-level: routes + query params verified against live prod OpenAPI
+# (.70:8888, 2026-07-22). Operations are bank-scoped upstream.
+
+
+def _capture_request(client: HindsightRESTClient, ret: Dict[str, Any]) -> Dict[str, Any]:
+    """Patch client._request to record method/path/params and return `ret`."""
+    captured: Dict[str, Any] = {}
+
+    async def fake_request(method: str, path: str, **kwargs: Any) -> Dict[str, Any]:
+        captured["method"] = method
+        captured["path"] = path
+        captured["params"] = kwargs.get("params")
+        return ret
+
+    patch.object(client, "_request", side_effect=fake_request).start()
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_list_banks_route_and_unwrap(backend: HindsightBackend) -> None:
+    client = backend._get_client()
+    with patch.object(
+        client, "_request",
+        AsyncMock(return_value={"banks": [{"bank_id": "alice"}, {"bank_id": "bob"}]}),
+    ) as m:
+        banks = await backend.list_banks()
+    assert m.call_args.args == ("GET", "/v1/default/banks")
+    assert banks == [{"bank_id": "alice"}, {"bank_id": "bob"}]
+
+
+@pytest.mark.asyncio
+async def test_list_banks_unwrap_missing_key(backend: HindsightBackend) -> None:
+    client = backend._get_client()
+    with patch.object(client, "_request", AsyncMock(return_value={})):
+        assert await backend.list_banks() == []
+
+
+@pytest.mark.asyncio
+async def test_list_documents_route_and_params(backend: HindsightBackend) -> None:
+    client = backend._get_client()
+    captured = _capture_request(client, {"items": [], "total": 0, "limit": 10, "offset": 0})
+    try:
+        await backend.list_documents(
+            "alice", q="phish", tags=["untrusted:false"], tags_match="all",
+            limit=10, offset=20,
+        )
+    finally:
+        patch.stopall()
+    assert captured["method"] == "GET"
+    assert captured["path"] == "/v1/default/banks/alice/documents"
+    assert captured["params"] == {
+        "q": "phish", "tags": ["untrusted:false"], "tags_match": "all",
+        "limit": 10, "offset": 20,
+    }
+
+
+@pytest.mark.asyncio
+async def test_list_documents_omits_none_params(backend: HindsightBackend) -> None:
+    client = backend._get_client()
+    captured = _capture_request(client, {"items": []})
+    try:
+        await backend.list_documents("alice")
+    finally:
+        patch.stopall()
+    # No filters supplied → params collapses to None (no empty ?q=&tags= noise).
+    assert captured["params"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_document_route(backend: HindsightBackend) -> None:
+    client = backend._get_client()
+    with patch.object(client, "_request", AsyncMock(return_value={"id": "d1"})) as m:
+        doc = await backend.get_document("alice", "d1")
+    assert m.call_args.args == ("GET", "/v1/default/banks/alice/documents/d1")
+    assert doc == {"id": "d1"}
+
+
+@pytest.mark.asyncio
+async def test_delete_document_route(backend: HindsightBackend) -> None:
+    client = backend._get_client()
+    ret = {"success": True, "message": "ok", "document_id": "d1", "memory_units_deleted": 3}
+    with patch.object(client, "_request", AsyncMock(return_value=ret)) as m:
+        result = await backend.delete_document("alice", "d1")
+    assert m.call_args.args == ("DELETE", "/v1/default/banks/alice/documents/d1")
+    assert result == ret
+
+
+@pytest.mark.asyncio
+async def test_list_operations_route_and_type_param(backend: HindsightBackend) -> None:
+    """The query param is `type`, not `op_type` (op_type is the Python kwarg)."""
+    client = backend._get_client()
+    captured = _capture_request(client, {"bank_id": "alice", "operations": []})
+    try:
+        await backend.list_operations(
+            "alice", status="pending", op_type="retain", limit=5,
+            offset=0, exclude_parents=True,
+        )
+    finally:
+        patch.stopall()
+    assert captured["path"] == "/v1/default/banks/alice/operations"
+    assert captured["params"] == {
+        "status": "pending", "type": "retain", "limit": 5,
+        "offset": 0, "exclude_parents": True,
+    }
+    assert "op_type" not in captured["params"]
+
+
+@pytest.mark.asyncio
+async def test_get_operation_route_and_payload_flag(backend: HindsightBackend) -> None:
+    client = backend._get_client()
+    # Default: include_payload False → no query params sent.
+    captured = _capture_request(client, {"operation_id": "op1", "status": "done"})
+    try:
+        await backend.get_operation("alice", "op1")
+    finally:
+        patch.stopall()
+    assert captured["path"] == "/v1/default/banks/alice/operations/op1"
+    assert captured["params"] is None
+
+    captured = _capture_request(client, {"operation_id": "op1"})
+    try:
+        await backend.get_operation("alice", "op1", include_payload=True)
+    finally:
+        patch.stopall()
+    assert captured["params"] == {"include_payload": True}
+
+
+@pytest.mark.asyncio
+async def test_read_surface_propagates_api_error(backend: HindsightBackend) -> None:
+    """Operator reads propagate (not fail-soft like recall) so the route 5xxs."""
+    client = backend._get_client()
+    with patch.object(
+        client, "_request", side_effect=HindsightAPIError(503, "bank down")
+    ):
+        with pytest.raises(HindsightAPIError):
+            await backend.list_documents("alice")
+
+
 # ---------- Live container fixtures (Golden Set Pattern) ----------
 
 

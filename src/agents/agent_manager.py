@@ -58,6 +58,9 @@ class AgentManager:
 
         self._registry: Dict[str, AgentRegistration] = {}
         self._running: Dict[str, RunningAgent] = {}
+        # Single-shot inference agents (DP-292): DI-built, cached, never looped.
+        self._inference_registry: Dict[str, AgentRegistration] = {}
+        self._inference_instances: Dict[str, Any] = {}
 
         # Load file-based config (recipients, agent defaults)
         self._config: Dict[str, Any] = {}
@@ -167,14 +170,15 @@ class AgentManager:
         logger.info(f"Agent '{name}' started.")
         return f"Agent '{name}' started successfully."
 
-    def _build_agent_instance(
-        self, name: str, agent_class: Type[Agent], config: Dict[str, Any],
-    ) -> Agent:
-        """Construct an agent instance, injecting dependencies based on its __init__ signature.
+    def _di_kwargs(
+        self, name: str, agent_class: Type[Any], config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Build constructor kwargs via convention-based dependency injection.
 
-        This uses convention-based injection: if the agent's __init__ accepts
-        'zammad_client', 'notification_router', etc., we supply them from
-        the manager's held references.
+        If the class's __init__ accepts 'zammad_client', 'notification_router',
+        or 'agent_config', supply them from the manager's held references.
+        Shared by scheduled-loop agents (`_build_agent_instance`) and
+        single-shot inference agents (`get_inference_agent`).
         """
         import inspect
         sig = inspect.signature(agent_class.__init__)
@@ -182,7 +186,6 @@ class AgentManager:
 
         kwargs: Dict[str, Any] = {"chat_system": self._chat_system}
 
-        # Convention-based dependency injection
         if "zammad_client" in params:
             from src.clients.zammad_service import ZammadIntegration
             zammad_service = self._chat_system.get_service("zammad")
@@ -205,7 +208,51 @@ class AgentManager:
             agent_cfg["_recipients"] = self._config.get("recipients", {})
             kwargs["agent_config"] = agent_cfg
 
-        return agent_class(**kwargs)
+        return kwargs
+
+    def _build_agent_instance(
+        self, name: str, agent_class: Type[Agent], config: Dict[str, Any],
+    ) -> Agent:
+        """Construct a scheduled-loop agent instance with injected dependencies."""
+        return agent_class(**self._di_kwargs(name, agent_class, config))
+
+    # ---------- single-shot inference agents (DP-292) ----------
+    # A second agent shape: synchronous, caller-invoked, returns a verdict
+    # (e.g. content classification, date extraction). These are still agents —
+    # persona + LLM call + tool schema — but they do NOT fit the scheduled-loop
+    # `Agent`/`start_agent` path (nothing to schedule). They register here so
+    # they get the SAME convention-DI (notification_router, zammad_client, …) as
+    # scheduled agents and a single lookup point, instead of being constructed
+    # ad-hoc from `chat_system` by their callers. Built lazily (deps may be set
+    # after registration) and cached.
+
+    def register_inference_agent(
+        self,
+        name: str,
+        agent_class: Type[Any],
+        default_config: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Register a single-shot inference-agent class for DI-built lookup."""
+        self._inference_registry[name] = AgentRegistration(
+            agent_class=agent_class,
+            default_config=default_config or {},
+        )
+        logger.info(f"Registered inference agent: {name} -> {agent_class.__name__}")
+
+    def get_inference_agent(self, name: str) -> Optional[Any]:
+        """Return the DI-built singleton for a registered inference agent, or
+        None if `name` was never registered. Built on first access (so deps set
+        after registration are still injected) and cached thereafter."""
+        if name not in self._inference_registry:
+            return None
+        inst = self._inference_instances.get(name)
+        if inst is None:
+            reg = self._inference_registry[name]
+            file_config = self._config.get("agents", {}).get(name, {})
+            merged = {**file_config, **reg.default_config}
+            inst = reg.agent_class(**self._di_kwargs(name, reg.agent_class, merged))
+            self._inference_instances[name] = inst
+        return inst
 
     async def stop_agent(self, name: str) -> str:
         """Stop a running agent gracefully.

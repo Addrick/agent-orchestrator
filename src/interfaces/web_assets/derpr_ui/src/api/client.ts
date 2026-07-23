@@ -34,6 +34,10 @@ import type {
   VersionsResponse,
   DevCommandResponse,
   AssembledRequest,
+  MemoryBank,
+  MemoryDocumentList,
+  MemoryOperationList,
+  UploadResult,
 } from '../types/contracts'
 
 // Same-origin in production (served under /derpr by the adapter); the dev
@@ -385,4 +389,126 @@ export async function transcribeVoice(
   const j = await r.json()
   if (!r.ok || j.error) throw new Error(j.error || `transcribe → ${r.status}`)
   return (j.text as string) || ''
+}
+
+// ---- DP-292 memory import panel ---------------------------------------
+// Live-only operator features (no mock fallback): these back the MEMORY dock,
+// which only makes sense against a real Hindsight backend. Errors surface the
+// server's JSON `error` (501 = SQLite backend, 4xx/5xx = upstream Hindsight).
+
+async function memErr(r: Response, label: string): Promise<never> {
+  let msg = `${label} → ${r.status}`
+  try {
+    const j = (await r.json()) as { error?: string }
+    if (j?.error) msg = j.error
+  } catch {
+    /* non-JSON body — keep the status message */
+  }
+  throw new Error(msg)
+}
+
+export async function listMemoryBanks(): Promise<MemoryBank[]> {
+  const r = await fetch(`${BASE}/api/v1/memory/banks`, {
+    headers: { Accept: 'application/json' },
+  })
+  if (!r.ok) return memErr(r, 'list banks')
+  return (await r.json()) as MemoryBank[]
+}
+
+export async function listMemoryDocuments(
+  bankId: string,
+  opts: { q?: string; tags?: string; limit?: number; offset?: number } = {},
+): Promise<MemoryDocumentList> {
+  const p = new URLSearchParams()
+  if (opts.q) p.set('q', opts.q)
+  if (opts.tags) p.set('tags', opts.tags)
+  if (opts.limit != null) p.set('limit', String(opts.limit))
+  if (opts.offset != null) p.set('offset', String(opts.offset))
+  const qs = p.toString()
+  const r = await fetch(
+    `${BASE}/api/v1/memory/banks/${encodeURIComponent(bankId)}/documents${qs ? '?' + qs : ''}`,
+    { headers: { Accept: 'application/json' } },
+  )
+  if (!r.ok) return memErr(r, 'list documents')
+  return (await r.json()) as MemoryDocumentList
+}
+
+export async function listMemoryOperations(
+  bankId: string,
+  opts: { status?: string; type?: string } = {},
+): Promise<MemoryOperationList> {
+  const p = new URLSearchParams()
+  if (opts.status) p.set('status', opts.status)
+  if (opts.type) p.set('type', opts.type)
+  const qs = p.toString()
+  const r = await fetch(
+    `${BASE}/api/v1/memory/banks/${encodeURIComponent(bankId)}/operations${qs ? '?' + qs : ''}`,
+    { headers: { Accept: 'application/json' } },
+  )
+  if (!r.ok) return memErr(r, 'list operations')
+  return (await r.json()) as MemoryOperationList
+}
+
+export async function deleteMemoryDocument(
+  bankId: string,
+  documentId: string,
+): Promise<void> {
+  // documentId may contain slashes (relpath keys) — the route uses a :path
+  // converter, so encode each segment but keep the separators.
+  const encoded = documentId.split('/').map(encodeURIComponent).join('/')
+  const r = await fetch(
+    `${BASE}/api/v1/memory/banks/${encodeURIComponent(bankId)}/documents/${encoded}`,
+    { method: 'DELETE', headers: withAuth() },
+  )
+  if (!r.ok) return memErr(r, 'delete document')
+}
+
+export async function uploadMemoryFiles(
+  bankId: string,
+  files: File[],
+  tags?: string,
+): Promise<UploadResult> {
+  const fd = new FormData()
+  for (const f of files) fd.append('files', f, f.name)
+  if (tags) fd.append('tags', tags)
+  const r = await fetch(
+    `${BASE}/api/v1/memory/banks/${encodeURIComponent(bankId)}/upload`,
+    { method: 'POST', headers: withAuth(), body: fd },
+  )
+  if (!r.ok) return memErr(r, 'upload')
+  return (await r.json()) as UploadResult
+}
+
+export async function ingestMemoryUrl(
+  bankId: string,
+  url: string,
+): Promise<{ status: string; document_id: string; bytes: number }> {
+  const r = await fetch(
+    `${BASE}/api/v1/memory/banks/${encodeURIComponent(bankId)}/ingest_url`,
+    {
+      method: 'POST',
+      headers: withAuth({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ url }),
+    },
+  )
+  if (!r.ok) return memErr(r, 'ingest url')
+  return (await r.json()) as { status: string; document_id: string; bytes: number }
+}
+
+export async function ingestMemoryPath(
+  bankId: string,
+  path: string,
+  glob?: string,
+  force?: boolean,
+): Promise<Record<string, unknown>> {
+  const r = await fetch(
+    `${BASE}/api/v1/memory/banks/${encodeURIComponent(bankId)}/ingest_path`,
+    {
+      method: 'POST',
+      headers: withAuth({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ path, glob, force }),
+    },
+  )
+  if (!r.ok) return memErr(r, 'ingest path')
+  return (await r.json()) as Record<string, unknown>
 }
