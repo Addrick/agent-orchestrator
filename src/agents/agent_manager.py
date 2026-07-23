@@ -203,8 +203,12 @@ class AgentManager:
             kwargs["notification_router"] = self._notification_router
 
         if "agent_config" in params:
-            # Merge agent-specific config with global recipients
-            agent_cfg = self._config.get("agents", {}).get(name, {})
+            # Merge agent-specific config with global recipients. COPY the
+            # per-agent block first: `self._config["agents"][name]` is a live
+            # reference, so assigning `_recipients` onto it in place would
+            # pollute the shared config (leaking the recipients map into every
+            # subsequent read of that agent's block, and re-running on rebuild).
+            agent_cfg = dict(self._config.get("agents", {}).get(name, {}))
             agent_cfg["_recipients"] = self._config.get("recipients", {})
             kwargs["agent_config"] = agent_cfg
 
