@@ -54,16 +54,59 @@ PROPOSAL_ACTIONS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+# DP-240: actions a *dispatched subagent* may queue via the MCP bridge, kept in
+# a SEPARATE dict from PROPOSAL_ACTIONS on purpose.
+#
+# PROPOSAL_ACTIONS feeds build_submission_tool_schema, which is managr's
+# extraction schema — and managr reads attacker-reachable ticket content. Adding
+# a generic tool-call action to that dict would let a poisoned ticket steer
+# managr into proposing arbitrary derpr tool calls. The two producers therefore
+# get two whitelists, and the scope is an explicit argument at every validation
+# site rather than a shared global (so the safe scope is the *default*).
+#
+# `tool_name` is NOT enum-pinned here: the authoritative check is the executor
+# re-resolving the tool against the live MCP ToolPolicy at execution time. A
+# name captured in a stored row must never be able to outlive or outrun the
+# policy that was in force when it was queued.
+AGENT_CALL_ACTIONS: Dict[str, Dict[str, Any]] = {
+    "call_derpr_tool": {
+        "description": "Execute a derpr tool on behalf of a dispatched subagent.",
+        "args": {
+            "tool_name": {"type": str, "required": True, "max_length": 128,
+                          "description": "Name of the derpr tool to execute."},
+            "tool_args": {"type": dict, "required": True,
+                          "description": "Arguments passed through to the tool."},
+            "agent_id": {"type": str, "required": True, "max_length": 128,
+                         "description": "Dispatched agent that requested the call."},
+        },
+    },
+}
 
-def validate_proposal_args(action_type: str, args: Any) -> List[str]:
-    """Validate proposal args against the whitelist. Returns a list of
-    human-readable errors; empty list means valid."""
-    if action_type not in PROPOSAL_ACTIONS:
+# Everything the executor is capable of running. Deliberately not exported as
+# the default validation scope — see validate_proposal_args.
+EXECUTABLE_ACTIONS: Dict[str, Dict[str, Any]] = {**PROPOSAL_ACTIONS, **AGENT_CALL_ACTIONS}
+
+
+def validate_proposal_args(
+    action_type: str,
+    args: Any,
+    scope: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> List[str]:
+    """Validate proposal args against a whitelist. Returns a list of
+    human-readable errors; empty list means valid.
+
+    `scope` defaults to PROPOSAL_ACTIONS (board actions only) so every existing
+    caller — notably managr's emission path — stays fail-closed against the
+    DP-240 agent-call action. The executor passes EXECUTABLE_ACTIONS explicitly,
+    because it is the one component allowed to run both families.
+    """
+    actions = PROPOSAL_ACTIONS if scope is None else scope
+    if action_type not in actions:
         return [f"unknown action_type '{action_type}'"]
     if not isinstance(args, dict):
         return ["args must be an object"]
 
-    spec = PROPOSAL_ACTIONS[action_type]["args"]
+    spec = actions[action_type]["args"]
     errors: List[str] = []
 
     for key in args:

@@ -6,6 +6,7 @@
 # If this UI ever becomes externally accessible, re-enable the rule (un-dismiss
 # the alerts in GitHub code scanning) and scrub tracebacks from all responses.
 
+import contextlib
 import json
 import logging
 import mimetypes
@@ -62,6 +63,7 @@ if TYPE_CHECKING:
     from src.memory.backend.base import MemoryBackend
     from src.message_handler import BotLogic
     from src.persona import Persona
+    from src.tools.mcp_bridge import McpBridge
     from src.tools.tool_manager import ToolManager
 
 logger = logging.getLogger(__name__)
@@ -133,8 +135,13 @@ class KoboldEngineAdapter:
     })
 
     def __init__(self, chat_system: ChatSystem, host: Optional[str] = None, port: int = 5003,
-                 date_tagger: Optional[LlmTagger] = None):
+                 date_tagger: Optional[LlmTagger] = None,
+                 mcp_bridge: Optional["McpBridge"] = None):
         self.chat_system = chat_system
+        # DP-240: MCP bridge exposing ToolManager tools to dispatched subagents.
+        # None = not wired (default); the mount and its lifespan are skipped
+        # entirely, so the route surface is unchanged for a normal deploy.
+        self._mcp_bridge = mcp_bridge
         # DP-292: injected LLM date-tagger fallback for document ingest (built +
         # DI'd by the composition root from AgentManager; None = regex-only).
         # Injected as a plain callable so this interface never imports the agent
@@ -151,6 +158,7 @@ class KoboldEngineAdapter:
         self.app: FastAPI = FastAPI(
             title="DERPR Kobold Engine Adapter",
             docs_url=None, redoc_url=None, openapi_url=None,
+            lifespan=self._lifespan,
         )
 
         # Auth first, CORS second: Starlette's add_middleware puts the LAST
@@ -174,6 +182,35 @@ class KoboldEngineAdapter:
         self._http = httpx.AsyncClient(timeout=None)
         self._setup_routes()
         self._setup_portal()
+        self._setup_mcp_bridge()
+
+    @contextlib.asynccontextmanager
+    async def _lifespan(self, app: FastAPI) -> AsyncIterator[None]:
+        """App lifespan — owns the MCP bridge session manager's task group.
+
+        The bridge's StreamableHTTPSessionManager creates its task group in
+        run(); handle_request fails outright without it, so this must wrap the
+        serving lifetime rather than being started lazily per request.
+        """
+        if self._mcp_bridge is None:
+            yield
+            return
+        async with self._mcp_bridge.lifespan():
+            yield
+
+    def _setup_mcp_bridge(self) -> None:
+        """Mount the DP-240 bridge as a raw ASGI sub-app.
+
+        Mounted rather than routed because the MCP SDK owns the whole
+        request/response cycle (streamable HTTP), and it authenticates itself:
+        the control-plane middleware exempts this prefix because the bridge's
+        caller is a *subagent* holding a per-dispatch token, not the operator
+        holding DERPR_CONTROL_TOKEN. Two principals, two credentials.
+        """
+        if self._mcp_bridge is None:
+            return
+        self.app.mount(global_config.MCP_BRIDGE_PATH, self._mcp_bridge.handle_asgi)
+        logger.info("MCP bridge mounted at %s", global_config.MCP_BRIDGE_PATH)
 
     @staticmethod
     def _extract_control_token(request: Request) -> str:
@@ -209,6 +246,15 @@ class KoboldEngineAdapter:
             if request.method in ("GET", "HEAD", "OPTIONS"):
                 return await call_next(request)
             if request.url.path in self.DATA_PLANE_POST_PATHS:
+                return await call_next(request)
+            # DP-240: the MCP bridge runs its own per-dispatch token check in
+            # its ASGI wrapper, before the MCP SDK is entered. Exempt only when
+            # a bridge is actually mounted, so the prefix is not a standing hole
+            # in the control plane on instances that never wired one.
+            if self._mcp_bridge is not None and (
+                request.url.path == global_config.MCP_BRIDGE_PATH
+                or request.url.path.startswith(global_config.MCP_BRIDGE_PATH + "/")
+            ):
                 return await call_next(request)
             if not global_config.DERPR_CONTROL_TOKEN:
                 return JSONResponse(
@@ -1899,5 +1945,6 @@ class KoboldEngineAdapter:
 def create_kobold_engine_adapter(
     chat_system: ChatSystem,
     date_tagger: Optional[LlmTagger] = None,
+    mcp_bridge: Optional["McpBridge"] = None,
 ) -> KoboldEngineAdapter:
-    return KoboldEngineAdapter(chat_system, date_tagger=date_tagger)
+    return KoboldEngineAdapter(chat_system, date_tagger=date_tagger, mcp_bridge=mcp_bridge)
