@@ -311,10 +311,11 @@ async def main() -> None:
     mcp_manager = MCPClientManager(personas_provider=lambda: bot.personas)
     bot.register_service(MCPIntegration(mcp_manager))
 
-    # 7.5 Register the proposal queue review surface (DP-282). Needs Zammad —
-    # the executor is the sole component that turns an approved proposal into
-    # an external write. Without Zammad there is nothing to execute against,
-    # so (like ZammadIntegration) it simply doesn't register.
+    # 7.5 Register the proposal queue review surface (DP-282, extended DP-240).
+    # The executor is the sole component that turns an approved proposal into
+    # an external write. It has two independent backends — Zammad for the
+    # ticket actions, the MCP bridge's AgentCallRunner for call_derpr_tool —
+    # and registers if either is present (see the registration block below).
     # 7.6 DP-240 MCP bridge: build the AgentCallRunner FIRST so the same
     # instance backs both the bridge (which decides what is exposed and what is
     # gated) and the executor (which re-checks that same exposure at approval
@@ -345,7 +346,13 @@ async def main() -> None:
         mcp_bridge = McpBridge(agent_call_runner, _propose_agent_call)
         logger.info("MCP bridge enabled; exposing tools: %s", MCP_BRIDGE_TOOLS)
 
-    if zammad_client is not None:
+    # The review surface registers when *either* backend exists. Zammad drives
+    # the ticket-shaped actions (DP-282); the MCP bridge drives call_derpr_tool
+    # (DP-240). Gating registration on Zammad alone would let a bridge-only
+    # deployment queue gated subagent calls into a queue with no approve/deny
+    # tools — the agent would wait forever on a row nobody can act on. The
+    # executor refuses whichever action family its backend is missing.
+    if zammad_client is not None or mcp_bridge is not None:
         from src.proposals import ProposalExecutor, ProposalIntegration
         bot.register_service(
             ProposalIntegration(
@@ -353,16 +360,11 @@ async def main() -> None:
                 ProposalExecutor(zammad_client, agent_call_runner=agent_call_runner),
             )
         )
-    elif mcp_bridge is not None:
-        # Known gap, logged loudly rather than papered over: the approve/deny
-        # tools and the executor both live behind ProposalIntegration, which
-        # only registers with Zammad present. Without it a subagent can queue a
-        # gated call that nothing can ever approve or run.
-        logger.warning(
-            "MCP bridge is enabled but Zammad is not configured — the proposal "
-            "review surface is unregistered, so gated subagent calls will queue "
-            "with no way to approve or execute them."
-        )
+        if zammad_client is None:
+            logger.info(
+                "Proposal review surface registered without Zammad — "
+                "call_derpr_tool rows are executable; ticket actions are not."
+            )
 
     # 8. Register interfaces
     # DP-292: build the date-tagger callable from AgentManager (convention-DI)

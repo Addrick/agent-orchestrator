@@ -185,6 +185,23 @@ async def test_executor_refuses_agent_call_without_a_runner():
 
 
 @pytest.mark.asyncio
+async def test_executor_refuses_ticket_actions_without_zammad(runner_and_calls):
+    """Bridge-only deployment: the ticket half of the executor must refuse
+    with a readable reason, not crash on a None client. This is what makes it
+    safe to register the review surface without Zammad."""
+    runner, _, _ = runner_and_calls
+    executor = ProposalExecutor(zammad_client=None, agent_call_runner=runner)
+
+    ok, message = await executor.execute({
+        "action_type": "add_note",
+        "action_args": {"ticket_number": 42, "body": "hello"},
+    })
+
+    assert ok is False
+    assert "Zammad is not configured" in message
+
+
+@pytest.mark.asyncio
 async def test_executor_revalidates_agent_call_args(runner_and_calls):
     """A row tampered between review and execution still can't smuggle args."""
     runner, calls, _ = runner_and_calls

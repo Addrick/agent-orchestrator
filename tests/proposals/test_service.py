@@ -224,3 +224,36 @@ async def test_retire_standing_order_audits_and_rejects_double(so_handler, mem_m
         await so_handler._retire_standing_order(order_id)
     with pytest.raises(ValueError, match="No active standing order"):
         await so_handler._retire_standing_order(9999)
+
+
+@pytest.mark.asyncio
+async def test_review_surface_registers_and_works_without_zammad(mem_manager):
+    """DP-240: a bridge-only deployment (no Zammad) must still get the full
+    review surface. Registering only with Zammad present left gated subagent
+    calls queued in a queue with no approve/deny tools — an agent parked on a
+    row nobody could act on."""
+    from src.tools.tool_manager import ToolManager
+
+    executor = ProposalExecutor(zammad_client=None)
+    manager = ToolManager()
+    ProposalIntegration(mem_manager, executor).register_tools(manager)
+
+    registered = {
+        t["function"]["name"] for t in manager.get_tool_definitions()
+        if t.get("type") == "function"
+    }
+    assert {"list_proposals", "approve_proposal", "deny_proposal"} <= registered
+
+    # And the surface is usable end to end: a call_derpr_tool row approves,
+    # reaching the executor (which refuses only because no runner is wired).
+    proposal_id = mem_manager.create_proposal(
+        agent_name="agent:a-1",
+        action_type="call_derpr_tool",
+        action_args={"tool_name": "inspect_agents", "tool_args": {}, "agent_id": "a-1"},
+        rationale="subagent asked",
+    )
+    handler = ProposalToolHandler(mem_manager, executor)
+    result = await handler._approve_proposal(proposal_id)
+
+    assert result["executed"] is False
+    assert "not wired" in result["result"]

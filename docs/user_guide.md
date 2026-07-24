@@ -693,9 +693,11 @@ finishes, is killed, or errors. A request with no valid token is rejected before
 it reaches any tool.
 
 > **Requires the proposal queue.** The review tools live behind the `proposals`
-> binding, which only registers when Zammad is configured. With the bridge on
-> and Zammad off, gated requests will queue with nothing able to approve them
-> (derpr logs a warning at startup).
+> binding. It registers whenever *either* backend is present — Zammad (for the
+> ticket actions) or the MCP bridge (for subagent tool calls) — so a
+> bridge-only deployment still gets `list_proposals` / `approve_proposal` /
+> `deny_proposal`. Approving an action whose backend is missing fails with a
+> readable reason rather than reporting success.
 
 ### Memory Tools (no service binding required)
 

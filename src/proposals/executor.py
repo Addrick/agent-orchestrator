@@ -22,8 +22,13 @@ class ProposalExecutor:
     args against the whitelist schema before every dispatch.
     """
 
-    def __init__(self, zammad_client: ZammadClient,
+    def __init__(self, zammad_client: Optional[ZammadClient] = None,
                  agent_call_runner: Optional[AgentCallRunner] = None) -> None:
+        # None = no Zammad on this instance. The ticket-shaped actions then
+        # refuse; call_derpr_tool rows still execute, because they never touch
+        # Zammad. This is what lets the review surface register for an
+        # MCP-bridge-only deployment (DP-240) instead of leaving gated subagent
+        # calls queued with nothing able to approve them.
         self._client = zammad_client
         # None = the MCP bridge is not wired; a call_derpr_tool row is then
         # refused rather than silently reported executed.
@@ -42,6 +47,13 @@ class ProposalExecutor:
 
         if action_type == "call_derpr_tool":
             return await self._run_agent_call(args)
+
+        # Every remaining action is ticket-shaped. Refused explicitly rather
+        # than crashing on a None client, so the row lands in
+        # 'execution_failed' with a readable reason.
+        if self._client is None:
+            return False, (f"Zammad is not configured on this instance; "
+                           f"'{action_type}' cannot be executed")
 
         try:
             ticket = await self._resolve_ticket(args["ticket_number"])
@@ -83,27 +95,38 @@ class ProposalExecutor:
             logger.error(f"Agent call execution failed ({tool_name}): {e}", exc_info=True)
             return False, f"agent call failed: {e}"
 
+    def _require_client(self) -> ZammadClient:
+        """The Zammad client, or a hard error.
+
+        Only reachable after ``execute`` has already refused the None case;
+        this exists so the ticket paths type-check without scattering asserts.
+        """
+        if self._client is None:
+            raise ValueError("Zammad is not configured on this instance")
+        return self._client
+
     async def _dispatch(self, action_type: str, ticket_id: int, number: Any,
                         args: Dict[str, Any]) -> Optional[str]:
         """Run one whitelisted action; returns the success message, or None
         for an action_type with no dispatch branch."""
+        client = self._require_client()
         if action_type == "add_note":
             # internal=True is hard-forced: Phase 1 proposals are never
             # customer-visible regardless of what the row says.
             await asyncio.to_thread(
-                self._client.add_article_to_ticket,
+                client.add_article_to_ticket,
                 ticket_id=ticket_id, body=args["body"], internal=True,
             )
             return f"internal note added to ticket #{number}"
         if action_type == "set_priority":
             await asyncio.to_thread(
-                self._client.update_ticket,
+                client.update_ticket,
                 ticket_id=ticket_id, payload={"priority": args["priority"]},
             )
             return f"ticket #{number} priority set to {args['priority']}"
         if action_type == "remind":
             await asyncio.to_thread(
-                self._client.update_ticket,
+                client.update_ticket,
                 ticket_id=ticket_id,
                 payload={"state": "pending reminder",
                          "pending_time": f"{args['pending_until']}T09:00:00Z"},
@@ -114,7 +137,7 @@ class ProposalExecutor:
     async def _resolve_ticket(self, ticket_number: int) -> Dict[str, Any]:
         """Resolve a user-facing ticket number to the ticket dict (internal id)."""
         results = await asyncio.to_thread(
-            self._client.search_tickets, query=f"number:{ticket_number}", limit=1,
+            self._require_client().search_tickets, query=f"number:{ticket_number}", limit=1,
         )
         if not results:
             raise ValueError(f"ticket #{ticket_number} not found")
