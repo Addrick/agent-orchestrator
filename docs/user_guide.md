@@ -646,6 +646,59 @@ Disabled by default. Enable with `MCP_ENABLED=true`. Config knobs:
   restrictive defaults, removed tools are unregistered, and every persona is
   re-validated against the new toolset.
 
+### MCP Bridge — derpr tools for dispatched subagents (DP-240)
+
+The mirror image of the section above: instead of derpr *consuming* someone
+else's MCP server, derpr *hosts* one, so a dispatched fixr subagent can call
+derpr's own tools. This exists so a subagent can investigate problems that code
+alone can't explain (its first real use is live-container investigation, landing
+in DP-241).
+
+**Off by default.** A normal `dispatch_fix` is completely unchanged — it never
+sees the bridge and its `claude` arguments are identical to before this feature
+existed. The capable tier is opt-in per dispatch and expected to be rare.
+
+Setup:
+
+| Setting | Meaning |
+|---|---|
+| `MCP_BRIDGE_ENABLED` | Master switch. Off by default. |
+| `MCP_BRIDGE_TOOLS` | Comma-separated tools exposed over the bridge. **Default-deny** — an empty list exposes nothing, so turning the bridge on without choosing tools does nothing. |
+| `MCP_BRIDGE_PUBLIC_URL` | The address the *subagent* uses to reach the bridge. Its host is added to the subagent's sandbox allow-list automatically. |
+| `MCP_BRIDGE_PATH` | Path the bridge mounts at on the portal app (default `/mcp`). |
+
+How a subagent's tool call is handled:
+
+- **Read-only tool** → runs immediately and returns its result, like any tool call.
+- **Write or irreversible tool** → **does not run.** It is queued as a proposal
+  for your review and the subagent is told to stop and wait. You approve or deny
+  it exactly like any other proposal — `list_proposals`, `approve_proposal`,
+  `deny_proposal` — from Discord, the portal, or anywhere else a persona with
+  the `proposals` binding can talk to you. On approval the tool runs and the
+  agent is resumed with the result.
+
+Two things worth knowing about the approval:
+
+- **Approval is re-checked at execution time, not at queueing time.** If you
+  narrow `MCP_BRIDGE_TOOLS` (or the tool stops being registered) while a request
+  is sitting in the queue, approving it will refuse rather than run. A queued
+  request can never outlive the permission that allowed it.
+- **The queue is the only thing standing between a subagent and the tool.**
+  Capable dispatches run with Claude Code's own permission prompts disabled, by
+  design — the subagent is headless and cannot answer them. Treat approving a
+  subagent's request with the same care as running the tool yourself.
+
+Each capable dispatch gets its own bearer token, revoked when the agent
+finishes, is killed, or errors. A request with no valid token is rejected before
+it reaches any tool.
+
+> **Requires the proposal queue.** The review tools live behind the `proposals`
+> binding. It registers whenever *either* backend is present — Zammad (for the
+> ticket actions) or the MCP bridge (for subagent tool calls) — so a
+> bridge-only deployment still gets `list_proposals` / `approve_proposal` /
+> `deny_proposal`. Approving an action whose backend is missing fails with a
+> readable reason rather than reporting success.
+
 ### Memory Tools (no service binding required)
 
 Available to any persona with `enabled_tools: ["*"]` (e.g., `joy`, `it-help`). These tools interact with the long-term memory store built by SqliteConsolidator.

@@ -24,7 +24,8 @@ import logging
 import os
 import shutil
 import time
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+import urllib.parse
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 
 from config import global_config
 from src.self_edit import clone_manager
@@ -44,6 +45,9 @@ from src.self_edit.registry import (
 )
 from src.self_edit import registry as reg
 from src.utils.claude_cli_env import build_claude_cli_env
+
+if TYPE_CHECKING:
+    from src.tools.mcp_bridge import BridgeTokenStore
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +77,7 @@ class Dispatcher:
         platform: str = "claude",
         model_arg: Optional[str] = None,
         clone_dir: Optional[str] = None,
+        token_store: Optional["BridgeTokenStore"] = None,
     ) -> None:
         self._registry = registry
         self._on_wake = on_wake
@@ -80,20 +85,36 @@ class Dispatcher:
         self._platform = platform
         self._model_arg = model_arg or "opus"
         self._clone_dir = clone_dir
+        # DP-240: None = no MCP bridge wired, so capable dispatches are refused
+        # outright rather than silently degrading to a normal dispatch.
+        self._token_store = token_store
         self._procs: Dict[str, asyncio.subprocess.Process] = {}
         self._bridges: Dict[str, "asyncio.Task[None]"] = {}
 
     # -- public API ----------------------------------------------------------
 
-    async def dispatch(self, bug_id: str, description: str) -> AgentRecord:
+    async def dispatch(self, bug_id: str, description: str,
+                       capable: bool = False) -> AgentRecord:
         """Create an isolated worktree and spawn a detached coding agent in it.
 
         Caller (the dispatch WRITE tool) has already been confirmed by the
-        ConfirmationManager. Returns the registered ``AgentRecord``."""
+        ConfirmationManager. Returns the registered ``AgentRecord``.
+
+        ``capable`` (DP-240) additionally wires the agent to derpr's MCP bridge
+        with a freshly minted per-dispatch token. Opt-in and rare; the default
+        tier is untouched. Requires a token store to have been injected."""
         if await self._registry.has_active_for_bug(bug_id):
             raise DispatcherError(
                 f"An agent for {bug_id} is already in flight. Inspect or kill it "
                 "before dispatching again."
+            )
+        # Validate the capable request BEFORE creating anything: a refusal after
+        # create_worktree would strand an orphan worktree that nothing reaps
+        # (prune only walks registry rows, and no record exists yet).
+        if capable and self._token_store is None:
+            raise DispatcherError(
+                "Capable dispatch requested but the MCP bridge is not wired "
+                "(MCP_BRIDGE_ENABLED is off)."
             )
 
         worktree = await asyncio.to_thread(
@@ -107,11 +128,15 @@ class Dispatcher:
 
         agent_id = f"{bug_id}-{int(time.time())}"
         prompt = f"Bug {bug_id}: {description}"
+        bridge_token: Optional[str] = None
+        if capable and self._token_store is not None:
+            bridge_token = self._token_store.mint(agent_id)
         proc = await self._spawn(
             prompt=prompt,
             system_prompt=DISPATCH_AGENT_PROMPT,
             cwd=worktree,
             raw_log=raw_log,
+            bridge_token=bridge_token,
         )
 
         record = AgentRecord(
@@ -169,6 +194,11 @@ class Dispatcher:
                 cwd=record.worktree,
                 raw_log=record.raw_log,
                 resume_session=record.session_id,
+                # Re-use the agent's existing token (None for a normal
+                # dispatch), so a capable agent keeps its bridge across the
+                # resume instead of losing its tools mid-task.
+                bridge_token=(self._token_store.token_for(agent_id)
+                              if self._token_store is not None else None),
             )
             await self._registry.update(agent_id, pid=proc.pid)
             self._procs[agent_id] = proc
@@ -205,6 +235,7 @@ class Dispatcher:
         task = self._bridges.pop(agent_id, None)
         if task is not None and not task.done():
             task.cancel()
+        self._revoke_bridge_token(agent_id)
         await self._registry.update(agent_id, status=reg.KILLED)
         if remove_worktree:
             await asyncio.to_thread(
@@ -272,11 +303,12 @@ class Dispatcher:
         cwd: str,
         raw_log: str,
         resume_session: Optional[str] = None,
+        bridge_token: Optional[str] = None,
     ) -> asyncio.subprocess.Process:
         binary = os.environ.get("CLAUDE_CLI_PATH") or shutil.which("claude")
         if not binary:
             raise DispatcherError("Claude Code 'claude' binary not found on PATH.")
-        argv = self._build_argv(prompt, system_prompt, resume_session)
+        argv = self._build_argv(prompt, system_prompt, resume_session, bridge_token)
         # Force the dispatched agent onto the Claude subscription (strip the
         # inherited ANTHROPIC_API_KEY so `-p` mode doesn't silently bill the API)
         # and scrub derpr's machine secrets (DP-277). fixr keeps GH_TOKEN — it is
@@ -304,10 +336,16 @@ class Dispatcher:
         prompt: str,
         system_prompt: Optional[str],
         resume_session: Optional[str],
+        bridge_token: Optional[str] = None,
     ) -> List[str]:
         """Assemble the detached ``claude`` argv. Mirrors engine._build_cc_args
         for the sandbox/yolo treatment so dispatched agents get the same OS
-        confinement as the cc-* engine route."""
+        confinement as the cc-* engine route.
+
+        ``bridge_token`` (DP-240) makes this a *capable* dispatch: the agent
+        additionally gets the derpr MCP bridge. When it is None the argv is
+        byte-identical to a pre-DP-240 dispatch — pinned by test, because the
+        default fixr tier must not drift as capable grows."""
         argv: List[str] = ["-p", prompt, "--output-format", "stream-json",
                            "--verbose", "--model", self._model_arg]
         if resume_session:
@@ -320,20 +358,52 @@ class Dispatcher:
             argv += ["--allowedTools", *global_config.CC_ALLOWED_TOOLS]
         if global_config.CC_MAX_TURNS > 0:
             argv += ["--max-turns", str(global_config.CC_MAX_TURNS)]
-        sandbox = self._sandbox_settings()
+        if bridge_token:
+            argv += ["--mcp-config", json.dumps(self._mcp_config(bridge_token))]
+        sandbox = self._sandbox_settings(capable=bridge_token is not None)
         if sandbox is not None:
             argv += ["--settings", json.dumps(sandbox)]
         return argv
 
     @staticmethod
-    def _sandbox_settings() -> Optional[Dict[str, Any]]:
+    def _mcp_config(bridge_token: str) -> Dict[str, Any]:
+        """``--mcp-config`` payload pointing the agent at derpr's own bridge.
+
+        HTTP transport, not stdio: a stdio server would be a child of the
+        agent's own ``claude``, and a process can subvert its own child — the
+        gate has to live somewhere the agent cannot reach. The token travels in
+        the header rather than the URL so it stays out of process listings and
+        any URL-logging on the path."""
+        return {
+            "mcpServers": {
+                "derpr": {
+                    "type": "http",
+                    "url": global_config.MCP_BRIDGE_PUBLIC_URL,
+                    "headers": {"Authorization": f"Bearer {bridge_token}"},
+                }
+            }
+        }
+
+    @staticmethod
+    def _sandbox_settings(capable: bool = False) -> Optional[Dict[str, Any]]:
+        """Sandbox block for ``--settings``.
+
+        A capable dispatch must additionally be able to reach the bridge host,
+        or the sandbox blocks the MCP connection and the agent silently has no
+        derpr tools. The bridge host is added to allowedDomains *only* for
+        capable dispatches, so a default dispatch's egress is unchanged."""
         if not global_config.CC_SANDBOX:
             return None
         sandbox: Dict[str, Any] = {"enabled": True, "autoAllowBashIfSandboxed": True}
         if global_config.CC_SANDBOX_WEAKER_NESTED:
             sandbox["enableWeakerNestedSandbox"] = True
-        if global_config.CC_SANDBOX_ALLOWED_DOMAINS:
-            sandbox["network"] = {"allowedDomains": list(global_config.CC_SANDBOX_ALLOWED_DOMAINS)}
+        domains = list(global_config.CC_SANDBOX_ALLOWED_DOMAINS)
+        if capable:
+            bridge_host = _host_of(global_config.MCP_BRIDGE_PUBLIC_URL)
+            if bridge_host and bridge_host not in domains:
+                domains.append(bridge_host)
+        if domains:
+            sandbox["network"] = {"allowedDomains": domains}
         return {"sandbox": sandbox}
 
     def _start_bridge(self, record: AgentRecord, *, resume_tail: bool = False) -> None:
@@ -418,6 +488,11 @@ class Dispatcher:
                 fields["pr_url"] = ev.payload["pr_url"]
         elif ev.type == ERROR:
             fields["status"] = reg.ERROR
+        # DP-240: a terminal agent must not keep a live bridge credential. Note
+        # this deliberately does NOT fire on QUESTION — a waiting agent is
+        # resumable and needs its token to survive the park.
+        if ev.type in (DONE, ERROR):
+            self._revoke_bridge_token(record.agent_id)
         elif ev.type == STARTED and ev.payload.get("session_id"):
             fields["session_id"] = ev.payload["session_id"]
         await self._registry.update(record.agent_id, **fields)
@@ -433,6 +508,19 @@ class Dispatcher:
                 await self._on_wake(record, ev)
             except Exception:  # noqa: BLE001 — a failed wake must not kill the bridge
                 logger.exception("on_wake failed for agent %s", record.agent_id)
+
+    def _revoke_bridge_token(self, agent_id: str) -> None:
+        """Drop an agent's bridge credential. Safe to call for agents that never
+        had one, and safe to call twice."""
+        if self._token_store is not None:
+            self._token_store.revoke(agent_id)
+
+
+def _host_of(url: str) -> str:
+    """Hostname of an absolute URL, or '' — for the sandbox allowedDomains entry."""
+    if not url:
+        return ""
+    return urllib.parse.urlparse(url).hostname or ""
 
 
 def _read_from(path: str, offset: int) -> tuple[List[str], int]:
