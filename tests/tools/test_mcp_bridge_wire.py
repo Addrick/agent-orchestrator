@@ -10,6 +10,13 @@ live dispatch.
 So these tests boot the bridge under uvicorn on a real port and connect with
 the SDK's own client: initialize handshake, tools/list, tools/call, and the
 401 path. No LLM involved, so this runs in CI on every change.
+
+Not covered here: whether the ``--mcp-config`` payload ``Dispatcher`` builds is
+a shape the ``claude`` CLI still accepts. That was verified once by hand
+(2026-07-24, CLI 2.1.219 — connected and called a tool). It is deliberately not
+a test: it needs the CLI, live API keys, and an llm_live run nobody performs on
+the day the CLI schema changes, so it would document rather than gate. Re-run
+the recipe in memory/project/tasks/DP-240.md if dispatch starts failing.
 """
 
 import asyncio
@@ -252,53 +259,3 @@ async def test_revoked_token_stops_working():
         _assert_rejected_401(caught.value)
 
     assert served.calls == [("safe_read", {"target": "logs"})]
-
-
-# -- real claude subprocess --------------------------------------------------
-
-@pytest.mark.llm_live
-@pytest.mark.asyncio
-async def test_real_claude_subprocess_calls_a_bridge_tool():
-    """End to end with the actual CLI, not just the SDK's client.
-
-    The tests above prove the MCP wire protocol works. This one proves the
-    other half: that the exact ``--mcp-config`` payload ``Dispatcher`` builds is
-    a shape ``claude`` accepts and connects with. Those fail independently — a
-    config-schema change in the CLI breaks dispatch while every wire test still
-    passes.
-    """
-    import shutil
-    from unittest.mock import patch
-
-    from src.self_edit.dispatcher import Dispatcher
-
-    if shutil.which("claude") is None:
-        pytest.skip("claude CLI not on PATH")
-
-    async with _serve() as served:
-        token = served.bridge.tokens.mint("DP-999-live")
-        with patch("config.global_config.MCP_BRIDGE_PUBLIC_URL", served.url):
-            mcp_config = Dispatcher._mcp_config(token)
-        assert mcp_config["mcpServers"]["derpr"]["url"] == served.url
-
-        proc = await asyncio.create_subprocess_exec(
-            "claude", "-p",
-            "--mcp-config", json.dumps(mcp_config),
-            "--dangerously-skip-permissions",
-            "--max-turns", "3",
-            "Call the derpr safe_read tool with target set to logs, "
-            "then reply with just the word DONE.",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=180)
-        except asyncio.TimeoutError:
-            proc.kill()
-            pytest.fail("claude subprocess did not finish within 180s")
-
-    assert served.calls, (
-        "claude never reached the bridge. stdout=%r stderr=%r"
-        % (stdout.decode(errors="replace")[-2000:], stderr.decode(errors="replace")[-2000:])
-    )
-    assert served.calls[0][0] == "safe_read"
