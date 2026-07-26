@@ -31,7 +31,9 @@ from src.origin import ANONYMOUS, Origin
 from src.persona import Persona
 from src.request_builder import AssembledRequest, RequestBuilder, RequestContext
 from src.security.scrubber import get_scrubber
-from src.tools.tool_loop import ToolLoop, _ApiPayloadEvent, _LoopFinishedEvent
+from src.tools.tool_loop import (
+    ToolLoop, _ApiPayloadEvent, _LoopFinishedEvent, _ToolContextEvent,
+)
 from src.turn_persistence import TurnPersistence
 from src.tools.tool_manager import ToolManager
 from src.tools.turn_context import TurnContext, turn_scope
@@ -375,6 +377,14 @@ class ChatSystem:
                     )
                     return
 
+                # The continuation below re-seals this turn's whole tool span
+                # (history_start_override points back at the park), so the
+                # parked row's own copy would double every call in history.
+                if resume.pending.parked_assistant_id is not None:
+                    self.memory_manager.clear_tool_context(
+                        resume.pending.parked_assistant_id,
+                    )
+
             # 3. Tool loop. ToolLoop owns iteration + tool dispatch; this
             #    forwards Token / ToolCallStart / ToolCallResult events,
             #    siphons api_payload into the request cache, and unpacks the
@@ -421,7 +431,24 @@ class ChatSystem:
                         yield ev
                     elif isinstance(ev, (ToolCallStartEvent, ToolCallResultEvent)):
                         yield ev
+                    elif isinstance(ev, _ToolContextEvent):
+                        tool_context_json = ev.tool_context_json
                     elif isinstance(ev, ErrorEvent):
+                        # The loop died mid-turn. Persist whatever tool calls it
+                        # made first — otherwise the next turn shows the model
+                        # its own prose with no trace of the call that failed,
+                        # and it re-proposes or hallucinates the action.
+                        if tool_context_json:
+                            self.turn_persistence.commit_or_update_assistant(
+                                persona_name=persona_name,
+                                user_identifier=user_identifier,
+                                channel=channel, server_id=server_id,
+                                final_text="".join(accumulated_parts),
+                                response_type=ResponseType.LLM_GENERATION,
+                                user_interaction_id=user_interaction_id,
+                                retry_assistant_id=retry_assistant_id,
+                                tool_context_json=tool_context_json,
+                            )
                         yield ev
                         return
                     elif isinstance(ev, _LoopFinishedEvent):
@@ -498,6 +525,18 @@ class ChatSystem:
                 retry_assistant_id=retry_assistant_id,
                 tool_context_json=tool_context_json,
             )
+
+            # Link the parked confirmation to the row that now holds its sealed
+            # tool_context, so a resume can clear it instead of duplicating the
+            # span. Set after the commit because that is where the id is minted.
+            #
+            # The park then goes back to reporting no assistant_id: DP-130's
+            # id-frame contract treats the confirmation chunk as unpersisted,
+            # and that row carries only tool context — never the confirmation
+            # text — so it is not addressable as this turn's assistant message.
+            if pending_writes is not None:
+                parked.parked_assistant_id = assistant_id
+                assistant_id = None
 
             # DP-113: retain assistant turn through the backend boundary.
             # Inherit ctx.turn_tainted so the untrusted bit reaches the

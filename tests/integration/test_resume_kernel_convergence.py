@@ -218,9 +218,13 @@ async def test_resume_persists_write_into_tool_context(mocked_chat_system):
         m.get("role") == "tool" and m.get("name") == "create_ticket" for m in tool_ctx
     ), "approved write result missing from replayed tool_context"
 
-    # And it actually replays into the next turn's formatted history.
+    # And it actually replays into the next turn's formatted history. The user
+    # row matters: DP-296 drops a tool block with no user turn ahead of it,
+    # because that shape opens the wire array with a function call and Gemini
+    # rejects the request.
     replayed = chat_system.request_builder.format_raw_history_for_llm(
-        [{"author_role": "assistant", "author_name": "test_persona",
+        [{"author_role": "user", "author_name": "Alice", "content": "make a ticket"},
+         {"author_role": "assistant", "author_name": "test_persona",
           "content": "Ticket created.", "tool_context": row["tool_context"]}],
         memory_mode="channel", persona_name="test_persona", server_id=None,
     )
@@ -408,3 +412,146 @@ async def test_stream_resume_valid_token_executes_write(mocked_chat_system):
     assert "create_ticket" in executed
     assert ("u8", "test_persona") not in chat_system.confirmations.pending
     assert get_turn_context() is None
+
+
+# --- DP-296: a park must stay visible to the model -------------------------
+
+
+@pytest.mark.asyncio
+async def test_parked_turn_persists_sealed_tool_context(mocked_chat_system):
+    """An unanswered park still records what the model did and proposed.
+
+    Before DP-296 the park exit persisted tool_context=None, so a proposal the
+    operator never answered left zero trace — the model's next turn saw only
+    its own prose and re-proposed or hallucinated the action.
+    """
+    import json
+    chat_system, mem_manager = mocked_chat_system
+    persona = chat_system.personas["test_persona"]
+    persona.set_execution_mode(ExecutionMode.CONFIRM)
+    persona.set_enabled_tools(["*"])
+
+    await _park_write(
+        chat_system, user="u7", channel="c7",
+        write_call={"id": "w1", "name": "update_ticket",
+                    "arguments": {"state": "closed"}},
+    )
+
+    conn = mem_manager._get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT tool_context FROM User_Interactions "
+        "WHERE author_role='assistant' ORDER BY interaction_id DESC LIMIT 1"
+    )
+    row = cursor.fetchone()
+    assert row is not None and row["tool_context"], \
+        "parked turn persisted without tool_context"
+
+    tool_ctx = json.loads(row["tool_context"])
+    proposed = next(
+        m for m in tool_ctx
+        if m.get("role") == "assistant" and m.get("tool_calls")
+    )
+    assert proposed["tool_calls"][0]["name"] == "update_ticket"
+
+    # Sealed, not left unpaired — an unpaired call block is unsendable.
+    sealed = next(m for m in tool_ctx if m.get("role") == "tool")
+    assert json.loads(sealed["content"]) == {
+        "status": "not_executed", "reason": "awaiting_approval",
+    }
+
+
+@pytest.mark.asyncio
+async def test_denied_write_reaches_next_turn_context(mocked_chat_system):
+    """A denial must land in replayable history so the model knows the action
+    did not happen and stops re-proposing it."""
+    import json
+    chat_system, mem_manager = mocked_chat_system
+    persona = chat_system.personas["test_persona"]
+    persona.set_execution_mode(ExecutionMode.CONFIRM)
+    persona.set_enabled_tools(["*"])
+
+    await _park_write(
+        chat_system, user="u8", channel="c8",
+        write_call={"id": "w1", "name": "update_ticket",
+                    "arguments": {"state": "closed"}},
+    )
+
+    _set_engine(chat_system, [
+        ({"type": "text", "content": "Understood, leaving it open."}, {}),
+    ])
+    await chat_system.resume_pending_confirmation("u8", "test_persona", approved=False)
+
+    conn = mem_manager._get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT tool_context FROM User_Interactions "
+        "WHERE author_role='assistant' AND content='Understood, leaving it open.'"
+    )
+    row = cursor.fetchone()
+    assert row is not None and row["tool_context"], \
+        "denied turn persisted without tool_context"
+
+    tool_ctx = json.loads(row["tool_context"])
+    denial = next(m for m in tool_ctx if m.get("role") == "tool")
+    assert "denied" in denial["content"].lower()
+
+    # Replays into the next request, which is the whole point.
+    replayed = chat_system.request_builder.format_raw_history_for_llm(
+        [{"author_role": "user", "author_name": "Alice", "content": "close it"},
+         {"author_role": "assistant", "author_name": "test_persona",
+          "content": "Understood, leaving it open.", "tool_context": row["tool_context"]}],
+        memory_mode="channel", persona_name="test_persona", server_id=None,
+    )
+    assert any(m.get("role") == "tool" and "denied" in m["content"].lower()
+               for m in replayed)
+
+
+@pytest.mark.asyncio
+async def test_resume_does_not_duplicate_parked_tool_context(mocked_chat_system):
+    """The parked row's provisional context is cleared on resume.
+
+    Both rows seal the same span (the continuation re-seals from the park
+    boundary), so leaving the parked copy in place would show the model every
+    approved write twice.
+    """
+    import json
+    chat_system, mem_manager = mocked_chat_system
+    persona = chat_system.personas["test_persona"]
+    persona.set_execution_mode(ExecutionMode.CONFIRM)
+    persona.set_enabled_tools(["*"])
+
+    async def fake_execute(name, **kwargs):
+        return {"ticket_id": 42}
+    chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[assignment]
+
+    await _park_write(
+        chat_system, user="u9", channel="c9",
+        write_call={"id": "w1", "name": "create_ticket", "arguments": {"title": "t"}},
+    )
+
+    _set_engine(chat_system, [
+        ({"type": "text", "content": "Ticket created."}, {}),
+    ])
+    await chat_system.resume_pending_confirmation("u9", "test_persona", approved=True)
+
+    conn = mem_manager._get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT content, tool_context FROM User_Interactions "
+        "WHERE author_role='assistant' ORDER BY interaction_id"
+    )
+    rows = cursor.fetchall()
+
+    # Exactly one row carries the span.
+    carriers = [r for r in rows if r["tool_context"]]
+    assert len(carriers) == 1, \
+        f"expected 1 row with tool_context, got {len(carriers)}"
+    assert carriers[0]["content"] == "Ticket created."
+
+    # And that span mentions the write exactly once.
+    tool_ctx = json.loads(carriers[0]["tool_context"])
+    call_ids = [
+        c["id"] for m in tool_ctx for c in (m.get("tool_calls") or [])
+    ]
+    assert call_ids.count("w1") == 1

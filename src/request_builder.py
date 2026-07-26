@@ -250,8 +250,23 @@ class RequestBuilder:
                 if author_name == persona_name:
                     tool_context_json = msg.get('tool_context')
                     if tool_context_json:
-                        final_history.extend(json.loads(tool_context_json))
-                    final_history.append({'role': 'assistant', 'content': content_clean})
+                        # A replayed tool block must follow a user turn. The
+                        # history limit slices raw rows, so an assistant row
+                        # carrying tool_context can end up oldest — replaying it
+                        # then opens the wire array with a function call and
+                        # Gemini rejects the request outright ("function call
+                        # turn must come immediately after a user turn or after
+                        # a function response turn"). Drop the orphan instead.
+                        if final_history and final_history[-1].get('role') == 'user':
+                            final_history.extend(json.loads(tool_context_json))
+                        else:
+                            logger.debug(
+                                "Dropping orphaned tool_context for %s: no "
+                                "preceding user turn survived the history limit.",
+                                persona_name,
+                            )
+                    if content_clean:
+                        final_history.append({'role': 'assistant', 'content': content_clean})
                 else:
                     # In a group chat, messages from other personas are treated as user messages
                     formatted_content = f"{author_name}: {content_clean}"

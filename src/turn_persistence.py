@@ -174,7 +174,17 @@ class TurnPersistence:
                 return None
 
         if response_type != ResponseType.LLM_GENERATION:
-            return None
+            # DP-296: a park still has to leave a trace of the actions it took
+            # and proposed, or an operator who never answers makes the whole
+            # turn invisible to the model — it then re-proposes or hallucinates
+            # the action on the next turn. Persist the sealed tool context with
+            # empty content: DP-130 keeps the *confirmation text* ephemeral
+            # (re-rendered from the PendingConfirmation), and this row is
+            # cleared by the resume when a decision finally arrives.
+            if response_type == ResponseType.PENDING_CONFIRMATION and tool_context_json:
+                final_text = ""
+            else:
+                return None
 
         try:
             assistant_id: Optional[int] = self.memory_manager.log_message(

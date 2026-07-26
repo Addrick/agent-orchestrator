@@ -621,6 +621,32 @@ def test_log_message_with_tool_context(mem_manager):
     assert parsed[0]['role'] == 'assistant'
 
 
+def test_clear_tool_context_leaves_content_intact(mem_manager):
+    """DP-296: clearing a parked row's provisional tool_context must not touch
+    its text — unlike update_interaction_content, which rewrites content and
+    invalidates embeddings."""
+    tool_ctx = json.dumps([
+        {"role": "assistant", "tool_calls": [{"id": "c1", "name": "update_ticket", "arguments": {}}]},
+        {"role": "tool", "tool_call_id": "c1", "name": "update_ticket",
+         "content": '{"status": "not_executed", "reason": "awaiting_approval"}'}
+    ])
+    interaction_id = mem_manager.log_message(
+        "user1", "persona1", "chan", "assistant", "Bot",
+        "Proposed a change", datetime.now(), tool_context=tool_ctx,
+    )
+
+    assert mem_manager.clear_tool_context(interaction_id) is True
+
+    history = mem_manager.get_personal_history("user1", "persona1")
+    assert history[0]['tool_context'] is None
+    assert history[0]['content'] == "Proposed a change"
+
+
+def test_clear_tool_context_missing_row(mem_manager):
+    """No row to clear reports False rather than raising."""
+    assert mem_manager.clear_tool_context(999999) is False
+
+
 def test_log_message_returns_interaction_id(mem_manager):
     """log_message returns the lastrowid (interaction_id)."""
     row_id = mem_manager.log_message("user1", "persona1", "chan", "user", "Human",

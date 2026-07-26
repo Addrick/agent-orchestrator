@@ -783,6 +783,33 @@ class MemoryManager:
                 conn.rollback()
                 return None
 
+    def clear_tool_context(self, interaction_id: int) -> bool:
+        """Drop a row's stored `tool_context`, leaving its content untouched.
+
+        Used when a parked confirmation resumes: the resumed continuation
+        re-seals the same tool span with real results, so the parked row's
+        provisional copy has to go or the model sees every call twice.
+        Deliberately narrower than `update_interaction_content` — no content
+        rewrite, no `parent_summary_id` reset, no embedding invalidation, since
+        the row's text has not changed.
+        """
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.execute(
+                    "UPDATE User_Interactions SET tool_context = NULL "
+                    "WHERE interaction_id = ?",
+                    (interaction_id,),
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+            except sqlite3.Error as e:
+                logger.error(
+                    f"clear_tool_context failed for id={interaction_id}: {e}"
+                )
+                conn.rollback()
+                return False
+
     def update_interaction_content(self, interaction_id: int, new_content: str,
                                    reasoning_content: Any = _UNSET,
                                    tool_context: Any = _UNSET) -> bool:

@@ -45,6 +45,16 @@ class _ApiPayloadEvent:
 
 
 @dataclass
+class _ToolContextEvent:
+    """Loop-internal: carries this turn's sealed tool context out of an exit
+    that has no `_LoopFinishedEvent` to hang it on (the error paths).
+
+    The orchestrator siphons it exactly like `_ApiPayloadEvent`, so an errored
+    turn can still persist the tool calls it made before dying."""
+    tool_context_json: Optional[str]
+
+
+@dataclass
 class _LoopFinishedEvent:
     """Loop-internal terminal event. Carries the resolved state so the
     orchestrator can persist the assistant turn / park CONFIRM-mode
@@ -65,8 +75,59 @@ class _LoopFinishedEvent:
 LoopEvent = Union[
     TokenEvent, ErrorEvent,
     ToolCallStartEvent, ToolCallResultEvent,
-    _ApiPayloadEvent, _LoopFinishedEvent,
+    _ApiPayloadEvent, _LoopFinishedEvent, _ToolContextEvent,
 ]
+
+# Reasons a tool call can be left without a real result when the turn ends.
+SEAL_AWAITING_APPROVAL = "awaiting_approval"
+SEAL_ERROR = "error"
+SEAL_MAX_ITERATIONS = "max_iterations_exceeded"
+
+
+def seal_tool_context(
+    conversation_history: List[Dict[str, Any]],
+    start: int,
+    reason: str,
+) -> Optional[str]:
+    """Serialize this turn's tool messages, synthesizing a result for every
+    tool call left unanswered.
+
+    A turn can end with calls still outstanding: a write parked for approval,
+    a provider error mid-iteration, the iteration cap. Persisting that slice
+    verbatim stores an assistant message whose `tool_calls` have no matching
+    `tool_result`, and both Anthropic and Gemini reject unpaired blocks on the
+    next request — which is why these exits used to persist nothing at all and
+    the model lost every gated or errored action it took.
+
+    Sealing keeps the turn replayable: the model sees what it called and that
+    the call did not complete. Does not mutate `conversation_history` — the
+    resume path still needs the unsealed list so real results can land.
+    """
+    tool_msgs = conversation_history[start:]
+    if not tool_msgs:
+        return None
+
+    answered = {
+        m.get("tool_call_id") for m in tool_msgs if m.get("role") == "tool"
+    }
+    sealed: List[Dict[str, Any]] = list(tool_msgs)
+    for msg in tool_msgs:
+        if msg.get("role") != "assistant":
+            continue
+        for call in msg.get("tool_calls") or []:
+            call_id = call.get("id")
+            if call_id in answered:
+                continue
+            answered.add(call_id)
+            sealed.append({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": call.get("name"),
+                "content": json.dumps(
+                    {"status": "not_executed", "reason": reason}
+                ),
+            })
+    return json.dumps(sealed)
 
 
 def build_wire_messages(
@@ -186,6 +247,11 @@ class ToolLoop:
                     if "empty response" in str(e)
                     else "Error while generating a response: " + str(e)
                 )
+                yield _ToolContextEvent(
+                    tool_context_json=seal_tool_context(
+                        conversation_history, history_start, SEAL_ERROR,
+                    )
+                )
                 yield ErrorEvent(message=err_msg)
                 return
             except Exception as e:
@@ -194,6 +260,11 @@ class ToolLoop:
                     f"[err {err_id}] Unexpected error during stream_messages "
                     f"(iter {iter_idx}): {e}",
                     exc_info=True,
+                )
+                yield _ToolContextEvent(
+                    tool_context_json=seal_tool_context(
+                        conversation_history, history_start, SEAL_ERROR,
+                    )
                 )
                 yield ErrorEvent(message=err_msg)
                 return
@@ -206,8 +277,9 @@ class ToolLoop:
                     full_text_from_done if full_text_from_done is not None
                     else "".join(accumulated_parts)
                 )
-                tool_msgs = conversation_history[history_start:]
-                tool_context_json = json.dumps(tool_msgs) if tool_msgs else None
+                tool_context_json = seal_tool_context(
+                    conversation_history, history_start, SEAL_ERROR,
+                )
                 yield _LoopFinishedEvent(
                     final_text=final_text,
                     response_type=ResponseType.LLM_GENERATION,
@@ -311,7 +383,15 @@ class ToolLoop:
                 yield _LoopFinishedEvent(
                     final_text="\n".join(lines),
                     response_type=ResponseType.PENDING_CONFIRMATION,
-                    tool_context_json=None,
+                    # Seal the reads this turn already executed plus the parked
+                    # write, so a deny — or an operator who simply never answers
+                    # — still leaves the model able to see what it did and
+                    # proposed. Cleared on resume, where the continuation
+                    # re-seals the same span with real results.
+                    tool_context_json=seal_tool_context(
+                        conversation_history, history_start,
+                        SEAL_AWAITING_APPROVAL,
+                    ),
                     pending_writes=write_calls,
                     turn_tainted=turn_tainted,
                     audit_info=audit_info,
@@ -327,7 +407,9 @@ class ToolLoop:
         yield _LoopFinishedEvent(
             final_text="I seem to be stuck in a loop. Could you please clarify your request?",
             response_type=ResponseType.DEV_COMMAND,
-            tool_context_json=None,
+            tool_context_json=seal_tool_context(
+                conversation_history, history_start, SEAL_MAX_ITERATIONS,
+            ),
             turn_tainted=turn_tainted,
         )
 

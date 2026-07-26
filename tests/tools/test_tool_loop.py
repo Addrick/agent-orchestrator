@@ -13,7 +13,7 @@ from src.generation_events import (
 )
 from src.persona import ExecutionMode
 from src.tools.tool_loop import (
-    ToolLoop, _ApiPayloadEvent, _LoopFinishedEvent,
+    ToolLoop, _ApiPayloadEvent, _LoopFinishedEvent, _ToolContextEvent,
 )
 
 
@@ -308,3 +308,178 @@ async def test_confirm_mode_parks_write_calls():
     assert finished.pending_writes[0]["name"] == "create_ticket"
     # Write tool was NOT executed — manager should not have been called for it.
     tools.execute_tool.assert_not_called()
+
+
+# --- DP-296: tool context must survive every loop exit ---------------------
+#
+# Before DP-296 the park, error and iteration-cap exits all persisted
+# tool_context_json=None, so a gated or errored turn left the model with no
+# record of its own tool calls on the next request.
+
+
+def _tool_context(finished) -> List[Dict[str, Any]]:
+    assert finished.tool_context_json is not None
+    return json.loads(finished.tool_context_json)
+
+
+def _assert_calls_all_answered(msgs: List[Dict[str, Any]]) -> None:
+    """Every tool_call in the slice has a matching tool result. Anthropic and
+    Gemini both reject unpaired blocks, so an unsealed slice is unsendable."""
+    answered = {m.get("tool_call_id") for m in msgs if m.get("role") == "tool"}
+    for m in msgs:
+        for call in m.get("tool_calls") or []:
+            assert call["id"] in answered, f"unpaired tool_call {call['id']}"
+
+
+@pytest.mark.asyncio
+async def test_park_seals_reads_and_pending_write():
+    """A parked turn persists the reads it already ran plus the unexecuted
+    write, sealed so the slice is replayable."""
+    engine = _make_engine([
+        [
+            {"type": "tool_calls", "calls": [
+                {"id": "r1", "name": "get_ticket_details", "arguments": {"id": 1}}
+            ]},
+            {"type": "done", "full_text": ""},
+        ],
+        [
+            {"type": "tool_calls", "calls": [
+                {"id": "w1", "name": "update_ticket", "arguments": {"state": "closed"}}
+            ]},
+            {"type": "done", "full_text": ""},
+        ],
+    ])
+    tools = _make_tool_manager({"get_ticket_details": {"title": "printer"}})
+    loop = ToolLoop(engine, tools)
+
+    events = await _drain(loop.run(
+        persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
+        conversation_history=[], params=MagicMock(), tools=[],
+    ))
+
+    finished = events[-1]
+    assert finished.response_type == ResponseType.PENDING_CONFIRMATION
+    msgs = _tool_context(finished)
+    _assert_calls_all_answered(msgs)
+
+    # The executed read carries its real result.
+    read_result = next(m for m in msgs if m.get("tool_call_id") == "r1")
+    assert "printer" in read_result["content"]
+
+    # The parked write is sealed as not executed, not silently dropped.
+    write_result = next(m for m in msgs if m.get("tool_call_id") == "w1")
+    assert json.loads(write_result["content"]) == {
+        "status": "not_executed", "reason": "awaiting_approval",
+    }
+
+
+@pytest.mark.asyncio
+async def test_error_exit_emits_sealed_tool_context():
+    """A provider error after a completed tool call still surfaces that call's
+    context, so the next turn can see what was attempted."""
+    streams = iter([
+        [
+            {"type": "tool_calls", "calls": [
+                {"id": "r1", "name": "search_tickets", "arguments": {}}
+            ]},
+            {"type": "done", "full_text": ""},
+        ],
+    ])
+
+    def stream_messages(*args, **kwargs):
+        try:
+            return _stream(next(streams))
+        except StopIteration:
+            async def boom():
+                raise LLMCommunicationError("upstream 500")
+                yield  # pragma: no cover
+            return boom()
+
+    engine = MagicMock()
+    engine.stream_messages.side_effect = stream_messages
+    tools = _make_tool_manager({"search_tickets": {"hits": 3}})
+    loop = ToolLoop(engine, tools)
+
+    events = await _drain(loop.run(
+        persona=_make_persona(), conversation_history=[],
+        params=MagicMock(), tools=[],
+    ))
+
+    assert isinstance(events[-1], ErrorEvent)
+    ctx = next(e for e in events if isinstance(e, _ToolContextEvent))
+    msgs = json.loads(ctx.tool_context_json)
+    _assert_calls_all_answered(msgs)
+    assert any(m.get("tool_call_id") == "r1" for m in msgs)
+
+
+@pytest.mark.asyncio
+async def test_error_before_any_tool_call_seals_nothing():
+    """No tool calls yet — nothing to persist, and the event must not invent
+    an empty assistant row."""
+    async def boom(*args, **kwargs):
+        raise LLMCommunicationError("upstream 500", api_payload={"req": 1})
+        yield  # pragma: no cover
+    engine = MagicMock()
+    engine.stream_messages.side_effect = lambda *a, **k: boom()
+    loop = ToolLoop(engine, _make_tool_manager({}))
+
+    events = await _drain(loop.run(
+        persona=_make_persona(), conversation_history=[],
+        params=MagicMock(), tools=[],
+    ))
+
+    ctx = next(e for e in events if isinstance(e, _ToolContextEvent))
+    assert ctx.tool_context_json is None
+
+
+@pytest.mark.asyncio
+async def test_max_iterations_seals_tool_context():
+    """The iteration cap is an exit like any other — it must not drop the
+    calls the model made on the way there."""
+    one_call_stream = lambda i: [
+        {"type": "tool_calls", "calls": [
+            {"id": f"c{i}", "name": "spinner", "arguments": {}}
+        ]},
+        {"type": "done", "full_text": ""},
+    ]
+    engine = _make_engine([one_call_stream(i) for i in range(3)])
+    tools = _make_tool_manager({"spinner": {"result": "spin"}})
+    loop = ToolLoop(engine, tools, max_iterations=3)
+
+    events = await _drain(loop.run(
+        persona=_make_persona(), conversation_history=[],
+        params=MagicMock(), tools=[],
+    ))
+
+    msgs = _tool_context(events[-1])
+    _assert_calls_all_answered(msgs)
+    assert {m.get("tool_call_id") for m in msgs if m.get("role") == "tool"} == {
+        "c0", "c1", "c2",
+    }
+
+
+@pytest.mark.asyncio
+async def test_seal_respects_history_start_override():
+    """A resumed turn seals from the park boundary, so the whole span (parked
+    read, approved write, continuation) lands in one tool_context."""
+    prior = [
+        {"role": "user", "content": "close it"},
+        {"role": "assistant", "tool_calls": [
+            {"id": "w1", "name": "update_ticket", "arguments": {}}
+        ]},
+        {"role": "tool", "tool_call_id": "w1", "name": "update_ticket",
+         "content": '{"ok": true}'},
+    ]
+    engine = _make_engine([[{"type": "done", "full_text": "Closed it."}]])
+    loop = ToolLoop(engine, _make_tool_manager({}))
+
+    events = await _drain(loop.run(
+        persona=_make_persona(), conversation_history=prior,
+        params=MagicMock(), tools=[], history_start_override=1,
+    ))
+
+    msgs = _tool_context(events[-1])
+    _assert_calls_all_answered(msgs)
+    # Starts at the park boundary — the user turn stays out of the block.
+    assert msgs[0].get("tool_calls")[0]["id"] == "w1"
+    assert len(msgs) == 2
