@@ -38,6 +38,8 @@ from src.interfaces.gmail_bot import create_gmail_bot
 from src.interfaces.kobold_engine_adapter import create_kobold_engine_adapter
 from config.global_config import (
     CHAT_LOG_LOCATION,
+    MCP_BRIDGE_ENABLED,
+    MCP_BRIDGE_TOOLS,
     LOGS_DIR,
     DISCORD_BOT,
     GMAIL_BOT,
@@ -136,11 +138,14 @@ def _register_interfaces(
     bot: ChatSystem,
     notification_router: NotificationRouter,
     date_tagger: Optional[Any] = None,
+    mcp_bridge: Optional[Any] = None,
 ) -> None:
     """Register long-running interface tasks (Discord, Gmail).
 
     `date_tagger` is the DP-292 LLM date-tagger callable (or None), injected
     into the engine adapter for document-ingest date anchoring.
+    `mcp_bridge` is the DP-240 subagent tool bridge (or None), mounted on the
+    engine adapter's app.
     """
     if DISCORD_BOT:
         logger.info("Initializing Discord bot...")
@@ -179,7 +184,8 @@ def _register_interfaces(
         # the engine adapter keeps its established :KOBOLD_PORT+1 (5003) port.
         engine_port = KOBOLD_PORT + 1
         logger.info(f"Initializing Kobold Engine API on port {engine_port}...")
-        engine_adapter = create_kobold_engine_adapter(bot, date_tagger=date_tagger)
+        engine_adapter = create_kobold_engine_adapter(
+            bot, date_tagger=date_tagger, mcp_bridge=mcp_bridge)
         engine_adapter.port = engine_port
         # DP-238 web: mount the browser/phone push-to-talk voice capture on the
         # engine adapter's FastAPI app (GET /voice). No-op unless VOICE_WEB_ENABLED.
@@ -305,15 +311,60 @@ async def main() -> None:
     mcp_manager = MCPClientManager(personas_provider=lambda: bot.personas)
     bot.register_service(MCPIntegration(mcp_manager))
 
-    # 7.5 Register the proposal queue review surface (DP-282). Needs Zammad —
-    # the executor is the sole component that turns an approved proposal into
-    # an external write. Without Zammad there is nothing to execute against,
-    # so (like ZammadIntegration) it simply doesn't register.
-    if zammad_client is not None:
+    # 7.5 Register the proposal queue review surface (DP-282, extended DP-240).
+    # The executor is the sole component that turns an approved proposal into
+    # an external write. It has two independent backends — Zammad for the
+    # ticket actions, the MCP bridge's AgentCallRunner for call_derpr_tool —
+    # and registers if either is present (see the registration block below).
+    # 7.6 DP-240 MCP bridge: build the AgentCallRunner FIRST so the same
+    # instance backs both the bridge (which decides what is exposed and what is
+    # gated) and the executor (which re-checks that same exposure at approval
+    # time). Two instances could drift apart, and the drift would silently widen
+    # what an approved row may run.
+    mcp_bridge = None
+    agent_call_runner = None
+    if MCP_BRIDGE_ENABLED:
+        from src.proposals.agent_call import AgentCallRunner
+        from src.tool_policy import ToolPolicy
+        from src.tools.mcp_bridge import McpBridge
+        agent_call_runner = AgentCallRunner(
+            tool_manager_lookup=lambda: bot.tool_manager,
+            policy_lookup=lambda: ToolPolicy(default="deny", allow=list(MCP_BRIDGE_TOOLS)),
+        )
+
+        async def _propose_agent_call(agent_id: str, tool_name: str,
+                                      tool_args: Dict[str, Any]) -> int:
+            return await asyncio.to_thread(
+                memory_manager.create_proposal,
+                agent_name=f"agent:{agent_id}",
+                action_type="call_derpr_tool",
+                action_args={"tool_name": tool_name, "tool_args": tool_args,
+                             "agent_id": agent_id},
+                rationale=f"Dispatched subagent {agent_id} requested {tool_name}.",
+            )
+
+        mcp_bridge = McpBridge(agent_call_runner, _propose_agent_call)
+        logger.info("MCP bridge enabled; exposing tools: %s", MCP_BRIDGE_TOOLS)
+
+    # The review surface registers when *either* backend exists. Zammad drives
+    # the ticket-shaped actions (DP-282); the MCP bridge drives call_derpr_tool
+    # (DP-240). Gating registration on Zammad alone would let a bridge-only
+    # deployment queue gated subagent calls into a queue with no approve/deny
+    # tools — the agent would wait forever on a row nobody can act on. The
+    # executor refuses whichever action family its backend is missing.
+    if zammad_client is not None or mcp_bridge is not None:
         from src.proposals import ProposalExecutor, ProposalIntegration
         bot.register_service(
-            ProposalIntegration(memory_manager, ProposalExecutor(zammad_client))
+            ProposalIntegration(
+                memory_manager,
+                ProposalExecutor(zammad_client, agent_call_runner=agent_call_runner),
+            )
         )
+        if zammad_client is None:
+            logger.info(
+                "Proposal review surface registered without Zammad — "
+                "call_derpr_tool rows are executable; ticket actions are not."
+            )
 
     # 8. Register interfaces
     # DP-292: build the date-tagger callable from AgentManager (convention-DI)
@@ -322,7 +373,8 @@ async def main() -> None:
     if DATE_TAGGER_ENABLED:
         _dt = agent_manager.get_inference_agent(DATE_TAGGER_NAME)
         date_tagger_callable = _dt.tag if _dt is not None else None
-    _register_interfaces(app, bot, notification_router, date_tagger=date_tagger_callable)
+    _register_interfaces(app, bot, notification_router, date_tagger=date_tagger_callable,
+                         mcp_bridge=mcp_bridge)
 
     # 8.1 Perform post-init startup tasks (e.g. Hindsight bank provisioning)
     await bot.startup()

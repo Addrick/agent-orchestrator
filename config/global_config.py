@@ -369,6 +369,29 @@ CC_ALLOWED_TOOLS = [
     t.strip() for t in os.environ.get("CC_ALLOWED_TOOLS", "").split(",") if t.strip()
 ]
 
+# --- DP-240: MCP bridge — derpr tools for dispatched subagents ----------------
+# A derpr-hosted MCP server (src/tools/mcp_bridge.py) mounted on the kobold
+# engine adapter, letting a *capable* dispatched subagent call ToolManager tools.
+# Off by default: default fixr dispatches are unchanged and never see it.
+#
+# Gated (write/irreversible) calls are NOT executed by the bridge — they become
+# `call_derpr_tool` proposal rows for human approval. See
+# memory/project/decisions/2026-07-23-mcp-gate-is-the-proposal-queue.md.
+MCP_BRIDGE_ENABLED = os.environ.get("MCP_BRIDGE_ENABLED", "False").lower() in ("true", "1", "yes", "on")
+# Tools exposed over the bridge. Default-deny: an empty list exposes NOTHING, so
+# enabling the bridge without choosing tools is inert rather than permissive.
+# DP-240 ships proving the path with read-only fixr tools; DP-241 adds docker.
+MCP_BRIDGE_TOOLS = [
+    t.strip() for t in os.environ.get("MCP_BRIDGE_TOOLS", "inspect_agents").split(",") if t.strip()
+]
+# Path the bridge mounts at on the engine adapter app.
+MCP_BRIDGE_PATH = os.environ.get("MCP_BRIDGE_PATH", "/mcp")
+# Absolute URL the *subagent* uses to reach the bridge. The subagent runs in a
+# sandbox, so it cannot rely on the adapter's own bind address — this is the
+# address from the child's perspective, and its host must also appear in
+# CC_SANDBOX_ALLOWED_DOMAINS or the sandbox blocks the connection.
+MCP_BRIDGE_PUBLIC_URL = os.environ.get("MCP_BRIDGE_PUBLIC_URL", "")
+
 # --- DP-227: fixr base clone + per-dispatch worktrees -------------------------
 # The "fixr" supervisor dispatches one detached coding agent per bug. Each agent
 # runs in an isolated `git worktree` off a PRISTINE base clone of derpr's OWN
