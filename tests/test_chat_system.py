@@ -823,6 +823,74 @@ async def test_prepare_request_prunes_to_max_context_tokens(chat_system_with_moc
     assert len(ctx.conversation_history) < 5  # at least one drop
 
 
+# --- Orphaned tool head (DP-298) ---
+
+def _orphan_history_rows():
+    """A DB window that opens mid-turn: the assistant row's tool_context expands
+    into a tool_calls/tool pair whose triggering user row fell off the window."""
+    tool_context = json.dumps([
+        {"role": "assistant", "tool_calls": [{"id": "c1", "name": "inspect_agents", "arguments": {}}]},
+        {"role": "tool", "tool_call_id": "c1", "name": "inspect_agents", "content": "{}"},
+    ])
+    return [
+        {"author_role": "assistant", "content": "agent dispatched", "author_name": "test_persona",
+         "tool_context": tool_context, "interaction_id": 2, "timestamp": "t"},
+        {"author_role": "user", "content": "and now?", "author_name": "u",
+         "interaction_id": 3, "timestamp": "t"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_prepare_request_drops_orphaned_tool_head(chat_system_with_mocks):
+    """DP-298: the DB window counts rows, not turns, so it can open on an
+    assistant row whose tool_context expands to a tool_calls/tool pair with no
+    preceding user turn. Google rejects that with 400 'function call turn must
+    come immediately after a user turn' — the orphaned head must be dropped."""
+    system, memory_mock, _, persona, _ = chat_system_with_mocks
+
+    memory_mock.get_channel_history.return_value = _orphan_history_rows()
+    ctx = RequestContext(
+        persona=persona, persona_name='test_persona', user_identifier='user',
+        channel='general', message='latest user msg', server_id='srv1',
+    )
+
+    await system.request_builder.prepare_request(ctx)
+
+    head = ctx.conversation_history[0]
+    assert head.get("role") != "tool"
+    assert not head.get("tool_calls")
+    # the orphaned pair is gone entirely — it is the only tool traffic here
+    assert not any(m.get("role") == "tool" or m.get("tool_calls")
+                   for m in ctx.conversation_history)
+    assert ctx.conversation_history[-1] == {"role": "user", "content": "latest user msg"}
+
+
+@pytest.mark.asyncio
+async def test_prepare_request_drops_orphaned_tool_head_behind_ltm_block(chat_system_with_mocks):
+    """DP-298: the LTM recall block is inserted at index 0 *after* the history is
+    built, so it sits in front of the orphan. It is not a real user turn and must
+    not shield it — otherwise the exact case this repair exists for (recall hit +
+    a window opening on tool traffic) still reaches the provider and 400s."""
+    system, memory_mock, _, persona, _ = chat_system_with_mocks
+
+    memory_mock.get_channel_history.return_value = _orphan_history_rows()
+    system.request_builder.retrieve_memory_block = AsyncMock(  # type: ignore[method-assign]
+        return_value=("[Recalled context] the user asked about agents earlier.", False),
+    )
+    ctx = RequestContext(
+        persona=persona, persona_name='test_persona', user_identifier='user',
+        channel='general', message='latest user msg', server_id='srv1',
+    )
+
+    await system.request_builder.prepare_request(ctx)
+
+    # The recall block is preserved at the head — only the orphan is removed.
+    assert ctx.conversation_history[0]["content"].startswith("[Recalled context]")
+    assert not any(m.get("role") == "tool" or m.get("tool_calls")
+                   for m in ctx.conversation_history)
+    assert ctx.conversation_history[-1] == {"role": "user", "content": "latest user msg"}
+
+
 # --- Internal Logging Tests ---
 
 @pytest.mark.asyncio

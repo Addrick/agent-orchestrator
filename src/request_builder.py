@@ -22,7 +22,7 @@ from config.global_config import (
 from src.embedding_service import EmbeddingService
 from src.generation_params import GenerationParams
 from src.memory.backend.base import MemoryBackend, MemoryHit
-from src.memory.context_budget import truncate_messages_to_budget
+from src.memory.context_budget import drop_orphaned_tool_head, truncate_messages_to_budget
 from src.memory.memory_manager import MemoryManager
 from src.persona import Persona, MemoryMode
 from src.tools.definitions import MODEL_INCOMPATIBLE_TOOLS
@@ -722,8 +722,10 @@ class RequestBuilder:
             current_message=ctx.message,
             oldest_interaction_id=ctx.oldest_interaction_id,
         )
+        memory_msg: Optional[Dict[str, Any]] = None
         if memory_block:
-            ctx.conversation_history.insert(0, {"role": "user", "content": memory_block})
+            memory_msg = {"role": "user", "content": memory_block}
+            ctx.conversation_history.insert(0, memory_msg)
         if has_untrusted:
             ctx.turn_tainted = True
             if "memory_recall" not in ctx.taint_sources:
@@ -753,4 +755,22 @@ class RequestBuilder:
                 f"Token-prune: dropped {dropped} oldest messages to fit "
                 f"max_context_tokens={ctx.persona.get_max_context_tokens()} "
                 f"(prompt_budget={prompt_budget}) for persona={ctx.persona_name}"
+            )
+
+        # Last stop before the wire. Both truncations above count messages, not
+        # turns, so either can slice into the middle of a tool sequence and leave
+        # the history starting on an assistant-with-tool_calls / tool message
+        # whose user turn is gone — which Google rejects outright. This runs
+        # *after* the token-prune because the prune itself can open a new orphan;
+        # the LTM block is passed as injected head content so the scan looks
+        # through it instead of stopping on it (it is not a real user turn).
+        ctx.conversation_history, orphaned = drop_orphaned_tool_head(
+            ctx.conversation_history,
+            injected=(memory_msg,) if memory_msg is not None else None,
+        )
+        if orphaned:
+            logger.info(
+                "Dropped %d orphaned tool-sequence message(s) from the head of the "
+                "history for persona=%s (truncation sliced mid-turn)",
+                orphaned, ctx.persona_name,
             )
