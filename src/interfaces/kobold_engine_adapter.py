@@ -1831,8 +1831,16 @@ class KoboldEngineAdapter:
             r = await self._http.post(url, json=body)
             return JSONResponse(status_code=r.status_code, content=r.json() if r.content else {})
         except Exception as e:
+            # The callers of this forwarder (/api/extra/tokencount,
+            # /api/extra/generate/check) are DATA_PLANE_POST_PATHS — reachable
+            # without the operator token. Unlike the control-plane error sites,
+            # the exception text here would go to an untrusted caller and can
+            # carry the upstream kobold URL, so log it and return a generic
+            # message. See decisions/2026-05-27-kobold-stack-trace-exposure.md.
             logger.warning(f"Forward POST {path} failed: {e}")
-            return JSONResponse(status_code=502, content={"error": str(e)})
+            return JSONResponse(
+                status_code=502, content={"error": "upstream backend unreachable"}
+            )
 
     @staticmethod
     def _assembled_to_dict(assembled: "AssembledRequest") -> Dict[str, Any]:
