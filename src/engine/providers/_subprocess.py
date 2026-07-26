@@ -19,11 +19,108 @@ import json
 import logging
 import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.llm_errors import LLMCommunicationError
 
 logger = logging.getLogger(__name__)
+
+#: Linux caps a *single* argv/env string at ``MAX_ARG_STRLEN`` (32 pages = 128
+#: KiB); ``execve()`` refuses anything larger with ``E2BIG`` — surfacing as
+#: ``OSError: [Errno 7] Argument list too long`` from ``create_subprocess_exec``.
+#: The rendered prompt is the only unbounded argv entry these routes pass (the
+#: engine bounds history by *tokens* — ~131k tokens is ~0.5 MB of text, four
+#: times the cap), so it must be bounded in bytes before the spawn.
+MAX_ARG_STRLEN = 128 * 1024
+#: Budget for the rendered prompt. Headroom under the hard cap covers the other
+#: argv entries and the child env, which share the overall ``ARG_MAX`` budget.
+MAX_CLI_PROMPT_BYTES = 96 * 1024
+#: Marker left in place of the history elided to fit the budget.
+ELISION_NOTICE = "[...older conversation elided to fit the CLI prompt size limit...]"
+
+_BLOCK_SEP = "\n\n"
+
+
+def _utf8_len(text: str) -> int:
+    return len(text.encode("utf-8"))
+
+
+def _keep_head_bytes(text: str, max_bytes: int) -> str:
+    """First ``max_bytes`` UTF-8 bytes of ``text`` (never splits a codepoint)."""
+    if max_bytes <= 0:
+        return ""
+    return text.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def _keep_tail_bytes(text: str, max_bytes: int) -> str:
+    """Last ``max_bytes`` UTF-8 bytes of ``text`` (never splits a codepoint)."""
+    if max_bytes <= 0:
+        return ""
+    return text.encode("utf-8")[-max_bytes:].decode("utf-8", errors="ignore")
+
+
+def fit_cli_prompt(
+    preamble: str, transcript: str, max_bytes: int = MAX_CLI_PROMPT_BYTES
+) -> Tuple[str, int]:
+    """Join ``preamble`` + ``transcript`` into one prompt that fits ``max_bytes``.
+
+    The agy / cc routes hand the whole prompt to the CLI as a single argv entry,
+    so an oversized prompt is not a slow call — it is an ``E2BIG`` spawn failure
+    (``OSError`` errno 7) before the CLI ever runs. The CLIs expose no stdin or
+    prompt-file transport (``agy --print`` / ``claude -p`` take the prompt as the
+    flag's value), so the payload has to fit the OS contract.
+
+    ``preamble`` (system prompt + tool protocol) is required for a correct answer
+    and is kept whole; the ``transcript`` is trimmed OLDEST-first, block by block
+    (``render_transcript`` joins turns with a blank line), mirroring how the
+    engine's token-budget pruning drops the oldest turns. Returns
+    ``(prompt, dropped_blocks)``.
+    """
+    parts = [p for p in (preamble, transcript) if p]
+    prompt = _BLOCK_SEP.join(parts)
+    if _utf8_len(prompt) <= max_bytes:
+        return prompt, 0
+
+    blocks = transcript.split(_BLOCK_SEP) if transcript else []
+    # Room left for history once the preamble and the elision marker are paid for.
+    fixed = _utf8_len(ELISION_NOTICE) + len(_BLOCK_SEP)
+    if preamble:
+        fixed += _utf8_len(preamble) + len(_BLOCK_SEP)
+    budget = max_bytes - fixed
+    if budget <= 0:
+        # Pathological: the preamble alone blows the limit. Nothing else fits.
+        logger.warning(
+            "CLI prompt preamble alone exceeds %d bytes — truncating it.", max_bytes
+        )
+        return _keep_head_bytes(prompt, max_bytes), len(blocks)
+
+    kept: List[str] = []
+    used = 0
+    for block in reversed(blocks):  # newest turns first
+        cost = _utf8_len(block) + (len(_BLOCK_SEP) if kept else 0)
+        if used + cost > budget:
+            break
+        kept.insert(0, block)
+        used += cost
+    dropped = len(blocks) - len(kept)
+    if not kept and blocks:
+        # Even the newest turn alone overflows: keep its tail (the most recent
+        # text) rather than dropping the current turn entirely.
+        kept = [_keep_tail_bytes(blocks[-1], budget)]
+        dropped = len(blocks) - 1
+        logger.warning(
+            "CLI prompt: newest history block alone exceeds %d bytes — kept its tail.",
+            budget,
+        )
+
+    prompt = _BLOCK_SEP.join(
+        [p for p in (preamble, ELISION_NOTICE, _BLOCK_SEP.join(kept)) if p]
+    )
+    logger.warning(
+        "CLI prompt exceeded %d bytes — elided %d oldest history block(s).",
+        max_bytes, dropped,
+    )
+    return prompt, dropped
 
 
 def render_transcript(history: List[Dict[str, Any]]) -> str:
@@ -78,16 +175,28 @@ async def exec_cli(binary: str, args: List[str], workspace_dir: str, timeout: fl
     # (cc passes a subscription-scrubbed env; agy passes None = inherit unchanged).
     proc = None
     try:
-        proc = await asyncio.create_subprocess_exec(
-            binary,
-            *args,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=workspace_dir,
-            env=env,
-            start_new_session=True
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                binary,
+                *args,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=workspace_dir,
+                env=env,
+                start_new_session=True
+            )
+        except OSError as e:
+            # execve refuses an oversized argv/env with E2BIG ("Argument list too
+            # long"). Callers clamp the prompt (`fit_cli_prompt`), so reaching
+            # here means some other argv entry or the child env blew the budget —
+            # surface it as a provider error instead of an unhandled OSError that
+            # takes the whole turn down.
+            argv_bytes = sum(len(a.encode("utf-8")) for a in args)
+            raise LLMCommunicationError(
+                f"{label} CLI could not be spawned ({e.strerror or e}); "
+                f"argv payload was {argv_bytes} bytes."
+            ) from e
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
         except asyncio.TimeoutError as e:

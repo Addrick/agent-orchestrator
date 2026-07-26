@@ -1090,6 +1090,56 @@ class TestAgyHandler:
         for forbidden in ["secret", "token", "oauth", "api_key"]:
             assert forbidden not in payload_str
 
+    @pytest.mark.asyncio
+    async def test_handler_clamps_oversized_prompt_to_argv_limit(
+        self, text_engine, base_context, monkeypatch
+    ):
+        """SYS-PAYLOAD-001: the prompt is one argv entry and execve caps a single
+        argument at 128 KiB. An oversized history must be elided oldest-first, not
+        handed to the spawn (which fails with OSError [Errno 7])."""
+        from src.engine.providers import _subprocess
+
+        mock_cli = AsyncMock(return_value="ok")
+        monkeypatch.setattr(text_engine, "_run_agy_cli", mock_cli)
+
+        ctx = dict(base_context)
+        ctx["history"] = [
+            {"role": "user", "content": "ancient question " + "a" * 80_000},
+            {"role": "tool", "name": "read_file", "content": "b" * 80_000},
+            {"role": "user", "content": "the latest question"},
+        ]
+
+        _, api_payload = await text_engine._generate_agy_response({"model_name": "agy-flash"}, ctx)
+
+        prompt_arg = mock_cli.call_args[0][0]
+        assert len(prompt_arg.encode("utf-8")) <= _subprocess.MAX_CLI_PROMPT_BYTES
+        assert len(prompt_arg.encode("utf-8")) < _subprocess.MAX_ARG_STRLEN
+        # System prompt and the newest turn survive; the oldest turn is elided.
+        assert "You are a test bot." in prompt_arg
+        assert "the latest question" in prompt_arg
+        assert "ancient question" not in prompt_arg
+        assert _subprocess.ELISION_NOTICE in prompt_arg
+        assert api_payload["history_blocks_elided"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_handler_leaves_normal_prompt_untouched(
+        self, text_engine, base_context, monkeypatch
+    ):
+        """The clamp must be inert for ordinary prompts (no elision marker)."""
+        from src.engine.providers import _subprocess
+
+        mock_cli = AsyncMock(return_value="ok")
+        monkeypatch.setattr(text_engine, "_run_agy_cli", mock_cli)
+
+        ctx = dict(base_context)
+        ctx["history"] = [{"role": "user", "content": "Hello"}]
+
+        _, api_payload = await text_engine._generate_agy_response({"model_name": "agy-flash"}, ctx)
+
+        prompt_arg = mock_cli.call_args[0][0]
+        assert _subprocess.ELISION_NOTICE not in prompt_arg
+        assert api_payload["history_blocks_elided"] == 0
+
     def test_route_resolves_to_agy_handler(self, text_engine, monkeypatch):
         # route resolution now calls the POSIX-only guard; no-op it so the
         # route-table assertion itself runs on any host
@@ -1196,6 +1246,26 @@ class TestAgyCliInvocation:
 
         await text_engine._run_agy_cli("hi", timeout=5)
         assert "--sandbox" not in captured["args"]
+
+    @pytest.mark.asyncio
+    async def test_run_agy_cli_wraps_spawn_oserror(self, text_engine, monkeypatch, tmp_path):
+        """SYS-PAYLOAD-001: a failed execve (E2BIG on an oversized argv/env) must
+        surface as an LLMCommunicationError, not a raw OSError that kills the turn."""
+        import src.engine as engine_mod
+        from config import global_config
+
+        monkeypatch.setattr(global_config, "AGY_WORKSPACES_DIR", tmp_path / "workspaces")
+
+        async def fake_exec(*args, **kwargs):
+            raise OSError(7, "Argument list too long")
+
+        monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/agy")
+        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
+
+        with pytest.raises(LLMCommunicationError, match="Argument list too long"):
+            await text_engine._run_agy_cli("hi", timeout=5)
+
 
     def test_agy_unsupported_on_windows_raises_clear_error(self, text_engine, monkeypatch):
         import src.engine as engine_mod
@@ -1401,6 +1471,47 @@ class TestAgyCliInvocation:
         assert captured_cwd == [os.path.abspath(workspace)]
         assert cache_target.exists()
         assert link.exists()
+
+
+class TestFitCliPrompt:
+    """SYS-PAYLOAD-001: byte-bounding the single argv entry the agy/cc CLIs take."""
+
+    def test_under_budget_is_verbatim(self):
+        from src.engine.providers._subprocess import fit_cli_prompt
+
+        prompt, dropped = fit_cli_prompt("SYS", "User: hi\n\nAssistant: yo")
+        assert prompt == "SYS\n\nUser: hi\n\nAssistant: yo"
+        assert dropped == 0
+
+    def test_drops_oldest_blocks_first(self):
+        from src.engine.providers._subprocess import ELISION_NOTICE, fit_cli_prompt
+
+        blocks = [f"User: turn {i} " + "x" * 400 for i in range(10)]
+        prompt, dropped = fit_cli_prompt("SYS", "\n\n".join(blocks), max_bytes=2000)
+        assert len(prompt.encode("utf-8")) <= 2000
+        assert dropped > 0
+        assert ELISION_NOTICE in prompt
+        assert "turn 9" in prompt and "turn 0" not in prompt
+
+    def test_single_oversized_block_keeps_its_tail(self):
+        from src.engine.providers._subprocess import fit_cli_prompt
+
+        prompt, _ = fit_cli_prompt("SYS", "User: " + "z" * 5000 + " END", max_bytes=1000)
+        assert len(prompt.encode("utf-8")) <= 1000
+        assert prompt.endswith(" END")  # the newest text is what survives
+
+    def test_oversized_preamble_is_truncated(self):
+        from src.engine.providers._subprocess import fit_cli_prompt
+
+        prompt, _ = fit_cli_prompt("S" * 5000, "User: hi", max_bytes=1000)
+        assert len(prompt.encode("utf-8")) <= 1000
+
+    def test_multibyte_boundary_is_not_split(self):
+        from src.engine.providers._subprocess import fit_cli_prompt
+
+        prompt, _ = fit_cli_prompt("", "User: " + "é" * 5000, max_bytes=1000)
+        assert len(prompt.encode("utf-8")) <= 1000
+        prompt.encode("utf-8").decode("utf-8")  # round-trips: no split codepoint
 
 
 class TestClaudeCodeProvider:

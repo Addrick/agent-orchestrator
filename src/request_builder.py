@@ -22,7 +22,7 @@ from config.global_config import (
 from src.embedding_service import EmbeddingService
 from src.generation_params import GenerationParams
 from src.memory.backend.base import MemoryBackend, MemoryHit
-from src.memory.context_budget import truncate_messages_to_budget
+from src.memory.context_budget import drop_orphaned_tool_head, truncate_messages_to_budget
 from src.memory.memory_manager import MemoryManager
 from src.persona import Persona, MemoryMode
 from src.tools.definitions import MODEL_INCOMPATIBLE_TOOLS
@@ -753,4 +753,17 @@ class RequestBuilder:
                 f"Token-prune: dropped {dropped} oldest messages to fit "
                 f"max_context_tokens={ctx.persona.get_max_context_tokens()} "
                 f"(prompt_budget={prompt_budget}) for persona={ctx.persona_name}"
+            )
+
+        # Last stop before the wire: both truncations above count messages, not
+        # turns, so either can slice into the middle of a tool sequence and leave
+        # the history starting on an assistant-with-tool_calls / tool message
+        # whose user turn is gone. Google rejects that outright ("function call
+        # turn must come immediately after a user turn"); drop the orphaned head.
+        ctx.conversation_history, orphaned = drop_orphaned_tool_head(ctx.conversation_history)
+        if orphaned:
+            logger.info(
+                "Dropped %d orphaned tool-sequence message(s) from the head of the "
+                "history for persona=%s (truncation sliced mid-turn)",
+                orphaned, ctx.persona_name,
             )

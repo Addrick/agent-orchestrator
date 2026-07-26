@@ -226,6 +226,13 @@ Each call is executed inside a persistent workspace directory (by default, perso
 - `AGY_WORKSPACE_MODE` (default `"persona"`): Set to `"global"` to share a single derpr-wide workspace.
 - `AGY_SANDBOX` (default `True`): Run `agy` under its built-in OS-level sandbox (`--sandbox`; nsjail on Linux, sandbox-exec on macOS). Set to `False` if the sandbox is unavailable in your environment (e.g. a container without the needed privileges).
 
+> **Prompt size.** The `agy` and `cc-*` CLIs take the whole prompt as a single
+> command-line argument, and the OS caps one argument at 128 KiB. A very long
+> conversation (or a single huge tool result) is therefore trimmed before the
+> call: the persona prompt and the newest turns are kept, the oldest turns are
+> replaced with an `[...older conversation elided...]` marker. The other
+> providers, which send the history over HTTP, are unaffected.
+
 > **Platform: POSIX only.** The `agy` provider works on Linux/macOS (and WSL or
 > Docker). It does **not** work on **native Windows**: `agy` is a TUI that only
 > writes its response to a TTY, while the engine captures `stdout` through a

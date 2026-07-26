@@ -94,3 +94,38 @@ def truncate_messages_to_budget(
         dropped += 1
 
     return kept, dropped
+
+
+def drop_orphaned_tool_head(
+    messages: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Drop a tool sequence left dangling at the head of `messages`.
+
+    A tool turn is three messages long — `user`, `assistant` (with
+    `tool_calls`), `tool` (the result) — but every truncation this codebase
+    performs counts *messages*, not turns: the DB sliding window
+    (`fetch_raw_history`'s row `LIMIT`, expanded into the full sequence by
+    `format_raw_history_for_llm`) and `truncate_messages_to_budget` above both
+    cut oldest-first and can land mid-sequence. That leaves the history
+    *starting* on an `assistant`-with-`tool_calls` or a `tool` message, whose
+    triggering user turn is gone.
+
+    Providers reject that shape: Google returns 400 "function call turn must
+    come immediately after a user turn" (a `model` Content whose first part is a
+    `function_call`, with nothing before it), and the OpenAI/Anthropic wire
+    formats reject an unpaired tool result the same way. Since the orphan's
+    context is already gone, the repair is to drop it — no valid prompt can be
+    built from a half turn.
+
+    Returns `(repaired_messages, dropped_count)`.
+    """
+    start = 0
+    for msg in messages:
+        role = msg.get("role")
+        if role == "tool" or (role == "assistant" and msg.get("tool_calls")):
+            start += 1
+            continue
+        break
+    if start == 0:
+        return messages, 0
+    return messages[start:], start

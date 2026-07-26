@@ -1,6 +1,10 @@
 # tests/memory/test_context_budget.py
 
-from memory.context_budget import estimate_tokens, truncate_messages_to_budget
+from memory.context_budget import (
+    drop_orphaned_tool_head,
+    estimate_tokens,
+    truncate_messages_to_budget,
+)
 
 
 # --- estimate_tokens boundaries ---
@@ -98,3 +102,63 @@ def test_truncate_returns_dropped_count_correctly():
     msgs = [_msg("user", 40)] * 10  # 10 tok each = 100 total
     out, dropped = truncate_messages_to_budget(msgs, 30)
     assert dropped == len(msgs) - len(out)
+
+
+# --- drop_orphaned_tool_head (SYS-PAYLOAD-001) ---
+#
+# Every truncation in the pipeline counts messages, not turns, so the DB
+# sliding window and the token pruner can both slice into the middle of a
+# user/assistant(tool_calls)/tool sequence. A history that then STARTS on a
+# tool_calls or tool message is rejected by Google with 400 "function call turn
+# must come immediately after a user turn".
+
+
+def _call_msg() -> dict:
+    return {"role": "assistant", "tool_calls": [{"id": "c1", "name": "t", "arguments": {}}]}
+
+
+def _result_msg() -> dict:
+    return {"role": "tool", "tool_call_id": "c1", "name": "t", "content": "{}"}
+
+
+def test_orphan_head_wellformed_history_untouched():
+    msgs = [_msg("user", 4), _call_msg(), _result_msg(), _msg("assistant", 4)]
+    out, dropped = drop_orphaned_tool_head(msgs)
+    assert out == msgs
+    assert dropped == 0
+
+
+def test_orphan_head_drops_leading_tool_call_and_result():
+    msgs = [_call_msg(), _result_msg(), _msg("assistant", 4), _msg("user", 4)]
+    out, dropped = drop_orphaned_tool_head(msgs)
+    assert dropped == 2
+    assert out[0]["role"] == "assistant" and "tool_calls" not in out[0]
+
+
+def test_orphan_head_drops_leading_bare_tool_result():
+    """Window can start after the tool_calls turn — the result alone is orphaned."""
+    msgs = [_result_msg(), _msg("assistant", 4), _msg("user", 4)]
+    out, dropped = drop_orphaned_tool_head(msgs)
+    assert dropped == 1
+    assert out[0]["role"] == "assistant"
+
+
+def test_orphan_head_keeps_assistant_text_turn():
+    """A plain assistant turn is a legal opener (model-first history); keep it."""
+    msgs = [_msg("assistant", 4), _msg("user", 4)]
+    out, dropped = drop_orphaned_tool_head(msgs)
+    assert out == msgs
+    assert dropped == 0
+
+
+def test_orphan_head_empty_history():
+    out, dropped = drop_orphaned_tool_head([])
+    assert out == []
+    assert dropped == 0
+
+
+def test_orphan_head_all_orphaned():
+    msgs = [_call_msg(), _result_msg()]
+    out, dropped = drop_orphaned_tool_head(msgs)
+    assert out == []
+    assert dropped == 2

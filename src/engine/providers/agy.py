@@ -37,6 +37,7 @@ from src.text_tool_protocol import (
 )
 
 from .base import Provider
+from ._subprocess import fit_cli_prompt
 
 if TYPE_CHECKING:
     from src.engine.driver import TextEngine
@@ -186,10 +187,14 @@ async def generate_agy(
             prompt_parts.append(rendered_tools)
 
     rendered_history = engine._render_agy_prompt(history)
-    if rendered_history:
-        prompt_parts.append(rendered_history)
 
-    prompt = "\n\n".join(prompt_parts)
+    # The whole prompt travels as ONE argv entry (`agy --print <prompt>` — the CLI
+    # has no stdin/prompt-file transport), and execve caps a single argument at
+    # 128 KiB. The engine bounds history by tokens (~131k ≈ 0.5 MB of text), so an
+    # unclamped prompt fails the *spawn* with OSError [Errno 7] "Argument list too
+    # long" before agy ever runs. Keep the system prompt + tool protocol whole and
+    # elide the oldest history to fit.
+    prompt, elided = fit_cli_prompt("\n\n".join(prompt_parts), rendered_history)
 
     tool_names = []
     if tools:
@@ -200,6 +205,7 @@ async def generate_agy(
     api_payload = {
         "model": config.get("model_name"),
         "prompt_chars": len(prompt),
+        "history_blocks_elided": elided,
         "tools": tool_names,
         "isolation": {
             "stdin": "devnull",
