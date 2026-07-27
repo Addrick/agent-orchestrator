@@ -147,16 +147,20 @@ To support multiple agents working concurrently, the following rules are mandato
 
 ## Documentation
 
-Two living documents track the system's design:
+Three living documents track the system's design:
 
 - **`docs/user_guide.md`** — Describes what users can do. Serves as both end-user reference and **spec for new features**. When planning new behavior, describe it here first in plain language before implementing. This ensures alignment on what we're building.
 - **`memory/codebase/architecture.md`** — Describes how the system works internally. Component reference for Claude's use across sessions.
+- **`docs/capability_map.md`** — capability → implementations. The **inverse index** of the other two, which are both organized by module and therefore cannot show you that a capability now has two implementations (the second one just gets its own new section). Read it before building anything that parks, schedules, stores, notifies, retries, or spawns.
 
 **Update rules:**
 - When implementing a new feature, update `user_guide.md` with the user-facing behavior (commands, tools, modes, etc.)
 - When changing internal architecture (new components, changed data flows, new config), update `architecture.md`
-- When you notice either doc is stale relative to the code, fix it — don't wait to be asked
+- When adding a capability — or a second implementation of one — update `docs/capability_map.md` **in the same commit**. A second implementation must be recorded as `by design` with a decision record, or not written.
+- When you notice any doc is stale relative to the code, fix it — don't wait to be asked
 - Spec-before-implement: if a design conversation produces a concrete behavior description, add it to `user_guide.md` before writing code
+
+**Search by intent, not by name (DP-302).** Before adding a capability, ask "does anything already do this job?" — not "is there a function called `approve_x`?". Code here is *regenerated*, not copy-pasted, so a re-derived implementation shares neither the name nor the vocabulary of the original and no clone detector will find it. `python scripts/arch_audit.py similar concepts` catches the function-level case; `docs/capability_map.md` is the only thing that catches the subsystem-level case.
 
 ## Memory System — Viking L0/L1/L2 Protocol
 
