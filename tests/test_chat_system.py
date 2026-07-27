@@ -931,6 +931,89 @@ def test_format_raw_history_injects_tool_context(chat_system_with_mocks):
     assert formatted[3] == {'role': 'assistant', 'content': 'Here are results'}
 
 
+def test_format_raw_history_drops_orphaned_tool_context(chat_system_with_mocks):
+    """DP-296: a replayed tool block must never open the wire array.
+
+    The history limit slices raw rows, so an assistant row carrying
+    tool_context can end up oldest. Replaying it there puts a function call
+    first and Gemini rejects the whole request ("function call turn must come
+    immediately after a user turn or after a function response turn"), which
+    took out four consecutive attempts in production on 2026-07-26.
+    """
+    system, _, _, _, _ = chat_system_with_mocks
+    tool_ctx = json.dumps([
+        {"role": "assistant", "tool_calls": [{"id": "c1", "name": "web_search", "arguments": {}}]},
+        {"role": "tool", "tool_call_id": "c1", "name": "web_search", "content": '{"result": "ok"}'}
+    ])
+    # No preceding user row survived the limit.
+    raw_history = [
+        {'author_role': 'assistant', 'author_name': 'test_persona', 'content': 'Here are results',
+         'tool_context': tool_ctx},
+        {'author_role': 'user', 'author_name': 'Alice', 'content': 'thanks'},
+    ]
+
+    formatted = system.request_builder.format_raw_history_for_llm(raw_history, "channel", "test_persona", None)
+
+    assert formatted[0] == {'role': 'assistant', 'content': 'Here are results'}
+    assert not any('tool_calls' in m for m in formatted)
+
+
+def test_format_raw_history_tool_context_after_assistant_is_dropped(chat_system_with_mocks):
+    """Two assistant rows in a row: the second one's tool block would follow an
+    assistant turn, which is equally invalid. Drop it too."""
+    system, _, _, _, _ = chat_system_with_mocks
+    tool_ctx = json.dumps([
+        {"role": "assistant", "tool_calls": [{"id": "c1", "name": "web_search", "arguments": {}}]},
+        {"role": "tool", "tool_call_id": "c1", "name": "web_search", "content": '{"result": "ok"}'}
+    ])
+    raw_history = [
+        {'author_role': 'user', 'author_name': 'Alice', 'content': 'search please'},
+        {'author_role': 'assistant', 'author_name': 'test_persona', 'content': 'One moment',
+         'tool_context': None},
+        {'author_role': 'assistant', 'author_name': 'test_persona', 'content': 'Here are results',
+         'tool_context': tool_ctx},
+    ]
+
+    formatted = system.request_builder.format_raw_history_for_llm(raw_history, "channel", "test_persona", None)
+
+    assert [m['role'] for m in formatted] == ['user', 'assistant', 'assistant']
+
+
+def test_format_raw_history_tool_context_after_park_row_is_kept(chat_system_with_mocks):
+    """DP-296 review: the provider allows a function-call turn after a user turn
+    *or after a function-response turn*, and a park row is exactly the latter —
+    it has empty content, so the block it emits ends on a `tool` message.
+    Accepting only 'user' would drop the tool context of every row following a
+    park, which is the memory this feature exists to keep.
+    """
+    system, _, _, _, _ = chat_system_with_mocks
+    park_ctx = json.dumps([
+        {"role": "assistant", "tool_calls": [{"id": "c1", "name": "update_ticket", "arguments": {}}]},
+        {"role": "tool", "tool_call_id": "c1", "name": "update_ticket",
+         "content": '{"status": "not_executed", "reason": "awaiting_approval"}'},
+    ])
+    resumed_ctx = json.dumps([
+        {"role": "assistant", "tool_calls": [{"id": "c2", "name": "update_ticket", "arguments": {}}]},
+        {"role": "tool", "tool_call_id": "c2", "name": "update_ticket", "content": '{"ok": true}'},
+    ])
+    raw_history = [
+        {'author_role': 'user', 'author_name': 'Alice', 'content': 'close the ticket'},
+        # The park: tool context only, no renderable text.
+        {'author_role': 'assistant', 'author_name': 'test_persona', 'content': '',
+         'tool_context': park_ctx},
+        {'author_role': 'assistant', 'author_name': 'test_persona', 'content': 'Closed it.',
+         'tool_context': resumed_ctx},
+    ]
+
+    formatted = system.request_builder.format_raw_history_for_llm(raw_history, "channel", "test_persona", None)
+
+    assert [m['role'] for m in formatted] == [
+        'user', 'assistant', 'tool', 'assistant', 'tool', 'assistant',
+    ]
+    assert [c['id'] for m in formatted if m.get('tool_calls')
+            for c in m['tool_calls']] == ['c1', 'c2']
+
+
 def test_format_raw_history_no_tool_context(chat_system_with_mocks):
     """NULL tool_context produces no extra messages."""
     system, _, _, _, _ = chat_system_with_mocks

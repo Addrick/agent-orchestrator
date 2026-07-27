@@ -12,6 +12,7 @@ future work documented in `memory/project/plans/web_ui_roadmap.md`
 budget allocation) lands here.
 """
 
+import json
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -30,10 +31,16 @@ def estimate_tokens(text: str) -> int:
 def _message_tokens(msg: Dict[str, Any]) -> int:
     """Token cost of a single OAI-style message dict.
 
-    Sums `content` (string or list-of-parts) token estimates. Tool/function
-    payloads and role overhead are not modelled — char/4 already absorbs the
-    rounding error.
+    Sums `content` (string or list-of-parts) token estimates, plus serialized
+    `tool_calls` when present. Role overhead is not modelled — char/4 already
+    absorbs the rounding error.
+
+    `tool_calls` has to be counted: a tool-call assistant message carries no
+    `content` key at all, so scoring it 0 would let the pruner drop it without
+    reducing the running total while its (non-empty) `tool` results survive.
     """
+    if msg.get("tool_calls"):
+        return estimate_tokens(json.dumps(msg["tool_calls"], default=str))
     content = msg.get("content")
     if isinstance(content, str):
         return estimate_tokens(content)
@@ -81,16 +88,30 @@ def truncate_messages_to_budget(
     kept: List[Dict[str, Any]] = []
     dropped = 0
     running = total
-    for i, msg in enumerate(messages):
+    n = len(messages)
+    i = 0
+    while i < n:
+        msg = messages[i]
+        # An assistant message carrying `tool_calls` and the `tool` messages
+        # answering it are one atomic unit. Cutting between them leaves an
+        # unpaired block at the head of the wire array, and both Anthropic and
+        # Gemini reject the whole request for it. DP-296 made such blocks
+        # routine — every park and every errored turn now persists one — so a
+        # pairing-blind pruner would fail most long conversations, not just
+        # those that used tools successfully.
+        end = i + 1
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            while end < n and messages[end].get("role") == "tool":
+                end += 1
+        span = messages[i:end]
+
         is_system = msg.get("role") == "system"
         is_last_user = (i == last_user_idx)
-        if running <= max_tokens:
-            kept.append(msg)
-            continue
-        if is_system or is_last_user:
-            kept.append(msg)
-            continue
-        running -= _message_tokens(msg)
-        dropped += 1
+        if running <= max_tokens or is_system or is_last_user:
+            kept.extend(span)
+        else:
+            running -= sum(_message_tokens(m) for m in span)
+            dropped += len(span)
+        i = end
 
     return kept, dropped

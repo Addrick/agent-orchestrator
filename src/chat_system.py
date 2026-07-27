@@ -31,7 +31,9 @@ from src.origin import ANONYMOUS, Origin
 from src.persona import Persona
 from src.request_builder import AssembledRequest, RequestBuilder, RequestContext
 from src.security.scrubber import get_scrubber
-from src.tools.tool_loop import ToolLoop, _ApiPayloadEvent, _LoopFinishedEvent
+from src.tools.tool_loop import (
+    ToolLoop, _ApiPayloadEvent, _LoopFinishedEvent, _ToolContextEvent,
+)
 from src.turn_persistence import TurnPersistence
 from src.tools.tool_manager import ToolManager
 from src.tools.turn_context import TurnContext, turn_scope
@@ -207,6 +209,27 @@ class ChatSystem:
             is_retry=is_retry, client_messages=client_messages,
         )
 
+    def _clear_parked_row(self, parked_row_id: Optional[int],
+                          committed_row_id: Optional[int]) -> None:
+        """Drop a resumed park's provisional tool_context, once it is redundant.
+
+        Safe to call unconditionally after any commit on the resume path. The
+        clear happens only when a row carrying the re-sealed span actually
+        landed (`committed_row_id is not None`) and is a *different* row —
+        on a retried park the continuation UPDATEs the parked row itself, and
+        clearing it would erase the context just written.
+
+        Ordering matters more than it looks: `apply_resume_decision` executes
+        the approved write before the continuation runs, so clearing early and
+        then losing the continuation (client disconnect, an exception past this
+        frame) would leave a performed write recorded in no row at all.
+        """
+        if parked_row_id is None or committed_row_id is None:
+            return
+        if parked_row_id == committed_row_id:
+            return
+        self.memory_manager.clear_tool_context(parked_row_id)
+
     async def _orchestrate(
             self,
             persona_name: str,
@@ -310,6 +333,9 @@ class ChatSystem:
             channel=channel,
             server_id=server_id,
         )):
+            # The parked turn's tool-context row, on a resume. Cleared only once
+            # a row carrying the re-sealed span has actually been committed.
+            parked_row_to_clear: Optional[int] = None
             if resume is None:
                 try:
                     await self.request_builder.prepare_request(ctx, is_retry=is_retry)
@@ -375,6 +401,17 @@ class ChatSystem:
                     )
                     return
 
+                # The continuation below re-seals this turn's whole tool span
+                # (history_start_override points back at the park), so the
+                # parked row's own copy would double every call in history.
+                #
+                # Deferred until a row actually carrying the re-sealed span has
+                # been committed. Clearing here instead would mean an aborted
+                # continuation — client disconnect, or the loop raising past
+                # this frame — deletes the only record of a write that
+                # `apply_resume_decision` above has already performed.
+                parked_row_to_clear = resume.pending.parked_assistant_id
+
             # 3. Tool loop. ToolLoop owns iteration + tool dispatch; this
             #    forwards Token / ToolCallStart / ToolCallResult events,
             #    siphons api_payload into the request cache, and unpacks the
@@ -421,7 +458,28 @@ class ChatSystem:
                         yield ev
                     elif isinstance(ev, (ToolCallStartEvent, ToolCallResultEvent)):
                         yield ev
+                    elif isinstance(ev, _ToolContextEvent):
+                        tool_context_json = ev.tool_context_json
                     elif isinstance(ev, ErrorEvent):
+                        # The loop died mid-turn. Persist whatever tool calls it
+                        # made first — otherwise the next turn shows the model
+                        # its own prose with no trace of the call that failed,
+                        # and it re-proposes or hallucinates the action.
+                        if tool_context_json:
+                            errored_id = self.turn_persistence.commit_or_update_assistant(
+                                persona_name=persona_name,
+                                user_identifier=user_identifier,
+                                channel=channel, server_id=server_id,
+                                final_text="".join(accumulated_parts),
+                                response_type=ResponseType.LLM_GENERATION,
+                                user_interaction_id=user_interaction_id,
+                                retry_assistant_id=retry_assistant_id,
+                                tool_context_json=tool_context_json,
+                            )
+                            # That row re-seals the parked span (history_start
+                            # points back at the park), so the parked row's copy
+                            # is now the duplicate — safe to drop, and only now.
+                            self._clear_parked_row(parked_row_to_clear, errored_id)
                         yield ev
                         return
                     elif isinstance(ev, _LoopFinishedEvent):
@@ -457,7 +515,33 @@ class ChatSystem:
             # the parked PendingConfirmation's correlation token. Carried on the
             # terminal DoneEvent so the id-frame can address the unpersisted chunk.
             ephemeral_chunk_id: Optional[str] = None
+            assistant_id: Optional[int] = None
             if pending_writes is not None:
+                # Commit the park's tool-context row *before* publishing the
+                # pending. `park()` makes the confirmation resumable, and the
+                # `yield` just below suspends this generator — a resume arriving
+                # in that window (auto-approver, the MCP executor, or simply a
+                # fast click) would see `parked_assistant_id is None`, skip the
+                # clear, and let the continuation re-seal a span the parked row
+                # still holds: every approved write twice in replayed history.
+                #
+                # The park then reports no assistant_id: DP-130's id-frame
+                # contract treats the confirmation chunk as unpersisted, and
+                # this row carries only tool context — never the confirmation
+                # text — so it is not addressable as this turn's assistant
+                # message.
+                parked_assistant_id = self.turn_persistence.commit_or_update_assistant(
+                    persona_name=persona_name, user_identifier=user_identifier,
+                    channel=channel, server_id=server_id,
+                    final_text=final_text, response_type=response_type,
+                    user_interaction_id=user_interaction_id,
+                    retry_assistant_id=retry_assistant_id,
+                    tool_context_json=tool_context_json,
+                )
+                # A resume that parks *again* seals the same span onto the new
+                # row (history_start_override still points at the first park),
+                # so the earlier park's copy is now the duplicate.
+                self._clear_parked_row(parked_row_to_clear, parked_assistant_id)
                 parked = PendingConfirmation(
                     write_calls=pending_writes,
                     conversation_history=ctx.conversation_history,
@@ -471,6 +555,7 @@ class ChatSystem:
                     tool_context_start=tool_context_start,
                     confirmation_text=final_text if final_text else "",
                     retry_assistant_id=retry_assistant_id,
+                    parked_assistant_id=parked_assistant_id,
                 )
                 # Parking (incl. supersede-eviction + audit logging) is the
                 # ConfirmationManager's job; the kernel only decides *when*.
@@ -488,16 +573,22 @@ class ChatSystem:
                     token=parked.token,
                     audit_info=audit_info,
                 )
-
-            # 4. Log/update assistant turn. Original text (including links) is preserved.
-            assistant_id = self.turn_persistence.commit_or_update_assistant(
-                persona_name=persona_name, user_identifier=user_identifier,
-                channel=channel, server_id=server_id,
-                final_text=final_text, response_type=response_type,
-                user_interaction_id=user_interaction_id,
-                retry_assistant_id=retry_assistant_id,
-                tool_context_json=tool_context_json,
-            )
+            else:
+                # 4. Log/update assistant turn. Original text (including links)
+                #    is preserved.
+                assistant_id = self.turn_persistence.commit_or_update_assistant(
+                    persona_name=persona_name, user_identifier=user_identifier,
+                    channel=channel, server_id=server_id,
+                    final_text=final_text, response_type=response_type,
+                    user_interaction_id=user_interaction_id,
+                    retry_assistant_id=retry_assistant_id,
+                    tool_context_json=tool_context_json,
+                )
+                # This row now carries the re-sealed span, so the parked row's
+                # provisional copy is the duplicate. Dropping it only here means
+                # an aborted continuation leaves the park's record intact rather
+                # than erasing an already-executed write.
+                self._clear_parked_row(parked_row_to_clear, assistant_id)
 
             # DP-113: retain assistant turn through the backend boundary.
             # Inherit ctx.turn_tainted so the untrusted bit reaches the
