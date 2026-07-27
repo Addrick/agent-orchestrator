@@ -647,6 +647,74 @@ def test_clear_tool_context_missing_row(mem_manager):
     assert mem_manager.clear_tool_context(999999) is False
 
 
+def test_set_tool_context_attaches_without_touching_content(mem_manager):
+    """DP-296 review: a *retried* turn that parks must attach its sealed context
+    to the archived assistant row without blanking the text that row renders."""
+    interaction_id = mem_manager.log_message(
+        "user1", "persona1", "chan", "assistant", "Bot",
+        "First attempt's answer", datetime.now(),
+    )
+    tool_ctx = json.dumps([
+        {"role": "assistant", "tool_calls": [{"id": "c1", "name": "update_ticket", "arguments": {}}]},
+        {"role": "tool", "tool_call_id": "c1", "name": "update_ticket",
+         "content": '{"status": "not_executed", "reason": "awaiting_approval"}'},
+    ])
+
+    assert mem_manager.set_tool_context(interaction_id, tool_ctx) is True
+
+    history = mem_manager.get_personal_history("user1", "persona1")
+    assert history[0]['content'] == "First attempt's answer"
+    assert json.loads(history[0]['tool_context'])[0]['tool_calls'][0]['id'] == "c1"
+
+
+def test_portal_retry_skips_empty_park_row(mem_manager):
+    """DP-296 review: the tool-context-only park row renders nowhere, so it must
+    not win handle_portal_retry's most-recent lookup. If it did, the retry would
+    archive a blank chevron version and hand the retried turn the very row the
+    still-open PendingConfirmation points at."""
+    real_id = mem_manager.log_message(
+        "user1", "persona1", "chan", "assistant", "Bot",
+        "The visible answer", datetime.now(),
+    )
+    park_id = mem_manager.log_message(
+        "user1", "persona1", "chan", "assistant", "Bot",
+        "", datetime.now(),
+        tool_context=json.dumps([{"role": "assistant", "tool_calls": []}]),
+    )
+
+    assert mem_manager.handle_portal_retry(
+        persona_name="persona1", user_identifier="user1", channel="chan",
+    ) == real_id
+
+    # The park row is untouched — no blank archive was created for it.
+    versions = mem_manager.list_interaction_versions(park_id)
+    assert len(versions) <= 1
+
+
+def test_history_excludes_rows_that_contribute_nothing(mem_manager):
+    """DP-296 review: a park whose tool_context was cleared on resume has no text
+    and no span left, but a raw `LIMIT N` would still spend a slot of the model's
+    window on it. Rows that still carry a span stay."""
+    mem_manager.log_message("user1", "persona1", "chan", "user", "Human",
+                            "Do the thing", datetime.now())
+    spent = mem_manager.log_message(
+        "user1", "persona1", "chan", "assistant", "Bot", "", datetime.now(),
+        tool_context=json.dumps([{"role": "assistant", "tool_calls": []}]),
+    )
+    mem_manager.log_message("user1", "persona1", "chan", "assistant", "Bot",
+                            "Done", datetime.now())
+
+    assert len(mem_manager.get_personal_history("user1", "persona1")) == 3
+
+    mem_manager.clear_tool_context(spent)
+    history = mem_manager.get_personal_history("user1", "persona1")
+    assert [r['interaction_id'] for r in history if r['interaction_id'] == spent] == []
+    assert len(history) == 2
+    assert len(mem_manager.get_channel_history("chan", "persona1")) == 2
+    assert len(mem_manager.get_global_history("persona1")) == 2
+    assert len(mem_manager.get_server_history(None, "persona1")) == 2
+
+
 def test_log_message_returns_interaction_id(mem_manager):
     """log_message returns the lastrowid (interaction_id)."""
     row_id = mem_manager.log_message("user1", "persona1", "chan", "user", "Human",

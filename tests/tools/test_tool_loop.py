@@ -483,3 +483,36 @@ async def test_seal_respects_history_start_override():
     # Starts at the park boundary — the user turn stays out of the block.
     assert msgs[0].get("tool_calls")[0]["id"] == "w1"
     assert len(msgs) == 2
+
+
+@pytest.mark.asyncio
+async def test_clean_exit_does_not_seal_with_the_error_reason():
+    """DP-296 review: the no-more-tool-calls exit is a *normal* completion, but
+    it sealed with SEAL_ERROR. Dormant while every read is answered by
+    _execute_calls — but if a result ever failed to land, a cleanly finished
+    turn would tell the model its own successful call errored."""
+    from src.tools.tool_loop import SEAL_ERROR
+
+    # A call whose result never landed, replayed into a turn that then finishes
+    # cleanly: exactly the shape the reason string describes.
+    prior = [
+        {"role": "user", "content": "close it"},
+        {"role": "assistant", "tool_calls": [
+            {"id": "w1", "name": "update_ticket", "arguments": {}}
+        ]},
+    ]
+    engine = _make_engine([[{"type": "done", "full_text": "All set."}]])
+    loop = ToolLoop(engine, _make_tool_manager({}))
+
+    events = await _drain(loop.run(
+        persona=_make_persona(), conversation_history=prior,
+        params=MagicMock(), tools=[], history_start_override=1,
+    ))
+
+    msgs = _tool_context(events[-1])
+    _assert_calls_all_answered(msgs)
+    sealed = next(m for m in msgs if m.get("role") == "tool")
+    assert json.loads(sealed["content"])["reason"] != SEAL_ERROR
+    assert json.loads(sealed["content"]) == {
+        "status": "not_executed", "reason": "unknown",
+    }

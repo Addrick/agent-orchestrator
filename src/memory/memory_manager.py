@@ -729,11 +729,19 @@ class MemoryManager:
             # Only a trailing assistant turn is eligible for archive-in-place;
             # if a user turn is newer (or the trailing assistant was deleted),
             # there is nothing to regenerate in place.
+            #
+            # Empty-content rows are excluded too: DP-296 parks write an
+            # assistant row carrying only tool_context, which renders nowhere.
+            # Left in the lookup it would win "most recent", archive a blank
+            # version into the chevron, and hand the retried turn the very row
+            # the still-open PendingConfirmation points at — so approving that
+            # park later would wipe the *retried* turn's tool context.
             cursor.execute(
                 "SELECT interaction_id, content, reasoning_content, author_role"
                 " FROM User_Interactions"
                 " WHERE persona_name = ? AND user_identifier = ? AND channel = ?"
-                + self._SUPPRESSION_SUBQUERY +
+                + self._SUPPRESSION_SUBQUERY
+                + self._NON_EMPTY_CONTENT_FILTER +
                 " ORDER BY timestamp DESC, interaction_id DESC LIMIT 1",
                 (persona_name, user_identifier, channel),
             )
@@ -783,32 +791,41 @@ class MemoryManager:
                 conn.rollback()
                 return None
 
-    def clear_tool_context(self, interaction_id: int) -> bool:
-        """Drop a row's stored `tool_context`, leaving its content untouched.
+    def set_tool_context(self, interaction_id: int,
+                         tool_context: Optional[str]) -> bool:
+        """Write a row's `tool_context` column, leaving its content untouched.
 
-        Used when a parked confirmation resumes: the resumed continuation
-        re-seals the same tool span with real results, so the parked row's
-        provisional copy has to go or the model sees every call twice.
         Deliberately narrower than `update_interaction_content` — no content
         rewrite, no `parent_summary_id` reset, no embedding invalidation, since
-        the row's text has not changed.
+        the row's text has not changed. Two callers need exactly that:
+
+        * a resume clearing the parked row's provisional copy (`None`), because
+          the continuation re-seals the same span with real results and the
+          model would otherwise see every call twice;
+        * a *retried* turn that parks (DP-296), which must attach the sealed
+          context to the archived assistant row without blanking the prior
+          attempt's text that row still renders.
         """
         with self._lock:
             conn = self._get_connection()
             try:
                 cursor = conn.execute(
-                    "UPDATE User_Interactions SET tool_context = NULL "
+                    "UPDATE User_Interactions SET tool_context = ? "
                     "WHERE interaction_id = ?",
-                    (interaction_id,),
+                    (tool_context, interaction_id),
                 )
                 conn.commit()
                 return cursor.rowcount > 0
             except sqlite3.Error as e:
                 logger.error(
-                    f"clear_tool_context failed for id={interaction_id}: {e}"
+                    f"set_tool_context failed for id={interaction_id}: {e}"
                 )
                 conn.rollback()
                 return False
+
+    def clear_tool_context(self, interaction_id: int) -> bool:
+        """Drop a row's stored `tool_context`, leaving its content untouched."""
+        return self.set_tool_context(interaction_id, None)
 
     def update_interaction_content(self, interaction_id: int, new_content: str,
                                    reasoning_content: Any = _UNSET,
@@ -1108,6 +1125,21 @@ class MemoryManager:
 
     _SUPPRESSION_SUBQUERY = (" AND interaction_id NOT IN (SELECT interaction_id FROM Suppressed_Interactions)")
 
+    # Rows whose content is empty/whitespace. Only DP-296 park rows reach this
+    # shape — both the user and assistant commit paths refuse empty text
+    # otherwise — so this is precisely "the tool-context-only row".
+    _NON_EMPTY_CONTENT_FILTER = " AND TRIM(COALESCE(content, '')) != ''"
+
+    # A row that contributes nothing to a replayed history: no text to show the
+    # model and no tool span to replay. A park whose tool_context was cleared on
+    # resume is exactly that, and the history getters slice a raw `LIMIT N`, so
+    # leaving it in would permanently cost one slot of the model's window per
+    # resolved park (DP-296). Kept as a filter rather than a DELETE: on a
+    # *retried* park the same row is the canonical archived assistant turn.
+    _CONTRIBUTES_TO_HISTORY = (
+        " AND (TRIM(COALESCE(content, '')) != '' OR tool_context IS NOT NULL)"
+    )
+
     @staticmethod
     def _suppression_filter(alias: str = "") -> str:
         prefix = f"{alias}." if alias else ""
@@ -1119,7 +1151,8 @@ class MemoryManager:
             conn = self._get_connection()
             cursor = conn.cursor()
             query = ("SELECT interaction_id, author_role, author_name, content, tool_context, reasoning_content FROM User_Interactions"
-                     " WHERE user_identifier = ? AND persona_name = ?" + self._SUPPRESSION_SUBQUERY)
+                     " WHERE user_identifier = ? AND persona_name = ?"
+                     + self._SUPPRESSION_SUBQUERY + self._CONTRIBUTES_TO_HISTORY)
             params: List[Any] = [user_identifier, persona_name]
             query += " ORDER BY timestamp DESC"
             if isinstance(limit, int):
@@ -1133,7 +1166,8 @@ class MemoryManager:
             conn = self._get_connection()
             cursor = conn.cursor()
             query = ("SELECT interaction_id, author_role, author_name, content, tool_context, reasoning_content FROM User_Interactions"
-                     " WHERE zammad_ticket_id = ?" + self._SUPPRESSION_SUBQUERY)
+                     " WHERE zammad_ticket_id = ?"
+                     + self._SUPPRESSION_SUBQUERY + self._CONTRIBUTES_TO_HISTORY)
             params: List[Any] = [ticket_id]
             query += " ORDER BY timestamp DESC"
             if isinstance(limit, int):
@@ -1156,6 +1190,7 @@ class MemoryManager:
             else:
                 query += " AND server_id IS NULL"
             query += self._SUPPRESSION_SUBQUERY
+            query += self._CONTRIBUTES_TO_HISTORY
             query += " ORDER BY timestamp DESC"
             if isinstance(limit, int):
                 query += " LIMIT ?"
@@ -1170,11 +1205,13 @@ class MemoryManager:
             cursor = conn.cursor()
             if server_id is not None:
                 query = ("SELECT interaction_id, author_role, author_name, content, tool_context, reasoning_content FROM User_Interactions"
-                         " WHERE server_id = ? AND persona_name = ?" + self._SUPPRESSION_SUBQUERY)
+                         " WHERE server_id = ? AND persona_name = ?"
+                         + self._SUPPRESSION_SUBQUERY + self._CONTRIBUTES_TO_HISTORY)
                 params: List[Any] = [server_id, persona_name]
             else:
                 query = ("SELECT interaction_id, author_role, author_name, content, tool_context, reasoning_content FROM User_Interactions"
-                         " WHERE server_id IS NULL AND persona_name = ?" + self._SUPPRESSION_SUBQUERY)
+                         " WHERE server_id IS NULL AND persona_name = ?"
+                         + self._SUPPRESSION_SUBQUERY + self._CONTRIBUTES_TO_HISTORY)
                 params = [persona_name]
             query += " ORDER BY timestamp DESC"
             if isinstance(limit, int):
@@ -1188,7 +1225,8 @@ class MemoryManager:
             conn = self._get_connection()
             cursor = conn.cursor()
             query = ("SELECT interaction_id, author_role, author_name, content, tool_context, reasoning_content FROM User_Interactions"
-                     " WHERE persona_name = ?" + self._SUPPRESSION_SUBQUERY)
+                     " WHERE persona_name = ?"
+                     + self._SUPPRESSION_SUBQUERY + self._CONTRIBUTES_TO_HISTORY)
             params: List[Any] = [persona_name]
             query += " ORDER BY timestamp DESC"
             if isinstance(limit, int):

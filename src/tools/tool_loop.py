@@ -82,6 +82,11 @@ LoopEvent = Union[
 SEAL_AWAITING_APPROVAL = "awaiting_approval"
 SEAL_ERROR = "error"
 SEAL_MAX_ITERATIONS = "max_iterations_exceeded"
+# The clean exit: the model stopped asking for tools. Every call should already
+# be answered here, so this reason is expected to appear in no sealed result —
+# it exists so a call that somehow slipped through does not tell the model its
+# successful turn errored.
+SEAL_UNKNOWN = "unknown"
 
 
 def seal_tool_context(
@@ -278,7 +283,7 @@ class ToolLoop:
                     else "".join(accumulated_parts)
                 )
                 tool_context_json = seal_tool_context(
-                    conversation_history, history_start, SEAL_ERROR,
+                    conversation_history, history_start, SEAL_UNKNOWN,
                 )
                 yield _LoopFinishedEvent(
                     final_text=final_text,

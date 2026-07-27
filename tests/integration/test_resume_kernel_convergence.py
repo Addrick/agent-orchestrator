@@ -555,3 +555,91 @@ async def test_resume_does_not_duplicate_parked_tool_context(mocked_chat_system)
         c["id"] for m in tool_ctx for c in (m.get("tool_calls") or [])
     ]
     assert call_ids.count("w1") == 1
+
+
+# --- DP-296 review: ordering of the parked row's clear + its id assignment ----
+
+@pytest.mark.asyncio
+async def test_parked_row_id_is_set_before_the_park_is_published(mocked_chat_system):
+    """`park()` makes the confirmation resumable and the PendingConfirmationEvent
+    yield suspends the generator. Assigning parked_assistant_id after that window
+    let a fast resume (auto-approver, the MCP executor, a quick click) see None,
+    skip the clear, and leave the parked row holding a span the continuation
+    re-seals — every approved write twice in replayed history."""
+    chat_system, _ = mocked_chat_system
+    persona = chat_system.personas["test_persona"]
+    persona.set_execution_mode(ExecutionMode.CONFIRM)
+    persona.set_enabled_tools(["*"])
+
+    seen = {}
+    real_park = chat_system.confirmations.park
+
+    def spy_park(user_identifier, persona_name, parked):
+        seen["id_at_park"] = parked.parked_assistant_id
+        return real_park(user_identifier, persona_name, parked)
+    chat_system.confirmations.park = spy_park  # type: ignore[assignment]
+
+    await _park_write(
+        chat_system, user="u10", channel="c10",
+        write_call={"id": "w1", "name": "create_ticket", "arguments": {"title": "t"}},
+    )
+
+    assert seen["id_at_park"] is not None, \
+        "park published before the row id was known — a resume in that window duplicates the span"
+    assert chat_system.confirmations.pending[("u10", "test_persona")] \
+        .parked_assistant_id == seen["id_at_park"]
+
+
+@pytest.mark.asyncio
+async def test_aborted_resume_keeps_the_parked_rows_context(mocked_chat_system):
+    """`apply_resume_decision` executes the approved write *before* the
+    continuation runs. Clearing the parked row up front meant an aborted
+    continuation — client disconnect — left that performed write recorded in no
+    row at all: strictly worse than the pre-DP-296 behaviour, which at least
+    didn't delete anything."""
+    import asyncio
+    import json
+    chat_system, mem_manager = mocked_chat_system
+    persona = chat_system.personas["test_persona"]
+    persona.set_execution_mode(ExecutionMode.CONFIRM)
+    persona.set_enabled_tools(["*"])
+
+    executed = []
+
+    async def fake_execute(name, **kwargs):
+        executed.append(name)
+        return {"ticket_id": 42}
+    chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[assignment]
+
+    await _park_write(
+        chat_system, user="u11", channel="c11",
+        write_call={"id": "w1", "name": "create_ticket", "arguments": {"title": "t"}},
+    )
+    parked_id = chat_system.confirmations.pending[("u11", "test_persona")].parked_assistant_id
+    assert parked_id is not None
+
+    # The client goes away mid-continuation.
+    async def abort(persona_config, history_object, *a, **k):
+        raise asyncio.CancelledError()
+    chat_system.text_engine.generate_response.side_effect = abort
+
+    with pytest.raises(asyncio.CancelledError):
+        await _drain(chat_system.stream_resume_confirmation(
+            "u11", "test_persona", approved=True))
+
+    assert executed == ["create_ticket"], "the write should have already run"
+
+    conn = mem_manager._get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT tool_context FROM User_Interactions WHERE interaction_id = ?",
+        (parked_id,),
+    )
+    row = cursor.fetchone()
+    assert row is not None and row["tool_context"], \
+        "aborted continuation erased the only record of an executed write"
+    call_ids = [
+        c["id"] for m in json.loads(row["tool_context"])
+        for c in (m.get("tool_calls") or [])
+    ]
+    assert "w1" in call_ids

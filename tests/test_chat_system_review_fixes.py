@@ -295,3 +295,50 @@ def test_conversation_taints_is_bounded(chat_system_with_mocks):
     for i in range(MAX_CONVERSATION_TAINTS + 50):
         system.request_builder.set_conversation_taint((f"u{i}", "p", "c", None), True)
     assert len(system.request_builder.conversation_taints) <= MAX_CONVERSATION_TAINTS
+
+
+# --- DP-296 review: retry paths must land tool context without blanking text --
+
+def test_retry_with_empty_text_does_not_blank_the_canonical_row(chat_system_with_mocks):
+    """The error path commits whatever prose accumulated, which is "" whenever
+    the model emitted tool calls and died before writing any. On a portal retry
+    that took the UPDATE branch and wrote content="" + reasoning=None, which
+    fails `_is_renderable` — dropping the message *and* its version chevron from
+    the transcript and stranding the archived original."""
+    system, mm, _, _, _ = chat_system_with_mocks
+
+    rid = system.turn_persistence.commit_or_update_assistant(
+        persona_name="test_persona", user_identifier="u", channel="c",
+        server_id=None, final_text="",
+        response_type=ResponseType.LLM_GENERATION,
+        user_interaction_id=None, retry_assistant_id=42,
+        tool_context_json='[{"role": "tool", "name": "get_ticket"}]',
+    )
+
+    assert rid == 42
+    mm.update_interaction_content.assert_not_called()
+    mm.set_tool_context.assert_called_once_with(
+        42, '[{"role": "tool", "name": "get_ticket"}]')
+
+
+def test_retry_park_still_records_its_tool_context(chat_system_with_mocks):
+    """DP-296's park row is INSERTed on the non-retry path only, so "retry a turn
+    → model proposes a write → operator never answers" used to leave zero trace
+    and a None parked_assistant_id. Attach the sealed context to the archived
+    row instead — without touching the prior attempt's text, which that row
+    still renders."""
+    system, mm, _, _, _ = chat_system_with_mocks
+    sealed = ('[{"role": "assistant", "tool_calls": [{"id": "c1"}]}, '
+              '{"role": "tool", "tool_call_id": "c1", "content": "{}"}]')
+
+    rid = system.turn_persistence.commit_or_update_assistant(
+        persona_name="test_persona", user_identifier="u", channel="c",
+        server_id=None, final_text="I'd like to perform the following actions:",
+        response_type=ResponseType.PENDING_CONFIRMATION,
+        user_interaction_id=None, retry_assistant_id=42,
+        tool_context_json=sealed,
+    )
+
+    assert rid == 42, "the park must report a row the resume can later clear"
+    mm.update_interaction_content.assert_not_called()
+    mm.set_tool_context.assert_called_once_with(42, sealed)

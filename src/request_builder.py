@@ -250,14 +250,21 @@ class RequestBuilder:
                 if author_name == persona_name:
                     tool_context_json = msg.get('tool_context')
                     if tool_context_json:
-                        # A replayed tool block must follow a user turn. The
-                        # history limit slices raw rows, so an assistant row
-                        # carrying tool_context can end up oldest — replaying it
-                        # then opens the wire array with a function call and
-                        # Gemini rejects the request outright ("function call
-                        # turn must come immediately after a user turn or after
-                        # a function response turn"). Drop the orphan instead.
-                        if final_history and final_history[-1].get('role') == 'user':
+                        # A replayed tool block must follow a user turn *or a
+                        # function-response turn*. The history limit slices raw
+                        # rows, so an assistant row carrying tool_context can end
+                        # up oldest — replaying it then opens the wire array with
+                        # a function call and Gemini rejects the request outright
+                        # ("function call turn must come immediately after a user
+                        # turn or after a function response turn"). Drop the
+                        # orphan instead.
+                        #
+                        # Both legal predecessors matter: a DP-296 park row has
+                        # empty content, so its own emitted block ends on a
+                        # `tool` message. Accepting only 'user' would drop the
+                        # tool context of every row that follows a park — the
+                        # exact memory this feature exists to keep.
+                        if final_history and final_history[-1].get('role') in ('user', 'tool'):
                             final_history.extend(json.loads(tool_context_json))
                         else:
                             logger.debug(

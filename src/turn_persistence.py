@@ -156,6 +156,37 @@ class TurnPersistence:
                 # the archived assistant row with the ephemeral confirmation text
                 # (DP-130: the park renders as an unpersisted chunk; the resumed
                 # continuation commits the real text).
+                #
+                # DP-296: the *tool context* still has to land, or "retry a turn
+                # → model proposes a write → operator never answers" leaves no
+                # trace and the model re-proposes the action next turn. Attach
+                # it to the archived row without touching its content, and
+                # report that row so the park can clear it on resume.
+                if tool_context_json:
+                    try:
+                        self.memory_manager.set_tool_context(
+                            retry_assistant_id, tool_context_json,
+                        )
+                        return retry_assistant_id
+                    except Exception as e:
+                        logger.error(f"Retry park set_tool_context failed: {e}")
+                return None
+            if not final_text or not final_text.strip():
+                # The turn died before producing prose (the error path commits
+                # whatever accumulated, which is "" whenever the model emitted
+                # tool calls and nothing else). Overwriting here would blank the
+                # canonical row: empty content + NULL reasoning fails
+                # `_is_renderable`, so the message *and* its version chevron
+                # drop out of the transcript and the archived original becomes
+                # unreachable through the UI. Keep the text, land the context.
+                if tool_context_json:
+                    try:
+                        self.memory_manager.set_tool_context(
+                            retry_assistant_id, tool_context_json,
+                        )
+                        return retry_assistant_id
+                    except Exception as e:
+                        logger.error(f"Retry set_tool_context failed: {e}")
                 return None
             try:
                 # Forward tool_context so the regenerated row's stored tool calls

@@ -98,3 +98,62 @@ def test_truncate_returns_dropped_count_correctly():
     msgs = [_msg("user", 40)] * 10  # 10 tok each = 100 total
     out, dropped = truncate_messages_to_budget(msgs, 30)
     assert dropped == len(msgs) - len(out)
+
+
+# --- DP-296 review: tool-call / tool-result pairing ---
+
+def _tool_span(call_id: str, result_chars: int):
+    """An assistant tool_calls message plus the `tool` message answering it."""
+    return [
+        {"role": "assistant", "tool_calls": [{"id": call_id, "name": "get_ticket",
+                                              "arguments": {}}]},
+        {"role": "tool", "tool_call_id": call_id, "name": "get_ticket",
+         "content": "R" * result_chars},
+    ]
+
+
+def test_tool_call_message_is_not_free():
+    """A tool_calls message carries no `content` key. Scoring it 0 let the pruner
+    drop it without reducing the running total while its results survived."""
+    from memory.context_budget import _message_tokens
+    assert _message_tokens(_tool_span("c1", 4)[0]) > 0
+
+
+def test_truncate_never_splits_a_tool_span():
+    """Cutting between an assistant tool_calls message and its results leaves an
+    unpaired block at the head of the wire array; Anthropic and Gemini reject the
+    whole request for it. DP-296 made such blocks routine."""
+    msgs = [
+        *_tool_span("c1", 400),   # oldest — this whole span should go
+        _msg("assistant", 40),
+        _msg("user", 40),
+    ]
+    out, dropped = truncate_messages_to_budget(msgs, 30)
+
+    assert not any(m.get("role") == "tool" for m in out), \
+        "orphaned tool_result survived its assistant tool_calls message"
+    # Both halves of the span leave together; the span alone frees enough that
+    # the two later messages stay.
+    assert dropped == 2
+    assert out == msgs[2:]
+
+
+def test_truncate_keeps_span_whole_when_it_fits():
+    msgs = [_msg("user", 40), *_tool_span("c1", 40), _msg("user", 40)]
+    out, dropped = truncate_messages_to_budget(msgs, 10_000)
+    assert dropped == 0
+    assert out == msgs
+
+
+def test_truncate_drops_whole_span_and_accounts_for_it():
+    """The span's tokens must actually come off `running`, or the pruner keeps
+    dropping past the budget (or stops short of it)."""
+    msgs = [
+        *_tool_span("c1", 400),   # 100 tok of results + the call itself
+        _msg("user", 200),        # 50 tok
+        _msg("user", 40),         # 10 tok, last user, preserved
+    ]
+    out, dropped = truncate_messages_to_budget(msgs, 60)
+    assert out[-1] is msgs[-1]
+    assert dropped == len(msgs) - len(out)
+    assert not any(m.get("tool_calls") or m.get("role") == "tool" for m in out)
