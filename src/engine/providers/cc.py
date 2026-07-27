@@ -31,6 +31,7 @@ from src.llm_errors import LLMCommunicationError
 from src.utils.claude_cli_env import build_claude_cli_env
 
 from .base import Provider
+from ._subprocess import clamp_cli_arg, fit_cli_prompt, render_transcript_blocks
 
 if TYPE_CHECKING:
     from src.engine.driver import TextEngine
@@ -169,7 +170,15 @@ async def generate_cc(
     prompt. `tools` is intentionally ignored — Claude Code uses its own sandboxed
     tools and returns final text."""
     system_prompt, history = engine._extract_system_prompt(history_object)
-    prompt = engine._render_agy_prompt(history)
+    # Same argv ceiling as the agy route: `claude -p <prompt>` passes the whole
+    # transcript as one argument and execve caps a single argument at 128 KiB, so
+    # an unclamped prompt fails the spawn with OSError [Errno 7] instead of
+    # reaching Claude Code. Elide the oldest history messages to fit.
+    prompt, elided = fit_cli_prompt("", render_transcript_blocks(history))
+    # `--system-prompt <text>` is its own argv entry and is bounded by the same
+    # per-argument ceiling, so it needs clamping too — it is not covered by the
+    # prompt budget above.
+    system_prompt = clamp_cli_arg(system_prompt or "", label="system prompt")
     model_arg = engine._cc_model_arg(config.get("model_name", ""))
     persona_name = config.get("persona_name")
     # DP-227: the orchestration layer may inject a per-run workspace (the fixr
@@ -187,6 +196,7 @@ async def generate_cc(
         "model": config.get("model_name"),
         "cc_model": model_arg,
         "prompt_chars": len(prompt),
+        "history_messages_elided": elided,
         "system_prompt_chars": len(system_prompt or ""),
         "tools_ignored": [
             t["function"]["name"] for t in tools or []
