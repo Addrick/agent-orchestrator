@@ -1,6 +1,13 @@
 #!/bin/sh
 # Memory-update reminder marker (existing behavior).
-echo 'pending' > .claude/.memory_update_pending
+# The UserPromptSubmit reader looks at $CLAUDE_PROJECT_DIR/.claude/ = the MAIN
+# worktree. A commit made inside a linked worktree has cwd = that worktree,
+# whose .claude/ is gitignored (missing) AND is not where the reader looks.
+# Resolve the main worktree from the common git dir so the marker lands where
+# the reader will find it, from any worktree.
+main_worktree=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")
+mkdir -p "$main_worktree/.claude"
+echo 'pending' > "$main_worktree/.claude/.memory_update_pending"
 
 # Keep .agents/AGENTS.md (read by Antigravity) in sync with the canonical
 # CLAUDE.md. CLAUDE.md is the single source of truth; the mirror is generated.
