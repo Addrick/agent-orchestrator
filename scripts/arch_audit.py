@@ -1,15 +1,30 @@
 # scripts/arch_audit.py
 """Maintainability audit (DP-302).
 
-Three read-only probes over src/, each answering a different question about
-why the codebase is hard to change:
+Read-only probes over src/, each answering a different question about why the
+codebase is hard to change:
 
   deps      package-level runtime import graph, cycles, fan-in
-  dupes     rename-insensitive structural duplication between functions
+  dupes     exact structural duplication -- same code shape, renamed
+  similar   near-duplicate bodies -- same work, regenerated with differences
+  records   parallel state shapes -- one concept, several record types
+  concepts  one domain noun implemented in several unrelated packages
   hotspots  churn x size, plus the long / deeply-nested functions
 
-Runs all three by default:  python scripts/arch_audit.py
-Or one at a time:           python scripts/arch_audit.py hotspots
+Runs all of them by default:  python scripts/arch_audit.py
+Or one at a time:             python scripts/arch_audit.py similar
+
+The last three exist because `dupes` measured the codebase as clean (1.23%
+exact clones) while it demonstrably was not. The growth pattern here is not
+copy-paste: a capability gets *regenerated* slightly differently rather than
+reused, so the codebase gains parallel subsystems for one concept -- more
+parts to learn, no textual overlap for a clone detector to find. Known
+instance: `confirmations.PendingConfirmation` (in-memory, token-correlated)
+sits parallel to the `proposals` SQLite queue; both park a write call for a
+human decision and then execute it.
+
+`dupes`/`similar` compare functions. `records`/`concepts` compare
+*subsystems*, which is where this codebase actually loses.
 
 Nothing here enforces anything -- `lint-imports` (setup.cfg) is the gate that
 runs in CI. This script is for deciding *what to refactor next*.
@@ -21,7 +36,9 @@ Baseline recorded 2026-07-27 at 6475d8d, for comparison on later runs:
 import ast
 import collections
 import hashlib
+import itertools
 import os
+import re
 import subprocess
 import sys
 
@@ -216,6 +233,248 @@ def dupes():
 
 
 # --------------------------------------------------------------------------
+# similar -- near-duplicate bodies
+# --------------------------------------------------------------------------
+
+# Vocabulary too generic to signal shared purpose.
+NOISE = {
+    'self', 'cls', 'get', 'set', 'append', 'len', 'str', 'int', 'dict', 'list',
+    'bool', 'format', 'join', 'keys', 'values', 'items', 'logger', 'debug',
+    'info', 'warning', 'error', 'exception', 'add', 'update', 'pop', 'name',
+    'data', 'result', 'value', 'key', 'args', 'kwargs', 'e', 'i', 'x', 'out',
+    'isinstance', 'super', '__init__', 'strip', 'lower', 'upper', 'split',
+}
+MIN_VOCAB = 12       # functions with a thinner vocabulary are too generic
+SIM_THRESHOLD = 0.55  # Jaccard over identifier vocabulary
+
+
+def _vocab(node):
+    """The identifier vocabulary of a function: what it calls and touches.
+
+    Deliberately ignores control flow -- the point is to match two functions
+    that do the same work even when one has grown an extra branch, which is
+    exactly what `dupes` (exact AST shape) cannot see.
+    """
+    words = set()
+    for n in ast.walk(node):
+        if isinstance(n, ast.Attribute):
+            words.add(n.attr)
+        elif isinstance(n, ast.Name):
+            words.add(n.id)
+        elif isinstance(n, ast.keyword) and n.arg:
+            words.add(n.arg)
+        elif isinstance(n, ast.Constant) and isinstance(n.value, str):
+            if 3 < len(n.value) < 60:
+                words.update(re.findall(r'[a-z_]{4,}', n.value.lower()))
+    return {w for w in words if w not in NOISE and not w.startswith('__')}
+
+
+def _collect_functions():
+    """(path, lineno, qualname, vocab) for every non-trivial function."""
+    out = []
+    for path in _walk('src'):
+        tree = _parse(path)
+        if tree is None:
+            continue
+        parents = {}
+        for parent in ast.walk(tree):
+            for child in ast.iter_child_nodes(parent):
+                parents[child] = parent
+        for n in ast.walk(tree):
+            if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            words = _vocab(n)
+            if len(words) < MIN_VOCAB:
+                continue
+            owner = parents.get(n)
+            qual = (f"{owner.name}.{n.name}"
+                    if isinstance(owner, ast.ClassDef) else n.name)
+            out.append((path, n.lineno, qual, words))
+    return out
+
+
+def similar():
+    funcs = _collect_functions()
+    print(f"{len(funcs)} functions with >= {MIN_VOCAB} distinct identifiers")
+    print(f"pairs above Jaccard {SIM_THRESHOLD}, different files only:\n")
+
+    hits = []
+    for (p1, l1, n1, v1), (p2, l2, n2, v2) in itertools.combinations(funcs, 2):
+        if p1 == p2:
+            continue
+        inter = len(v1 & v2)
+        if not inter:
+            continue
+        j = inter / len(v1 | v2)
+        if j >= SIM_THRESHOLD:
+            hits.append((j, p1, l1, n1, p2, l2, n2, sorted(v1 & v2)[:8]))
+
+    hits.sort(reverse=True)
+    for j, p1, l1, n1, p2, l2, n2, shared in hits[:40]:
+        print(f"{j:.2f}  {p1}:{l1} {n1}()")
+        print(f"      {p2}:{l2} {n2}()")
+        print(f"      shared: {', '.join(shared)}")
+    if not hits:
+        print("(none)")
+    else:
+        print(f"\n{len(hits)} cross-file near-duplicate pairs")
+
+
+# --------------------------------------------------------------------------
+# records -- parallel state shapes
+# --------------------------------------------------------------------------
+
+FIELD_NOISE = {'id', 'name', 'created_at', 'updated_at', 'status', 'type'}
+REC_THRESHOLD = 0.34
+
+
+def _class_fields(node):
+    """Annotated attributes of a class -- its record shape."""
+    return {s.target.id for s in node.body
+            if isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name)}
+
+
+def _table_fields(text):
+    """(table, columns) for every CREATE TABLE in a source file's SQL."""
+    out = []
+    for m in re.finditer(r'CREATE TABLE(?: IF NOT EXISTS)?\s+(\w+)\s*\((.*?)\n\s*\)',
+                         text, re.S | re.I):
+        cols = set()
+        for line in m.group(2).splitlines():
+            word = re.match(r'\s*(\w+)\s+\w', line)
+            if word and word.group(1).upper() not in (
+                    'PRIMARY', 'FOREIGN', 'UNIQUE', 'CHECK', 'CONSTRAINT'):
+                cols.add(word.group(1))
+        if cols:
+            out.append((m.group(1), cols))
+    return out
+
+
+def _collect_records():
+    recs = []
+    for path in _walk('src'):
+        try:
+            text = open(path, encoding='utf-8').read()
+        except OSError:
+            continue
+        for table, cols in _table_fields(text):
+            recs.append((f"{path} table:{table}", cols))
+        tree = _parse(path)
+        if tree is None:
+            continue
+        for n in ast.walk(tree):
+            if isinstance(n, ast.ClassDef):
+                fields = _class_fields(n)
+                if len(fields) >= 4:
+                    recs.append((f"{path}:{n.lineno} {n.name}", fields))
+    return recs
+
+
+def records():
+    recs = _collect_records()
+    print(f"{len(recs)} record shapes (dataclasses, annotated classes, tables)")
+    print(f"pairs sharing >= {REC_THRESHOLD:.0%} of their field names:\n")
+
+    hits = []
+    for (n1, f1), (n2, f2) in itertools.combinations(recs, 2):
+        a, b = f1 - FIELD_NOISE, f2 - FIELD_NOISE
+        if len(a) < 3 or len(b) < 3:
+            continue
+        j = len(a & b) / len(a | b)
+        if j >= REC_THRESHOLD:
+            hits.append((j, n1, n2, sorted(a & b)))
+
+    hits.sort(reverse=True)
+    for j, n1, n2, shared in hits[:30]:
+        print(f"{j:.2f}  {n1}")
+        print(f"      {n2}")
+        print(f"      shared: {', '.join(shared)}")
+    if not hits:
+        print("(none)")
+
+
+# --------------------------------------------------------------------------
+# concepts -- one noun, many packages
+# --------------------------------------------------------------------------
+
+VERBS = {'get', 'set', 'is', 'has', 'to', 'from', 'build', 'make', 'run',
+         'handle', 'on', 'do', 'load', 'save', 'read', 'write', 'apply',
+         'ensure', 'try', 'with', 'as', 'for', 'the', 'a', 'and', 'or',
+         'new', 'old', 'all', 'any', 'init', 'test', 'main', 'wrap', 'call',
+         # second pass: these swamped the first run's output. A verb shared
+         # across packages means "many things register/parse/start", which is
+         # normal. Only shared *nouns* suggest a re-implemented concept.
+         'register', 'resolve', 'start', 'stop', 'parse', 'create', 'extract',
+         'send', 'fetch', 'process', 'update', 'delete', 'remove', 'add',
+         'check', 'validate', 'format', 'render', 'emit', 'close', 'open',
+         'list', 'find', 'lookup', 'sync', 'flush', 'reset', 'clear',
+         'prepare', 'setup', 'inject', 'collect', 'count', 'log', 'notify'}
+GENERIC = {'tool', 'tools', 'data', 'info', 'value', 'result', 'item', 'list',
+           'dict', 'str', 'text', 'json', 'file', 'path', 'error', 'manager',
+           'handler', 'name', 'id', 'args', 'kwargs', 'config', 'client',
+           'message', 'messages', 'response', 'request', 'content', 'model'}
+
+
+def _words(identifier):
+    parts = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', identifier).lower().split('_')
+    return [p for p in parts if p and p not in VERBS and p not in GENERIC
+            and len(p) > 3]
+
+
+def _noun_index(classes_only):
+    """noun -> package -> definitions that mention it."""
+    index = collections.defaultdict(lambda: collections.defaultdict(list))
+    wanted = (ast.ClassDef,) if classes_only else (
+        ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+    for path in _walk('src'):
+        tree = _parse(path)
+        if tree is None:
+            continue
+        parts = path.split('/')
+        pkg = parts[1] if len(parts) > 2 else 'src(root)'
+        for n in ast.walk(tree):
+            if isinstance(n, wanted):
+                for w in _words(n.name):
+                    index[w][pkg].append(f"{path}:{n.lineno} {n.name}")
+    return index
+
+
+def _report_nouns(index, min_pkgs, limit, header):
+    rows = [(len(pkgs), sum(len(v) for v in pkgs.values()), noun, pkgs)
+            for noun, pkgs in index.items() if len(pkgs) >= min_pkgs]
+    rows.sort(reverse=True)
+    print(header)
+    for _, _, noun, pkgs in rows[:limit]:
+        total = sum(len(v) for v in pkgs.values())
+        print(f"'{noun}' -- {len(pkgs)} packages, {total} definitions")
+        for pkg, defs in sorted(pkgs.items(), key=lambda kv: -len(kv[1])):
+            print(f"    {pkg:18s} {len(defs):3d}  e.g. {defs[0]}")
+        print()
+    if not rows:
+        print("(none)\n")
+
+
+def concepts():
+    """Domain nouns that several unrelated packages each implement.
+
+    A noun owned by one package is a component. The same noun *typed* in three
+    packages usually means the concept was re-implemented rather than
+    imported -- the parallel-subsystem growth this codebase actually has.
+
+    The class-name pass is the high-signal one: a shared verb only means many
+    things start or register, but a shared noun across class names means
+    several packages each minted their own model of one idea.
+    """
+    _report_nouns(_noun_index(classes_only=True), 2, 12,
+                  "TYPES: nouns appearing in class names in 2+ packages "
+                  "(strongest signal)\n")
+    print()
+    _report_nouns(_noun_index(classes_only=False), 4, 10,
+                  "ALL DEFINITIONS: nouns spanning 4+ packages "
+                  "(weaker -- read as vocabulary spread)\n")
+
+
+# --------------------------------------------------------------------------
 # hotspots
 # --------------------------------------------------------------------------
 
@@ -300,7 +559,8 @@ def hotspots():
     print(f"  {len(funcs)} functions, {sum(loc.values())} LOC")
 
 
-PROBES = {'deps': deps, 'dupes': dupes, 'hotspots': hotspots}
+PROBES = {'deps': deps, 'dupes': dupes, 'similar': similar,
+          'records': records, 'concepts': concepts, 'hotspots': hotspots}
 
 if __name__ == '__main__':
     chosen = sys.argv[1:] or list(PROBES)
