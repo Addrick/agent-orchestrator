@@ -1,6 +1,10 @@
 # tests/memory/test_context_budget.py
 
-from memory.context_budget import estimate_tokens, truncate_messages_to_budget
+from memory.context_budget import (
+    drop_orphaned_tool_head,
+    estimate_tokens,
+    truncate_messages_to_budget,
+)
 
 
 # --- estimate_tokens boundaries ---
@@ -157,3 +161,117 @@ def test_truncate_drops_whole_span_and_accounts_for_it():
     assert out[-1] is msgs[-1]
     assert dropped == len(msgs) - len(out)
     assert not any(m.get("tool_calls") or m.get("role") == "tool" for m in out)
+
+
+# --- drop_orphaned_tool_head (DP-298) ---
+#
+# Every truncation in the pipeline counts messages, not turns, so the DB
+# sliding window and the token pruner can both slice into the middle of a
+# user/assistant(tool_calls)/tool sequence. A history that then STARTS on a
+# tool_calls or tool message is rejected by Google with 400 "function call turn
+# must come immediately after a user turn" (leading call) or "function response
+# turn must come immediately after a function call turn" (leading bare result).
+
+
+def _call_msg() -> dict:
+    return {"role": "assistant", "tool_calls": [{"id": "c1", "name": "t", "arguments": {}}]}
+
+
+def _result_msg() -> dict:
+    return {"role": "tool", "tool_call_id": "c1", "name": "t", "content": "{}"}
+
+
+def test_orphan_head_wellformed_history_untouched():
+    msgs = [_msg("user", 4), _call_msg(), _result_msg(), _msg("assistant", 4)]
+    out, dropped = drop_orphaned_tool_head(msgs)
+    assert out == msgs
+    assert dropped == 0
+
+
+def test_orphan_head_drops_leading_tool_call_and_result():
+    msgs = [_call_msg(), _result_msg(), _msg("assistant", 4), _msg("user", 4)]
+    out, dropped = drop_orphaned_tool_head(msgs)
+    assert dropped == 2
+    assert out[0]["role"] == "assistant" and "tool_calls" not in out[0]
+
+
+def test_orphan_head_drops_leading_bare_tool_result():
+    """Window can start after the tool_calls turn — the result alone is orphaned."""
+    msgs = [_result_msg(), _msg("assistant", 4), _msg("user", 4)]
+    out, dropped = drop_orphaned_tool_head(msgs)
+    assert dropped == 1
+    assert out[0]["role"] == "assistant"
+
+
+def test_orphan_head_keeps_assistant_text_turn():
+    """A plain assistant turn is a legal opener (model-first history); keep it."""
+    msgs = [_msg("assistant", 4), _msg("user", 4)]
+    out, dropped = drop_orphaned_tool_head(msgs)
+    assert out == msgs
+    assert dropped == 0
+
+
+def test_orphan_head_empty_history():
+    out, dropped = drop_orphaned_tool_head([])
+    assert out == []
+    assert dropped == 0
+
+
+def test_orphan_head_all_orphaned():
+    msgs = [_call_msg(), _result_msg()]
+    out, dropped = drop_orphaned_tool_head(msgs)
+    assert out == []
+    assert dropped == 2
+
+
+# The two masking cases. Both defeated a scan that simply `break`s on the first
+# message it does not recognise as tool traffic — the orphan sat at index 1 and
+# reached the provider anyway.
+
+
+def test_orphan_head_looks_through_injected_memory_block():
+    """The LTM recall block is prepended after truncation and is not a real user
+    turn, so it must not shield an orphan sitting behind it."""
+    memory = {"role": "user", "content": "[Recalled context] ..."}
+    msgs = [memory, _result_msg(), _msg("assistant", 4)]
+    out, dropped = drop_orphaned_tool_head(msgs, injected=(memory,))
+    assert dropped == 1
+    assert out[0] is memory
+    assert not any(m.get("role") == "tool" for m in out)
+
+
+def test_orphan_head_looks_through_leading_system_message():
+    """truncate_messages_to_budget preserves system entries while dropping the
+    conversation around them, so [system, tool, ...] is reachable."""
+    msgs = [{"role": "system", "content": "sys"}, _call_msg(), _result_msg(), _msg("user", 4)]
+    out, dropped = drop_orphaned_tool_head(msgs)
+    assert dropped == 2
+    assert out[0]["role"] == "system"
+    assert out[1]["role"] == "user"
+
+
+def test_orphan_head_injected_block_absent_after_pruning():
+    """The LTM block is droppable by the token pruner (it is not the last user
+    message). Passing a block that no longer exists must not misalign the scan."""
+    memory = {"role": "user", "content": "[Recalled context] ..."}
+    msgs = [_result_msg(), _msg("user", 4)]  # memory block already pruned away
+    out, dropped = drop_orphaned_tool_head(msgs, injected=(memory,))
+    assert dropped == 1
+    assert out[0]["role"] == "user"
+
+
+def test_orphan_head_genuine_user_turn_still_anchors_the_call():
+    """A real user turn in front of the tool traffic makes it well-formed — the
+    preamble skip must not make the scan greedy past legitimate history."""
+    msgs = [_msg("user", 4), _call_msg(), _result_msg()]
+    out, dropped = drop_orphaned_tool_head(msgs, injected=None)
+    assert dropped == 0
+    assert out == msgs
+
+
+def test_orphan_head_preamble_only_history_is_untouched():
+    memory = {"role": "user", "content": "[Recalled context] ..."}
+    msgs = [{"role": "system", "content": "sys"}, memory]
+    out, dropped = drop_orphaned_tool_head(msgs, injected=(memory,))
+    assert dropped == 0
+    assert out == msgs

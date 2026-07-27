@@ -13,7 +13,7 @@ budget allocation) lands here.
 """
 
 import json
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 def estimate_tokens(text: str) -> int:
@@ -115,3 +115,80 @@ def truncate_messages_to_budget(
         i = end
 
     return kept, dropped
+
+
+def drop_orphaned_tool_head(
+    messages: List[Dict[str, Any]],
+    injected: Optional[Iterable[Dict[str, Any]]] = None,
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Drop a tool sequence left dangling at the head of `messages`.
+
+    A tool turn is three messages long — `user`, `assistant` (with
+    `tool_calls`), `tool` (the result) — while the windows that trim history
+    count *messages*, not turns, so a cut can land mid-sequence and leave the
+    history *starting* on an `assistant`-with-`tool_calls` or a `tool` message
+    whose triggering user turn is gone.
+
+    Two of the three producers of that shape are now fixed upstream, and this
+    is the backstop rather than the primary defense for them:
+
+    * `truncate_messages_to_budget` above treats an `assistant`+`tool_calls`
+      message and its `tool` answers as one atomic span (DP-296), so the token
+      pruner no longer splits a pair;
+    * `build_conversation_history` refuses to replay an assistant row's
+      `tool_context` unless a `user` or `tool` turn precedes it (DP-296), which
+      closes the DB sliding-window case at the source.
+
+    The path where this function is still load-bearing is `client_messages`
+    (kobold-lite supplies its own array, which `prepare_request` takes verbatim
+    apart from stripping one leading system message) — neither guard above runs
+    on it. Keeping the repair as the last stop before the wire also means any
+    future producer of an unpaired head fails safe.
+
+    Providers reject that shape: Google returns 400 "function call turn must
+    come immediately after a user turn" for a leading `function_call`, and
+    "function response turn must come immediately after a function call turn"
+    for a leading bare result. Since the orphan's context is already gone, the
+    repair is to drop it — no valid prompt can be built from a half turn.
+
+    Two kinds of message may sit *in front* of the orphan without making it
+    well-formed, and must be scanned through rather than treated as the head:
+
+    * `role == "system"` entries, which `truncate_messages_to_budget`
+      deliberately preserves while dropping the conversation around them, and
+      of which the `client_messages` path strips only one;
+    * anything in `injected` — head content the request builder prepends after
+      truncation (the long-term-memory recall block, a `user` message that is
+      not a real conversational turn). Matched by **identity**, so a caller can
+      pass a block that may or may not have survived pruning and get the right
+      answer either way.
+
+    Neither is a turn the orphan can legally attach to, so skipping them and
+    continuing the scan is what makes the repair fire in the cases that
+    actually reach a provider.
+
+    Returns `(repaired_messages, dropped_count)`. The skipped preamble is
+    preserved in the result; only the orphaned tool messages are removed.
+    """
+    injected_ids = {id(m) for m in (injected or ())}
+
+    # Walk past preamble that cannot serve as the orphan's originating turn.
+    preamble = 0
+    for msg in messages:
+        if msg.get("role") == "system" or id(msg) in injected_ids:
+            preamble += 1
+            continue
+        break
+
+    start = preamble
+    for msg in messages[preamble:]:
+        role = msg.get("role")
+        if role == "tool" or (role == "assistant" and msg.get("tool_calls")):
+            start += 1
+            continue
+        break
+
+    dropped = start - preamble
+    if dropped == 0:
+        return messages, 0
+    return messages[:preamble] + messages[start:], dropped
