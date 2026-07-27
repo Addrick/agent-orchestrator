@@ -336,6 +336,8 @@ The bot implements a comprehensive security framework to prevent prompt injectio
 ### Universal Write-Audit
 Regardless of execution mode, **all write tools** (tools that modify state, like creating tickets or deleting users) are parked for human audit before execution. This ensures that no state-changing action is taken without explicit user consent.
 
+**Gated actions stay in the model's memory (DP-296).** A persona remembers the tool calls it made and the writes it proposed, even when the turn did not finish cleanly — a proposal you approved, denied, or simply never answered, a turn that died on a provider error, or one that hit the tool-iteration cap. Previously only turns that ended with the model writing text carried their tool calls forward, so gated actions were invisible on the next turn: ask "did you see the error you got?" after a parked proposal and the persona had no record of ever calling anything, and would re-propose or invent an answer. Unfinished calls are recorded as *not executed* with a reason (`awaiting_approval`, `denied`, `error`), so a persona can tell "I did this" from "I asked to do this and it didn't happen" and stops re-proposing denied actions. This holds for regenerated turns too: retrying a reply that then proposes a write records the proposal against the regenerated message, without disturbing the text that message already shows or the version history behind it.
+
 ### Taint Tracking
 The system tracks the "trustworthiness" of the conversation context. If a persona uses a tool that retrieves potentially untrusted content (like `web_search` or `recall_memory` containing past external input), the current turn is marked as **tainted**. 
 - Taint is "sticky" for the duration of the conversation.
