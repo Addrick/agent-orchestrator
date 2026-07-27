@@ -54,6 +54,12 @@ jobs:
       - name: Type check with mypy
         run: mypy src/ --config-file mypy.ini
 
+      # Enforces the layer contracts in setup.cfg. Without this step the
+      # contracts silently rot: they were broken (and erroring on a stale
+      # ignore) for an unknown number of months before DP-302 found them.
+      - name: Check architecture layers with import-linter
+        run: lint-imports
+
       - name: Run tests with pytest, skipping integration.
         run: pytest -n auto -m "not integration"
 
