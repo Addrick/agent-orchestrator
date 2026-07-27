@@ -60,6 +60,13 @@ class PendingConfirmation:
     # place. Without it the resume would INSERT a fresh assistant row and
     # strand the archived one with its pre-retry content.
     retry_assistant_id: Optional[int] = None
+    # The assistant row written for the parked turn itself. That row carries a
+    # sealed tool_context (this turn's reads + the write marked
+    # `awaiting_approval`) so an unanswered or denied park stays visible to the
+    # model. On resume the continuation re-seals the same span with real
+    # results, so this row's copy must be cleared or every approved write shows
+    # up twice in history.
+    parked_assistant_id: Optional[int] = None
 
 
 class ConfirmationManager:

@@ -250,8 +250,30 @@ class RequestBuilder:
                 if author_name == persona_name:
                     tool_context_json = msg.get('tool_context')
                     if tool_context_json:
-                        final_history.extend(json.loads(tool_context_json))
-                    final_history.append({'role': 'assistant', 'content': content_clean})
+                        # A replayed tool block must follow a user turn *or a
+                        # function-response turn*. The history limit slices raw
+                        # rows, so an assistant row carrying tool_context can end
+                        # up oldest — replaying it then opens the wire array with
+                        # a function call and Gemini rejects the request outright
+                        # ("function call turn must come immediately after a user
+                        # turn or after a function response turn"). Drop the
+                        # orphan instead.
+                        #
+                        # Both legal predecessors matter: a DP-296 park row has
+                        # empty content, so its own emitted block ends on a
+                        # `tool` message. Accepting only 'user' would drop the
+                        # tool context of every row that follows a park — the
+                        # exact memory this feature exists to keep.
+                        if final_history and final_history[-1].get('role') in ('user', 'tool'):
+                            final_history.extend(json.loads(tool_context_json))
+                        else:
+                            logger.debug(
+                                "Dropping orphaned tool_context for %s: no "
+                                "preceding user turn survived the history limit.",
+                                persona_name,
+                            )
+                    if content_clean:
+                        final_history.append({'role': 'assistant', 'content': content_clean})
                 else:
                     # In a group chat, messages from other personas are treated as user messages
                     formatted_content = f"{author_name}: {content_clean}"
@@ -757,13 +779,15 @@ class RequestBuilder:
                 f"(prompt_budget={prompt_budget}) for persona={ctx.persona_name}"
             )
 
-        # Last stop before the wire. Both truncations above count messages, not
-        # turns, so either can slice into the middle of a tool sequence and leave
-        # the history starting on an assistant-with-tool_calls / tool message
-        # whose user turn is gone — which Google rejects outright. This runs
-        # *after* the token-prune because the prune itself can open a new orphan;
-        # the LTM block is passed as injected head content so the scan looks
-        # through it instead of stopping on it (it is not a real user turn).
+        # Last stop before the wire: a history that STARTS on an
+        # assistant-with-tool_calls / tool message whose user turn is gone is
+        # rejected outright by Google. DP-296 closed the two DB-side producers
+        # (atomic tool spans in the pruner, the tool_context replay guard in
+        # build_conversation_history); the client_messages path above has
+        # neither guard, and this also fails safe for any future producer.
+        # Runs after the token-prune, and the LTM block is passed as injected
+        # head content so the scan looks through it rather than stopping on it
+        # (it is not a real user turn).
         ctx.conversation_history, orphaned = drop_orphaned_tool_head(
             ctx.conversation_history,
             injected=(memory_msg,) if memory_msg is not None else None,
@@ -771,6 +795,6 @@ class RequestBuilder:
         if orphaned:
             logger.info(
                 "Dropped %d orphaned tool-sequence message(s) from the head of the "
-                "history for persona=%s (truncation sliced mid-turn)",
+                "history for persona=%s (window opened mid-turn)",
                 orphaned, ctx.persona_name,
             )

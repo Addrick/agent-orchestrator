@@ -12,6 +12,7 @@ future work documented in `memory/project/plans/web_ui_roadmap.md`
 budget allocation) lands here.
 """
 
+import json
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
@@ -30,10 +31,16 @@ def estimate_tokens(text: str) -> int:
 def _message_tokens(msg: Dict[str, Any]) -> int:
     """Token cost of a single OAI-style message dict.
 
-    Sums `content` (string or list-of-parts) token estimates. Tool/function
-    payloads and role overhead are not modelled — char/4 already absorbs the
-    rounding error.
+    Sums `content` (string or list-of-parts) token estimates, plus serialized
+    `tool_calls` when present. Role overhead is not modelled — char/4 already
+    absorbs the rounding error.
+
+    `tool_calls` has to be counted: a tool-call assistant message carries no
+    `content` key at all, so scoring it 0 would let the pruner drop it without
+    reducing the running total while its (non-empty) `tool` results survive.
     """
+    if msg.get("tool_calls"):
+        return estimate_tokens(json.dumps(msg["tool_calls"], default=str))
     content = msg.get("content")
     if isinstance(content, str):
         return estimate_tokens(content)
@@ -81,17 +88,31 @@ def truncate_messages_to_budget(
     kept: List[Dict[str, Any]] = []
     dropped = 0
     running = total
-    for i, msg in enumerate(messages):
+    n = len(messages)
+    i = 0
+    while i < n:
+        msg = messages[i]
+        # An assistant message carrying `tool_calls` and the `tool` messages
+        # answering it are one atomic unit. Cutting between them leaves an
+        # unpaired block at the head of the wire array, and both Anthropic and
+        # Gemini reject the whole request for it. DP-296 made such blocks
+        # routine — every park and every errored turn now persists one — so a
+        # pairing-blind pruner would fail most long conversations, not just
+        # those that used tools successfully.
+        end = i + 1
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            while end < n and messages[end].get("role") == "tool":
+                end += 1
+        span = messages[i:end]
+
         is_system = msg.get("role") == "system"
         is_last_user = (i == last_user_idx)
-        if running <= max_tokens:
-            kept.append(msg)
-            continue
-        if is_system or is_last_user:
-            kept.append(msg)
-            continue
-        running -= _message_tokens(msg)
-        dropped += 1
+        if running <= max_tokens or is_system or is_last_user:
+            kept.extend(span)
+        else:
+            running -= sum(_message_tokens(m) for m in span)
+            dropped += len(span)
+        i = end
 
     return kept, dropped
 
@@ -103,13 +124,26 @@ def drop_orphaned_tool_head(
     """Drop a tool sequence left dangling at the head of `messages`.
 
     A tool turn is three messages long — `user`, `assistant` (with
-    `tool_calls`), `tool` (the result) — but every truncation this codebase
-    performs counts *messages*, not turns: the DB sliding window
-    (`fetch_raw_history`'s row `LIMIT`, expanded into the full sequence by
-    `format_raw_history_for_llm`) and `truncate_messages_to_budget` above both
-    cut oldest-first and can land mid-sequence. That leaves the history
-    *starting* on an `assistant`-with-`tool_calls` or a `tool` message whose
-    triggering user turn is gone.
+    `tool_calls`), `tool` (the result) — while the windows that trim history
+    count *messages*, not turns, so a cut can land mid-sequence and leave the
+    history *starting* on an `assistant`-with-`tool_calls` or a `tool` message
+    whose triggering user turn is gone.
+
+    Two of the three producers of that shape are now fixed upstream, and this
+    is the backstop rather than the primary defense for them:
+
+    * `truncate_messages_to_budget` above treats an `assistant`+`tool_calls`
+      message and its `tool` answers as one atomic span (DP-296), so the token
+      pruner no longer splits a pair;
+    * `build_conversation_history` refuses to replay an assistant row's
+      `tool_context` unless a `user` or `tool` turn precedes it (DP-296), which
+      closes the DB sliding-window case at the source.
+
+    The path where this function is still load-bearing is `client_messages`
+    (kobold-lite supplies its own array, which `prepare_request` takes verbatim
+    apart from stripping one leading system message) — neither guard above runs
+    on it. Keeping the repair as the last stop before the wire also means any
+    future producer of an unpaired head fails safe.
 
     Providers reject that shape: Google returns 400 "function call turn must
     come immediately after a user turn" for a leading `function_call`, and
@@ -122,7 +156,7 @@ def drop_orphaned_tool_head(
 
     * `role == "system"` entries, which `truncate_messages_to_budget`
       deliberately preserves while dropping the conversation around them, and
-      which the `client_messages` path only strips one of;
+      of which the `client_messages` path strips only one;
     * anything in `injected` — head content the request builder prepends after
       truncation (the long-term-memory recall block, a `user` message that is
       not a real conversational turn). Matched by **identity**, so a caller can

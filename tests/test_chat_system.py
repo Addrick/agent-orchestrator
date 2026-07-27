@@ -841,11 +841,17 @@ def _orphan_history_rows():
 
 
 @pytest.mark.asyncio
-async def test_prepare_request_drops_orphaned_tool_head(chat_system_with_mocks):
-    """DP-298: the DB window counts rows, not turns, so it can open on an
-    assistant row whose tool_context expands to a tool_calls/tool pair with no
-    preceding user turn. Google rejects that with 400 'function call turn must
-    come immediately after a user turn' — the orphaned head must be dropped."""
+async def test_prepare_request_drops_orphaned_tool_head_from_db_window(chat_system_with_mocks):
+    """The DB window counts rows, not turns, so it can open on an assistant row
+    whose tool_context expands to a tool_calls/tool pair with no preceding user
+    turn — Google rejects that with a 400.
+
+    DP-296 now also guards this at the source (`build_conversation_history`
+    refuses to replay tool_context that no user/tool turn precedes), so on this
+    path the repair is belt-and-braces: the assertion is that nothing unpaired
+    reaches the wire, not that this particular guard is the one that acted.
+    The path where `drop_orphaned_tool_head` is still load-bearing is
+    `client_messages` — see the test below."""
     system, memory_mock, _, persona, _ = chat_system_with_mocks
 
     memory_mock.get_channel_history.return_value = _orphan_history_rows()
@@ -859,7 +865,35 @@ async def test_prepare_request_drops_orphaned_tool_head(chat_system_with_mocks):
     head = ctx.conversation_history[0]
     assert head.get("role") != "tool"
     assert not head.get("tool_calls")
-    # the orphaned pair is gone entirely — it is the only tool traffic here
+    assert not any(m.get("role") == "tool" or m.get("tool_calls")
+                   for m in ctx.conversation_history)
+    assert ctx.conversation_history[-1] == {"role": "user", "content": "latest user msg"}
+
+
+@pytest.mark.asyncio
+async def test_prepare_request_drops_orphaned_tool_head_from_client_messages(chat_system_with_mocks):
+    """DP-298: the kobold-lite path supplies its own message array, which
+    `prepare_request` uses verbatim apart from stripping ONE leading system
+    message. DP-296's source guard lives in the DB branch and does not run here,
+    so a client window that opens mid-tool-sequence reaches the provider unless
+    the head repair catches it. This is the path the repair is load-bearing on."""
+    system, memory_mock, _, persona, _ = chat_system_with_mocks
+
+    memory_mock.get_channel_history.return_value = []
+    ctx = RequestContext(
+        persona=persona, persona_name='test_persona', user_identifier='user',
+        channel='general', message='latest user msg', server_id='srv1',
+        client_messages=[
+            # kobold-lite's window opened after the user turn that triggered it
+            {"role": "tool", "tool_call_id": "c1", "name": "inspect_agents", "content": "{}"},
+            {"role": "assistant", "content": "agent dispatched"},
+            {"role": "user", "content": "and now?"},
+        ],
+    )
+
+    await system.request_builder.prepare_request(ctx)
+
+    assert ctx.conversation_history[0].get("role") != "tool"
     assert not any(m.get("role") == "tool" or m.get("tool_calls")
                    for m in ctx.conversation_history)
     assert ctx.conversation_history[-1] == {"role": "user", "content": "latest user msg"}
@@ -873,13 +907,18 @@ async def test_prepare_request_drops_orphaned_tool_head_behind_ltm_block(chat_sy
     a window opening on tool traffic) still reaches the provider and 400s."""
     system, memory_mock, _, persona, _ = chat_system_with_mocks
 
-    memory_mock.get_channel_history.return_value = _orphan_history_rows()
+    memory_mock.get_channel_history.return_value = []
     system.request_builder.retrieve_memory_block = AsyncMock(  # type: ignore[method-assign]
         return_value=("[Recalled context] the user asked about agents earlier.", False),
     )
     ctx = RequestContext(
         persona=persona, persona_name='test_persona', user_identifier='user',
         channel='general', message='latest user msg', server_id='srv1',
+        client_messages=[
+            {"role": "tool", "tool_call_id": "c1", "name": "inspect_agents", "content": "{}"},
+            {"role": "assistant", "content": "agent dispatched"},
+            {"role": "user", "content": "and now?"},
+        ],
     )
 
     await system.request_builder.prepare_request(ctx)
@@ -997,6 +1036,89 @@ def test_format_raw_history_injects_tool_context(chat_system_with_mocks):
     assert 'tool_calls' in formatted[1]
     assert formatted[2]['role'] == 'tool'
     assert formatted[3] == {'role': 'assistant', 'content': 'Here are results'}
+
+
+def test_format_raw_history_drops_orphaned_tool_context(chat_system_with_mocks):
+    """DP-296: a replayed tool block must never open the wire array.
+
+    The history limit slices raw rows, so an assistant row carrying
+    tool_context can end up oldest. Replaying it there puts a function call
+    first and Gemini rejects the whole request ("function call turn must come
+    immediately after a user turn or after a function response turn"), which
+    took out four consecutive attempts in production on 2026-07-26.
+    """
+    system, _, _, _, _ = chat_system_with_mocks
+    tool_ctx = json.dumps([
+        {"role": "assistant", "tool_calls": [{"id": "c1", "name": "web_search", "arguments": {}}]},
+        {"role": "tool", "tool_call_id": "c1", "name": "web_search", "content": '{"result": "ok"}'}
+    ])
+    # No preceding user row survived the limit.
+    raw_history = [
+        {'author_role': 'assistant', 'author_name': 'test_persona', 'content': 'Here are results',
+         'tool_context': tool_ctx},
+        {'author_role': 'user', 'author_name': 'Alice', 'content': 'thanks'},
+    ]
+
+    formatted = system.request_builder.format_raw_history_for_llm(raw_history, "channel", "test_persona", None)
+
+    assert formatted[0] == {'role': 'assistant', 'content': 'Here are results'}
+    assert not any('tool_calls' in m for m in formatted)
+
+
+def test_format_raw_history_tool_context_after_assistant_is_dropped(chat_system_with_mocks):
+    """Two assistant rows in a row: the second one's tool block would follow an
+    assistant turn, which is equally invalid. Drop it too."""
+    system, _, _, _, _ = chat_system_with_mocks
+    tool_ctx = json.dumps([
+        {"role": "assistant", "tool_calls": [{"id": "c1", "name": "web_search", "arguments": {}}]},
+        {"role": "tool", "tool_call_id": "c1", "name": "web_search", "content": '{"result": "ok"}'}
+    ])
+    raw_history = [
+        {'author_role': 'user', 'author_name': 'Alice', 'content': 'search please'},
+        {'author_role': 'assistant', 'author_name': 'test_persona', 'content': 'One moment',
+         'tool_context': None},
+        {'author_role': 'assistant', 'author_name': 'test_persona', 'content': 'Here are results',
+         'tool_context': tool_ctx},
+    ]
+
+    formatted = system.request_builder.format_raw_history_for_llm(raw_history, "channel", "test_persona", None)
+
+    assert [m['role'] for m in formatted] == ['user', 'assistant', 'assistant']
+
+
+def test_format_raw_history_tool_context_after_park_row_is_kept(chat_system_with_mocks):
+    """DP-296 review: the provider allows a function-call turn after a user turn
+    *or after a function-response turn*, and a park row is exactly the latter —
+    it has empty content, so the block it emits ends on a `tool` message.
+    Accepting only 'user' would drop the tool context of every row following a
+    park, which is the memory this feature exists to keep.
+    """
+    system, _, _, _, _ = chat_system_with_mocks
+    park_ctx = json.dumps([
+        {"role": "assistant", "tool_calls": [{"id": "c1", "name": "update_ticket", "arguments": {}}]},
+        {"role": "tool", "tool_call_id": "c1", "name": "update_ticket",
+         "content": '{"status": "not_executed", "reason": "awaiting_approval"}'},
+    ])
+    resumed_ctx = json.dumps([
+        {"role": "assistant", "tool_calls": [{"id": "c2", "name": "update_ticket", "arguments": {}}]},
+        {"role": "tool", "tool_call_id": "c2", "name": "update_ticket", "content": '{"ok": true}'},
+    ])
+    raw_history = [
+        {'author_role': 'user', 'author_name': 'Alice', 'content': 'close the ticket'},
+        # The park: tool context only, no renderable text.
+        {'author_role': 'assistant', 'author_name': 'test_persona', 'content': '',
+         'tool_context': park_ctx},
+        {'author_role': 'assistant', 'author_name': 'test_persona', 'content': 'Closed it.',
+         'tool_context': resumed_ctx},
+    ]
+
+    formatted = system.request_builder.format_raw_history_for_llm(raw_history, "channel", "test_persona", None)
+
+    assert [m['role'] for m in formatted] == [
+        'user', 'assistant', 'tool', 'assistant', 'tool', 'assistant',
+    ]
+    assert [c['id'] for m in formatted if m.get('tool_calls')
+            for c in m['tool_calls']] == ['c1', 'c2']
 
 
 def test_format_raw_history_no_tool_context(chat_system_with_mocks):
