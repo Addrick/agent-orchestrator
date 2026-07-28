@@ -82,6 +82,13 @@ def _kobold_base_url() -> str:
     return raw
 
 
+# Deadline for the statusline's own upstream calls. These are polled once a
+# second and are pure telemetry, so a backend that accepts the connection and
+# then never answers (hung GPU host) must fail fast rather than occupy the poll
+# forever — see useKoboldPerf for what an unbounded wait does to the loop.
+_PERF_TIMEOUT_S = 5.0
+
+
 def _kobold_progress_url() -> str:
     """Base URL of the kcpp-progress sidecar, or "" when not deployed.
 
@@ -1127,7 +1134,34 @@ class KoboldEngineAdapter:
 
         @self.app.get("/api/extra/perf")
         async def get_perf() -> Any:
-            return await self._forward_get("/api/extra/perf", {})
+            """Backend processing counters, forwarded from KCPP.
+
+            Deliberately NOT `_forward_get`: its failure mode is a 200 carrying
+            the fallback body, and the only honest fallback here is `{}`. An
+            empty object passes every truthiness check the statusline makes
+            while `idle === 0` reads false — so a *stopped* KCPP renders as a
+            healthy idle backend, which is the one thing this line exists to
+            tell you apart. Answer with a status the caller can distinguish.
+
+            `timeout` is per-request rather than on the shared client, whose
+            `timeout=None` is load-bearing for streaming generations that
+            legitimately run for minutes.
+            """
+            try:
+                r = await self._http.get(
+                    f"{_kobold_base_url()}/api/extra/perf", timeout=_PERF_TIMEOUT_S
+                )
+                body = r.json() if r.content else None
+                # `idle` is the field the portal keys on; a body without it is
+                # not a perf sample no matter what status carried it.
+                if r.status_code == 200 and isinstance(body, dict) and "idle" in body:
+                    return JSONResponse(status_code=200, content=body)
+                logger.warning(f"perf upstream answered {r.status_code} with an unusable body")
+            except Exception as e:
+                # Generic reason to the client — the exception text can carry
+                # the upstream URL (decisions/2026-05-27-kobold-stack-trace-exposure).
+                logger.warning(f"perf fetch failed: {e}")
+            return JSONResponse(status_code=503, content={"error": "backend_unreachable"})
 
         @self.app.get("/api/extra/prefill")
         async def get_prefill() -> Any:
@@ -1150,23 +1184,31 @@ class KoboldEngineAdapter:
                 if r.status_code != 200:
                     return JSONResponse(content={"available": False, "reason": "upstream_error"})
                 body = r.json() if r.content else {}
+                # Re-project rather than passing the sidecar's body through, so
+                # a future sidecar field cannot silently reach the browser.
+                # Inside the `try` on purpose: this is where a sidecar that
+                # answers 200 with a JSON *array*, or a counter as a
+                # non-numeric string, blows up — and the contract this route
+                # promises is that it always degrades to `available: false`,
+                # never that it 500s.
+                if not isinstance(body, dict):
+                    raise TypeError(f"sidecar body is {type(body).__name__}, not an object")
+                projected = {
+                    "available": True,
+                    "phase": str(body.get("phase", "idle")),
+                    "processed": int(body.get("processed") or 0),
+                    "total": int(body.get("total") or 0),
+                    "generated": int(body.get("generated") or 0),
+                    "generate_total": int(body.get("generate_total") or 0),
+                    "run": int(body.get("run") or 0),
+                }
             except Exception as e:
                 # Data-plane route: the exception text can carry the upstream URL,
                 # so log it and return a generic reason (same rule as
                 # _forward_post — decisions/2026-05-27-kobold-stack-trace-exposure).
                 logger.debug(f"prefill progress fetch failed: {e}")
                 return JSONResponse(content={"available": False, "reason": "unreachable"})
-            # Re-project rather than passing the sidecar's body through, so a
-            # future sidecar field cannot silently reach the browser.
-            return JSONResponse(content={
-                "available": True,
-                "phase": str(body.get("phase", "idle")),
-                "processed": int(body.get("processed") or 0),
-                "total": int(body.get("total") or 0),
-                "generated": int(body.get("generated") or 0),
-                "generate_total": int(body.get("generate_total") or 0),
-                "run": int(body.get("run") or 0),
-            })
+            return JSONResponse(content=projected)
 
         @self.app.post("/api/extra/tokencount")
         async def tokencount(request: Request) -> Any:

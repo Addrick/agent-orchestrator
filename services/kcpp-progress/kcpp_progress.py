@@ -31,7 +31,7 @@ import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict
+from typing import Any, Dict, Optional, TextIO, Tuple
 
 logger = logging.getLogger("kcpp_progress")
 
@@ -111,17 +111,72 @@ class ProgressState:
             }
 
 
+def _open_at_end(path: str) -> Tuple[TextIO, int]:
+    """Open `path` positioned at EOF — only what happens next matters — and
+    return it with its inode, the handle on rotation detection."""
+    fh = open(path, "r", encoding="utf-8", errors="replace")
+    fh.seek(0, os.SEEK_END)
+    return fh, os.fstat(fh.fileno()).st_ino
+
+
+def _reopen_needed(path: str, fh: TextIO, inode: int) -> bool:
+    """True when the open handle no longer refers to the live log: rotated
+    (new inode), replaced (gone), or truncated in place (KCPP's log is capped
+    and something truncates it — see the infra notes)."""
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        return True
+    return st.st_ino != inode or st.st_size < fh.tell()
+
+
+def _feed(buf: str, chunk: str, state: ProgressState) -> str:
+    """Consume every complete record in `buf + chunk`; return the partial tail."""
+    buf += chunk
+    # Split on CR and LF alike; keep the trailing partial record.
+    parts = re.split(r"[\r\n]", buf)
+    buf = parts.pop()
+    if len(buf) > 8192:  # a line this long is not one of ours
+        buf = ""
+    for line in parts:
+        _consume(line, state)
+    # Also evaluate the still-incomplete tail. KCPP's end-of-run summary
+    # ("[hh:mm:ss] CtxLimit:… Generated:8/8 …") is the LAST thing it writes and
+    # its newline does not arrive until the next run starts — so waiting for a
+    # terminator leaves the phase stuck at `generate` until the staleness
+    # timeout, which is exactly the bug this line fixes. Re-consuming the same
+    # record when its terminator finally lands is harmless: every _consume path
+    # is idempotent for identical input.
+    if buf:
+        _consume(buf, state)
+    return buf
+
+
+def _pump(
+    fh: TextIO, path: str, inode: int, buf: str, state: ProgressState, poll_s: float
+) -> Tuple[str, bool]:
+    """One read cycle. Returns the carried-over partial record and whether the
+    handle is still usable — False means the log rotated or was truncated and
+    the caller must reopen."""
+    chunk = fh.read()
+    if chunk:
+        return _feed(buf, chunk, state), True
+    # No new bytes: check for rotation/truncation before sleeping.
+    if _reopen_needed(path, fh, inode):
+        return buf, False
+    time.sleep(poll_s)
+    return buf, True
+
+
 def tail_log(path: str, state: ProgressState, poll_s: float = 0.25) -> None:
     """Follow `path` forever, feeding matched counters into `state`.
 
-    Handles the file being absent, rotated, or truncated in place (KCPP's log is
-    capped and something truncates it — see the infra notes). Reads bytes rather
-    than lines because progress records end in CR, so `readline()` would block
-    until an unrelated writer emitted an LF — which is the exact 20-30s clumping
-    this sidecar exists to avoid.
+    Reads bytes rather than lines because progress records end in CR, so
+    `readline()` would block until an unrelated writer emitted an LF — which is
+    the exact 20-30s clumping this sidecar exists to avoid.
     """
-    fh = None
-    inode = None
+    fh: Optional[TextIO] = None
+    inode = -1
     buf = ""
     while True:
         try:
@@ -129,45 +184,13 @@ def tail_log(path: str, state: ProgressState, poll_s: float = 0.25) -> None:
                 if not os.path.exists(path):
                     time.sleep(1.0)
                     continue
-                fh = open(path, "r", encoding="utf-8", errors="replace")
-                fh.seek(0, os.SEEK_END)  # only care about what happens next
-                inode = os.fstat(fh.fileno()).st_ino
+                fh, inode = _open_at_end(path)
                 buf = ""
 
-            chunk = fh.read()
-            if chunk:
-                buf += chunk
-                # Split on CR and LF alike; keep the trailing partial record.
-                parts = re.split(r"[\r\n]", buf)
-                buf = parts.pop()
-                if len(buf) > 8192:  # a line this long is not one of ours
-                    buf = ""
-                for line in parts:
-                    _consume(line, state)
-                # Also evaluate the still-incomplete tail. KCPP's end-of-run
-                # summary ("[hh:mm:ss] CtxLimit:… Generated:8/8 …") is the LAST
-                # thing it writes and its newline does not arrive until the next
-                # run starts — so waiting for a terminator leaves the phase stuck
-                # at `generate` until the staleness timeout, which is exactly the
-                # bug this line fixes. Re-consuming the same record when its
-                # terminator finally lands is harmless: every _consume path is
-                # idempotent for identical input.
-                if buf:
-                    _consume(buf, state)
-                continue
-
-            # No new bytes: check for rotation/truncation before sleeping.
-            try:
-                st = os.stat(path)
-                if st.st_ino != inode or st.st_size < fh.tell():
-                    fh.close()
-                    fh = None
-                    continue
-            except FileNotFoundError:
+            buf, usable = _pump(fh, path, inode, buf, state, poll_s)
+            if not usable:
                 fh.close()
                 fh = None
-                continue
-            time.sleep(poll_s)
         except Exception:
             logger.exception("tail loop error; reopening in 2s")
             try:

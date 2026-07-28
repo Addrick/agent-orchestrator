@@ -53,3 +53,15 @@ on `/var/log/kobold`. Unauthenticated on the LAN, matching kcpp's own posture on
 expose it further.
 
 **Do not add a "recent log lines" endpoint** — that single change turns a counter into a content leak.
+
+### Known hardening gaps (deliberate, tracked)
+
+Both need a redeploy on the model host, not just a merge, so they are staged rather than bundled:
+
+- **Runs as root.** A network-listening process whose whole job is reading one file does not need it.
+  Wants `DynamicUser=yes` plus a supplementary group with read on `/var/log/kobold`, and
+  `PrivateDevices=` / `RestrictAddressFamilies=AF_INET`. (`ReadOnlyPaths=/var/log/kobold` in the unit
+  today is a no-op — `ProtectSystem=strict` already covers `/var`.)
+- **`Access-Control-Allow-Origin: *` on an all-interfaces bind.** The engine proxies this server-side,
+  so no browser needs the header; leaving it means any page a LAN user visits can read backend
+  activity metadata cross-origin from their machine. Drop it, or scope to the engine's origin.

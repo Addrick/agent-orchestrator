@@ -36,11 +36,11 @@ pytest tests/test_engine.py
 # Run with coverage
 pytest --cov=src
 
-# Lint
-flake8 src/
+# Lint (services/ holds deployed out-of-tree Python — CI gates it too)
+flake8 src/ services/
 
 # Type check
-mypy src/ --config-file mypy.ini
+mypy src/ services/ --config-file mypy.ini
 
 # Run the application
 python -m src.main
@@ -85,7 +85,7 @@ When changing any of the following, you MUST add corresponding tests before comm
 **Cross-module contracts** (imports, base class APIs, interface signatures):
 - If renaming or moving a class/function: grep for all importers and update them in the same commit
 - If changing a base class API (e.g. `Agent` or `AgentLoop`): update all subclasses and their tests in the same commit
-- Run `mypy src/ --config-file mypy.ini` before committing any structural change
+- Run `mypy src/ services/ --config-file mypy.ini` before committing any structural change
 
 **Startup registration** (new `ServiceIntegration`, tool handler, or notifier):
 - If a component must be registered at startup to function, test that the registration actually happens — not just that the component works in isolation

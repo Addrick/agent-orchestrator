@@ -60,11 +60,18 @@ export function StatusLine() {
   // that something is running: a stale `prefill` blob outliving its run would
   // otherwise pin a bar at 34% forever (the sidecar ages its own state out, but
   // this render must not depend on that being the only guard).
-  const ingesting = !!prefill && prefill.phase === 'prefill' && (prefill.total ?? 0) > 0
-  const ingestDone = prefill?.processed ?? 0
-  const ingestTotal = prefill?.total ?? 0
+  //
+  // `stale` is the second half of that guard. A failed poll keeps the last good
+  // blob on purpose — a dropped request is not evidence the counters reset —
+  // but "last known" is not "live", and rendering it anyway put the row in a
+  // state that contradicted itself: `backend unreachable` in amber next to a
+  // pulsing ingest bar frozen mid-run.
+  const live = stale ? null : prefill
+  const ingesting = !!live && live.phase === 'prefill' && (live.total ?? 0) > 0
+  const ingestDone = live?.processed ?? 0
+  const ingestTotal = live?.total ?? 0
   const ingestPct = ingestTotal ? Math.min(100, Math.round((ingestDone / ingestTotal) * 100)) : 0
-  const decoding = !!prefill && prefill.phase === 'generate' && (prefill.generate_total ?? 0) > 0
+  const decoding = !!live && live.phase === 'generate' && (live.generate_total ?? 0) > 0
 
   return (
     <div className="statusline" role="status">
@@ -126,7 +133,7 @@ export function StatusLine() {
         <span className="sl-chip sl-busy" title="live decode progress (kcpp-progress sidecar)">
           gen{' '}
           <b>
-            {fmtTok(prefill?.generated ?? 0)}/{fmtTok(prefill?.generate_total ?? 0)} tok
+            {fmtTok(live?.generated ?? 0)}/{fmtTok(live?.generate_total ?? 0)} tok
           </b>
         </span>
       ) : (

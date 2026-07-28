@@ -21,13 +21,19 @@ import type { KoboldPerf, KoboldPrefill } from '../types/contracts'
  *  endpoint is hit by every open portal tab. */
 const BUSY_MS = 1000
 const IDLE_MS = 5000
+/** How long a `not_configured` verdict suppresses the sidecar poll. The verdict
+ *  cannot change without an engine restart — but a portal tab outlives engine
+ *  restarts, so latching it permanently means a tab open across the restart
+ *  that first sets `KOBOLD_PROGRESS_URL` never shows the live bar again until
+ *  it is reloaded. Re-probe rarely instead of never. */
+const NO_SIDECAR_RECHECK_MS = 60_000
 
 export interface PerfSnapshot {
   /** Last successful sample, or null before the first one lands. */
   perf: KoboldPerf | null
   /** Live ingestion progress from the kcpp-progress sidecar, or null where it
-   *  is not deployed (the common case — poll stops after the first such
-   *  answer). Present alongside `perf`, never instead of it. */
+   *  is not deployed (the common case — the poll then backs off to once a
+   *  minute). Present alongside `perf`, never instead of it. */
   prefill: KoboldPrefill | null
   /** True once a poll has failed since the last success — the numbers shown
    *  are the last good ones and may be arbitrarily old. */
@@ -45,10 +51,11 @@ export function useKoboldPerf(): PerfSnapshot {
   // a state dep would tear down and rebuild the timer on every sample. Keep the
   // loop self-scheduling and read the flag from a ref.
   const busyRef = useRef(false)
-  // Set once the engine answers `not_configured` — that verdict cannot change
-  // without an engine restart, so polling a route that will keep saying "no
-  // sidecar here" every second is pure waste.
-  const noSidecarRef = useRef(false)
+  // Wall-clock deadline until which the sidecar poll is skipped. Set when the
+  // engine answers `not_configured`: polling a route that will keep saying "no
+  // sidecar here" every second is pure waste, but see NO_SIDECAR_RECHECK_MS for
+  // why the answer is a snooze rather than a latch.
+  const noSidecarUntilRef = useRef(0)
 
   useEffect(() => {
     let cancelled = false
@@ -65,13 +72,13 @@ export function useKoboldPerf(): PerfSnapshot {
         // the perf sample we already hold, so it is fetched and caught
         // separately rather than in the same try.
         let prefill: KoboldPrefill | null = null
-        if (!noSidecarRef.current) {
+        if (Date.now() >= noSidecarUntilRef.current) {
           try {
             const p = await getKoboldPrefill(ctl.signal)
             if (p.available) {
               prefill = p
             } else if (p.reason === 'not_configured') {
-              noSidecarRef.current = true
+              noSidecarUntilRef.current = Date.now() + NO_SIDECAR_RECHECK_MS
             }
           } catch {
             /* transient — fall back to perf's last-completed counters */

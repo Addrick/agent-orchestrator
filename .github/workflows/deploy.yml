@@ -43,16 +43,19 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
+      # `services/` holds deployed-but-out-of-tree Python (the kcpp-progress
+      # sidecar, DP-311). It ships to a host and has its own tests, so leaving
+      # it outside the gates just means it rots where nothing is looking.
       - name: Lint with flake8
         run: |
           # Stop the build if there are Python syntax errors, undefined names, or bad imports
-          flake8 src/ --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 src/ services/ --count --select=E9,F63,F7,F82 --show-source --statistics
           # Treat all other issues as warnings
-          flake8 src/ --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+          flake8 src/ services/ --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
       - name: Check for missing dependencies
         run: python scripts/check_missing_deps.py
       - name: Type check with mypy
-        run: mypy src/ --config-file mypy.ini
+        run: mypy src/ services/ --config-file mypy.ini
 
       # Enforces the layer contracts in setup.cfg. Without this step the
       # contracts silently rot: they were broken (and erroring on a stale
