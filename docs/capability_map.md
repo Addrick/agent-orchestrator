@@ -66,7 +66,9 @@ add a *second* implementation of an existing capability, change the verdict to
 
 | Capability | Implementations | Verdict |
 |---|---|---|
-| Spawn a `claude` CLI subprocess | `engine/providers/cc.py` (as an LLM provider) · `self_edit/dispatcher.py` (as a supervised coding agent) | `by design` — different lifetimes (request-scoped vs detached+resumable). **But** their sandbox-settings builders are independent copies: `providers/cc.py:90 build_cc_sandbox_settings()` vs `dispatcher.py:388 _sandbox_settings()`, vocabulary similarity 0.68. That part is `unreviewed` and is a security-relevant divergence risk. |
+| Spawn a `claude` CLI subprocess | `engine/providers/cc.py` (as an LLM provider) · `self_edit/dispatcher.py` (as a supervised coding agent) | `by design` — different lifetimes (request-scoped vs detached+resumable). The sandbox-settings divergence recorded here before DP-314 is **resolved**: both now delegate to `utils/cc_sandbox.build_sandbox_settings()` and contribute only their own deltas (bridge host, notes path). `tests/utils/test_cc_sandbox.py` pins the parity and fails if they drift again. |
+| Build the `claude --settings` sandbox block | `utils/cc_sandbox.build_sandbox_settings` | `single` — unified in DP-314; was two independent copies at 0.68 similarity. |
+| Clone a git repo for an agent to work in | `self_edit/clone_manager` (derpr's own source: pristine base + per-dispatch worktree) · `utils/notes_workspace` (the notes repo: ONE shared clone that advances) | `by design` — opposite mutability on purpose. The base clone is never advanced because worktrees hang off it; the notes clone IS the working copy every agent edits. Shared git plumbing lives in `utils/git_support`. |
 | Run a command on a remote host | `proxmox/ssh.SSHRunner` (argv-list, never a shell string) | `single` |
 | Expose derpr tools to an external caller | `tools/mcp_bridge` (derpr as MCP **server**) | `single` |
 | Consume an external tool server | `tools/mcp_client` (derpr as MCP **client**) | `single` |

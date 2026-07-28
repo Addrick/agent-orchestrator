@@ -23,7 +23,10 @@ branched off master for ONE bug. Fix it end to end:
 3. Run the suite as a sanity check (advisory only — CI re-runs it clean): \
 `pytest -m "not llm_live and not zammad_live and not discord_live" -n auto`. \
 Run `flake8 src/` and `mypy src/ --config-file mypy.ini` if your change is structural.
-4. Commit to your CURRENT branch with a gitmoji message `<emoji> DP-XXX: concise description`.
+4. Commit to your CURRENT branch with the message `DP-XXX: concise description`. \
+No decorative emoji, no `Co-Authored-By:` trailer, no "Generated with Claude Code" \
+line — CLAUDE.md is the authority on commit format and this repo's is clean of \
+tool attribution.
 5. Push your branch and open a pull request against master: \
 `git push -u origin HEAD` then `gh pr create --base master`, summarizing the \
 bug, the root cause, and the fix.

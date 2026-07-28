@@ -36,6 +36,12 @@ import threading
 from typing import List, Optional
 
 from config import global_config
+from src.utils.git_support import GitError, configure_push_auth, run_git
+from src.utils.notes_workspace import (
+    NOTES_LINK_NAME,
+    link_notes_into,
+    prepare_notes_clone,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,38 +60,19 @@ _SEED_FILES = (".env.test",)
 # Serializes base clone creation/fetch so concurrent dispatches don't race.
 _clone_lock = threading.Lock()
 
-# Generous ceiling for a clone/fetch over the network.
-_GIT_TIMEOUT_SECONDS = 600
-
 
 class CloneManagerError(RuntimeError):
     """Raised when preparing the base clone or a worktree fails."""
 
 
 def _run_git(args: List[str], cwd: Optional[str] = None) -> str:
-    """Run a git command, returning stdout. Raises CloneManagerError on failure
-    (non-zero exit, missing binary, or timeout) with a clear message."""
-    cmd = ["git", *args]
+    """Thin adapter over `utils.git_support.run_git`, re-raising as this
+    module's error type. The plumbing moved to `utils` in DP-314 so the notes
+    clone could share it; callers here still see `CloneManagerError`."""
     try:
-        proc = subprocess.run(
-            cmd,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=_GIT_TIMEOUT_SECONDS,
-        )
-    except FileNotFoundError as e:
-        raise CloneManagerError("git binary not found on PATH.") from e
-    except subprocess.TimeoutExpired as e:
-        raise CloneManagerError(
-            f"git {' '.join(args)} timed out after {_GIT_TIMEOUT_SECONDS}s."
-        ) from e
-    if proc.returncode != 0:
-        stderr = (proc.stderr or "").strip()
-        raise CloneManagerError(
-            f"git {' '.join(args)} failed (exit {proc.returncode}): {stderr}"
-        )
-    return proc.stdout
+        return run_git(args, cwd=cwd)
+    except GitError as e:
+        raise CloneManagerError(str(e)) from e
 
 
 def _derive_repo_url(source_root: str) -> str:
@@ -100,47 +87,6 @@ def _derive_repo_url(source_root: str) -> str:
             "and CC_FIXR_REPO_URL is unset."
         )
     return url
-
-
-def _configure_push_auth(clone_dir: str) -> None:
-    """Configure git so the dispatched agent's `git push` / `gh pr create`
-    authenticate to GitHub without writing any secret to disk.
-
-    The base clone is fetched anonymously (agent-orchestrator is public), but a
-    dispatched agent must PUSH its bugfix branch to open a PR. The `git push`
-    uses git's credential system — unconfigured in a fresh clone. We install an
-    inline shell credential helper that emits ``x-access-token`` + ``$GH_TOKEN``
-    (read from the environment) on git's ``get`` request. The token therefore
-    never lands in `.git/config` (matching the no-secret-on-disk rule in
-    _SEED_FILES); only the helper *script* is stored. Shared `.git/config` →
-    every worktree inherits it. Idempotent: re-running rewrites the same value.
-
-    We deliberately do NOT use `gh auth git-credential`: the deployed chatbot
-    container ships git but not the `gh` CLI, so that helper fails
-    (`gh: not found`) and every dispatched push dies with "could not read
-    Username for https://github.com". The inline helper needs only `git` + `sh`
-    (both present) and the ``GH_TOKEN`` already inherited by the child.
-
-    Non-fatal on failure: the agent can still diagnose/commit, just not push.
-    """
-    # git runs a `!`-prefixed helper via sh, calling `<helper> get`; it expects
-    # `username=`/`password=` on stdout. Reading $GH_TOKEN at call time keeps the
-    # token out of .git/config. Single-quoted so Python interpolates nothing.
-    helper = (
-        '!f() { test "$1" = get && '
-        'printf "username=x-access-token\\npassword=%s\\n" "$GH_TOKEN"; }; f'
-    )
-    try:
-        _run_git(
-            [
-                "config",
-                "credential.https://github.com.helper",
-                helper,
-            ],
-            cwd=clone_dir,
-        )
-    except CloneManagerError as e:
-        logger.warning("Could not configure GitHub push credential helper: %s", e)
 
 
 def _seed_support_files(target_dir: str, source_root: str) -> None:
@@ -235,7 +181,7 @@ def prepare_base_clone(
             _run_git(["clone", url, clone_dir])
         logger.debug("Fetching origin in base clone %s", clone_dir)
         _run_git(["fetch", "origin"], cwd=clone_dir)
-        _configure_push_auth(clone_dir)
+        configure_push_auth(clone_dir)
         return clone_dir
 
 
@@ -284,7 +230,50 @@ def create_worktree(
     )
     _seed_support_files(worktree_dir, src_root)
     _link_venv(worktree_dir, base)
+    _link_notes(worktree_dir, src_root)
     return os.path.abspath(worktree_dir)
+
+
+def _drop_shared_links(worktree_dir: str) -> None:
+    """Unlink everything in the worktree that points at SHARED state, before any
+    recursive removal touches it.
+
+    Both the `.venv` and the `memory/` notes clone live outside the worktree and
+    are used by every other dispatch. A recursive delete through a junction
+    destroys the target rather than the link — the footgun that repeatedly
+    destroyed the shared venv before DP-227, and which would now also take out
+    every agent's memory.
+    """
+    for name in (".venv", NOTES_LINK_NAME):
+        link = os.path.join(worktree_dir, name)
+        if not (os.path.islink(link) or os.path.exists(link)):
+            continue
+        try:
+            if os.path.islink(link):
+                os.unlink(link)
+            elif os.name == "nt":
+                # Windows junction: rmdir removes the link, not the target.
+                os.rmdir(link)
+        except OSError as e:
+            logger.warning("Could not drop worktree %s link %s: %s", name, link, e)
+
+
+def _link_notes(worktree_dir: str, source_root: str) -> None:
+    """Link the shared notes clone into the worktree as `memory/` (DP-314).
+
+    The worktree already carries CLAUDE.md as a tracked file, so only the notes
+    tree is missing — `memory/` is gitignored and therefore in no checkout. Best
+    effort: an agent with no memory is the pre-DP-314 agent, which is worse but
+    not broken, whereas failing the dispatch over a notes repo would be.
+    """
+    notes = prepare_notes_clone(source_root=source_root)
+    if not notes:
+        return
+    if not link_notes_into(worktree_dir, notes):
+        logger.warning(
+            "Worktree %s has no memory/ link; the agent runs without notes.",
+            worktree_dir,
+        )
 
 
 def remove_worktree(
@@ -301,18 +290,7 @@ def remove_worktree(
     if not os.path.exists(worktree_dir):
         return
 
-    # Drop the venv link before any recursive removal so we never follow it into
-    # the shared base venv (the same footgun documented for the main repo).
-    link = os.path.join(worktree_dir, ".venv")
-    if os.path.islink(link) or os.path.exists(link):
-        try:
-            if os.path.islink(link):
-                os.unlink(link)
-            elif os.name == "nt":
-                # Windows junction: rmdir removes the link, not the target.
-                os.rmdir(link)
-        except OSError as e:
-            logger.warning("Could not drop worktree .venv link %s: %s", link, e)
+    _drop_shared_links(worktree_dir)
 
     args = ["worktree", "remove", worktree_dir]
     if force:

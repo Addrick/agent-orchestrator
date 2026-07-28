@@ -287,6 +287,44 @@ prompt. Configure in `.env` or `config/global_config.py`:
 - `CC_SANDBOX_ALLOWED_DOMAINS` (default empty): comma-separated domains the sandboxed Bash tool may reach. Empty = no network (a headless run cannot answer a domain-approval prompt, so network-needing tasks must list domains here).
 - `CC_MAX_TURNS` (default `0` = no cap): bound on agentic turns per call (`--max-turns`).
 
+#### Project instructions and memory
+
+Every `cc-*` instance — a persona workspace or a dispatched fixr worktree — gets
+`CLAUDE.md` and a **writable** `memory/`, so the instructions it reads are ones
+it can actually follow.
+
+`CLAUDE.md` was never the problem for a dispatched agent: a worktree is a real
+checkout, and Claude Code reads project instructions from the working directory
+even though DERPR passes `--system-prompt` (which replaces the system prompt but
+does not suppress instruction files). A **persona workspace** is a bare
+directory, so it gets a copy, refreshed on every call.
+
+`memory/` is the notes repo, and no checkout has ever carried it — it is
+gitignored, so the CI-built production image has no copy. DERPR now keeps ONE
+shared clone and links it into each workspace as `memory/`. It is writable
+because the memory protocol tells agents to record decisions and root causes;
+read-only would make that instruction unfollowable. Two agents running at once
+therefore share one working copy and can collide on `main` — accepted, since
+memory writes are append-mostly to distinct files.
+
+- `CC_NOTES_ENABLED` (default `True`): master switch. Off = no link, no seeding.
+- `CC_NOTES_DIR` (default `data/notes`): the shared clone.
+- `CC_NOTES_REPO_URL` (default unset): derived from the running checkout's own
+  `memory/` remote when unset. **The container has no `memory/`, so a deploy
+  must set this** or its agents run without memory.
+- `CC_NOTES_BRANCH` (default `main`): the notes repo uses `main`, not `master`.
+
+To push memory back, the notes repo needs `github.com,api.github.com` in
+`CC_SANDBOX_ALLOWED_DOMAINS` and a `GH_TOKEN` in the environment. The notes repo
+is private, so unlike the fixr base clone even the initial clone needs the token.
+Every failure here degrades loudly rather than breaking the run: the agent
+proceeds without memory and the reason is logged at WARNING.
+
+> **The link points out of the workspace.** The sandbox confines writes to the
+> working directory, so the clone's real path is added to the sandbox's
+> `filesystem.allowWrite`. Without that entry the link exists but every write
+> fails with a bare `EACCES`.
+
 > **Platform: POSIX only when sandboxed.** The Claude Code OS sandbox runs on
 > macOS/Linux/WSL2, never native Windows. Because this provider runs yolo, the
 > sandbox is the safety boundary, so DERPR refuses the `cc` route on native

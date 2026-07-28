@@ -34,7 +34,15 @@ services:
       - CC_WORKSPACE_MODE=persona
       # Headless runs can't answer a domain-approval prompt, so the sandboxed
       # Bash tool has NO network unless domains are listed here (comma-sep).
+      # Required for DP-314 memory pushes as well as fixr's PRs.
       # - CC_SANDBOX_ALLOWED_DOMAINS=github.com,api.github.com
+      # --- Notes repo linked into every cc-* workspace as memory/ (DP-314) ---
+      # This image is built in CI from a checkout, and `memory/` is gitignored,
+      # so there is no local remote to derive the URL from — it MUST be set here
+      # or cc-* agents run without memory. The clone lands under the mounted
+      # ./data volume so it survives container recreation. Needs GH_TOKEN in
+      # .env: the notes repo is private, so even the first clone is authenticated.
+      - CC_NOTES_REPO_URL=https://github.com/Addrick/derpr-private-notes.git
     volumes:
       # Persist the SQLite database and other data
       - ./data:/app/data
