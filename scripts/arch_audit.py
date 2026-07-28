@@ -481,11 +481,34 @@ def concepts():
 NESTING_NODES = (ast.If, ast.For, ast.While, ast.Try, ast.With,
                  ast.AsyncFor, ast.AsyncWith)
 
+SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+
+def _is_elif(parent, child):
+    """True if `child` is an `elif` branch of `parent`, not a nested `if`.
+
+    `elif` parses as an `If` inside the parent's `orelse`, which makes a flat
+    dispatch chain look arbitrarily deep. An explicit `else:` + indented `if`
+    is a genuine level; the two are identical in the AST *except* that an
+    `elif` starts at its parent's column.
+    """
+    return (isinstance(parent, ast.If) and isinstance(child, ast.If)
+            and parent.orelse == [child]
+            and child.col_offset == parent.col_offset)
+
 
 def _depth(node, current=0):
     best = current
     for child in ast.iter_child_nodes(node):
-        nxt = current + 1 if isinstance(child, NESTING_NODES) else current
+        # Nested defs get their own row in the report; letting their depth
+        # bubble up scores an enclosing function for control flow it does not
+        # contain (a flat route table inherits its handlers' nesting).
+        if isinstance(child, SCOPE_NODES):
+            continue
+        if isinstance(child, NESTING_NODES) and not _is_elif(node, child):
+            nxt = current + 1
+        else:
+            nxt = current
         best = max(best, _depth(child, nxt))
     return best
 
