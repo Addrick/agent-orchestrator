@@ -14,6 +14,12 @@ config/personas.json
 .claude/
 .coverage
 
+# Skills are symlinks/junctions into the notes repo (memory/skills/), which is
+# where their content is versioned. Git walks straight through a junction, so
+# without this it would commit a second copy here and the two would drift.
+# Recreating the links on a fresh clone: see memory/skills/README.md.
+.agents/skills/
+
 # Local helper scripts
 aggregate_code.py
 aggregate_tests.py
