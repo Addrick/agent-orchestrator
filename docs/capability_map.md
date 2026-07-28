@@ -85,6 +85,7 @@ add a *second* implementation of an existing capability, change the verdict to
 |---|---|---|
 | Serve HTTP | `interfaces/kobold_engine_adapter` FastAPI app (owns the lifespan) · `interfaces/portal_render` · `voice/web.attach_web` (mounts onto the adapter app) · `mcp_bridge` (ASGI sub-app on the same) | `by design` — one app, three mounts. |
 | Authenticate a caller | `DERPR_CONTROL_TOKEN` control-plane middleware · `BridgeTokenStore` per-dispatch bearer tokens | `by design` — two principals, two credentials, documented in `mcp_bridge`. |
+| Surface backend liveness/processing state to the user | `derpr_ui` `state/useKoboldPerf` → `StatusLine` (polls the adapter's `/api/extra/perf` passthrough; KCPP busy/idle, last-gen counts, stop reason) · `api/client.usingMock`/`store.offline` → TopBar chip (is the *adapter* answering at all) | `by design` (DP-311) — two different subjects: the adapter's reachability vs the inference backend behind it. The perf poll deliberately bypasses `liveOr` so a dropped poll cannot flip the session's mock/offline verdict. Note the engine exposes **no** `/health` route; liveness is inferred from real calls. |
 
 ---
 

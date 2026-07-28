@@ -38,6 +38,7 @@ import type {
   MemoryDocumentList,
   MemoryOperationList,
   UploadResult,
+  KoboldPerf,
 } from '../types/contracts'
 
 // Same-origin in production (served under /derpr by the adapter); the dev
@@ -511,4 +512,18 @@ export async function ingestMemoryPath(
   )
   if (!r.ok) return memErr(r, 'ingest path')
   return (await r.json()) as Record<string, unknown>
+}
+
+// ---- backend perf (statusline) ---------------------------------------
+// DP-311. Deliberately NOT routed through `liveOr`: this is a 1-5s poll, so a
+// transient failure must not flip the session's mock/offline verdict (and a
+// mocked perf blob would be an outright lie about the backend's state). The
+// caller keeps the last good sample and marks it stale instead.
+export async function getKoboldPerf(signal?: AbortSignal): Promise<KoboldPerf> {
+  const r = await fetch(`${BASE}/api/extra/perf`, {
+    headers: { Accept: 'application/json' },
+    signal,
+  })
+  if (!r.ok) throw new Error(`/api/extra/perf → ${r.status}`)
+  return (await r.json()) as KoboldPerf
 }
