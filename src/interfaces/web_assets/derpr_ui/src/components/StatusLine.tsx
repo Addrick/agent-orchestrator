@@ -30,7 +30,7 @@ function useNow(active: boolean, ms: number): number {
 }
 
 export function StatusLine() {
-  const { perf, stale, sampledAt } = useKoboldPerf()
+  const { perf, prefill, stale, sampledAt } = useKoboldPerf()
   const busy = !!perf && perf.idle === 0
   const tick = useNow(!!perf, busy ? 250 : 5000)
   // Before the first tick lands, anchor on the sample itself so nothing renders
@@ -56,47 +56,90 @@ export function StatusLine() {
   // moment the first generation starts, before any counter is filled in.
   const hasGen = perf.total_gens > 0
 
+  // Live progress, where the sidecar is deployed. Only trust it while it agrees
+  // that something is running: a stale `prefill` blob outliving its run would
+  // otherwise pin a bar at 34% forever (the sidecar ages its own state out, but
+  // this render must not depend on that being the only guard).
+  const ingesting = !!prefill && prefill.phase === 'prefill' && (prefill.total ?? 0) > 0
+  const ingestDone = prefill?.processed ?? 0
+  const ingestTotal = prefill?.total ?? 0
+  const ingestPct = ingestTotal ? Math.min(100, Math.round((ingestDone / ingestTotal) * 100)) : 0
+  const decoding = !!prefill && prefill.phase === 'generate' && (prefill.generate_total ?? 0) > 0
+
   return (
     <div className="statusline" role="status">
       <span className={`sl-chip ${busy ? 'sl-busy' : ''} ${stale ? 'sl-stale' : ''}`}>
         <span className="dot" />
-        {stale ? 'backend unreachable' : busy ? `generating · ${fmtDur(since)}` : 'idle'}
+        {stale
+          ? 'backend unreachable'
+          : busy
+            ? `${ingesting ? 'ingesting' : 'generating'} · ${fmtDur(since)}`
+            : 'idle'}
         {perf.queue > 0 && ` · queue ${perf.queue}`}
       </span>
 
-      <span
-        className="sl-chip"
-        title={
-          busy
-            ? 'Counters freeze during a generation — KCPP exposes live prefill progress only in its stdout log, not over the API.'
-            : 'Prompt tokens ingested by the last completed generation (KCPP last_input_count).'
-        }
-      >
-        ingest{' '}
-        {hasGen ? (
+      {ingesting ? (
+        /* Live, from the sidecar tailing KCPP's stdout — the only place these
+           per-batch counts exist. Steps by blasbatchsize, so it advances in
+           visible jumps rather than smoothly; that is the real granularity, not
+           a rendering artifact. */
+        <span
+          className="sl-chip sl-busy"
+          title="live prompt ingestion (kcpp-progress sidecar); steps by blasbatchsize"
+        >
+          ingest{' '}
           <b>
-            {fmtTok(perf.last_input_count)}/{fmtTok(perf.last_input_count)} tok
+            {fmtTok(ingestDone)}/{fmtTok(ingestTotal)} tok
           </b>
-        ) : (
-          <b>—</b>
-        )}
-        {hasGen && perf.last_process_time > 0 && (
-          <span className="sl-sub">
-            {' '}
-            · {fmtDur(perf.last_process_time)} · {perf.last_process_speed.toFixed(0)} t/s
+          <span className="sl-bar" aria-hidden="true">
+            <i style={{ width: `${ingestPct}%` }} />
           </span>
-        )}
-      </span>
+          <span className="sl-sub">{ingestPct}%</span>
+        </span>
+      ) : (
+        <span
+          className="sl-chip"
+          title={
+            busy
+              ? 'Counters freeze during a generation — perf reports the previous run until this one completes.'
+              : 'Prompt tokens ingested by the last completed generation (KCPP last_input_count).'
+          }
+        >
+          ingest{' '}
+          {hasGen ? (
+            <b>
+              {fmtTok(perf.last_input_count)}/{fmtTok(perf.last_input_count)} tok
+            </b>
+          ) : (
+            <b>—</b>
+          )}
+          {hasGen && perf.last_process_time > 0 && (
+            <span className="sl-sub">
+              {' '}
+              · {fmtDur(perf.last_process_time)} · {perf.last_process_speed.toFixed(0)} t/s
+            </span>
+          )}
+        </span>
+      )}
 
-      <span className="sl-chip" title="Last generation: decode tokens, and prefill + decode wall time.">
-        gen {hasGen ? <b>{fmtTok(perf.last_token_count)} tok</b> : <b>—</b>}
-        {hasGen && (
-          <span className="sl-sub">
-            {' '}
-            · {perf.last_eval_speed.toFixed(1)} t/s · total <b>{fmtDur(genTotal)}</b>
-          </span>
-        )}
-      </span>
+      {decoding ? (
+        <span className="sl-chip sl-busy" title="live decode progress (kcpp-progress sidecar)">
+          gen{' '}
+          <b>
+            {fmtTok(prefill?.generated ?? 0)}/{fmtTok(prefill?.generate_total ?? 0)} tok
+          </b>
+        </span>
+      ) : (
+        <span className="sl-chip" title="Last generation: decode tokens, and prefill + decode wall time.">
+          gen {hasGen ? <b>{fmtTok(perf.last_token_count)} tok</b> : <b>—</b>}
+          {hasGen && (
+            <span className="sl-sub">
+              {' '}
+              · {perf.last_eval_speed.toFixed(1)} t/s · total <b>{fmtDur(genTotal)}</b>
+            </span>
+          )}
+        </span>
+      )}
 
       {/* Two reasons this chip goes blank mid-generation, both verified against a
           live KCPP rather than assumed:

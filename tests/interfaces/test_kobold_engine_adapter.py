@@ -2599,3 +2599,89 @@ def test_adapter_engine_surface_is_enumerated():
             f"`self.chat_system.{attr}` reached from {func!r} — routes must go "
             f"through the {allowed[attr]!r} seam, not ChatSystem directly."
         )
+
+
+# -------- DP-311: GET /api/extra/prefill (kcpp-progress sidecar proxy) --------
+# Live prompt-ingestion progress does not exist in KoboldCPP's API — its perf
+# `last_*` fields are frozen for the duration of a run. The counters come from a
+# sidecar tailing KCPP's stdout, which is OPTIONAL: the route must degrade to
+# `available: false` everywhere it is not deployed rather than error.
+
+
+def _prefill_adapter(monkeypatch, progress_url=""):
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    monkeypatch.setenv("KOBOLD_PROGRESS_URL", progress_url)
+    return adapter, mm
+
+
+def test_prefill_reports_unavailable_when_sidecar_not_configured(monkeypatch):
+    adapter, mm = _prefill_adapter(monkeypatch, progress_url="")
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/extra/prefill")
+    assert r.status_code == 200, "an absent sidecar is a normal deployment, not an error"
+    assert r.json() == {"available": False, "reason": "not_configured"}
+    mm.close()
+
+
+def test_prefill_projects_sidecar_counters(monkeypatch):
+    adapter, mm = _prefill_adapter(monkeypatch, progress_url="http://sidecar:5011")
+
+    async def _fake_get(url, **kw):
+        assert url == "http://sidecar:5011/progress", url
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.content = b"{}"
+        resp.json = lambda: {
+            "phase": "prefill", "processed": 8192, "total": 24310,
+            "generated": 0, "generate_total": 0, "run": 3, "source": "log",
+        }
+        return resp
+
+    monkeypatch.setattr(adapter._http, "get", _fake_get)
+    with TestClient(adapter.app) as client:
+        body = client.get("/api/extra/prefill").json()
+    assert body == {
+        "available": True, "phase": "prefill", "processed": 8192,
+        "total": 24310, "generated": 0, "generate_total": 0, "run": 3,
+    }
+    mm.close()
+
+
+def test_prefill_does_not_pass_through_unknown_sidecar_fields(monkeypatch):
+    """The response is re-projected field by field so a future sidecar addition
+    (or a compromised one) cannot push arbitrary keys to the browser."""
+    adapter, mm = _prefill_adapter(monkeypatch, progress_url="http://sidecar:5011")
+
+    async def _fake_get(url, **kw):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.content = b"{}"
+        resp.json = lambda: {
+            "phase": "prefill", "processed": 1, "total": 2,
+            "recent_log": "a leaked prompt line", "__proto__": {"x": 1},
+        }
+        return resp
+
+    monkeypatch.setattr(adapter._http, "get", _fake_get)
+    with TestClient(adapter.app) as client:
+        body = client.get("/api/extra/prefill").json()
+    assert "recent_log" not in body and "__proto__" not in body
+    assert "leaked" not in json.dumps(body)
+    mm.close()
+
+
+def test_prefill_hides_upstream_url_when_sidecar_unreachable(monkeypatch):
+    """Data-plane route: the failure reason must not carry the internal URL
+    (same rule as _forward_post — kobold-stack-trace-exposure decision)."""
+    adapter, mm = _prefill_adapter(monkeypatch, progress_url="http://internal-sidecar.lan:5011")
+
+    async def _boom(url, **kw):
+        raise RuntimeError("connect to http://internal-sidecar.lan:5011 failed")
+
+    monkeypatch.setattr(adapter._http, "get", _boom)
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/extra/prefill")
+    assert r.status_code == 200
+    assert r.json() == {"available": False, "reason": "unreachable"}
+    assert "internal-sidecar" not in r.text
+    mm.close()

@@ -106,10 +106,13 @@ Personas with `history_messages: 0` always render an empty transcript — the po
 
 **Backend statusline (DP-311):** a thin row under the top bar reports what the KoboldCPP backend is doing, polled from `GET /api/extra/perf` (1s while a generation is in flight, 5s idle). It shows, left to right: **state** — `idle`, or `generating · <elapsed>` with a pulsing marker, plus `queue N` when requests are waiting; **ingest** — prompt tokens the last completed generation ingested, with its prefill time and rate; **gen** — tokens produced, decode rate, and `total` (prefill + decode) wall time for that generation; **stop** — why the last generation ended (`EOS`, `stop sequence`, `out of tokens`, `aborted`) and how long ago, with the exact clock time on hover; and, right-aligned, completed generation count and backend uptime.
 
-The line reflects the *backend*, not your tab: a generation started from Discord, an agent, or another browser shows as busy here too. Two honest limitations, both dictated by what KoboldCPP exposes:
+The line reflects the *backend*, not your tab: a generation started from Discord, an agent, or another browser shows as busy here too.
 
-- **The ingest counters are last-completed, not live.** KoboldCPP's per-step `Processing Prompt (x / y tokens)` progress exists only in its stdout log — host-local, block-buffered, and minutes behind — so there is no live prefill bar over the API. While a generation runs, the ingest/gen numbers are the *previous* run's; the elapsed clock is the live part.
-- **The stop reason blanks to `…` mid-generation.** KoboldCPP resets `stop_reason` to `0` when a run *starts*, so a running generation would otherwise misreport itself as "out of tokens". The real value appears when the run completes.
+**Live ingestion bar (needs the `kcpp-progress` sidecar).** KoboldCPP publishes per-batch prefill progress in **no API** — every `last_*` field on `/api/extra/perf` is frozen for the duration of a run. The counters exist only on KoboldCPP's stdout (`Processing Prompt [BATCH] (8192 / 24310 tokens)`). Where the optional `services/kcpp-progress` sidecar is deployed alongside the model and the engine has `KOBOLD_PROGRESS_URL` set, the statusline shows a live bar — `ingesting · 15.9s   ingest 10.2k/24.3k tok ▓▓▓░░ 42%` — advancing in `blasbatchsize` steps (visible jumps, roughly every 3s on the 40B; that is the true granularity, not a rendering artifact). Decode progress (`gen 17/400 tok`) comes from the same source.
+
+Without the sidecar the line degrades silently to last-completed counters: no bar, no error, and the poll stops after the engine reports it is not configured. Setup and the mandatory `stdbuf -o0` unbuffering of KoboldCPP are documented in `services/kcpp-progress/README.md` — without that, progress records (which end in CR, not LF) sit in a stdio buffer and arrive in 20-30 second clumps.
+
+**The stop reason blanks to `…` mid-generation.** KoboldCPP resets `stop_reason` to `0` when a run *starts*, so a running generation would otherwise misreport itself as "out of tokens". The real value appears when the run completes.
 
 If the backend stops answering, the line turns amber and reads `backend unreachable` while keeping the last known numbers — a dropped poll is not evidence that the counters changed.
 

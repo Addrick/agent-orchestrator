@@ -275,6 +275,12 @@ HINDSIGHT_LLM_MODEL = os.environ.get("HINDSIGHT_LLM_MODEL", "qwen2.5-32b")
 
 LOCAL_LLM_URL = os.environ.get("LOCAL_LLM_URL", "http://10.0.0.70:5001/v1")
 
+# Base URL of the optional kcpp-progress sidecar (services/kcpp-progress), which
+# serves live prompt-ingestion counters KoboldCPP exposes only on stdout. Empty
+# = not deployed; GET /api/extra/prefill then reports available:false and the
+# portal statusline falls back to last-completed counters (DP-311).
+KOBOLD_PROGRESS_URL = os.environ.get("KOBOLD_PROGRESS_URL", "")
+
 # =============================================================================
 # --- API Rate Limiting ---
 # =============================================================================

@@ -296,6 +296,24 @@ export interface UploadResult {
  * NOTE: `stop_reason` is worse than frozen — it RESETS TO 0 when a generation
  * starts, so mid-run it reports "out of tokens" for a run that has not stopped.
  * Consumers must suppress it while `idle === 0`. */
+/* DP-311 — `GET /api/extra/prefill`, the engine's projection of the optional
+ * kcpp-progress sidecar. This is the ONLY source of live ingestion progress:
+ * KoboldCPP prints per-batch prefill counts on stdout and exposes them in no
+ * API. `available: false` is a normal state (sidecar not deployed) — consumers
+ * must fall back to the last-completed counters in `KoboldPerf`, not error.
+ * `run` increments per prefill, so a counter that jumps backwards can be told
+ * apart from a new run. */
+export interface KoboldPrefill {
+  available: boolean
+  reason?: string
+  phase?: 'idle' | 'prefill' | 'generate'
+  processed?: number
+  total?: number
+  generated?: number
+  generate_total?: number
+  run?: number
+}
+
 export interface KoboldPerf {
   last_process: number
   last_eval: number

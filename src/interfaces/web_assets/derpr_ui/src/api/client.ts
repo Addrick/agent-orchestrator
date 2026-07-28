@@ -39,6 +39,7 @@ import type {
   MemoryOperationList,
   UploadResult,
   KoboldPerf,
+  KoboldPrefill,
 } from '../types/contracts'
 
 // Same-origin in production (served under /derpr by the adapter); the dev
@@ -526,4 +527,16 @@ export async function getKoboldPerf(signal?: AbortSignal): Promise<KoboldPerf> {
   })
   if (!r.ok) throw new Error(`/api/extra/perf → ${r.status}`)
   return (await r.json()) as KoboldPerf
+}
+
+// Live prompt-ingestion progress from the kcpp-progress sidecar, if deployed.
+// Never throws on "not deployed" — that is a normal answer, distinct from a
+// failed request, and the caller stops polling on it.
+export async function getKoboldPrefill(signal?: AbortSignal): Promise<KoboldPrefill> {
+  const r = await fetch(`${BASE}/api/extra/prefill`, {
+    headers: { Accept: 'application/json' },
+    signal,
+  })
+  if (!r.ok) throw new Error(`/api/extra/prefill → ${r.status}`)
+  return (await r.json()) as KoboldPrefill
 }

@@ -121,6 +121,14 @@ button { font-family: inherit; cursor: pointer; }
   width: 6px; height: 6px; border-radius: 50%;
   background: var(--ok); box-shadow: 0 0 6px var(--ok);
 }
+/* Live ingestion fill. Advances in blasbatchsize steps, so a transition keeps
+   the jumps from reading as glitches without pretending to be smoother. */
+.sl-bar {
+  display: inline-block; width: 64px; height: 4px; border-radius: 3px;
+  background: var(--line-2); overflow: hidden; vertical-align: middle;
+}
+.sl-bar i { display: block; height: 100%; background: var(--accent); transition: width .3s linear; }
+@media (prefers-reduced-motion: reduce) { .sl-bar i { transition: none } }
 .sl-busy { color: var(--accent); }
 .sl-busy b { color: var(--accent-2); }
 .sl-busy .dot {

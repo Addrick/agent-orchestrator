@@ -82,6 +82,17 @@ def _kobold_base_url() -> str:
     return raw
 
 
+def _kobold_progress_url() -> str:
+    """Base URL of the kcpp-progress sidecar, or "" when not deployed.
+
+    Separate from LOCAL_LLM_URL because the sidecar is a different process on a
+    different port — and is optional: every deployment has KoboldCPP, only some
+    have the sidecar (see services/kcpp-progress/README.md).
+    """
+    raw = os.environ.get("KOBOLD_PROGRESS_URL", global_config.KOBOLD_PROGRESS_URL) or ""
+    return raw.rstrip("/")
+
+
 def _channel_source(channel: str) -> str:
     """Derive a coarse source tag from a `channel` string (DP-136 / handoff §10).
 
@@ -1117,6 +1128,45 @@ class KoboldEngineAdapter:
         @self.app.get("/api/extra/perf")
         async def get_perf() -> Any:
             return await self._forward_get("/api/extra/perf", {})
+
+        @self.app.get("/api/extra/prefill")
+        async def get_prefill() -> Any:
+            """Live prompt-ingestion progress, from the kcpp-progress sidecar.
+
+            NOT a KoboldCPP route — KCPP has no API for this. Its `last_*` perf
+            fields are frozen for the duration of a run, so the only source of
+            per-batch prefill progress is KCPP's stdout, which a sidecar next to
+            the model host tails and serves (`services/kcpp-progress`).
+
+            Optional by design: with `KOBOLD_PROGRESS_URL` unset, or the sidecar
+            down, this reports `available: false` and the portal falls back to
+            last-completed counters rather than showing a broken bar.
+            """
+            base = _kobold_progress_url()
+            if not base:
+                return JSONResponse(content={"available": False, "reason": "not_configured"})
+            try:
+                r = await self._http.get(f"{base}/progress", timeout=2.0)
+                if r.status_code != 200:
+                    return JSONResponse(content={"available": False, "reason": "upstream_error"})
+                body = r.json() if r.content else {}
+            except Exception as e:
+                # Data-plane route: the exception text can carry the upstream URL,
+                # so log it and return a generic reason (same rule as
+                # _forward_post — decisions/2026-05-27-kobold-stack-trace-exposure).
+                logger.debug(f"prefill progress fetch failed: {e}")
+                return JSONResponse(content={"available": False, "reason": "unreachable"})
+            # Re-project rather than passing the sidecar's body through, so a
+            # future sidecar field cannot silently reach the browser.
+            return JSONResponse(content={
+                "available": True,
+                "phase": str(body.get("phase", "idle")),
+                "processed": int(body.get("processed") or 0),
+                "total": int(body.get("total") or 0),
+                "generated": int(body.get("generated") or 0),
+                "generate_total": int(body.get("generate_total") or 0),
+                "run": int(body.get("run") or 0),
+            })
 
         @self.app.post("/api/extra/tokencount")
         async def tokencount(request: Request) -> Any:

@@ -13,8 +13,8 @@
    answers "what is the box doing", not "what is my tab doing".
    ============================================================ */
 import { useEffect, useRef, useState } from 'react'
-import { getKoboldPerf } from '../api/client'
-import type { KoboldPerf } from '../types/contracts'
+import { getKoboldPerf, getKoboldPrefill } from '../api/client'
+import type { KoboldPerf, KoboldPrefill } from '../types/contracts'
 
 /** Poll cadence. Busy is polled hard enough for the elapsed clock to read as
  *  live; idle is slow because nothing changes until a gen starts, and this
@@ -25,6 +25,10 @@ const IDLE_MS = 5000
 export interface PerfSnapshot {
   /** Last successful sample, or null before the first one lands. */
   perf: KoboldPerf | null
+  /** Live ingestion progress from the kcpp-progress sidecar, or null where it
+   *  is not deployed (the common case — poll stops after the first such
+   *  answer). Present alongside `perf`, never instead of it. */
+  prefill: KoboldPrefill | null
   /** True once a poll has failed since the last success — the numbers shown
    *  are the last good ones and may be arbitrarily old. */
   stale: boolean
@@ -33,7 +37,7 @@ export interface PerfSnapshot {
   sampledAt: number
 }
 
-const EMPTY: PerfSnapshot = { perf: null, stale: false, sampledAt: 0 }
+const EMPTY: PerfSnapshot = { perf: null, prefill: null, stale: false, sampledAt: 0 }
 
 export function useKoboldPerf(): PerfSnapshot {
   const [snap, setSnap] = useState<PerfSnapshot>(EMPTY)
@@ -41,6 +45,10 @@ export function useKoboldPerf(): PerfSnapshot {
   // a state dep would tear down and rebuild the timer on every sample. Keep the
   // loop self-scheduling and read the flag from a ref.
   const busyRef = useRef(false)
+  // Set once the engine answers `not_configured` — that verdict cannot change
+  // without an engine restart, so polling a route that will keep saying "no
+  // sidecar here" every second is pure waste.
+  const noSidecarRef = useRef(false)
 
   useEffect(() => {
     let cancelled = false
@@ -52,7 +60,25 @@ export function useKoboldPerf(): PerfSnapshot {
         const perf = await getKoboldPerf(ctl.signal)
         if (cancelled) return
         busyRef.current = perf.idle === 0
-        setSnap({ perf, stale: false, sampledAt: Date.now() })
+
+        // Progress is best-effort and secondary: its failure must never cost us
+        // the perf sample we already hold, so it is fetched and caught
+        // separately rather than in the same try.
+        let prefill: KoboldPrefill | null = null
+        if (!noSidecarRef.current) {
+          try {
+            const p = await getKoboldPrefill(ctl.signal)
+            if (p.available) {
+              prefill = p
+            } else if (p.reason === 'not_configured') {
+              noSidecarRef.current = true
+            }
+          } catch {
+            /* transient — fall back to perf's last-completed counters */
+          }
+        }
+        if (cancelled) return
+        setSnap({ perf, prefill, stale: false, sampledAt: Date.now() })
       } catch {
         if (cancelled) return
         // Keep the last good sample — a dropped poll is not evidence that the
