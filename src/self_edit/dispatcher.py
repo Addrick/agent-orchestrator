@@ -44,7 +44,9 @@ from src.self_edit.registry import (
     AgentRegistry,
 )
 from src.self_edit import registry as reg
+from src.utils.cc_sandbox import build_sandbox_settings
 from src.utils.claude_cli_env import build_claude_cli_env
+from src.utils.notes_workspace import notes_allow_write_paths
 
 if TYPE_CHECKING:
     from src.tools.mcp_bridge import BridgeTokenStore
@@ -388,23 +390,26 @@ class Dispatcher:
     def _sandbox_settings(capable: bool = False) -> Optional[Dict[str, Any]]:
         """Sandbox block for ``--settings``.
 
+        Common policy lives in `utils.cc_sandbox`, shared with the cc-* engine
+        route; this method contributes only the two deltas a dispatch needs.
+
         A capable dispatch must additionally be able to reach the bridge host,
         or the sandbox blocks the MCP connection and the agent silently has no
         derpr tools. The bridge host is added to allowedDomains *only* for
-        capable dispatches, so a default dispatch's egress is unchanged."""
-        if not global_config.CC_SANDBOX:
-            return None
-        sandbox: Dict[str, Any] = {"enabled": True, "autoAllowBashIfSandboxed": True}
-        if global_config.CC_SANDBOX_WEAKER_NESTED:
-            sandbox["enableWeakerNestedSandbox"] = True
-        domains = list(global_config.CC_SANDBOX_ALLOWED_DOMAINS)
+        capable dispatches, so a default dispatch's egress is unchanged.
+
+        The notes clone is linked into every worktree as `memory/` but lives
+        outside it, so it needs an explicit `allowWrite` entry (DP-314) or the
+        agent cannot write the memories CLAUDE.md tells it to write."""
+        extra_domains = []
         if capable:
             bridge_host = _host_of(global_config.MCP_BRIDGE_PUBLIC_URL)
-            if bridge_host and bridge_host not in domains:
-                domains.append(bridge_host)
-        if domains:
-            sandbox["network"] = {"allowedDomains": domains}
-        return {"sandbox": sandbox}
+            if bridge_host:
+                extra_domains.append(bridge_host)
+        return build_sandbox_settings(
+            extra_domains=extra_domains,
+            allow_write=notes_allow_write_paths(),
+        )
 
     def _start_bridge(self, record: AgentRecord, *, resume_tail: bool = False) -> None:
         adapter = get_adapter(self._platform, record.agent_id)

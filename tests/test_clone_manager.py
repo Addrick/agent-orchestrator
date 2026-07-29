@@ -15,6 +15,7 @@ import threading
 import pytest
 
 import src.self_edit.clone_manager as cm
+import src.utils.notes_workspace as nw
 from src.self_edit.clone_manager import (
     CloneManagerError,
     create_worktree,
@@ -397,3 +398,98 @@ def test_lock_serializes_concurrent_base_prep(tmp_path, monkeypatch):
         t.join()
 
     assert in_critical["max"] == 1
+
+
+# --- DP-314: the shared notes clone linked in as memory/ ----------------------
+
+
+def test_create_worktree_links_notes(tmp_path, monkeypatch):
+    """A fresh worktree gets `memory/` pointing at the shared notes clone."""
+    clone_dir = tmp_path / "fixr_clone"
+    (clone_dir / ".git").mkdir(parents=True)
+    source_root = tmp_path / "src_checkout"
+    source_root.mkdir()
+    notes_dir = tmp_path / "notes"
+    (notes_dir / ".git").mkdir(parents=True)
+
+    monkeypatch.setattr(cm.global_config, "CC_NOTES_ENABLED", True)
+    monkeypatch.setattr(cm.global_config, "CC_NOTES_DIR", str(notes_dir))
+    monkeypatch.setattr(nw.global_config, "CC_NOTES_ENABLED", True)
+    monkeypatch.setattr(nw.global_config, "CC_NOTES_DIR", str(notes_dir))
+
+    def fake_run(cmd, **k):
+        if cmd[1] == "worktree" and cmd[2] == "add":
+            os.makedirs(cmd[3], exist_ok=True)
+        return _ok("")
+
+    monkeypatch.setattr(cm.subprocess, "run", fake_run)
+
+    linked = {}
+    monkeypatch.setattr(nw.os, "name", "posix")
+    monkeypatch.setattr(
+        nw.os, "symlink",
+        lambda src, dst, target_is_directory=False: linked.update(src=src, dst=dst),
+    )
+
+    create_worktree("DP-999", clone_dir=str(clone_dir), source_root=str(source_root))
+
+    assert linked["src"] == os.path.abspath(str(notes_dir))
+    assert linked["dst"].endswith(os.path.join("DP-999", "memory"))
+
+
+def test_create_worktree_survives_unavailable_notes(tmp_path, monkeypatch):
+    """No notes repo => the worktree is still created. An agent without memory
+    is the pre-DP-314 agent; a failed dispatch is worse."""
+    clone_dir = tmp_path / "fixr_clone"
+    (clone_dir / ".git").mkdir(parents=True)
+    source_root = tmp_path / "src_checkout"
+    source_root.mkdir()  # no memory/ inside, so no URL can be derived
+
+    monkeypatch.setattr(nw.global_config, "CC_NOTES_ENABLED", True)
+    monkeypatch.setattr(nw.global_config, "CC_NOTES_DIR", str(tmp_path / "absent"))
+    monkeypatch.setattr(nw.global_config, "CC_NOTES_REPO_URL", None)
+
+    def fake_run(cmd, **k):
+        if cmd[1] == "worktree" and cmd[2] == "add":
+            os.makedirs(cmd[3], exist_ok=True)
+        return _ok("")
+
+    monkeypatch.setattr(cm.subprocess, "run", fake_run)
+
+    wt = create_worktree("DP-998", clone_dir=str(clone_dir), source_root=str(source_root))
+
+    assert os.path.isdir(wt)
+    assert not os.path.exists(os.path.join(wt, "memory"))
+
+
+def test_remove_worktree_drops_notes_link_without_deleting_the_clone(tmp_path, monkeypatch):
+    """The notes clone is SHARED. If teardown recursed through the link, one
+    finished dispatch would destroy every other agent's memory — the same
+    footgun that repeatedly destroyed the shared venv before DP-227."""
+    clone_dir = tmp_path / "fixr_clone"
+    wt = clone_dir / "worktrees" / "DP-999"
+    wt.mkdir(parents=True)
+    notes_dir = tmp_path / "notes"
+    notes_dir.mkdir()
+    (notes_dir / "MEMORY.md").write_text("the index")
+    # Link it the way the code under test would on this platform, so the
+    # destructive path is exercised here and not only on CI's Linux.
+    if os.name == "nt":
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(wt / "memory"), str(notes_dir)],
+            check=True, capture_output=True, text=True,
+        )
+    else:
+        os.symlink(str(notes_dir), str(wt / "memory"), target_is_directory=True)
+
+    order = []
+    monkeypatch.setattr(
+        cm.subprocess, "run",
+        lambda cmd, **k: (order.append(cmd[1:3]), _ok(""))[1],
+    )
+
+    remove_worktree("DP-999", clone_dir=str(clone_dir))
+
+    assert not os.path.islink(str(wt / "memory"))
+    assert (notes_dir / "MEMORY.md").read_text() == "the index"
+    assert ["worktree", "remove"] in order

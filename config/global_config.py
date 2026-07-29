@@ -437,6 +437,40 @@ CC_FIXR_CHANNEL = os.environ.get("CC_FIXR_CHANNEL", "fixr")
 CC_FIXR_MODEL_ARG = os.environ.get("CC_FIXR_MODEL_ARG", "opus")
 CC_FIXR_DISCORD_CHANNEL = os.environ.get("CC_FIXR_DISCORD_CHANNEL", "")
 
+# --- DP-314: the notes repo, linked into every cc-* workspace -----------------
+# CLAUDE.md tells whoever reads it to navigate `memory/` (the Viking L0/L1/L2
+# tree) and to WRITE decisions and root-cause findings back into it. That
+# instruction was a lie for every cc-* instance: `memory/` is gitignored in this
+# repo, so the deployed image — built in CI from a checkout — has never carried
+# a copy, and a persona workspace is a bare directory with no CLAUDE.md either.
+#
+# ONE shared clone, symlinked in as `memory/` (option A). Concurrent dispatches
+# can therefore race on `main`; accepted because memory writes are append-mostly
+# to distinct files and two agents rarely run at once. The alternative — a notes
+# worktree and branch per dispatch — adds a second PR to every run.
+#
+# Writable, deliberately: a read-only mount would make the memory protocol
+# unfollowable. The link points OUT of the workspace, so the clone's real path is
+# also added to the sandbox's `filesystem.allowWrite` (see src/utils/cc_sandbox.py)
+# — without that the OS sandbox denies the write and the agent sees a bare EACCES.
+#
+# CC_NOTES_ENABLED  — master switch. Off => no link, no CLAUDE.md seeding.
+# CC_NOTES_DIR      — the one shared clone. Under DATA_DIR so it survives
+#                     container recreation on the mounted ./data volume.
+# CC_NOTES_REPO_URL — None => derive from `git remote get-url origin` in the
+#                     running checkout's own memory/ (developer boxes have it;
+#                     the container does not, so the deploy must set this).
+# CC_NOTES_BRANCH   — branch to track. The notes repo uses `main`, not `master`.
+#
+# LIVE-RUN PREREQUISITES: same as CC_FIXR_* above — `github.com,api.github.com`
+# in CC_SANDBOX_ALLOWED_DOMAINS, and a GH_TOKEN in the environment. The notes
+# repo is PRIVATE, so unlike the fixr base clone even the initial clone needs
+# the token.
+CC_NOTES_ENABLED = os.environ.get("CC_NOTES_ENABLED", "True").lower() in ("true", "1", "yes", "on")
+CC_NOTES_DIR = os.environ.get("CC_NOTES_DIR") or str(DATA_DIR / "notes")
+CC_NOTES_REPO_URL = os.environ.get("CC_NOTES_REPO_URL")  # None => derive from memory/ origin
+CC_NOTES_BRANCH = os.environ.get("CC_NOTES_BRANCH", "main")
+
 # Direct subagent ↔ Discord channel (DP-230). Each dispatched agent gets its own
 # THREAD under one auto-silenced parent channel; a human talks straight to the
 # agent in-thread (question → human → answer_agent) with NO fixr LLM turn.

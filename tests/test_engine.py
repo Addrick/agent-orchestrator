@@ -1897,6 +1897,43 @@ class TestClaudeCodeProvider:
         assert env is not None and "ANTHROPIC_API_KEY" not in env
         assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-keep"
 
+    @pytest.mark.asyncio
+    async def test_notes_are_prepared_before_argv_is_built(self, text_engine, monkeypatch, tmp_path):
+        """DP-314 ordering guard. The sandbox `allowWrite` entry is derived from
+        whether the notes clone EXISTS, so building argv before preparing notes
+        ships an empty allowlist on the first call — the agent then gets a
+        `memory/` it cannot write, failing with a bare EACCES. Order is load-
+        bearing, so pin it."""
+        import src.engine as engine_mod
+        import src.engine.providers.cc as cc_mod
+        from config import global_config
+        monkeypatch.setattr(global_config, "CC_SANDBOX", True)
+        monkeypatch.setattr(global_config, "CC_WORKSPACE_DIR", None)
+        monkeypatch.setattr(global_config, "CC_WORKSPACES_DIR", tmp_path / "workspaces")
+        monkeypatch.setattr(global_config, "CC_WORKSPACE_MODE", "persona")
+
+        order = []
+        monkeypatch.setattr(
+            cc_mod, "prepare_workspace_notes",
+            lambda ws, *a, **k: order.append("notes"),
+        )
+        real_build = text_engine._build_cc_args
+        monkeypatch.setattr(
+            text_engine, "_build_cc_args",
+            lambda *a, **k: (order.append("argv"), real_build(*a, **k))[1],
+        )
+
+        async def fake_exec(*args, **kwargs):
+            return self._FakeProc(stdout=b"ok")
+
+        monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/claude")
+        monkeypatch.setattr(text_engine, "_ensure_cc_supported", lambda: None)
+
+        await text_engine._run_cc_cli("hi", "sys", "sonnet", persona_name="alice")
+
+        assert order == ["notes", "argv"]
+
     # --- subprocess wiring + workspaces ------------------------------------
 
     @pytest.mark.asyncio

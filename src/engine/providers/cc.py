@@ -28,7 +28,12 @@ from aiolimiter import AsyncLimiter
 
 from config import global_config
 from src.llm_errors import LLMCommunicationError
+from src.utils.cc_sandbox import build_sandbox_settings
 from src.utils.claude_cli_env import build_claude_cli_env
+from src.utils.notes_workspace import (
+    notes_allow_write_paths,
+    prepare_workspace_notes,
+)
 
 from .base import Provider
 from ._subprocess import clamp_cli_arg, fit_cli_prompt, render_transcript_blocks
@@ -89,19 +94,17 @@ def resolve_cc_workspace(
 
 def build_cc_sandbox_settings() -> Optional[Dict[str, Any]]:
     """Build the `--settings` sandbox block, or None when CC_SANDBOX is off.
-    Auto-allows sandboxed Bash so a headless run never blocks on a prompt; the
-    OS sandbox confines it to the workspace + allowed domains."""
-    if not global_config.CC_SANDBOX:
-        return None
-    sandbox: Dict[str, Any] = {
-        "enabled": True,
-        "autoAllowBashIfSandboxed": True,
-    }
-    if global_config.CC_SANDBOX_WEAKER_NESTED:
-        sandbox["enableWeakerNestedSandbox"] = True
-    if global_config.CC_SANDBOX_ALLOWED_DOMAINS:
-        sandbox["network"] = {"allowedDomains": list(global_config.CC_SANDBOX_ALLOWED_DOMAINS)}
-    return {"sandbox": sandbox}
+
+    Policy lives in `utils.cc_sandbox` — shared with the fixr dispatcher, which
+    used to carry an independent copy (`docs/capability_map.md` flagged the pair
+    as a security-relevant divergence risk before DP-314 unified them).
+
+    The one thing added here: the notes clone linked in as `memory/` sits
+    OUTSIDE the workspace, and the sandbox confines writes to the working
+    directory, so without an `allowWrite` entry for it every attempt to record a
+    memory would fail with a bare EACCES the agent cannot interpret.
+    """
+    return build_sandbox_settings(allow_write=notes_allow_write_paths())
 
 
 def build_cc_args(engine: "TextEngine", prompt: str, system_prompt: str, model_arg: str) -> List[str]:
@@ -142,7 +145,6 @@ async def run_cc_cli(
     if not binary:
         raise LLMCommunicationError("Claude Code 'claude' binary not found on PATH.")
 
-    args = engine._build_cc_args(prompt, system_prompt, model_arg)
     # cc-* must use the Claude subscription, not the metered API: strip the
     # inherited ANTHROPIC_API_KEY so `-p` mode falls through to the OAuth token.
     cc_env = build_claude_cli_env()
@@ -151,6 +153,12 @@ async def run_cc_cli(
     if workspace_dir is None:
         temp_dir = tempfile.mkdtemp()
         try:
+            # Notes BEFORE argv: the sandbox `allowWrite` entry is derived from
+            # the clone's existence, so building args first would ship an empty
+            # allowlist on the very first call and silently make memory
+            # read-only. See _build_cc_args -> build_cc_sandbox_settings.
+            await asyncio.to_thread(prepare_workspace_notes, temp_dir)
+            args = engine._build_cc_args(prompt, system_prompt, model_arg)
             return await engine._exec_agy(binary, args, temp_dir, timeout, label="Claude Code", env=cc_env)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -158,6 +166,12 @@ async def run_cc_cli(
     os.makedirs(workspace_dir, exist_ok=True)
     lock = engine._cc_workspace_locks.setdefault(workspace_dir, asyncio.Lock())
     async with lock:
+        # Under the lock: a persona workspace is shared across concurrent calls,
+        # and the notes clone is shared across every workspace, so the git work
+        # must not run twice at once. Blocking git/filesystem work goes to a
+        # thread so it can't stall the event loop.
+        await asyncio.to_thread(prepare_workspace_notes, workspace_dir)
+        args = engine._build_cc_args(prompt, system_prompt, model_arg)
         return await engine._exec_agy(binary, args, workspace_dir, timeout, label="Claude Code", env=cc_env)
 
 
