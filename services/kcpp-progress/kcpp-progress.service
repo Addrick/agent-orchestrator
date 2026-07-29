@@ -1,0 +1,20 @@
+[Unit]
+Description=kcpp-progress — serve KoboldCPP prompt-ingestion counters over HTTP (DP-311)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/kcpp-progress/kcpp_progress.py --log /var/log/kobold/current.log --port 5011
+Restart=on-failure
+RestartSec=5
+# Read-only tailer: it needs the log and nothing else. It must never be able to
+# write to the model host, and it deliberately never returns raw log lines.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ReadOnlyPaths=/var/log/kobold
+
+[Install]
+WantedBy=multi-user.target

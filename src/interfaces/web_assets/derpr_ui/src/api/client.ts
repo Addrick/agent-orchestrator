@@ -38,6 +38,8 @@ import type {
   MemoryDocumentList,
   MemoryOperationList,
   UploadResult,
+  KoboldPerf,
+  KoboldPrefill,
 } from '../types/contracts'
 
 // Same-origin in production (served under /derpr by the adapter); the dev
@@ -511,4 +513,73 @@ export async function ingestMemoryPath(
   )
   if (!r.ok) return memErr(r, 'ingest path')
   return (await r.json()) as Record<string, unknown>
+}
+
+// ---- backend perf (statusline) ---------------------------------------
+// DP-311. Deliberately NOT routed through `liveOr`: this is a 1-5s poll, so a
+// transient failure must not flip the session's mock/offline verdict (and a
+// mocked perf blob would be an outright lie about the backend's state). The
+// caller keeps the last good sample and marks it stale instead.
+// Every poll gets a deadline. Without one, a backend that accepts the TCP
+// connection and then never answers — a hung or OOMing GPU host, which is a
+// real failure mode on this stack — leaves the fetch pending forever. The poll
+// loop schedules its next tick AFTER the await, so a single such request stops
+// polling permanently: no `stale` flag, no recovery, the line just freezes at
+// its last sample until the page is reloaded. 4s is well over the p99 for a
+// LAN telemetry call and well under the 5s idle cadence.
+const POLL_TIMEOUT_MS = 4000
+
+/** `signal` combined with a timeout, plus the cleanup that cancels the timer.
+ *  Hand-rolled rather than `AbortSignal.any` + `AbortSignal.timeout`, which
+ *  Safari only picked up in 17.4 — this is polled on every open tab. */
+function withDeadline(
+  signal: AbortSignal | undefined,
+  ms: number,
+): { signal: AbortSignal; done: () => void } {
+  const ctl = new AbortController()
+  const timer = setTimeout(() => ctl.abort(new Error('timeout')), ms)
+  const onAbort = () => ctl.abort(signal?.reason)
+  if (signal?.aborted) onAbort()
+  else signal?.addEventListener('abort', onAbort, { once: true })
+  return {
+    signal: ctl.signal,
+    done: () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+    },
+  }
+}
+
+export async function getKoboldPerf(signal?: AbortSignal): Promise<KoboldPerf> {
+  const d = withDeadline(signal, POLL_TIMEOUT_MS)
+  try {
+    const r = await fetch(`${BASE}/api/extra/perf`, {
+      headers: { Accept: 'application/json' },
+      signal: d.signal,
+    })
+    // 503 is the adapter saying the backend itself is unreachable — distinct
+    // from the adapter being down, and deliberately not a 200 with an empty
+    // body, which would render as a healthy idle backend.
+    if (!r.ok) throw new Error(`/api/extra/perf → ${r.status}`)
+    return (await r.json()) as KoboldPerf
+  } finally {
+    d.done()
+  }
+}
+
+// Live prompt-ingestion progress from the kcpp-progress sidecar, if deployed.
+// Never throws on "not deployed" — that is a normal answer, distinct from a
+// failed request, and the caller stops polling on it.
+export async function getKoboldPrefill(signal?: AbortSignal): Promise<KoboldPrefill> {
+  const d = withDeadline(signal, POLL_TIMEOUT_MS)
+  try {
+    const r = await fetch(`${BASE}/api/extra/prefill`, {
+      headers: { Accept: 'application/json' },
+      signal: d.signal,
+    })
+    if (!r.ok) throw new Error(`/api/extra/prefill → ${r.status}`)
+    return (await r.json()) as KoboldPrefill
+  } finally {
+    d.done()
+  }
 }

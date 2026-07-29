@@ -46,10 +46,13 @@ def main() -> int:
 
     stages: list[tuple[str, list[str]]] = [
         # CI's blocking flake8 pass: syntax errors / undefined names / bad imports.
-        ("flake8 (errors)", [PY, "-m", "flake8", "src/", "--count",
+        # Targets must match deploy.yml — `services/` holds deployed out-of-tree
+        # Python (the kcpp-progress sidecar), and a local gate that checks less
+        # than CI is a gate that hands you a green push and a red build.
+        ("flake8 (errors)", [PY, "-m", "flake8", "src/", "services/", "--count",
                              "--select=E9,F63,F7,F82", "--show-source", "--statistics"]),
         ("missing-deps", [PY, "scripts/check_missing_deps.py"]),
-        ("mypy", [PY, "-m", "mypy", "src/", "--config-file", "mypy.ini"]),
+        ("mypy", [PY, "-m", "mypy", "src/", "services/", "--config-file", "mypy.ini"]),
     ]
 
     if not args.no_tests:

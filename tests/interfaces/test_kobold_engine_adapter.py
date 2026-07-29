@@ -2599,3 +2599,222 @@ def test_adapter_engine_surface_is_enumerated():
             f"`self.chat_system.{attr}` reached from {func!r} — routes must go "
             f"through the {allowed[attr]!r} seam, not ChatSystem directly."
         )
+
+
+# -------- DP-311: GET /api/extra/prefill (kcpp-progress sidecar proxy) --------
+# Live prompt-ingestion progress does not exist in KoboldCPP's API — its perf
+# `last_*` fields are frozen for the duration of a run. The counters come from a
+# sidecar tailing KCPP's stdout, which is OPTIONAL: the route must degrade to
+# `available: false` everywhere it is not deployed rather than error.
+
+
+def _prefill_adapter(monkeypatch, progress_url=""):
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    monkeypatch.setenv("KOBOLD_PROGRESS_URL", progress_url)
+    return adapter, mm
+
+
+def test_prefill_reports_unavailable_when_sidecar_not_configured(monkeypatch):
+    adapter, mm = _prefill_adapter(monkeypatch, progress_url="")
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/extra/prefill")
+    assert r.status_code == 200, "an absent sidecar is a normal deployment, not an error"
+    assert r.json() == {"available": False, "reason": "not_configured"}
+    mm.close()
+
+
+def test_prefill_projects_sidecar_counters(monkeypatch):
+    adapter, mm = _prefill_adapter(monkeypatch, progress_url="http://sidecar:5011")
+
+    async def _fake_get(url, **kw):
+        assert url == "http://sidecar:5011/progress", url
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.content = b"{}"
+        resp.json = lambda: {
+            "phase": "prefill", "processed": 8192, "total": 24310,
+            "generated": 0, "generate_total": 0, "run": 3, "source": "log",
+        }
+        return resp
+
+    monkeypatch.setattr(adapter._http, "get", _fake_get)
+    with TestClient(adapter.app) as client:
+        body = client.get("/api/extra/prefill").json()
+    assert body == {
+        "available": True, "phase": "prefill", "processed": 8192,
+        "total": 24310, "generated": 0, "generate_total": 0, "run": 3,
+    }
+    mm.close()
+
+
+def test_prefill_does_not_pass_through_unknown_sidecar_fields(monkeypatch):
+    """The response is re-projected field by field so a future sidecar addition
+    (or a compromised one) cannot push arbitrary keys to the browser."""
+    adapter, mm = _prefill_adapter(monkeypatch, progress_url="http://sidecar:5011")
+
+    async def _fake_get(url, **kw):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.content = b"{}"
+        resp.json = lambda: {
+            "phase": "prefill", "processed": 1, "total": 2,
+            "recent_log": "a leaked prompt line", "__proto__": {"x": 1},
+        }
+        return resp
+
+    monkeypatch.setattr(adapter._http, "get", _fake_get)
+    with TestClient(adapter.app) as client:
+        body = client.get("/api/extra/prefill").json()
+    assert "recent_log" not in body and "__proto__" not in body
+    assert "leaked" not in json.dumps(body)
+    mm.close()
+
+
+def test_prefill_hides_upstream_url_when_sidecar_unreachable(monkeypatch):
+    """Data-plane route: the failure reason must not carry the internal URL
+    (same rule as _forward_post — kobold-stack-trace-exposure decision)."""
+    adapter, mm = _prefill_adapter(monkeypatch, progress_url="http://internal-sidecar.lan:5011")
+
+    async def _boom(url, **kw):
+        raise RuntimeError("connect to http://internal-sidecar.lan:5011 failed")
+
+    monkeypatch.setattr(adapter._http, "get", _boom)
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/extra/prefill")
+    assert r.status_code == 200
+    assert r.json() == {"available": False, "reason": "unreachable"}
+    assert "internal-sidecar" not in r.text
+    mm.close()
+
+
+def test_prefill_degrades_when_sidecar_body_is_not_an_object(monkeypatch):
+    """A sidecar answering 200 with a JSON array (or any non-object) must not
+    500 the route — `body.get` would raise, and the contract this route
+    promises callers is that it always degrades to `available: false`."""
+    adapter, mm = _prefill_adapter(monkeypatch, progress_url="http://sidecar:5011")
+
+    async def _fake_get(url, **kw):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.content = b"[]"
+        resp.json = lambda: ["not", "an", "object"]
+        return resp
+
+    monkeypatch.setattr(adapter._http, "get", _fake_get)
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/extra/prefill")
+    assert r.status_code == 200
+    assert r.json() == {"available": False, "reason": "unreachable"}
+    mm.close()
+
+
+def test_prefill_degrades_when_a_counter_is_not_numeric(monkeypatch):
+    """int('lots') raises. Coercion happens on the failure side of the boundary,
+    so a malformed counter costs the bar, not the request."""
+    adapter, mm = _prefill_adapter(monkeypatch, progress_url="http://sidecar:5011")
+
+    async def _fake_get(url, **kw):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.content = b"{}"
+        resp.json = lambda: {"phase": "prefill", "processed": "lots", "total": 24310}
+        return resp
+
+    monkeypatch.setattr(adapter._http, "get", _fake_get)
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/extra/prefill")
+    assert r.status_code == 200
+    assert r.json() == {"available": False, "reason": "unreachable"}
+    mm.close()
+
+
+# -------- DP-311: GET /api/extra/perf must not make a dead backend look idle --
+
+def _perf_adapter():
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    return adapter, mm
+
+
+def test_perf_forwards_a_healthy_sample(monkeypatch):
+    adapter, mm = _perf_adapter()
+    sample = {"idle": 1, "uptime": 900, "total_gens": 3, "stop_reason": 1, "queue": 0}
+
+    async def _fake_get(url, **kw):
+        assert url.endswith("/api/extra/perf"), url
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.content = b"{}"
+        resp.json = lambda: sample
+        return resp
+
+    monkeypatch.setattr(adapter._http, "get", _fake_get)
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/extra/perf")
+    assert r.status_code == 200 and r.json() == sample
+    mm.close()
+
+
+def test_perf_reports_503_when_backend_is_unreachable(monkeypatch):
+    """The bug this replaces: the generic forwarder answered 200 with `{}` on
+    upstream failure. `{}` is truthy and its `idle` is not 0, so a *stopped*
+    KoboldCPP rendered in the portal as a healthy idle backend — the single
+    thing the statusline exists to distinguish."""
+    adapter, mm = _perf_adapter()
+
+    async def _boom(url, **kw):
+        raise RuntimeError("connect to http://internal-kobold.lan:5001 failed")
+
+    monkeypatch.setattr(adapter._http, "get", _boom)
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/extra/perf")
+    assert r.status_code == 503, "an unreachable backend must not answer 200"
+    assert r.json() == {"error": "backend_unreachable"}
+    assert "internal-kobold" not in r.text, "failure reason must not carry the upstream URL"
+    mm.close()
+
+
+@pytest.mark.parametrize("status,body", [
+    (200, {}),                       # answered, but with nothing in it
+    (200, {"uptime": 900}),          # a body, but not a perf sample
+    (502, {"idle": 0}),              # a gateway error that happens to parse
+])
+def test_perf_reports_503_for_any_body_without_idle(monkeypatch, status, body):
+    """`idle` is the field the portal keys on. A response missing it is not a
+    perf sample no matter what status carried it."""
+    adapter, mm = _perf_adapter()
+
+    async def _fake_get(url, **kw):
+        resp = MagicMock()
+        resp.status_code = status
+        resp.content = b"{}"
+        resp.json = lambda: body
+        return resp
+
+    monkeypatch.setattr(adapter._http, "get", _fake_get)
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/extra/perf")
+    assert r.status_code == 503
+    mm.close()
+
+
+def test_perf_request_carries_a_deadline(monkeypatch):
+    """The shared client is built with `timeout=None` because streamed
+    generations legitimately run for minutes. A once-a-second telemetry poll
+    must not inherit that: a backend that accepts the connection and never
+    answers would otherwise hold the request open forever."""
+    adapter, mm = _perf_adapter()
+    seen = {}
+
+    async def _fake_get(url, **kw):
+        seen.update(kw)
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.content = b"{}"
+        resp.json = lambda: {"idle": 1}
+        return resp
+
+    monkeypatch.setattr(adapter._http, "get", _fake_get)
+    with TestClient(adapter.app) as client:
+        client.get("/api/extra/perf")
+    assert seen.get("timeout"), "perf poll inherited the client's unbounded timeout"
+    mm.close()

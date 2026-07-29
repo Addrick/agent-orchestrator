@@ -8,6 +8,7 @@ import { Conversation } from './components/Conversation'
 import { Inspector } from './components/Inspector'
 import { NewPersonaModal } from './components/NewPersonaModal'
 import { MemoryPanel } from './components/MemoryPanel'
+import { StatusLine } from './components/StatusLine'
 
 export type PortalView = 'chat' | 'memory'
 
@@ -55,6 +56,7 @@ export default function App() {
         toggle={toggle}
         onNewPersona={() => setNewPersonaOpen(true)}
       />
+      <StatusLine />
       <div className="body">
         <NavRail view={view} onNavigate={setView} />
         {view === 'chat' ? (

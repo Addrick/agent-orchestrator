@@ -85,6 +85,8 @@ add a *second* implementation of an existing capability, change the verdict to
 |---|---|---|
 | Serve HTTP | `interfaces/kobold_engine_adapter` FastAPI app (owns the lifespan) · `interfaces/portal_render` · `voice/web.attach_web` (mounts onto the adapter app) · `mcp_bridge` (ASGI sub-app on the same) | `by design` — one app, three mounts. |
 | Authenticate a caller | `DERPR_CONTROL_TOKEN` control-plane middleware · `BridgeTokenStore` per-dispatch bearer tokens | `by design` — two principals, two credentials, documented in `mcp_bridge`. |
+| Surface backend liveness/processing state to the user | `derpr_ui` `state/useKoboldPerf` → `StatusLine` (polls `/api/extra/perf` for busy/idle + last-gen counts, and `/api/extra/prefill` for live ingestion) · `api/client.usingMock`/`store.offline` → TopBar chip (is the *adapter* answering at all) | `by design` (DP-311) — two different subjects: the adapter's reachability vs the inference backend behind it. The perf poll deliberately bypasses `liveOr` so a dropped poll cannot flip the session's mock/offline verdict. Note the engine exposes **no** `/health` route; liveness is inferred from real calls. |
+| Read model-backend state KoboldCPP exposes only on stdout | `services/kcpp-progress` sidecar (tails the log, serves parsed integers) → adapter `GET /api/extra/prefill` | `single` — the **only** sanctioned way to get log-only backend facts. Adding a second log reader, or letting the engine SSH to the model host, re-opens the egress/credential line closed in `2026-07-09-tool-security-lines`. Extend the sidecar instead. ⚠️ It must never return raw log lines — the log carries generated text. |
 
 ---
 
