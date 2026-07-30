@@ -411,9 +411,14 @@ def test_gated_tools_are_announced_to_subagents(tool):
 
 
 def test_always_confirm_tools_exist_and_are_writes():
-    """`ALWAYS_CONFIRM_TOOLS` is a fourth, name-keyed answer to the approval
-    question (consumed by tool_loop). A typo in it fails open silently, and a
-    non-write entry would mean the strictest list disagrees with the base one."""
+    """`ALWAYS_CONFIRM_TOOLS` is a name-keyed list consumed by tool_loop.
+
+    NOTE (DP-315): despite its name it does NOT gate anything today. Its only
+    runtime effect is `tool_loop.py:378`, which appends a "HIGH-IMPACT" badge to
+    the confirmation text -- every write already parks unconditionally. So this
+    test keeps a *label* honest, not a predicate. A typo still matters: it would
+    silently drop the badge on the tool that most needs it.
+    """
     assert definitions.ALWAYS_CONFIRM_TOOLS, (
         "ALWAYS_CONFIRM_TOOLS is empty -- every assertion below passes vacuously"
     )
@@ -429,6 +434,7 @@ def test_always_confirm_tools_exist_and_are_writes():
 
 
 # NOTE: the inverse direction -- "every statically irreversible tool is in
-# ALWAYS_CONFIRM_TOOLS" -- is NOT asserted, because it does not hold today:
-# `create_ticket` and `reboot_node` are irreversible and unlisted. Whether that
-# is intended is a policy call, not a test fix. See DP-306.
+# ALWAYS_CONFIRM_TOOLS" -- is NOT asserted. It does not hold (`create_ticket`
+# and `reboot_node` are irreversible and unlisted), but the omission is harmless
+# today because the set only drives a badge: every write parks regardless. It
+# becomes a real gap only if an autonomy tier is ever built. See DP-315.
