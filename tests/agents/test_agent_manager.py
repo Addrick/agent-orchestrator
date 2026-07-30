@@ -64,6 +64,51 @@ async def test_legacy_poll_interval_is_ignored():
         await asyncio.gather(mgr._running["noop"].task, return_exceptions=True)
 
 
+@pytest.mark.asyncio
+async def test_signal_stop_all_signals_without_awaiting():
+    """DP-304: AppManager needs to signal agents *before* it drains long-running
+    tasks — agents and MemoryConsolidator contend on MemoryManager._lock, so an
+    agent left deploying for the whole drain window races the work item the
+    drain exists to let finish. shutdown_all() awaits, so it can't be that call.
+    """
+    mgr = _make_manager()
+    await mgr.start_agent("noop")
+    try:
+        instance = mgr._running["noop"].instance
+        assert instance._shutdown_event.is_set() is False
+
+        mgr.signal_stop_all()
+
+        # Signalled synchronously; nothing was awaited to make that happen.
+        assert instance._shutdown_event.is_set() is True
+    finally:
+        mgr._running["noop"].instance.stop()
+        await asyncio.gather(mgr._running["noop"].task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_signal_stop_all_survives_a_failing_agent():
+    from src.agents.agent_manager import RunningAgent
+
+    mgr = _make_manager()
+    await mgr.start_agent("noop")
+    try:
+        boom = MagicMock()
+        boom.stop.side_effect = RuntimeError("stop exploded")
+        mgr._running["boom"] = RunningAgent(
+            instance=boom, task=mgr._running["noop"].task
+        )
+
+        mgr.signal_stop_all()  # must not propagate
+
+        boom.stop.assert_called_once()
+        assert mgr._running["noop"].instance._shutdown_event.is_set() is True
+    finally:
+        mgr._running.pop("boom", None)
+        mgr._running["noop"].instance.stop()
+        await asyncio.gather(mgr._running["noop"].task, return_exceptions=True)
+
+
 # ---------- single-shot inference agents (DP-292) ----------
 
 class _InferenceAgent:
