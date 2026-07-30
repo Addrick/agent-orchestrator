@@ -142,12 +142,15 @@ class McpBridge:
         """Translate a derpr tool definition into an MCP Tool.
 
         The description is annotated when the tool is gated, so the subagent can
-        plan around the park instead of being surprised by it mid-task.
+        plan around the park instead of being surprised by it mid-task. The
+        annotation asks `_is_gated` rather than re-reading `is_write`: this is a
+        fifth answer to the approval question, and an irreversible-but-not-write
+        tool would otherwise be parked with no warning in its description.
         """
         fn = definition.get("function", {})
         name = str(fn.get("name", ""))
         description = str(fn.get("description", ""))
-        if definition.get("is_write"):
+        if McpBridge._is_gated(definition):
             description += (
                 "\n\nNOTE: this tool requires human approval. Calling it queues a "
                 "request and returns immediately without executing; you will be "
@@ -159,12 +162,17 @@ class McpBridge:
             inputSchema=fn.get("parameters") or {"type": "object", "properties": {}},
         )
 
-    def _is_gated(self, definition: Dict[str, Any]) -> bool:
+    @staticmethod
+    def _is_gated(definition: Dict[str, Any]) -> bool:
         """Whether a call to this tool must be queued rather than executed.
 
         Write tools are gated. So is anything the definition marks irreversible
         even if it somehow is not flagged as a write — the two are independently
         sourced and this path fails closed on either.
+
+        Static so the cross-predicate agreement tests can call the real
+        implementation rather than re-deriving it; a test that re-implements
+        this expression cannot detect the gate being removed.
         """
         if definition.get("is_write"):
             return True

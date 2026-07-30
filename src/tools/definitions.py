@@ -115,11 +115,14 @@ def _validate_is_write(name: str, tool: Dict[str, Any]) -> None:
     Every definition carried it before this check existed, but by convention
     only; requiring it is what makes the classification unskippable.
 
-    Non-`function` entries (e.g. `type: "google_grounding"`) are exempt: they
-    are signals to the engine, not calls the tool loop or bridge can dispatch,
-    so there is nothing to gate.
+    The exemption is keyed on the absence of a `function.name`, which is the
+    registry's OWN callability predicate (`register` indexes and write-flags a
+    definition `if name:`). Keying it on `type != "function"` instead would be a
+    bypass: a definition with a name but a missing or misspelled `type` is still
+    indexed, still answers `is_write_tool()`/`_is_gated()`, and is still listed
+    to subagents -- it would just skip this check.
     """
-    if tool.get("type") != "function":
+    if not tool.get("function", {}).get("name"):
         return
     if "is_write" not in tool:
         raise ValueError(

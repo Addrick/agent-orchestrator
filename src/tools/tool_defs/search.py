@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 SEARCH_TOOLS: List[Dict[str, Any]] = [
     {
         "type": "google_grounding",
+        "is_write": False,
         "capabilities": {
             "produces_untrusted": True,
             "irreversible": False,
