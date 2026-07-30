@@ -114,8 +114,12 @@ def test_validator_rejects_unresolvable_irreversible_if_function():
 # --- ToolDefinitionRegistry (DP-268: dynamic registration for MCP tools) ---
 
 def _make_tool(name, *, is_write=False, caps=None):
+    # `is_write` is always set, never conditionally: DP-306 made an omitted flag
+    # a registration error, because omitting it silently exempts a tool from the
+    # write audit and from MCP-bridge gating.
     tool = {
         "type": "function",
+        "is_write": is_write,
         "function": {"name": name, "description": "t", "parameters": {}},
         "capabilities": caps or {
             "produces_untrusted": True,
@@ -124,8 +128,6 @@ def _make_tool(name, *, is_write=False, caps=None):
             "sensitivity": "pii",
         },
     }
-    if is_write:
-        tool["is_write"] = True
     return tool
 
 
@@ -237,3 +239,101 @@ def test_add_note_def_is_internal_only_and_not_exfil_capable():
     assert tool["capabilities"]["exfil_capable"] is False
     assert "irreversible_if" not in tool["capabilities"]
     assert "internal" not in tool["function"]["parameters"]["properties"]
+
+
+# --- DP-306: approval classification must be unskippable --------------------
+#
+# Three predicates answer "does this call need human approval?":
+#   1. definitions.is_write_tool()        -> tool_loop's universal write audit
+#   2. mcp_bridge._is_gated()             -> is_write OR capabilities.irreversible
+#   3. definitions.is_irreversible()      -> capabilities + argument-aware classifier
+# Two of the three read top-level `is_write`. Nothing used to require it, so a
+# definition could omit it, register cleanly, and be silently ungated. These
+# tests pin the flag as mandatory and pin the predicates to each other.
+
+
+def test_validator_rejects_missing_is_write():
+    tool = _make_tool("no_write_flag")
+    del tool["is_write"]
+    with pytest.raises(ValueError, match="missing top-level 'is_write'"):
+        validate_tool_capabilities(tool)
+
+
+def test_validator_rejects_non_bool_is_write():
+    tool = _make_tool("stringy_write_flag")
+    tool["is_write"] = "true"  # truthy string would have gated by accident
+    with pytest.raises(ValueError, match="'is_write' must be bool"):
+        validate_tool_capabilities(tool)
+
+
+def test_registry_refuses_to_register_tool_without_is_write():
+    """The gate is at registration, not merely at import of the static seed —
+    runtime-registered (MCP) tools go through the same door."""
+    reg = ToolDefinitionRegistry(ALL_TOOL_DEFINITIONS)
+    tool = _make_tool("mcp__rogue__unflagged")
+    del tool["is_write"]
+    with pytest.raises(ValueError, match="missing top-level 'is_write'"):
+        reg.register(tool)
+    assert reg.get("mcp__rogue__unflagged") is None
+    assert reg.is_write("mcp__rogue__unflagged") is False
+
+
+@pytest.mark.parametrize(
+    "tool",
+    ALL_TOOL_DEFINITIONS,
+    ids=[t.get("function", {}).get("name", "<unknown>") for t in ALL_TOOL_DEFINITIONS],
+)
+def test_every_tool_declares_is_write(tool):
+    if tool.get("type") != "function":
+        pytest.skip("non-function entry (engine signal) has nothing to gate")
+    assert "is_write" in tool, (
+        f"{tool.get('function', {}).get('name')} does not declare is_write"
+    )
+    assert isinstance(tool["is_write"], bool)
+
+
+@pytest.mark.parametrize(
+    "tool",
+    ALL_TOOL_DEFINITIONS,
+    ids=[t.get("function", {}).get("name", "<unknown>") for t in ALL_TOOL_DEFINITIONS],
+)
+def test_write_audit_and_bridge_gate_agree(tool):
+    """Predicate 1 vs predicate 2. The bridge gate is `is_write OR irreversible`,
+    so it must never be *narrower* than the write audit: anything the tool loop
+    treats as a write must also be gated for an autonomous agent."""
+    name = tool["function"]["name"]
+    caps = definitions.get_tool_capabilities(name)
+    bridge_gated = bool(tool.get("is_write")) or bool(caps.get("irreversible"))
+    if definitions.is_write_tool(name):
+        assert bridge_gated, f"{name} is write-audited but ungated at the MCP bridge"
+
+
+@pytest.mark.parametrize(
+    "tool",
+    ALL_TOOL_DEFINITIONS,
+    ids=[t.get("function", {}).get("name", "<unknown>") for t in ALL_TOOL_DEFINITIONS],
+)
+def test_statically_irreversible_tools_are_gated(tool):
+    """Predicate 3 vs predicate 2: a tool whose capabilities call it
+    irreversible must be gated, with no argument needed to get there."""
+    name = tool["function"]["name"]
+    if definitions.is_irreversible(name, {}):
+        caps = definitions.get_tool_capabilities(name)
+        assert bool(tool.get("is_write")) or bool(caps.get("irreversible")), (
+            f"{name} is irreversible but ungated at the MCP bridge"
+        )
+
+
+def test_always_confirm_tools_exist_and_are_writes():
+    """`ALWAYS_CONFIRM_TOOLS` is a fourth, name-keyed answer to the approval
+    question (consumed by tool_loop). A typo in it fails open silently, and a
+    non-write entry would mean the strictest list disagrees with the base one."""
+    names = {t["function"]["name"] for t in ALL_TOOL_DEFINITIONS
+             if t.get("type") == "function"}
+    for tool_name in definitions.ALWAYS_CONFIRM_TOOLS:
+        assert tool_name in names, (
+            f"ALWAYS_CONFIRM_TOOLS names '{tool_name}', which is not a real tool"
+        )
+        assert definitions.is_write_tool(tool_name), (
+            f"ALWAYS_CONFIRM_TOOLS names '{tool_name}' but it is not a write tool"
+        )

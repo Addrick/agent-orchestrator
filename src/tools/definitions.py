@@ -64,11 +64,13 @@ def validate_tool_capabilities(tool: Dict[str, Any]) -> None:
     Assert a tool definition carries the required `capabilities` block per
     the tool-security framework. Raises ValueError on any violation.
 
+    - Top-level `is_write` must be present and bool (DP-306).
     - `capabilities` must be a dict with bool `produces_untrusted` and `irreversible`.
     - Optional `irreversible_if` must be a `"module:function"` dotted path that
       resolves to a callable at validation time.
     """
     name = tool.get("function", {}).get("name", "<unknown>")
+
     caps = tool.get("capabilities")
     if not isinstance(caps, dict):
         raise ValueError(f"Tool '{name}' missing 'capabilities' block")
@@ -99,6 +101,37 @@ def validate_tool_capabilities(tool: Dict[str, Any]) -> None:
         )
 
     _validate_irreversible_if(name, caps.get("irreversible_if"))
+    _validate_is_write(name, tool)
+
+
+def _validate_is_write(name: str, tool: Dict[str, Any]) -> None:
+    """Assert a callable tool declares top-level `is_write` (DP-306).
+
+    `is_write` feeds two of the three approval predicates: `is_write_tool()`
+    (the tool loop's universal write audit) and `mcp_bridge._is_gated` (the
+    autonomous-agent boundary). Both read it as `.get("is_write")`, so a
+    definition that merely OMITS the flag registers cleanly and is then
+    silently ungated -- the happy path and the ungated path look identical.
+    Every definition carried it before this check existed, but by convention
+    only; requiring it is what makes the classification unskippable.
+
+    Non-`function` entries (e.g. `type: "google_grounding"`) are exempt: they
+    are signals to the engine, not calls the tool loop or bridge can dispatch,
+    so there is nothing to gate.
+    """
+    if tool.get("type") != "function":
+        return
+    if "is_write" not in tool:
+        raise ValueError(
+            f"Tool '{name}' missing top-level 'is_write' flag. Every callable "
+            f"tool must declare whether it writes; omitting it silently exempts "
+            f"the tool from the write audit and from MCP-bridge gating."
+        )
+    if not isinstance(tool["is_write"], bool):
+        raise ValueError(
+            f"Tool '{name}' 'is_write' must be bool, "
+            f"got {type(tool['is_write']).__name__}"
+        )
 
 
 def _validate_irreversible_if(name: str, classifier: Any) -> None:
