@@ -77,3 +77,126 @@ class TestAppManagerShutdown:
         app = AppManager()
         # Should not raise even without agent manager
         await app.shutdown()
+
+
+class TestAppManagerTaskShutdown:
+    """DP-304: shutdown() used to ignore _running_tasks entirely, so a
+    registered daemon was never stopped — it outlived shutdown until the event
+    loop went away."""
+
+    @pytest.mark.asyncio
+    async def test_stop_callback_lets_task_drain(self):
+        app = AppManager()
+        stop_event = asyncio.Event()
+        completed = False
+
+        async def cooperative():
+            nonlocal completed
+            await stop_event.wait()
+            completed = True
+
+        app.register_task("cooperative", cooperative(), stop=stop_event.set)
+        app._running_tasks = [
+            asyncio.create_task(coro, name=name) for name, coro in app._pending_tasks
+        ]
+
+        await app.shutdown()
+
+        # Drained to completion, not cancelled mid-flight.
+        assert completed is True
+        assert app._running_tasks[0].done()
+        assert not app._running_tasks[0].cancelled()
+
+    @pytest.mark.asyncio
+    async def test_task_without_stop_callback_is_cancelled(self):
+        app = AppManager()
+
+        async def uncooperative():
+            await asyncio.Event().wait()  # never completes on its own
+
+        app.register_task("uncooperative", uncooperative())
+        app._running_tasks = [
+            asyncio.create_task(coro, name=name) for name, coro in app._pending_tasks
+        ]
+        await asyncio.sleep(0)  # let it reach the await
+
+        app.GRACEFUL_SHUTDOWN_SECONDS = 0.05
+        await app.shutdown()
+
+        assert app._running_tasks[0].cancelled()
+
+    @pytest.mark.asyncio
+    async def test_ignored_stop_signal_is_cancelled_after_grace(self):
+        """A task that is signalled but refuses to exit still gets cancelled."""
+        app = AppManager()
+        signalled = False
+
+        def stop():
+            nonlocal signalled
+            signalled = True
+
+        async def stubborn():
+            await asyncio.Event().wait()
+
+        app.register_task("stubborn", stubborn(), stop=stop)
+        app._running_tasks = [
+            asyncio.create_task(coro, name=name) for name, coro in app._pending_tasks
+        ]
+        await asyncio.sleep(0)
+
+        app.GRACEFUL_SHUTDOWN_SECONDS = 0.05
+        await app.shutdown()
+
+        assert signalled is True
+        assert app._running_tasks[0].cancelled()
+
+    @pytest.mark.asyncio
+    async def test_task_that_refuses_to_unwind_is_abandoned(self):
+        """Cancellation is a request, not a guarantee. `discord.py`'s
+        `Client.close()` does network teardown on the way out, so awaiting a
+        cancelled task unbounded hangs shutdown — this pins the bound."""
+        app = AppManager()
+
+        async def swallows_cancellation():
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                # Slow teardown that outlives the grace window.
+                await asyncio.sleep(30)
+
+        app.register_task("slow_teardown", swallows_cancellation())
+        app._running_tasks = [
+            asyncio.create_task(coro, name=name) for name, coro in app._pending_tasks
+        ]
+        await asyncio.sleep(0)
+
+        app.GRACEFUL_SHUTDOWN_SECONDS = 0.05
+        app.CANCEL_GRACE_SECONDS = 0.05
+
+        # Must return, not hang.
+        await asyncio.wait_for(app.shutdown(), timeout=2.0)
+
+        # Abandoned, still pending — shutdown did not wait on it.
+        assert not app._running_tasks[0].done()
+        app._running_tasks[0].cancel()
+
+    @pytest.mark.asyncio
+    async def test_failing_stop_callback_does_not_block_shutdown(self):
+        app = AppManager()
+
+        def boom():
+            raise RuntimeError("stop callback exploded")
+
+        async def cooperative():
+            await asyncio.Event().wait()
+
+        app.register_task("boom", cooperative(), stop=boom)
+        app._running_tasks = [
+            asyncio.create_task(coro, name=name) for name, coro in app._pending_tasks
+        ]
+        await asyncio.sleep(0)
+
+        app.GRACEFUL_SHUTDOWN_SECONDS = 0.05
+        await app.shutdown()  # must not propagate the callback's error
+
+        assert app._running_tasks[0].cancelled()

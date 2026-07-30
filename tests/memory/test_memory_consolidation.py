@@ -1,5 +1,6 @@
 # tests/memory/test_memory_consolidation.py
 
+import asyncio
 import pytest
 import math
 import struct
@@ -132,3 +133,106 @@ async def test_retrieval_excludes_archived_and_prefers_core(mem_manager, consoli
     assert "Loose Fact" in contents
     assert "Archived Fact" not in contents
     assert len(results) == 2
+
+
+# --- DP-304: daemon shutdown semantics ---------------------------------------
+#
+# start_daemon() was a bare `while True` + `asyncio.sleep()` with no stop
+# condition, launched via app.register_task(). Shutdown could only end it by
+# cancelling mid-sleep — or, since AppManager.shutdown() never touched its
+# running tasks, not at all.
+
+
+@pytest.mark.asyncio
+async def test_daemon_stops_when_signalled(consolidator):
+    """The daemon exits on stop(), without waiting out the interval."""
+    consolidator._run_global_consolidation = AsyncMock()
+
+    # A long interval: if the daemon waited it out, the test would time out.
+    task = asyncio.create_task(consolidator.start_daemon(check_interval_seconds=3600))
+    await asyncio.sleep(0)  # let it run one cycle and enter the wait
+
+    consolidator.stop()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert task.done()
+    assert not task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_daemon_exits_before_a_second_work_item(consolidator):
+    """stop() during a work item ends the loop after it, not after another."""
+    calls = 0
+
+    async def work():
+        nonlocal calls
+        calls += 1
+        consolidator.stop()  # signalled mid-work-item
+
+    consolidator._run_global_consolidation = work
+
+    await asyncio.wait_for(
+        consolidator.start_daemon(check_interval_seconds=3600), timeout=1.0
+    )
+
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_daemon_survives_work_item_errors(consolidator):
+    """An exception in the work item must not kill the loop (pre-existing
+    behavior — guard it while changing the loop around it)."""
+    calls = 0
+
+    async def flaky():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("transient")
+        consolidator.stop()
+
+    consolidator._run_global_consolidation = flaky
+
+    await asyncio.wait_for(
+        consolidator.start_daemon(check_interval_seconds=0), timeout=1.0
+    )
+
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_stop_before_start_runs_no_work(consolidator):
+    """Signalling before launch means the loop body never executes."""
+    consolidator._run_global_consolidation = AsyncMock()
+    consolidator.stop()
+
+    await asyncio.wait_for(
+        consolidator.start_daemon(check_interval_seconds=3600), timeout=1.0
+    )
+
+    consolidator._run_global_consolidation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_consolidation_drains_between_targets(mem_manager, consolidator):
+    """Shutdown mid-run stops between targets rather than mid-write."""
+    ts = datetime.now()
+    for chan in ("chan1", "chan2", "chan3"):
+        seg_id = mem_manager.store_segment(chan, None, "persona1", 1, 10, 10, ts)
+        mem_manager.store_summary(
+            seg_id, "Fact", _unit_blob(1.0, 0.0), "m1", ts,
+            summary_level=LEVEL_EPISODIC,
+        )
+
+    seen = []
+
+    async def record(llm_persona, target_persona_name, channel, server_id=None):
+        seen.append(channel)
+        consolidator.stop()  # signal during the first target
+
+    consolidator.consolidate_memory = record
+
+    await consolidator._run_global_consolidation()
+
+    # Finished the target in flight, then stopped — did not process all three.
+    assert len(seen) == 1

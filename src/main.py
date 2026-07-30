@@ -386,7 +386,11 @@ async def main() -> None:
     # 9. Register background daemons — legacy SQLite L1→L2 consolidation only
     if SEMANTIC_BACKEND == "sqlite":
         consolidator = MemoryConsolidator(memory_manager, text_engine, embedding_service)
-        app.register_task("memory_consolidator", consolidator.start_daemon(check_interval_seconds=3600))
+        app.register_task(
+            "memory_consolidator",
+            consolidator.start_daemon(check_interval_seconds=3600),
+            stop=consolidator.stop,
+        )
 
     # 10. Optionally update the model list on startup
     if UPDATE_MODELS_ON_STARTUP:

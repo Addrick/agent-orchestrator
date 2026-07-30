@@ -438,10 +438,17 @@ def test_truncate_only_system_exceeds_budget():
 
 @pytest.mark.asyncio
 async def test_consolidation_daemon_survives_text_engine_failure(tmp_path):
-    """The daemon catches text-engine exceptions and continues to the next
-    sleep tick rather than crashing."""
+    """The daemon catches text-engine exceptions and continues to the next tick
+    rather than crashing.
+
+    DP-304: this used to escape the loop by patching `asyncio.sleep` to raise
+    `CancelledError`, because a bare `while True` offered no other exit -- the
+    old docstring's "the CancelledError from sleep was the only way out" was
+    stating the defect. The loop now waits on a shutdown event, so the test
+    leaves the way a caller does: `stop()`.
+    """
     from src.memory.memory_consolidation import MemoryConsolidator
-    from unittest.mock import MagicMock, AsyncMock
+    from unittest.mock import MagicMock
 
     mm = MemoryManager(db_path=":memory:")
     mm.create_schema()
@@ -450,20 +457,25 @@ async def test_consolidation_daemon_survives_text_engine_failure(tmp_path):
         es = MagicMock()
         es.model_name = "test"
         consol = MemoryConsolidator(mm, te, es)
-        # Make _run_global_consolidation raise
-        consol._run_global_consolidation = AsyncMock(side_effect=RuntimeError("boom"))
 
-        # Run one iteration: schedule a short sleep override via asyncio.sleep patch.
-        from unittest.mock import patch as _p
-        # Patch asyncio.sleep inside the consolidation module
-        async def fake_sleep(_):
-            raise asyncio.CancelledError()
+        calls = 0
 
-        with _p("asyncio.sleep", side_effect=fake_sleep):
-            with pytest.raises(asyncio.CancelledError):
-                await consol.start_daemon(check_interval_seconds=0)
-        # If we get here, the daemon DID catch the RuntimeError; the CancelledError
-        # from sleep was the only way out. Test passes.
+        async def boom():
+            nonlocal calls
+            calls += 1
+            if calls >= 2:
+                # Survived the first failure and came back for another pass,
+                # which is the property under test. Now end the loop.
+                consol.stop()
+            raise RuntimeError("boom")
+
+        consol._run_global_consolidation = boom
+
+        await asyncio.wait_for(
+            consol.start_daemon(check_interval_seconds=0), timeout=5.0
+        )
+
+        assert calls >= 2, "daemon did not survive the first exception"
     finally:
         mm.close()
 
@@ -501,7 +513,12 @@ async def test_consolidation_singleton_not_promoted(tmp_path):
 
 @pytest.mark.asyncio
 async def test_consolidation_daemon_loop_interval():
-    """start_daemon honors check_interval_seconds via asyncio.sleep."""
+    """start_daemon honors check_interval_seconds.
+
+    DP-304: the interval is now the timeout on the shutdown-event wait rather
+    than an `asyncio.sleep` argument, so that is where it is observed. The
+    change is what makes the wait interruptible at all.
+    """
     from src.memory.memory_consolidation import MemoryConsolidator
     from unittest.mock import MagicMock, AsyncMock, patch as _p
 
@@ -514,15 +531,18 @@ async def test_consolidation_daemon_loop_interval():
         consol = MemoryConsolidator(mm, te, es)
         consol._run_global_consolidation = AsyncMock()
 
-        sleeps: List[float] = []
+        timeouts: List[float] = []
+        real_wait_for = asyncio.wait_for
 
-        async def fake_sleep(t):
-            sleeps.append(t)
-            raise asyncio.CancelledError()
+        async def capturing_wait_for(awaitable, timeout=None):
+            timeouts.append(timeout)
+            # End the loop after this first wait, so the test terminates.
+            consol.stop()
+            return await real_wait_for(awaitable, timeout=timeout)
 
-        with _p("asyncio.sleep", side_effect=fake_sleep):
-            with pytest.raises(asyncio.CancelledError):
-                await consol.start_daemon(check_interval_seconds=42)
-        assert sleeps == [42]
+        with _p("asyncio.wait_for", side_effect=capturing_wait_for):
+            await consol.start_daemon(check_interval_seconds=42)
+
+        assert timeouts == [42]
     finally:
         mm.close()
