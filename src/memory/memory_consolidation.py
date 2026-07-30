@@ -23,7 +23,24 @@ SUMMARIZER_PERSONA_NAME = 'memory_summarizer'
 
 logger = logging.getLogger(__name__)
 
+
 class MemoryConsolidator:
+    """Legacy SQLite L1→L2 memory consolidation daemon.
+
+    Single-use: `stop()` is terminal. `_shutdown_event` is never cleared, so a
+    consolidator that has been stopped will not run again — `start_daemon()`
+    returns immediately. That is deliberate (a stop that arrives before the
+    daemon launches must still take effect); to restart consolidation,
+    construct a fresh instance, the way `AgentManager.restart_agent` does.
+    """
+
+    #: One unit of work here is `_compress_cluster`: a generation against a 31B
+    #: summarizer plus an embedding call plus the transaction, which routinely
+    #: outruns AppManager's default 30s drain window. A drain shorter than one
+    #: work item expires mid-LLM-call and cancels the task anyway, which is the
+    #: exact outcome the drain exists to prevent — so register with this (DP-304).
+    DRAIN_TIMEOUT_SECONDS: float = 300.0
+
     def __init__(self, memory_manager: MemoryManager, text_engine: TextEngine, embedding_service: EmbeddingService):
         self.memory_manager = memory_manager
         self.text_engine = text_engine
@@ -35,8 +52,23 @@ class MemoryConsolidator:
         self._shutdown_event = asyncio.Event()
 
     def stop(self) -> None:
-        """Signal the daemon to exit at its next checkpoint."""
+        """Signal the daemon to exit at its next checkpoint. Terminal — see the
+        class docstring; a stopped consolidator cannot be restarted."""
         self._shutdown_event.set()
+
+    async def _wait_for_next_cycle(self, check_interval_seconds: int) -> None:
+        """Sleep until the interval elapses or shutdown is signalled.
+
+        Its own method so tests can observe the interval by patching *this
+        instance*, rather than patching the module-global `asyncio.wait_for`
+        and intercepting every other coroutine sharing the loop (DP-304).
+        """
+        try:
+            await asyncio.wait_for(
+                self._shutdown_event.wait(), timeout=check_interval_seconds
+            )
+        except asyncio.TimeoutError:
+            pass
 
     async def start_daemon(self, check_interval_seconds: int = 3600) -> None:
         """Periodically consolidate memory across all active channels until stopped."""
@@ -48,12 +80,7 @@ class MemoryConsolidator:
                 err_str = str(e)
                 is_transient = "500" in err_str or "InternalServerError" in err_str or "INTERNAL" in err_str
                 logger.error(f"Error in MemoryConsolidator loop: {e}", exc_info=not is_transient)
-            try:
-                await asyncio.wait_for(
-                    self._shutdown_event.wait(), timeout=check_interval_seconds
-                )
-            except asyncio.TimeoutError:
-                pass
+            await self._wait_for_next_cycle(check_interval_seconds)
         logger.info("MemoryConsolidator daemon stopped.")
 
     async def _run_global_consolidation(self) -> None:

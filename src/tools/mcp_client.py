@@ -222,6 +222,11 @@ class MCPClientManager:
     leave a stale quarantine verdict standing.
     """
 
+    #: Upper bound on how long ``aclose()`` will wait for the maintenance loop
+    #: or any one server's transport teardown. Cancellation is a request, so an
+    #: unbounded await here can wedge process exit (DP-304).
+    CLOSE_TIMEOUT_SECONDS: float = 10.0
+
     def __init__(
         self,
         config_path: Path = MCP_SERVERS_FILE,
@@ -273,15 +278,29 @@ class MCPClientManager:
     async def aclose(self) -> None:
         if self._maintenance_task is not None:
             self._maintenance_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._maintenance_task
+            # Bounded: cancellation is a request. An awaited-unbounded cancelled
+            # task hangs process exit no matter how carefully AppManager bounded
+            # its own teardown a moment earlier (DP-304).
+            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    self._maintenance_task, timeout=self.CLOSE_TIMEOUT_SECONDS
+                )
             self._maintenance_task = None
         conns = list(self._connections.values())
         self._connections.clear()
         if conns:
             # Stops are independent; run them concurrently so shutdown costs
-            # one slowest server, not the sum of every hung transport.
-            await asyncio.gather(*(conn.stop() for conn in conns))
+            # one slowest server, not the sum of every hung transport. Bounded
+            # for the same reason as above: a hung MCP transport must not be
+            # able to wedge shutdown forever.
+            stops = [asyncio.ensure_future(conn.stop()) for conn in conns]
+            _, pending = await asyncio.wait(stops, timeout=self.CLOSE_TIMEOUT_SECONDS)
+            for task in pending:
+                logger.warning(
+                    f"An MCP connection did not stop within {self.CLOSE_TIMEOUT_SECONDS}s; "
+                    f"abandoning it."
+                )
+                task.cancel()
 
     # ----------------------------------------------------------- tool handlers
 

@@ -518,9 +518,14 @@ async def test_consolidation_daemon_loop_interval():
     DP-304: the interval is now the timeout on the shutdown-event wait rather
     than an `asyncio.sleep` argument, so that is where it is observed. The
     change is what makes the wait interruptible at all.
+
+    Observed by replacing the consolidator's own `_wait_for_next_cycle`, not by
+    patching the module-global `asyncio.wait_for` — a global patch intercepts
+    every other coroutine sharing the loop (pytest-asyncio internals, fixture
+    teardown) and fires this test's side effect on all of them.
     """
     from src.memory.memory_consolidation import MemoryConsolidator
-    from unittest.mock import MagicMock, AsyncMock, patch as _p
+    from unittest.mock import MagicMock, AsyncMock
 
     mm = MemoryManager(db_path=":memory:")
     mm.create_schema()
@@ -531,18 +536,18 @@ async def test_consolidation_daemon_loop_interval():
         consol = MemoryConsolidator(mm, te, es)
         consol._run_global_consolidation = AsyncMock()
 
-        timeouts: List[float] = []
-        real_wait_for = asyncio.wait_for
+        intervals: List[float] = []
+        real_wait = consol._wait_for_next_cycle
 
-        async def capturing_wait_for(awaitable, timeout=None):
-            timeouts.append(timeout)
+        async def capturing_wait(check_interval_seconds):
+            intervals.append(check_interval_seconds)
             # End the loop after this first wait, so the test terminates.
             consol.stop()
-            return await real_wait_for(awaitable, timeout=timeout)
+            await real_wait(check_interval_seconds)
 
-        with _p("asyncio.wait_for", side_effect=capturing_wait_for):
-            await consol.start_daemon(check_interval_seconds=42)
+        consol._wait_for_next_cycle = capturing_wait  # type: ignore[method-assign]
+        await consol.start_daemon(check_interval_seconds=42)
 
-        assert timeouts == [42]
+        assert intervals == [42]
     finally:
         mm.close()
