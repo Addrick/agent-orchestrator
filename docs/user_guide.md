@@ -970,7 +970,7 @@ The retain path is fire-and-forget through a per-bank async queue: user turns en
 
 ### Operator trust overrides
 
-`mark_trusted` / `mark_untrusted` flip the `untrusted` bit on a specific recall hit (per the [tool security framework](../memory/project/plans/tool_security_framework.md)). Overrides live in a parallel SQLite file (`src/memory/hindsight_overrides.db`) — recall post-filters and rewrites the bit. Every flip is audit-logged with operator_id, reason, prior, and new values.
+`mark_trusted` / `mark_untrusted` flip the `untrusted` bit on a specific recall hit (per the [tool security framework](../memory/project/plans/tool_security_framework.md)). Overrides live in a parallel SQLite file (`data/hindsight_overrides.db`, `HINDSIGHT_OVERRIDE_DB`) — recall post-filters and rewrites the bit. Every flip is audit-logged with operator_id, reason, prior, and new values.
 
 ## System Defaults
 

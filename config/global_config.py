@@ -273,6 +273,19 @@ SEMANTIC_BACKEND = os.environ.get("SEMANTIC_BACKEND", "sqlite") # Literal["sqlit
 HINDSIGHT_URL = os.environ.get("HINDSIGHT_URL", "http://10.0.0.70:8888")
 HINDSIGHT_LLM_MODEL = os.environ.get("HINDSIGHT_LLM_MODEL", "qwen2.5-32b")
 
+# Local SQLite state the Hindsight backend keeps alongside the remote service.
+# These MUST default under DATA_DIR (the mounted volume in docker-compose):
+# they previously derived their path from the source tree, which put them in
+# the image layer, so every CI/CD rebuild silently discarded them — including
+# every operator "this memory unit is untrusted" flip and its audit trail.
+# See DP-303.
+HINDSIGHT_OVERRIDE_DB = os.environ.get(
+    "HINDSIGHT_OVERRIDE_DB", str(DATA_DIR / "hindsight_overrides.db")
+)
+HINDSIGHT_DOC_SCOPE_DB = os.environ.get(
+    "HINDSIGHT_DOC_SCOPE_DB", str(DATA_DIR / "hindsight_doc_scope.db")
+)
+
 LOCAL_LLM_URL = os.environ.get("LOCAL_LLM_URL", "http://10.0.0.70:5001/v1")
 
 # Base URL of the optional kcpp-progress sidecar (services/kcpp-progress), which
