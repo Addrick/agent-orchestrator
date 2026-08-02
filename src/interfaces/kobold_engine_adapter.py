@@ -48,6 +48,7 @@ from src.chat_system import (
 from src.interfaces.kobold_export import build_kobold_savefile, build_transcript, _parse_tool_context
 from src.memory.date_extraction import LlmTagger, resolve_ingest_anchor
 from src.origin import Origin
+from src.security.scrubber import get_scrubber
 from src.stream_engine import CHAT_TEMPLATES
 from src.interfaces.portal_render import render_portal_html
 from src.personas.store import save_personas_to_file
@@ -1776,7 +1777,19 @@ class KoboldEngineAdapter:
             # POST back to /api/v1/persona/{name}/confirm. The terminal DoneEvent
             # that follows ends the stream without echoing this text into the
             # chat bubble — the modal is the canonical surface.
-            payload = json.dumps({
+            #
+            # Egress scrub: `ev.write_calls` is the RAW call the server keeps
+            # in order to execute it on approval, so unlike `ev.text` and
+            # `ev.audit_info` (both scrubbed upstream at the write gate) its
+            # arguments still hold real secret values. The frame is display
+            # only — the portal approves by POSTing back the `token`, never the
+            # arguments — so redacting here costs nothing and stops a secret
+            # from crossing to a browser that may cache or log it.
+            #
+            # Scrubs the assembled dict rather than the arguments alone so a
+            # field added to this frame later is covered without a second
+            # thought; re-scrubbing the already-clean fields is idempotent.
+            payload = json.dumps(get_scrubber().scrub({
                 "text": ev.text,
                 "persona": ev.persona_name,
                 "token": ev.token,
@@ -1789,7 +1802,7 @@ class KoboldEngineAdapter:
                     for c in ev.write_calls
                 ],
                 "audit_info": ev.audit_info,
-            })
+            }))
             frames.append((
                 "PendingConfirmationEvent",
                 f"event: derpr-confirm\ndata: {payload}\n\n".encode("utf-8"),

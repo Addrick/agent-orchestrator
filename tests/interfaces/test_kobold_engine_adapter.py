@@ -1081,6 +1081,74 @@ def test_parked_write_turn_persists_normally_and_carries_its_token():
     mm.close()
 
 
+def _parked_write_with_secret_stream(secret):
+    """Like `_parked_write_stream`, but the proposed write carries a secret in
+    its arguments — the case where the frame would leak."""
+    calls = {"n": 0}
+
+    async def stream_messages(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield {"type": "api_payload", "payload": {}}
+            yield {"type": "tool_calls", "calls": [
+                {"id": "call_w1", "name": "create_ticket",
+                 "arguments": {"title": "test", "api_key": secret}}
+            ]}
+            yield {"type": "done", "full_text": ""}
+        else:
+            yield {"type": "text_delta", "text": " Sent for approval."}
+            yield {"type": "done", "full_text": " Sent for approval."}
+    return stream_messages
+
+
+def test_derpr_confirm_frame_redacts_write_arguments():
+    """The confirm frame is display-only, so it must not carry raw arguments.
+
+    The server keeps the real call — it has to, or approving would execute the
+    write with a literal "[REDACTED]" — but the browser only ever needs to see
+    what it is approving and to POST the token back. Asserts both halves: the
+    wire is clean AND the park still holds the real value.
+    """
+    from src.security.scrubber import get_scrubber, reset_scrubber
+
+    secret = "supersecretvalue123"
+    reset_scrubber()
+    get_scrubber().register(secret, "TEST_KEY")
+    try:
+        adapter, mm, persona, chat_system = _make_real_adapter(
+            stream_messages=_parked_write_with_secret_stream(secret),
+        )
+        persona.set_enabled_tools(["*"])
+
+        body = _chat_body("make a ticket", stream=True)
+        body["derpr_user_text"] = "make a ticket"
+        with TestClient(adapter.app) as client:
+            r = client.post("/chat/completions", json=body)
+        body_text = r.text
+
+        # Nowhere in the whole SSE stream, not merely absent from the field we
+        # happened to think of.
+        assert secret not in body_text
+
+        confirm = re.search(r"event: derpr-confirm\ndata: (\{.*?\})\n\n",
+                            body_text)
+        assert confirm, f"missing derpr-confirm frame in:\n{body_text}"
+        payload = json.loads(confirm.group(1))
+        args = payload["calls"][0]["arguments"]
+        assert args["api_key"] == "[REDACTED:TEST_KEY]"
+        # Redaction must not have eaten the non-secret content the operator
+        # needs in order to judge the proposal.
+        assert args["title"] == "test"
+
+        # The server side kept the executable call intact.
+        parks = chat_system.confirmations.list_for("portal", "test_persona")
+        assert len(parks) == 1
+        assert parks[0].write_call["arguments"]["api_key"] == secret
+        mm.close()
+    finally:
+        reset_scrubber()
+
+
 # -------- DP-130 transcript projection (C1, C3-projection, C5) --------
 
 def test_transcript_unknown_persona_returns_404():
