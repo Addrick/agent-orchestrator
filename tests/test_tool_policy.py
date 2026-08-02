@@ -267,6 +267,7 @@ def test_exfil_capable_capability_validation():
     from src.tools.definitions import validate_tool_capabilities
     good = {
         "function": {"name": "x"},
+        "is_write": False,  # DP-306: a named tool must declare it
         "capabilities": {
             "produces_untrusted": False, "irreversible": False,
             "locality": "network", "sensitivity": "internal",
