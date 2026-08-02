@@ -73,6 +73,19 @@ class WriteParkedEvent:
 
 
 @dataclass
+class _WriteDuplicateEvent:
+    """Loop-internal: a write suppressed by the pending-duplicate guard.
+
+    Emits no public affordance — that is the point of suppressing it — but the
+    orchestrator still has to hear about it, because the synthetic result it
+    just appended will need patching when the ORIGINAL proposal resolves. Its
+    row id, like a park's, does not exist until this turn commits.
+    """
+    token: str
+    call_id: Optional[str]
+
+
+@dataclass
 class _LoopFinishedEvent:
     """Loop-internal terminal event. Carries the resolved state so the
     orchestrator can persist the assistant turn / re-emit a public DoneEvent."""
@@ -86,6 +99,7 @@ LoopEvent = Union[
     TokenEvent, ErrorEvent,
     ToolCallStartEvent, ToolCallResultEvent,
     _ApiPayloadEvent, _LoopFinishedEvent, _ToolContextEvent, WriteParkedEvent,
+    _WriteDuplicateEvent,
 ]
 
 # Status values for a gated write's synthetic tool result. These are what the
@@ -483,6 +497,9 @@ class ToolLoop:
                                 ),
                             }),
                         })
+                        yield _WriteDuplicateEvent(
+                            token=existing, call_id=wc.get("id"),
+                        )
                         continue
 
                     token = uuid.uuid4().hex

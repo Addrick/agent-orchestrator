@@ -630,6 +630,104 @@ async def test_reproposal_after_resolution_parks_again(mocked_chat_system):
     assert parks[0].token != token, "a new decision needs a new token"
 
 
+def _tool_entries(mem_manager):
+    """Every sealed tool entry across the conversation, keyed by call id."""
+    cursor = mem_manager._get_connection().cursor()
+    cursor.execute(
+        "SELECT tool_context FROM User_Interactions "
+        "WHERE tool_context IS NOT NULL ORDER BY interaction_id"
+    )
+    out = {}
+    for (blob,) in cursor.fetchall():
+        for msg in json.loads(blob):
+            if msg.get("role") == "tool":
+                out[msg.get("tool_call_id")] = json.loads(msg["content"])
+    return out
+
+
+@pytest.mark.asyncio
+async def test_resolving_a_park_also_patches_its_suppressed_duplicate(
+        mocked_chat_system):
+    """A suppressed duplicate must not keep claiming the action is pending.
+
+    The duplicate's entry says "still awaiting the operator". Nothing else
+    would ever correct it, so once the original is decided history would assert
+    a decided action is queued — the same verdict/record split that the denial
+    instruction fixed elsewhere.
+
+    Note the duplicate lands in a DIFFERENT assistant row than the park (the
+    re-proposal is a later turn), so this also pins that the patch follows
+    `duplicate_refs` across rows rather than scanning the park's own row.
+    """
+    chat_system, mem_manager = mocked_chat_system
+    _confirm_persona(chat_system)
+    _recording_tool_manager(chat_system)
+
+    (token,) = await _park_writes(
+        chat_system, user="u12", channel="c12",
+        write_calls=[{"id": "w1", "name": "create_ticket",
+                      "arguments": {"title": "t", "body": "b"}}],
+    )
+
+    # Turn 2 re-proposes it; the guard answers inline with `duplicate_of_pending`.
+    _set_engine(chat_system, [
+        _calls({"id": "w2", "name": "create_ticket",
+                "arguments": {"title": "t", "body": "b"}}),
+        _text("Still waiting."),
+    ])
+    await _drain(chat_system.stream_response(
+        "test_persona", "u12", "c12", "do it again"))
+
+    before = _tool_entries(mem_manager)
+    assert before["w2"]["status"] == "duplicate_of_pending"
+
+    _set_engine(chat_system, [_text("Ticket opened.")])
+    await _drain(chat_system.stream_resolve_park(
+        "u12", "test_persona", token, approved=True))
+
+    after = _tool_entries(mem_manager)
+    assert after["w1"]["status"] == "approved"
+    assert after["w2"]["status"] == "approved", (
+        "the suppressed duplicate still claims the action is pending"
+    )
+    # Marked, so the transcript does not read as the action having run twice.
+    assert after["w2"]["duplicate_of"] == "w1"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_in_the_same_turn_is_also_patched(mocked_chat_system):
+    """The in-turn case: park and duplicate share one row.
+
+    `_register_duplicates` runs AFTER `_register_parks` precisely so a duplicate
+    can find a park minted moments earlier in the same turn.
+    """
+    chat_system, mem_manager = mocked_chat_system
+    _confirm_persona(chat_system)
+    _recording_tool_manager(chat_system)
+
+    _set_engine(chat_system, [
+        _calls({"id": "w1", "name": "create_ticket",
+                "arguments": {"title": "t", "body": "b"}}),
+        _calls({"id": "w2", "name": "create_ticket",
+                "arguments": {"title": "t", "body": "b"}}),
+        _text("Proposed once."),
+    ])
+    await _drain(chat_system.stream_response(
+        "test_persona", "u13", "c13", "open a ticket"))
+
+    parks = chat_system.confirmations.list_for("u13", "test_persona")
+    assert len(parks) == 1
+    assert _tool_entries(mem_manager)["w2"]["status"] == "duplicate_of_pending"
+
+    _set_engine(chat_system, [_text("Denied.")])
+    await _drain(chat_system.stream_resolve_park(
+        "u13", "test_persona", parks[0].token, approved=False))
+
+    after = _tool_entries(mem_manager)
+    assert after["w1"]["status"] == "denied"
+    assert after["w2"]["status"] == "denied"
+
+
 @pytest.mark.asyncio
 async def test_distinct_writes_across_turns_both_park(mocked_chat_system):
     """The guard must not swallow a genuinely different second proposal."""

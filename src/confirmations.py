@@ -66,6 +66,13 @@ class ParkedWrite:
     # The assistant row whose sealed tool_context holds this call's
     # `awaiting_human_approval` entry — the row patched when it resolves.
     parked_assistant_id: Optional[int] = None
+    # `(row_id, call_id)` for every write the duplicate guard suppressed in
+    # favour of this park. Each left a `duplicate_of_pending` entry saying the
+    # action is "still awaiting the operator", so each has to be patched too or
+    # history claims something is queued after it was decided. A list because a
+    # model can re-propose across several turns, each landing in its own row —
+    # which is why one `parked_assistant_id` cannot cover them.
+    duplicate_refs: List[Tuple[int, str]] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
 
     @property
@@ -266,11 +273,32 @@ class ConfirmationManager:
         verbatim — there is no synthesized placeholder to collide with and the
         target is guaranteed present. (Before DP-297 the seal invented the
         entry at write time, which is why this could not be done then.)
+
+        Also patches every suppressed duplicate of this park. Those entries say
+        the action is "still awaiting the operator", and nothing else would ever
+        correct them — leaving history asserting a decided action is queued.
+        They live in whichever row the re-proposal landed in, which is why this
+        walks `duplicate_refs` rather than one row.
         """
+        primary_ok = False
         row_id = park.parked_assistant_id
         call_id = park.call_id
-        if row_id is None or call_id is None:
-            return False
+        if row_id is not None and call_id is not None:
+            primary_ok = self._patch_one(
+                park, row_id, call_id, status, result, duplicate=False)
+
+        for dup_row_id, dup_call_id in park.duplicate_refs:
+            # Best-effort: a stale duplicate is a cosmetic history wart, while a
+            # failed primary patch is the real defect. Never let one shadow the
+            # other in the return value.
+            self._patch_one(park, dup_row_id, dup_call_id, status, result,
+                            duplicate=True)
+
+        return primary_ok
+
+    def _patch_one(self, park: ParkedWrite, row_id: int, call_id: str,
+                   status: str, result: Any, *, duplicate: bool) -> bool:
+        """Rewrite a single tool entry in a single row's tool_context."""
         blob = self.memory_manager.get_tool_context(row_id)
         if not blob:
             logger.warning(
@@ -287,14 +315,20 @@ class ConfirmationManager:
 
         for msg in msgs:
             if msg.get("role") == "tool" and msg.get("tool_call_id") == call_id:
-                msg["content"] = json.dumps({
+                entry: Dict[str, Any] = {
                     "status": status,
                     "token": park.token,
                     # Egress scrub (DP-225 boundary 1): this result reaches the
                     # model's replayed history and the portal transcript, so it
                     # is redacted exactly like a live tool result.
                     "result": get_scrubber().scrub(result),
-                })
+                }
+                if duplicate:
+                    # Marked so the transcript explains why one outcome appears
+                    # against two call ids, rather than reading as the action
+                    # having happened twice.
+                    entry["duplicate_of"] = park.call_id
+                msg["content"] = json.dumps(entry)
                 break
         else:
             logger.warning(

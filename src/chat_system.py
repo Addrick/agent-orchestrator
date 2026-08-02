@@ -31,7 +31,7 @@ from src.request_builder import AssembledRequest, RequestBuilder, RequestContext
 from src.security.scrubber import get_scrubber
 from src.tools.tool_loop import (
     ToolLoop, WriteParkedEvent, _ApiPayloadEvent, _LoopFinishedEvent,
-    _ToolContextEvent, write_call_identity,
+    _ToolContextEvent, _WriteDuplicateEvent, write_call_identity,
 )
 from src.turn_persistence import TurnPersistence
 from src.tools.tool_manager import ToolManager
@@ -408,6 +408,11 @@ class ChatSystem:
             # after the assistant row commits, since each needs that row's id to
             # patch later — see the park-registration block below.
             parks_this_turn: List[ParkedWrite] = []
+            # Writes the duplicate guard suppressed this turn. Registered
+            # against the committed row alongside the parks, so their
+            # `duplicate_of_pending` entries get corrected when the original
+            # proposal resolves.
+            dups_this_turn: List[_WriteDuplicateEvent] = []
 
             def _already_pending(write_call: Dict[str, Any]) -> Optional[str]:
                 """Token of an identical proposal still awaiting the operator.
@@ -482,6 +487,11 @@ class ChatSystem:
                             token=ev.token,
                             audit_info=ev.audit_info,
                         )
+                    elif isinstance(ev, _WriteDuplicateEvent):
+                        # Suppressed by the pending-duplicate guard: no
+                        # affordance, no audit row — but its history entry will
+                        # need correcting when the original resolves.
+                        dups_this_turn.append(ev)
                     elif isinstance(ev, ErrorEvent):
                         # The loop died mid-turn. Persist whatever tool calls it
                         # made first — otherwise the next turn shows the model
@@ -504,6 +514,10 @@ class ChatSystem:
                             # entries, or the operator sees affordances that
                             # resolve to nothing.
                             self._register_parks(parks_this_turn, errored_id)
+                            # After the parks: a duplicate can point at a park
+                            # created earlier in THIS turn, which only became
+                            # findable by token on the line above.
+                            self._register_duplicates(dups_this_turn, errored_id)
                         yield ev
                         return
                     elif isinstance(ev, _LoopFinishedEvent):
@@ -545,6 +559,7 @@ class ChatSystem:
                 tool_context_json=tool_context_json,
             )
             self._register_parks(parks_this_turn, assistant_id)
+            self._register_duplicates(dups_this_turn, assistant_id)
 
             # DP-113: retain assistant turn through the backend boundary.
             # Inherit ctx.turn_tainted so the untrusted bit reaches the
@@ -588,6 +603,37 @@ class ChatSystem:
         for parked in parks:
             parked.parked_assistant_id = assistant_id
             self.confirmations.park(parked)
+
+    def _register_duplicates(self, dups: List[_WriteDuplicateEvent],
+                             assistant_id: Optional[int]) -> None:
+        """Point each suppressed duplicate at the park it was folded into.
+
+        Same deferral as `_register_parks`, and for the same reason: the row id
+        does not exist until the turn commits. Without this the duplicate's
+        `duplicate_of_pending` entry — which says the action is still awaiting
+        the operator — would never be corrected once the original resolves.
+
+        The target park may be in a DIFFERENT row than this one (a re-proposal
+        usually arrives a turn later), so the reference is stored on the park
+        rather than resolved by scanning this row.
+        """
+        if assistant_id is None:
+            return
+        for dup in dups:
+            if dup.call_id is None:
+                continue
+            parked = self.confirmations.pending.get(dup.token)
+            if parked is None:
+                # Resolved between the guard firing and this turn committing.
+                # Its entry is already stale, but there is nothing left to hang
+                # the reference on — and the model was told the truth at the
+                # time, which is the part that mattered.
+                logger.debug(
+                    "duplicate for token %s: park already resolved, "
+                    "leaving its entry as-is", dup.token,
+                )
+                continue
+            parked.duplicate_refs.append((assistant_id, dup.call_id))
 
     async def stream_response(
             self,
