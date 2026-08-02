@@ -31,7 +31,7 @@ from src.request_builder import AssembledRequest, RequestBuilder, RequestContext
 from src.security.scrubber import get_scrubber
 from src.tools.tool_loop import (
     ToolLoop, WriteParkedEvent, _ApiPayloadEvent, _LoopFinishedEvent,
-    _ToolContextEvent,
+    _ToolContextEvent, write_call_identity,
 )
 from src.turn_persistence import TurnPersistence
 from src.tools.tool_manager import ToolManager
@@ -408,6 +408,26 @@ class ChatSystem:
             # patch later — see the park-registration block below.
             parks_this_turn: List[ParkedWrite] = []
 
+            def _already_pending(write_call: Dict[str, Any]) -> Optional[str]:
+                """Token of an identical proposal still awaiting the operator.
+
+                Spans both scopes on purpose: parks made earlier in THIS turn
+                (not yet in the store — they register only after the assistant
+                row commits) and parks still live from earlier turns. The
+                cross-turn case is the one that matters most: a continuation
+                exists because something was decided, and the model re-reading
+                its own still-pending siblings is exactly when it re-proposes.
+                """
+                identity = write_call_identity(write_call)
+                for park in parks_this_turn:
+                    if write_call_identity(park.write_call) == identity:
+                        return park.token
+                for park in self.confirmations.list_for(
+                        ctx.user_identifier, ctx.persona_name):
+                    if write_call_identity(park.write_call) == identity:
+                        return park.token
+                return None
+
             # Construct per-call so tests that swap `chat_system.text_engine`
             # post-init still see the new engine; ToolLoop is stateless.
             tool_loop = ToolLoop(self.text_engine, self.tool_manager)
@@ -421,6 +441,7 @@ class ChatSystem:
                     image_url=ctx.image_url,
                     turn_tainted=ctx.turn_tainted,
                     initial_taint_sources=ctx.taint_sources,
+                    pending_lookup=_already_pending,
                 ):
                     if isinstance(ev, _ApiPayloadEvent):
                         self.turn_persistence.store_api_request(

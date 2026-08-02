@@ -550,3 +550,107 @@ async def test_valid_token_executes_write(mocked_chat_system):
     assert done.text == "Ticket opened."
     assert executed == ["create_ticket"]
     assert chat_system.confirmations.list_for("u8", "test_persona") == []
+
+
+# ---- DP-297 duplicate-proposal guard, wired end to end -------------------
+#
+# The tool-loop unit tests drive `pending_lookup` with a fake. These assert the
+# real closure in `_orchestrate` is actually PASSED and actually consults the
+# live store -- a guard that exists but is never reached is the failure mode
+# this file exists to catch.
+
+
+@pytest.mark.asyncio
+async def test_reproposal_across_turns_does_not_create_a_second_park(
+        mocked_chat_system):
+    """A later turn re-proposing a still-pending write gets no second park.
+
+    The cross-turn case is the one that bites: the park survives the turn, the
+    model re-reads it as pending, and proposes again.
+    """
+    chat_system, _ = mocked_chat_system
+    _confirm_persona(chat_system)
+    _recording_tool_manager(chat_system)
+
+    write = {"id": "w1", "name": "create_ticket",
+             "arguments": {"title": "t", "body": "b"}}
+    (token,) = await _park_writes(
+        chat_system, user="u9", channel="c9", write_calls=[write],
+    )
+
+    # Turn 2: same action, different provider call id (as a real re-proposal
+    # would have).
+    _set_engine(chat_system, [
+        _calls({"id": "w2", "name": "create_ticket",
+                "arguments": {"title": "t", "body": "b"}}),
+        _text("Still waiting on you."),
+    ])
+    await _drain(chat_system.stream_response(
+        "test_persona", "u9", "c9", "do it again"))
+
+    parks = chat_system.confirmations.list_for("u9", "test_persona")
+    assert len(parks) == 1, "re-proposal must not queue a second affordance"
+    assert parks[0].token == token, "the original park is the survivor"
+
+
+@pytest.mark.asyncio
+async def test_reproposal_after_resolution_parks_again(mocked_chat_system):
+    """The guard keys on PENDING, not on history.
+
+    Once the operator has decided, the action is no longer queued, so proposing
+    it again is a legitimate new request -- a denied write the user then asks
+    for explicitly must be able to reach them a second time.
+    """
+    chat_system, _ = mocked_chat_system
+    _confirm_persona(chat_system)
+    _recording_tool_manager(chat_system)
+
+    write = {"id": "w1", "name": "create_ticket",
+             "arguments": {"title": "t", "body": "b"}}
+    (token,) = await _park_writes(
+        chat_system, user="u10", channel="c10", write_calls=[write],
+    )
+
+    _set_engine(chat_system, [_text("Denied, understood.")])
+    await _drain(chat_system.stream_resolve_park(
+        "u10", "test_persona", token, approved=False,
+    ))
+    assert chat_system.confirmations.list_for("u10", "test_persona") == []
+
+    _set_engine(chat_system, [
+        _calls({"id": "w2", "name": "create_ticket",
+                "arguments": {"title": "t", "body": "b"}}),
+        _text("Proposed again."),
+    ])
+    await _drain(chat_system.stream_response(
+        "test_persona", "u10", "c10", "actually, do it"))
+
+    parks = chat_system.confirmations.list_for("u10", "test_persona")
+    assert len(parks) == 1
+    assert parks[0].token != token, "a new decision needs a new token"
+
+
+@pytest.mark.asyncio
+async def test_distinct_writes_across_turns_both_park(mocked_chat_system):
+    """The guard must not swallow a genuinely different second proposal."""
+    chat_system, _ = mocked_chat_system
+    _confirm_persona(chat_system)
+    _recording_tool_manager(chat_system)
+
+    (first,) = await _park_writes(
+        chat_system, user="u11", channel="c11",
+        write_calls=[{"id": "w1", "name": "create_ticket",
+                      "arguments": {"title": "t", "body": "b"}}],
+    )
+
+    _set_engine(chat_system, [
+        _calls({"id": "w2", "name": "create_ticket",
+                "arguments": {"title": "OTHER", "body": "b"}}),
+        _text("Two for review."),
+    ])
+    await _drain(chat_system.stream_response(
+        "test_persona", "u11", "c11", "and another"))
+
+    parks = chat_system.confirmations.list_for("u11", "test_persona")
+    assert len(parks) == 2
+    assert {p.token for p in parks} >= {first}

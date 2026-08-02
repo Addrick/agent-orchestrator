@@ -416,6 +416,16 @@ decide, then that same entry is rewritten in place with the real outcome —
 The persona reads that outcome on its next turn, so it can tell a completed action
 from one it merely suggested, and does not re-propose something you already approved.
 
+**The same action is never queued twice.** If a persona proposes an action
+identical to one already waiting for you — same tool, same arguments — it is not
+added to your queue a second time; the model is told it is already pending and
+which proposal it belongs to. You will not get two checkmarks for one action, and
+approving cannot run it twice. Volume is not restricted: proposing six *different*
+ticket updates in one reply gives you six proposals, because that is six decisions.
+Once you have answered a proposal it is no longer pending, so a persona can
+legitimately propose the same action again later — if you denied a write and then
+ask for it directly, it reaches you again rather than being silently swallowed.
+
 **Approvals do not survive a restart.** Pending proposals live in memory only. If
 the bot restarts, anything unanswered is gone and must be re-requested — which is
 why the 24-hour window is a ceiling, not a promise.

@@ -13,8 +13,9 @@ from src.generation_events import (
 )
 from src.persona import ExecutionMode
 from src.tools.tool_loop import (
-    PARK_STATUS_AWAITING, ToolLoop, WriteParkedEvent, _ApiPayloadEvent,
-    _LoopFinishedEvent, _ToolContextEvent,
+    PARK_STATUS_AWAITING, PARK_STATUS_DUPLICATE, ToolLoop, WriteParkedEvent,
+    _ApiPayloadEvent, _LoopFinishedEvent, _ToolContextEvent,
+    write_call_identity,
 )
 
 
@@ -605,3 +606,145 @@ async def test_clean_exit_does_not_seal_with_the_error_reason():
     assert json.loads(sealed["content"]) == {
         "status": "not_executed", "reason": "unknown",
     }
+
+
+# ---- DP-297 duplicate-proposal guard -------------------------------------
+
+def test_write_call_identity_ignores_the_provider_call_id():
+    """Two re-proposals of one action always carry different ids, so the id
+    must not participate — otherwise the guard never fires."""
+    a = {"id": "call_1", "name": "create_ticket", "arguments": {"t": "x"}}
+    b = {"id": "call_2", "name": "create_ticket", "arguments": {"t": "x"}}
+    assert write_call_identity(a) == write_call_identity(b)
+
+
+def test_write_call_identity_is_argument_order_independent():
+    """Argument key order is not stable across iterations; a reordered dict is
+    the same proposal."""
+    a = {"name": "create_ticket", "arguments": {"a": 1, "b": 2}}
+    b = {"name": "create_ticket", "arguments": {"b": 2, "a": 1}}
+    assert write_call_identity(a) == write_call_identity(b)
+
+
+def test_write_call_identity_separates_different_arguments():
+    """The guard must not collapse genuinely different proposals — six ticket
+    updates in one turn are six proposals, not one."""
+    a = {"name": "create_ticket", "arguments": {"t": "x"}}
+    b = {"name": "create_ticket", "arguments": {"t": "y"}}
+    assert write_call_identity(a) != write_call_identity(b)
+
+
+@pytest.mark.asyncio
+async def test_reproposed_write_is_answered_but_not_parked_twice():
+    """A model that ignores the do-not-resubmit instruction gets one park.
+
+    Without this the operator sees N identical affordances, each of which
+    executes the write again if approved.
+    """
+    call = {"id": "w1", "name": "create_ticket", "arguments": {"title": "x"}}
+    again = {"id": "w2", "name": "create_ticket", "arguments": {"title": "x"}}
+    engine = _make_engine([
+        [{"type": "tool_calls", "calls": [dict(call)]},
+         {"type": "done", "full_text": ""}],
+        [{"type": "tool_calls", "calls": [dict(again)]},
+         {"type": "done", "full_text": ""}],
+        [{"type": "done", "full_text": "Waiting on you."}],
+    ])
+    tools = _make_tool_manager({})
+    loop = ToolLoop(engine, tools)
+
+    parked: List[Dict[str, Any]] = []
+
+    def pending_lookup(wc):
+        for p in parked:
+            if write_call_identity(p["call"]) == write_call_identity(wc):
+                return p["token"]
+        return None
+
+    history: List[Dict[str, Any]] = []
+    events = []
+    async for ev in loop.run(
+        persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
+        conversation_history=history, params=MagicMock(), tools=[],
+        pending_lookup=pending_lookup,
+    ):
+        if isinstance(ev, WriteParkedEvent):
+            parked.append({"call": ev.write_call, "token": ev.token})
+        events.append(ev)
+
+    parks = [e for e in events if isinstance(e, WriteParkedEvent)]
+    assert len(parks) == 1, "the re-proposal must not create a second park"
+
+    # The duplicate call is still ANSWERED — an assistant tool_calls block with
+    # no matching result is rejected outright by Anthropic and Gemini.
+    dup = [m for m in history
+           if m.get("role") == "tool" and m.get("tool_call_id") == "w2"]
+    assert len(dup) == 1
+    content = json.loads(dup[0]["content"])
+    assert content["status"] == PARK_STATUS_DUPLICATE
+    # It points at the live proposal, so the model can reason about which one.
+    assert content["token"] == parks[0].token
+
+    tools.execute_tool.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_distinct_writes_in_one_iteration_all_park():
+    """The guard is about repetition, not volume: several different writes
+    proposed together are several proposals."""
+    engine = _make_engine([
+        [{"type": "tool_calls", "calls": [
+            {"id": "w1", "name": "create_ticket", "arguments": {"t": "a"}},
+            {"id": "w2", "name": "create_ticket", "arguments": {"t": "b"}},
+            {"id": "w3", "name": "create_ticket", "arguments": {"t": "c"}},
+        ]},
+         {"type": "done", "full_text": ""}],
+        [{"type": "done", "full_text": "Three for review."}],
+    ])
+    tools = _make_tool_manager({})
+    loop = ToolLoop(engine, tools)
+
+    parked: List[Dict[str, Any]] = []
+
+    def pending_lookup(wc):
+        for p in parked:
+            if write_call_identity(p["call"]) == write_call_identity(wc):
+                return p["token"]
+        return None
+
+    events = []
+    async for ev in loop.run(
+        persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
+        conversation_history=[], params=MagicMock(), tools=[],
+        pending_lookup=pending_lookup,
+    ):
+        if isinstance(ev, WriteParkedEvent):
+            parked.append({"call": ev.write_call, "token": ev.token})
+        events.append(ev)
+
+    parks = [e for e in events if isinstance(e, WriteParkedEvent)]
+    assert len(parks) == 3
+    assert len({p.token for p in parks}) == 3
+
+
+@pytest.mark.asyncio
+async def test_no_pending_lookup_parks_everything():
+    """`pending_lookup` is optional — callers that do not supply it (tests,
+    any future embedder) must keep the pre-guard behaviour."""
+    engine = _make_engine([
+        [{"type": "tool_calls", "calls": [
+            {"id": "w1", "name": "create_ticket", "arguments": {"t": "a"}}]},
+         {"type": "done", "full_text": ""}],
+        [{"type": "tool_calls", "calls": [
+            {"id": "w2", "name": "create_ticket", "arguments": {"t": "a"}}]},
+         {"type": "done", "full_text": ""}],
+        [{"type": "done", "full_text": "ok"}],
+    ])
+    tools = _make_tool_manager({})
+    loop = ToolLoop(engine, tools)
+
+    events = await _drain(loop.run(
+        persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
+        conversation_history=[], params=MagicMock(), tools=[],
+    ))
+    assert len([e for e in events if isinstance(e, WriteParkedEvent)]) == 2

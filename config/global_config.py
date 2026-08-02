@@ -82,13 +82,23 @@ UPDATE_MODELS_ON_STARTUP = True
 DISCORD_CHAR_LIMIT = 2000
 DISCORD_STATUS_LIMIT = 128
 
-# Tool use limit to avoid infinite loops.
+# Tool use limit to avoid infinite loops. Counts LOOP ITERATIONS, not calls.
+#
 # DP-297 raised this 5 → 10: a gated write no longer ends the turn, so every
-# proposal now costs an iteration that used to be the turn's last. This is also
-# the ONLY bound on how many proposals a single turn can emit — deliberately so.
-# A per-conversation proposal cap was considered and rejected: a continuation
-# only exists because a human approved something, so proposal growth is
-# human-gated and cannot run away on its own.
+# proposal now costs an iteration that used to be the turn's last. At 5, an
+# ordinary turn (a couple of reads, a couple of proposals, then wrap-up) hit the
+# cap and answered with the "stuck in a loop" text.
+#
+# ⚠️ This does NOT bound how many proposals a turn can emit. One model response
+# may carry any number of write calls and they all park inside a single
+# iteration. That is deliberate — six ticket updates proposed together are one
+# considered plan, not runaway behaviour, and capping them would split a
+# coherent batch for an arbitrary number's sake.
+#
+# What IS bounded is repetition: `tool_loop.write_call_identity` refuses to park
+# a proposal identical to one already awaiting the operator, so a model that
+# ignores the "do not re-submit" instruction cannot turn N iterations into N
+# copies of the same affordance.
 MAX_TOOL_CALLS = 10
 # Max cached API request payloads (for dump commands); FIFO eviction beyond this
 MAX_CACHED_API_REQUESTS = 128

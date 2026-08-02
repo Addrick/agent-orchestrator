@@ -16,7 +16,9 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, List, Optional, Union, cast
+from typing import (
+    Any, AsyncIterator, Callable, Dict, List, Optional, Tuple, Union, cast,
+)
 
 from config.global_config import MAX_TOOL_CALLS
 from src.engine import LLMCommunicationError, TextEngine
@@ -93,6 +95,28 @@ PARK_STATUS_AWAITING = "awaiting_human_approval"
 PARK_STATUS_APPROVED = "approved"
 PARK_STATUS_DENIED = "denied"
 PARK_STATUS_EXPIRED = "expired"
+# Not a park outcome — the answer to a write the model proposed while an
+# identical one was already waiting. No second park is created.
+PARK_STATUS_DUPLICATE = "duplicate_of_pending"
+
+
+def write_call_identity(call: Dict[str, Any]) -> Tuple[str, str]:
+    """Identity of a write proposal for duplicate detection: tool name plus
+    canonicalized arguments.
+
+    Deliberately excludes the provider call id — two re-proposals of the same
+    action always carry different ids, which is precisely the case this has to
+    catch. `sort_keys` because argument order is not stable across iterations.
+    """
+    name = str(call.get("name") or "")
+    try:
+        args = json.dumps(call.get("arguments") or {}, sort_keys=True,
+                          default=str)
+    except (TypeError, ValueError):
+        # Unserializable arguments cannot be compared; fall back to an identity
+        # that never matches, so an odd call parks rather than being swallowed.
+        args = repr(object())
+    return (name, args)
 
 # Reasons a tool call can be left without a real result when the turn ends.
 # (There is no awaiting-approval reason: since DP-297 a parked write is
@@ -238,6 +262,9 @@ class ToolLoop:
         turn_tainted: bool = False,
         initial_taint_sources: Optional[List[str]] = None,
         history_start_override: Optional[int] = None,
+        pending_lookup: Optional[
+            Callable[[Dict[str, Any]], Optional[str]]
+        ] = None,
     ) -> AsyncIterator[LoopEvent]:
         """Yield generation events for one turn. Mutates
         `conversation_history` in-place so the orchestrator (and any
@@ -247,6 +274,12 @@ class ToolLoop:
         tool-context boundary back at the parked turn's first tool message, so
         the captured tool_context_json spans the whole turn (parked read calls,
         the approved write, and its result) rather than only post-resume calls.
+
+        `pending_lookup(write_call) -> token | None` answers "is an identical
+        proposal already waiting?". Injected rather than read from a store
+        because the pending set lives in `ConfirmationManager`, which sits
+        ABOVE this module in the layer order — the loop stays policy-free and
+        the caller decides what counts as already-pending.
         """
         persona_config = persona.get_config_for_engine()
         history_start = (
@@ -422,6 +455,36 @@ class ToolLoop:
                 # Independent approve/deny is the whole point — a burst of three
                 # writes must produce three separately resolvable proposals.
                 for wc, action in zip(write_calls, audit_info["actions"]):
+                    # Duplicate guard. The `instruction` below asks the model
+                    # not to re-submit, but that is model compliance, not
+                    # enforcement — and a model that ignores it would hand the
+                    # operator N identical affordances to clear, each of which
+                    # executes the write again if approved. Answer the call so
+                    # the block stays paired, but create no second park.
+                    existing = pending_lookup(wc) if pending_lookup else None
+                    if existing is not None:
+                        logger.info(
+                            "tool-loop iter %d: %s re-proposed while token %s "
+                            "is still pending — not parking a duplicate",
+                            iter_idx, wc.get("name"), existing,
+                        )
+                        conversation_history.append({
+                            "role": "tool",
+                            "tool_call_id": wc.get("id"),
+                            "name": wc.get("name"),
+                            "content": json.dumps({
+                                "status": PARK_STATUS_DUPLICATE,
+                                "token": existing,
+                                "instruction": (
+                                    "You already proposed this exact action "
+                                    "and it is still awaiting the operator. It "
+                                    "was NOT queued a second time. Do not "
+                                    "propose it again; wait for the outcome."
+                                ),
+                            }),
+                        })
+                        continue
+
                     token = uuid.uuid4().hex
 
                     # Append a REAL synthetic tool result. This is what lets the
