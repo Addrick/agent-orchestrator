@@ -23,6 +23,7 @@ from src.text_tool_protocol import (
     TOOL_CALL_SYNTAX,
     decode_tool_call_payload,
 )
+from src.utils.history_shape import extract_system_prompt
 from src.utils.model_utils import get_chat_template_for_model, get_current_kobold_model
 
 logger = logging.getLogger(__name__)
@@ -303,13 +304,6 @@ class StreamEngine:
         # dropped `persona_prompt` whenever the history opened with a system
         # turn — see `extract_system_prompt` for why that was a transcription
         # slip and not a design choice.
-        #
-        # Imported inside the function, not at module scope: `src.engine`'s
-        # package __init__ imports `driver`, which imports this module, so a
-        # top-level `from src.engine.providers._shared import ...` here would
-        # cycle whenever `src.stream_engine` is the first of the two imported.
-        from src.engine.providers._shared import extract_system_prompt
-
         system_prompt, history = extract_system_prompt(history_object)
         messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         messages.extend(history)

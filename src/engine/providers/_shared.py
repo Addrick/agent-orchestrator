@@ -11,18 +11,17 @@ from typing import Any, Dict, List, Tuple
 
 import aiohttp
 
+# DP-317: moved down to the `utils` leaf so `src.stream_engine` — which sits
+# below `src.engine` in the layer order — can share it without an upward
+# import. Re-exported here because every provider already imports it from
+# `_shared`, and this is its provider-facing home.
+# The redundant-looking alias is the explicit-re-export form mypy requires
+# under `no_implicit_reexport`.
+from src.utils.history_shape import (  # noqa: F401
+    extract_system_prompt as extract_system_prompt,
+)
+
 logger = logging.getLogger(__name__)
-
-
-def extract_system_prompt(history_object: Dict[str, Any]) -> Tuple[str, List[Dict[str, Any]]]:
-    """Returns (merged_system_prompt, remaining_history). A leading system turn
-    in the history is folded into the persona prompt."""
-    system_prompt = history_object["persona_prompt"]
-    history = history_object.get("message_history", history_object.get("history", []))
-    if history and history[0]["role"] == "system":
-        system_prompt = f"{system_prompt}\n\n{history[0]['content']}"
-        history = history[1:]
-    return system_prompt, history
 
 
 async def download_image(image_url: str) -> Tuple[bytes, str]:
