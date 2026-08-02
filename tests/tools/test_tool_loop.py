@@ -748,3 +748,38 @@ async def test_no_pending_lookup_parks_everything():
         conversation_history=[], params=MagicMock(), tools=[],
     ))
     assert len([e for e in events if isinstance(e, WriteParkedEvent)]) == 2
+
+
+def test_write_call_identity_never_matches_when_arguments_are_unserializable():
+    """The fallback identity has to be genuinely unique.
+
+    It was `repr(object())`, which reads like "a value nothing can equal" but
+    is not: CPython reuses the address of the object it just freed, so two
+    evaluations return the same string. The guard's fail-open branch therefore
+    matched ALWAYS — two different unserializable writes collapsed into one,
+    the second was suppressed as a duplicate, and no park (and no operator
+    affordance) was ever created for it."""
+    a = {"name": "create_ticket", "arguments": {("tuple", "key"): 1}}
+    b = {"name": "create_ticket", "arguments": {("other", "key"): 2}}
+
+    ia, ib = write_call_identity(a), write_call_identity(b)
+
+    assert ia != ib
+    # Same call twice must also not match itself: the arguments are
+    # incomparable, so "already pending" is unknowable and parking is the only
+    # fail-closed answer.
+    assert write_call_identity(a) != write_call_identity(a)
+    assert ia[0] == "create_ticket"
+
+
+def test_write_call_identity_fallback_is_unique_in_bulk():
+    """Uniqueness has to hold every time, not usually.
+
+    `repr(object())` collides whenever the allocator hands back the address it
+    just freed — which it does often enough that a single-pair assertion is
+    flaky in both directions. Sampling makes the defect deterministic: 200
+    fallback identities from an address-derived value always contain
+    duplicates, from a uuid never do."""
+    call = {"name": "create_ticket", "arguments": {("k",): 1}}
+    idents = [write_call_identity(call)[1] for _ in range(200)]
+    assert len(set(idents)) == 200

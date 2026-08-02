@@ -369,3 +369,77 @@ def test_retry_park_still_records_its_tool_context(chat_system_with_mocks):
     assert rid == 42, "the park must report a row the resume can later clear"
     mm.update_interaction_content.assert_not_called()
     mm.set_tool_context.assert_called_once_with(42, sealed)
+
+
+# --- DP-297 review #1: a parked turn that then exhausts MAX_TOOL_CALLS -------
+
+def test_non_llm_turn_with_tool_context_is_persisted(chat_system_with_mocks):
+    """The DP-296 rescue keyed off PENDING_CONFIRMATION, which DP-297 stopped
+    producing anywhere. The max-iterations exit emits DEV_COMMAND plus a sealed
+    span holding every `awaiting_human_approval` entry, so it fell through to
+    `return None` — dropping the only row those parks can ever be patched
+    through."""
+    system, mm, _, _, _ = chat_system_with_mocks
+    mm.log_message.return_value = 999
+    sealed = ('[{"role": "assistant", "tool_calls": [{"id": "c1"}]}, '
+              '{"role": "tool", "tool_call_id": "c1", '
+              '"content": "{\\"status\\": \\"awaiting_human_approval\\"}"}]')
+
+    rid = system.turn_persistence.commit_or_update_assistant(
+        persona_name="test_persona", user_identifier="u", channel="c",
+        server_id=None,
+        final_text="I seem to be stuck in a loop. Could you please clarify?",
+        response_type=ResponseType.DEV_COMMAND,
+        user_interaction_id=None, retry_assistant_id=None,
+        tool_context_json=sealed,
+    )
+
+    assert rid == 999
+    mm.log_message.assert_called_once()
+    kwargs = mm.log_message.call_args.kwargs
+    assert kwargs["tool_context"] == sealed
+    # Only PENDING_CONFIRMATION blanks its text (DP-130). This turn's prose is
+    # what the user actually saw and has to survive.
+    assert kwargs["content"].startswith("I seem to be stuck")
+
+
+def test_non_llm_turn_without_tool_context_still_skipped(chat_system_with_mocks):
+    """The widened rescue must stay keyed on there being a context to preserve —
+    an ordinary dev command has no proposals and must not start landing rows."""
+    system, mm, _, _, _ = chat_system_with_mocks
+
+    rid = system.turn_persistence.commit_or_update_assistant(
+        persona_name="test_persona", user_identifier="u", channel="c",
+        server_id=None, final_text="Current model: mock_model",
+        response_type=ResponseType.DEV_COMMAND,
+        user_interaction_id=None, retry_assistant_id=None,
+        tool_context_json=None,
+    )
+
+    assert rid is None
+    mm.log_message.assert_not_called()
+
+
+def test_register_parks_drops_parks_when_the_row_is_missing(
+        chat_system_with_mocks, caplog):
+    """`log_message` can still fail. Registering anyway binds the park to
+    `parked_assistant_id=None`, so approving it executes a real write while
+    `patch_parked_entry` silently no-ops — the action happens and history never
+    mentions it. Failing closed costs a refused click instead."""
+    from src.confirmations import ParkedWrite, new_token
+    system, *_ = chat_system_with_mocks
+    parked = ParkedWrite(
+        token=new_token(),
+        write_call={"id": "c1", "name": "create_ticket", "arguments": {}},
+        audit_info={"actions": []},
+        confirmation_text="create a ticket?",
+        user_identifier="u",
+        persona_name="test_persona",
+    )
+
+    with caplog.at_level(logging.ERROR):
+        system._register_parks([parked], None)
+
+    assert system.confirmations.pending == {}
+    assert parked.token not in system.confirmations.pending
+    assert "dropping" in caplog.text

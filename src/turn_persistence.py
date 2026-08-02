@@ -205,17 +205,27 @@ class TurnPersistence:
                 return None
 
         if response_type != ResponseType.LLM_GENERATION:
-            # DP-296: a park still has to leave a trace of the actions it took
-            # and proposed, or an operator who never answers makes the whole
-            # turn invisible to the model — it then re-proposes or hallucinates
-            # the action on the next turn. Persist the sealed tool context with
-            # empty content: DP-130 keeps the *confirmation text* ephemeral
-            # (re-rendered from the PendingConfirmation), and this row is
-            # cleared by the resume when a decision finally arrives.
-            if response_type == ResponseType.PENDING_CONFIRMATION and tool_context_json:
-                final_text = ""
-            else:
+            # DP-296: a turn that gated writes still has to leave a trace of the
+            # actions it took and proposed, or an operator who never answers
+            # makes the whole turn invisible to the model — it then re-proposes
+            # or hallucinates the action on the next turn.
+            #
+            # The condition is `tool_context_json`, NOT a response_type: it used
+            # to key off PENDING_CONFIRMATION, which DP-297 stopped producing
+            # anywhere, so the rescue was dead and the max-iterations exit
+            # (DEV_COMMAND + a sealed span holding every awaiting_human_approval
+            # entry) returned None here. That dropped the row the parks are
+            # patched through, and `_register_parks` then bound them to
+            # `parked_assistant_id=None` — approving one executed a real write
+            # with no record of it anywhere in history.
+            if not tool_context_json:
                 return None
+            if response_type == ResponseType.PENDING_CONFIRMATION:
+                # DP-130 keeps the *confirmation text* ephemeral (re-rendered
+                # from the park), so only this type blanks its content. Every
+                # other type reaching here — max_iterations especially — has
+                # real text the user already saw and must keep it.
+                final_text = ""
 
         try:
             assistant_id: Optional[int] = self.memory_manager.log_message(

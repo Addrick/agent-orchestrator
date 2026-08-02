@@ -599,7 +599,21 @@ class ChatSystem:
         (mid-stream) and the token becoming resolvable (here). A click inside it
         is refused with "no such pending action" and the operator clicks again;
         it fails closed and never executes the wrong thing.
+
+        A `None` row id fails closed the same way, and for a stronger reason:
+        without it there is nothing to patch when the write resolves, so
+        registering anyway would let an operator approve an irreversible action
+        whose only record — the `awaiting_human_approval` entry — was never
+        committed. Dropping the park costs the operator a refused click; keeping
+        it costs a write that happened and that history never mentions.
         """
+        if assistant_id is None:
+            logger.error(
+                "Assistant row missing for %d gated write(s); dropping them "
+                "rather than making them resolvable against no history entry. "
+                "Tokens: %s", len(parks), [p.token for p in parks],
+            )
+            return
         for parked in parks:
             parked.parked_assistant_id = assistant_id
             self.confirmations.park(parked)

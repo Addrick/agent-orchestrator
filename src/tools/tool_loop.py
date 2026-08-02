@@ -108,6 +108,11 @@ LoopEvent = Union[
 PARK_STATUS_AWAITING = "awaiting_human_approval"
 PARK_STATUS_APPROVED = "approved"
 PARK_STATUS_DENIED = "denied"
+# Approved by the operator, but the tool raised when it ran. Distinct from
+# `PARK_STATUS_APPROVED` because both outcomes leave a `result` and only the
+# status distinguishes them, and distinct from `PARK_STATUS_DENIED` because the
+# operator said yes — the model must not read it as a refusal to re-argue.
+PARK_STATUS_FAILED = "approved_but_failed"
 PARK_STATUS_EXPIRED = "expired"
 # Not a park outcome — the answer to a write the model proposed while an
 # identical one was already waiting. No second park is created.
@@ -129,7 +134,13 @@ def write_call_identity(call: Dict[str, Any]) -> Tuple[str, str]:
     except (TypeError, ValueError):
         # Unserializable arguments cannot be compared; fall back to an identity
         # that never matches, so an odd call parks rather than being swallowed.
-        args = repr(object())
+        #
+        # It must be a fresh uuid, NOT `repr(object())`: CPython reuses the
+        # address of the object it just freed, so two calls to `repr(object())`
+        # return the same string and the "never matches" identity matched
+        # ALWAYS — inverting this guard into one that swallowed every
+        # unserializable write without ever surfacing an affordance.
+        args = f"<unserializable:{uuid.uuid4().hex}>"
     return (name, args)
 
 # Reasons a tool call can be left without a real result when the turn ends.

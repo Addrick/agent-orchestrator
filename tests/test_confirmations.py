@@ -345,3 +345,63 @@ async def test_approval_does_not_carry_the_denial_instruction(
 
     blob = mem_manager.get_tool_context(row_id)
     assert DENIAL_INSTRUCTION not in blob
+
+
+# ---- DP-297 review #3: approved-but-failed is its own outcome -------------
+
+def test_status_separates_the_two_axes():
+    """`approved` is what the operator decided; `ok` is whether the tool ran.
+    Deriving the durable status from `approved` alone collapsed them, so an
+    approved write that then failed was recorded as a plain success."""
+    park = _park()
+    assert Decision(park=park, approved=True, ok=True).status == "approved"
+    assert Decision(park=park, approved=True, ok=False).status == \
+        "approved_but_failed"
+    assert Decision(park=park, approved=False, ok=False).status == "denied"
+    # A denial is a denial regardless of `ok` — nothing ran, so the flag is
+    # meaningless on that branch and must not leak into the status.
+    assert Decision(park=park, approved=False, ok=True).status == "denied"
+
+
+@pytest.mark.asyncio
+async def test_apply_records_an_approved_failure_distinctly(
+        manager, mem_manager):
+    """The failure has to be visible to a reader that keys off `status`.
+
+    Before this, history said `approved` and the only statement of the failure
+    was the `error` inside `result` — which denial ALSO produces, so `error`
+    alone cannot distinguish "the operator refused" from "it broke". That is
+    the same defect DENIAL_INSTRUCTION fixes one branch over."""
+    row_id = _row_with_awaiting_entries(mem_manager, ["c1"])
+    parked = _park(token="tok-c1", call_id="c1", row_id=row_id)
+    manager.park(parked)
+    manager._tool_manager.execute_tool.side_effect = RuntimeError("zammad 500")
+
+    decision = Decision(park=parked, approved=True)
+    await manager.apply(decision)
+
+    payload = json.loads(json.loads(
+        mem_manager.get_tool_context(row_id))[1]["content"])
+    assert payload["status"] == "approved_but_failed"
+    assert payload["status"] != "denied", "the operator did approve it"
+    assert "zammad 500" in json.dumps(payload["result"])
+    assert decision.ok is False
+
+
+@pytest.mark.asyncio
+async def test_audit_row_carries_the_failed_status(manager, mem_manager):
+    """The audit trail keys off the same property, so it must not read
+    `approved` for a write that never landed."""
+    row_id = _row_with_awaiting_entries(mem_manager, ["c1"])
+    parked = _park(token="tok-c1", call_id="c1", row_id=row_id)
+    manager.park(parked)
+    manager._tool_manager.execute_tool.side_effect = RuntimeError("boom")
+
+    await manager.apply(Decision(park=parked, approved=True))
+
+    conn = mem_manager._get_connection()
+    row = conn.execute(
+        "SELECT * FROM Audit_Log WHERE event_type='audit_decision'"
+    ).fetchone()
+    assert row is not None, "apply() must log an audit_decision row"
+    assert row["new_state"] == "approved_but_failed"

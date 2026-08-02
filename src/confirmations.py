@@ -25,7 +25,7 @@ from src.security.scrubber import get_scrubber
 from src.tools.definitions import get_tool_capabilities
 from src.tools.tool_loop import (
     PARK_STATUS_APPROVED, PARK_STATUS_AWAITING, PARK_STATUS_DENIED,
-    PARK_STATUS_EXPIRED,
+    PARK_STATUS_EXPIRED, PARK_STATUS_FAILED,
 )
 from src.tools.tool_manager import ToolManager
 
@@ -96,7 +96,19 @@ class Decision:
 
     @property
     def status(self) -> str:
-        return PARK_STATUS_APPROVED if self.approved else PARK_STATUS_DENIED
+        """The outcome as durable history records it.
+
+        `approved` and `ok` are different axes: `approved` is what the operator
+        decided, `ok` is whether the tool actually ran. Deriving this from
+        `approved` alone wrote an approved-then-failed write into history as a
+        plain `approved`, so every consumer that keys off the status — and not
+        the `error` buried in `result` — read a failure as a success. That is
+        the same defect `DENIAL_INSTRUCTION` fixes one branch over: a verdict
+        whose real outcome outlives the only place that states it.
+        """
+        if not self.approved:
+            return PARK_STATUS_DENIED
+        return PARK_STATUS_APPROVED if self.ok else PARK_STATUS_FAILED
 
 
 class ConfirmationManager:
@@ -387,5 +399,5 @@ def new_token() -> str:
 
 __all__ = [
     "ConfirmationManager", "ParkedWrite", "Decision", "new_token",
-    "PARK_STATUS_AWAITING", "DENIAL_INSTRUCTION",
+    "PARK_STATUS_AWAITING", "PARK_STATUS_FAILED", "DENIAL_INSTRUCTION",
 ]
