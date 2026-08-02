@@ -298,13 +298,20 @@ class StreamEngine:
 
     @staticmethod
     def _build_messages(history_object: Dict[str, Any]) -> List[Dict[str, Any]]:
-        messages: List[Dict[str, Any]] = []
-        history = history_object.get("message_history", history_object.get("history", []))
-        if history and history[0].get("role") == "system":
-            messages.append(history[0])
-            history = history[1:]
-        else:
-            messages.append({"role": "system", "content": history_object["persona_prompt"]})
+        # DP-317: a leading system turn is *merged* onto the persona prompt,
+        # never substituted for it. This used to inline its own split that
+        # dropped `persona_prompt` whenever the history opened with a system
+        # turn — see `extract_system_prompt` for why that was a transcription
+        # slip and not a design choice.
+        #
+        # Imported inside the function, not at module scope: `src.engine`'s
+        # package __init__ imports `driver`, which imports this module, so a
+        # top-level `from src.engine.providers._shared import ...` here would
+        # cycle whenever `src.stream_engine` is the first of the two imported.
+        from src.engine.providers._shared import extract_system_prompt
+
+        system_prompt, history = extract_system_prompt(history_object)
+        messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         messages.extend(history)
         return messages
 
