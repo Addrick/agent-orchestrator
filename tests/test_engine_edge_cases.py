@@ -41,8 +41,16 @@ class TestOpenAIHistoryEdgeCases:
     async def test_openai_system_message_deduplication(
         self, mock_openai_class, text_engine, base_context, monkeypatch
     ):
-        """If history starts with a system message, persona_prompt's own system
-        message must NOT be added — only the one in history is sent."""
+        """If history starts with a system message, exactly one system message
+        is sent — and it carries BOTH the persona prompt and the history's own
+        system turn.
+
+        DP-317: this previously asserted that `persona_prompt` was dropped
+        entirely ("only the one in history is sent"), which codified the
+        substitute-don't-merge slip from `3921318` as if it were deduplication.
+        Deduplicating the system *message* is correct; discarding the persona
+        prompt to achieve it is not. See tests/test_system_prompt_merge.py.
+        """
         monkeypatch.setenv("OPENAI_API_KEY", "dummy")
         mock_instance = mock_openai_class.return_value
         mock_instance.chat.completions.create = AsyncMock(
@@ -57,7 +65,9 @@ class TestOpenAIHistoryEdgeCases:
         messages = call_args["messages"]
         system_messages = [m for m in messages if m["role"] == "system"]
         assert len(system_messages) == 1
-        assert system_messages[0]["content"] == "Explicit system message"
+        assert system_messages[0]["content"] == (
+            "You are a test bot.\n\nExplicit system message"
+        )
 
     @pytest.mark.asyncio
     async def test_openai_null_content_returns_empty(

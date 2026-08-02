@@ -21,7 +21,7 @@ from src.llm_errors import LLMCommunicationError
 from src.security.vault import get_vault
 
 from .base import Provider
-from ._shared import parse_openai_tool_calls
+from ._shared import extract_system_prompt, parse_openai_tool_calls
 
 if TYPE_CHECKING:
     from src.engine.driver import TextEngine
@@ -55,14 +55,13 @@ def build_openai_params(config: Dict[str, Any], history_object: Dict[str, Any],
     """Builds the chat.completions request kwargs. Single source of truth for
     the canonical streaming driver (wire-payload parity pinned by
     tests/test_engine_payload_parity.py)."""
-    messages: List[Dict[str, Any]] = []
-    message_history = history_object.get("message_history", history_object.get("history", []))
-    if message_history and message_history[0]["role"] == "system":
-        messages.append(message_history[0])
-        history_to_process = message_history[1:]
-    else:
-        messages.append({"role": "system", "content": history_object["persona_prompt"]})
-        history_to_process = message_history
+    # DP-317: a leading system turn is *merged* onto the persona prompt, never
+    # substituted for it. This used to inline its own split that dropped
+    # `persona_prompt` whenever the history opened with a system turn — see
+    # `extract_system_prompt` for why that was a transcription slip and not a
+    # design choice.
+    system_prompt, history_to_process = extract_system_prompt(history_object)
+    messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
 
     # Add remaining history
     for msg in history_to_process:
