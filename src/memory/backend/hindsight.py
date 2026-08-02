@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, NoReturn, Optional, Tuple, TYPE_CHECKING, cast
 import httpx
+from config import global_config
 from .base import (
     MemoryBackend, MemoryBackendError, MemoryHit, Experience, ReflectResult,
     MentalModel,
@@ -495,10 +496,13 @@ class HindsightBackend(MemoryBackend):
         self._workers: Dict[str, "asyncio.Task[None]"] = {}
         self._lock = asyncio.Lock()
         self._closed = False
+        # Paths come from config, never from the source tree: these files must
+        # live on the mounted data volume or every image rebuild wipes them
+        # (DP-303). Callers may still inject explicit paths for tests.
         if override_db_path is None:
-            override_db_path = str(Path(__file__).resolve().parent.parent / "hindsight_overrides.db")
+            override_db_path = global_config.HINDSIGHT_OVERRIDE_DB
         if doc_scope_db_path is None:
-            doc_scope_db_path = str(Path(__file__).resolve().parent.parent / "hindsight_doc_scope.db")
+            doc_scope_db_path = global_config.HINDSIGHT_DOC_SCOPE_DB
         self._overrides = _TrustOverrideStore(override_db_path)
         self._doc_scope = _DocScopeStore(doc_scope_db_path)
 
