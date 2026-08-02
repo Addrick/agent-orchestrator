@@ -13,7 +13,8 @@ from src.generation_events import (
 )
 from src.persona import ExecutionMode
 from src.tools.tool_loop import (
-    ToolLoop, _ApiPayloadEvent, _LoopFinishedEvent, _ToolContextEvent,
+    PARK_STATUS_AWAITING, ToolLoop, WriteParkedEvent, _ApiPayloadEvent,
+    _LoopFinishedEvent, _ToolContextEvent,
 )
 
 
@@ -283,14 +284,16 @@ async def test_max_iterations_cap():
 
 @pytest.mark.asyncio
 async def test_confirm_mode_parks_write_calls():
-    """CONFIRM-mode persona with a write tool: loop parks via
-    pending_writes on the terminal event, no execution."""
+    """A write tool is gated via a WriteParkedEvent, not executed."""
     engine = _make_engine([
         [
             {"type": "tool_calls", "calls": [
                 {"id": "w1", "name": "create_ticket", "arguments": {"title": "x"}}
             ]},
             {"type": "done", "full_text": ""},
+        ],
+        [
+            {"type": "done", "full_text": "Queued that for you."},
         ],
     ])
     tools = _make_tool_manager({})
@@ -301,13 +304,96 @@ async def test_confirm_mode_parks_write_calls():
         conversation_history=[], params=MagicMock(), tools=[],
     ))
 
-    finished = events[-1]
-    assert isinstance(finished, _LoopFinishedEvent)
-    assert finished.response_type == ResponseType.PENDING_CONFIRMATION
-    assert finished.pending_writes is not None
-    assert finished.pending_writes[0]["name"] == "create_ticket"
+    parks = [e for e in events if isinstance(e, WriteParkedEvent)]
+    assert len(parks) == 1
+    assert parks[0].write_call["name"] == "create_ticket"
+    assert parks[0].token
     # Write tool was NOT executed — manager should not have been called for it.
     tools.execute_tool.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_park_does_not_end_the_turn():
+    """DP-297: the loop keeps going after gating a write, so the turn ends
+    with the model's own text instead of dying on the proposal.
+
+    This is the regression that motivated the ticket: the model physically
+    could not propose a second write, because the first ended the turn.
+    """
+    engine = _make_engine([
+        [
+            {"type": "tool_calls", "calls": [
+                {"id": "w1", "name": "create_ticket", "arguments": {"title": "a"}}
+            ]},
+            {"type": "done", "full_text": ""},
+        ],
+        [
+            {"type": "tool_calls", "calls": [
+                {"id": "w2", "name": "update_ticket", "arguments": {"state": "closed"}}
+            ]},
+            {"type": "done", "full_text": ""},
+        ],
+        [
+            {"type": "done", "full_text": "Proposed two actions."},
+        ],
+    ])
+    loop = ToolLoop(engine, _make_tool_manager({}))
+
+    events = await _drain(loop.run(
+        persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
+        conversation_history=[], params=MagicMock(), tools=[],
+    ))
+
+    parks = [e for e in events if isinstance(e, WriteParkedEvent)]
+    assert [p.write_call["name"] for p in parks] == [
+        "create_ticket", "update_ticket",
+    ]
+    # Distinct tokens — one dialog per proposal, independently resolvable.
+    assert len({p.token for p in parks}) == 2
+
+    finished = events[-1]
+    assert isinstance(finished, _LoopFinishedEvent)
+    assert finished.response_type == ResponseType.LLM_GENERATION
+    assert finished.final_text == "Proposed two actions."
+
+
+@pytest.mark.asyncio
+async def test_parked_write_is_answered_inline_in_history():
+    """Each gated write gets a real synthetic tool result appended.
+
+    Not cosmetic: an assistant message whose tool_calls have no matching
+    result is rejected by Anthropic and Gemini on the next iteration, so this
+    is what makes continuing past a park possible at all. It is also the entry
+    ConfirmationManager patches when the operator decides.
+    """
+    engine = _make_engine([
+        [
+            {"type": "tool_calls", "calls": [
+                {"id": "w1", "name": "create_ticket", "arguments": {"title": "x"}}
+            ]},
+            {"type": "done", "full_text": ""},
+        ],
+        [
+            {"type": "done", "full_text": "done"},
+        ],
+    ])
+    history: List[Dict[str, Any]] = []
+    loop = ToolLoop(engine, _make_tool_manager({}))
+
+    events = await _drain(loop.run(
+        persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
+        conversation_history=history, params=MagicMock(), tools=[],
+    ))
+    token = [e for e in events if isinstance(e, WriteParkedEvent)][0].token
+
+    result_msg = next(m for m in history
+                      if m.get("role") == "tool" and m.get("tool_call_id") == "w1")
+    payload = json.loads(result_msg["content"])
+    assert payload["status"] == PARK_STATUS_AWAITING
+    assert payload["token"] == token
+    # The re-proposal guard rides in the result, not the system prompt, so it
+    # reaches every provider identically.
+    assert "not re-submit" in payload["instruction"].lower()
 
 
 # --- DP-296: tool context must survive every loop exit ---------------------
@@ -333,8 +419,8 @@ def _assert_calls_all_answered(msgs: List[Dict[str, Any]]) -> None:
 
 @pytest.mark.asyncio
 async def test_park_seals_reads_and_pending_write():
-    """A parked turn persists the reads it already ran plus the unexecuted
-    write, sealed so the slice is replayable."""
+    """A turn that gated a write persists the reads it ran plus the gated
+    write's awaiting-approval entry, sealed so the slice is replayable."""
     engine = _make_engine([
         [
             {"type": "tool_calls", "calls": [
@@ -348,6 +434,9 @@ async def test_park_seals_reads_and_pending_write():
             ]},
             {"type": "done", "full_text": ""},
         ],
+        [
+            {"type": "done", "full_text": "Proposed a close."},
+        ],
     ])
     tools = _make_tool_manager({"get_ticket_details": {"title": "printer"}})
     loop = ToolLoop(engine, tools)
@@ -358,7 +447,7 @@ async def test_park_seals_reads_and_pending_write():
     ))
 
     finished = events[-1]
-    assert finished.response_type == ResponseType.PENDING_CONFIRMATION
+    assert finished.response_type == ResponseType.LLM_GENERATION
     msgs = _tool_context(finished)
     _assert_calls_all_answered(msgs)
 
@@ -366,11 +455,11 @@ async def test_park_seals_reads_and_pending_write():
     read_result = next(m for m in msgs if m.get("tool_call_id") == "r1")
     assert "printer" in read_result["content"]
 
-    # The parked write is sealed as not executed, not silently dropped.
+    # The gated write carries the REAL synthetic result the loop appended —
+    # not a placeholder the seal invented. That distinction is what lets the
+    # entry be patched in place later when the operator decides.
     write_result = next(m for m in msgs if m.get("tool_call_id") == "w1")
-    assert json.loads(write_result["content"]) == {
-        "status": "not_executed", "reason": "awaiting_approval",
-    }
+    assert json.loads(write_result["content"])["status"] == PARK_STATUS_AWAITING
 
 
 @pytest.mark.asyncio

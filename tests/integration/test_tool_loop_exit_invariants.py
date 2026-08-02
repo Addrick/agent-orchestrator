@@ -193,27 +193,30 @@ async def test_idless_tool_call_gets_stable_matching_tool_call_id(mocked_chat_sy
 # --------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_resume_sets_and_resets_turn_context(mocked_chat_system):
-    """The continuation generate_response in resume must run with the turn's
-    scope pinned, and the ContextVar must be reset afterward."""
+async def test_continuation_sets_and_resets_turn_context(mocked_chat_system):
+    """The continuation generate_response must run with the turn's scope
+    pinned, and the ContextVar must be reset afterward."""
     chat_system, _ = mocked_chat_system
     chat_system.personas["test_persona"].set_enabled_tools(["*"])
     chat_system.tool_manager.enrich_audit_action = AsyncMock(return_value=None)  # type: ignore[assignment]
-    chat_system.confirmations.execute_write_calls = AsyncMock()  # type: ignore[assignment]
+    chat_system.tool_manager.execute_tool = AsyncMock(return_value={"ok": True})  # type: ignore[assignment]
 
-    # Turn 1: drive a write tool to park a PendingConfirmation, drained clean.
+    # Turn 1: gate a write, then finish with text (DP-297: the gate no longer
+    # ends the turn, so the script needs the trailing response).
     _script_engine(chat_system, [
         ({"type": "tool_calls", "calls": [
             {"id": "w1", "name": "create_ticket",
              "arguments": {"title": "t", "body": "b"}}]}, {}),
+        ({"type": "text", "content": "Proposed."}, {}),
     ])
     await _drain(chat_system.stream_response(
         "test_persona", "u6", "c6", "open a ticket",
     ))
-    assert ("u6", "test_persona") in chat_system.confirmations.pending
+    parks = chat_system.confirmations.list_for("u6", "test_persona")
+    assert len(parks) == 1
     assert get_turn_context() is None  # clean after turn 1
 
-    # Resume: record live ctx during the continuation.
+    # Resolve: record live ctx during the continuation.
     seen = {}
 
     async def fake_continuation(persona_config, history_object, *a, **k):
@@ -221,12 +224,14 @@ async def test_resume_sets_and_resets_turn_context(mocked_chat_system):
         return ({"type": "text", "content": "Ticket created."}, {})
     chat_system.text_engine.generate_response.side_effect = fake_continuation
 
-    await chat_system.resume_pending_confirmation("u6", "test_persona", approved=True)
+    await chat_system.resolve_park(
+        "u6", "test_persona", parks[0].token, approved=True,
+    )
 
-    assert seen["ctx"] is not None, "#4: resume continuation ran with no turn context"
+    assert seen["ctx"] is not None, "#4: continuation ran with no turn context"
     assert seen["ctx"].user_identifier == "u6"
     assert seen["ctx"].persona_name == "test_persona"
-    assert get_turn_context() is None, "#4: turn context not reset after resume"
+    assert get_turn_context() is None, "#4: turn context not reset after continuation"
 
 
 # --------------------------------------------------------------------------

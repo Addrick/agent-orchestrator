@@ -25,6 +25,7 @@ from src.persona import Persona, ExecutionMode
 
 
 # Reuse the shared fixture
+from tests.helpers import only_pending_token
 from tests.test_chat_system import chat_system_with_mocks  # noqa: F401
 
 
@@ -120,32 +121,47 @@ def test_retry_update_persists_tool_context(chat_system_with_mocks):
 # --- #9: overwriting an unresolved parked write must be audited -------------
 
 @pytest.mark.asyncio
-async def test_overwriting_pending_confirmation_is_audited(chat_system_with_mocks):
-    """Parking write B while write A is still pending for the same
-    (user, persona) evicts A — that eviction must emit an audit event."""
+async def test_second_park_does_not_evict_the_first(chat_system_with_mocks):
+    """Parking write B while A is still pending keeps BOTH.
+
+    Inverts the pre-DP-297 contract. The store was keyed `(user, persona)` and
+    held one park, so B silently superseded A; the best that could be done was
+    to audit the eviction (`audit_parked_evicted`). Since parks are token-keyed
+    they are siblings, so nothing is evicted and that event no longer exists.
+    """
     system, mm, text_engine_mock, persona, _ = chat_system_with_mocks
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_enabled_tools(["*"])
 
-    call_a = {"type": "tool_calls",
-              "calls": [{"id": "A", "name": "update_ticket",
-                         "arguments": {"ticket_id": 1, "state": "closed"}}]}
-    text_engine_mock.generate_response.return_value = (call_a, {})
+    text_engine_mock.generate_response.side_effect = [
+        ({"type": "tool_calls",
+          "calls": [{"id": "A", "name": "update_ticket",
+                     "arguments": {"ticket_id": 1, "state": "closed"}}]}, {}),
+        ({"type": "text", "content": "Proposed A."}, {}),
+    ]
     await system.generate_response("test_persona", "user", "channel", "close 1")
-    assert ("user", "test_persona") in system.confirmations.pending
+    first = [p.token for p in system.confirmations.list_for("user", "test_persona")]
+    assert len(first) == 1
 
     mm.log_audit_event.reset_mock()
 
     # Park a second write WITHOUT resolving the first.
-    call_b = {"type": "tool_calls",
-              "calls": [{"id": "B", "name": "update_ticket",
-                         "arguments": {"ticket_id": 2, "state": "closed"}}]}
-    text_engine_mock.generate_response.return_value = (call_b, {})
+    text_engine_mock.generate_response.side_effect = [
+        ({"type": "tool_calls",
+          "calls": [{"id": "B", "name": "update_ticket",
+                     "arguments": {"ticket_id": 2, "state": "closed"}}]}, {}),
+        ({"type": "text", "content": "Proposed B."}, {}),
+    ]
     await system.generate_response("test_persona", "user", "channel", "close 2")
 
+    parks = system.confirmations.list_for("user", "test_persona")
+    assert [p.write_call["id"] for p in parks] == ["A", "B"], \
+        "the first pending write was lost when a second one parked"
+    assert parks[0].token == first[0], "A's token must be stable across B's park"
+
     event_types = [c.kwargs.get("event_type") for c in mm.log_audit_event.call_args_list]
-    assert "audit_parked_evicted" in event_types, (
-        f"silent overwrite of pending A not audited; events={event_types}")
+    assert "audit_parked_evicted" not in event_types, (
+        f"nothing should be evicted any more; events={event_types}")
 
 
 # --- #14: client-fallback log must report the real DB row count -------------
@@ -224,44 +240,55 @@ def test_retry_park_does_not_overwrite_archived_row(chat_system_with_mocks):
 # --- DP-200 review: retry linkage must survive the park/resume cycle --------
 
 @pytest.mark.asyncio
-async def test_resume_after_retry_updates_archived_row(chat_system_with_mocks):
-    """A retried turn that parks for confirmation must carry its
-    retry_assistant_id through the park, so the resumed continuation UPDATEs
-    the archived assistant row instead of INSERTing a fresh one beside it."""
+async def test_retried_turn_that_gates_a_write_updates_the_archived_row(
+        chat_system_with_mocks):
+    """A retried turn that gates a write still lands on the archived row.
+
+    The retry linkage no longer has to survive the park, which is the point:
+    the gating turn now ends with its own text and commits immediately, so it
+    consumes `retry_assistant_id` itself. The continuation that follows an
+    approval is a *separate* turn and correctly writes its own row — where the
+    pre-DP-297 park deferred everything to the resume, which then had to carry
+    the linkage across.
+    """
     system, mm, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_enabled_tools(["*"])
     mm.handle_portal_retry.return_value = 42
     mm.get_channel_history.return_value = []
 
-    # Retry turn proposes a write → parks.
-    tool_call = {"type": "tool_calls",
-                 "calls": [{"id": "c1", "name": "update_ticket",
-                            "arguments": {"state": "closed"}}]}
-    text_engine_mock.generate_response.return_value = (tool_call, {})
+    # Retry turn proposes a write, then finishes with text.
+    text_engine_mock.generate_response.side_effect = [
+        ({"type": "tool_calls",
+          "calls": [{"id": "c1", "name": "update_ticket",
+                     "arguments": {"state": "closed"}}]}, {}),
+        ({"type": "text", "content": "I've proposed closing it."}, {}),
+    ]
     async for _ in system.stream_response(
             "test_persona", "user", "channel", "regenerate", is_retry=True):
         pass
 
-    pending = system.confirmations.pending[("user", "test_persona")]
-    assert pending.retry_assistant_id == 42
-    mm.update_interaction_content.assert_not_called()  # the park persists nothing
-
-    # Approve: the continuation must land on the archived row.
-    tool_manager_mock.execute_tool.return_value = {"ok": True}
-    text_engine_mock.generate_response.return_value = (
-        {"type": "text", "content": "Done, ticket closed."}, {})
-    _, rtype, assistant_id, _ = await system.resume_pending_confirmation(
-        "user", "test_persona", approved=True)
-
-    assert rtype == ResponseType.LLM_GENERATION
-    assert assistant_id == 42
+    token = only_pending_token(system, "user", "test_persona")
+    # The retried turn UPDATEd the archived row rather than inserting beside it.
     mm.update_interaction_content.assert_called_once()
     assert mm.update_interaction_content.call_args.args[0] == 42
-    # No fresh assistant row inserted beside the archived one.
     assistant_inserts = [c for c in mm.log_message.call_args_list
                          if c.kwargs.get("author_role") == "assistant"]
     assert assistant_inserts == []
+    # And that row is the one the proposal will patch when it resolves.
+    assert system.confirmations.pending[token].parked_assistant_id == 42
+
+    # Approving runs a fresh continuation turn, which gets its own row.
+    mm.update_interaction_content.reset_mock()
+    tool_manager_mock.execute_tool.return_value = {"ok": True}
+    text_engine_mock.generate_response.side_effect = None
+    text_engine_mock.generate_response.return_value = (
+        {"type": "text", "content": "Done, ticket closed."}, {})
+    _, rtype, _, _ = await system.resolve_park(
+        "user", "test_persona", token, approved=True)
+
+    assert rtype == ResponseType.LLM_GENERATION
+    mm.update_interaction_content.assert_not_called()
 
 
 # --- DP-200 review: RequestBuilder must see a post-init tool_manager swap ---

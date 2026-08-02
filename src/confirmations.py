@@ -1,12 +1,17 @@
 # src/confirmations.py
-"""Write-confirmation parking for the universal audit gate (DP-200 slice B).
+"""Token-keyed store + lifecycle for writes gated on human approval.
 
-Extracted from ChatSystem: the orchestrator owns *when* a turn parks and
-resumes, but the confirmation store, eviction/decision audit logging, and the
-approved/denied write execution live here. ToolLoop stays stateless across the
-park — it surfaces pending writes and this manager carries them to the resume.
+DP-200 slice B extracted this from ChatSystem; DP-297 made it *non-blocking*.
+A parked write no longer ends the turn, so one turn can queue several, each
+with its own token, each resolvable independently and out of order.
+
+Division of labour: this module owns the pending set, execution of an approved
+call, the in-place patch of the parked history entry, expiry, and the audit
+trail. The orchestrator (`ChatSystem`) owns the continuation turn that runs
+afterwards, because that needs the whole turn lifecycle.
 """
 
+import asyncio
 import json
 import logging
 import time
@@ -14,67 +19,77 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from config.global_config import PENDING_ACTION_TTL
 from src.memory.memory_manager import MemoryManager
+from src.security.scrubber import get_scrubber
 from src.tools.definitions import get_tool_capabilities
+from src.tools.tool_loop import (
+    PARK_STATUS_APPROVED, PARK_STATUS_AWAITING, PARK_STATUS_DENIED,
+    PARK_STATUS_EXPIRED,
+)
 from src.tools.tool_manager import ToolManager
 
 logger = logging.getLogger(__name__)
 
+ConversationKey = Tuple[str, str]
+
 
 @dataclass
-class PendingConfirmation:
-    """Stores state for a tool call awaiting user approval.
+class ParkedWrite:
+    """One write tool call awaiting an operator decision.
 
-    All write-tool calls are parked here for audit before execution,
-    regardless of execution mode. The audit_info dict carries structured
-    metadata (irreversibility flags, taint sources, model reasoning) so
-    the approval surface can present an informed review.
+    Exactly one call — not a list. A turn that proposes three writes creates
+    three of these, so each can be approved or denied on its own.
+
+    Deliberately carries NO conversation snapshot. The continuation rebuilds
+    live history from the DB, which is what lets several parks from one turn be
+    resolved in any order without forking the conversation: there is no stale
+    copy to replay.
     """
-    write_calls: List[Dict[str, Any]]
-    conversation_history: List[Dict[str, Any]]
+    token: str
+    write_call: Dict[str, Any]
+    audit_info: Dict[str, Any]
+    confirmation_text: str
+    user_identifier: str
     persona_name: str
-    tools_for_llm: List[Dict[str, Any]]
-    image_url: Optional[str]
     channel: str = ""
     server_id: Optional[str] = None
     turn_tainted: bool = False
-    audit_info: Optional[Dict[str, Any]] = None
-    created_at: float = field(default_factory=time.time)
-    # Index into conversation_history where this turn's tool messages start.
-    # Passed to the resumed tool loop as history_start_override so the approved
-    # write and its result are captured into tool_context_json (and thus
-    # replayed on later turns) instead of being dropped.
-    tool_context_start: int = 0
-    # DP-130 history contract: stable handle for the rendered-but-unpersisted
-    # confirmation chunk. Surfaced as `ephemeral_chunk_id` in the SSE id-frame
-    # and the transcript projection, and as the correlation token an interactive
-    # surface (portal) sends back on approve/deny so a resume can be matched to
-    # *this* park. (Reconciles with the DP-127-engine confirm-modal `token`.)
-    token: str = field(default_factory=lambda: uuid.uuid4().hex)
-    # The parked confirmation's rendered text — projected as the ephemeral
-    # chunk's content so a fresh page load (transcript) can render the pending
-    # approval without a DB row.
-    confirmation_text: str = ""
-    # Retry linkage: when the parked turn was itself a portal retry, this is
-    # the archived assistant row the resumed continuation must UPDATE in
-    # place. Without it the resume would INSERT a fresh assistant row and
-    # strand the archived one with its pre-retry content.
-    retry_assistant_id: Optional[int] = None
-    # The assistant row written for the parked turn itself. That row carries a
-    # sealed tool_context (this turn's reads + the write marked
-    # `awaiting_approval`) so an unanswered or denied park stays visible to the
-    # model. On resume the continuation re-seals the same span with real
-    # results, so this row's copy must be cleared or every approved write shows
-    # up twice in history.
+    # The assistant row whose sealed tool_context holds this call's
+    # `awaiting_human_approval` entry — the row patched when it resolves.
     parked_assistant_id: Optional[int] = None
+    created_at: float = field(default_factory=time.time)
+
+    @property
+    def key(self) -> ConversationKey:
+        return (self.user_identifier, self.persona_name)
+
+    @property
+    def call_id(self) -> Optional[str]:
+        cid = self.write_call.get("id")
+        return str(cid) if cid is not None else None
+
+
+@dataclass
+class Decision:
+    """An operator's answer to one park, plus the outcome of acting on it."""
+    park: ParkedWrite
+    approved: bool
+    note: Optional[str] = None
+    result: Any = None
+    ok: bool = False
+
+    @property
+    def status(self) -> str:
+        return PARK_STATUS_APPROVED if self.approved else PARK_STATUS_DENIED
 
 
 class ConfirmationManager:
-    """Orchestrator-owned store + lifecycle for parked write confirmations.
+    """Orchestrator-owned store for gated writes, keyed by token.
 
-    Keyed (user_identifier, persona_name) — at most one pending write per
-    conversation pair; a newer park supersedes (and audit-logs the eviction
-    of) the old one.
+    Was keyed `(user_identifier, persona_name)` and held at most one park —
+    a second park for the same pair evicted the first. DP-297 replaced that
+    with a token key plus a per-conversation index, so a burst survives intact.
     """
 
     def __init__(self, tool_manager_lookup: Callable[[], ToolManager],
@@ -85,114 +100,231 @@ class ConfirmationManager:
         # would execute against the stale manager.
         self._tool_manager_lookup = tool_manager_lookup
         self.memory_manager = memory_manager
-        self.pending: Dict[Tuple[str, str], PendingConfirmation] = {}
+        self.pending: Dict[str, ParkedWrite] = {}
+        # Insertion-ordered token list per conversation — drives the portal's
+        # pending list and Discord's ordering.
+        self._by_key: Dict[ConversationKey, List[str]] = {}
+        # Decisions acted on but not yet folded into a continuation turn.
+        self._queued: Dict[ConversationKey, List[Decision]] = {}
+        # One lock per conversation. Serializes execute -> patch -> continue, so
+        # two fast approvals cannot run two tool loops over the same history.
+        self._locks: Dict[ConversationKey, asyncio.Lock] = {}
 
-    def park(self, user_identifier: str, persona_name: str,
-             parked: PendingConfirmation) -> None:
-        """Store a parked write and log the audit_parked event.
+    # ---- store -----------------------------------------------------------
 
-        A still-pending write for this (user, persona) is silently superseded
-        by this one — the operator's eventual approve/deny would resolve the
-        wrong intent. We can't queue both (the key is 1:1), so at minimum the
-        eviction must leave an audit trail.
+    def park(self, parked: ParkedWrite) -> None:
+        """Store a gated write and log the audit_parked event.
+
+        Nothing is evicted: since DP-297 a second park for the same
+        conversation is a sibling, not a replacement, so the
+        `audit_parked_evicted` event this used to emit no longer exists.
         """
-        key = (user_identifier, persona_name)
-        evicted = self.pending.get(key)
-        if evicted is not None:
-            self.memory_manager.log_audit_event(
-                event_type="audit_parked_evicted",
-                operator_id=user_identifier,
-                prior_state="pending",
-                new_state="evicted",
-                reason="Superseded by a newer pending write for the same persona",
-                metadata=evicted.audit_info,
-            )
-        self.pending[key] = parked
-        # Phase 7: Log audit parking
+        self.sweep_expired()
+        self.pending[parked.token] = parked
+        self._by_key.setdefault(parked.key, []).append(parked.token)
         self.memory_manager.log_audit_event(
             event_type="audit_parked",
-            operator_id=user_identifier,
+            operator_id=parked.user_identifier,
             new_state="pending",
             reason="Universal write-audit gate triggered",
             metadata=parked.audit_info,
         )
 
-    async def execute_write_calls(
-            self,
-            write_calls: List[Dict[str, Any]],
-            conversation_history: List[Dict[str, Any]]
-    ) -> None:
-        """Execute write tool calls and append results to history."""
-        # Resolve once per batch — all calls in one decision execute against
-        # the same manager, even if it is swapped mid-batch.
-        tool_manager = self._tool_manager_lookup()
-        for call_item in write_calls:
-            tool_name: str = call_item.get("name", "")
-            tool_args = call_item.get("arguments", {})
-            tool_result = await tool_manager.execute_tool(tool_name, **tool_args)
-            conversation_history.append({
-                "role": "tool",
-                "tool_call_id": call_item.get("id"),
-                "name": tool_name,
-                "content": json.dumps(tool_result)
-            })
+    def take(self, token: str) -> Optional[ParkedWrite]:
+        """Remove and return a park, or None if it is already gone.
 
-    @staticmethod
-    def append_denied_tool_results(
-            write_calls: List[Dict[str, Any]],
-            conversation_history: List[Dict[str, Any]]
-    ) -> None:
-        """Appends denial results for write tools the user rejected."""
-        for call_item in write_calls:
-            conversation_history.append({
-                "role": "tool",
-                "tool_call_id": call_item.get("id"),
-                "name": call_item.get("name"),
-                "content": json.dumps({"error": "Tool call denied by user"})
-            })
-
-    async def apply_resume_decision(
-            self,
-            pending: PendingConfirmation,
-            approved: bool,
-            conversation_history: List[Dict[str, Any]],
-            *,
-            operator_id: str,
-            turn_tainted: bool,
-    ) -> bool:
-        """Apply an approve/deny decision to the parked turn before continuation.
-
-        On approval the write calls execute and their results are appended to
-        the parked history (so they precede the model's continuation); denial
-        appends synthetic denial results instead. Either way the audit decision
-        is logged. Read-side taint is recomputed from the executed write calls
-        and folded into the returned `turn_tainted` so the continuation loop
-        inherits it.
+        Pure synchronous — no `await` anywhere in it. That is what makes it
+        atomic under asyncio and what stops a double-click (or a retried POST)
+        from executing the same write twice: only one caller can win the pop.
         """
-        if approved:
-            await self.execute_write_calls(pending.write_calls, conversation_history)
-            for wc in pending.write_calls:
-                wc_name = wc.get("name") or "unknown"
-                if get_tool_capabilities(wc_name).get("produces_untrusted"):
-                    turn_tainted = True
-            decision_state = "approved"
-            decision_reason = "Human approved tool execution"
-        else:
-            self.append_denied_tool_results(pending.write_calls, conversation_history)
-            decision_state = "denied"
-            decision_reason = "Human denied tool execution"
+        parked = self.pending.pop(token, None)
+        if parked is None:
+            return None
+        tokens = self._by_key.get(parked.key)
+        if tokens and token in tokens:
+            tokens.remove(token)
+            if not tokens:
+                self._by_key.pop(parked.key, None)
+        return parked
 
-        # Phase 7: Log audit decision
+    def restore(self, parked: ParkedWrite) -> None:
+        """Put a taken park back (a claim that turned out to be invalid)."""
+        self.pending[parked.token] = parked
+        self._by_key.setdefault(parked.key, []).append(parked.token)
+
+    def list_for(self, user_identifier: str,
+                 persona_name: str) -> List[ParkedWrite]:
+        """Live parks for one conversation, oldest first."""
+        self.sweep_expired()
+        return [
+            self.pending[t]
+            for t in self._by_key.get((user_identifier, persona_name), [])
+            if t in self.pending
+        ]
+
+    def lock_for(self, key: ConversationKey) -> asyncio.Lock:
+        return self._locks.setdefault(key, asyncio.Lock())
+
+    def enqueue(self, decision: Decision) -> None:
+        self._queued.setdefault(decision.park.key, []).append(decision)
+
+    def drain(self, key: ConversationKey) -> List[Decision]:
+        """Take every decision queued for this conversation.
+
+        Called by whichever caller holds the lock. Decisions that arrived while
+        it was waiting get folded into its continuation instead of spawning a
+        second one — which is why rapid-fire approvals produce one summary and
+        deliberate, spaced approvals produce one each.
+        """
+        return self._queued.pop(key, [])
+
+    # ---- resolution ------------------------------------------------------
+
+    async def apply(self, decision: Decision) -> None:
+        """Execute (or refuse) one decided write, then patch its history entry.
+
+        Ordering matters: the patch must land before the continuation rebuilds
+        history, or the model reads its own proposal as still pending and
+        summarizes the wrong thing.
+        """
+        park = decision.park
+        tool_name = park.write_call.get("name") or "unknown"
+
+        if decision.approved:
+            tool_manager = self._tool_manager_lookup()
+            try:
+                decision.result = await tool_manager.execute_tool(
+                    tool_name, **(park.write_call.get("arguments") or {}),
+                )
+                decision.ok = True
+            except Exception as e:
+                logger.error(
+                    f"Approved write {tool_name} (token {park.token}) "
+                    f"failed: {e}", exc_info=True,
+                )
+                decision.result = {"error": f"Tool execution failed: {e}"}
+                decision.ok = False
+            if get_tool_capabilities(tool_name).get("produces_untrusted"):
+                park.turn_tainted = True
+        else:
+            decision.result = {"error": "Tool call denied by operator",
+                               "note": decision.note}
+            decision.ok = False
+
         self.memory_manager.log_audit_event(
             event_type="audit_decision",
-            operator_id=operator_id,
+            operator_id=park.user_identifier,
             prior_state="pending",
-            new_state=decision_state,
-            reason=decision_reason,
+            new_state=decision.status,
+            reason=(decision.note or
+                    ("Human approved tool execution" if decision.approved
+                     else "Human denied tool execution")),
             metadata={
-                "write_calls": pending.write_calls,
-                "audit_info": pending.audit_info,
-                "turn_tainted": turn_tainted,
+                "write_calls": [park.write_call],
+                "audit_info": park.audit_info,
+                "turn_tainted": park.turn_tainted,
+                "token": park.token,
+                "executed_ok": decision.ok,
             },
         )
-        return turn_tainted
+        self.patch_parked_entry(park, decision.status, decision.result)
+
+    def patch_parked_entry(self, park: ParkedWrite, status: str,
+                           result: Any) -> bool:
+        """Rewrite this call's entry inside an already-committed row's
+        tool_context, flipping `awaiting_human_approval` to the real outcome.
+
+        Safe to do in place because the park appended a *real* synthetic tool
+        result when it was created, so the sealed blob contains that entry
+        verbatim — there is no synthesized placeholder to collide with and the
+        target is guaranteed present. (Before DP-297 the seal invented the
+        entry at write time, which is why this could not be done then.)
+        """
+        row_id = park.parked_assistant_id
+        call_id = park.call_id
+        if row_id is None or call_id is None:
+            return False
+        blob = self.memory_manager.get_tool_context(row_id)
+        if not blob:
+            logger.warning(
+                "park %s: assistant row %s has no tool_context to patch",
+                park.token, row_id,
+            )
+            return False
+        try:
+            msgs = json.loads(blob)
+        except (ValueError, TypeError):
+            logger.error("park %s: row %s tool_context is not valid JSON",
+                         park.token, row_id)
+            return False
+
+        for msg in msgs:
+            if msg.get("role") == "tool" and msg.get("tool_call_id") == call_id:
+                msg["content"] = json.dumps({
+                    "status": status,
+                    "token": park.token,
+                    # Egress scrub (DP-225 boundary 1): this result reaches the
+                    # model's replayed history and the portal transcript, so it
+                    # is redacted exactly like a live tool result.
+                    "result": get_scrubber().scrub(result),
+                })
+                break
+        else:
+            logger.warning(
+                "park %s: no tool entry %s found in row %s — history will keep "
+                "showing it as pending", park.token, call_id, row_id,
+            )
+            return False
+
+        return self.memory_manager.set_tool_context(row_id, json.dumps(msgs))
+
+    # ---- expiry ----------------------------------------------------------
+
+    def sweep_expired(self, now: Optional[float] = None) -> int:
+        """Drop and patch every park past its TTL. Returns how many.
+
+        Swept lazily from `park`, `list_for` and the resolve path rather than
+        by a background task — a periodic loop here would re-introduce exactly
+        the shutdown-contract problem DP-304 just fixed, for a deadline that
+        does not need second-level precision.
+
+        An expiry fires NO continuation: an unprompted summary hours after the
+        operator walked away is noise. The patched entry is enough — the model
+        sees the outcome next time it speaks.
+        """
+        now = time.time() if now is None else now
+        stale = [t for t, p in self.pending.items()
+                 if now - p.created_at > PENDING_ACTION_TTL]
+        for token in stale:
+            parked = self.take(token)
+            if parked is None:
+                continue
+            self.patch_parked_entry(parked, PARK_STATUS_EXPIRED,
+                                    {"reason": "expired before review"})
+            self.memory_manager.log_audit_event(
+                event_type="audit_park_expired",
+                operator_id=parked.user_identifier,
+                prior_state="pending",
+                new_state=PARK_STATUS_EXPIRED,
+                reason=f"No decision within {PENDING_ACTION_TTL}s",
+                metadata=parked.audit_info,
+            )
+        if stale:
+            logger.info("Expired %d unanswered gated write(s)", len(stale))
+        return len(stale)
+
+    def is_expired(self, parked: ParkedWrite,
+                   now: Optional[float] = None) -> bool:
+        now = time.time() if now is None else now
+        return now - parked.created_at > PENDING_ACTION_TTL
+
+
+def new_token() -> str:
+    """Stable per-park handle, surfaced as `ephemeral_chunk_id` to surfaces."""
+    return uuid.uuid4().hex
+
+
+__all__ = [
+    "ConfirmationManager", "ParkedWrite", "Decision", "new_token",
+    "PARK_STATUS_AWAITING",
+]

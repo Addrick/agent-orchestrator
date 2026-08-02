@@ -15,7 +15,7 @@ import pytest
 from src.generation_events import ResponseType
 from src.persona import ExecutionMode
 from src.tools.tool_loop import (
-    ToolLoop, _LoopFinishedEvent,
+    ToolLoop, WriteParkedEvent, _LoopFinishedEvent,
 )
 
 
@@ -62,16 +62,23 @@ async def _drain(loop_run):
 
 
 @pytest.mark.asyncio
-async def test_initial_taint_sources_propagates_to_finished_event():
-    """When initial_taint_sources=['memory_recall'] is passed in,
-    the _LoopFinishedEvent includes it in the taint_sources (via audit_info)
-    and sets turn_tainted=True when write tools are present."""
+async def test_initial_taint_sources_propagates_to_park_event():
+    """initial_taint_sources=['memory_recall'] reaches the gated write's
+    audit_info, and turn_tainted stays set on the terminal event.
+
+    audit_info moved from the terminal event to the per-write park event in
+    DP-297: a turn can gate several writes and still end with text, so there
+    is no longer one audit surface per turn.
+    """
     engine = _make_engine([
         [
             {"type": "tool_calls", "calls": [
                 {"id": "w1", "name": "create_ticket", "arguments": {"title": "test"}}
             ]},
             {"type": "done", "full_text": ""},
+        ],
+        [
+            {"type": "done", "full_text": "queued"},
         ],
     ])
     tools = _make_tool_manager()
@@ -84,13 +91,13 @@ async def test_initial_taint_sources_propagates_to_finished_event():
         initial_taint_sources=["memory_recall"],
     ))
 
+    park = next(e for e in events if isinstance(e, WriteParkedEvent))
+    assert park.audit_info["tainted"] is True
+    assert "memory_recall" in park.audit_info["taint_sources"]
+
     finished = events[-1]
     assert isinstance(finished, _LoopFinishedEvent)
-    assert finished.response_type == ResponseType.PENDING_CONFIRMATION
     assert finished.turn_tainted is True
-    assert finished.audit_info is not None
-    assert finished.audit_info["tainted"] is True
-    assert "memory_recall" in finished.audit_info["taint_sources"]
 
 
 @pytest.mark.asyncio
@@ -129,6 +136,9 @@ async def test_memory_taint_combines_with_tool_taint():
             ]},
             {"type": "done", "full_text": ""},
         ],
+        [
+            {"type": "done", "full_text": "queued"},
+        ],
     ])
     tools = _make_tool_manager({"web_search": {"result": []}})
     loop = ToolLoop(engine, tools)
@@ -140,17 +150,15 @@ async def test_memory_taint_combines_with_tool_taint():
         initial_taint_sources=["memory_recall"],
     ))
 
-    finished = events[-1]
-    assert isinstance(finished, _LoopFinishedEvent)
-    assert finished.audit_info is not None
-    assert "memory_recall" in finished.audit_info["taint_sources"]
-    assert "web_search" in finished.audit_info["taint_sources"]
+    park = next(e for e in events if isinstance(e, WriteParkedEvent))
+    assert "memory_recall" in park.audit_info["taint_sources"]
+    assert "web_search" in park.audit_info["taint_sources"]
 
 
 @pytest.mark.asyncio
 async def test_memory_taint_text_only_no_audit_surface():
     """When memory taint is set but the model only produces text (no writes),
-    turn_tainted is true but no audit_info is generated (no write calls)."""
+    turn_tainted is true and no park — hence no audit surface — is emitted."""
     engine = _make_engine([
         [
             {"type": "text_delta", "text": "Here is what I found"},
@@ -170,7 +178,7 @@ async def test_memory_taint_text_only_no_audit_surface():
     finished = events[-1]
     assert isinstance(finished, _LoopFinishedEvent)
     assert finished.turn_tainted is True
-    assert finished.audit_info is None  # No write calls → no audit surface
+    assert not [e for e in events if isinstance(e, WriteParkedEvent)]
     assert finished.response_type == ResponseType.LLM_GENERATION
 
 

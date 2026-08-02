@@ -2,16 +2,14 @@
 
 import asyncio
 import logging
-import time
 from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, AsyncGenerator, AsyncIterator, Coroutine, Dict, List, Optional, Set, Tuple
 
-from config.global_config import PENDING_CONFIRMATION_TIMEOUT
 from src.embedding_service import EmbeddingService
 from src.clients.service_integration import ServiceIntegration
-from src.confirmations import ConfirmationManager, PendingConfirmation
+from src.confirmations import ConfirmationManager, Decision, ParkedWrite
 from src.memory.backend.base import MemoryBackend
 from src.memory.memory_manager import MemoryManager
 from src.engine import TextEngine
@@ -32,7 +30,8 @@ from src.persona import Persona
 from src.request_builder import AssembledRequest, RequestBuilder, RequestContext
 from src.security.scrubber import get_scrubber
 from src.tools.tool_loop import (
-    ToolLoop, _ApiPayloadEvent, _LoopFinishedEvent, _ToolContextEvent,
+    ToolLoop, WriteParkedEvent, _ApiPayloadEvent, _LoopFinishedEvent,
+    _ToolContextEvent,
 )
 from src.turn_persistence import TurnPersistence
 from src.tools.tool_manager import ToolManager
@@ -43,17 +42,51 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class _ResumeState:
-    """Carries a resumed write-confirmation into the orchestration kernel.
+class _ContinuationState:
+    """Carries a batch of just-resolved parks into the orchestration kernel.
 
-    `_orchestrate(resume=...)` re-enters with the parked turn instead of a
-    fresh request: it skips dev-command preprocessing, history build, and
-    user-turn logging, applies the operator's approve/deny decision to the
-    parked history, then drives the tool loop + persistence tail through the
-    same code path as a normal turn (DP-124).
+    `_orchestrate(continuation=...)` runs an ordinary turn that happens to log
+    no user row: history is rebuilt LIVE from the DB (where each resolved
+    write's entry has already been patched with its real outcome), so the model
+    reads what actually happened and summarizes it.
+
+    This replaced DP-124's `_ResumeState`, which instead replayed the parked
+    turn's *snapshot* of history. A snapshot cannot survive DP-297's bursts —
+    with several parks resolvable in any order, every snapshot predates its
+    siblings, so replaying one forks the conversation.
     """
-    pending: PendingConfirmation
-    approved: bool
+    batch: List[Decision]
+
+
+def _render_resolution_nudge(batch: List[Decision]) -> str:
+    """The synthetic user turn that opens a continuation.
+
+    Exists for a wire-level reason, not a prompt-engineering one: without it the
+    message array would end on the parked turn's assistant message, which
+    Anthropic treats as a prefill to continue rather than a turn to answer — the
+    model would resume its old sentence instead of reporting the outcome.
+
+    Deliberately NOT persisted. `prepare_request` appends it to the in-memory
+    history only; the continuation skips `log_user_turn`, so the durable record
+    of what happened stays the patched tool entries rather than words the
+    operator never typed.
+    """
+    lines = []
+    for decision in batch:
+        tool_name = decision.park.write_call.get("name") or "action"
+        if not decision.approved:
+            lines.append(f"- denied: {tool_name}")
+        elif decision.ok:
+            lines.append(f"- approved and executed: {tool_name}")
+        else:
+            lines.append(f"- approved but FAILED: {tool_name}")
+    verb = "action" if len(lines) == 1 else "actions"
+    return (
+        f"[The operator reviewed {len(lines)} pending {verb}:]\n"
+        + "\n".join(lines)
+        + "\n[Results are in the tool context above. Report the outcome "
+          "briefly. Do not re-propose an action that was already approved.]"
+    )
 
 
 class ChatSystem:
@@ -209,27 +242,6 @@ class ChatSystem:
             is_retry=is_retry, client_messages=client_messages,
         )
 
-    def _clear_parked_row(self, parked_row_id: Optional[int],
-                          committed_row_id: Optional[int]) -> None:
-        """Drop a resumed park's provisional tool_context, once it is redundant.
-
-        Safe to call unconditionally after any commit on the resume path. The
-        clear happens only when a row carrying the re-sealed span actually
-        landed (`committed_row_id is not None`) and is a *different* row —
-        on a retried park the continuation UPDATEs the parked row itself, and
-        clearing it would erase the context just written.
-
-        Ordering matters more than it looks: `apply_resume_decision` executes
-        the approved write before the continuation runs, so clearing early and
-        then losing the continuation (client disconnect, an exception past this
-        frame) would leave a performed write recorded in no row at all.
-        """
-        if parked_row_id is None or committed_row_id is None:
-            return
-        if parked_row_id == committed_row_id:
-            return
-        self.memory_manager.clear_tool_context(parked_row_id)
-
     async def _orchestrate(
             self,
             persona_name: str,
@@ -246,7 +258,7 @@ class ChatSystem:
             local_inference_config: Optional[Dict[str, Any]] = None,
             is_retry: bool = False,
             client_messages: Optional[List[Dict[str, Any]]] = None,
-            resume: Optional[_ResumeState] = None,
+            continuation: Optional[_ContinuationState] = None,
             origin: Optional[Origin] = None,
     ) -> AsyncGenerator[GenerationEvent, None]:
         """Shared streaming kernel — single source of truth for the request
@@ -255,16 +267,17 @@ class ChatSystem:
         `generate_response` (collect-stream wrapper) and `stream_response`
         (portal entry) delegate here.
 
-        `resume` (DP-124) re-enters this kernel to continue a write that was
-        parked for confirmation: dev-command preprocessing, history build, and
-        user-turn logging are skipped; the parked history carries the turn and
-        the approve/deny decision is applied before the tool loop runs.
+        `continuation` (DP-297) runs the summary turn after an operator
+        resolved one or more gated writes: dev-command preprocessing and
+        user-turn logging are skipped, but history is built normally — the
+        resolved writes are already patched into it.
         """
         # 1. Dev command preprocessing — short-circuits before any LLM call.
-        #    Skipped on resume: there is no fresh user message to interpret.
+        #    Skipped on a continuation: there is no fresh user message to
+        #    interpret, only the synthetic nudge built by the caller.
         #    DP-277: callers that don't assert an authenticated origin get
         #    ANONYMOUS (operator=False) — control-plane commands are refused.
-        if resume is None:
+        if continuation is None:
             command_result: Optional[Dict[str, Any]] = await self.bot_logic.preprocess_message(
                 origin or ANONYMOUS, persona_name, user_identifier, message
             )
@@ -311,15 +324,6 @@ class ChatSystem:
             client_messages=client_messages,
         )
 
-        # On resume the parked turn replaces the freshly-built request state:
-        # the conversation history already terminates in the assistant
-        # tool_calls message (+ any read results), and the tool/taint context
-        # carries over from when the write was parked.
-        if resume is not None:
-            ctx.conversation_history = resume.pending.conversation_history
-            ctx.tools_for_llm = resume.pending.tools_for_llm
-            ctx.turn_tainted = resume.pending.turn_tainted
-
         # DP-113: pin the active turn's scope so engine-side tools (e.g.
         # `recall_memory`) inherit persona/channel/user/server without those
         # showing up as model-callable args. turn_scope guarantees the
@@ -333,21 +337,20 @@ class ChatSystem:
             channel=channel,
             server_id=server_id,
         )):
-            # The parked turn's tool-context row, on a resume. Cleared only once
-            # a row carrying the re-sealed span has actually been committed.
-            parked_row_to_clear: Optional[int] = None
-            if resume is None:
-                try:
-                    await self.request_builder.prepare_request(ctx, is_retry=is_retry)
-                except Exception as e:
-                    err_id, err_msg = format_internal_error(e, scrub=get_scrubber().scrub)
-                    logger.error(
-                        f"[err {err_id}] prepare_request failed for "
-                        f"{user_identifier}: {e}", exc_info=True,
-                    )
-                    yield ErrorEvent(message=err_msg)
-                    return
+            try:
+                await self.request_builder.prepare_request(
+                    ctx, is_retry=is_retry and continuation is None,
+                )
+            except Exception as e:
+                err_id, err_msg = format_internal_error(e, scrub=get_scrubber().scrub)
+                logger.error(
+                    f"[err {err_id}] prepare_request failed for "
+                    f"{user_identifier}: {e}", exc_info=True,
+                )
+                yield ErrorEvent(message=err_msg)
+                return
 
+            if continuation is None:
                 # 2. Log user turn (or archive for retry). Done after history is built
                 #    (so the freshly-inserted row doesn't show up twice) but before
                 #    the LLM call so the user row is always pinned even if the model
@@ -373,49 +376,24 @@ class ChatSystem:
                         interaction_id=user_interaction_id, untrusted=False,
                     )
             else:
-                # 2'. Resume: no fresh user turn. Apply the operator's
-                #     approve/deny decision to the parked history (write results
-                #     land *before* the continuation) and log the audit
-                #     decision. Runs inside turn_scope so write-tool execution
-                #     inherits the persona/channel/user scope.
+                # 2'. Continuation: the operator's decisions were already
+                #     executed and patched into history by the caller, so there
+                #     is nothing to apply here and no user row to log. The
+                #     synthetic nudge in `message` rode into the wire array via
+                #     prepare_request above but is deliberately NOT persisted —
+                #     the patched tool entries are the durable record.
                 user_interaction_id = None
-                # Carry the park's retry linkage so a retried turn's resumed
-                # continuation UPDATEs the archived assistant row instead of
-                # INSERTing a fresh one beside it.
-                retry_assistant_id = resume.pending.retry_assistant_id
-                try:
-                    ctx.turn_tainted = await self.confirmations.apply_resume_decision(
-                        resume.pending, resume.approved, ctx.conversation_history,
-                        operator_id=ctx.user_identifier,
-                        turn_tainted=ctx.turn_tainted,
-                    )
-                except Exception as e:
-                    err_id, err_msg = format_internal_error(e, scrub=get_scrubber().scrub)
-                    logger.error(
-                        f"[err {err_id}] Error resuming pending confirmation for "
-                        f"{user_identifier}: {e}",
-                        exc_info=True,
-                    )
-                    yield ErrorEvent(
-                        message=f"Error processing the confirmed action. {err_msg}",
-                    )
-                    return
-
-                # The continuation below re-seals this turn's whole tool span
-                # (history_start_override points back at the park), so the
-                # parked row's own copy would double every call in history.
-                #
-                # Deferred until a row actually carrying the re-sealed span has
-                # been committed. Clearing here instead would mean an aborted
-                # continuation — client disconnect, or the loop raising past
-                # this frame — deletes the only record of a write that
-                # `apply_resume_decision` above has already performed.
-                parked_row_to_clear = resume.pending.parked_assistant_id
+                retry_assistant_id = None
+                # Inherit taint from any approved write that produced untrusted
+                # output, so the summary turn is marked like the turn that
+                # proposed it.
+                if any(d.park.turn_tainted for d in continuation.batch):
+                    ctx.turn_tainted = True
 
             # 3. Tool loop. ToolLoop owns iteration + tool dispatch; this
             #    forwards Token / ToolCallStart / ToolCallResult events,
-            #    siphons api_payload into the request cache, and unpacks the
-            #    terminal _LoopFinishedEvent to drive CONFIRM-mode parking +
+            #    siphons api_payload into the request cache, collects gated
+            #    writes, and unpacks the terminal _LoopFinishedEvent to drive
             #    assistant persistence.
             params = self.request_builder.resolve_generation_params(
                 ctx.persona, ctx.local_inference_config,
@@ -425,9 +403,10 @@ class ChatSystem:
             response_type = ResponseType.LLM_GENERATION
             tool_context_json: Optional[str] = None
             accumulated_parts: List[str] = []
-            pending_writes: Optional[List[Dict[str, Any]]] = None
-            audit_info: Optional[Dict[str, Any]] = None
-            tool_context_start: int = 0
+            # Writes this turn gated for approval. Registered in the store only
+            # after the assistant row commits, since each needs that row's id to
+            # patch later — see the park-registration block below.
+            parks_this_turn: List[ParkedWrite] = []
 
             # Construct per-call so tests that swap `chat_system.text_engine`
             # post-init still see the new engine; ToolLoop is stateless.
@@ -442,9 +421,6 @@ class ChatSystem:
                     image_url=ctx.image_url,
                     turn_tainted=ctx.turn_tainted,
                     initial_taint_sources=ctx.taint_sources,
-                    history_start_override=(
-                        resume.pending.tool_context_start if resume is not None else None
-                    ),
                 ):
                     if isinstance(ev, _ApiPayloadEvent):
                         self.turn_persistence.store_api_request(
@@ -460,6 +436,30 @@ class ChatSystem:
                         yield ev
                     elif isinstance(ev, _ToolContextEvent):
                         tool_context_json = ev.tool_context_json
+                    elif isinstance(ev, WriteParkedEvent):
+                        # DP-297: a gated write, mid-turn. Hold it — the store
+                        # registration needs the assistant row id that does not
+                        # exist until this turn commits — but surface it now so
+                        # an interactive client can render the affordance in
+                        # stream order.
+                        parks_this_turn.append(ParkedWrite(
+                            token=ev.token,
+                            write_call=ev.write_call,
+                            audit_info=ev.audit_info,
+                            confirmation_text=ev.confirmation_text,
+                            user_identifier=ctx.user_identifier,
+                            persona_name=ctx.persona_name,
+                            channel=ctx.channel,
+                            server_id=ctx.server_id,
+                            turn_tainted=ev.turn_tainted,
+                        ))
+                        yield PendingConfirmationEvent(
+                            text=ev.confirmation_text,
+                            write_calls=[ev.write_call],
+                            persona_name=ctx.persona_name,
+                            token=ev.token,
+                            audit_info=ev.audit_info,
+                        )
                     elif isinstance(ev, ErrorEvent):
                         # The loop died mid-turn. Persist whatever tool calls it
                         # made first — otherwise the next turn shows the model
@@ -476,19 +476,18 @@ class ChatSystem:
                                 retry_assistant_id=retry_assistant_id,
                                 tool_context_json=tool_context_json,
                             )
-                            # That row re-seals the parked span (history_start
-                            # points back at the park), so the parked row's copy
-                            # is now the duplicate — safe to drop, and only now.
-                            self._clear_parked_row(parked_row_to_clear, errored_id)
+                            # Writes gated before the loop died are still real
+                            # proposals — register them against the row that
+                            # just captured their `awaiting_human_approval`
+                            # entries, or the operator sees affordances that
+                            # resolve to nothing.
+                            self._register_parks(parks_this_turn, errored_id)
                         yield ev
                         return
                     elif isinstance(ev, _LoopFinishedEvent):
                         final_text = ev.final_text
                         response_type = ev.response_type
                         tool_context_json = ev.tool_context_json
-                        pending_writes = ev.pending_writes
-                        audit_info = ev.audit_info
-                        tool_context_start = ev.tool_context_start
                         ctx.turn_tainted = ev.turn_tainted
                         # Persist back to the conversation cache for stickiness
                         taint_key = (ctx.user_identifier, ctx.persona_name, ctx.channel, ctx.server_id)
@@ -510,85 +509,20 @@ class ChatSystem:
                     )
                 raise
 
-            # DP-130 history contract: the ephemeral_chunk_id for this turn's
-            # rendered confirmation chunk. Non-None only on a parked turn — it is
-            # the parked PendingConfirmation's correlation token. Carried on the
-            # terminal DoneEvent so the id-frame can address the unpersisted chunk.
-            ephemeral_chunk_id: Optional[str] = None
-            assistant_id: Optional[int] = None
-            if pending_writes is not None:
-                # Commit the park's tool-context row *before* publishing the
-                # pending. `park()` makes the confirmation resumable, and the
-                # `yield` just below suspends this generator — a resume arriving
-                # in that window (auto-approver, the MCP executor, or simply a
-                # fast click) would see `parked_assistant_id is None`, skip the
-                # clear, and let the continuation re-seal a span the parked row
-                # still holds: every approved write twice in replayed history.
-                #
-                # The park then reports no assistant_id: DP-130's id-frame
-                # contract treats the confirmation chunk as unpersisted, and
-                # this row carries only tool context — never the confirmation
-                # text — so it is not addressable as this turn's assistant
-                # message.
-                parked_assistant_id = self.turn_persistence.commit_or_update_assistant(
-                    persona_name=persona_name, user_identifier=user_identifier,
-                    channel=channel, server_id=server_id,
-                    final_text=final_text, response_type=response_type,
-                    user_interaction_id=user_interaction_id,
-                    retry_assistant_id=retry_assistant_id,
-                    tool_context_json=tool_context_json,
-                )
-                # A resume that parks *again* seals the same span onto the new
-                # row (history_start_override still points at the first park),
-                # so the earlier park's copy is now the duplicate.
-                self._clear_parked_row(parked_row_to_clear, parked_assistant_id)
-                parked = PendingConfirmation(
-                    write_calls=pending_writes,
-                    conversation_history=ctx.conversation_history,
-                    persona_name=ctx.persona_name,
-                    tools_for_llm=ctx.tools_for_llm,
-                    image_url=ctx.image_url,
-                    channel=ctx.channel,
-                    server_id=ctx.server_id,
-                    turn_tainted=ctx.turn_tainted,
-                    audit_info=audit_info,
-                    tool_context_start=tool_context_start,
-                    confirmation_text=final_text if final_text else "",
-                    retry_assistant_id=retry_assistant_id,
-                    parked_assistant_id=parked_assistant_id,
-                )
-                # Parking (incl. supersede-eviction + audit logging) is the
-                # ConfirmationManager's job; the kernel only decides *when*.
-                self.confirmations.park(ctx.user_identifier, ctx.persona_name, parked)
-                ephemeral_chunk_id = parked.token
-                # Surface the park to interactive consumers (the portal) so they
-                # can render an approve/deny affordance and resume via the token.
-                # Emitted before the terminal DoneEvent; non-interactive callers
-                # (generate_response, the non-streaming resume drain) ignore it
-                # and rely on the DoneEvent text instead.
-                yield PendingConfirmationEvent(
-                    text=final_text,
-                    write_calls=pending_writes,
-                    persona_name=ctx.persona_name,
-                    token=parked.token,
-                    audit_info=audit_info,
-                )
-            else:
-                # 4. Log/update assistant turn. Original text (including links)
-                #    is preserved.
-                assistant_id = self.turn_persistence.commit_or_update_assistant(
-                    persona_name=persona_name, user_identifier=user_identifier,
-                    channel=channel, server_id=server_id,
-                    final_text=final_text, response_type=response_type,
-                    user_interaction_id=user_interaction_id,
-                    retry_assistant_id=retry_assistant_id,
-                    tool_context_json=tool_context_json,
-                )
-                # This row now carries the re-sealed span, so the parked row's
-                # provisional copy is the duplicate. Dropping it only here means
-                # an aborted continuation leaves the park's record intact rather
-                # than erasing an already-executed write.
-                self._clear_parked_row(parked_row_to_clear, assistant_id)
+            # 4. Log/update assistant turn. Original text (including links)
+            #    is preserved. Since DP-297 a gated write no longer diverts this
+            #    into a separate park-only row: a turn that proposed writes still
+            #    ends with real text, so it persists like any other turn and the
+            #    proposals hang off that row's tool_context.
+            assistant_id = self.turn_persistence.commit_or_update_assistant(
+                persona_name=persona_name, user_identifier=user_identifier,
+                channel=channel, server_id=server_id,
+                final_text=final_text, response_type=response_type,
+                user_interaction_id=user_interaction_id,
+                retry_assistant_id=retry_assistant_id,
+                tool_context_json=tool_context_json,
+            )
+            self._register_parks(parks_this_turn, assistant_id)
 
             # DP-113: retain assistant turn through the backend boundary.
             # Inherit ctx.turn_tainted so the untrusted bit reaches the
@@ -607,8 +541,31 @@ class ChatSystem:
                 response_type=response_type,
                 assistant_id=assistant_id,
                 user_interaction_id=user_interaction_id,
-                ephemeral_chunk_id=ephemeral_chunk_id,
+                # No ephemeral chunk: since DP-297 the turn's own text is
+                # persisted normally and each proposal carries its own token on
+                # its PendingConfirmationEvent instead.
+                ephemeral_chunk_id=None,
             )
+
+    def _register_parks(self, parks: List[ParkedWrite],
+                        assistant_id: Optional[int]) -> None:
+        """Make this turn's gated writes resolvable, bound to the row that
+        holds their `awaiting_human_approval` entries.
+
+        Registration is deliberately deferred to here rather than done when the
+        loop emits each park: `parked_assistant_id` is the row this turn is
+        only now committing, and a park registered without it cannot be patched
+        when it resolves — the operator would approve a write whose history
+        entry says "pending" forever.
+
+        The cost is a short window between the surface rendering an affordance
+        (mid-stream) and the token becoming resolvable (here). A click inside it
+        is refused with "no such pending action" and the operator clicks again;
+        it fails closed and never executes the wrong thing.
+        """
+        for parked in parks:
+            parked.parked_assistant_id = assistant_id
+            self.confirmations.park(parked)
 
     async def stream_response(
             self,
@@ -712,88 +669,126 @@ class ChatSystem:
                     user_interaction_id = None
         return final_text, response_type, assistant_id, user_interaction_id
 
-    async def stream_resume_confirmation(
-            self, user_identifier: str, persona_name: str, approved: bool,
-            *, expected_token: Optional[str] = None,
+    async def stream_resolve_park(
+            self, user_identifier: str, persona_name: str, token: str,
+            approved: bool, *, note: Optional[str] = None,
     ) -> AsyncGenerator[GenerationEvent, None]:
-        """Streaming resume of a parked write — single source of truth for the
-        approve/deny continuation.
+        """Approve or deny ONE gated write, then summarize (DP-297).
 
-        DP-124 re-enters the `_orchestrate` kernel with the parked turn so the
-        continuation runs the full tool loop, persists the assistant row on the
-        correct channel, and shares the single turn lifecycle (scope, taint
-        write-back, retain, terminal event). DP-127 makes this streaming so the
-        portal can render the continuation (and any *chained* confirmation) just
-        like a normal turn. The not-found / expired / persona-missing guards are
-        surfaced as a terminal DEV_COMMAND DoneEvent so every consumer renders
-        them uniformly.
+        Single entry point for every surface. The token is mandatory: with
+        several writes resolvable per conversation, `(user, persona)` no longer
+        identifies one. (It was optional before, on the reasoning that Discord
+        keyed off a specific message so a stale token could not arise — true
+        only while at most one park existed.)
 
-        `expected_token` (the portal path) rejects a resume whose token no longer
-        matches the live park — i.e. the model proposed a different write since.
-        It is validated *before* the park is consumed, so a stale request leaves
-        the real pending confirmation intact. Discord passes None and resumes by
-        (user, persona) alone.
+        Sequence, and why it is this order:
+
+        1. `take()` the park — synchronous, so exactly one caller can win it and
+           a double-click cannot execute the write twice.
+        2. Acquire the conversation lock, then drain. Whoever holds the lock
+           folds in every decision that arrived while it waited, so a flurry of
+           approvals yields one summary rather than N racing tool loops over the
+           same history.
+        3. Execute + patch history for each decision, in approval order.
+        4. Run ONE continuation turn on the freshly-rebuilt history.
         """
         key = (user_identifier, persona_name)
-        pending = self.confirmations.pending.get(key)
+        parked = self.confirmations.take(token)
 
-        if not pending:
+        if parked is None:
             yield DoneEvent(
-                text="No pending confirmation found.",
+                text="No such pending action — it was already resolved or it expired.",
                 response_type=ResponseType.DEV_COMMAND,
             )
             return
 
-        if expected_token is not None and pending.token != expected_token:
+        if parked.key != key:
+            # A token belonging to another conversation must not be resolvable
+            # from this one even if the caller somehow knows the hex.
+            self.confirmations.restore(parked)
             yield DoneEvent(
-                text="This confirmation is no longer valid. Please try again.",
+                text="No such pending action.",
                 response_type=ResponseType.DEV_COMMAND,
             )
             return
 
-        # Commit to acting on this park: remove it so a duplicate approve/deny
-        # (double-click, retried POST) can't execute the writes twice.
-        self.confirmations.pending.pop(key, None)
-
-        if time.time() - pending.created_at > PENDING_CONFIRMATION_TIMEOUT:
+        if self.confirmations.is_expired(parked):
+            self.confirmations.patch_parked_entry(
+                parked, "expired", {"reason": "expired before review"},
+            )
             yield DoneEvent(
-                text="Confirmation expired. Please try again.",
+                text="That action expired before it was reviewed.",
                 response_type=ResponseType.DEV_COMMAND,
             )
             return
 
-        if pending.persona_name not in self.personas:
+        if parked.persona_name not in self.personas:
             yield DoneEvent(
                 text="Error: Persona not found.",
                 response_type=ResponseType.DEV_COMMAND,
             )
             return
 
-        async with aclosing(self._orchestrate(
-            persona_name=pending.persona_name,
-            user_identifier=user_identifier,
-            channel=pending.channel,
-            message="",
-            server_id=pending.server_id,
-            image_url=pending.image_url,
-            resume=_ResumeState(pending=pending, approved=approved),
-        )) as agen:
-            async for ev in agen:
-                yield ev
+        self.confirmations.enqueue(
+            Decision(park=parked, approved=approved, note=note),
+        )
 
-    async def resume_pending_confirmation(
-            self, user_identifier: str, persona_name: str, approved: bool
+        applied: List[Decision] = []
+        async with self.confirmations.lock_for(key):
+            batch = self.confirmations.drain(key)
+            if not batch:
+                # A continuation that held the lock before us already folded
+                # this decision in and acted on it. Nothing left to do.
+                return
+
+            try:
+                # Re-drain after each round. Acquiring an uncontended
+                # asyncio.Lock does not suspend, so the winner of a race gets
+                # here before the loser has even enqueued — draining once would
+                # leave the loser to run a second continuation over the same
+                # history. Looping until the queue is empty is what actually
+                # folds a flurry of approvals into one summary.
+                while batch:
+                    for decision in batch:
+                        await self.confirmations.apply(decision)
+                        applied.append(decision)
+                    batch = self.confirmations.drain(key)
+            except Exception as e:
+                err_id, err_msg = format_internal_error(
+                    e, scrub=get_scrubber().scrub,
+                )
+                logger.error(
+                    f"[err {err_id}] Error applying approval decision for "
+                    f"{user_identifier}: {e}", exc_info=True,
+                )
+                yield ErrorEvent(
+                    message=f"Error processing the confirmed action. {err_msg}",
+                )
+                return
+
+            async with aclosing(self._orchestrate(
+                persona_name=parked.persona_name,
+                user_identifier=user_identifier,
+                channel=parked.channel,
+                message=_render_resolution_nudge(applied),
+                server_id=parked.server_id,
+                continuation=_ContinuationState(batch=applied),
+            )) as agen:
+                async for ev in agen:
+                    yield ev
+
+    async def resolve_park(
+            self, user_identifier: str, persona_name: str, token: str,
+            approved: bool, *, note: Optional[str] = None,
     ) -> Tuple[str, ResponseType, Optional[int], Optional[int]]:
-        """Non-streaming resume — drains `stream_resume_confirmation` into the
-        4-tuple Discord expects. Token validation is skipped (Discord keys the
-        confirmation by reaction on a specific message, so a stale token can't
-        arise the way it can over HTTP).
+        """Non-streaming resolve — drains `stream_resolve_park` into the
+        4-tuple Discord expects.
         """
         final_text = ""
         response_type = ResponseType.DEV_COMMAND
         assistant_id: Optional[int] = None
-        async with aclosing(self.stream_resume_confirmation(
-            user_identifier, persona_name, approved,
+        async with aclosing(self.stream_resolve_park(
+            user_identifier, persona_name, token, approved, note=note,
         )) as agen:
             async for ev in agen:
                 if isinstance(ev, (TokenEvent, ToolCallStartEvent,

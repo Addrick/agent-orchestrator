@@ -135,3 +135,25 @@ def make_bot_logic(state: Any) -> BotLogic:
         get_models_available=lambda: state.models_available,
         set_models_available=lambda models: setattr(state, "models_available", models),
     )
+
+
+def only_pending_token(chat_system: Any, user: str, persona: str) -> str:
+    """The token of the single gated write for this conversation.
+
+    DP-297 made parks token-keyed and plural, so a test that used to say
+    `confirmations.pending[(user, persona)]` now has to name WHICH proposal it
+    means. Most tests park exactly one; this asserts that and hands back its
+    token, so a test that accidentally parks two fails loudly here rather than
+    silently resolving whichever came first.
+    """
+    parks = chat_system.confirmations.list_for(user, persona)
+    assert len(parks) == 1, (
+        f"expected exactly one pending action for ({user}, {persona}), "
+        f"got {len(parks)}: {[p.write_call.get('name') for p in parks]}"
+    )
+    return str(parks[0].token)
+
+
+def pending_tokens(chat_system: Any, user: str, persona: str) -> list:
+    """Every live gated write for this conversation, oldest first."""
+    return [p.token for p in chat_system.confirmations.list_for(user, persona)]

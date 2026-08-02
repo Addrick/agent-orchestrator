@@ -55,31 +55,49 @@ class _ToolContextEvent:
 
 
 @dataclass
+class WriteParkedEvent:
+    """One write call gated for human approval (DP-297).
+
+    Emitted *mid-turn* — the loop keeps running after it, so a turn can emit
+    several. The orchestrator parks each one and forwards it to the surface as
+    its own approve/deny affordance. Public (not underscore-prefixed) because
+    interfaces consume it directly, unlike the loop-internal events above.
+    """
+    token: str
+    write_call: Dict[str, Any]
+    audit_info: Dict[str, Any]
+    confirmation_text: str
+    turn_tainted: bool = False
+
+
+@dataclass
 class _LoopFinishedEvent:
     """Loop-internal terminal event. Carries the resolved state so the
-    orchestrator can persist the assistant turn / park CONFIRM-mode
-    confirmation / re-emit a public DoneEvent."""
+    orchestrator can persist the assistant turn / re-emit a public DoneEvent."""
     final_text: str
     response_type: ResponseType
     tool_context_json: Optional[str] = None
-    pending_writes: Optional[List[Dict[str, Any]]] = None
     turn_tainted: bool = False
-    audit_info: Optional[Dict[str, Any]] = None
-    # Index into conversation_history marking where this turn's tool messages
-    # begin. Carried on the pending-write event so a resumed continuation can
-    # capture the parked tool calls (+ their results) into tool_context_json
-    # rather than dropping them. See ChatSystem resume path.
-    tool_context_start: int = 0
 
 
 LoopEvent = Union[
     TokenEvent, ErrorEvent,
     ToolCallStartEvent, ToolCallResultEvent,
-    _ApiPayloadEvent, _LoopFinishedEvent, _ToolContextEvent,
+    _ApiPayloadEvent, _LoopFinishedEvent, _ToolContextEvent, WriteParkedEvent,
 ]
 
+# Status values for a gated write's synthetic tool result. These are what the
+# model reads in replayed history, and `PARK_STATUS_AWAITING` is the entry
+# `ConfirmationManager` later patches in place once the operator decides.
+PARK_STATUS_AWAITING = "awaiting_human_approval"
+PARK_STATUS_APPROVED = "approved"
+PARK_STATUS_DENIED = "denied"
+PARK_STATUS_EXPIRED = "expired"
+
 # Reasons a tool call can be left without a real result when the turn ends.
-SEAL_AWAITING_APPROVAL = "awaiting_approval"
+# (There is no awaiting-approval reason: since DP-297 a parked write is
+# answered inline with a real synthetic result, so it is never unanswered at
+# seal time — which is also what guarantees the patch target exists later.)
 SEAL_ERROR = "error"
 SEAL_MAX_ITERATIONS = "max_iterations_exceeded"
 # The clean exit: the model stopped asking for tools. Every call should already
@@ -133,6 +151,41 @@ def seal_tool_context(
                 ),
             })
     return json.dumps(sealed)
+
+
+def _render_confirmation_text(
+    action: Dict[str, Any],
+    turn_tainted: bool,
+    taint_sources: List[str],
+) -> str:
+    """Human-readable approval prompt for ONE gated action.
+
+    Takes an already-scrubbed action dict (DP-225 boundary 2 runs on the whole
+    audit_info before this is called), so nothing here needs to re-scrub.
+    """
+    flags = []
+    if action["service_binding"]:
+        flags.append(action["service_binding"].upper())
+    if action["sensitivity"]:
+        flags.append(action["sensitivity"].upper())
+    if action["irreversible"]:
+        flags.append("IRREVERSIBLE")
+    if action["always_confirm"]:
+        flags.append("HIGH-IMPACT")
+
+    flag_str = f" [{', '.join(flags)}]" if flags else ""
+    enrich_str = f": **{action['enrichment']}**" if action["enrichment"] else ":"
+    lines = [
+        "I'd like to perform the following action:",
+        f"- **{action['tool']}**{flag_str}{enrich_str} "
+        f"{json.dumps(action['arguments'])}",
+    ]
+    if turn_tainted:
+        lines.append(
+            f"\n⚠️ Context contains untrusted content from: "
+            f"{', '.join(taint_sources)}"
+        )
+    return "\n".join(lines)
 
 
 def build_wire_messages(
@@ -317,7 +370,7 @@ class ToolLoop:
             if write_calls:
                 logger.info(
                     "tool-loop iter %d: parking %d write call(s) for audit: %s "
-                    "(reads this iter: %s) — turn ends PENDING_CONFIRMATION",
+                    "(reads this iter: %s) — turn CONTINUES",
                     iter_idx,
                     len(write_calls),
                     [w.get("name") for w in write_calls],
@@ -365,48 +418,55 @@ class ToolLoop:
                 # approved write still executes with real argument values.
                 audit_info = cast(Dict[str, Any], get_scrubber().scrub(audit_info))
 
-                # Build human-readable confirmation text from the scrubbed actions.
-                lines = ["I'd like to perform the following actions:"]
-                for a in audit_info["actions"]:
-                    flags = []
-                    if a["service_binding"]:
-                        flags.append(a["service_binding"].upper())
-                    if a["sensitivity"]:
-                        flags.append(a["sensitivity"].upper())
-                    if a["irreversible"]:
-                        flags.append("IRREVERSIBLE")
-                    if a["always_confirm"]:
-                        flags.append("HIGH-IMPACT")
-                    
-                    flag_str = f" [{', '.join(flags)}]" if flags else ""
-                    enrich_str = f": **{a['enrichment']}**" if a["enrichment"] else ":"
-                    lines.append(f"- **{a['tool']}**{flag_str}{enrich_str} {json.dumps(a['arguments'])}")
-                
-                if turn_tainted:
-                    lines.append(f"\n⚠️ Context contains untrusted content from: {', '.join(taint_sources)}")
+                # DP-297: one park per write call, not one park per iteration.
+                # Independent approve/deny is the whole point — a burst of three
+                # writes must produce three separately resolvable proposals.
+                for wc, action in zip(write_calls, audit_info["actions"]):
+                    token = uuid.uuid4().hex
 
-                yield _LoopFinishedEvent(
-                    final_text="\n".join(lines),
-                    response_type=ResponseType.PENDING_CONFIRMATION,
-                    # Seal the reads this turn already executed plus the parked
-                    # write, so a deny — or an operator who simply never answers
-                    # — still leaves the model able to see what it did and
-                    # proposed. Cleared on resume, where the continuation
-                    # re-seals the same span with real results.
-                    tool_context_json=seal_tool_context(
-                        conversation_history, history_start,
-                        SEAL_AWAITING_APPROVAL,
-                    ),
-                    pending_writes=write_calls,
-                    turn_tainted=turn_tainted,
-                    audit_info=audit_info,
-                    tool_context_start=history_start,
-                )
-                return
+                    # Append a REAL synthetic tool result. This is what lets the
+                    # loop continue past a park at all: an assistant message
+                    # whose tool_calls have no matching result is rejected
+                    # outright by Anthropic and Gemini on the next iteration.
+                    #
+                    # The `instruction` field is the re-proposal guard, and it
+                    # lives here rather than in the system prompt because a tool
+                    # result is provider-neutral — no prompt-assembly change, and
+                    # every provider surfaces it identically.
+                    conversation_history.append({
+                        "role": "tool",
+                        "tool_call_id": wc.get("id"),
+                        "name": wc.get("name"),
+                        "content": json.dumps({
+                            "status": PARK_STATUS_AWAITING,
+                            "token": token,
+                            "instruction": (
+                                "Proposal queued for the operator. Do NOT "
+                                "re-submit it; you will be re-invoked with the "
+                                "result once it is approved or denied."
+                            ),
+                        }),
+                    })
+
+                    yield WriteParkedEvent(
+                        token=token,
+                        write_call=wc,
+                        # Single-action slice: each park carries only its own
+                        # action, so a surface renders one dialog per proposal
+                        # and the audit row describes exactly what was gated.
+                        audit_info={**audit_info, "actions": [action]},
+                        confirmation_text=_render_confirmation_text(
+                            action, turn_tainted, taint_sources,
+                        ),
+                        turn_tainted=turn_tainted,
+                    )
+
+                # THE DP-297 CHANGE: fall through to the next iteration instead
+                # of returning. The model can now keep working — and propose
+                # again — while the operator decides.
+                continue
 
             # If we reach here, there were no write_calls this iteration.
-            # (All write_calls are parked above; this branch only runs for
-            # read-only iterations that loop back for more LLM output.)
 
         logger.error(f"Exceeded max tool iterations ({self.max_iterations}).")
         yield _LoopFinishedEvent(

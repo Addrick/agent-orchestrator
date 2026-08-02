@@ -78,8 +78,8 @@ def _make_adapter_with_seeded_db(persona_name: str = "test_persona",
         get_session_memory_block=retrieve_memory_block or AsyncMock(return_value=None),
         get_view_history=_get_view_history,
         # The transcript projection reads the confirmation store directly
-        # (DP-201b removed the getattr fallback) — stub an empty park map.
-        confirmations=SimpleNamespace(pending={}),
+        # (DP-201b removed the getattr fallback) — stub an empty park store.
+        confirmations=SimpleNamespace(pending={}, list_for=lambda *a, **k: []),
     )
     adapter = KoboldAdapter(chat_system=chat_system)
     return adapter, mm, persona
@@ -612,7 +612,7 @@ def test_chat_completions_stream_emits_derpr_confirm_frame():
     assert text.index("derpr-confirm") < text.index("[DONE]")
 
     chat_system.tool_manager.execute_tool.assert_not_called()
-    assert ("portal", "test_persona") in chat_system.confirmations.pending
+    assert len(chat_system.confirmations.list_for("portal", "test_persona")) == 1
     mm.close()
 
 
@@ -1024,25 +1024,33 @@ def test_stream_id_frame_carries_full_contract_shape():
 
 
 def _parked_write_stream():
-    """stream_messages stub: model proposes a write tool (create_ticket) on the
-    first call. The universal write-audit gate parks it → PENDING_CONFIRMATION,
-    no assistant row, an ephemeral_chunk_id for the confirmation chunk."""
+    """stream_messages stub: the model proposes a write on the first call, then
+    (since DP-297 the loop continues past a gated write) wraps up with text on
+    the second."""
+    calls = {"n": 0}
+
     async def stream_messages(*args, **kwargs):
-        yield {"type": "api_payload", "payload": {}}
-        yield {"type": "text_delta", "text": "I'll create that ticket."}
-        yield {"type": "tool_calls", "calls": [
-            {"id": "call_w1", "name": "create_ticket",
-             "arguments": {"title": "test", "body": "x"}}
-        ]}
-        yield {"type": "done", "full_text": "I'll create that ticket."}
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield {"type": "api_payload", "payload": {}}
+            yield {"type": "text_delta", "text": "I'll create that ticket."}
+            yield {"type": "tool_calls", "calls": [
+                {"id": "call_w1", "name": "create_ticket",
+                 "arguments": {"title": "test", "body": "x"}}
+            ]}
+            yield {"type": "done", "full_text": "I'll create that ticket."}
+        else:
+            yield {"type": "text_delta", "text": " Sent for approval."}
+            yield {"type": "done", "full_text": " Sent for approval."}
     return stream_messages
 
 
-def test_parked_write_emits_id_frame_with_ephemeral_chunk_id():
-    # DP-130 (C3): a parked CONFIRM write emits an id-frame with user_id set,
-    # assistant_id null, response_type PENDING_CONFIRMATION, and a stable
-    # ephemeral_chunk_id for the confirmation chunk — the turn that previously
-    # emitted NO frame and drifted the portal's id array.
+def test_parked_write_turn_persists_normally_and_carries_its_token():
+    # DP-297 changed this contract. A turn that gates a write used to emit an
+    # id-frame with assistant_id null + an ephemeral_chunk_id, because the
+    # confirmation text WAS the turn's output and lived in no row. Now the turn
+    # ends with the model's own text, persists like any other turn, and each
+    # proposal carries its token on its own derpr-confirm frame instead.
     adapter, mm, persona, chat_system = _make_real_adapter(
         stream_messages=_parked_write_stream(),
     )
@@ -1053,20 +1061,23 @@ def test_parked_write_emits_id_frame_with_ephemeral_chunk_id():
     with TestClient(adapter.app) as client:
         r = client.post("/chat/completions", json=body)
     body_text = r.text
-    assert "event: derpr" in body_text
-    assert body_text.index("event: derpr") < body_text.index("[DONE]")
     m = re.search(r"event: derpr\ndata: (\{.*?\})\n\n", body_text)
     assert m, f"derpr frame not parseable: {body_text!r}"
     payload = json.loads(m.group(1))
-    assert payload["response_type"] == "PENDING_CONFIRMATION"
-    assert payload["assistant_id"] is None
-    assert payload["ephemeral_chunk_id"], "parked turn must carry an ephemeral_chunk_id"
+    assert payload["response_type"] == "LLM_GENERATION"
+    assert payload["assistant_id"] is not None
+    assert payload["ephemeral_chunk_id"] is None
+
     rows = _fetch_portal_rows(mm, "test_persona")
     user_row = next(r for r in rows if r["author_role"] == "user")
     assert payload["user_id"] == user_row["interaction_id"]
-    # And the parked confirmation lives in the pending map under that token.
-    parked = chat_system.confirmations.pending[("portal", "test_persona")]
-    assert parked.token == payload["ephemeral_chunk_id"]
+
+    # The proposal is live and its token rode out on the confirm frame.
+    confirm = re.search(r"event: derpr-confirm\ndata: (\{.*?\})\n\n", body_text)
+    assert confirm, f"missing derpr-confirm frame in:\n{body_text}"
+    parks = chat_system.confirmations.list_for("portal", "test_persona")
+    assert len(parks) == 1
+    assert parks[0].token == json.loads(confirm.group(1))["token"]
     mm.close()
 
 
@@ -1110,20 +1121,25 @@ def test_transcript_excludes_suppressed_rows():
     mm.close()
 
 
-def test_transcript_appends_live_pending_confirmation_as_ephemeral():
-    # C3 (projection side): a live parked confirmation surfaces as a trailing
-    # ephemeral chunk so a fresh load renders the awaiting-approval text.
-    from src.confirmations import PendingConfirmation
+def _seed_park(chat_system, token, text, tool="create_ticket"):
+    from src.confirmations import ParkedWrite
+    chat_system.confirmations.park(ParkedWrite(
+        token=token,
+        write_call={"id": f"call_{token}", "name": tool, "arguments": {}},
+        audit_info={"actions": []},
+        confirmation_text=text,
+        user_identifier="portal",
+        persona_name="test_persona",
+        channel="web_ui",
+    ))
 
+
+def test_transcript_appends_live_pending_confirmation_as_ephemeral():
+    # C3 (projection side): a live gated write surfaces as a trailing ephemeral
+    # chunk so a fresh load renders the awaiting-approval text.
     adapter, mm, persona, chat_system = _make_real_adapter()
     _seed_history(mm, "test_persona", turns=1)
-    parked = PendingConfirmation(
-        write_calls=[{"name": "create_ticket", "arguments": {}}],
-        conversation_history=[], persona_name="test_persona",
-        tools_for_llm=[], image_url=None, channel="web_ui",
-        confirmation_text="I'll create that ticket.",
-    )
-    chat_system.confirmations.pending[("portal", "test_persona")] = parked
+    _seed_park(chat_system, "tok-a", "I'll create that ticket.")
 
     with TestClient(adapter.app) as client:
         r = client.get("/api/v1/session/test_persona/transcript")
@@ -1131,43 +1147,40 @@ def test_transcript_appends_live_pending_confirmation_as_ephemeral():
     last = chunks[-1]
     assert last["ephemeral"] is True
     assert last["interaction_id"] is None
-    assert last["ephemeral_chunk_id"] == parked.token
+    assert last["ephemeral_chunk_id"] == "tok-a"
     assert last["content"] == "I'll create that ticket."
     mm.close()
 
 
-def test_transcript_pending_confirmation_surfaces_tool_context():
-    # The parked chunk renders the tool call awaiting approval by slicing the
-    # in-flight conversation_history from tool_context_start and parsing those
-    # raw OpenAI messages into the structured ToolContext shape.
-    from src.confirmations import PendingConfirmation
+def test_transcript_appends_every_live_park_not_just_one():
+    """DP-297: N gated writes produce N ephemeral chunks.
 
+    The regression this guards: the projection used to read a single
+    `pending` object, so after a reload the operator could only see (and
+    answer) one proposal — the rest were unreachable with no way to resolve
+    them, which is exactly the dangling-proposal bug from the 2026-07-26
+    Discord session.
+    """
     adapter, mm, persona, chat_system = _make_real_adapter()
     _seed_history(mm, "test_persona", turns=1)
-    convo = [
-        {"role": "user", "content": "make a ticket"},
-        {"role": "assistant", "tool_calls": [
-            {"id": "call_7", "name": "create_ticket",
-             "arguments": {"title": "x"}},
-        ]},
-    ]
-    parked = PendingConfirmation(
-        write_calls=[{"name": "create_ticket", "arguments": {"title": "x"}}],
-        conversation_history=convo, persona_name="test_persona",
-        tools_for_llm=[], image_url=None, channel="web_ui",
-        confirmation_text="I'll create that ticket.",
-        tool_context_start=1,  # slice from the assistant tool-call message
-    )
-    chat_system.confirmations.pending[("portal", "test_persona")] = parked
+    _seed_park(chat_system, "tok-1", "Proposal one.")
+    _seed_park(chat_system, "tok-2", "Proposal two.", tool="update_ticket")
+    _seed_park(chat_system, "tok-3", "Proposal three.", tool="close_ticket")
 
     with TestClient(adapter.app) as client:
         r = client.get("/api/v1/session/test_persona/transcript")
-    last = r.json()["chunks"][-1]
-    assert last["ephemeral"] is True
-    assert last["tool_context"] == [{
-        "call_id": "call_7", "group_id": None, "tool_name": "create_ticket",
-        "arguments": {"title": "x"}, "result": None, "error": None,
-    }]
+    chunks = r.json()["chunks"]
+
+    ephemeral = [c for c in chunks if c["ephemeral"]]
+    assert [c["ephemeral_chunk_id"] for c in ephemeral] == [
+        "tok-1", "tok-2", "tok-3",
+    ]
+    assert [c["content"] for c in ephemeral] == [
+        "Proposal one.", "Proposal two.", "Proposal three.",
+    ]
+    # C1 still holds for every one of them.
+    for c in chunks:
+        assert (c["interaction_id"] is not None) != (c["ephemeral"] is True)
     mm.close()
 
 
@@ -2554,7 +2567,7 @@ def test_adapter_engine_surface_is_enumerated():
         "confirmations": "_confirmations",
         "provision_persona_memory": "_provision_persona_memory",
         "stream_response": "_stream_response",
-        "stream_resume_confirmation": "_stream_resume_confirmation",
+        "stream_resolve_park": "_stream_resolve_park",
         "assemble_request": "_assemble_request",
         "get_view_history": "_get_view_history",
         "get_session_memory_block": "_get_session_memory_block",

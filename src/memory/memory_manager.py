@@ -823,6 +823,33 @@ class MemoryManager:
                 conn.rollback()
                 return False
 
+    def get_tool_context(self, interaction_id: int) -> Optional[str]:
+        """Read one row's raw `tool_context` JSON, or None if it has none.
+
+        The read half of `set_tool_context`. Needed by DP-297 to patch a single
+        gated write's entry inside an already-committed row when the operator
+        approves or denies it — a read-modify-write of the blob, since the
+        column stores the whole sealed span rather than one row per call.
+        """
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                cursor = conn.execute(
+                    "SELECT tool_context FROM User_Interactions "
+                    "WHERE interaction_id = ?",
+                    (interaction_id,),
+                )
+                row = cursor.fetchone()
+            except sqlite3.Error as e:
+                logger.error(
+                    f"get_tool_context failed for id={interaction_id}: {e}"
+                )
+                return None
+        if row is None:
+            return None
+        value = row[0]
+        return str(value) if value is not None else None
+
     def clear_tool_context(self, interaction_id: int) -> bool:
         """Drop a row's stored `tool_context`, leaving its content untouched."""
         return self.set_tool_context(interaction_id, None)

@@ -14,11 +14,17 @@ If neither matches, the message is ignored (unless in an ambient logging channel
 
 **Dev commands:** Commands like `set`, `what`, `detail`, etc. are handled before the LLM is invoked. Responses are sent as threaded replies on the original message (auto-archive after 60 minutes). Mutating commands (e.g., `set model`) also add a checkmark reaction.
 
-**Confirmation flow:** When a persona is in CONFIRM mode and the LLM requests a write tool:
-1. The bot presents the tool call details and adds checkmark/X reactions
-2. The user reacts to approve or deny
-3. On approval, the tool executes and the LLM generates a follow-up response
-4. Timeout: 5 minutes (300 seconds)
+**Confirmation flow:** When the LLM requests a write tool:
+1. The turn **keeps going** — the model can do more work and propose more writes
+2. After the reply, the bot posts one message per proposed action with checkmark/X reactions
+3. React to approve or deny **any** of them, in any order — they are independent
+4. Each decision executes (or refuses) that one action, then the persona reports what happened
+5. Timeout: 24 hours, and only while the bot stays up (pending approvals are in memory, so a restart drops them)
+
+A turn can therefore end with several proposals waiting at once. Approving one does
+not touch the others, and answering the third before the first is fine. The
+persona's reply to an approval may itself propose more actions, which appear as
+new messages with their own reactions.
 
 **Ambient logging:** Messages in configured channels (default: "general", "random", "development") are logged to the database under persona "ambient" without triggering any response. Useful for building conversational context.
 
@@ -78,11 +84,11 @@ Saving from the Inference Matrix persists the `memory_mode` to the backend. The 
 
 **Editing and deleting messages (Phase 2.4):** Editing a portal turn from the inline edit UI propagates the new content to the DERPR DB via `PATCH /api/v1/interaction/{id}`. The L0 embedding is invalidated on edit so the next batch from `SqliteConsolidator` re-encodes against the updated text; the row is also re-queued for L1 summarization (`parent_summary_id` is cleared). Saving an empty edit deletes the message: a soft-suppression flag is recorded server-side via `DELETE /api/v1/interaction/{id}`, after which the row no longer appears in subsequent `kobold_export`s, sliding-window history, or LTM retrieval. Reply chains are left intact (no nulling of `reply_to_id`); orphaned assistant turns whose paired user row was deleted still segment cleanly. Toggling the chevrons back and forth between two contents does not grow the archive — repeat-content swaps reuse the existing archive row instead of inserting a duplicate.
 
-**History contract (Phase 4.1):** Every turn on the `/chat/completions` stream now ends with a server-authored `event: derpr` frame carrying `{user_id, assistant_id, response_type, ephemeral_chunk_id}` — emitted even when a turn parks a write for confirmation (`assistant_id` is `null`, with a stable `ephemeral_chunk_id` for the pending-approval text), runs tools only, or produces no text. A companion `GET /api/v1/session/{persona}/transcript` returns the ordered conversation as identity-addressed chunks (each carries an `interaction_id`, or `ephemeral: true` for a not-yet-saved parked confirmation). Together these let a client address each message by its server identity instead of its position in the story, so edit/delete reliably target the right row even after a parked-write or tool-only turn. (This release is server-side only; the kobold-lite portal's own edit/delete still uses the older positional mapping until the Phase 4.2 stopgap re-syncs it from `/transcript`.)
+**History contract (Phase 4.1):** Every turn on the `/chat/completions` stream now ends with a server-authored `event: derpr` frame carrying `{user_id, assistant_id, response_type, ephemeral_chunk_id}` — emitted even when a turn proposes writes for approval, runs tools only, or produces no text. (Before DP-297 a turn that gated a write had no text of its own, so it reported `assistant_id: null` plus an `ephemeral_chunk_id`; such a turn now persists normally, and each proposal carries its own token on its `derpr-confirm` frame instead.) A companion `GET /api/v1/session/{persona}/transcript` returns the ordered conversation as identity-addressed chunks (each carries an `interaction_id`, or `ephemeral: true` — one such chunk per pending approval, so a reload renders every proposal still awaiting an answer). Together these let a client address each message by its server identity instead of its position in the story, so edit/delete reliably target the right row even after a parked-write or tool-only turn. (This release is server-side only; the kobold-lite portal's own edit/delete still uses the older positional mapping until the Phase 4.2 stopgap re-syncs it from `/transcript`.)
 
 > The portal's normal generation path is the OpenAI-style `/chat/completions` route (KoboldCPP jinja mode). The kobold-native `/api/v1/generate` and `/api/extra/generate/stream` routes are still served by the adapter for clients that prefer per-token SSE; both proxy to KoboldCPP and log user/assistant turns under `channel="web_ui"` the same way the OAI route does. Token-by-token portal usage falls on the native streaming route.
 
-**Tool-enabled personas in the portal (tool revamp v1):** A persona with `enabled_tools` set can run over the portal SSE stream — token deltas and tool calls interleave in a single linear stream with no drain-and-restart. While the model is invoking a tool, the portal renders an inline collapsible block (using kobold-lite's existing `<think>` Reflective-Process pipeline) showing the tool name, JSON arguments, and the result/error. The block is streaming-only — the database stores the resolved assistant text without it, so reload / version-chevron / retry flows stay clean. CONFIRM-mode write-tool gating is honored: a parked write surfaces in the bespoke portal transcript as a pending row with an inline **approve & run / deny** bar (resolved via `POST /api/v1/persona/{name}/confirm`, which streams the continuation over the same SSE protocol); a chained write re-parks with a fresh approval bar. The adapter also emits structured `event: derpr-tool-start` / `event: derpr-tool-result` SSE frames carrying `{tool_name, arguments, call_id}` and `{call_id, result, error}` for portal-aware listeners (`window.derprOnToolStart` / `derprOnToolResult` hooks; latest payloads accumulate in `window.derpr_tool_calls[call_id]`).
+**Tool-enabled personas in the portal (tool revamp v1):** A persona with `enabled_tools` set can run over the portal SSE stream — token deltas and tool calls interleave in a single linear stream with no drain-and-restart. While the model is invoking a tool, the portal renders an inline collapsible block (using kobold-lite's existing `<think>` Reflective-Process pipeline) showing the tool name, JSON arguments, and the result/error. The block is streaming-only — the database stores the resolved assistant text without it, so reload / version-chevron / retry flows stay clean. CONFIRM-mode write-tool gating is honored: each proposed write surfaces in the bespoke portal transcript as its own pending row with an inline **approve & run / deny** bar (resolved via `POST /api/v1/persona/{name}/confirm`, which now **requires** the proposal's `token` and streams the continuation over the same SSE protocol); several can be open at once and are answered independently. The adapter also emits structured `event: derpr-tool-start` / `event: derpr-tool-result` SSE frames carrying `{tool_name, arguments, call_id}` and `{call_id, result, error}` for portal-aware listeners (`window.derprOnToolStart` / `derprOnToolResult` hooks; latest payloads accumulate in `window.derpr_tool_calls[call_id]`).
 
 ### Bespoke DERPR portal (`/derpr`)
 
@@ -387,7 +393,7 @@ Determines the autonomy level for a persona's tool-use capabilities.
 | Mode | Behavior |
 |------|----------|
 | **AUTONOMOUS** | **Read-only** tools execute immediately. **Write tools still require audit** (see [Tool Security](#tool-security) below). The user sees the final response after all automated steps. |
-| **CONFIRM** | Standard mode. All write tools are presented for approval. Provides a consistent point of review for all state-changing actions. On Discord, approval uses reaction buttons with a 5-minute timeout. |
+| **CONFIRM** | Standard mode. All write tools are presented for approval. Provides a consistent point of review for all state-changing actions. On Discord, approval uses reaction buttons; proposals wait up to 24 hours (or until restart) and are answered independently. |
 
 ## Tool Security
 
@@ -395,6 +401,24 @@ The bot implements a comprehensive security framework to prevent prompt injectio
 
 ### Universal Write-Audit
 Regardless of execution mode, **all write tools** (tools that modify state, like creating tickets or deleting users) are parked for human audit before execution. This ensures that no state-changing action is taken without explicit user consent.
+
+**Proposing an action no longer ends the turn (DP-297).** A gated write is queued
+and the model keeps working, so one reply can propose several actions — each with
+its own approve/deny affordance, each resolvable independently and out of order.
+Previously a persona could propose exactly one write per turn and the turn stopped
+there; a second proposal made during an approval was rendered as plain text with no
+buttons and dangled forever, unanswerable. Each proposal now carries a stable token,
+so the surface always knows which action you answered.
+
+What you see in history: a proposed write appears as *awaiting approval* until you
+decide, then that same entry is rewritten in place with the real outcome —
+`approved` plus the result, `denied`, or `expired` if it was never answered in time.
+The persona reads that outcome on its next turn, so it can tell a completed action
+from one it merely suggested, and does not re-propose something you already approved.
+
+**Approvals do not survive a restart.** Pending proposals live in memory only. If
+the bot restarts, anything unanswered is gone and must be re-requested — which is
+why the 24-hour window is a ceiling, not a promise.
 
 **Gated actions stay in the model's memory (DP-296).** A persona remembers the tool calls it made and the writes it proposed, even when the turn did not finish cleanly — a proposal you approved, denied, or simply never answered, a turn that died on a provider error, or one that hit the tool-iteration cap. Previously only turns that ended with the model writing text carried their tool calls forward, so gated actions were invisible on the next turn: ask "did you see the error you got?" after a parked proposal and the persona had no record of ever calling anything, and would re-propose or invent an answer. Unfinished calls are recorded as *not executed* with a reason (`awaiting_approval`, `denied`, `error`), so a persona can tell "I did this" from "I asked to do this and it didn't happen" and stops re-proposing denied actions. This holds for regenerated turns too: retrying a reply that then proposes a write records the proposal against the regenerated message, without disturbing the text that message already shows or the version history behind it.
 

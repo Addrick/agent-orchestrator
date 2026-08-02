@@ -18,7 +18,7 @@ from src.generation_events import (
 )
 from src.persona import ExecutionMode
 from src.security.scrubber import get_scrubber, reset_scrubber
-from src.tools.tool_loop import ToolLoop, _LoopFinishedEvent
+from src.tools.tool_loop import ToolLoop, WriteParkedEvent, _LoopFinishedEvent
 from src.turn_persistence import TurnPersistence
 
 SECRET = "supersecretvalue123"
@@ -174,35 +174,8 @@ async def test_boundary2_model_reasoning_scrubbed_in_audit():
             ]},
             {"type": "done", "full_text": ""},
         ],
-    ])
-    tools = _make_tool_manager({})
-    loop = ToolLoop(engine, tools)
-
-    events = await _drain(loop.run(
-        persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
-        conversation_history=[], params=MagicMock(), tools=[],
-    ))
-
-    finished = events[-1]
-    assert isinstance(finished, _LoopFinishedEvent)
-    assert finished.audit_info is not None
-    reasoning = finished.audit_info["model_reasoning"]
-    assert reasoning is not None
-    assert SECRET not in reasoning
-    assert REDACTED in reasoning
-
-
-@pytest.mark.asyncio
-async def test_boundary2_write_args_scrubbed_in_audit_and_confirmation():
-    """A CONFIRM-mode write call whose arguments embed a secret: the parked
-    audit_info actions and the human confirmation final_text must redact it."""
-    engine = _make_engine([
         [
-            {"type": "tool_calls", "calls": [
-                {"id": "w1", "name": "create_ticket",
-                 "arguments": {"title": "t", "api_key": SECRET}}
-            ]},
-            {"type": "done", "full_text": ""},
+            {"type": "done", "full_text": "proposed"},
         ],
     ])
     tools = _make_tool_manager({})
@@ -213,18 +186,50 @@ async def test_boundary2_write_args_scrubbed_in_audit_and_confirmation():
         conversation_history=[], params=MagicMock(), tools=[],
     ))
 
-    finished = events[-1]
-    assert isinstance(finished, _LoopFinishedEvent)
-    assert finished.response_type == ResponseType.PENDING_CONFIRMATION
-    assert finished.audit_info is not None
+    park = next(e for e in events if isinstance(e, WriteParkedEvent))
+    reasoning = park.audit_info["model_reasoning"]
+    assert reasoning is not None
+    assert SECRET not in reasoning
+    assert REDACTED in reasoning
 
-    args = finished.audit_info["actions"][0]["arguments"]
+
+@pytest.mark.asyncio
+async def test_boundary2_write_args_scrubbed_in_audit_and_confirmation():
+    """A gated write whose arguments embed a secret: the park's audit_info
+    actions and its human confirmation text must redact it."""
+    engine = _make_engine([
+        [
+            {"type": "tool_calls", "calls": [
+                {"id": "w1", "name": "create_ticket",
+                 "arguments": {"title": "t", "api_key": SECRET}}
+            ]},
+            {"type": "done", "full_text": ""},
+        ],
+        [
+            {"type": "done", "full_text": "proposed"},
+        ],
+    ])
+    tools = _make_tool_manager({})
+    loop = ToolLoop(engine, tools)
+
+    events = await _drain(loop.run(
+        persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
+        conversation_history=[], params=MagicMock(), tools=[],
+    ))
+
+    park = next(e for e in events if isinstance(e, WriteParkedEvent))
+
+    args = park.audit_info["actions"][0]["arguments"]
     assert args["api_key"] == REDACTED
     assert SECRET not in json.dumps(args)
 
-    # The human-readable confirmation renders the (scrubbed) args.
-    assert SECRET not in finished.final_text
-    assert REDACTED in finished.final_text
+    # The human-readable approval prompt renders the (scrubbed) args.
+    assert SECRET not in park.confirmation_text
+    assert REDACTED in park.confirmation_text
+
+    # …but the raw call kept for execution is NOT scrubbed, or an approved
+    # write would run with a literal "[REDACTED]" argument value.
+    assert park.write_call["arguments"]["api_key"] == SECRET
 
 
 # ---- Boundary 3: cached api_payload -> /assemble inspector ----------------

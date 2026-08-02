@@ -313,8 +313,8 @@ def test_transcript_skips_non_renderable_rows():
 
 def test_transcript_appends_pending_ephemeral_chunk():
     rows = _rows(2)
-    pending = {"ephemeral_chunk_id": "tok123", "content": "awaiting approval",
-               "tool_context": None}
+    pending = [{"ephemeral_chunk_id": "tok123", "content": "awaiting approval",
+                "tool_context": None}]
     chunks = build_transcript(rows, pending=pending)["chunks"]
     assert len(chunks) == 3
     last = chunks[-1]
@@ -322,6 +322,30 @@ def test_transcript_appends_pending_ephemeral_chunk():
     assert last["interaction_id"] is None
     assert last["ephemeral_chunk_id"] == "tok123"
     assert last["content"] == "awaiting approval"
+
+
+def test_transcript_appends_one_chunk_per_pending_action():
+    """DP-297 made `pending` a list — every live proposal gets its own chunk.
+
+    Before, the projection took a single dict, so a reload showed one
+    proposal and silently dropped the rest.
+    """
+    rows = _rows(2)
+    pending = [
+        {"ephemeral_chunk_id": "tok1", "content": "one", "tool_context": None},
+        {"ephemeral_chunk_id": "tok2", "content": "two", "tool_context": None},
+    ]
+    chunks = build_transcript(rows, pending=pending)["chunks"]
+    assert len(chunks) == 4
+    assert [c["ephemeral_chunk_id"] for c in chunks[-2:]] == ["tok1", "tok2"]
+    assert all(c["ephemeral"] is True for c in chunks[-2:])
+
+
+def test_transcript_with_no_pending_actions():
+    """An empty list and None both mean 'nothing awaiting approval'."""
+    rows = _rows(2)
+    assert len(build_transcript(rows, pending=[])["chunks"]) == 2
+    assert len(build_transcript(rows, pending=None)["chunks"]) == 2
 
 
 # -------- _parse_tool_context: raw-OpenAI-message -> frontend ToolContext --------

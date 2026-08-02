@@ -423,11 +423,11 @@ class KoboldEngineAdapter:
         return self.chat_system.stream_response
 
     @property
-    def _stream_resume_confirmation(
+    def _stream_resolve_park(
         self,
     ) -> Callable[..., AsyncGenerator[GenerationEvent, None]]:
-        """Approve/deny continuation stream for a parked CONFIRM write."""
-        return self.chat_system.stream_resume_confirmation
+        """Approve/deny continuation stream for one gated write."""
+        return self.chat_system.stream_resolve_park
 
     @property
     def _assemble_request(self) -> Callable[..., Awaitable[Optional[AssembledRequest]]]:
@@ -753,18 +753,21 @@ class KoboldEngineAdapter:
 
         @self.app.post("/api/v1/persona/{name}/confirm")
         async def confirm_pending(name: str, request: Request) -> Any:
-            """Approve or deny a CONFIRM-mode write parked for persona `name`.
+            """Approve or deny ONE gated write for persona `name`.
 
             The portal calls this after a `derpr-confirm` SSE frame surfaces a
-            parked write. The continuation (write execution on approve, denial
-            results on deny, then the model's follow-up turn) streams back as
-            SSE using the same wire protocol as /v1/chat/completions — so any
-            chained confirmation re-surfaces as another `derpr-confirm` frame.
+            proposal. The continuation (write execution on approve, denial on
+            deny, then the model's summary turn) streams back as SSE using the
+            same wire protocol as /v1/chat/completions — so any further
+            proposal surfaces as another `derpr-confirm` frame.
 
-            Body: {"approved": bool, "token": "<token from the frame>"}. The
-            token guards against resuming a stale park (model proposed different
-            writes since); omit or send empty to skip the check. The portal user
-            is always "portal", matching the park key (user, persona).
+            Body: {"approved": bool, "token": "<token from the frame>"}.
+
+            DP-297 made `token` REQUIRED. It used to be an optional staleness
+            check because a persona had at most one parked write, so (user,
+            persona) identified it; now several can be pending at once and the
+            token is the only thing that says which one the operator answered.
+            The portal user is always "portal".
             """
             if name not in self._personas:
                 return JSONResponse(status_code=404,
@@ -772,13 +775,19 @@ class KoboldEngineAdapter:
             body = await request.json()
             approved = bool(body.get("approved"))
             token = body.get("token") or None
+            if not token:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": "token is required — it identifies which "
+                                      "pending action is being resolved"},
+                )
 
             async def relay() -> AsyncIterator[bytes]:
-                async for ev in self._stream_resume_confirmation(
+                async for ev in self._stream_resolve_park(
                     user_identifier="portal",
                     persona_name=name,
+                    token=token,
                     approved=approved,
-                    expected_token=token,
                 ):
                     if await request.is_disconnected():
                         return
@@ -864,19 +873,23 @@ class KoboldEngineAdapter:
             ids_with_versions = await asyncio.to_thread(
                 self._memory_manager.get_ids_with_versions, ids
             )
-            # Surface a live parked confirmation (portal session) as a trailing
-            # ephemeral chunk so a fresh load renders the awaiting-approval text.
-            # Park key is (user_identifier, persona) — honor the requested user.
-            pending_map = self._confirmations.pending
-            pending_obj = pending_map.get((user_identifier, persona))
-            pending: Optional[Dict[str, Any]] = None
-            if pending_obj is not None:
-                tool_msgs = pending_obj.conversation_history[pending_obj.tool_context_start:] if pending_obj.conversation_history else []
-                pending = {
-                    "ephemeral_chunk_id": pending_obj.token,
-                    "content": pending_obj.confirmation_text,
-                    "tool_context": _parse_tool_context(tool_msgs) if tool_msgs else None,
+            # Surface live gated writes (portal session) as trailing ephemeral
+            # chunks so a fresh load renders every awaiting-approval affordance.
+            # DP-297: a list, not a single object — one conversation can hold
+            # several proposals, and dropping all but one would strand the rest
+            # with no way to answer them after a reload.
+            #
+            # No tool_context is attached: since DP-297 each proposal's call and
+            # its `awaiting_human_approval` result live in the parked turn's own
+            # persisted row, which is already rendered above.
+            pending: List[Dict[str, Any]] = [
+                {
+                    "ephemeral_chunk_id": park.token,
+                    "content": park.confirmation_text,
+                    "tool_context": None,
                 }
+                for park in self._confirmations.list_for(user_identifier, persona)
+            ]
             transcript = build_transcript(
                 raw_history,
                 ids_with_versions=ids_with_versions,
