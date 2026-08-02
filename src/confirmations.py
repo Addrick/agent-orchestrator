@@ -33,6 +33,14 @@ logger = logging.getLogger(__name__)
 
 ConversationKey = Tuple[str, str]
 
+# What a denied write reports back to the model, for as long as the entry
+# survives in history. Deliberately more than a verdict: it names the state the
+# model should now be in ("wait"), because the verdict alone reads as a
+# recoverable tool failure and invites a retry.
+DENIAL_INSTRUCTION = (
+    "Tool call denied by operator. Wait for corrections or further instruction."
+)
+
 
 @dataclass
 class ParkedWrite:
@@ -207,7 +215,14 @@ class ConfirmationManager:
             if get_tool_capabilities(tool_name).get("produces_untrusted"):
                 park.turn_tainted = True
         else:
-            decision.result = {"error": "Tool call denied by operator",
+            # The standing instruction lives HERE, in the patched entry, not in
+            # the continuation nudge. The nudge is ephemeral by design, so a
+            # denial framed only there decays into a bare `error` one turn
+            # later — and a bare `error` is the shape this loop uses everywhere
+            # else to mean "the tool failed, adapt and retry". The verdict and
+            # what to do about it have the same lifetime as the proposal they
+            # describe, because they are the same fact.
+            decision.result = {"error": DENIAL_INSTRUCTION,
                                "note": decision.note}
             decision.ok = False
 
@@ -338,5 +353,5 @@ def new_token() -> str:
 
 __all__ = [
     "ConfirmationManager", "ParkedWrite", "Decision", "new_token",
-    "PARK_STATUS_AWAITING",
+    "PARK_STATUS_AWAITING", "DENIAL_INSTRUCTION",
 ]

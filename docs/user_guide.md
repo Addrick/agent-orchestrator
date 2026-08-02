@@ -416,6 +416,13 @@ decide, then that same entry is rewritten in place with the real outcome —
 The persona reads that outcome on its next turn, so it can tell a completed action
 from one it merely suggested, and does not re-propose something you already approved.
 
+A denial carries its instruction with it: the entry reads *"Tool call denied by
+operator. Wait for corrections or further instruction."* — the verdict and what to
+do about it have the same lifetime, so the guidance is still there many turns
+later rather than only in the reply immediately after you denied. Note this is
+guidance the persona reads, not a hard block: if you deny a write and then ask for
+it directly, it will propose it again, which is intended.
+
 **The same action is never queued twice.** If a persona proposes an action
 identical to one already waiting for you — same tool, same arguments — it is not
 added to your queue a second time; the model is told it is already pending and

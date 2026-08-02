@@ -15,7 +15,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from config.global_config import PENDING_ACTION_TTL
-from src.confirmations import ConfirmationManager, Decision, ParkedWrite
+from src.confirmations import (
+    DENIAL_INSTRUCTION, ConfirmationManager, Decision, ParkedWrite,
+)
 from src.memory.memory_manager import MemoryManager
 
 
@@ -281,3 +283,65 @@ def test_is_expired_boundary(manager):
 
     assert manager.is_expired(just_inside) is False
     assert manager.is_expired(just_outside) is True
+
+
+# ---- denial carries its own standing instruction -------------------------
+
+
+@pytest.mark.asyncio
+async def test_denial_instruction_persists_in_the_patched_entry(
+        manager, mem_manager):
+    """The "wait" instruction must live in the entry, not in the nudge.
+
+    The continuation nudge is ephemeral by design, so a denial framed only
+    there decays after one turn into a bare `error` — which is the shape this
+    codebase uses everywhere else to mean "the tool failed, adapt and retry".
+    The verdict and what to do about it have the same lifetime because they are
+    the same fact.
+    """
+    row_id = _row_with_awaiting_entries(mem_manager, ["c1"])
+    parked = _park(token="tok-c1", call_id="c1", row_id=row_id)
+
+    await manager.apply(Decision(park=parked, approved=False))
+
+    entry = json.loads(next(
+        m for m in json.loads(mem_manager.get_tool_context(row_id))
+        if m.get("tool_call_id") == "c1"
+    )["content"])
+    assert entry["status"] == "denied"
+    assert entry["result"]["error"] == DENIAL_INSTRUCTION
+    # Not merely a verdict: it names the state the model should now be in.
+    assert "Wait for corrections" in entry["result"]["error"]
+
+
+@pytest.mark.asyncio
+async def test_denial_instruction_survives_without_an_operator_note(
+        manager, mem_manager):
+    """Discord's reaction path sends no note, so the note must not be what
+    carries the instruction."""
+    row_id = _row_with_awaiting_entries(mem_manager, ["c1"])
+    parked = _park(token="tok-c1", call_id="c1", row_id=row_id)
+
+    await manager.apply(Decision(park=parked, approved=False, note=None))
+
+    entry = json.loads(next(
+        m for m in json.loads(mem_manager.get_tool_context(row_id))
+        if m.get("tool_call_id") == "c1"
+    )["content"])
+    assert entry["result"]["note"] is None
+    assert entry["result"]["error"] == DENIAL_INSTRUCTION
+
+
+@pytest.mark.asyncio
+async def test_approval_does_not_carry_the_denial_instruction(
+        manager, mem_manager):
+    """An approved write reports its real result and nothing else — telling a
+    model to wait after a successful action would be worse than saying
+    nothing."""
+    row_id = _row_with_awaiting_entries(mem_manager, ["c1"])
+    parked = _park(token="tok-c1", call_id="c1", row_id=row_id)
+
+    await manager.apply(Decision(park=parked, approved=True))
+
+    blob = mem_manager.get_tool_context(row_id)
+    assert DENIAL_INSTRUCTION not in blob

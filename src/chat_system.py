@@ -85,7 +85,8 @@ def _render_resolution_nudge(batch: List[Decision]) -> str:
         f"[The operator reviewed {len(lines)} pending {verb}:]\n"
         + "\n".join(lines)
         + "\n[Results are in the tool context above. Report the outcome "
-          "briefly. Do not re-propose an action that was already approved.]"
+          "briefly. Do not re-propose an action that was already decided, "
+          "whether it was approved or denied.]"
     )
 
 
