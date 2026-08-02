@@ -15,9 +15,19 @@
 # Run:   pytest -m llm_live tests/live/test_repropose_live.py -s
 #        (-s matters: the per-turn report goes to stdout)
 #
-# Model: defaults to the shared LLM_LIVE_MODEL. Override to prod a specific
-# model — this behaviour is model-dependent, which is the point:
+# Model: defaults to DEFAULT_AGENT_MODEL (agy), tracking that knob rather than
+# pinning a name. Override to prod a specific model — this behaviour is
+# model-dependent, which is the whole point:
 #        DERPR_REPROPOSE_MODEL=claude-sonnet-5 pytest -m llm_live ... -s
+#
+# ⚠️ agy is POSIX-only (subprocess CLI route, see providers/_subprocess.py), so
+# on Windows these skip. That is a real constraint, not a harness bug: prod the
+# default model from a POSIX box, or name a hosted model via the env var.
+#
+# agy also reaches the tool loop through derpr's <tool_call> TEXT protocol
+# rather than a native tool-calling API — it is a clamped text provider. So a
+# skip here can mean "the text protocol did not round-trip", which is worth
+# knowing separately from "the model chose not to re-propose".
 #
 # Nothing external is touched. `create_ticket` is registered with a stub
 # handler, so an APPROVED write executes the stub and never reaches Zammad.
@@ -25,10 +35,12 @@
 import json
 import os
 import random
+import sys
 from typing import Any, Dict, List
 
 import pytest
 
+from config.global_config import DEFAULT_AGENT_MODEL
 from src.chat_system import ChatSystem
 from src.confirmations import DENIAL_INSTRUCTION
 from src.engine import TextEngine
@@ -56,7 +68,27 @@ PROBE_PROMPT = (
 
 
 def _model_name() -> str:
-    return os.environ.get("DERPR_REPROPOSE_MODEL", LLM_LIVE_MODEL)
+    """Default to the agent model (agy). `LLM_LIVE_MODEL` is imported only as
+    the documented hosted alternative — name it via the env var when prodding
+    from a box where agy cannot run."""
+    return os.environ.get("DERPR_REPROPOSE_MODEL", DEFAULT_AGENT_MODEL)
+
+
+@pytest.fixture(autouse=True)
+def _requires_posix_for_agy():
+    """agy spawns a CLI through the POSIX-only subprocess route.
+
+    Skipping loudly beats a confusing spawn failure, and beats silently
+    substituting a different model — which model answered is the single most
+    load-bearing fact about any result this file produces.
+    """
+    model = _model_name()
+    if model.startswith("agy") and sys.platform == "win32":
+        pytest.skip(
+            f"{model} is POSIX-only; run these probes from a POSIX box, or set "
+            f"DERPR_REPROPOSE_MODEL to a hosted model "
+            f"(e.g. {LLM_LIVE_MODEL})."
+        )
 
 
 class _TurnReport:
