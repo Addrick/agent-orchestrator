@@ -13,6 +13,7 @@ from pathlib import Path
 # --- NEW: Import the global embedding model variable ---
 from config.global_config import EMBEDDING_MODEL, EMBEDDING_DIMENSION, SEMANTIC_BACKEND, HINDSIGHT_URL
 from src.memory.backend.base import MemoryHit, Experience, MentalModel, ReflectResult
+from src.security.scrubber import get_scrubber
 import sqlite_vec
 
 logger = logging.getLogger(__name__)
@@ -1845,15 +1846,39 @@ class MemoryManager:
                         operator_id: Optional[str] = None, prior_state: Optional[str] = None, 
                         new_state: Optional[str] = None, reason: Optional[str] = None, 
                         metadata: Optional[Dict[str, Any]] = None) -> None:
-        """Internal helper to log security-relevant events to Audit_Log."""
+        """Internal helper to log security-relevant events to Audit_Log.
+
+        Egress scrub (DP-225, audit sink): `metadata` and `reason` are the two
+        free-text fields here, and unlike every other scrub boundary this one
+        writes to disk *permanently* — an Audit_Log row outlives the process,
+        the conversation, and any TTL.
+
+        Redaction happens at this sink rather than at each call site because
+        callers legitimately hold raw secrets: `ConfirmationManager` carries the
+        approved write's real argument values (it must, or the tool would
+        execute with a literal "[REDACTED]"), and `proposals/service` carries
+        `action_args`. Scrubbing here means a caller cannot leak by forgetting,
+        and a future caller inherits the protection instead of re-introducing
+        the hole.
+
+        Recursive dict scrub rather than scrubbing the serialized JSON: the
+        pattern fallback is skipped on strings past MAX_PATTERN_SCAN_LEN, so
+        scrubbing field-by-field keeps unregistered-shape detection alive on a
+        large metadata blob that would exceed the limit once flattened.
+        """
         now = datetime.now()
-        meta_json = json.dumps(metadata) if metadata else None
-        
+        scrubber = get_scrubber()
+        safe_metadata = (
+            cast(Dict[str, Any], scrubber.scrub(metadata)) if metadata else None
+        )
+        safe_reason = cast(Optional[str], scrubber.scrub(reason)) if reason else reason
+        meta_json = json.dumps(safe_metadata) if safe_metadata else None
+
         cursor.execute(
-            """INSERT INTO Audit_Log 
+            """INSERT INTO Audit_Log
                (event_type, target_id, operator_id, timestamp, prior_state, new_state, reason, metadata)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (event_type, target_id, operator_id, now, prior_state, new_state, reason, meta_json)
+            (event_type, target_id, operator_id, now, prior_state, new_state, safe_reason, meta_json)
         )
 
     # ---------- New Hindsight-shape Delegation ----------
