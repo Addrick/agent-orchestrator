@@ -357,6 +357,21 @@ class AgentManager:
 
         return status
 
+    def signal_stop_all(self) -> None:
+        """Signal every running agent to exit at its next checkpoint, without waiting.
+
+        Signal-only; `shutdown_all()` does the awaiting. Splitting the two lets
+        AppManager stop agents *before* it drains long-running tasks. Otherwise
+        an agent keeps deploying for the whole drain window and contends with
+        the memory consolidator on `MemoryManager._lock` — racing the very work
+        item the drain exists to let finish cleanly (DP-304).
+        """
+        for name in self.get_running():
+            try:
+                self._running[name].instance.stop()
+            except Exception as e:
+                logger.error(f"Error signalling agent '{name}' to stop: {e}")
+
     async def shutdown_all(self) -> None:
         """Stop all running agents. Called during application shutdown."""
         running_names = self.get_running()

@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import signal
 import sys
 import logging
 from logging.handlers import RotatingFileHandler
@@ -231,6 +232,38 @@ def _register_agents(
         CONTENT_CLASSIFIER_NAME, ContentClassifier)
 
 
+def _install_shutdown_handlers(
+    app: AppManager, loop: Optional[asyncio.AbstractEventLoop] = None
+) -> None:
+    """Route SIGINT/SIGTERM to AppManager.request_shutdown() (DP-304).
+
+    Without this, the only way out is `asyncio.run()`'s own teardown, which
+    calls `task.cancel()` on *every* task before `start()`'s finally block gets
+    to run. The memory consolidator is therefore killed mid-cluster and its
+    stop callback fires at a coroutine already unwinding a CancelledError —
+    i.e. the graceful drain exists but is unreachable on the shutdown the
+    process actually performs.
+
+    `loop` is injectable so the fallback branch can be exercised on a platform
+    that doesn't need it.
+    """
+    loop = loop or asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, app.request_shutdown)
+        except (NotImplementedError, AttributeError, RuntimeError):
+            # Windows' ProactorEventLoop has no add_signal_handler. signal.signal
+            # runs the handler on the main thread between bytecodes, so hop back
+            # onto the loop thread-safely.
+            try:
+                signal.signal(
+                    sig, lambda *_: loop.call_soon_threadsafe(app.request_shutdown)
+                )
+            except (ValueError, OSError, RuntimeError) as e:
+                # Not the main thread, or the signal isn't supported here.
+                logger.warning(f"Could not install a handler for {sig!r}: {e}")
+
+
 async def main() -> None:
     """Main asynchronous function to initialize and run the application."""
     logger.info("Starting application...")
@@ -386,13 +419,19 @@ async def main() -> None:
     # 9. Register background daemons — legacy SQLite L1→L2 consolidation only
     if SEMANTIC_BACKEND == "sqlite":
         consolidator = MemoryConsolidator(memory_manager, text_engine, embedding_service)
-        app.register_task("memory_consolidator", consolidator.start_daemon(check_interval_seconds=3600))
+        app.register_task(
+            "memory_consolidator",
+            consolidator.start_daemon(check_interval_seconds=3600),
+            stop=consolidator.stop,
+            drain_timeout=MemoryConsolidator.DRAIN_TIMEOUT_SECONDS,
+        )
 
     # 10. Optionally update the model list on startup
     if UPDATE_MODELS_ON_STARTUP:
         app.register_task("model_update", update_models_and_sync_bot(bot))
 
     # 11. Run everything (auto_start agents + interface tasks)
+    _install_shutdown_handlers(app)
     try:
         await app.start()
     finally:

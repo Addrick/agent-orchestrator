@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import numpy as np
 from datetime import datetime, timezone
@@ -22,25 +23,65 @@ SUMMARIZER_PERSONA_NAME = 'memory_summarizer'
 
 logger = logging.getLogger(__name__)
 
+
 class MemoryConsolidator:
+    """Legacy SQLite L1→L2 memory consolidation daemon.
+
+    Single-use: `stop()` is terminal. `_shutdown_event` is never cleared, so a
+    consolidator that has been stopped will not run again — `start_daemon()`
+    returns immediately. That is deliberate (a stop that arrives before the
+    daemon launches must still take effect); to restart consolidation,
+    construct a fresh instance, the way `AgentManager.restart_agent` does.
+    """
+
+    #: One unit of work here is `_compress_cluster`: a generation against a 31B
+    #: summarizer plus an embedding call plus the transaction, which routinely
+    #: outruns AppManager's default 30s drain window. A drain shorter than one
+    #: work item expires mid-LLM-call and cancels the task anyway, which is the
+    #: exact outcome the drain exists to prevent — so register with this (DP-304).
+    DRAIN_TIMEOUT_SECONDS: float = 300.0
+
     def __init__(self, memory_manager: MemoryManager, text_engine: TextEngine, embedding_service: EmbeddingService):
         self.memory_manager = memory_manager
         self.text_engine = text_engine
         self.embedding_service = embedding_service
         self.similarity_threshold = 0.90  # Strict Topic Isolation (prevents Hardware merging with Wagyu/Jury)
+        # Mirrors the Agent base-class pattern (src/agents/base.py): the daemon
+        # waits on this instead of a bare sleep, so shutdown costs one work item
+        # rather than one interval (DP-304).
+        self._shutdown_event = asyncio.Event()
+
+    def stop(self) -> None:
+        """Signal the daemon to exit at its next checkpoint. Terminal — see the
+        class docstring; a stopped consolidator cannot be restarted."""
+        self._shutdown_event.set()
+
+    async def _wait_for_next_cycle(self, check_interval_seconds: int) -> None:
+        """Sleep until the interval elapses or shutdown is signalled.
+
+        Its own method so tests can observe the interval by patching *this
+        instance*, rather than patching the module-global `asyncio.wait_for`
+        and intercepting every other coroutine sharing the loop (DP-304).
+        """
+        try:
+            await asyncio.wait_for(
+                self._shutdown_event.wait(), timeout=check_interval_seconds
+            )
+        except asyncio.TimeoutError:
+            pass
 
     async def start_daemon(self, check_interval_seconds: int = 3600) -> None:
-        """Infinite loop to periodically consolidate memory across all active channels."""
+        """Periodically consolidate memory across all active channels until stopped."""
         logger.info(f"MemoryConsolidator daemon started (interval: {check_interval_seconds}s)")
-        while True:
+        while not self._shutdown_event.is_set():
             try:
                 await self._run_global_consolidation()
             except Exception as e:
                 err_str = str(e)
                 is_transient = "500" in err_str or "InternalServerError" in err_str or "INTERNAL" in err_str
                 logger.error(f"Error in MemoryConsolidator loop: {e}", exc_info=not is_transient)
-            import asyncio
-            await asyncio.sleep(check_interval_seconds)
+            await self._wait_for_next_cycle(check_interval_seconds)
+        logger.info("MemoryConsolidator daemon stopped.")
 
     async def _run_global_consolidation(self) -> None:
         with self.memory_manager._lock:
@@ -58,6 +99,11 @@ class MemoryConsolidator:
             return
 
         for t in targets:
+            # Drain checkpoint: finish the target in flight, then exit rather
+            # than being cancelled mid-write (DP-304).
+            if self._shutdown_event.is_set():
+                logger.info("MemoryConsolidator: shutdown signalled, stopping between targets.")
+                return
             # Persona for DB lookup (the actual stored persona_name)
             target_persona_name = t['persona_name']
             # Separate LLM persona for text generation — uses the memory_summarizer model
@@ -141,6 +187,11 @@ class MemoryConsolidator:
         logger.info(f"consolidate_memory: formed {len(clusters)} cluster(s) for {target_persona_name}/{channel}")
         
         for cluster in clusters:
+            # One cluster compression is the unit of work: an LLM call plus the
+            # summary writes. Exit between clusters, never inside one (DP-304).
+            if self._shutdown_event.is_set():
+                logger.info("MemoryConsolidator: shutdown signalled, stopping between clusters.")
+                return
             try:
                 await self._compress_cluster(cluster, llm_persona, channel, server_id)
             except Exception as e:
