@@ -173,3 +173,43 @@ async def test_chat_system_audit_decision_denied(chat_system, mem_manager):
     assert "Human denied" in row['reason']
     meta = json.loads(row['metadata'])
     assert meta['turn_tainted'] is True
+
+
+@pytest.mark.asyncio
+async def test_audit_decision_metadata_carries_no_raw_write_call(
+        chat_system, mem_manager):
+    """The decision row describes the write without re-serializing the raw call.
+
+    `write_calls` used to duplicate the tool name and arguments that
+    `audit_info["actions"]` already carries, differing only in being
+    unredacted. The sink scrubs now, so this is defence in depth — but the
+    reviewable content must survive the field's removal, which is what the
+    audit_info and call_id assertions below pin.
+    """
+    audit_info = {"actions": [{"tool": "write_tool",
+                               "arguments": {"title": "t"},
+                               "irreversible": False}]}
+    token = _seed_park(chat_system, audit_info)
+    chat_system.personas["test_p"] = Persona("test_p", "model", "prompt")
+
+    chat_system.tool_manager.execute_tool = AsyncMock(return_value={"ok": True})
+    chat_system.text_engine.generate_response = AsyncMock(
+        return_value=({"content": "Done"}, {}))
+
+    await chat_system.resolve_park("user_id", "test_p", token, approved=True)
+
+    cursor = mem_manager._get_connection().cursor()
+    cursor.execute(
+        "SELECT * FROM Audit_Log WHERE event_type = 'audit_decision'"
+    )
+    row = cursor.fetchone()
+    assert row is not None
+    meta = json.loads(row['metadata'])
+
+    assert "write_calls" not in meta
+    # Everything the removed field contributed is still reachable.
+    assert meta['audit_info']['actions'][0]['tool'] == "write_tool"
+    assert meta['audit_info']['actions'][0]['arguments'] == {"title": "t"}
+    # `call_id` replaces the raw call's only unique field, and is what ties the
+    # row to the patched tool_context entry.
+    assert meta['call_id'] == "c1"

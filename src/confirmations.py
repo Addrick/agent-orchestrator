@@ -219,11 +219,23 @@ class ConfirmationManager:
             reason=(decision.note or
                     ("Human approved tool execution" if decision.approved
                      else "Human denied tool execution")),
+            # No raw `write_call` here. It carried the tool name and arguments
+            # a second time — `audit_info["actions"][0]` already has both, plus
+            # the irreversibility / sensitivity / enrichment / taint flags that
+            # make the row reviewable. The only field the raw copy added was the
+            # provider call id, kept below as `call_id` for correlation with the
+            # patched tool_context entry.
+            #
+            # It existed because it was the *execution* payload, not because the
+            # audit needed it. The sink scrubs now either way, so this is
+            # defence in depth rather than the fix — but a field whose only
+            # distinguishing property was "unredacted" should not be written to
+            # a permanent store at all.
             metadata={
-                "write_calls": [park.write_call],
                 "audit_info": park.audit_info,
                 "turn_tainted": park.turn_tainted,
                 "token": park.token,
+                "call_id": park.call_id,
                 "executed_ok": decision.ok,
             },
         )
