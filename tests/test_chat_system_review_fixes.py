@@ -14,12 +14,14 @@ written to FAIL against the unpatched code, then pass once fixed:
 Uses the shared `chat_system_with_mocks` fixture from tests/test_chat_system.py.
 """
 
+import asyncio
 import logging
 
 import pytest
 
 from config.global_config import MAX_CACHED_API_REQUESTS
 from src.chat_system import ResponseType
+from src.confirmations import Decision
 from src.request_builder import RequestContext
 from src.persona import Persona, ExecutionMode
 
@@ -560,3 +562,157 @@ def test_nudge_stays_clean_when_the_patch_succeeded():
         [Decision(park=parked, approved=True, ok=True, patched=True)])
     assert "could not be updated" not in nudge
     assert "approved and executed" in nudge
+
+
+# --- DP-297 review #5: one failing decision must not strand its siblings ----
+
+@pytest.mark.asyncio
+async def test_a_failing_apply_does_not_discard_the_rest_of_the_batch(
+        chat_system_with_mocks):
+    """drain() has already popped every decision from _queued and take() has
+    already removed every park, so a single try around the whole loop left the
+    un-applied ones in no structure at all — the operator's approval simply
+    evaporated, with no execution, no patch and no audit."""
+    from src.confirmations import ParkedWrite, new_token
+    system, *_ = chat_system_with_mocks
+    parks = [
+        ParkedWrite(
+            token=new_token(),
+            write_call={"id": f"c{i}", "name": f"tool_{i}", "arguments": {}},
+            audit_info={"actions": []}, confirmation_text="?",
+            user_identifier="u", persona_name="test_persona",
+        )
+        for i in range(3)
+    ]
+    for p in parks:
+        system.confirmations.park(p)
+
+    real_apply = system.confirmations.apply
+    seen = []
+
+    async def flaky_apply(decision):
+        seen.append(decision.park.write_call["name"])
+        if decision.park.write_call["name"] == "tool_1":
+            raise RuntimeError("patch blew up after the tool already ran")
+        await real_apply(decision)
+
+    system.confirmations.apply = flaky_apply
+
+    async for _ in system.stream_resolve_park(
+            "u", "test_persona", parks[0].token, approved=True):
+        pass
+    # tokens 1 and 2 arrive while the first holds the lock
+    for p in parks[1:]:
+        system.confirmations.enqueue(
+            Decision(park=p, approved=True))
+    async for _ in system.stream_resolve_park(
+            "u", "test_persona", parks[1].token, approved=True):
+        pass
+
+    assert "tool_2" in seen, (
+        "tool_2 was approved and must still be applied even though tool_1 "
+        "raised"
+    )
+
+
+# --- DP-297 review #10: expiry must not do SQLite on the event loop ---------
+
+@pytest.mark.asyncio
+async def test_list_for_does_no_database_work_on_the_event_loop(
+        chat_system_with_mocks):
+    """`list_for` runs mid-token-stream and inside the SSE routes; `park` runs
+    once per gated write. Both used to sweep inline, so one day-old park meant
+    a synchronous SELECT + UPDATE + INSERT on the loop, stalling every other
+    stream. The eviction must stay synchronous (it has to be atomic, like
+    `take`) but its DB half must not."""
+    import time
+    from config.global_config import PENDING_ACTION_TTL
+    from src.confirmations import ParkedWrite, new_token
+    system, mm, _, _, _ = chat_system_with_mocks
+    stale = ParkedWrite(
+        token=new_token(), write_call={"id": "c1", "name": "t"},
+        audit_info={}, confirmation_text="", user_identifier="u",
+        persona_name="test_persona",
+        created_at=time.time() - PENDING_ACTION_TTL - 10,
+    )
+    system.confirmations.pending[stale.token] = stale
+    system.confirmations._by_key[("u", "test_persona")] = [stale.token]
+    mm.reset_mock()
+
+    live = system.confirmations.list_for("u", "test_persona")
+
+    # Evicted synchronously...
+    assert live == []
+    assert system.confirmations.pending == {}
+    # ...but nothing touched the DB before returning to the caller.
+    mm.get_tool_context.assert_not_called()
+    mm.set_tool_context.assert_not_called()
+    mm.log_audit_event.assert_not_called()
+    # The DB half is real, just deferred.
+    while system.confirmations._sweep_tasks:
+        await asyncio.gather(*list(system.confirmations._sweep_tasks))
+    assert mm.log_audit_event.called
+
+
+@pytest.mark.asyncio
+async def test_sweep_off_thread_still_patches_and_audits(
+        chat_system_with_mocks):
+    """Deferring the DB half must not drop it — the expired entry still has to
+    stop reading `awaiting_human_approval`."""
+    import time
+    from config.global_config import PENDING_ACTION_TTL
+    from src.confirmations import ParkedWrite, new_token
+    system, mm, _, _, _ = chat_system_with_mocks
+    stale = ParkedWrite(
+        token=new_token(), write_call={"id": "c1", "name": "t"},
+        audit_info={}, confirmation_text="", user_identifier="u",
+        persona_name="test_persona",
+        created_at=time.time() - PENDING_ACTION_TTL - 10,
+    )
+    system.confirmations.pending[stale.token] = stale
+
+    system.confirmations._sweep_off_thread()
+    # Drain the scheduled task rather than sleeping on a duration.
+    while system.confirmations._sweep_tasks:
+        await asyncio.gather(*list(system.confirmations._sweep_tasks))
+
+    kinds = [c.kwargs.get("event_type")
+             for c in mm.log_audit_event.call_args_list]
+    assert "audit_park_expired" in kinds
+
+
+# --- DP-297 review #11: aclose() mid-stream must free the conversation lock --
+
+@pytest.mark.asyncio
+async def test_aclose_mid_stream_releases_the_conversation_lock(
+        chat_system_with_mocks):
+    """`stream_resolve_park` holds the per-conversation lock across the whole
+    continuation turn. The /confirm relay returns on client disconnect, so it
+    must `aclose()` the generator — this pins the other half: that aclose()
+    actually frees the lock, rather than leaving it held until the asyncgen
+    finalizer eventually runs."""
+    from src.confirmations import ParkedWrite, new_token
+    system, _, text_engine_mock, _, _ = chat_system_with_mocks
+    parked = ParkedWrite(
+        token=new_token(),
+        write_call={"id": "c1", "name": "update_ticket", "arguments": {}},
+        audit_info={"actions": []}, confirmation_text="?",
+        user_identifier="u", persona_name="test_persona",
+    )
+    system.confirmations.park(parked)
+    text_engine_mock.generate_response.return_value = (
+        {'type': 'text', 'content': 'Done.'}, {})
+
+    key = ("u", "test_persona")
+    agen = system.stream_resolve_park(
+        "u", "test_persona", parked.token, approved=True)
+    await agen.__anext__()   # suspend inside the locked region
+    assert system.confirmations.lock_for(key).locked(), (
+        "precondition: the generator should be holding the lock here"
+    )
+
+    await agen.aclose()
+
+    assert not system.confirmations.lock_for(key).locked(), (
+        "an abandoned generator must not strand the conversation lock"
+    )

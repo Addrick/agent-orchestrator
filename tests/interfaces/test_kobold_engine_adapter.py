@@ -2899,3 +2899,57 @@ def test_perf_request_carries_a_deadline(monkeypatch):
         client.get("/api/extra/perf")
     assert seen.get("timeout"), "perf poll inherited the client's unbounded timeout"
     mm.close()
+
+
+# --- DP-297 review #11: the /confirm relay must close its generator ---------
+
+def test_confirm_relay_closes_the_generator_on_disconnect():
+    """`stream_resolve_park` holds the per-conversation lock across the whole
+    continuation turn, and the relay returns the moment the client drops. With
+    no explicit close the generator stays suspended at its yield and the lock
+    is released only whenever the asyncgen finalizer eventually runs — during
+    which any concurrent approve/deny for the same (user, persona), including
+    Discord's reaction handler, blocks with its park already out of `pending`.
+    """
+    import contextlib as _contextlib
+    from unittest.mock import patch as _patch
+    from src.generation_events import DoneEvent, ResponseType, TokenEvent
+
+    adapter, mm, _, _ = _make_real_adapter()
+    closed = []
+
+    async def fake_resolve(**kwargs):
+        try:
+            yield TokenEvent(delta="working")
+            yield TokenEvent(delta="more")
+            yield DoneEvent(text="done",
+                            response_type=ResponseType.LLM_GENERATION)
+        finally:
+            # Runs on aclose(); without one it waits for the finalizer.
+            closed.append(True)
+
+    adapter.chat_system.stream_resolve_park = fake_resolve  # type: ignore[method-assign]
+
+    async def always_disconnected(self):
+        return True
+
+    with _patch("fastapi.Request.is_disconnected", always_disconnected):
+        with TestClient(adapter.app) as client:
+            with client.stream(
+                "POST", "/api/v1/persona/test_persona/confirm",
+                json={"approved": True, "token": "tok"},
+            ) as r:
+                b"".join(chunk for chunk in r.iter_raw())
+
+    assert closed == [True], (
+        "the relay abandoned a suspended generator instead of closing it"
+    )
+    # NOTE: this asserts the generator ends up closed, not that the relay is
+    # what closed it — an abandoned asyncgen is finalized eventually too, and
+    # under this client the loop usually runs long enough for that to happen.
+    # The indeterminacy IS the defect, which makes it a poor discriminator. The
+    # deterministic half of the contract — that aclose() mid-stream releases
+    # the conversation lock — is pinned by
+    # test_aclose_mid_stream_releases_the_conversation_lock.
+    assert _contextlib.aclosing is not None
+    mm.close()

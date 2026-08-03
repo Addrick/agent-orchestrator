@@ -308,15 +308,32 @@ async def _post_pending_proposals(
             continue
         try:
             confirm_msg = await channel.send(park.confirmation_text)
-            await confirm_msg.add_reaction('✅')
-            await confirm_msg.add_reaction('❌')
         except discord.HTTPException as e:
             logger.error(f"Failed to post proposal {park.token}: {e}")
             continue
+
+        # Register BEFORE the reactions. The send is what makes the proposal
+        # visible; the reactions are only the affordance on top of it. A single
+        # try around all three (the original shape) meant a bot lacking "Add
+        # Reactions" — a routine permission gap — posted the confirmation text
+        # and then skipped both the id→token mapping and the rendered mark. The
+        # operator got a message they could not answer, any reaction they added
+        # by hand was ignored, and `list_for` re-posted the same proposal on
+        # every later turn for the full 24h TTL.
         _confirm_registry[confirm_msg.id] = (
             park.token, user_identifier, persona_name,
         )
         _rendered_park_tokens.add(park.token)
+
+        try:
+            await confirm_msg.add_reaction('✅')
+            await confirm_msg.add_reaction('❌')
+        except discord.HTTPException as e:
+            logger.error(
+                f"Posted proposal {park.token} but could not add its "
+                f"reactions ({e}); the operator must react manually or "
+                f"resolve it from another surface.",
+            )
 
 
 def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:

@@ -836,28 +836,45 @@ class ChatSystem:
                 # this decision in and acted on it. Nothing left to do.
                 return
 
-            try:
-                # Re-drain after each round. Acquiring an uncontended
-                # asyncio.Lock does not suspend, so the winner of a race gets
-                # here before the loser has even enqueued — draining once would
-                # leave the loser to run a second continuation over the same
-                # history. Looping until the queue is empty is what actually
-                # folds a flurry of approvals into one summary.
-                while batch:
-                    for decision in batch:
+            # Re-drain after each round. Acquiring an uncontended asyncio.Lock
+            # does not suspend, so the winner of a race gets here before the
+            # loser has even enqueued — draining once would leave the loser to
+            # run a second continuation over the same history. Looping until
+            # the queue is empty is what actually folds a flurry of approvals
+            # into one summary.
+            failed: List[str] = []
+            while batch:
+                for decision in batch:
+                    # Isolated per decision. A single try around the whole loop
+                    # abandoned every un-applied sibling: drain() had already
+                    # popped them from _queued and take() had already removed
+                    # their parks, so they existed in no structure at all and
+                    # the operator's approval simply evaporated. One decision
+                    # that cannot be applied must not silently discard the rest.
+                    try:
                         await self.confirmations.apply(decision)
-                        applied.append(decision)
-                    batch = self.confirmations.drain(key)
-            except Exception as e:
-                err_id, err_msg = format_internal_error(
-                    e, scrub=get_scrubber().scrub,
-                )
-                logger.error(
-                    f"[err {err_id}] Error applying approval decision for "
-                    f"{user_identifier}: {e}", exc_info=True,
-                )
+                    except Exception as e:
+                        err_id, _ = format_internal_error(
+                            e, scrub=get_scrubber().scrub,
+                        )
+                        logger.error(
+                            f"[err {err_id}] Error applying approval decision "
+                            f"for {user_identifier}: {e}", exc_info=True,
+                        )
+                        decision.patched = False
+                        failed.append(
+                            decision.park.write_call.get("name") or "action")
+                    applied.append(decision)
+                batch = self.confirmations.drain(key)
+
+            if failed and not any(d.patched for d in applied):
+                # Nothing survived — there is no outcome for a continuation to
+                # report, so say so directly rather than asking the model to
+                # summarize an empty result set.
                 yield ErrorEvent(
-                    message=f"Error processing the confirmed action. {err_msg}",
+                    message="Error processing the confirmed action"
+                            f"{'s' if len(failed) > 1 else ''}: "
+                            f"{', '.join(failed)}.",
                 )
                 return
 

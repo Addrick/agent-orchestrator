@@ -17,7 +17,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from config.global_config import PENDING_ACTION_TTL
 from src.memory.memory_manager import MemoryManager
@@ -143,6 +143,8 @@ class ConfirmationManager:
         # One lock per conversation. Serializes execute -> patch -> continue, so
         # two fast approvals cannot run two tool loops over the same history.
         self._locks: Dict[ConversationKey, asyncio.Lock] = {}
+        # In-flight off-loop expiry sweeps, held so they are not GC'd.
+        self._sweep_tasks: Set["asyncio.Task[None]"] = set()
 
     # ---- store -----------------------------------------------------------
 
@@ -153,7 +155,7 @@ class ConfirmationManager:
         conversation is a sibling, not a replacement, so the
         `audit_parked_evicted` event this used to emit no longer exists.
         """
-        self.sweep_expired()
+        self._sweep_off_thread()
         self.pending[parked.token] = parked
         self._by_key.setdefault(parked.key, []).append(parked.token)
         self.memory_manager.log_audit_event(
@@ -189,7 +191,7 @@ class ConfirmationManager:
     def list_for(self, user_identifier: str,
                  persona_name: str) -> List[ParkedWrite]:
         """Live parks for one conversation, oldest first."""
-        self.sweep_expired()
+        self._sweep_off_thread()
         return [
             self.pending[t]
             for t in self._by_key.get((user_identifier, persona_name), [])
@@ -381,17 +383,53 @@ class ConfirmationManager:
         operator walked away is noise. The patched entry is enough — the model
         sees the outcome next time it speaks.
         """
-        now = time.time() if now is None else now
-        stale = [t for t, p in self.pending.items()
-                 if now - p.created_at > PENDING_ACTION_TTL]
-        for token in stale:
-            parked = self.take(token)
-            if parked is None:
-                continue
+        stale = self._take_expired(now)
+        for parked in stale:
             self.expire(parked, f"No decision within {PENDING_ACTION_TTL}s")
+        return len(stale)
+
+    def _take_expired(self, now: Optional[float] = None) -> List[ParkedWrite]:
+        """Remove every past-TTL park from the store. Pure in-memory.
+
+        Split out from the DB half so the hot paths (`park`, `list_for`) can
+        evict synchronously — which must stay atomic, like `take` — without
+        also running SELECT + UPDATE + INSERT inline. Those calls sit inside
+        the token stream and the SSE routes, where a single day-old park was
+        enough to stall every other stream on the loop.
+        """
+        now = time.time() if now is None else now
+        tokens = [t for t, p in self.pending.items()
+                  if now - p.created_at > PENDING_ACTION_TTL]
+        stale = [p for p in (self.take(t) for t in tokens) if p is not None]
         if stale:
             logger.info("Expired %d unanswered gated write(s)", len(stale))
-        return len(stale)
+        return stale
+
+    def _sweep_off_thread(self) -> None:
+        """Evict expired parks now; do their DB writes off the event loop.
+
+        Fire-and-forget by design — an expiry fires no continuation, so nothing
+        downstream waits on the patch. Falls back to inline when there is no
+        running loop (sync callers, tests).
+        """
+        stale = self._take_expired()
+        if not stale:
+            return
+        reason = f"No decision within {PENDING_ACTION_TTL}s"
+
+        def _finish() -> None:
+            for parked in stale:
+                self.expire(parked, reason)
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            _finish()
+            return
+        task = loop.create_task(asyncio.to_thread(_finish))
+        # Hold a reference: a bare create_task can be GC'd mid-flight.
+        self._sweep_tasks.add(task)
+        task.add_done_callback(self._sweep_tasks.discard)
 
     def expire(self, parked: ParkedWrite, reason: str) -> None:
         """Terminate an already-taken park as expired: patch, then audit.

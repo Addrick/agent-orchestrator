@@ -390,3 +390,73 @@ async def test_on_message_succeeds_despite_typing_429(
     # The bot should still have generated and sent a response
     mock_chat_system.generate_response.assert_called_once()
     mock_message.channel.send.assert_called_once_with("**vocal:** Hello!")
+
+# --- DP-297 review #7: a proposal posted but not registered is unanswerable --
+
+@pytest.mark.asyncio
+async def test_reaction_failure_still_registers_the_proposal():
+    """A bot lacking "Add Reactions" is a routine permission gap. One try around
+    send + both add_reaction calls meant the confirmation text was posted while
+    the id->token mapping and the rendered mark were both skipped: the operator
+    got a message they could not answer, any manual reaction was ignored, and
+    `list_for` re-posted the same proposal on every later turn for the full 24h
+    TTL — into whatever channel that (user, persona) spoke in next."""
+    from src.interfaces import discord_bot as db
+    from src.confirmations import ParkedWrite, new_token
+
+    park = ParkedWrite(
+        token=new_token(),
+        write_call={"id": "c1", "name": "update_ticket", "arguments": {}},
+        audit_info={}, confirmation_text="Run update_ticket?",
+        user_identifier="u", persona_name="p",
+    )
+    chat_system = MagicMock()
+    chat_system.confirmations.list_for.return_value = [park]
+
+    confirm_msg = MagicMock()
+    confirm_msg.id = 4242
+    confirm_msg.add_reaction = AsyncMock(side_effect=_make_http_exc(403))
+    channel = MagicMock()
+    channel.send = AsyncMock(return_value=confirm_msg)
+
+    db._confirm_registry.clear()
+    db._rendered_park_tokens.clear()
+    try:
+        await db._post_pending_proposals(chat_system, channel, "u", "p")
+
+        assert db._confirm_registry.get(4242) == (park.token, "u", "p")
+        assert park.token in db._rendered_park_tokens, (
+            "an unmarked token is re-posted on every turn until it expires"
+        )
+    finally:
+        db._confirm_registry.clear()
+        db._rendered_park_tokens.clear()
+
+
+@pytest.mark.asyncio
+async def test_send_failure_registers_nothing():
+    """The send is what makes a proposal visible, so if IT fails there is
+    nothing to map a reaction back to and the token must stay unrendered so a
+    later turn retries it."""
+    from src.interfaces import discord_bot as db
+    from src.confirmations import ParkedWrite, new_token
+
+    park = ParkedWrite(
+        token=new_token(), write_call={"id": "c1", "name": "update_ticket"},
+        audit_info={}, confirmation_text="?", user_identifier="u",
+        persona_name="p",
+    )
+    chat_system = MagicMock()
+    chat_system.confirmations.list_for.return_value = [park]
+    channel = MagicMock()
+    channel.send = AsyncMock(side_effect=_make_http_exc(403))
+
+    db._confirm_registry.clear()
+    db._rendered_park_tokens.clear()
+    try:
+        await db._post_pending_proposals(chat_system, channel, "u", "p")
+        assert db._confirm_registry == {}
+        assert db._rendered_park_tokens == set()
+    finally:
+        db._confirm_registry.clear()
+        db._rendered_park_tokens.clear()

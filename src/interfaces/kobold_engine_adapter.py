@@ -784,16 +784,26 @@ class KoboldEngineAdapter:
                 )
 
             async def relay() -> AsyncIterator[bytes]:
-                async for ev in self._stream_resolve_park(
+                # `aclosing` is load-bearing here, not hygiene. The generator
+                # holds the per-conversation lock across the entire
+                # continuation turn, and this loop returns on client
+                # disconnect. Without an explicit close the generator stays
+                # suspended at its yield, so the lock is released only whenever
+                # the asyncgen finalizer eventually runs — and any concurrent
+                # approve/deny for the same (user, persona), including
+                # Discord's reaction handler, blocks for that indeterminate
+                # window with its park already out of `pending`.
+                async with contextlib.aclosing(self._stream_resolve_park(
                     user_identifier="portal",
                     persona_name=name,
                     token=token,
                     approved=approved,
-                ):
-                    if await request.is_disconnected():
-                        return
-                    for _label, frame in self._event_to_sse(ev):
-                        yield frame
+                )) as agen:
+                    async for ev in agen:
+                        if await request.is_disconnected():
+                            return
+                        for _label, frame in self._event_to_sse(ev):
+                            yield frame
 
             return StreamingResponse(
                 relay(),
