@@ -80,6 +80,13 @@ def _render_resolution_nudge(batch: List[Decision]) -> str:
             lines.append(f"- approved and executed: {tool_name}")
         else:
             lines.append(f"- approved but FAILED: {tool_name}")
+        if not decision.patched:
+            # History still reads `awaiting_human_approval` for this call, so
+            # the model is about to see its own proposal as pending and would
+            # otherwise report the wrong thing. The nudge is ephemeral, but it
+            # is the only channel left once the durable one has failed.
+            lines[-1] += (" (its history entry could not be updated — trust "
+                          "this line, not the tool context)")
     verb = "action" if len(lines) == 1 else "actions"
     return (
         f"[The operator reviewed {len(lines)} pending {verb}:]\n"
@@ -795,8 +802,8 @@ class ChatSystem:
             return
 
         if self.confirmations.is_expired(parked):
-            self.confirmations.patch_parked_entry(
-                parked, "expired", {"reason": "expired before review"},
+            self.confirmations.expire(
+                parked, "Operator answered after the TTL had passed",
             )
             yield DoneEvent(
                 text="That action expired before it was reviewed.",
@@ -805,6 +812,12 @@ class ChatSystem:
             return
 
         if parked.persona_name not in self.personas:
+            # Same restore as the wrong-conversation branch above: `take()` has
+            # already removed it, and dropping it here would destroy both the
+            # proposal and the operator's decision with no audit trail, leaving
+            # its history entry reading `awaiting_human_approval` forever with
+            # no park left for the duplicate guard to match against.
+            self.confirmations.restore(parked)
             yield DoneEvent(
                 text="Error: Persona not found.",
                 response_type=ResponseType.DEV_COMMAND,

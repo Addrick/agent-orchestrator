@@ -143,6 +143,7 @@ def write_call_identity(call: Dict[str, Any]) -> Tuple[str, str]:
         args = f"<unserializable:{uuid.uuid4().hex}>"
     return (name, args)
 
+
 # Reasons a tool call can be left without a real result when the turn ends.
 # (There is no awaiting-approval reason: since DP-297 a parked write is
 # answered inline with a real synthetic result, so it is never unanswered at

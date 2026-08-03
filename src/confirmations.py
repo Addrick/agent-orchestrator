@@ -93,6 +93,13 @@ class Decision:
     note: Optional[str] = None
     result: Any = None
     ok: bool = False
+    # False when `patch_parked_entry` could not rewrite the history entry, so
+    # durable history still reads `awaiting_human_approval` for a write that
+    # already ran. `apply()` used to discard that return, leaving only a
+    # WARNING — the continuation then read its own proposal as still pending
+    # and summarized the wrong outcome, which is precisely what the
+    # execute-then-patch ordering exists to prevent.
+    patched: bool = True
 
     @property
     def status(self) -> str:
@@ -273,7 +280,16 @@ class ConfirmationManager:
                 "executed_ok": decision.ok,
             },
         )
-        self.patch_parked_entry(park, decision.status, decision.result)
+        decision.patched = self.patch_parked_entry(
+            park, decision.status, decision.result,
+        )
+        if not decision.patched:
+            logger.error(
+                "History entry for %s (token %s) could not be patched; the "
+                "write already ran and durable history still reads pending. "
+                "Audit row carries the real outcome (executed_ok=%s).",
+                tool_name, park.token, decision.ok,
+            )
 
     def patch_parked_entry(self, park: ParkedWrite, status: str,
                            result: Any) -> bool:
@@ -372,19 +388,31 @@ class ConfirmationManager:
             parked = self.take(token)
             if parked is None:
                 continue
-            self.patch_parked_entry(parked, PARK_STATUS_EXPIRED,
-                                    {"reason": "expired before review"})
-            self.memory_manager.log_audit_event(
-                event_type="audit_park_expired",
-                operator_id=parked.user_identifier,
-                prior_state="pending",
-                new_state=PARK_STATUS_EXPIRED,
-                reason=f"No decision within {PENDING_ACTION_TTL}s",
-                metadata=parked.audit_info,
-            )
+            self.expire(parked, f"No decision within {PENDING_ACTION_TTL}s")
         if stale:
             logger.info("Expired %d unanswered gated write(s)", len(stale))
         return len(stale)
+
+    def expire(self, parked: ParkedWrite, reason: str) -> None:
+        """Terminate an already-taken park as expired: patch, then audit.
+
+        Shared by the lazy sweep and the resolve path. The click path used to
+        inline the patch with a hardcoded "expired" and log nothing, which made
+        it the only park-terminating path leaving no audit trail — so the fact
+        that a human actually tried to approve an expired irreversible action
+        was recorded nowhere, and its writer was decoupled from the constant
+        every other consumer keys off.
+        """
+        self.patch_parked_entry(parked, PARK_STATUS_EXPIRED,
+                                {"reason": "expired before review"})
+        self.memory_manager.log_audit_event(
+            event_type="audit_park_expired",
+            operator_id=parked.user_identifier,
+            prior_state="pending",
+            new_state=PARK_STATUS_EXPIRED,
+            reason=reason,
+            metadata=parked.audit_info,
+        )
 
     def is_expired(self, parked: ParkedWrite,
                    now: Optional[float] = None) -> bool:

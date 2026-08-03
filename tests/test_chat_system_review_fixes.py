@@ -443,3 +443,120 @@ def test_register_parks_drops_parks_when_the_row_is_missing(
     assert system.confirmations.pending == {}
     assert parked.token not in system.confirmations.pending
     assert "dropping" in caplog.text
+
+
+# --- DP-297 review #4/#13: the pre-apply guards in stream_resolve_park -------
+
+@pytest.mark.asyncio
+async def test_missing_persona_restores_the_park(chat_system_with_mocks):
+    """`take()` has already claimed the park by the time this guard runs. The
+    wrong-conversation branch above it restores; this one dropped the object on
+    the floor, destroying both the proposal and the operator's decision — the
+    write never ran, and its history entry read `awaiting_human_approval`
+    forever with no park left for the duplicate guard to match."""
+    from src.confirmations import ParkedWrite, new_token
+    system, *_ = chat_system_with_mocks
+    parked = ParkedWrite(
+        token=new_token(),
+        write_call={"id": "c1", "name": "update_ticket", "arguments": {}},
+        audit_info={"actions": []},
+        confirmation_text="update?",
+        user_identifier="u",
+        persona_name="test_persona",
+    )
+    system.confirmations.park(parked)
+    # The persona is renamed / removed while the write sits parked.
+    system.personas = {}
+
+    text, _, _, _ = await system.resolve_park(
+        "u", "test_persona", parked.token, approved=True)
+
+    assert "Persona not found" in text
+    assert system.confirmations.pending.get(parked.token) is parked, (
+        "the park must survive so it is still resolvable once the persona is"
+    )
+
+
+@pytest.mark.asyncio
+async def test_expiry_at_click_audits_like_the_sweep(chat_system_with_mocks):
+    """Clicking approve on a park that aged out past its TTL but was not yet
+    swept is the one park-terminating path that logged nothing — so the fact
+    that a human tried to approve an expired irreversible action was recorded
+    nowhere. It also hardcoded the literal "expired" instead of the constant
+    every other consumer keys off."""
+    import time
+    from config.global_config import PENDING_ACTION_TTL
+    from src.confirmations import ParkedWrite, new_token
+    from src.tools.tool_loop import PARK_STATUS_EXPIRED
+    system, mm, _, _, _ = chat_system_with_mocks
+    parked = ParkedWrite(
+        token=new_token(),
+        write_call={"id": "c1", "name": "update_ticket", "arguments": {}},
+        audit_info={"actions": []},
+        confirmation_text="update?",
+        user_identifier="u",
+        persona_name="test_persona",
+        created_at=time.time() - PENDING_ACTION_TTL - 10,
+    )
+    system.confirmations.pending[parked.token] = parked
+    system.confirmations._by_key.setdefault(
+        ("u", "test_persona"), []).append(parked.token)
+
+    text, _, _, _ = await system.resolve_park(
+        "u", "test_persona", parked.token, approved=True)
+
+    assert "expired" in text
+    kinds = [c.kwargs.get("event_type")
+             for c in mm.log_audit_event.call_args_list]
+    assert "audit_park_expired" in kinds
+    states = [c.kwargs.get("new_state")
+              for c in mm.log_audit_event.call_args_list]
+    assert PARK_STATUS_EXPIRED in states
+
+
+# --- DP-297 review #6: a failed history patch must not be silent ------------
+
+@pytest.mark.asyncio
+async def test_unpatchable_decision_is_stated_in_the_nudge(
+        chat_system_with_mocks):
+    """`patch_parked_entry` returns False on four reachable conditions, and
+    `apply()` discarded that. The write has already run, so the continuation
+    rebuilds history, reads its own proposal as still pending, and summarizes
+    the wrong outcome. The nudge is the only channel left once the durable one
+    failed."""
+    from src.confirmations import Decision, ParkedWrite, new_token
+    from src.chat_system import _render_resolution_nudge
+    system, *_ = chat_system_with_mocks
+    parked = ParkedWrite(
+        token=new_token(),
+        write_call={"id": "c1", "name": "update_ticket", "arguments": {}},
+        audit_info={"actions": []},
+        confirmation_text="update?",
+        user_identifier="u",
+        persona_name="test_persona",
+        parked_assistant_id=None,   # nothing to patch → patch returns False
+    )
+    system.confirmations.park(parked)
+    decision = Decision(park=parked, approved=True)
+
+    await system.confirmations.apply(decision)
+
+    assert decision.patched is False
+    assert "history entry could not be updated" in \
+        _render_resolution_nudge([decision])
+
+
+def test_nudge_stays_clean_when_the_patch_succeeded():
+    """The warning must not appear on the ordinary path — it would train the
+    model to distrust a tool context that is in fact correct."""
+    from src.confirmations import Decision, ParkedWrite, new_token
+    from src.chat_system import _render_resolution_nudge
+    parked = ParkedWrite(
+        token=new_token(), write_call={"id": "c1", "name": "update_ticket"},
+        audit_info={}, confirmation_text="", user_identifier="u",
+        persona_name="p",
+    )
+    nudge = _render_resolution_nudge(
+        [Decision(park=parked, approved=True, ok=True, patched=True)])
+    assert "could not be updated" not in nudge
+    assert "approved and executed" in nudge

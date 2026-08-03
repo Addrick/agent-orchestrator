@@ -45,7 +45,7 @@ from src.chat_system import (
     PendingConfirmationEvent, ResponseType, TokenEvent, ToolCallResultEvent,
     ToolCallStartEvent,
 )
-from src.interfaces.kobold_export import build_kobold_savefile, build_transcript, _parse_tool_context
+from src.interfaces.kobold_export import build_kobold_savefile, build_transcript
 from src.memory.date_extraction import LlmTagger, resolve_ingest_anchor
 from src.origin import Origin
 from src.security.scrubber import get_scrubber

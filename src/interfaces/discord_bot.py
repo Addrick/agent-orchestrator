@@ -13,7 +13,7 @@ from config.global_config import DISCORD_CHAR_LIMIT, DISCORD_STATUS_LIMIT, DISCO
 from src.origin import Origin, is_discord_operator, parse_operator_allowlist
 from src.utils.message_utils import split_string_by_limit
 from src.personas.store import save_personas_to_file
-from src.chat_system import ChatSystem, ResponseType
+from src.chat_system import ChatSystem
 from src.persona import Persona
 from src.self_edit.dispatcher import DispatcherError
 
