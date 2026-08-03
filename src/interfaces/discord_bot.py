@@ -6,14 +6,14 @@ import discord
 import asyncio
 import io
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Optional, List
+from typing import Any, AsyncIterator, Dict, Optional, List, Set, Tuple
 
 from config.global_config import DISCORD_CHAR_LIMIT, DISCORD_STATUS_LIMIT, DISCORD_DEBUG_CHANNEL, \
-    AMBIENT_LOGGING_CHANNELS, GLOBAL_HISTORY_MESSAGES, PENDING_CONFIRMATION_TIMEOUT, OPERATOR_ALLOWLIST
+    AMBIENT_LOGGING_CHANNELS, GLOBAL_HISTORY_MESSAGES, OPERATOR_ALLOWLIST
 from src.origin import Origin, is_discord_operator, parse_operator_allowlist
 from src.utils.message_utils import split_string_by_limit
 from src.personas.store import save_personas_to_file
-from src.chat_system import ChatSystem, ResponseType
+from src.chat_system import ChatSystem
 from src.persona import Persona
 from src.self_edit.dispatcher import DispatcherError
 
@@ -275,6 +275,67 @@ async def _safe_typing(channel: discord.abc.Messageable) -> AsyncIterator[None]:
                 pass
 
 
+# DP-297: message id -> (token, owner user id, persona). Maps an approve/deny
+# reaction back to the exact proposal it belongs to.
+#
+# Before DP-297 a park was answered by an inline `wait_for`, which worked only
+# because at most one park could exist per conversation. With a burst, the
+# message a reaction lands on is the ONLY thing that identifies which proposal
+# the operator meant.
+#
+# In-memory, like the park store itself: both die on restart together, so a
+# stranded button cannot outlive the park it points at.
+_confirm_registry: Dict[int, Tuple[str, str, str]] = {}
+# Tokens already rendered, so re-posting the pending list cannot double up.
+_rendered_park_tokens: Set[str] = set()
+
+
+async def _post_pending_proposals(
+        chat_system: 'ChatSystem',
+        channel: discord.abc.Messageable,
+        user_identifier: str,
+        persona_name: str,
+) -> None:
+    """Post an approve/deny message for each not-yet-rendered gated write."""
+    try:
+        parks = chat_system.confirmations.list_for(user_identifier, persona_name)
+    except Exception as e:
+        logger.error(f"Could not list pending proposals: {e}", exc_info=True)
+        return
+
+    for park in parks:
+        if park.token in _rendered_park_tokens:
+            continue
+        try:
+            confirm_msg = await channel.send(park.confirmation_text)
+        except discord.HTTPException as e:
+            logger.error(f"Failed to post proposal {park.token}: {e}")
+            continue
+
+        # Register BEFORE the reactions. The send is what makes the proposal
+        # visible; the reactions are only the affordance on top of it. A single
+        # try around all three (the original shape) meant a bot lacking "Add
+        # Reactions" — a routine permission gap — posted the confirmation text
+        # and then skipped both the id→token mapping and the rendered mark. The
+        # operator got a message they could not answer, any reaction they added
+        # by hand was ignored, and `list_for` re-posted the same proposal on
+        # every later turn for the full 24h TTL.
+        _confirm_registry[confirm_msg.id] = (
+            park.token, user_identifier, persona_name,
+        )
+        _rendered_park_tokens.add(park.token)
+
+        try:
+            await confirm_msg.add_reaction('✅')
+            await confirm_msg.add_reaction('❌')
+        except discord.HTTPException as e:
+            logger.error(
+                f"Posted proposal {park.token} but could not add its "
+                f"reactions ({e}); the operator must react manually or "
+                f"resolve it from another surface.",
+            )
+
+
 def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
     intents = discord.Intents.default()
     intents.message_content = True
@@ -293,6 +354,68 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
         logger.info(f'Logged in as {client.user}!')
         logger.info(f'Bot is currently in {len(client.guilds)} guilds: {", ".join(guild_names)}')
         await reset_discord_status(client, chat_system)
+
+    @client.event
+    async def on_reaction_add(reaction: discord.Reaction,
+                              user: discord.abc.User) -> None:
+        """Resolve one gated write (DP-297).
+
+        Replaces the inline `wait_for` this used to block on. A global handler
+        is what makes out-of-order approval possible: the reaction carries its
+        own message id, so a proposal from three turns ago is as answerable as
+        the newest one, and nothing has to still be awaiting it.
+        """
+        if user.bot:
+            return
+        entry = _confirm_registry.get(reaction.message.id)
+        if entry is None:
+            return
+        token, owner_id, persona_name = entry
+        # Only the operator who owns the conversation may resolve it.
+        if str(user.id) != owner_id:
+            return
+        emoji = str(reaction.emoji)
+        if emoji not in ('✅', '❌'):
+            return
+
+        # Claim it locally before awaiting anything, so a double-click cannot
+        # start two resolutions. (`ConfirmationManager.take` is the real
+        # guard; this just avoids the wasted round trip and a second reply.)
+        _confirm_registry.pop(reaction.message.id, None)
+        try:
+            await reaction.message.clear_reactions()
+        except discord.HTTPException:
+            pass
+
+        try:
+            async with _safe_typing(reaction.message.channel):
+                final_text, _final_type, final_assistant_id, _ = \
+                    await chat_system.resolve_park(
+                        owner_id, persona_name, token,
+                        approved=(emoji == '✅'),
+                    )
+        except Exception as e:
+            logger.error(f"Error resolving proposal {token}: {e}", exc_info=True)
+            await reaction.message.channel.send(
+                "A critical error occurred resolving that action. "
+                "Please check the logs."
+            )
+            return
+
+        if final_text and final_text.strip():
+            last_reply: Optional[discord.Message] = None
+            for chunk in split_string_by_limit(final_text, DISCORD_CHAR_LIMIT):
+                last_reply = await reaction.message.channel.send(chunk)
+            if last_reply and final_assistant_id is not None:
+                await asyncio.to_thread(
+                    chat_system.memory_manager.update_platform_message_id,
+                    final_assistant_id, str(last_reply.id),
+                )
+
+        # The continuation may itself have proposed more writes.
+        await _post_pending_proposals(
+            chat_system, reaction.message.channel, owner_id, persona_name,
+        )
 
     @client.event
     async def on_message_delete(message: discord.Message) -> None:
@@ -420,45 +543,6 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                     discord_file = discord.File(fp=file_buffer, filename=filename)
                     await message.channel.send("Here is the context dump:", file=discord_file)
 
-                elif response_type == ResponseType.PENDING_CONFIRMATION:
-                    confirm_msg = await message.channel.send(response_text)
-                    await confirm_msg.add_reaction('✅')
-                    await confirm_msg.add_reaction('❌')
-
-                    def reaction_check(reaction: discord.Reaction, user: discord.User) -> bool:
-                        return (user == message.author
-                                and reaction.message.id == confirm_msg.id
-                                and str(reaction.emoji) in ('✅', '❌'))
-
-                    try:
-                        reaction, _ = await client.wait_for(
-                            'reaction_add', timeout=PENDING_CONFIRMATION_TIMEOUT, check=reaction_check
-                        )
-                        approved = str(reaction.emoji) == '✅'
-                    except asyncio.TimeoutError:
-                        approved = False
-                        await confirm_msg.edit(content=response_text + "\n\n*(Confirmation timed out)*")
-
-                    try:
-                        await confirm_msg.clear_reactions()
-                    except discord.HTTPException:
-                        pass
-
-                    async with _safe_typing(message.channel):
-                        final_text, final_type, final_assistant_id, _ = await chat_system.resume_pending_confirmation(
-                            str(message.author.id), active_persona_name, approved=approved
-                        )
-                    if final_text and final_text.strip():
-                        chunks = split_string_by_limit(final_text, DISCORD_CHAR_LIMIT)
-                        last_confirm_reply: Optional[discord.Message] = None
-                        for chunk in chunks:
-                            last_confirm_reply = await message.channel.send(chunk)
-                        if last_confirm_reply and final_assistant_id is not None:
-                            await asyncio.to_thread(
-                                chat_system.memory_manager.update_platform_message_id,
-                                final_assistant_id, str(last_confirm_reply.id)
-                            )
-
                 elif response_text and response_text.strip():
                     persona: Persona = chat_system.personas[active_persona_name]
                     final_reply_text: str = response_text
@@ -475,6 +559,16 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                             chat_system.memory_manager.update_platform_message_id,
                             assistant_id, str(last_reply_message.id)
                         )
+
+                # DP-297: gated writes are posted AFTER the turn's own text,
+                # one message per proposal, and are answered later via
+                # on_reaction_add. The turn does not block on them, so a model
+                # that proposed three writes gets three independently
+                # resolvable dialogs instead of one that supersedes the rest.
+                await _post_pending_proposals(
+                    chat_system, message.channel,
+                    str(message.author.id), active_persona_name,
+                )
                 await reset_discord_status(client, chat_system)
                 return
             except Exception as e:

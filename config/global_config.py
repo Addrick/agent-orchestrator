@@ -82,12 +82,36 @@ UPDATE_MODELS_ON_STARTUP = True
 DISCORD_CHAR_LIMIT = 2000
 DISCORD_STATUS_LIMIT = 128
 
-# Tool use limit to avoid infinite loops
-MAX_TOOL_CALLS = 5
+# Tool use limit to avoid infinite loops. Counts LOOP ITERATIONS, not calls.
+#
+# DP-297 raised this 5 → 10: a gated write no longer ends the turn, so every
+# proposal now costs an iteration that used to be the turn's last. At 5, an
+# ordinary turn (a couple of reads, a couple of proposals, then wrap-up) hit the
+# cap and answered with the "stuck in a loop" text.
+#
+# ⚠️ This does NOT bound how many proposals a turn can emit. One model response
+# may carry any number of write calls and they all park inside a single
+# iteration. That is deliberate — six ticket updates proposed together are one
+# considered plan, not runaway behaviour, and capping them would split a
+# coherent batch for an arbitrary number's sake.
+#
+# What IS bounded is repetition: `tool_loop.write_call_identity` refuses to park
+# a proposal identical to one already awaiting the operator, so a model that
+# ignores the "do not re-submit" instruction cannot turn N iterations into N
+# copies of the same affordance.
+MAX_TOOL_CALLS = 10
 # Max cached API request payloads (for dump commands); FIFO eviction beyond this
 MAX_CACHED_API_REQUESTS = 128
-# Seconds before a pending tool confirmation expires (CONFIRM execution mode)
-PENDING_CONFIRMATION_TIMEOUT = 300
+# Seconds before a gated write expires unanswered.
+#
+# DP-297 raised this 300 → 24h. Parking stopped being a blocking modal the user
+# is staring at (5 minutes was sized for "answer the prompt in front of you")
+# and became a queue an operator works through later.
+#
+# ⚠️ The store is in-memory, so the effective TTL is min(this, process uptime).
+# A multi-day value here is not a promise the system can keep across a restart —
+# closing that gap is the motivation for the durability follow-up.
+PENDING_ACTION_TTL = 24 * 60 * 60
 
 # DP-118: `ingest_path` agent tool — global kill switch + hash-cache location.
 # Set INGEST_PATH_ENABLED=0 to disable the tool everywhere. Per-persona gating

@@ -199,7 +199,7 @@ def build_transcript(
     raw_history: List[Dict[str, Any]],
     *,
     ids_with_versions: Optional[Set[int]] = None,
-    pending: Optional[Dict[str, Any]] = None,
+    pending: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Project DERPR history rows into the DP-130 transcript contract.
 
@@ -219,11 +219,15 @@ def build_transcript(
     `ephemeral=true` (never both, never neither).
 
     `ids_with_versions` marks which interaction ids carry edit/regen archives
-    (drives the chevron affordance). `pending`, when supplied, is the live
-    parked confirmation for this session — appended as a trailing ephemeral
-    chunk (`ephemeral=true`, `interaction_id=null`) carrying its
-    `ephemeral_chunk_id`, so a fresh load can render the awaiting-approval text
-    without a DB row (invariant C3 on the projection side).
+    (drives the chevron affordance). `pending` is the live gated writes for
+    this session — each appended as a trailing ephemeral chunk
+    (`ephemeral=true`, `interaction_id=null`) carrying its
+    `ephemeral_chunk_id`, so a fresh load can render every awaiting-approval
+    affordance without a DB row (invariant C3 on the projection side).
+
+    DP-297 made `pending` a list. It was a single optional dict back when a
+    conversation could hold only one parked write; rendering just one of
+    several now would leave the rest unanswerable after a reload.
     """
     versions = ids_with_versions or set()
     chunks: List[Dict[str, Any]] = []
@@ -248,15 +252,15 @@ def build_transcript(
             "has_versions": iid in versions if iid is not None else False,
         })
 
-    if pending is not None:
+    for park in (pending or []):
         chunks.append({
             "interaction_id": None,
-            "ephemeral_chunk_id": pending.get("ephemeral_chunk_id"),
+            "ephemeral_chunk_id": park.get("ephemeral_chunk_id"),
             "role": "assistant",
-            "content": pending.get("content") or "",
+            "content": park.get("content") or "",
             "ephemeral": True,
             "reasoning": None,
-            "tool_context": pending.get("tool_context"),
+            "tool_context": park.get("tool_context"),
             "has_versions": False,
         })
 

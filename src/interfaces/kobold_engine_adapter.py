@@ -45,9 +45,10 @@ from src.chat_system import (
     PendingConfirmationEvent, ResponseType, TokenEvent, ToolCallResultEvent,
     ToolCallStartEvent,
 )
-from src.interfaces.kobold_export import build_kobold_savefile, build_transcript, _parse_tool_context
+from src.interfaces.kobold_export import build_kobold_savefile, build_transcript
 from src.memory.date_extraction import LlmTagger, resolve_ingest_anchor
 from src.origin import Origin
+from src.security.scrubber import get_scrubber
 from src.stream_engine import CHAT_TEMPLATES
 from src.interfaces.portal_render import render_portal_html
 from src.personas.store import save_personas_to_file
@@ -423,11 +424,11 @@ class KoboldEngineAdapter:
         return self.chat_system.stream_response
 
     @property
-    def _stream_resume_confirmation(
+    def _stream_resolve_park(
         self,
     ) -> Callable[..., AsyncGenerator[GenerationEvent, None]]:
-        """Approve/deny continuation stream for a parked CONFIRM write."""
-        return self.chat_system.stream_resume_confirmation
+        """Approve/deny continuation stream for one gated write."""
+        return self.chat_system.stream_resolve_park
 
     @property
     def _assemble_request(self) -> Callable[..., Awaitable[Optional[AssembledRequest]]]:
@@ -753,18 +754,21 @@ class KoboldEngineAdapter:
 
         @self.app.post("/api/v1/persona/{name}/confirm")
         async def confirm_pending(name: str, request: Request) -> Any:
-            """Approve or deny a CONFIRM-mode write parked for persona `name`.
+            """Approve or deny ONE gated write for persona `name`.
 
             The portal calls this after a `derpr-confirm` SSE frame surfaces a
-            parked write. The continuation (write execution on approve, denial
-            results on deny, then the model's follow-up turn) streams back as
-            SSE using the same wire protocol as /v1/chat/completions — so any
-            chained confirmation re-surfaces as another `derpr-confirm` frame.
+            proposal. The continuation (write execution on approve, denial on
+            deny, then the model's summary turn) streams back as SSE using the
+            same wire protocol as /v1/chat/completions — so any further
+            proposal surfaces as another `derpr-confirm` frame.
 
-            Body: {"approved": bool, "token": "<token from the frame>"}. The
-            token guards against resuming a stale park (model proposed different
-            writes since); omit or send empty to skip the check. The portal user
-            is always "portal", matching the park key (user, persona).
+            Body: {"approved": bool, "token": "<token from the frame>"}.
+
+            DP-297 made `token` REQUIRED. It used to be an optional staleness
+            check because a persona had at most one parked write, so (user,
+            persona) identified it; now several can be pending at once and the
+            token is the only thing that says which one the operator answered.
+            The portal user is always "portal".
             """
             if name not in self._personas:
                 return JSONResponse(status_code=404,
@@ -772,18 +776,34 @@ class KoboldEngineAdapter:
             body = await request.json()
             approved = bool(body.get("approved"))
             token = body.get("token") or None
+            if not token:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": "token is required — it identifies which "
+                                      "pending action is being resolved"},
+                )
 
             async def relay() -> AsyncIterator[bytes]:
-                async for ev in self._stream_resume_confirmation(
+                # `aclosing` is load-bearing here, not hygiene. The generator
+                # holds the per-conversation lock across the entire
+                # continuation turn, and this loop returns on client
+                # disconnect. Without an explicit close the generator stays
+                # suspended at its yield, so the lock is released only whenever
+                # the asyncgen finalizer eventually runs — and any concurrent
+                # approve/deny for the same (user, persona), including
+                # Discord's reaction handler, blocks for that indeterminate
+                # window with its park already out of `pending`.
+                async with contextlib.aclosing(self._stream_resolve_park(
                     user_identifier="portal",
                     persona_name=name,
+                    token=token,
                     approved=approved,
-                    expected_token=token,
-                ):
-                    if await request.is_disconnected():
-                        return
-                    for _label, frame in self._event_to_sse(ev):
-                        yield frame
+                )) as agen:
+                    async for ev in agen:
+                        if await request.is_disconnected():
+                            return
+                        for _label, frame in self._event_to_sse(ev):
+                            yield frame
 
             return StreamingResponse(
                 relay(),
@@ -864,19 +884,23 @@ class KoboldEngineAdapter:
             ids_with_versions = await asyncio.to_thread(
                 self._memory_manager.get_ids_with_versions, ids
             )
-            # Surface a live parked confirmation (portal session) as a trailing
-            # ephemeral chunk so a fresh load renders the awaiting-approval text.
-            # Park key is (user_identifier, persona) — honor the requested user.
-            pending_map = self._confirmations.pending
-            pending_obj = pending_map.get((user_identifier, persona))
-            pending: Optional[Dict[str, Any]] = None
-            if pending_obj is not None:
-                tool_msgs = pending_obj.conversation_history[pending_obj.tool_context_start:] if pending_obj.conversation_history else []
-                pending = {
-                    "ephemeral_chunk_id": pending_obj.token,
-                    "content": pending_obj.confirmation_text,
-                    "tool_context": _parse_tool_context(tool_msgs) if tool_msgs else None,
+            # Surface live gated writes (portal session) as trailing ephemeral
+            # chunks so a fresh load renders every awaiting-approval affordance.
+            # DP-297: a list, not a single object — one conversation can hold
+            # several proposals, and dropping all but one would strand the rest
+            # with no way to answer them after a reload.
+            #
+            # No tool_context is attached: since DP-297 each proposal's call and
+            # its `awaiting_human_approval` result live in the parked turn's own
+            # persisted row, which is already rendered above.
+            pending: List[Dict[str, Any]] = [
+                {
+                    "ephemeral_chunk_id": park.token,
+                    "content": park.confirmation_text,
+                    "tool_context": None,
                 }
+                for park in self._confirmations.list_for(user_identifier, persona)
+            ]
             transcript = build_transcript(
                 raw_history,
                 ids_with_versions=ids_with_versions,
@@ -1763,7 +1787,19 @@ class KoboldEngineAdapter:
             # POST back to /api/v1/persona/{name}/confirm. The terminal DoneEvent
             # that follows ends the stream without echoing this text into the
             # chat bubble — the modal is the canonical surface.
-            payload = json.dumps({
+            #
+            # Egress scrub: `ev.write_calls` is the RAW call the server keeps
+            # in order to execute it on approval, so unlike `ev.text` and
+            # `ev.audit_info` (both scrubbed upstream at the write gate) its
+            # arguments still hold real secret values. The frame is display
+            # only — the portal approves by POSTing back the `token`, never the
+            # arguments — so redacting here costs nothing and stops a secret
+            # from crossing to a browser that may cache or log it.
+            #
+            # Scrubs the assembled dict rather than the arguments alone so a
+            # field added to this frame later is covered without a second
+            # thought; re-scrubbing the already-clean fields is idempotent.
+            payload = json.dumps(get_scrubber().scrub({
                 "text": ev.text,
                 "persona": ev.persona_name,
                 "token": ev.token,
@@ -1776,7 +1812,7 @@ class KoboldEngineAdapter:
                     for c in ev.write_calls
                 ],
                 "audit_info": ev.audit_info,
-            })
+            }))
             frames.append((
                 "PendingConfirmationEvent",
                 f"event: derpr-confirm\ndata: {payload}\n\n".encode("utf-8"),

@@ -43,6 +43,10 @@ tests/test_data/
 /src/memory/user_memory.db
 /portal_test.db
 /portal.db
+# Live/probe harness scratch DBs (tests/live/test_repropose_*), in case a
+# Windows file lock defeats their teardown.
+/smoke_*.db
+/probe_repropose_*.db
 
 # Eval harness run logs (keep result JSONs for archaeology)
 eval_harnesses/results/*.log

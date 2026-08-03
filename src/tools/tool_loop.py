@@ -16,7 +16,9 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, List, Optional, Union, cast
+from typing import (
+    Any, AsyncIterator, Callable, Dict, List, Optional, Tuple, Union, cast,
+)
 
 from config.global_config import MAX_TOOL_CALLS
 from src.engine import LLMCommunicationError, TextEngine
@@ -55,31 +57,97 @@ class _ToolContextEvent:
 
 
 @dataclass
+class WriteParkedEvent:
+    """One write call gated for human approval (DP-297).
+
+    Emitted *mid-turn* — the loop keeps running after it, so a turn can emit
+    several. The orchestrator parks each one and forwards it to the surface as
+    its own approve/deny affordance. Public (not underscore-prefixed) because
+    interfaces consume it directly, unlike the loop-internal events above.
+    """
+    token: str
+    write_call: Dict[str, Any]
+    audit_info: Dict[str, Any]
+    confirmation_text: str
+    turn_tainted: bool = False
+
+
+@dataclass
+class _WriteDuplicateEvent:
+    """Loop-internal: a write suppressed by the pending-duplicate guard.
+
+    Emits no public affordance — that is the point of suppressing it — but the
+    orchestrator still has to hear about it, because the synthetic result it
+    just appended will need patching when the ORIGINAL proposal resolves. Its
+    row id, like a park's, does not exist until this turn commits.
+    """
+    token: str
+    call_id: Optional[str]
+
+
+@dataclass
 class _LoopFinishedEvent:
     """Loop-internal terminal event. Carries the resolved state so the
-    orchestrator can persist the assistant turn / park CONFIRM-mode
-    confirmation / re-emit a public DoneEvent."""
+    orchestrator can persist the assistant turn / re-emit a public DoneEvent."""
     final_text: str
     response_type: ResponseType
     tool_context_json: Optional[str] = None
-    pending_writes: Optional[List[Dict[str, Any]]] = None
     turn_tainted: bool = False
-    audit_info: Optional[Dict[str, Any]] = None
-    # Index into conversation_history marking where this turn's tool messages
-    # begin. Carried on the pending-write event so a resumed continuation can
-    # capture the parked tool calls (+ their results) into tool_context_json
-    # rather than dropping them. See ChatSystem resume path.
-    tool_context_start: int = 0
 
 
 LoopEvent = Union[
     TokenEvent, ErrorEvent,
     ToolCallStartEvent, ToolCallResultEvent,
-    _ApiPayloadEvent, _LoopFinishedEvent, _ToolContextEvent,
+    _ApiPayloadEvent, _LoopFinishedEvent, _ToolContextEvent, WriteParkedEvent,
+    _WriteDuplicateEvent,
 ]
 
+# Status values for a gated write's synthetic tool result. These are what the
+# model reads in replayed history, and `PARK_STATUS_AWAITING` is the entry
+# `ConfirmationManager` later patches in place once the operator decides.
+PARK_STATUS_AWAITING = "awaiting_human_approval"
+PARK_STATUS_APPROVED = "approved"
+PARK_STATUS_DENIED = "denied"
+# Approved by the operator, but the tool raised when it ran. Distinct from
+# `PARK_STATUS_APPROVED` because both outcomes leave a `result` and only the
+# status distinguishes them, and distinct from `PARK_STATUS_DENIED` because the
+# operator said yes — the model must not read it as a refusal to re-argue.
+PARK_STATUS_FAILED = "approved_but_failed"
+PARK_STATUS_EXPIRED = "expired"
+# Not a park outcome — the answer to a write the model proposed while an
+# identical one was already waiting. No second park is created.
+PARK_STATUS_DUPLICATE = "duplicate_of_pending"
+
+
+def write_call_identity(call: Dict[str, Any]) -> Tuple[str, str]:
+    """Identity of a write proposal for duplicate detection: tool name plus
+    canonicalized arguments.
+
+    Deliberately excludes the provider call id — two re-proposals of the same
+    action always carry different ids, which is precisely the case this has to
+    catch. `sort_keys` because argument order is not stable across iterations.
+    """
+    name = str(call.get("name") or "")
+    try:
+        args = json.dumps(call.get("arguments") or {}, sort_keys=True,
+                          default=str)
+    except (TypeError, ValueError):
+        # Unserializable arguments cannot be compared; fall back to an identity
+        # that never matches, so an odd call parks rather than being swallowed.
+        #
+        # It must be a fresh uuid, NOT `repr(object())`: CPython reuses the
+        # address of the object it just freed, so two calls to `repr(object())`
+        # return the same string and the "never matches" identity matched
+        # ALWAYS — inverting this guard into one that swallowed every
+        # unserializable write without ever surfacing an affordance.
+        args = f"<unserializable:{uuid.uuid4().hex}>"
+    return (name, args)
+
+
 # Reasons a tool call can be left without a real result when the turn ends.
-SEAL_AWAITING_APPROVAL = "awaiting_approval"
+# (There is no awaiting-approval reason: since DP-297 a parked write is
+# answered inline with a real synthetic result, so it is never unanswered at
+# seal time — which is also what guarantees the patch target exists later.)
 SEAL_ERROR = "error"
 SEAL_MAX_ITERATIONS = "max_iterations_exceeded"
 # The clean exit: the model stopped asking for tools. Every call should already
@@ -135,6 +203,41 @@ def seal_tool_context(
     return json.dumps(sealed)
 
 
+def _render_confirmation_text(
+    action: Dict[str, Any],
+    turn_tainted: bool,
+    taint_sources: List[str],
+) -> str:
+    """Human-readable approval prompt for ONE gated action.
+
+    Takes an already-scrubbed action dict (DP-225 boundary 2 runs on the whole
+    audit_info before this is called), so nothing here needs to re-scrub.
+    """
+    flags = []
+    if action["service_binding"]:
+        flags.append(action["service_binding"].upper())
+    if action["sensitivity"]:
+        flags.append(action["sensitivity"].upper())
+    if action["irreversible"]:
+        flags.append("IRREVERSIBLE")
+    if action["always_confirm"]:
+        flags.append("HIGH-IMPACT")
+
+    flag_str = f" [{', '.join(flags)}]" if flags else ""
+    enrich_str = f": **{action['enrichment']}**" if action["enrichment"] else ":"
+    lines = [
+        "I'd like to perform the following action:",
+        f"- **{action['tool']}**{flag_str}{enrich_str} "
+        f"{json.dumps(action['arguments'])}",
+    ]
+    if turn_tainted:
+        lines.append(
+            f"\n⚠️ Context contains untrusted content from: "
+            f"{', '.join(taint_sources)}"
+        )
+    return "\n".join(lines)
+
+
 def build_wire_messages(
     persona: Persona, conversation_history: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
@@ -185,6 +288,9 @@ class ToolLoop:
         turn_tainted: bool = False,
         initial_taint_sources: Optional[List[str]] = None,
         history_start_override: Optional[int] = None,
+        pending_lookup: Optional[
+            Callable[[Dict[str, Any]], Optional[str]]
+        ] = None,
     ) -> AsyncIterator[LoopEvent]:
         """Yield generation events for one turn. Mutates
         `conversation_history` in-place so the orchestrator (and any
@@ -194,6 +300,12 @@ class ToolLoop:
         tool-context boundary back at the parked turn's first tool message, so
         the captured tool_context_json spans the whole turn (parked read calls,
         the approved write, and its result) rather than only post-resume calls.
+
+        `pending_lookup(write_call) -> token | None` answers "is an identical
+        proposal already waiting?". Injected rather than read from a store
+        because the pending set lives in `ConfirmationManager`, which sits
+        ABOVE this module in the layer order — the loop stays policy-free and
+        the caller decides what counts as already-pending.
         """
         persona_config = persona.get_config_for_engine()
         history_start = (
@@ -317,7 +429,7 @@ class ToolLoop:
             if write_calls:
                 logger.info(
                     "tool-loop iter %d: parking %d write call(s) for audit: %s "
-                    "(reads this iter: %s) — turn ends PENDING_CONFIRMATION",
+                    "(reads this iter: %s) — turn CONTINUES",
                     iter_idx,
                     len(write_calls),
                     [w.get("name") for w in write_calls],
@@ -365,48 +477,88 @@ class ToolLoop:
                 # approved write still executes with real argument values.
                 audit_info = cast(Dict[str, Any], get_scrubber().scrub(audit_info))
 
-                # Build human-readable confirmation text from the scrubbed actions.
-                lines = ["I'd like to perform the following actions:"]
-                for a in audit_info["actions"]:
-                    flags = []
-                    if a["service_binding"]:
-                        flags.append(a["service_binding"].upper())
-                    if a["sensitivity"]:
-                        flags.append(a["sensitivity"].upper())
-                    if a["irreversible"]:
-                        flags.append("IRREVERSIBLE")
-                    if a["always_confirm"]:
-                        flags.append("HIGH-IMPACT")
-                    
-                    flag_str = f" [{', '.join(flags)}]" if flags else ""
-                    enrich_str = f": **{a['enrichment']}**" if a["enrichment"] else ":"
-                    lines.append(f"- **{a['tool']}**{flag_str}{enrich_str} {json.dumps(a['arguments'])}")
-                
-                if turn_tainted:
-                    lines.append(f"\n⚠️ Context contains untrusted content from: {', '.join(taint_sources)}")
+                # DP-297: one park per write call, not one park per iteration.
+                # Independent approve/deny is the whole point — a burst of three
+                # writes must produce three separately resolvable proposals.
+                for wc, action in zip(write_calls, audit_info["actions"]):
+                    # Duplicate guard. The `instruction` below asks the model
+                    # not to re-submit, but that is model compliance, not
+                    # enforcement — and a model that ignores it would hand the
+                    # operator N identical affordances to clear, each of which
+                    # executes the write again if approved. Answer the call so
+                    # the block stays paired, but create no second park.
+                    existing = pending_lookup(wc) if pending_lookup else None
+                    if existing is not None:
+                        logger.info(
+                            "tool-loop iter %d: %s re-proposed while token %s "
+                            "is still pending — not parking a duplicate",
+                            iter_idx, wc.get("name"), existing,
+                        )
+                        conversation_history.append({
+                            "role": "tool",
+                            "tool_call_id": wc.get("id"),
+                            "name": wc.get("name"),
+                            "content": json.dumps({
+                                "status": PARK_STATUS_DUPLICATE,
+                                "token": existing,
+                                "instruction": (
+                                    "You already proposed this exact action "
+                                    "and it is still awaiting the operator. It "
+                                    "was NOT queued a second time. Do not "
+                                    "propose it again; wait for the outcome."
+                                ),
+                            }),
+                        })
+                        yield _WriteDuplicateEvent(
+                            token=existing, call_id=wc.get("id"),
+                        )
+                        continue
 
-                yield _LoopFinishedEvent(
-                    final_text="\n".join(lines),
-                    response_type=ResponseType.PENDING_CONFIRMATION,
-                    # Seal the reads this turn already executed plus the parked
-                    # write, so a deny — or an operator who simply never answers
-                    # — still leaves the model able to see what it did and
-                    # proposed. Cleared on resume, where the continuation
-                    # re-seals the same span with real results.
-                    tool_context_json=seal_tool_context(
-                        conversation_history, history_start,
-                        SEAL_AWAITING_APPROVAL,
-                    ),
-                    pending_writes=write_calls,
-                    turn_tainted=turn_tainted,
-                    audit_info=audit_info,
-                    tool_context_start=history_start,
-                )
-                return
+                    token = uuid.uuid4().hex
+
+                    # Append a REAL synthetic tool result. This is what lets the
+                    # loop continue past a park at all: an assistant message
+                    # whose tool_calls have no matching result is rejected
+                    # outright by Anthropic and Gemini on the next iteration.
+                    #
+                    # The `instruction` field is the re-proposal guard, and it
+                    # lives here rather than in the system prompt because a tool
+                    # result is provider-neutral — no prompt-assembly change, and
+                    # every provider surfaces it identically.
+                    conversation_history.append({
+                        "role": "tool",
+                        "tool_call_id": wc.get("id"),
+                        "name": wc.get("name"),
+                        "content": json.dumps({
+                            "status": PARK_STATUS_AWAITING,
+                            "token": token,
+                            "instruction": (
+                                "Proposal queued for the operator. Do NOT "
+                                "re-submit it; you will be re-invoked with the "
+                                "result once it is approved or denied."
+                            ),
+                        }),
+                    })
+
+                    yield WriteParkedEvent(
+                        token=token,
+                        write_call=wc,
+                        # Single-action slice: each park carries only its own
+                        # action, so a surface renders one dialog per proposal
+                        # and the audit row describes exactly what was gated.
+                        audit_info={**audit_info, "actions": [action]},
+                        confirmation_text=_render_confirmation_text(
+                            action, turn_tainted, taint_sources,
+                        ),
+                        turn_tainted=turn_tainted,
+                    )
+
+                # THE DP-297 CHANGE: fall through to the next iteration instead
+                # of returning. The model can now keep working — and propose
+                # again — while the operator decides.
+                continue
 
             # If we reach here, there were no write_calls this iteration.
-            # (All write_calls are parked above; this branch only runs for
-            # read-only iterations that loop back for more LLM output.)
 
         logger.error(f"Exceeded max tool iterations ({self.max_iterations}).")
         yield _LoopFinishedEvent(

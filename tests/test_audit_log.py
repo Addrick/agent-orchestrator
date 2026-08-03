@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, AsyncMock, patch
 
 from src.memory.memory_manager import MemoryManager
 from src.chat_system import ResponseType
-from src.confirmations import PendingConfirmation
+from src.confirmations import ParkedWrite
 from tests.helpers import make_chat_system
 from src.persona import Persona, ExecutionMode
 from src.engine import TextEngine
@@ -64,21 +64,27 @@ async def test_chat_system_audit_parked(chat_system, mem_manager):
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_enabled_tools(["*"])
     
-    # Mock ToolLoop event
-    from src.tools.tool_loop import _LoopFinishedEvent
+    # Mock ToolLoop events: a gated write mid-turn, then a normal finish.
+    from src.tools.tool_loop import WriteParkedEvent, _LoopFinishedEvent
     audit_info = {"actions": [{"tool": "write_tool", "args": {}}]}
-    finish_ev = _LoopFinishedEvent(
-        final_text="Parking",
-        response_type=ResponseType.PENDING_CONFIRMATION,
-        pending_writes=[{"name": "write_tool", "arguments": {}}],
+    park_ev = WriteParkedEvent(
+        token="tok-audit-1",
+        write_call={"id": "c1", "name": "write_tool", "arguments": {}},
         audit_info=audit_info,
-        turn_tainted=True
+        confirmation_text="Parking",
+        turn_tainted=True,
     )
-    
+    finish_ev = _LoopFinishedEvent(
+        final_text="Proposed a write.",
+        response_type=ResponseType.LLM_GENERATION,
+        turn_tainted=True,
+    )
+
     # Mock ToolLoop.run
     with patch('src.chat_system.ToolLoop') as mock_loop_cls:
         mock_loop = mock_loop_cls.return_value
         async def mock_run(*args, **kwargs):
+            yield park_ev
             yield finish_ev
         mock_loop.run = mock_run
         
@@ -102,69 +108,59 @@ async def test_chat_system_audit_parked(chat_system, mem_manager):
         assert row['new_state'] == "pending"
         assert json.loads(row['metadata']) == audit_info
 
+def _seed_park(chat_system, audit_info, *, token="tok-1", turn_tainted=False):
+    """Register a gated write directly, as a completed turn would have."""
+    park = ParkedWrite(
+        token=token,
+        write_call={"id": "c1", "name": "write_tool", "arguments": {}},
+        audit_info=audit_info,
+        confirmation_text="Approve?",
+        user_identifier="user_id",
+        persona_name="test_p",
+        channel="chan",
+        turn_tainted=turn_tainted,
+    )
+    chat_system.confirmations.park(park)
+    return park.token
+
+
 @pytest.mark.asyncio
 async def test_chat_system_audit_decision_approved(chat_system, mem_manager):
-    # Setup pending confirmation
     audit_info = {"actions": [{"tool": "write_tool", "args": {}}]}
-    pending = PendingConfirmation(
-        write_calls=[{"name": "write_tool", "arguments": {}}],
-        conversation_history=[],
-        persona_name="test_p",
-        tools_for_llm=[],
-        image_url=None,
-        channel="chan",
-        server_id=None,
-        turn_tainted=False,
-        audit_info=audit_info
-    )
-    chat_system.confirmations.pending[("user_id", "test_p")] = pending
+    token = _seed_park(chat_system, audit_info)
     chat_system.personas["test_p"] = Persona("test_p", "model", "prompt")
-    
-    # Mock dependencies for resume
-    chat_system.confirmations.execute_write_calls = AsyncMock()
+
+    chat_system.tool_manager.execute_tool = AsyncMock(return_value={"ok": True})
     chat_system.text_engine.generate_response = AsyncMock(return_value=({"content": "Done"}, {}))
-    
-    # Resume with approval
-    await chat_system.resume_pending_confirmation("user_id", "test_p", approved=True)
-    
+
+    await chat_system.resolve_park("user_id", "test_p", token, approved=True)
+
     # Verify audit log
     conn = mem_manager._get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM Audit_Log WHERE event_type = 'audit_decision' AND new_state = 'approved'")
     row = cursor.fetchone()
-    
+
     assert row is not None
     assert row['operator_id'] == "user_id"
     assert row['prior_state'] == "pending"
     assert "Human approved" in row['reason']
     meta = json.loads(row['metadata'])
     assert meta['audit_info'] == audit_info
+    # The token is on the row, so an audit trail can tie a decision to the
+    # exact proposal — necessary now that several can be open at once.
+    assert meta['token'] == token
 
 @pytest.mark.asyncio
 async def test_chat_system_audit_decision_denied(chat_system, mem_manager):
-    # Setup pending confirmation
     audit_info = {"actions": [{"tool": "write_tool", "args": {}}]}
-    pending = PendingConfirmation(
-        write_calls=[{"name": "write_tool", "arguments": {}}],
-        conversation_history=[],
-        persona_name="test_p",
-        tools_for_llm=[],
-        image_url=None,
-        channel="chan",
-        server_id=None,
-        turn_tainted=True,
-        audit_info=audit_info
-    )
-    chat_system.confirmations.pending[("user_id", "test_p")] = pending
+    token = _seed_park(chat_system, audit_info, turn_tainted=True)
     chat_system.personas["test_p"] = Persona("test_p", "model", "prompt")
-    
-    # Mock dependencies for resume
-    chat_system.confirmations.append_denied_tool_results = MagicMock()
+
     chat_system.text_engine.generate_response = AsyncMock(return_value=({"content": "Denied"}, {}))
-    
-    # Resume with denial
-    await chat_system.resume_pending_confirmation("user_id", "test_p", approved=False)
-    
+
+    await chat_system.resolve_park("user_id", "test_p", token, approved=False)
+
     # Verify audit log
     conn = mem_manager._get_connection()
     cursor = conn.cursor()
@@ -177,3 +173,43 @@ async def test_chat_system_audit_decision_denied(chat_system, mem_manager):
     assert "Human denied" in row['reason']
     meta = json.loads(row['metadata'])
     assert meta['turn_tainted'] is True
+
+
+@pytest.mark.asyncio
+async def test_audit_decision_metadata_carries_no_raw_write_call(
+        chat_system, mem_manager):
+    """The decision row describes the write without re-serializing the raw call.
+
+    `write_calls` used to duplicate the tool name and arguments that
+    `audit_info["actions"]` already carries, differing only in being
+    unredacted. The sink scrubs now, so this is defence in depth — but the
+    reviewable content must survive the field's removal, which is what the
+    audit_info and call_id assertions below pin.
+    """
+    audit_info = {"actions": [{"tool": "write_tool",
+                               "arguments": {"title": "t"},
+                               "irreversible": False}]}
+    token = _seed_park(chat_system, audit_info)
+    chat_system.personas["test_p"] = Persona("test_p", "model", "prompt")
+
+    chat_system.tool_manager.execute_tool = AsyncMock(return_value={"ok": True})
+    chat_system.text_engine.generate_response = AsyncMock(
+        return_value=({"content": "Done"}, {}))
+
+    await chat_system.resolve_park("user_id", "test_p", token, approved=True)
+
+    cursor = mem_manager._get_connection().cursor()
+    cursor.execute(
+        "SELECT * FROM Audit_Log WHERE event_type = 'audit_decision'"
+    )
+    row = cursor.fetchone()
+    assert row is not None
+    meta = json.loads(row['metadata'])
+
+    assert "write_calls" not in meta
+    # Everything the removed field contributed is still reachable.
+    assert meta['audit_info']['actions'][0]['tool'] == "write_tool"
+    assert meta['audit_info']['actions'][0]['arguments'] == {"title": "t"}
+    # `call_id` replaces the raw call's only unique field, and is what ties the
+    # row to the patched tool_context entry.
+    assert meta['call_id'] == "c1"

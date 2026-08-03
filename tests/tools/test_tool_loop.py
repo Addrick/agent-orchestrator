@@ -13,7 +13,9 @@ from src.generation_events import (
 )
 from src.persona import ExecutionMode
 from src.tools.tool_loop import (
-    ToolLoop, _ApiPayloadEvent, _LoopFinishedEvent, _ToolContextEvent,
+    PARK_STATUS_AWAITING, PARK_STATUS_DUPLICATE, ToolLoop, WriteParkedEvent,
+    _ApiPayloadEvent, _LoopFinishedEvent, _ToolContextEvent,
+    write_call_identity,
 )
 
 
@@ -283,14 +285,16 @@ async def test_max_iterations_cap():
 
 @pytest.mark.asyncio
 async def test_confirm_mode_parks_write_calls():
-    """CONFIRM-mode persona with a write tool: loop parks via
-    pending_writes on the terminal event, no execution."""
+    """A write tool is gated via a WriteParkedEvent, not executed."""
     engine = _make_engine([
         [
             {"type": "tool_calls", "calls": [
                 {"id": "w1", "name": "create_ticket", "arguments": {"title": "x"}}
             ]},
             {"type": "done", "full_text": ""},
+        ],
+        [
+            {"type": "done", "full_text": "Queued that for you."},
         ],
     ])
     tools = _make_tool_manager({})
@@ -301,13 +305,96 @@ async def test_confirm_mode_parks_write_calls():
         conversation_history=[], params=MagicMock(), tools=[],
     ))
 
-    finished = events[-1]
-    assert isinstance(finished, _LoopFinishedEvent)
-    assert finished.response_type == ResponseType.PENDING_CONFIRMATION
-    assert finished.pending_writes is not None
-    assert finished.pending_writes[0]["name"] == "create_ticket"
+    parks = [e for e in events if isinstance(e, WriteParkedEvent)]
+    assert len(parks) == 1
+    assert parks[0].write_call["name"] == "create_ticket"
+    assert parks[0].token
     # Write tool was NOT executed — manager should not have been called for it.
     tools.execute_tool.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_park_does_not_end_the_turn():
+    """DP-297: the loop keeps going after gating a write, so the turn ends
+    with the model's own text instead of dying on the proposal.
+
+    This is the regression that motivated the ticket: the model physically
+    could not propose a second write, because the first ended the turn.
+    """
+    engine = _make_engine([
+        [
+            {"type": "tool_calls", "calls": [
+                {"id": "w1", "name": "create_ticket", "arguments": {"title": "a"}}
+            ]},
+            {"type": "done", "full_text": ""},
+        ],
+        [
+            {"type": "tool_calls", "calls": [
+                {"id": "w2", "name": "update_ticket", "arguments": {"state": "closed"}}
+            ]},
+            {"type": "done", "full_text": ""},
+        ],
+        [
+            {"type": "done", "full_text": "Proposed two actions."},
+        ],
+    ])
+    loop = ToolLoop(engine, _make_tool_manager({}))
+
+    events = await _drain(loop.run(
+        persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
+        conversation_history=[], params=MagicMock(), tools=[],
+    ))
+
+    parks = [e for e in events if isinstance(e, WriteParkedEvent)]
+    assert [p.write_call["name"] for p in parks] == [
+        "create_ticket", "update_ticket",
+    ]
+    # Distinct tokens — one dialog per proposal, independently resolvable.
+    assert len({p.token for p in parks}) == 2
+
+    finished = events[-1]
+    assert isinstance(finished, _LoopFinishedEvent)
+    assert finished.response_type == ResponseType.LLM_GENERATION
+    assert finished.final_text == "Proposed two actions."
+
+
+@pytest.mark.asyncio
+async def test_parked_write_is_answered_inline_in_history():
+    """Each gated write gets a real synthetic tool result appended.
+
+    Not cosmetic: an assistant message whose tool_calls have no matching
+    result is rejected by Anthropic and Gemini on the next iteration, so this
+    is what makes continuing past a park possible at all. It is also the entry
+    ConfirmationManager patches when the operator decides.
+    """
+    engine = _make_engine([
+        [
+            {"type": "tool_calls", "calls": [
+                {"id": "w1", "name": "create_ticket", "arguments": {"title": "x"}}
+            ]},
+            {"type": "done", "full_text": ""},
+        ],
+        [
+            {"type": "done", "full_text": "done"},
+        ],
+    ])
+    history: List[Dict[str, Any]] = []
+    loop = ToolLoop(engine, _make_tool_manager({}))
+
+    events = await _drain(loop.run(
+        persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
+        conversation_history=history, params=MagicMock(), tools=[],
+    ))
+    token = [e for e in events if isinstance(e, WriteParkedEvent)][0].token
+
+    result_msg = next(m for m in history
+                      if m.get("role") == "tool" and m.get("tool_call_id") == "w1")
+    payload = json.loads(result_msg["content"])
+    assert payload["status"] == PARK_STATUS_AWAITING
+    assert payload["token"] == token
+    # The re-proposal guard rides in the result, not the system prompt, so it
+    # reaches every provider identically.
+    assert "not re-submit" in payload["instruction"].lower()
 
 
 # --- DP-296: tool context must survive every loop exit ---------------------
@@ -333,8 +420,8 @@ def _assert_calls_all_answered(msgs: List[Dict[str, Any]]) -> None:
 
 @pytest.mark.asyncio
 async def test_park_seals_reads_and_pending_write():
-    """A parked turn persists the reads it already ran plus the unexecuted
-    write, sealed so the slice is replayable."""
+    """A turn that gated a write persists the reads it ran plus the gated
+    write's awaiting-approval entry, sealed so the slice is replayable."""
     engine = _make_engine([
         [
             {"type": "tool_calls", "calls": [
@@ -348,6 +435,9 @@ async def test_park_seals_reads_and_pending_write():
             ]},
             {"type": "done", "full_text": ""},
         ],
+        [
+            {"type": "done", "full_text": "Proposed a close."},
+        ],
     ])
     tools = _make_tool_manager({"get_ticket_details": {"title": "printer"}})
     loop = ToolLoop(engine, tools)
@@ -358,7 +448,7 @@ async def test_park_seals_reads_and_pending_write():
     ))
 
     finished = events[-1]
-    assert finished.response_type == ResponseType.PENDING_CONFIRMATION
+    assert finished.response_type == ResponseType.LLM_GENERATION
     msgs = _tool_context(finished)
     _assert_calls_all_answered(msgs)
 
@@ -366,11 +456,11 @@ async def test_park_seals_reads_and_pending_write():
     read_result = next(m for m in msgs if m.get("tool_call_id") == "r1")
     assert "printer" in read_result["content"]
 
-    # The parked write is sealed as not executed, not silently dropped.
+    # The gated write carries the REAL synthetic result the loop appended —
+    # not a placeholder the seal invented. That distinction is what lets the
+    # entry be patched in place later when the operator decides.
     write_result = next(m for m in msgs if m.get("tool_call_id") == "w1")
-    assert json.loads(write_result["content"]) == {
-        "status": "not_executed", "reason": "awaiting_approval",
-    }
+    assert json.loads(write_result["content"])["status"] == PARK_STATUS_AWAITING
 
 
 @pytest.mark.asyncio
@@ -516,3 +606,180 @@ async def test_clean_exit_does_not_seal_with_the_error_reason():
     assert json.loads(sealed["content"]) == {
         "status": "not_executed", "reason": "unknown",
     }
+
+
+# ---- DP-297 duplicate-proposal guard -------------------------------------
+
+def test_write_call_identity_ignores_the_provider_call_id():
+    """Two re-proposals of one action always carry different ids, so the id
+    must not participate — otherwise the guard never fires."""
+    a = {"id": "call_1", "name": "create_ticket", "arguments": {"t": "x"}}
+    b = {"id": "call_2", "name": "create_ticket", "arguments": {"t": "x"}}
+    assert write_call_identity(a) == write_call_identity(b)
+
+
+def test_write_call_identity_is_argument_order_independent():
+    """Argument key order is not stable across iterations; a reordered dict is
+    the same proposal."""
+    a = {"name": "create_ticket", "arguments": {"a": 1, "b": 2}}
+    b = {"name": "create_ticket", "arguments": {"b": 2, "a": 1}}
+    assert write_call_identity(a) == write_call_identity(b)
+
+
+def test_write_call_identity_separates_different_arguments():
+    """The guard must not collapse genuinely different proposals — six ticket
+    updates in one turn are six proposals, not one."""
+    a = {"name": "create_ticket", "arguments": {"t": "x"}}
+    b = {"name": "create_ticket", "arguments": {"t": "y"}}
+    assert write_call_identity(a) != write_call_identity(b)
+
+
+@pytest.mark.asyncio
+async def test_reproposed_write_is_answered_but_not_parked_twice():
+    """A model that ignores the do-not-resubmit instruction gets one park.
+
+    Without this the operator sees N identical affordances, each of which
+    executes the write again if approved.
+    """
+    call = {"id": "w1", "name": "create_ticket", "arguments": {"title": "x"}}
+    again = {"id": "w2", "name": "create_ticket", "arguments": {"title": "x"}}
+    engine = _make_engine([
+        [{"type": "tool_calls", "calls": [dict(call)]},
+         {"type": "done", "full_text": ""}],
+        [{"type": "tool_calls", "calls": [dict(again)]},
+         {"type": "done", "full_text": ""}],
+        [{"type": "done", "full_text": "Waiting on you."}],
+    ])
+    tools = _make_tool_manager({})
+    loop = ToolLoop(engine, tools)
+
+    parked: List[Dict[str, Any]] = []
+
+    def pending_lookup(wc):
+        for p in parked:
+            if write_call_identity(p["call"]) == write_call_identity(wc):
+                return p["token"]
+        return None
+
+    history: List[Dict[str, Any]] = []
+    events = []
+    async for ev in loop.run(
+        persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
+        conversation_history=history, params=MagicMock(), tools=[],
+        pending_lookup=pending_lookup,
+    ):
+        if isinstance(ev, WriteParkedEvent):
+            parked.append({"call": ev.write_call, "token": ev.token})
+        events.append(ev)
+
+    parks = [e for e in events if isinstance(e, WriteParkedEvent)]
+    assert len(parks) == 1, "the re-proposal must not create a second park"
+
+    # The duplicate call is still ANSWERED — an assistant tool_calls block with
+    # no matching result is rejected outright by Anthropic and Gemini.
+    dup = [m for m in history
+           if m.get("role") == "tool" and m.get("tool_call_id") == "w2"]
+    assert len(dup) == 1
+    content = json.loads(dup[0]["content"])
+    assert content["status"] == PARK_STATUS_DUPLICATE
+    # It points at the live proposal, so the model can reason about which one.
+    assert content["token"] == parks[0].token
+
+    tools.execute_tool.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_distinct_writes_in_one_iteration_all_park():
+    """The guard is about repetition, not volume: several different writes
+    proposed together are several proposals."""
+    engine = _make_engine([
+        [{"type": "tool_calls", "calls": [
+            {"id": "w1", "name": "create_ticket", "arguments": {"t": "a"}},
+            {"id": "w2", "name": "create_ticket", "arguments": {"t": "b"}},
+            {"id": "w3", "name": "create_ticket", "arguments": {"t": "c"}},
+        ]},
+         {"type": "done", "full_text": ""}],
+        [{"type": "done", "full_text": "Three for review."}],
+    ])
+    tools = _make_tool_manager({})
+    loop = ToolLoop(engine, tools)
+
+    parked: List[Dict[str, Any]] = []
+
+    def pending_lookup(wc):
+        for p in parked:
+            if write_call_identity(p["call"]) == write_call_identity(wc):
+                return p["token"]
+        return None
+
+    events = []
+    async for ev in loop.run(
+        persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
+        conversation_history=[], params=MagicMock(), tools=[],
+        pending_lookup=pending_lookup,
+    ):
+        if isinstance(ev, WriteParkedEvent):
+            parked.append({"call": ev.write_call, "token": ev.token})
+        events.append(ev)
+
+    parks = [e for e in events if isinstance(e, WriteParkedEvent)]
+    assert len(parks) == 3
+    assert len({p.token for p in parks}) == 3
+
+
+@pytest.mark.asyncio
+async def test_no_pending_lookup_parks_everything():
+    """`pending_lookup` is optional — callers that do not supply it (tests,
+    any future embedder) must keep the pre-guard behaviour."""
+    engine = _make_engine([
+        [{"type": "tool_calls", "calls": [
+            {"id": "w1", "name": "create_ticket", "arguments": {"t": "a"}}]},
+         {"type": "done", "full_text": ""}],
+        [{"type": "tool_calls", "calls": [
+            {"id": "w2", "name": "create_ticket", "arguments": {"t": "a"}}]},
+         {"type": "done", "full_text": ""}],
+        [{"type": "done", "full_text": "ok"}],
+    ])
+    tools = _make_tool_manager({})
+    loop = ToolLoop(engine, tools)
+
+    events = await _drain(loop.run(
+        persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
+        conversation_history=[], params=MagicMock(), tools=[],
+    ))
+    assert len([e for e in events if isinstance(e, WriteParkedEvent)]) == 2
+
+
+def test_write_call_identity_never_matches_when_arguments_are_unserializable():
+    """The fallback identity has to be genuinely unique.
+
+    It was `repr(object())`, which reads like "a value nothing can equal" but
+    is not: CPython reuses the address of the object it just freed, so two
+    evaluations return the same string. The guard's fail-open branch therefore
+    matched ALWAYS — two different unserializable writes collapsed into one,
+    the second was suppressed as a duplicate, and no park (and no operator
+    affordance) was ever created for it."""
+    a = {"name": "create_ticket", "arguments": {("tuple", "key"): 1}}
+    b = {"name": "create_ticket", "arguments": {("other", "key"): 2}}
+
+    ia, ib = write_call_identity(a), write_call_identity(b)
+
+    assert ia != ib
+    # Same call twice must also not match itself: the arguments are
+    # incomparable, so "already pending" is unknowable and parking is the only
+    # fail-closed answer.
+    assert write_call_identity(a) != write_call_identity(a)
+    assert ia[0] == "create_ticket"
+
+
+def test_write_call_identity_fallback_is_unique_in_bulk():
+    """Uniqueness has to hold every time, not usually.
+
+    `repr(object())` collides whenever the allocator hands back the address it
+    just freed — which it does often enough that a single-pair assertion is
+    flaky in both directions. Sampling makes the defect deterministic: 200
+    fallback identities from an address-derived value always contain
+    duplicates, from a uuid never do."""
+    call = {"name": "create_ticket", "arguments": {("k",): 1}}
+    idents = [write_call_identity(call)[1] for _ in range(200)]
+    assert len(set(idents)) == 200

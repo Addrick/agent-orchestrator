@@ -16,13 +16,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.chat_system import ResponseType
-from src.confirmations import PendingConfirmation
+from src.confirmations import ParkedWrite
 from src.persona import Persona, ExecutionMode
 from src.tools.turn_context import get_turn_context
 from memory.memory_manager import MemoryManager
 from src.engine import TextEngine
 
 # Reuse the shared fixture
+from tests.helpers import only_pending_token, pending_tokens
 from tests.test_chat_system import chat_system_with_mocks  # noqa: F401
 
 
@@ -30,107 +31,140 @@ from tests.test_chat_system import chat_system_with_mocks  # noqa: F401
 
 @pytest.mark.asyncio
 async def test_confirm_deny_then_retry_creates_new_pending(chat_system_with_mocks):
-    """After denying a pending write, re-issuing the same request should
-    park a NEW PendingConfirmation (no stale state from the prior deny)."""
+    """After denying a gated write, re-issuing the same request parks a NEW
+    proposal with its own token (no stale state from the prior deny)."""
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_enabled_tools(['*'])
 
-    # First turn: LLM returns a write call → park pending
-    tool_call = {'type': 'tool_calls',
-                 'calls': [{'id': 'call_1', 'name': 'update_ticket',
-                            'arguments': {'ticket_id': 1, 'state': 'closed'}}]}
-    text_engine_mock.generate_response.return_value = (tool_call, {})
+    # First turn: LLM returns a write call → gate it
+    text_engine_mock.generate_response.side_effect = [
+        ({'type': 'tool_calls',
+          'calls': [{'id': 'call_1', 'name': 'update_ticket',
+                     'arguments': {'ticket_id': 1, 'state': 'closed'}}]}, {}),
+        ({'type': 'text', 'content': 'Proposed.'}, {}),
+    ]
     await system.generate_response('test_persona', 'user', 'channel', 'close it')
-    assert ('user', 'test_persona') in system.confirmations.pending
+    first_token = only_pending_token(system, 'user', 'test_persona')
 
-    # Deny the pending
-    final_response = {'type': 'text', 'content': 'OK, not closing.'}
-    text_engine_mock.generate_response.return_value = (final_response, {})
-    await system.resume_pending_confirmation('user', 'test_persona', approved=False)
-    # Resume must have cleared the slot
-    assert ('user', 'test_persona') not in system.confirmations.pending
+    # Deny it
+    text_engine_mock.generate_response.side_effect = None
+    text_engine_mock.generate_response.return_value = (
+        {'type': 'text', 'content': 'OK, not closing.'}, {})
+    await system.resolve_park('user', 'test_persona', first_token, approved=False)
+    assert pending_tokens(system, 'user', 'test_persona') == []
 
-    # Now ask again → fresh tool call → fresh pending
-    tool_call2 = {'type': 'tool_calls',
-                  'calls': [{'id': 'call_2', 'name': 'update_ticket',
-                             'arguments': {'ticket_id': 1, 'state': 'closed'}}]}
-    text_engine_mock.generate_response.return_value = (tool_call2, {})
-    _, response_type, _, _ = await system.generate_response(
+    # Now ask again → fresh tool call → fresh proposal, distinct token
+    text_engine_mock.generate_response.side_effect = [
+        ({'type': 'tool_calls',
+          'calls': [{'id': 'call_2', 'name': 'update_ticket',
+                     'arguments': {'ticket_id': 1, 'state': 'closed'}}]}, {}),
+        ({'type': 'text', 'content': 'Proposed again.'}, {}),
+    ]
+    await system.generate_response(
         'test_persona', 'user', 'channel', 'really close it')
-    assert response_type == ResponseType.PENDING_CONFIRMATION
-    new_pending = system.confirmations.pending.get(('user', 'test_persona'))
-    assert new_pending is not None
-    assert new_pending.write_calls[0]['id'] == 'call_2'
+
+    parks = system.confirmations.list_for('user', 'test_persona')
+    assert len(parks) == 1
+    assert parks[0].write_call['id'] == 'call_2'
+    assert parks[0].token != first_token
 
 
 @pytest.mark.asyncio
-async def test_confirm_deny_resume_max_iterations(chat_system_with_mocks):
-    """After denial, the post-resume LLM call still respects max-iterations
-    semantics: if the model immediately produces another write, that lands
-    via the *next* generate_response call, not via resume itself.
-    Resume should return a clean LLM_GENERATION with the denial-aware text."""
+async def test_confirm_deny_continuation_parks_nothing_new(chat_system_with_mocks):
+    """A denial's continuation returns clean text and leaves nothing pending,
+    provided the model doesn't propose again."""
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_enabled_tools(['*'])
 
-    # Park
-    tool_call = {'type': 'tool_calls',
-                 'calls': [{'id': 'call_1', 'name': 'update_ticket',
-                            'arguments': {'ticket_id': 1, 'state': 'closed'}}]}
-    text_engine_mock.generate_response.return_value = (tool_call, {})
+    text_engine_mock.generate_response.side_effect = [
+        ({'type': 'tool_calls',
+          'calls': [{'id': 'call_1', 'name': 'update_ticket',
+                     'arguments': {'ticket_id': 1, 'state': 'closed'}}]}, {}),
+        ({'type': 'text', 'content': 'Proposed.'}, {}),
+    ]
     await system.generate_response('test_persona', 'user', 'channel', 'close it')
+    token = only_pending_token(system, 'user', 'test_persona')
 
-    # Resume denied — even if LLM tries to call another write tool, resume
-    # returns text (resume path uses generate_response which yields the text
-    # content of whatever the LLM emits; it does not re-enter the tool loop).
-    persistent = {'type': 'text', 'content': 'Acknowledged denial.'}
-    text_engine_mock.generate_response.return_value = (persistent, {})
-    _, response_type, _, _ = await system.resume_pending_confirmation(
-        'user', 'test_persona', approved=False)
+    text_engine_mock.generate_response.side_effect = None
+    text_engine_mock.generate_response.return_value = (
+        {'type': 'text', 'content': 'Acknowledged denial.'}, {})
+    _, response_type, _, _ = await system.resolve_park(
+        'user', 'test_persona', token, approved=False)
     assert response_type == ResponseType.LLM_GENERATION
     tool_manager_mock.execute_tool.assert_not_called()
-    # No new pending was parked by resume
-    assert ('user', 'test_persona') not in system.confirmations.pending
+    assert pending_tokens(system, 'user', 'test_persona') == []
 
 
 @pytest.mark.asyncio
-async def test_resume_minimal_conversation_history(chat_system_with_mocks):
-    """Resume must work even when the parked conversation_history is
-    minimal (only the assistant tool_calls turn, no prior user/system).
-    Approval should still execute the write and return LLM text."""
+async def test_continuation_may_propose_again(chat_system_with_mocks):
+    """A continuation runs the full tool loop, so the model may gate ANOTHER
+    write off the back of a resolved one. That new proposal must be a live,
+    independently resolvable park — this chaining is what the old blocking
+    resume could not express (the 2026-07-26 dangling-proposal bug)."""
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_enabled_tools(['*'])
 
-    # Hand-construct a minimal PendingConfirmation and drop it in.
-    pending = PendingConfirmation(
-        write_calls=[{'id': 'w1', 'name': 'update_ticket',
-                      'arguments': {'ticket_id': 7, 'state': 'closed'}}],
-        conversation_history=[
-            {'role': 'assistant', 'tool_calls': [
-                {'id': 'w1', 'name': 'update_ticket',
-                 'arguments': {'ticket_id': 7, 'state': 'closed'}}
-            ]},
-        ],
-        persona_name='test_persona',
-        tools_for_llm=[],
-        image_url=None,
-        channel='channel',
-        server_id=None,
-        turn_tainted=False,
+    text_engine_mock.generate_response.side_effect = [
+        ({'type': 'tool_calls',
+          'calls': [{'id': 'call_1', 'name': 'update_ticket',
+                     'arguments': {'ticket_id': 1, 'state': 'closed'}}]}, {}),
+        ({'type': 'text', 'content': 'Proposed.'}, {}),
+    ]
+    await system.generate_response('test_persona', 'user', 'channel', 'close it')
+    first = only_pending_token(system, 'user', 'test_persona')
+
+    tool_manager_mock.execute_tool.return_value = {'result': 'closed'}
+    text_engine_mock.generate_response.side_effect = [
+        ({'type': 'tool_calls',
+          'calls': [{'id': 'call_2', 'name': 'create_ticket',
+                     'arguments': {'title': 'follow-up'}}]}, {}),
+        ({'type': 'text', 'content': 'Closed it; proposed a follow-up.'}, {}),
+    ]
+    _, response_type, _, _ = await system.resolve_park(
+        'user', 'test_persona', first, approved=True)
+
+    assert response_type == ResponseType.LLM_GENERATION
+    parks = system.confirmations.list_for('user', 'test_persona')
+    assert len(parks) == 1
+    assert parks[0].write_call['name'] == 'create_ticket'
+    assert parks[0].token != first
+
+
+@pytest.mark.asyncio
+async def test_resolve_a_park_registered_directly(chat_system_with_mocks):
+    """A park registered without any preceding turn still resolves.
+
+    Guards the store's independence from the turn that created it: since
+    DP-297 a ParkedWrite carries no conversation snapshot, so nothing about
+    resolution may depend on one existing.
+    """
+    system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
+    persona.set_execution_mode(ExecutionMode.CONFIRM)
+    persona.set_enabled_tools(['*'])
+
+    park = ParkedWrite(
+        token='w1-token',
+        write_call={'id': 'w1', 'name': 'update_ticket',
+                    'arguments': {'ticket_id': 7, 'state': 'closed'}},
         audit_info={'actions': [], 'tainted': False, 'taint_sources': [],
                     'model_reasoning': None, 'execution_mode': 'CONFIRM'},
+        confirmation_text='Close #7?',
+        user_identifier='user',
+        persona_name='test_persona',
+        channel='channel',
     )
-    system.confirmations.pending[('user', 'test_persona')] = pending
+    system.confirmations.park(park)
 
     tool_manager_mock.execute_tool.return_value = {'result': 'closed'}
     text_engine_mock.generate_response.return_value = (
         {'type': 'text', 'content': 'Done.'}, {},
     )
 
-    response, response_type, _, _ = await system.resume_pending_confirmation(
-        'user', 'test_persona', approved=True)
+    response, response_type, _, _ = await system.resolve_park(
+        'user', 'test_persona', 'w1-token', approved=True)
     assert response_type == ResponseType.LLM_GENERATION
     assert response == 'Done.'
     tool_manager_mock.execute_tool.assert_called_once_with(
@@ -138,28 +172,32 @@ async def test_resume_minimal_conversation_history(chat_system_with_mocks):
 
 
 @pytest.mark.asyncio
-async def test_confirmation_timeout_boundary(chat_system_with_mocks):
-    """If `time.time() - pending.created_at > PENDING_CONFIRMATION_TIMEOUT`
-    at resume entry, resume must reject with the expired text — even if
-    the user clicked approve. (Race: timer crossed boundary before resume.)"""
+async def test_expired_park_is_not_executed_on_approval(chat_system_with_mocks):
+    """A park past its TTL must refuse even an explicit approval.
+
+    Race the guard exists for: the deadline crossed between the operator
+    seeing the affordance and clicking it.
+    """
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_enabled_tools(['*'])
 
-    # Park
-    tool_call = {'type': 'tool_calls',
-                 'calls': [{'id': 'call_1', 'name': 'update_ticket',
-                            'arguments': {'ticket_id': 1, 'state': 'closed'}}]}
-    text_engine_mock.generate_response.return_value = (tool_call, {})
+    text_engine_mock.generate_response.side_effect = [
+        ({'type': 'tool_calls',
+          'calls': [{'id': 'call_1', 'name': 'update_ticket',
+                     'arguments': {'ticket_id': 1, 'state': 'closed'}}]}, {}),
+        ({'type': 'text', 'content': 'Proposed.'}, {}),
+    ]
     await system.generate_response('test_persona', 'user', 'channel', 'close it')
+    token = only_pending_token(system, 'user', 'test_persona')
 
-    pending = system.confirmations.pending[('user', 'test_persona')]
-    # Backdate the parked timestamp far enough that any reasonable
-    # PENDING_CONFIRMATION_TIMEOUT is exceeded.
-    pending.created_at = time.time() - (60 * 60 * 24 * 365)  # 1 year ago
+    # Backdate past any reasonable PENDING_ACTION_TTL.
+    system.confirmations.pending[token].created_at = (
+        time.time() - (60 * 60 * 24 * 365)  # 1 year ago
+    )
 
-    response, response_type, _, _ = await system.resume_pending_confirmation(
-        'user', 'test_persona', approved=True)
+    response, response_type, _, _ = await system.resolve_park(
+        'user', 'test_persona', token, approved=True)
     assert response_type == ResponseType.DEV_COMMAND
     assert 'expired' in response.lower()
     # Critically, the write was NOT executed despite approval

@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 import json
-from src.tools.tool_loop import ToolLoop, _LoopFinishedEvent
+from src.tools.tool_loop import ToolLoop, WriteParkedEvent, _LoopFinishedEvent
 from src.tools.tool_manager import ToolManager, ZammadToolHandler
 from src.persona import Persona, ExecutionMode
 from src.generation_events import TokenEvent, ToolCallStartEvent, ToolCallResultEvent, ResponseType
@@ -45,17 +45,14 @@ async def test_zammad_approval_enrichment():
         events.append(ev)
     
     # 3. Assertions
-    # We expect: 
-    # 1. TokenEvent (not yielded because tool_calls came first in this mock)
-    # 2. _LoopFinishedEvent with ResponseType.PENDING_CONFIRMATION
-    
-    finished_event = next(ev for ev in events if isinstance(ev, _LoopFinishedEvent))
-    assert finished_event.response_type == ResponseType.PENDING_CONFIRMATION
-    
-    # Check the final text for the enrichment and expanded tags
-    text = finished_event.final_text
+    # The gated write surfaces as a WriteParkedEvent carrying its own approval
+    # prompt (DP-297); the turn itself no longer ends on the park.
+    park = next(ev for ev in events if isinstance(ev, WriteParkedEvent))
+
+    # Check the approval prompt for the enrichment and expanded tags
+    text = park.confirmation_text
     print(f"\nGenerated confirmation text:\n{text}")
-    
+
     assert "[ZAMMAD, INTERNAL]" in text
     assert "#202605130001 (Broken Printer)" in text
     assert "update_ticket" in text
@@ -103,9 +100,9 @@ async def test_zammad_merge_enrichment():
         events.append(ev)
     
     # 3. Assertions
-    finished_event = next(ev for ev in events if isinstance(ev, _LoopFinishedEvent))
-    text = finished_event.final_text
+    park = next(ev for ev in events if isinstance(ev, WriteParkedEvent))
+    text = park.confirmation_text
     print(f"\nGenerated merge confirmation text:\n{text}")
-    
+
     assert "[ZAMMAD, INTERNAL, IRREVERSIBLE, HIGH-IMPACT]" in text
     assert "Merge #202605130001 into #202605130002 ('New Ticket')" in text

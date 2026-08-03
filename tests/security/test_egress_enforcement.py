@@ -1,10 +1,11 @@
 # tests/security/test_egress_enforcement.py
 """DP-225 Sprint 2 — egress enforcement at the LLM boundaries.
 
-The scrubber is wired at three boundaries in the tool loop / turn persistence.
-These tests register a known secret with the process-global scrubber, then drive
-each boundary and assert the secret is redacted to ``[REDACTED:TEST_KEY]`` in
-every place the model / audit log / inspector can read it back.
+The scrubber is wired at four boundaries: three in the tool loop / turn
+persistence, plus the Audit_Log sink in `MemoryManager`. These tests register a
+known secret with the process-global scrubber, then drive each boundary and
+assert the secret is redacted to ``[REDACTED:TEST_KEY]`` in every place the
+model / audit log / inspector can read it back.
 """
 
 import json
@@ -16,9 +17,10 @@ import pytest
 from src.generation_events import (
     ResponseType, ToolCallResultEvent,
 )
+from src.memory.memory_manager import MemoryManager
 from src.persona import ExecutionMode
 from src.security.scrubber import get_scrubber, reset_scrubber
-from src.tools.tool_loop import ToolLoop, _LoopFinishedEvent
+from src.tools.tool_loop import ToolLoop, WriteParkedEvent, _LoopFinishedEvent
 from src.turn_persistence import TurnPersistence
 
 SECRET = "supersecretvalue123"
@@ -174,35 +176,8 @@ async def test_boundary2_model_reasoning_scrubbed_in_audit():
             ]},
             {"type": "done", "full_text": ""},
         ],
-    ])
-    tools = _make_tool_manager({})
-    loop = ToolLoop(engine, tools)
-
-    events = await _drain(loop.run(
-        persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
-        conversation_history=[], params=MagicMock(), tools=[],
-    ))
-
-    finished = events[-1]
-    assert isinstance(finished, _LoopFinishedEvent)
-    assert finished.audit_info is not None
-    reasoning = finished.audit_info["model_reasoning"]
-    assert reasoning is not None
-    assert SECRET not in reasoning
-    assert REDACTED in reasoning
-
-
-@pytest.mark.asyncio
-async def test_boundary2_write_args_scrubbed_in_audit_and_confirmation():
-    """A CONFIRM-mode write call whose arguments embed a secret: the parked
-    audit_info actions and the human confirmation final_text must redact it."""
-    engine = _make_engine([
         [
-            {"type": "tool_calls", "calls": [
-                {"id": "w1", "name": "create_ticket",
-                 "arguments": {"title": "t", "api_key": SECRET}}
-            ]},
-            {"type": "done", "full_text": ""},
+            {"type": "done", "full_text": "proposed"},
         ],
     ])
     tools = _make_tool_manager({})
@@ -213,18 +188,50 @@ async def test_boundary2_write_args_scrubbed_in_audit_and_confirmation():
         conversation_history=[], params=MagicMock(), tools=[],
     ))
 
-    finished = events[-1]
-    assert isinstance(finished, _LoopFinishedEvent)
-    assert finished.response_type == ResponseType.PENDING_CONFIRMATION
-    assert finished.audit_info is not None
+    park = next(e for e in events if isinstance(e, WriteParkedEvent))
+    reasoning = park.audit_info["model_reasoning"]
+    assert reasoning is not None
+    assert SECRET not in reasoning
+    assert REDACTED in reasoning
 
-    args = finished.audit_info["actions"][0]["arguments"]
+
+@pytest.mark.asyncio
+async def test_boundary2_write_args_scrubbed_in_audit_and_confirmation():
+    """A gated write whose arguments embed a secret: the park's audit_info
+    actions and its human confirmation text must redact it."""
+    engine = _make_engine([
+        [
+            {"type": "tool_calls", "calls": [
+                {"id": "w1", "name": "create_ticket",
+                 "arguments": {"title": "t", "api_key": SECRET}}
+            ]},
+            {"type": "done", "full_text": ""},
+        ],
+        [
+            {"type": "done", "full_text": "proposed"},
+        ],
+    ])
+    tools = _make_tool_manager({})
+    loop = ToolLoop(engine, tools)
+
+    events = await _drain(loop.run(
+        persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
+        conversation_history=[], params=MagicMock(), tools=[],
+    ))
+
+    park = next(e for e in events if isinstance(e, WriteParkedEvent))
+
+    args = park.audit_info["actions"][0]["arguments"]
     assert args["api_key"] == REDACTED
     assert SECRET not in json.dumps(args)
 
-    # The human-readable confirmation renders the (scrubbed) args.
-    assert SECRET not in finished.final_text
-    assert REDACTED in finished.final_text
+    # The human-readable approval prompt renders the (scrubbed) args.
+    assert SECRET not in park.confirmation_text
+    assert REDACTED in park.confirmation_text
+
+    # …but the raw call kept for execution is NOT scrubbed, or an approved
+    # write would run with a literal "[REDACTED]" argument value.
+    assert park.write_call["arguments"]["api_key"] == SECRET
 
 
 # ---- Boundary 3: cached api_payload -> /assemble inspector ----------------
@@ -249,3 +256,119 @@ def test_boundary3_cached_payload_scrubbed():
     iters = tp.last_api_iterations["user1"]["personaA"]
     assert SECRET not in json.dumps(iters)
     assert REDACTED in json.dumps(iters)
+
+
+# ---- Boundary 4: audit events -> Audit_Log on disk ------------------------
+#
+# The only scrub boundary whose sink is permanent. Every other boundary feeds
+# something transient (a stream event, an in-memory cache, replayed history);
+# an Audit_Log row outlives the process, so a secret written here is written
+# for good. Asserts read the row back out of SQLite rather than inspecting the
+# dict that was passed in — the dict being clean proves nothing about the sink.
+
+
+@pytest.fixture
+def audit_mem_manager():
+    mm = MemoryManager(db_path=":memory:")
+    mm.create_schema()
+    yield mm
+    mm.close()
+
+
+def _audit_row(mm: MemoryManager, event_type: str) -> Any:
+    cursor = mm._get_connection().cursor()
+    cursor.execute(
+        "SELECT * FROM Audit_Log WHERE event_type = ?", (event_type,)
+    )
+    return cursor.fetchone()
+
+
+def test_boundary4_audit_metadata_scrubbed_at_the_sink(audit_mem_manager):
+    """A secret anywhere in `metadata` must not reach the persisted row.
+
+    Nested deliberately: callers pass whole tool-call dicts, so a scrub that
+    only walked the top level would miss every real leak.
+    """
+    audit_mem_manager.log_audit_event(
+        event_type="test_meta_scrub",
+        operator_id="user1",
+        metadata={"calls": [{"name": "create_ticket",
+                             "arguments": {"api_key": SECRET}}]},
+    )
+
+    row = _audit_row(audit_mem_manager, "test_meta_scrub")
+    assert row is not None
+    assert SECRET not in row["metadata"]
+    assert REDACTED in row["metadata"]
+    # Shape survives redaction — an audit row that lost its structure is not
+    # an audit row.
+    meta = json.loads(row["metadata"])
+    assert meta["calls"][0]["name"] == "create_ticket"
+    assert meta["calls"][0]["arguments"]["api_key"] == REDACTED
+
+
+def test_boundary4_audit_reason_scrubbed_at_the_sink(audit_mem_manager):
+    """`reason` is free text (it carries the operator's denial note), so it is
+    a leak path in its own right — a clean `metadata` does not cover it."""
+    audit_mem_manager.log_audit_event(
+        event_type="test_reason_scrub",
+        operator_id="user1",
+        reason=f"denied, key {SECRET} looked wrong",
+    )
+
+    row = _audit_row(audit_mem_manager, "test_reason_scrub")
+    assert row is not None
+    assert SECRET not in row["reason"]
+    assert REDACTED in row["reason"]
+
+
+def test_boundary4_unregistered_secret_shape_scrubbed(audit_mem_manager):
+    """The pattern fallback must survive into this sink: an audit row is where
+    a secret derpr never registered is most likely to be discovered, and it is
+    the one place the leak is permanent."""
+    audit_mem_manager.log_audit_event(
+        event_type="test_pattern_scrub",
+        operator_id="user1",
+        metadata={"arguments": {"auth": "Bearer abcdefghijklmnopqrstuvwxyz012345"}},
+    )
+
+    row = _audit_row(audit_mem_manager, "test_pattern_scrub")
+    assert row is not None
+    assert "abcdefghijklmnopqrstuvwxyz012345" not in row["metadata"]
+    assert "[REDACTED:pattern]" in row["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_boundary4_approved_write_args_not_persisted_raw(audit_mem_manager):
+    """End-to-end: the decision audit for an approved write.
+
+    `ConfirmationManager` holds the write's REAL arguments on purpose — the
+    tool has to execute with them. This asserts that raw call never reaches the
+    audit row, which is the actual DP-297 exposure: the park keeps the secret
+    in memory for up to the TTL, and the audit row would have kept it forever.
+    """
+    from src.confirmations import ConfirmationManager, Decision, ParkedWrite
+
+    tools = _make_tool_manager({})
+    manager = ConfirmationManager(lambda: tools, audit_mem_manager)
+    park = ParkedWrite(
+        token="tok1",
+        write_call={"id": "w1", "name": "create_ticket",
+                    "arguments": {"title": "t", "api_key": SECRET}},
+        audit_info={"actions": [{"tool": "create_ticket",
+                                 "arguments": {"api_key": REDACTED}}]},
+        confirmation_text="approve?",
+        user_identifier="user1",
+        persona_name="personaA",
+    )
+
+    await manager.apply(Decision(park=park, approved=True))
+
+    # The tool really did run with the real value — scrubbing the audit trail
+    # must not have scrubbed the execution path.
+    tools.execute_tool.assert_awaited_once()
+    assert tools.execute_tool.await_args.kwargs["api_key"] == SECRET
+
+    row = _audit_row(audit_mem_manager, "audit_decision")
+    assert row is not None
+    assert SECRET not in row["metadata"]

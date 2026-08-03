@@ -19,7 +19,7 @@ from src.generation_events import (
 )
 from src.persona import ExecutionMode
 from src.tools.tool_loop import (
-    ToolLoop, _ApiPayloadEvent, _LoopFinishedEvent,
+    ToolLoop, WriteParkedEvent, _ApiPayloadEvent, _LoopFinishedEvent,
 )
 
 # Reuse the helpers from the sibling test module via direct import.
@@ -136,6 +136,9 @@ async def test_retry_confirm_mode_with_tools():
             ]},
             {"type": "done", "full_text": ""},
         ],
+        [
+            {"type": "done", "full_text": "proposed"},
+        ],
     ])
     tools = _make_tool_manager({})
     loop = ToolLoop(engine, tools)
@@ -151,19 +154,17 @@ async def test_retry_confirm_mode_with_tools():
         conversation_history=history, params=MagicMock(), tools=[],
     ))
 
-    finished = events[-1]
-    assert isinstance(finished, _LoopFinishedEvent)
-    assert finished.response_type == ResponseType.PENDING_CONFIRMATION
-    assert finished.pending_writes is not None
-    assert finished.pending_writes[0]["name"] == "update_ticket"
+    parks = [e for e in events if isinstance(e, WriteParkedEvent)]
+    assert len(parks) == 1
+    assert parks[0].write_call["name"] == "update_ticket"
     tools.execute_tool.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_resume_taint_propagation():
-    """initial_taint_sources from a prior memory recall must be reflected
-    on the terminal event's audit_info and turn_tainted flag when writes
-    are parked. Confirms taint flows memory → tool_loop park."""
+    """initial_taint_sources from a prior memory recall must reach the gated
+    write's audit_info + confirmation text. Confirms taint flows
+    memory → tool_loop park."""
     engine = _make_engine([
         [
             {"type": "tool_calls", "calls": [
@@ -171,6 +172,9 @@ async def test_resume_taint_propagation():
                  "arguments": {"ticket_id": 1, "state": "closed"}}
             ]},
             {"type": "done", "full_text": ""},
+        ],
+        [
+            {"type": "done", "full_text": "proposed"},
         ],
     ])
     tools = _make_tool_manager({})
@@ -182,14 +186,16 @@ async def test_resume_taint_propagation():
         turn_tainted=True, initial_taint_sources=["memory_recall"],
     ))
 
+    park = next(e for e in events if isinstance(e, WriteParkedEvent))
+    assert park.turn_tainted is True
+    assert park.audit_info["tainted"] is True
+    assert "memory_recall" in park.audit_info["taint_sources"]
+    # The human-readable approval prompt should mention taint
+    assert "untrusted" in park.confirmation_text.lower()
+
     finished = events[-1]
     assert isinstance(finished, _LoopFinishedEvent)
     assert finished.turn_tainted is True
-    assert finished.audit_info is not None
-    assert finished.audit_info["tainted"] is True
-    assert "memory_recall" in finished.audit_info["taint_sources"]
-    # The human-readable confirmation prompt should mention taint
-    assert "untrusted" in finished.final_text.lower()
 
 
 @pytest.mark.asyncio
@@ -204,6 +210,9 @@ async def test_audit_info_flag_combinations():
             ]},
             {"type": "done", "full_text": "I will delete user 42"},
         ],
+        [
+            {"type": "done", "full_text": "proposed"},
+        ],
     ])
     tools = _make_tool_manager({})
     loop = ToolLoop(engine, tools)
@@ -213,16 +222,16 @@ async def test_audit_info_flag_combinations():
         conversation_history=[], params=MagicMock(), tools=[],
     ))
 
-    finished = events[-1]
-    assert isinstance(finished, _LoopFinishedEvent)
-    audit = finished.audit_info
-    assert audit is not None
+    park = next(e for e in events if isinstance(e, WriteParkedEvent))
+    audit = park.audit_info
     assert audit["execution_mode"] == "CONFIRM"
+    # One action per park since DP-297, not one list per turn.
+    assert len(audit["actions"]) == 1
     action = audit["actions"][0]
     assert action["tool"] == "delete_user"
     assert action["always_confirm"] is True
     # delete_user is irreversible per definitions
     assert action["irreversible"] is True
-    # And the rendered final_text surfaces the flags
-    assert "HIGH-IMPACT" in finished.final_text
-    assert "IRREVERSIBLE" in finished.final_text
+    # And the rendered approval prompt surfaces the flags
+    assert "HIGH-IMPACT" in park.confirmation_text
+    assert "IRREVERSIBLE" in park.confirmation_text

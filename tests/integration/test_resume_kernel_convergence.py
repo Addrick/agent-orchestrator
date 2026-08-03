@@ -1,19 +1,24 @@
 # tests/integration/test_resume_kernel_convergence.py
 #
-# DP-124: resume_pending_confirmation re-enters the _orchestrate kernel with
-# the parked turn instead of re-implementing it. These tests pin the four
-# behaviours that convergence unlocks / must preserve:
+# DP-124 converged the approve/deny continuation onto the _orchestrate kernel
+# instead of re-implementing it. DP-297 then made parking non-blocking, so the
+# same convergence now has to hold for N proposals resolvable in any order.
+#
+# Pinned here:
 #
 #   1. approved -> the continuation runs a *further* tool loop
 #   2. denied   -> clean close, no write executed
 #   3. the persisted assistant row carries the real channel (not channel="")
-#   4. no turn-context leak across the resumed turn (scope pinned during the
-#      continuation, reset afterwards)
+#   4. no turn-context leak across the continuation
+#   5. a burst of writes in one turn all survive, with distinct tokens
+#   6. out-of-order resolution works
+#   7. concurrent approvals serialize into ONE continuation
 #
-# plus the parked-turn timeout/expiry behaviour, which must survive the
-# refactor. All run with a real MemoryManager + TextEngine (generate_response
-# mocked), so the continuation exercises the genuine ToolLoop path.
+# All run with a real MemoryManager + TextEngine (generate_response mocked), so
+# the continuation exercises the genuine ToolLoop path.
 
+import asyncio
+import json
 import time
 
 import pytest
@@ -21,10 +26,10 @@ import pytest
 from src.chat_system import (
     ResponseType, PendingConfirmationEvent, DoneEvent,
 )
-from src.confirmations import PendingConfirmation
+from src.confirmations import ParkedWrite
 from src.persona import ExecutionMode
 from src.tools.turn_context import get_turn_context
-from config.global_config import PENDING_CONFIRMATION_TIMEOUT
+from config.global_config import PENDING_ACTION_TTL
 
 pytestmark = pytest.mark.integration
 
@@ -43,48 +48,74 @@ def _set_engine(chat_system, scripted):
     chat_system.text_engine.generate_response.side_effect = fake_generate_response
 
 
-async def _park_write(chat_system, *, user, channel, write_call):
-    """Drive turn 1 to park a write-confirmation, drained clean."""
+def _text(content):
+    return ({"type": "text", "content": content}, {})
+
+
+def _calls(*call_dicts):
+    return ({"type": "tool_calls", "calls": list(call_dicts)}, {})
+
+
+async def _park_writes(chat_system, *, user, channel, write_calls,
+                       closing_text="Proposed."):
+    """Drive turn 1 so it gates `write_calls`, then ends with text.
+
+    Since DP-297 a gated write does not end the turn, so the script needs a
+    trailing text response — that extra step IS the behaviour change.
+    """
     _set_engine(chat_system, [
-        ({"type": "tool_calls", "calls": [write_call]}, {}),
+        _calls(*write_calls),
+        _text(closing_text),
     ])
-    await _drain(chat_system.stream_response("test_persona", user, channel, "do the thing"))
-    assert (user, "test_persona") in chat_system.confirmations.pending
+    await _drain(
+        chat_system.stream_response("test_persona", user, channel, "do the thing")
+    )
+    parks = chat_system.confirmations.list_for(user, "test_persona")
+    assert len(parks) == len(write_calls)
     assert get_turn_context() is None
+    return [p.token for p in parks]
 
 
-@pytest.mark.asyncio
-async def test_resume_approved_runs_further_tool_loop(mocked_chat_system):
-    """Approval continues the turn through the full kernel: the approved write
-    executes and the model's follow-up read tool call runs a *further* loop
-    iteration — the capability the old partial re-implementation lacked."""
-    chat_system, _ = mocked_chat_system
+def _confirm_persona(chat_system):
     persona = chat_system.personas["test_persona"]
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_enabled_tools(["*"])
+    return persona
 
+
+def _recording_tool_manager(chat_system, result=None):
     executed = []
 
     async def fake_execute(name, **kwargs):
         executed.append(name)
-        return {"ok": True}
+        return result if result is not None else {"ok": True}
     chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[assignment]
+    return executed
 
-    await _park_write(
+
+@pytest.mark.asyncio
+async def test_approval_runs_further_tool_loop(mocked_chat_system):
+    """Approval continues through the full kernel: the approved write executes
+    and the model's follow-up read runs a *further* loop iteration."""
+    chat_system, _ = mocked_chat_system
+    _confirm_persona(chat_system)
+    executed = _recording_tool_manager(chat_system)
+
+    (token,) = await _park_writes(
         chat_system, user="u1", channel="c1",
-        write_call={"id": "w1", "name": "create_ticket",
-                    "arguments": {"title": "t", "body": "b"}},
+        write_calls=[{"id": "w1", "name": "create_ticket",
+                      "arguments": {"title": "t", "body": "b"}}],
     )
 
     # Continuation: a read tool call, then a text answer.
     _set_engine(chat_system, [
-        ({"type": "tool_calls", "calls": [
-            {"id": "r1", "name": "get_agent_status", "arguments": {"agent_id": "a"}}]}, {}),
-        ({"type": "text", "content": "Ticket opened and status checked."}, {}),
+        _calls({"id": "r1", "name": "get_agent_status",
+                "arguments": {"agent_id": "a"}}),
+        _text("Ticket opened and status checked."),
     ])
 
-    text, rtype, assistant_id, uid = await chat_system.resume_pending_confirmation(
-        "u1", "test_persona", approved=True,
+    text, rtype, assistant_id, uid = await chat_system.resolve_park(
+        "u1", "test_persona", token, approved=True,
     )
 
     assert rtype == ResponseType.LLM_GENERATION
@@ -93,70 +124,52 @@ async def test_resume_approved_runs_further_tool_loop(mocked_chat_system):
     assert "get_agent_status" in executed, "continuation did not run a further tool loop"
     assert assistant_id is not None
     assert uid is None
-    assert ("u1", "test_persona") not in chat_system.confirmations.pending
-    assert get_turn_context() is None, "turn scope leaked after resume"
+    assert chat_system.confirmations.list_for("u1", "test_persona") == []
+    assert get_turn_context() is None, "turn scope leaked after continuation"
 
 
 @pytest.mark.asyncio
-async def test_resume_denied_closes_cleanly(mocked_chat_system):
-    """Denial feeds synthetic denial results to the model and returns its
-    close-out text; the rejected write never executes."""
+async def test_denial_closes_cleanly(mocked_chat_system):
+    """Denial returns the model's close-out text; the write never executes."""
     chat_system, _ = mocked_chat_system
-    persona = chat_system.personas["test_persona"]
-    persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(["*"])
+    _confirm_persona(chat_system)
+    executed = _recording_tool_manager(chat_system)
 
-    executed = []
-
-    async def fake_execute(name, **kwargs):
-        executed.append(name)
-        return {"ok": True}
-    chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[assignment]
-
-    await _park_write(
+    (token,) = await _park_writes(
         chat_system, user="u2", channel="c2",
-        write_call={"id": "w1", "name": "create_ticket",
-                    "arguments": {"title": "t", "body": "b"}},
+        write_calls=[{"id": "w1", "name": "create_ticket",
+                      "arguments": {"title": "t", "body": "b"}}],
     )
 
-    _set_engine(chat_system, [
-        ({"type": "text", "content": "Understood, I won't create the ticket."}, {}),
-    ])
+    _set_engine(chat_system, [_text("Understood, I won't create the ticket.")])
 
-    text, rtype, assistant_id, uid = await chat_system.resume_pending_confirmation(
-        "u2", "test_persona", approved=False,
+    text, rtype, assistant_id, uid = await chat_system.resolve_park(
+        "u2", "test_persona", token, approved=False,
     )
 
     assert rtype == ResponseType.LLM_GENERATION
     assert "won't create" in text
     assert "create_ticket" not in executed, "denied write must not execute"
-    assert ("u2", "test_persona") not in chat_system.confirmations.pending
+    assert chat_system.confirmations.list_for("u2", "test_persona") == []
     assert get_turn_context() is None
 
 
 @pytest.mark.asyncio
-async def test_resume_persists_assistant_on_correct_channel(mocked_chat_system):
+async def test_continuation_persists_assistant_on_correct_channel(mocked_chat_system):
     """The continuation's assistant row is logged on the parked channel — not
     the channel="" the old implementation hardcoded."""
     chat_system, mem_manager = mocked_chat_system
-    persona = chat_system.personas["test_persona"]
-    persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(["*"])
+    _confirm_persona(chat_system)
+    _recording_tool_manager(chat_system)
 
-    async def fake_execute(name, **kwargs):
-        return {"ok": True}
-    chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[assignment]
-
-    await _park_write(
+    (token,) = await _park_writes(
         chat_system, user="u3", channel="team-chan",
-        write_call={"id": "w1", "name": "create_ticket",
-                    "arguments": {"title": "t", "body": "b"}},
+        write_calls=[{"id": "w1", "name": "create_ticket",
+                      "arguments": {"title": "t", "body": "b"}}],
     )
 
-    _set_engine(chat_system, [
-        ({"type": "text", "content": "Done."}, {}),
-    ])
-    await chat_system.resume_pending_confirmation("u3", "test_persona", approved=True)
+    _set_engine(chat_system, [_text("Done.")])
+    await chat_system.resolve_park("u3", "test_persona", token, approved=True)
 
     conn = mem_manager._get_connection()
     cursor = conn.cursor()
@@ -171,74 +184,72 @@ async def test_resume_persists_assistant_on_correct_channel(mocked_chat_system):
 
 
 @pytest.mark.asyncio
-async def test_resume_persists_write_into_tool_context(mocked_chat_system):
-    """The approved write and its result must be captured in the assistant row's
-    tool_context so they replay on later turns. Regression: the resumed loop used
-    to set history_start *after* the parked tool calls, dropping the executed
-    write from history entirely."""
+async def test_approved_write_result_is_patched_into_history(mocked_chat_system):
+    """The approved write's real result replaces its awaiting-approval entry in
+    the ALREADY-COMMITTED parked row, and replays on later turns.
+
+    This is DP-297's replacement for re-sealing the span on resume. The park's
+    entry is patched in place, so the model reads the actual outcome — and
+    exactly once, since nothing re-writes the span.
+    """
     chat_system, mem_manager = mocked_chat_system
-    persona = chat_system.personas["test_persona"]
-    persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(["*"])
+    _confirm_persona(chat_system)
+    _recording_tool_manager(chat_system, result={"ticket_id": 42})
 
-    async def fake_execute(name, **kwargs):
-        return {"ticket_id": 42}
-    chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[assignment]
-
-    await _park_write(
+    (token,) = await _park_writes(
         chat_system, user="u6", channel="c6",
-        write_call={"id": "w1", "name": "create_ticket",
-                    "arguments": {"title": "t", "body": "b"}},
+        write_calls=[{"id": "w1", "name": "create_ticket",
+                      "arguments": {"title": "t", "body": "b"}}],
+        closing_text="Ticket proposed.",
     )
-
-    _set_engine(chat_system, [
-        ({"type": "text", "content": "Ticket created."}, {}),
-    ])
-    await chat_system.resume_pending_confirmation("u6", "test_persona", approved=True)
 
     conn = mem_manager._get_connection()
     cursor = conn.cursor()
     cursor.execute(
         "SELECT tool_context FROM User_Interactions "
-        "WHERE author_role='assistant' AND content='Ticket created.'"
+        "WHERE author_role='assistant' AND content='Ticket proposed.'"
     )
-    row = cursor.fetchone()
-    assert row is not None and row["tool_context"], \
-        "assistant turn persisted without tool_context"
+    parked_ctx = json.loads(cursor.fetchone()["tool_context"])
+    awaiting = next(m for m in parked_ctx
+                    if m.get("role") == "tool" and m.get("tool_call_id") == "w1")
+    assert json.loads(awaiting["content"])["status"] == "awaiting_human_approval"
 
-    import json
-    tool_ctx = json.loads(row["tool_context"])
-    # The parked write tool_call and its execution result must both be present.
-    assert any(
-        m.get("role") == "assistant" and any(
-            c.get("name") == "create_ticket" for c in m.get("tool_calls", [])
-        ) for m in tool_ctx
-    ), "approved write tool_call missing from replayed tool_context"
-    assert any(
-        m.get("role") == "tool" and m.get("name") == "create_ticket" for m in tool_ctx
-    ), "approved write result missing from replayed tool_context"
+    _set_engine(chat_system, [_text("Ticket created.")])
+    await chat_system.resolve_park("u6", "test_persona", token, approved=True)
 
-    # And it actually replays into the next turn's formatted history. The user
-    # row matters: DP-296 drops a tool block with no user turn ahead of it,
-    # because that shape opens the wire array with a function call and Gemini
-    # rejects the request.
+    cursor.execute(
+        "SELECT tool_context FROM User_Interactions "
+        "WHERE author_role='assistant' AND content='Ticket proposed.'"
+    )
+    patched = json.loads(cursor.fetchone()["tool_context"])
+    entry = next(m for m in patched
+                 if m.get("role") == "tool" and m.get("tool_call_id") == "w1")
+    payload = json.loads(entry["content"])
+    assert payload["status"] == "approved"
+    assert payload["result"] == {"ticket_id": 42}
+    assert payload["token"] == token
+
+    # The write's call and its patched result both still replay into history.
+    # The user row matters: DP-296 drops a tool block with no user turn ahead
+    # of it, because that shape opens the wire array with a function call and
+    # Gemini rejects the request.
     replayed = chat_system.request_builder.format_raw_history_for_llm(
         [{"author_role": "user", "author_name": "Alice", "content": "make a ticket"},
          {"author_role": "assistant", "author_name": "test_persona",
-          "content": "Ticket created.", "tool_context": row["tool_context"]}],
+          "content": "Ticket proposed.",
+          "tool_context": json.dumps(patched)}],
         memory_mode="channel", persona_name="test_persona", server_id=None,
     )
-    assert any(m.get("role") == "tool" and m.get("name") == "create_ticket" for m in replayed)
+    assert any(m.get("role") == "tool" and m.get("name") == "create_ticket"
+               for m in replayed)
 
 
 @pytest.mark.asyncio
-async def test_resume_pins_scope_during_continuation_and_resets(mocked_chat_system):
-    """The resumed turn runs with the parked scope pinned (so engine-side tools
+async def test_continuation_pins_scope_and_resets(mocked_chat_system):
+    """The continuation runs with the parked scope pinned (so engine-side tools
     inherit persona/user/channel) and the ContextVar is reset on exit."""
     chat_system, _ = mocked_chat_system
-    persona = chat_system.personas["test_persona"]
-    persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(["*"])
+    _confirm_persona(chat_system)
 
     seen = {}
 
@@ -247,82 +258,226 @@ async def test_resume_pins_scope_during_continuation_and_resets(mocked_chat_syst
         return {"ok": True}
     chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[assignment]
 
-    await _park_write(
+    (token,) = await _park_writes(
         chat_system, user="u4", channel="c4",
-        write_call={"id": "w1", "name": "create_ticket",
-                    "arguments": {"title": "t", "body": "b"}},
+        write_calls=[{"id": "w1", "name": "create_ticket",
+                      "arguments": {"title": "t", "body": "b"}}],
     )
 
-    # Continuation issues a read so fake_execute fires inside the resumed turn.
     _set_engine(chat_system, [
-        ({"type": "tool_calls", "calls": [
-            {"id": "r1", "name": "get_agent_status", "arguments": {"agent_id": "a"}}]}, {}),
-        ({"type": "text", "content": "ok"}, {}),
+        _calls({"id": "r1", "name": "get_agent_status",
+                "arguments": {"agent_id": "a"}}),
+        _text("ok"),
     ])
-    await chat_system.resume_pending_confirmation("u4", "test_persona", approved=True)
+    await chat_system.resolve_park("u4", "test_persona", token, approved=True)
 
     assert seen["ctx"] is not None, "continuation ran with no turn context"
     assert seen["ctx"].user_identifier == "u4"
     assert seen["ctx"].persona_name == "test_persona"
     assert seen["ctx"].channel == "c4"
-    assert get_turn_context() is None, "turn context not reset after resume"
+    assert get_turn_context() is None, "turn context not reset after continuation"
 
 
 @pytest.mark.asyncio
-async def test_resume_expired_confirmation(mocked_chat_system):
-    """An expired parked confirmation closes out without re-entering the kernel."""
+async def test_expired_park_closes_out(mocked_chat_system):
+    """An expired park closes out without re-entering the kernel."""
     chat_system, _ = mocked_chat_system
 
-    chat_system.confirmations.pending[("u5", "test_persona")] = PendingConfirmation(
-        write_calls=[{"id": "w1", "name": "create_ticket", "arguments": {}}],
-        conversation_history=[],
+    chat_system.confirmations.park(ParkedWrite(
+        token="stale-token",
+        write_call={"id": "w1", "name": "create_ticket", "arguments": {}},
+        audit_info={"actions": []},
+        confirmation_text="Approve?",
+        user_identifier="u5",
         persona_name="test_persona",
-        tools_for_llm=[],
-        image_url=None,
         channel="c5",
-        created_at=time.time() - PENDING_CONFIRMATION_TIMEOUT - 10,
-    )
+        created_at=time.time() - PENDING_ACTION_TTL - 10,
+    ))
 
-    text, rtype, assistant_id, uid = await chat_system.resume_pending_confirmation(
-        "u5", "test_persona", approved=True,
+    text, rtype, assistant_id, uid = await chat_system.resolve_park(
+        "u5", "test_persona", "stale-token", approved=True,
     )
 
     assert rtype == ResponseType.DEV_COMMAND
     assert "expired" in text.lower()
     assert assistant_id is None
-    assert ("u5", "test_persona") not in chat_system.confirmations.pending
+    assert chat_system.confirmations.list_for("u5", "test_persona") == []
     assert get_turn_context() is None
 
 
 @pytest.mark.asyncio
-async def test_resume_no_pending_confirmation(mocked_chat_system):
-    """Resume with nothing parked returns the not-found close-out."""
+async def test_unknown_token_closes_out(mocked_chat_system):
+    """Resolving a token that was never parked returns the not-found close-out."""
     chat_system, _ = mocked_chat_system
-    text, rtype, assistant_id, uid = await chat_system.resume_pending_confirmation(
-        "nobody", "test_persona", approved=True,
+    text, rtype, assistant_id, uid = await chat_system.resolve_park(
+        "nobody", "test_persona", "no-such-token", approved=True,
     )
     assert rtype == ResponseType.DEV_COMMAND
-    assert "No pending confirmation" in text
+    assert "No such pending action" in text
     assert assistant_id is None
 
 
-# -------- DP-127: portal-facing park event + tokenised streaming resume --------
+# -------- DP-297: bursts, ordering, and concurrency ------------------------
+
+
+@pytest.mark.asyncio
+async def test_burst_of_writes_all_survive_with_distinct_tokens(mocked_chat_system):
+    """THE regression this ticket exists for.
+
+    One turn proposing three writes must yield three live proposals. Under the
+    old 1:1 `(user, persona)` key, parks 1 and 2 were evicted (each emitting an
+    `audit_parked_evicted` row) and only the last survived — which is why the
+    2026-07-26 Discord session left proposals dangling with no affordance.
+    """
+    chat_system, mem_manager = mocked_chat_system
+    _confirm_persona(chat_system)
+    _recording_tool_manager(chat_system)
+
+    # Three writes across three iterations: the loop must keep going after each.
+    _set_engine(chat_system, [
+        _calls({"id": "w1", "name": "create_ticket", "arguments": {"title": "a"}}),
+        _calls({"id": "w2", "name": "update_ticket", "arguments": {"ticket_id": 1}}),
+        _calls({"id": "w3", "name": "merge_tickets",
+                "arguments": {"source_ticket_id": 2, "target_ticket_id": 3}}),
+        _text("Proposed three actions."),
+    ])
+    events = await _drain(
+        chat_system.stream_response("test_persona", "burst", "c", "do three things")
+    )
+
+    parks = chat_system.confirmations.list_for("burst", "test_persona")
+    assert [p.write_call["name"] for p in parks] == [
+        "create_ticket", "update_ticket", "merge_tickets",
+    ]
+    assert len({p.token for p in parks}) == 3
+
+    # One approve/deny affordance per proposal, all before the terminal event.
+    pce = [e for e in events if isinstance(e, PendingConfirmationEvent)]
+    assert [e.token for e in pce] == [p.token for p in parks]
+    done_idx = next(i for i, e in enumerate(events) if isinstance(e, DoneEvent))
+    assert all(i < done_idx for i, e in enumerate(events)
+               if isinstance(e, PendingConfirmationEvent))
+
+    # The turn still ended with the model's own text.
+    assert events[done_idx].text == "Proposed three actions."
+
+    # Nothing was evicted.
+    conn = mem_manager._get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT COUNT(*) AS n FROM Audit_Log WHERE event_type='audit_parked_evicted'"
+    )
+    assert cursor.fetchone()["n"] == 0
+    cursor.execute(
+        "SELECT COUNT(*) AS n FROM Audit_Log WHERE event_type='audit_parked'"
+    )
+    assert cursor.fetchone()["n"] == 3
+
+
+@pytest.mark.asyncio
+async def test_out_of_order_resolution(mocked_chat_system):
+    """Proposals resolve independently and in any order."""
+    chat_system, _ = mocked_chat_system
+    _confirm_persona(chat_system)
+    executed = _recording_tool_manager(chat_system)
+
+    _set_engine(chat_system, [
+        _calls({"id": "w1", "name": "create_ticket", "arguments": {"title": "a"}}),
+        _calls({"id": "w2", "name": "update_ticket", "arguments": {"ticket_id": 1}}),
+        _text("Proposed two."),
+    ])
+    await _drain(
+        chat_system.stream_response("test_persona", "ooo", "c", "two things")
+    )
+    first, second = [p.token
+                     for p in chat_system.confirmations.list_for("ooo", "test_persona")]
+
+    # Resolve the SECOND one first.
+    _set_engine(chat_system, [_text("Updated.")])
+    await chat_system.resolve_park("ooo", "test_persona", second, approved=True)
+    assert executed == ["update_ticket"]
+    # The first is untouched and still live.
+    remaining = chat_system.confirmations.list_for("ooo", "test_persona")
+    assert [p.token for p in remaining] == [first]
+
+    _set_engine(chat_system, [_text("Created.")])
+    await chat_system.resolve_park("ooo", "test_persona", first, approved=True)
+    assert executed == ["update_ticket", "create_ticket"]
+    assert chat_system.confirmations.list_for("ooo", "test_persona") == []
+
+
+@pytest.mark.asyncio
+async def test_concurrent_approvals_serialize(mocked_chat_system):
+    """Two approvals fired at once must never run two tool loops over the same
+    conversation concurrently.
+
+    This is the property the per-conversation lock exists for. Without it both
+    continuations mutate one history list and each writes its own assistant row
+    for the same logical turn — the interleaving that made per-approval
+    re-entry unsafe once a burst became possible.
+
+    Note what is NOT promised: that both fold into a single summary. Acquiring
+    an uncontended asyncio.Lock does not suspend, so the winner is typically
+    already inside its continuation before the loser is scheduled. Coalescing
+    is best-effort (decisions arriving mid-execution do get folded in);
+    serialization is the guarantee.
+    """
+    chat_system, mem_manager = mocked_chat_system
+    _confirm_persona(chat_system)
+
+    concurrent = {"now": 0, "max": 0}
+
+    async def fake_execute(name, **kwargs):
+        concurrent["now"] += 1
+        concurrent["max"] = max(concurrent["max"], concurrent["now"])
+        await asyncio.sleep(0)  # give the other task a chance to interleave
+        concurrent["now"] -= 1
+        return {"ok": True}
+    chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[assignment]
+
+    _set_engine(chat_system, [
+        _calls({"id": "w1", "name": "create_ticket", "arguments": {"title": "a"}}),
+        _calls({"id": "w2", "name": "update_ticket", "arguments": {"ticket_id": 1}}),
+        _text("Proposed two."),
+    ])
+    await _drain(
+        chat_system.stream_response("test_persona", "race", "c", "two things")
+    )
+    tokens = [p.token
+              for p in chat_system.confirmations.list_for("race", "test_persona")]
+
+    _set_engine(chat_system, [_text("Handled."), _text("Handled.")])
+
+    await asyncio.gather(*(
+        chat_system.resolve_park("race", "test_persona", t, approved=True)
+        for t in tokens
+    ))
+
+    assert concurrent["max"] == 1, "two approvals executed tools concurrently"
+    assert chat_system.confirmations.list_for("race", "test_persona") == []
+
+    # Every resolved proposal is accounted for exactly once in history.
+    conn = mem_manager._get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT COUNT(*) AS n FROM Audit_Log "
+        "WHERE event_type='audit_decision' AND new_state='approved'"
+    )
+    assert cursor.fetchone()["n"] == 2
 
 
 @pytest.mark.asyncio
 async def test_park_yields_pending_confirmation_event(mocked_chat_system):
-    """When a write parks, the stream surfaces a PendingConfirmationEvent
-    (structured calls + resume token) before the terminal DoneEvent, so an
-    interactive surface can render approve/deny. The token matches the park."""
+    """A gated write surfaces a PendingConfirmationEvent (structured call +
+    token) before the terminal DoneEvent, so a surface can render approve/deny.
+    The token matches the stored park."""
     chat_system, _ = mocked_chat_system
-    persona = chat_system.personas["test_persona"]
-    persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(["*"])
+    _confirm_persona(chat_system)
 
     _set_engine(chat_system, [
-        ({"type": "tool_calls", "calls": [
-            {"id": "w1", "name": "create_ticket",
-             "arguments": {"title": "t", "body": "b"}}]}, {}),
+        _calls({"id": "w1", "name": "create_ticket",
+                "arguments": {"title": "t", "body": "b"}}),
+        _text("Proposed."),
     ])
     events = await _drain(
         chat_system.stream_response("test_persona", "u6", "c6", "do it")
@@ -333,10 +488,10 @@ async def test_park_yields_pending_confirmation_event(mocked_chat_system):
     ev = pce[0]
     assert ev.persona_name == "test_persona"
     assert ev.write_calls[0]["name"] == "create_ticket"
-    assert ev.token, "park event must carry a resume token"
+    assert ev.token, "park event must carry a token"
 
-    parked = chat_system.confirmations.pending[("u6", "test_persona")]
-    assert ev.token == parked.token, "event token must match the stored park"
+    parks = chat_system.confirmations.list_for("u6", "test_persona")
+    assert ev.token == parks[0].token, "event token must match the stored park"
 
     pce_idx = next(i for i, e in enumerate(events)
                    if isinstance(e, PendingConfirmationEvent))
@@ -345,301 +500,255 @@ async def test_park_yields_pending_confirmation_event(mocked_chat_system):
 
 
 @pytest.mark.asyncio
-async def test_stream_resume_token_mismatch_preserves_park(mocked_chat_system):
-    """A streaming resume with a stale token is rejected and leaves the real
-    park intact, so a correct-token retry can still go through."""
+async def test_stale_token_leaves_other_parks_intact(mocked_chat_system):
+    """A resolve with an unknown token executes nothing and leaves live parks
+    alone, so a correct-token retry still goes through."""
     chat_system, _ = mocked_chat_system
-    persona = chat_system.personas["test_persona"]
-    persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(["*"])
+    _confirm_persona(chat_system)
+    executed = _recording_tool_manager(chat_system)
 
-    executed = []
-
-    async def fake_execute(name, **kwargs):
-        executed.append(name)
-        return {"ok": True}
-    chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[assignment]
-
-    await _park_write(
+    (token,) = await _park_writes(
         chat_system, user="u7", channel="c7",
-        write_call={"id": "w1", "name": "create_ticket",
-                    "arguments": {"title": "t", "body": "b"}},
+        write_calls=[{"id": "w1", "name": "create_ticket",
+                      "arguments": {"title": "t", "body": "b"}}],
     )
 
-    events = await _drain(chat_system.stream_resume_confirmation(
-        "u7", "test_persona", approved=True, expected_token="not-the-token",
+    events = await _drain(chat_system.stream_resolve_park(
+        "u7", "test_persona", "not-the-token", approved=True,
     ))
     done = [e for e in events if isinstance(e, DoneEvent)][-1]
     assert done.response_type == ResponseType.DEV_COMMAND
-    assert "no longer valid" in done.text.lower()
-    assert "create_ticket" not in executed, "stale resume must not execute the write"
-    assert ("u7", "test_persona") in chat_system.confirmations.pending, \
-        "stale token must leave the park intact"
+    assert "no such pending action" in done.text.lower()
+    assert "create_ticket" not in executed, "stale resolve must not execute the write"
+
+    parks = chat_system.confirmations.list_for("u7", "test_persona")
+    assert [p.token for p in parks] == [token], \
+        "stale token must leave the real park intact"
 
 
 @pytest.mark.asyncio
-async def test_stream_resume_valid_token_executes_write(mocked_chat_system):
-    """A streaming resume with the matching token consumes the park, executes
-    the write, and streams the continuation."""
+async def test_valid_token_executes_write(mocked_chat_system):
+    """A streaming resolve with a live token consumes the park, executes the
+    write, and streams the continuation."""
     chat_system, _ = mocked_chat_system
-    persona = chat_system.personas["test_persona"]
-    persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(["*"])
+    _confirm_persona(chat_system)
+    executed = _recording_tool_manager(chat_system)
 
-    executed = []
-
-    async def fake_execute(name, **kwargs):
-        executed.append(name)
-        return {"ok": True}
-    chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[assignment]
-
-    await _park_write(
+    (token,) = await _park_writes(
         chat_system, user="u8", channel="c8",
-        write_call={"id": "w1", "name": "create_ticket",
-                    "arguments": {"title": "t", "body": "b"}},
+        write_calls=[{"id": "w1", "name": "create_ticket",
+                      "arguments": {"title": "t", "body": "b"}}],
     )
-    token = chat_system.confirmations.pending[("u8", "test_persona")].token
 
-    _set_engine(chat_system, [
-        ({"type": "text", "content": "Ticket opened."}, {}),
-    ])
-    events = await _drain(chat_system.stream_resume_confirmation(
-        "u8", "test_persona", approved=True, expected_token=token,
+    _set_engine(chat_system, [_text("Ticket opened.")])
+    events = await _drain(chat_system.stream_resolve_park(
+        "u8", "test_persona", token, approved=True,
     ))
+
     done = [e for e in events if isinstance(e, DoneEvent)][-1]
     assert done.response_type == ResponseType.LLM_GENERATION
     assert done.text == "Ticket opened."
-    assert "create_ticket" in executed
-    assert ("u8", "test_persona") not in chat_system.confirmations.pending
-    assert get_turn_context() is None
+    assert executed == ["create_ticket"]
+    assert chat_system.confirmations.list_for("u8", "test_persona") == []
 
 
-# --- DP-296: a park must stay visible to the model -------------------------
+# ---- DP-297 duplicate-proposal guard, wired end to end -------------------
+#
+# The tool-loop unit tests drive `pending_lookup` with a fake. These assert the
+# real closure in `_orchestrate` is actually PASSED and actually consults the
+# live store -- a guard that exists but is never reached is the failure mode
+# this file exists to catch.
 
 
 @pytest.mark.asyncio
-async def test_parked_turn_persists_sealed_tool_context(mocked_chat_system):
-    """An unanswered park still records what the model did and proposed.
+async def test_reproposal_across_turns_does_not_create_a_second_park(
+        mocked_chat_system):
+    """A later turn re-proposing a still-pending write gets no second park.
 
-    Before DP-296 the park exit persisted tool_context=None, so a proposal the
-    operator never answered left zero trace — the model's next turn saw only
-    its own prose and re-proposed or hallucinated the action.
+    The cross-turn case is the one that bites: the park survives the turn, the
+    model re-reads it as pending, and proposes again.
     """
-    import json
-    chat_system, mem_manager = mocked_chat_system
-    persona = chat_system.personas["test_persona"]
-    persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(["*"])
-
-    await _park_write(
-        chat_system, user="u7", channel="c7",
-        write_call={"id": "w1", "name": "update_ticket",
-                    "arguments": {"state": "closed"}},
-    )
-
-    conn = mem_manager._get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT tool_context FROM User_Interactions "
-        "WHERE author_role='assistant' ORDER BY interaction_id DESC LIMIT 1"
-    )
-    row = cursor.fetchone()
-    assert row is not None and row["tool_context"], \
-        "parked turn persisted without tool_context"
-
-    tool_ctx = json.loads(row["tool_context"])
-    proposed = next(
-        m for m in tool_ctx
-        if m.get("role") == "assistant" and m.get("tool_calls")
-    )
-    assert proposed["tool_calls"][0]["name"] == "update_ticket"
-
-    # Sealed, not left unpaired — an unpaired call block is unsendable.
-    sealed = next(m for m in tool_ctx if m.get("role") == "tool")
-    assert json.loads(sealed["content"]) == {
-        "status": "not_executed", "reason": "awaiting_approval",
-    }
-
-
-@pytest.mark.asyncio
-async def test_denied_write_reaches_next_turn_context(mocked_chat_system):
-    """A denial must land in replayable history so the model knows the action
-    did not happen and stops re-proposing it."""
-    import json
-    chat_system, mem_manager = mocked_chat_system
-    persona = chat_system.personas["test_persona"]
-    persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(["*"])
-
-    await _park_write(
-        chat_system, user="u8", channel="c8",
-        write_call={"id": "w1", "name": "update_ticket",
-                    "arguments": {"state": "closed"}},
-    )
-
-    _set_engine(chat_system, [
-        ({"type": "text", "content": "Understood, leaving it open."}, {}),
-    ])
-    await chat_system.resume_pending_confirmation("u8", "test_persona", approved=False)
-
-    conn = mem_manager._get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT tool_context FROM User_Interactions "
-        "WHERE author_role='assistant' AND content='Understood, leaving it open.'"
-    )
-    row = cursor.fetchone()
-    assert row is not None and row["tool_context"], \
-        "denied turn persisted without tool_context"
-
-    tool_ctx = json.loads(row["tool_context"])
-    denial = next(m for m in tool_ctx if m.get("role") == "tool")
-    assert "denied" in denial["content"].lower()
-
-    # Replays into the next request, which is the whole point.
-    replayed = chat_system.request_builder.format_raw_history_for_llm(
-        [{"author_role": "user", "author_name": "Alice", "content": "close it"},
-         {"author_role": "assistant", "author_name": "test_persona",
-          "content": "Understood, leaving it open.", "tool_context": row["tool_context"]}],
-        memory_mode="channel", persona_name="test_persona", server_id=None,
-    )
-    assert any(m.get("role") == "tool" and "denied" in m["content"].lower()
-               for m in replayed)
-
-
-@pytest.mark.asyncio
-async def test_resume_does_not_duplicate_parked_tool_context(mocked_chat_system):
-    """The parked row's provisional context is cleared on resume.
-
-    Both rows seal the same span (the continuation re-seals from the park
-    boundary), so leaving the parked copy in place would show the model every
-    approved write twice.
-    """
-    import json
-    chat_system, mem_manager = mocked_chat_system
-    persona = chat_system.personas["test_persona"]
-    persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(["*"])
-
-    async def fake_execute(name, **kwargs):
-        return {"ticket_id": 42}
-    chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[assignment]
-
-    await _park_write(
-        chat_system, user="u9", channel="c9",
-        write_call={"id": "w1", "name": "create_ticket", "arguments": {"title": "t"}},
-    )
-
-    _set_engine(chat_system, [
-        ({"type": "text", "content": "Ticket created."}, {}),
-    ])
-    await chat_system.resume_pending_confirmation("u9", "test_persona", approved=True)
-
-    conn = mem_manager._get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT content, tool_context FROM User_Interactions "
-        "WHERE author_role='assistant' ORDER BY interaction_id"
-    )
-    rows = cursor.fetchall()
-
-    # Exactly one row carries the span.
-    carriers = [r for r in rows if r["tool_context"]]
-    assert len(carriers) == 1, \
-        f"expected 1 row with tool_context, got {len(carriers)}"
-    assert carriers[0]["content"] == "Ticket created."
-
-    # And that span mentions the write exactly once.
-    tool_ctx = json.loads(carriers[0]["tool_context"])
-    call_ids = [
-        c["id"] for m in tool_ctx for c in (m.get("tool_calls") or [])
-    ]
-    assert call_ids.count("w1") == 1
-
-
-# --- DP-296 review: ordering of the parked row's clear + its id assignment ----
-
-@pytest.mark.asyncio
-async def test_parked_row_id_is_set_before_the_park_is_published(mocked_chat_system):
-    """`park()` makes the confirmation resumable and the PendingConfirmationEvent
-    yield suspends the generator. Assigning parked_assistant_id after that window
-    let a fast resume (auto-approver, the MCP executor, a quick click) see None,
-    skip the clear, and leave the parked row holding a span the continuation
-    re-seals — every approved write twice in replayed history."""
     chat_system, _ = mocked_chat_system
-    persona = chat_system.personas["test_persona"]
-    persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(["*"])
+    _confirm_persona(chat_system)
+    _recording_tool_manager(chat_system)
 
-    seen = {}
-    real_park = chat_system.confirmations.park
-
-    def spy_park(user_identifier, persona_name, parked):
-        seen["id_at_park"] = parked.parked_assistant_id
-        return real_park(user_identifier, persona_name, parked)
-    chat_system.confirmations.park = spy_park  # type: ignore[assignment]
-
-    await _park_write(
-        chat_system, user="u10", channel="c10",
-        write_call={"id": "w1", "name": "create_ticket", "arguments": {"title": "t"}},
+    write = {"id": "w1", "name": "create_ticket",
+             "arguments": {"title": "t", "body": "b"}}
+    (token,) = await _park_writes(
+        chat_system, user="u9", channel="c9", write_calls=[write],
     )
 
-    assert seen["id_at_park"] is not None, \
-        "park published before the row id was known — a resume in that window duplicates the span"
-    assert chat_system.confirmations.pending[("u10", "test_persona")] \
-        .parked_assistant_id == seen["id_at_park"]
+    # Turn 2: same action, different provider call id (as a real re-proposal
+    # would have).
+    _set_engine(chat_system, [
+        _calls({"id": "w2", "name": "create_ticket",
+                "arguments": {"title": "t", "body": "b"}}),
+        _text("Still waiting on you."),
+    ])
+    await _drain(chat_system.stream_response(
+        "test_persona", "u9", "c9", "do it again"))
+
+    parks = chat_system.confirmations.list_for("u9", "test_persona")
+    assert len(parks) == 1, "re-proposal must not queue a second affordance"
+    assert parks[0].token == token, "the original park is the survivor"
 
 
 @pytest.mark.asyncio
-async def test_aborted_resume_keeps_the_parked_rows_context(mocked_chat_system):
-    """`apply_resume_decision` executes the approved write *before* the
-    continuation runs. Clearing the parked row up front meant an aborted
-    continuation — client disconnect — left that performed write recorded in no
-    row at all: strictly worse than the pre-DP-296 behaviour, which at least
-    didn't delete anything."""
-    import asyncio
-    import json
-    chat_system, mem_manager = mocked_chat_system
-    persona = chat_system.personas["test_persona"]
-    persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(["*"])
+async def test_reproposal_after_resolution_parks_again(mocked_chat_system):
+    """The guard keys on PENDING, not on history.
 
-    executed = []
+    Once the operator has decided, the action is no longer queued, so proposing
+    it again is a legitimate new request -- a denied write the user then asks
+    for explicitly must be able to reach them a second time.
+    """
+    chat_system, _ = mocked_chat_system
+    _confirm_persona(chat_system)
+    _recording_tool_manager(chat_system)
 
-    async def fake_execute(name, **kwargs):
-        executed.append(name)
-        return {"ticket_id": 42}
-    chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[assignment]
-
-    await _park_write(
-        chat_system, user="u11", channel="c11",
-        write_call={"id": "w1", "name": "create_ticket", "arguments": {"title": "t"}},
+    write = {"id": "w1", "name": "create_ticket",
+             "arguments": {"title": "t", "body": "b"}}
+    (token,) = await _park_writes(
+        chat_system, user="u10", channel="c10", write_calls=[write],
     )
-    parked_id = chat_system.confirmations.pending[("u11", "test_persona")].parked_assistant_id
-    assert parked_id is not None
 
-    # The client goes away mid-continuation.
-    async def abort(persona_config, history_object, *a, **k):
-        raise asyncio.CancelledError()
-    chat_system.text_engine.generate_response.side_effect = abort
+    _set_engine(chat_system, [_text("Denied, understood.")])
+    await _drain(chat_system.stream_resolve_park(
+        "u10", "test_persona", token, approved=False,
+    ))
+    assert chat_system.confirmations.list_for("u10", "test_persona") == []
 
-    with pytest.raises(asyncio.CancelledError):
-        await _drain(chat_system.stream_resume_confirmation(
-            "u11", "test_persona", approved=True))
+    _set_engine(chat_system, [
+        _calls({"id": "w2", "name": "create_ticket",
+                "arguments": {"title": "t", "body": "b"}}),
+        _text("Proposed again."),
+    ])
+    await _drain(chat_system.stream_response(
+        "test_persona", "u10", "c10", "actually, do it"))
 
-    assert executed == ["create_ticket"], "the write should have already run"
+    parks = chat_system.confirmations.list_for("u10", "test_persona")
+    assert len(parks) == 1
+    assert parks[0].token != token, "a new decision needs a new token"
 
-    conn = mem_manager._get_connection()
-    cursor = conn.cursor()
+
+def _tool_entries(mem_manager):
+    """Every sealed tool entry across the conversation, keyed by call id."""
+    cursor = mem_manager._get_connection().cursor()
     cursor.execute(
-        "SELECT tool_context FROM User_Interactions WHERE interaction_id = ?",
-        (parked_id,),
+        "SELECT tool_context FROM User_Interactions "
+        "WHERE tool_context IS NOT NULL ORDER BY interaction_id"
     )
-    row = cursor.fetchone()
-    assert row is not None and row["tool_context"], \
-        "aborted continuation erased the only record of an executed write"
-    call_ids = [
-        c["id"] for m in json.loads(row["tool_context"])
-        for c in (m.get("tool_calls") or [])
-    ]
-    assert "w1" in call_ids
+    out = {}
+    for (blob,) in cursor.fetchall():
+        for msg in json.loads(blob):
+            if msg.get("role") == "tool":
+                out[msg.get("tool_call_id")] = json.loads(msg["content"])
+    return out
+
+
+@pytest.mark.asyncio
+async def test_resolving_a_park_also_patches_its_suppressed_duplicate(
+        mocked_chat_system):
+    """A suppressed duplicate must not keep claiming the action is pending.
+
+    The duplicate's entry says "still awaiting the operator". Nothing else
+    would ever correct it, so once the original is decided history would assert
+    a decided action is queued — the same verdict/record split that the denial
+    instruction fixed elsewhere.
+
+    Note the duplicate lands in a DIFFERENT assistant row than the park (the
+    re-proposal is a later turn), so this also pins that the patch follows
+    `duplicate_refs` across rows rather than scanning the park's own row.
+    """
+    chat_system, mem_manager = mocked_chat_system
+    _confirm_persona(chat_system)
+    _recording_tool_manager(chat_system)
+
+    (token,) = await _park_writes(
+        chat_system, user="u12", channel="c12",
+        write_calls=[{"id": "w1", "name": "create_ticket",
+                      "arguments": {"title": "t", "body": "b"}}],
+    )
+
+    # Turn 2 re-proposes it; the guard answers inline with `duplicate_of_pending`.
+    _set_engine(chat_system, [
+        _calls({"id": "w2", "name": "create_ticket",
+                "arguments": {"title": "t", "body": "b"}}),
+        _text("Still waiting."),
+    ])
+    await _drain(chat_system.stream_response(
+        "test_persona", "u12", "c12", "do it again"))
+
+    before = _tool_entries(mem_manager)
+    assert before["w2"]["status"] == "duplicate_of_pending"
+
+    _set_engine(chat_system, [_text("Ticket opened.")])
+    await _drain(chat_system.stream_resolve_park(
+        "u12", "test_persona", token, approved=True))
+
+    after = _tool_entries(mem_manager)
+    assert after["w1"]["status"] == "approved"
+    assert after["w2"]["status"] == "approved", (
+        "the suppressed duplicate still claims the action is pending"
+    )
+    # Marked, so the transcript does not read as the action having run twice.
+    assert after["w2"]["duplicate_of"] == "w1"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_in_the_same_turn_is_also_patched(mocked_chat_system):
+    """The in-turn case: park and duplicate share one row.
+
+    `_register_duplicates` runs AFTER `_register_parks` precisely so a duplicate
+    can find a park minted moments earlier in the same turn.
+    """
+    chat_system, mem_manager = mocked_chat_system
+    _confirm_persona(chat_system)
+    _recording_tool_manager(chat_system)
+
+    _set_engine(chat_system, [
+        _calls({"id": "w1", "name": "create_ticket",
+                "arguments": {"title": "t", "body": "b"}}),
+        _calls({"id": "w2", "name": "create_ticket",
+                "arguments": {"title": "t", "body": "b"}}),
+        _text("Proposed once."),
+    ])
+    await _drain(chat_system.stream_response(
+        "test_persona", "u13", "c13", "open a ticket"))
+
+    parks = chat_system.confirmations.list_for("u13", "test_persona")
+    assert len(parks) == 1
+    assert _tool_entries(mem_manager)["w2"]["status"] == "duplicate_of_pending"
+
+    _set_engine(chat_system, [_text("Denied.")])
+    await _drain(chat_system.stream_resolve_park(
+        "u13", "test_persona", parks[0].token, approved=False))
+
+    after = _tool_entries(mem_manager)
+    assert after["w1"]["status"] == "denied"
+    assert after["w2"]["status"] == "denied"
+
+
+@pytest.mark.asyncio
+async def test_distinct_writes_across_turns_both_park(mocked_chat_system):
+    """The guard must not swallow a genuinely different second proposal."""
+    chat_system, _ = mocked_chat_system
+    _confirm_persona(chat_system)
+    _recording_tool_manager(chat_system)
+
+    (first,) = await _park_writes(
+        chat_system, user="u11", channel="c11",
+        write_calls=[{"id": "w1", "name": "create_ticket",
+                      "arguments": {"title": "t", "body": "b"}}],
+    )
+
+    _set_engine(chat_system, [
+        _calls({"id": "w2", "name": "create_ticket",
+                "arguments": {"title": "OTHER", "body": "b"}}),
+        _text("Two for review."),
+    ])
+    await _drain(chat_system.stream_response(
+        "test_persona", "u11", "c11", "and another"))
+
+    parks = chat_system.confirmations.list_for("u11", "test_persona")
+    assert len(parks) == 2
+    assert {p.token for p in parks} >= {first}

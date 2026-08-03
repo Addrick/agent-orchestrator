@@ -9,7 +9,9 @@ from unittest.mock import patch, AsyncMock
 from src.chat_system import ResponseType
 from src.persona import ExecutionMode
 
-from tests.helpers import route_stream_through_generate_response
+from tests.helpers import (
+    only_pending_token, route_stream_through_generate_response,
+)
 from tests.live.conftest import wait_for_search
 
 pytestmark = pytest.mark.zammad_live
@@ -30,14 +32,17 @@ async def test_confirm_mode_pends_write_tools(live_chat_system, managed_zammad_u
 
     tool_call = ({'type': 'tool_calls', 'calls': [
         {'id': 'call_1', 'name': 'create_ticket', 'arguments': {'title': 'Pending Ticket', 'body': 'test'}}]}, {})
+    closing = ({'type': 'text', 'content': 'Proposed that ticket.'}, {})
     with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
-                      side_effect=[tool_call]):
+                      side_effect=[tool_call, closing]):
         response, response_type, _, _ = await chat_system.generate_response(
             "test_persona", user_info["identifier"], "support", "Create a ticket"
         )
-        assert response_type == ResponseType.PENDING_CONFIRMATION
-        assert "create_ticket" in response
-        assert (user_info["identifier"], "test_persona") in chat_system.confirmations.pending
+        # DP-297: gating no longer ends the turn — it finishes with the model's
+        # own text and the proposal waits alongside it.
+        assert response_type == ResponseType.LLM_GENERATION
+        parks = chat_system.confirmations.list_for(user_info["identifier"], "test_persona")
+        assert [p.write_call["name"] for p in parks] == ["create_ticket"]
         results = zammad_client.search_tickets(query="title:\"Pending Ticket\"")
         assert len(results) == 0
 
@@ -62,15 +67,17 @@ async def test_confirm_mode_resume_approved_creates_ticket(live_chat_system, man
         final_text = ({'type': 'text', 'content': 'Ticket created successfully.'}, {})
 
         with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
-                          side_effect=[tool_call]):
+                          side_effect=[tool_call,
+                                       ({'type': 'text', 'content': 'Proposed.'}, {})]):
             await chat_system.generate_response(
                 "test_persona", user_info["identifier"], "support", "Create a ticket"
             )
+        token = only_pending_token(chat_system, user_info["identifier"], "test_persona")
 
         with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
                           return_value=final_text):
-            response, response_type, _, _ = await chat_system.resume_pending_confirmation(
-                user_info["identifier"], "test_persona", approved=True
+            response, response_type, _, _ = await chat_system.resolve_park(
+                user_info["identifier"], "test_persona", token, approved=True
             )
             assert response_type == ResponseType.LLM_GENERATION
 
@@ -118,15 +125,17 @@ async def test_confirm_mode_resume_denied_skips_tool(live_chat_system, managed_z
     denial_response = ({'type': 'text', 'content': 'Understood, I will not create the ticket.'}, {})
 
     with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
-                      side_effect=[tool_call]):
+                      side_effect=[tool_call,
+                                   ({'type': 'text', 'content': 'Proposed.'}, {})]):
         await chat_system.generate_response(
             "test_persona", user_info["identifier"], "support", "Create a ticket"
         )
+    token = only_pending_token(chat_system, user_info["identifier"], "test_persona")
 
     with patch.object(chat_system.text_engine, 'generate_response', new_callable=AsyncMock,
                       return_value=denial_response):
-        response, response_type, _, _ = await chat_system.resume_pending_confirmation(
-            user_info["identifier"], "test_persona", approved=False
+        response, response_type, _, _ = await chat_system.resolve_park(
+            user_info["identifier"], "test_persona", token, approved=False
         )
         assert response_type == ResponseType.LLM_GENERATION
         assert "not create" in response.lower() or "denied" in response.lower() or len(response) > 0

@@ -40,7 +40,8 @@ flowchart TD
   tc -- yes --> split[append assistant tool_calls;\nsplit read / write]
   split --> reads[execute reads, update taint]
   reads --> w{write calls?}
-  w -- yes --> park[_LoopFinishedEvent\nPENDING_CONFIRMATION + audit_info]
+  w -- yes --> park[WriteParkedEvent per call\n+ synthetic awaiting_human_approval result]
+  park --> loop
   w -- no --> loop{iter < max?}
   loop -- yes --> start
   loop -- no --> stuck[_LoopFinishedEvent\nDEV_COMMAND 'stuck in a loop']
@@ -56,10 +57,10 @@ flowchart TD
 | loop emits ErrorEvent (885) | ErrorEvent | ✅ explicit reset | covers `LLMCommunicationError` |
 | `CancelledError` (899) | re-raises | ✅ explicit reset | flushes partial assistant text |
 | normal LLM_GENERATION | DoneEvent | ✅ `turn_scope` | guaranteed on full drain *and* early break |
-| PENDING_CONFIRMATION | DoneEvent | ✅ `turn_scope` | `log_audit_event` raise no longer leaks |
+| parked write(s) | DoneEvent (LLM_GENERATION) | ✅ `turn_scope` | DP-297: parking is mid-turn, not an exit — the loop continues and the turn ends normally |
 | `turn_persistence.log_user_turn` raises | propagates | ✅ `turn_scope` | now inside the scope |
 | max-iter DEV_COMMAND | DoneEvent | ✅ `turn_scope` | |
-| `resume` re-entry (DP-124) | DoneEvent / ErrorEvent | ✅ `turn_scope` | shares the kernel; parked history + applied decision drive the loop |
+| `continuation` re-entry (DP-297) | DoneEvent / ErrorEvent | ✅ `turn_scope` | shares the kernel; history is rebuilt LIVE from the DB after each decision is patched |
 
 **Fix for #1 — `turn_scope` + `aclosing` (two non-obvious parts):**
 
@@ -98,25 +99,39 @@ flowchart TD
 - **#3 — read group executes concurrently** (`ToolLoop._execute_calls`): calls
   in one batch share a `group_id` because they're independent, so they're
   dispatched with `asyncio.gather`; results are appended/emitted in original
-  order to keep the transcript stable. Writes still short-circuit to
-  confirmation, so only the read group is parallelized.
+  order to keep the transcript stable. Writes are gated rather than executed,
+  so only the read group is parallelized.
 
-## resume_pending_confirmation re-enters the kernel (DP-124)
+## stream_resolve_park re-enters the kernel (DP-124, reworked by DP-297)
 
-`resume_pending_confirmation` no longer re-implements the loop. It re-enters
-`_orchestrate(resume=_ResumeState(pending, approved))`, which skips the
-fresh-request front half (dev-command preprocess, history build, user-turn
-logging), applies the approve/deny decision to the **parked history** — the
-approved write results are appended *before* the continuation — then runs the
-shared tool loop + persistence tail. Consequences:
+`stream_resolve_park` does not re-implement the loop. It re-enters
+`_orchestrate(continuation=_ContinuationState(batch))`, which skips the
+fresh-request front half (dev-command preprocess, user-turn logging) and then
+runs the shared tool loop + persistence tail.
 
-- the continuation can run a **further tool loop** (and re-park if it issues
-  another write — the same `pending_writes` branch handles it);
-- the assistant row is persisted on the **real channel** (`pending.channel`),
+DP-124 passed `_ResumeState(pending, approved)` — the parked turn's **snapshot**
+of history, with the approved write's result spliced in. DP-297 deleted that:
+once several parks are resolvable in any order, every snapshot predates its
+siblings, so replaying one forks the conversation. The continuation now rebuilds
+history **live from the DB**, where `ConfirmationManager.apply()` has already
+patched each resolved write's entry with its real outcome — execute-then-patch
+ordering exists precisely so the model reads what actually happened.
+
+Consequences:
+
+- decisions that arrive while the lock is held are folded into **one**
+  continuation (`drain()` in a loop), not N racing tool loops over one history;
+- the continuation can run a **further tool loop** and re-park if it issues
+  another write — the same `WriteParkedEvent` branch handles it;
+- the assistant row is persisted on the **real channel** (`parked.channel`),
   not the old hardcoded `channel=""`;
 - `turn_scope`, taint write-back, retain, and the terminal event live in
-  **exactly one place** — the duplicate `turn_scope` in resume is gone.
+  **exactly one place**;
+- the turn opens on `_render_resolution_nudge`, a synthetic user message that
+  is deliberately **not** persisted — it exists because ending the array on the
+  parked assistant message makes Anthropic treat it as a prefill to continue
+  rather than a turn to answer.
 
-The audit-decision logging (`_apply_resume_decision`) and the parked-turn
-timeout/expiry checks are preserved, the latter ahead of kernel re-entry.
+Audit-decision logging (`ConfirmationManager.apply`) and the expiry check are
+preserved, the latter ahead of kernel re-entry.
 Coverage: `tests/integration/test_resume_kernel_convergence.py`.
