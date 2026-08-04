@@ -91,7 +91,7 @@ colorama==0.4.6 ; sys_platform == 'win32'
     #   -c requirements.txt
     #   click
     #   tqdm
-cryptography==48.0.1
+cryptography==50.0.0
     # via
     #   -c requirements.txt
     #   google-auth

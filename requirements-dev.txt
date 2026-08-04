@@ -93,7 +93,7 @@ colorama==0.4.6 ; os_name == 'nt' or sys_platform == 'win32'
     #   tqdm
 coverage==7.14.1
     # via -r requirements-dev.in
-cryptography==48.0.1
+cryptography==50.0.0
     # via
     #   -c requirements.txt
     #   google-auth
