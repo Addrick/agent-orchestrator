@@ -2,7 +2,7 @@
 #    uv pip compile --universal requirements.in -o requirements.txt
 aiohappyeyeballs==2.6.2
     # via aiohttp
-aiohttp==3.14.1
+aiohttp==3.14.3
     # via
     #   -r requirements.in
     #   discord-py
@@ -131,7 +131,7 @@ hpack==4.1.0
     # via h2
 httpcore==1.0.9
     # via httpx
-httplib2==0.31.2
+httplib2==0.32.0
     # via
     #   google-api-python-client
     #   google-auth-httplib2
@@ -202,7 +202,7 @@ protobuf==7.35.0
     #   grpc-google-iam-v1
     #   grpcio-status
     #   proto-plus
-pyasn1==0.6.3
+pyasn1==0.6.4
     # via pyasn1-modules
 pyasn1-modules==0.4.2
     # via google-auth
