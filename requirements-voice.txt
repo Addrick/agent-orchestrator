@@ -4,7 +4,7 @@ aiohappyeyeballs==2.6.2
     # via
     #   -c requirements.txt
     #   aiohttp
-aiohttp==3.14.1
+aiohttp==3.14.3
     # via
     #   -c requirements.txt
     #   -r requirements.in
@@ -212,7 +212,7 @@ httpcore==1.0.9
     # via
     #   -c requirements.txt
     #   httpx
-httplib2==0.31.2
+httplib2==0.32.0
     # via
     #   -c requirements.txt
     #   google-api-python-client
@@ -363,7 +363,7 @@ protobuf==7.35.0
     #   grpcio-status
     #   onnxruntime
     #   proto-plus
-pyasn1==0.6.3
+pyasn1==0.6.4
     # via
     #   -c requirements.txt
     #   pyasn1-modules
