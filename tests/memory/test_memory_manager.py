@@ -2959,7 +2959,8 @@ def test_migration_creates_parked_writes_table(legacy_mem_manager):
     assert {'token', 'created_at', 'status', 'user_identifier', 'persona_name',
             'channel', 'server_id', 'write_call', 'call_identity', 'audit_info',
             'confirmation_text', 'turn_tainted', 'parked_assistant_id',
-            'duplicate_refs', 'resolved_at', 'resolution'} == columns
+            'duplicate_refs', 'resolved_at', 'resolution',
+            'resolution_reason'} == columns
 
     cursor.execute("PRAGMA index_list(Parked_Writes)")
     names = {row['name'] for row in cursor.fetchall()}
@@ -3052,5 +3053,100 @@ def test_resolved_lookup_matches_on_arguments_not_just_tool_name():
             "u", "p", same, 0.0, ("approved",)) is not None
         assert manager.find_resolved_parked_write(
             "u", "p", other, 0.0, ("approved",)) is None
+    finally:
+        manager.close()
+
+
+# ---- DP-319 review: store-level contracts ---------------------------------
+
+
+def test_finalize_keeps_the_outcome_and_the_sentence_apart():
+    """`resolution` is filtered on; `resolution_reason` is read by a human.
+
+    One column doing both meant the approve path wrote constants and the expire
+    path wrote prose, so any query over expired or interrupted rows matched
+    nothing. Same split `log_audit_event` already makes between `new_state` and
+    `reason`.
+    """
+    manager = MemoryManager(db_path=":memory:")
+    manager.create_schema()
+    try:
+        _insert_park(manager, token="a")
+        assert manager.finalize_parked_write(
+            "a", "expired", "expired", "No decision within 86400s") is True
+
+        row = manager._get_connection().execute(
+            "SELECT * FROM Parked_Writes WHERE token = 'a'").fetchone()
+        assert row["resolution"] == "expired"
+        assert row["resolution_reason"] == "No decision within 86400s"
+    finally:
+        manager.close()
+
+
+def test_status_lookup_separates_a_missing_row_from_a_decided_one():
+    """`release_parked_write` returns False for both, and they need opposite
+    handling — treating them alike let a decided park be re-INSERTed as
+    pending, i.e. resurrected as approvable."""
+    manager = MemoryManager(db_path=":memory:")
+    manager.create_schema()
+    try:
+        _insert_park(manager, token="a")
+        assert manager.get_parked_write_status("a") == "pending"
+        manager.claim_parked_write("a")
+        assert manager.get_parked_write_status("a") == "claimed"
+        manager.finalize_parked_write("a", "resolved", "approved", "ran")
+
+        assert manager.release_parked_write("a") is False
+        assert manager.get_parked_write_status("a") == "resolved", \
+            "a terminal row must be distinguishable from no row at all"
+        assert manager.get_parked_write_status("nope") is None
+    finally:
+        manager.close()
+
+
+def test_an_undecodable_payload_is_reported_not_silently_nulled():
+    """`write_call = None` is indistinguishable from "no arguments".
+
+    It is the payload an approval executes with, so the caller has to be able
+    to tell a decode failure from an empty call and quarantine the row instead
+    of reinstating a park with nothing in it.
+    """
+    manager = MemoryManager(db_path=":memory:")
+    manager.create_schema()
+    try:
+        _insert_park(manager, token="a")
+        conn = manager._get_connection()
+        conn.execute("UPDATE Parked_Writes SET write_call = '{trunc' "
+                     "WHERE token = 'a'")
+        conn.commit()
+
+        (row,) = manager.load_parked_writes(("pending",))
+        assert row["write_call"] is None
+        assert row["_undecodable"] == ["write_call"]
+    finally:
+        manager.close()
+
+
+def test_park_writes_swallow_store_errors_instead_of_raising():
+    """Every method here is called from a path that has already mutated
+    in-memory state (or is the boot sequence), so an escaping `sqlite3.Error`
+    loses a park or stops the process. `insert_parked_write` was the only one
+    guarded.
+    """
+    manager = MemoryManager(db_path=":memory:")
+    manager.create_schema()
+    try:
+        _insert_park(manager, token="a")
+        manager.close()  # every subsequent statement now raises
+
+        assert manager.claim_parked_write("a") is False
+        assert manager.release_parked_write("a") is False
+        assert manager.finalize_parked_write("a", "resolved", "approved") is False
+        assert manager.update_parked_write_duplicate_refs("a", [[1, "c"]]) is False
+        assert manager.get_parked_write_status("a") is None
+        assert manager.load_parked_writes(("pending",)) == []
+        assert manager.find_resolved_parked_write(
+            "u", "p", "hash", 0.0, ("approved",)) is None
+        assert manager.purge_parked_writes(time.time()) == 0
     finally:
         manager.close()

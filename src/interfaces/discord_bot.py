@@ -283,11 +283,46 @@ async def _safe_typing(channel: discord.abc.Messageable) -> AsyncIterator[None]:
 # message a reaction lands on is the ONLY thing that identifies which proposal
 # the operator meant.
 #
-# In-memory, like the park store itself: both die on restart together, so a
-# stranded button cannot outlive the park it points at.
+# In-memory, and since DP-319 the park store is NOT — the durable store
+# outlives this map rather than dying with it. So a stranded button IS now
+# possible: after a restart the park is reloaded and fully resolvable while the
+# ✅ still visible on the old message maps to nothing. `on_reaction_add` answers
+# that click explicitly instead of dropping it, because the alternative is an
+# operator clicking a live-looking button on a live proposal and getting silence.
 _confirm_registry: Dict[int, Tuple[str, str, str]] = {}
 # Tokens already rendered, so re-posting the pending list cannot double up.
 _rendered_park_tokens: Set[str] = set()
+# Message ids already answered with the stale-button notice, so a second click
+# (or the operator removing and re-adding the reaction) does not repeat it.
+_stale_button_notified: Set[int] = set()
+
+
+async def _notify_stale_button(
+        reaction: discord.Reaction, emoji: str, client: discord.Client,
+) -> None:
+    """Answer an approve/deny click that maps to no live registry entry.
+
+    Narrow on purpose — only our own message, only the two proposal emoji, only
+    once per message. The registry is in-memory and the park store is not, so
+    this is the restart case: the proposal may well still be awaiting a
+    decision, and the operator has to be told where it went rather than left
+    watching a button that does nothing.
+    """
+    if emoji not in ('✅', '❌'):
+        return
+    if client.user is None or reaction.message.author.id != client.user.id:
+        return
+    if reaction.message.id in _stale_button_notified:
+        return
+    _stale_button_notified.add(reaction.message.id)
+    try:
+        await reaction.message.channel.send(
+            "That approve/deny button is no longer live — I restarted since "
+            "posting it. Any proposal still awaiting you is intact; send me a "
+            "message and I'll re-post it with working buttons."
+        )
+    except discord.HTTPException as e:
+        logger.warning(f"Could not answer a stale proposal reaction: {e}")
 
 
 async def _post_pending_proposals(
@@ -367,14 +402,22 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
         """
         if user.bot:
             return
+        emoji = str(reaction.emoji)
         entry = _confirm_registry.get(reaction.message.id)
         if entry is None:
+            # DP-319: the registry no longer dies with the park store, so an
+            # unmapped ✅ on one of our own messages is most likely a proposal
+            # that survived a restart — still live, still resolvable, just not
+            # through this button. Say so rather than dropping the click: the
+            # only other affordance is `_post_pending_proposals`, which does not
+            # fire until the operator's next message to that persona, so until
+            # then the sole thing on screen is a dead button.
+            await _notify_stale_button(reaction, emoji, client)
             return
         token, owner_id, persona_name = entry
         # Only the operator who owns the conversation may resolve it.
         if str(user.id) != owner_id:
             return
-        emoji = str(reaction.emoji)
         if emoji not in ('✅', '❌'):
             return
 

@@ -30,8 +30,9 @@ from src.persona import Persona
 from src.request_builder import AssembledRequest, RequestBuilder, RequestContext
 from src.security.scrubber import get_scrubber
 from src.tools.tool_loop import (
-    ToolLoop, WriteParkedEvent, _ApiPayloadEvent, _LoopFinishedEvent,
-    _ToolContextEvent, _WriteDuplicateEvent, write_call_identity,
+    PARK_STATUS_EXPIRED, ToolLoop, WriteParkedEvent, _ApiPayloadEvent,
+    _LoopFinishedEvent, _ToolContextEvent, _WriteDuplicateEvent,
+    write_call_identity,
 )
 from src.turn_persistence import TurnPersistence
 from src.tools.tool_manager import ToolManager
@@ -451,7 +452,23 @@ class ChatSystem:
                 where the model is re-reading its own tool span and most likely
                 to re-propose. Durable since DP-319, which is why this lookup
                 can exist at all.
+
+                CONTINUATION TURNS ONLY, and that scoping is the whole
+                correctness argument. Unlike the pending guard, this one
+                suppresses with no affordance at all: no park, no
+                `PendingConfirmationEvent`, nothing on Discord or the portal.
+                Left running on ordinary turns it would answer "restart that
+                service again" — four minutes after the first restart hung —
+                with "that already happened", silently, for fifteen minutes,
+                breaking the property `user_guide.md` states for the pending
+                guard ("a persona can legitimately propose the same action
+                again later"). A continuation is the only turn nobody asked
+                for, so it is the only turn where a re-proposal can be assumed
+                to be the model re-reading itself rather than a human meaning
+                it.
                 """
+                if continuation is None:
+                    return None
                 return self.confirmations.already_resolved(
                     (ctx.user_identifier, ctx.persona_name), write_call,
                 )
@@ -825,7 +842,8 @@ class ChatSystem:
 
         if self.confirmations.is_expired(parked):
             self.confirmations.expire(
-                parked, "Operator answered after the TTL had passed",
+                parked, PARK_STATUS_EXPIRED,
+                "Operator answered after the TTL had passed",
             )
             yield DoneEvent(
                 text="That action expired before it was reviewed.",

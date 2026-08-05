@@ -460,3 +460,65 @@ async def test_send_failure_registers_nothing():
     finally:
         db._confirm_registry.clear()
         db._rendered_park_tokens.clear()
+
+
+# --- DP-319 review: the registry no longer dies with the park store ---------
+
+
+def _reaction_on_our_own_message(emoji, client, message_id=99):
+    reaction = MagicMock()
+    reaction.emoji = emoji
+    reaction.message.id = message_id
+    reaction.message.author.id = client.user.id
+    reaction.message.channel.send = AsyncMock()
+    return reaction
+
+
+@pytest.mark.asyncio
+async def test_an_unmapped_approve_click_is_answered_not_dropped():
+    """Before DP-319 the registry and the park store died together, so an
+    unmapped button could not point at a live park. Now the store survives a
+    restart and the registry does not, so the ✅ on the old message is a dead
+    control on a proposal that is still fully resolvable — and dropping the
+    event leaves the operator clicking silently at the only affordance on
+    screen until their next message re-posts it."""
+    from src.interfaces import discord_bot as db
+
+    client = MagicMock()
+    client.user.id = 1
+    reaction = _reaction_on_our_own_message('✅', client)
+
+    db._stale_button_notified.clear()
+    try:
+        await db._notify_stale_button(reaction, '✅', client)
+        reaction.message.channel.send.assert_awaited_once()
+        assert "restarted" in reaction.message.channel.send.await_args[0][0]
+
+        # Once per message: a second click must not repeat it.
+        await db._notify_stale_button(reaction, '✅', client)
+        assert reaction.message.channel.send.await_count == 1
+    finally:
+        db._stale_button_notified.clear()
+
+
+@pytest.mark.asyncio
+async def test_unrelated_reactions_are_still_ignored():
+    """Narrow on purpose — only our own message, only the proposal emoji.
+    Anything wider turns every reaction in the channel into a bot reply."""
+    from src.interfaces import discord_bot as db
+
+    client = MagicMock()
+    client.user.id = 1
+
+    db._stale_button_notified.clear()
+    try:
+        other = _reaction_on_our_own_message('🎉', client, message_id=101)
+        await db._notify_stale_button(other, '🎉', client)
+        other.message.channel.send.assert_not_awaited()
+
+        someone_else = _reaction_on_our_own_message('✅', client, message_id=102)
+        someone_else.message.author.id = 2
+        await db._notify_stale_button(someone_else, '✅', client)
+        someone_else.message.channel.send.assert_not_awaited()
+    finally:
+        db._stale_button_notified.clear()

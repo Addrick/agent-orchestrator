@@ -546,27 +546,50 @@ class ToolLoop:
                     # No `_WriteDuplicateEvent`: that event exists so a later
                     # resolution can correct a "still awaiting" entry, and this
                     # entry is already terminal.
+                    #
+                    # The caller decides WHEN to consult this — it is scoped to
+                    # continuation turns, because suppressing here produces no
+                    # affordance on any surface, so on an ordinary turn it would
+                    # swallow a repeat the operator meant.
                     resolved = resolved_lookup(wc) if resolved_lookup else None
                     if resolved is not None:
+                        outcome = resolved.get("resolution")
                         logger.info(
                             "tool-loop iter %d: %s re-proposed after token %s "
                             "was already resolved (%s) — not parking it again",
                             iter_idx, wc.get("name"), resolved.get("token"),
-                            resolved.get("resolution"),
+                            outcome,
                         )
+                        # An outcome of `approved_but_failed` means the tool ran
+                        # and then raised, so the effect is genuinely unknown —
+                        # the same shape as INTERRUPTED_INSTRUCTION, and for the
+                        # same reason: "it failed" reads as a plain retryable
+                        # error, and the retry is a possible second execution of
+                        # an irreversible action.
+                        if outcome == PARK_STATUS_FAILED:
+                            instruction = (
+                                "You already proposed this exact action; the "
+                                "operator approved it and the tool then errored, "
+                                "so whether it took effect is unknown. It was "
+                                "NOT queued again. Do NOT assume either outcome "
+                                "— check the current state and report what you "
+                                "find."
+                            )
+                        else:
+                            instruction = (
+                                "You already proposed this exact action and "
+                                "the operator decided it. It was NOT queued "
+                                "again. Report the outcome above; do not "
+                                "re-propose it."
+                            )
                         conversation_history.append({
                             "role": "tool",
                             "tool_call_id": wc.get("id"),
                             "name": wc.get("name"),
                             "content": json.dumps({
                                 "status": PARK_STATUS_ALREADY_RESOLVED,
-                                "outcome": resolved.get("resolution"),
-                                "instruction": (
-                                    "You already proposed this exact action and "
-                                    "the operator decided it. It was NOT queued "
-                                    "again. Report the outcome above; do not "
-                                    "re-propose it."
-                                ),
+                                "outcome": outcome,
+                                "instruction": instruction,
                             }),
                         })
                         continue

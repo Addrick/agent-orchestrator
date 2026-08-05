@@ -667,6 +667,53 @@ async def test_reproposal_during_the_continuation_cannot_double_execute(
         "the re-proposal must not leave a second approvable affordance"
 
 
+@pytest.mark.asyncio
+async def test_an_ordinary_turn_may_repeat_an_action_that_already_ran(
+        mocked_chat_system):
+    """DP-319 review: the re-execution guard is scoped to CONTINUATIONS.
+
+    Unlike the pending guard, this one suppresses with no affordance at all —
+    no park, no PendingConfirmationEvent, nothing on Discord or the portal. Left
+    running on ordinary turns it answers "restart that service again" (four
+    minutes after the first restart hung) with "that already happened",
+    silently, for the whole guard window, and the operator has no way to force
+    it through. A continuation is the only turn nobody asked for, which is what
+    makes it the only turn where a re-proposal can be assumed to be the model
+    re-reading itself rather than a human meaning it.
+    """
+    chat_system, _ = mocked_chat_system
+    _confirm_persona(chat_system)
+    executed = _recording_tool_manager(chat_system)
+
+    write = {"id": "w1", "name": "create_ticket",
+             "arguments": {"title": "t", "body": "b"}}
+    (token,) = await _park_writes(
+        chat_system, user="u14", channel="c14", write_calls=[write],
+    )
+    _set_engine(chat_system, [_text("Opened it.")])
+    await _drain(chat_system.stream_resolve_park(
+        "u14", "test_persona", token, approved=True,
+    ))
+    assert executed == ["create_ticket"]
+    assert chat_system.confirmations.list_for("u14", "test_persona") == []
+
+    # A NEW user turn, well inside the guard window, asking for it again.
+    _set_engine(chat_system, [
+        _calls({"id": "w2", "name": "create_ticket",
+                "arguments": {"title": "t", "body": "b"}}),
+        _text("Proposing it again."),
+    ])
+    await _drain(chat_system.stream_response(
+        "test_persona", "u14", "c14", "do that again please"))
+
+    parks = chat_system.confirmations.list_for("u14", "test_persona")
+    assert len(parks) == 1, \
+        "a deliberate repeat must reach the operator, not be swallowed"
+    assert parks[0].token != token
+    assert executed == ["create_ticket"], \
+        "and it must still be gated — parked, not executed"
+
+
 def _tool_entries(mem_manager):
     """Every sealed tool entry across the conversation, keyed by call id."""
     cursor = mem_manager._get_connection().cursor()

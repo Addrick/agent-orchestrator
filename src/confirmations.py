@@ -20,9 +20,13 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from config.global_config import (
-    PARK_REEXECUTION_GUARD_WINDOW, PARK_ROW_RETENTION, PENDING_ACTION_TTL,
+    PARK_PURGE_INTERVAL, PARK_REEXECUTION_GUARD_WINDOW, PARK_ROW_RETENTION,
+    PENDING_ACTION_TTL,
 )
-from src.memory.memory_manager import MemoryManager
+from src.memory.memory_manager import (
+    PARK_DB_CLAIMED, PARK_DB_EXPIRED, PARK_DB_INTERRUPTED, PARK_DB_LIVE,
+    PARK_DB_PENDING, PARK_DB_RESOLVED, MemoryManager,
+)
 from src.security.scrubber import get_scrubber
 from src.tools.definitions import get_tool_capabilities
 from src.tools.tool_loop import (
@@ -110,11 +114,25 @@ class ParkedWrite:
         `duplicate_refs` comes back from JSON as lists, not tuples — converted
         here because `_patch_one` unpacks them positionally and a silent shape
         drift would only surface as an unpatched history entry hours later.
+
+        A missing or undecodable `write_call` is rejected outright rather than
+        defaulted to `{}`. An empty call still renders a perfectly normal-looking
+        approve/deny affordance, but approving it executes tool "unknown" and its
+        `call_id` is None — so `patch_parked_entry` cannot patch anything and the
+        history entry reads `awaiting_human_approval` forever. That orphan state
+        is exactly what the boot-time expiry branch exists to eliminate; a row
+        whose payload cannot be read must be quarantined, not restored.
         """
+        undecodable = row.get("_undecodable") or []
+        if "write_call" in undecodable:
+            raise ValueError("write_call did not decode")
+        write_call = row.get("write_call")
+        if not isinstance(write_call, dict) or not write_call:
+            raise ValueError("write_call is missing or empty")
         refs = row.get("duplicate_refs") or []
         return cls(
             token=str(row["token"]),
-            write_call=row.get("write_call") or {},
+            write_call=write_call,
             audit_info=row.get("audit_info") or {},
             confirmation_text=row.get("confirmation_text") or "",
             user_identifier=str(row["user_identifier"]),
@@ -188,6 +206,10 @@ class ConfirmationManager:
         self._locks: Dict[ConversationKey, asyncio.Lock] = {}
         # In-flight off-loop expiry sweeps, held so they are not GC'd.
         self._sweep_tasks: Set["asyncio.Task[None]"] = set()
+        # When the retention purge last ran. Starts at "never", so the first
+        # sweep after boot does one — a process that is restarted often would
+        # otherwise never reach the interval.
+        self._last_purge: float = 0.0
 
     # ---- store -----------------------------------------------------------
 
@@ -210,12 +232,14 @@ class ConfirmationManager:
             metadata=parked.audit_info,
         )
 
-    def take(self, token: str) -> Optional[ParkedWrite]:
-        """Remove and return a park, or None if it is already gone.
+    def _pop(self, token: str) -> Optional[ParkedWrite]:
+        """Remove a park from the in-memory index only. No DB, no await.
 
-        Pure synchronous — no `await` anywhere in it. That is what makes it
-        atomic under asyncio and what stops a double-click (or a retried POST)
-        from executing the same write twice: only one caller can win the pop.
+        The atomic half of `take`. Split out because the expiry sweep must be
+        able to evict synchronously on the hot paths without also running a
+        commit inline — and because a sweep that marks rows `claimed` before
+        its off-thread half finishes turns a crash in that window into a park
+        that reboots as "a decision was in flight" when nobody ever saw it.
         """
         parked = self.pending.pop(token, None)
         if parked is None:
@@ -225,22 +249,71 @@ class ConfirmationManager:
             tokens.remove(token)
             if not tokens:
                 self._by_key.pop(parked.key, None)
-        # DP-319: mark the durable row claimed. The in-memory pop above is
-        # still the authority within this process — the DB claim is what stops
-        # a park that survived a restart being resolved twice, and what tells a
-        # later boot that a decision was in flight when the process died.
-        self.memory_manager.claim_parked_write(token)
+        return parked
+
+    def take(self, token: str) -> Optional[ParkedWrite]:
+        """Remove and return a park, or None if it is already gone.
+
+        Synchronous — no `await` anywhere in it. That is what makes it atomic
+        under asyncio and what stops a double-click (or a retried POST) from
+        executing the same write twice: only one caller can win the pop.
+
+        The DB claim that follows the pop is what stops a park that survived a
+        restart being resolved twice, and what tells a later boot that a
+        decision was in flight when the process died. It cannot raise —
+        `claim_parked_write` swallows `sqlite3.Error` — because by the time it
+        runs the pop has already happened, so an exception here would destroy
+        the park in memory while its row stayed `pending`.
+        """
+        parked = self._pop(token)
+        if parked is None:
+            return None
+        if not self.memory_manager.claim_parked_write(token):
+            # Not fatal — the in-memory pop is the authority in this process —
+            # but it means the durable row is missing or already terminal, so
+            # the restart path will not agree with what happens next.
+            logger.warning(
+                "park %s: durable row could not be claimed (missing or already "
+                "terminal); resolving from memory only", token,
+            )
         return parked
 
     def restore(self, parked: ParkedWrite) -> None:
-        """Put a taken park back (a claim that turned out to be invalid)."""
+        """Put a taken park back (a claim that turned out to be invalid).
+
+        The durable half is deliberately not a blind re-INSERT. `release`
+        returning False is ambiguous between "no row" and "row already
+        terminal", and `INSERT OR REPLACE` writes `status='pending'` over the
+        whole row — so treating the two alike rewound `resolved_at` and
+        `resolution` to NULL and resurrected a decided, already-executed write
+        as an approvable affordance that survived the next restart. That is the
+        precise outcome durable parks exist to prevent, so a terminal row wins
+        over the in-memory restore instead of the other way round.
+        """
+        if self.memory_manager.release_parked_write(parked.token):
+            self._reinstate(parked)
+            return
+
+        status = self.memory_manager.get_parked_write_status(parked.token)
+        if status is None:
+            # Genuinely gone: re-insert, or the restored park would outlive its
+            # durable record and vanish on the next restart.
+            self._reinstate(parked)
+            self._persist_new(parked)
+        elif status in PARK_DB_LIVE:
+            # Already `pending` (a concurrent release, or it was never claimed).
+            self._reinstate(parked)
+        else:
+            logger.error(
+                "park %s: refusing to restore — its durable row is already %s. "
+                "The decision stands; it must not become approvable again.",
+                parked.token, status,
+            )
+
+    def _reinstate(self, parked: ParkedWrite) -> None:
+        """Put a park back into the in-memory index, without touching the DB."""
         self.pending[parked.token] = parked
         self._by_key.setdefault(parked.key, []).append(parked.token)
-        if not self.memory_manager.release_parked_write(parked.token):
-            # The row is gone or already terminal, so the restored in-memory
-            # park would outlive its durable record and vanish on the next
-            # restart. Re-insert rather than leave the two stores disagreeing.
-            self._persist_new(parked)
 
     def list_for(self, user_identifier: str,
                  persona_name: str) -> List[ParkedWrite]:
@@ -305,8 +378,8 @@ class ConfirmationManager:
         keep claiming the action is still awaiting an operator forever.
         """
         parked.duplicate_refs.append((row_id, call_id))
-        self.memory_manager.update_parked_write_refs(
-            parked.token, duplicate_refs=[list(r) for r in parked.duplicate_refs],
+        self.memory_manager.update_parked_write_duplicate_refs(
+            parked.token, [list(r) for r in parked.duplicate_refs],
         )
 
     def already_resolved(self, key: ConversationKey,
@@ -320,12 +393,24 @@ class ConfirmationManager:
         tool span. A fresh park would then be created, and approving it would run
         the write a SECOND time.
 
-        Narrow on both axes on purpose. Only `PARK_STATUS_APPROVED` counts (the
-        tool actually ran); a denial executed nothing, and DP-297 deliberately
-        supports the operator asking for a denied action again. And only inside
-        `PARK_REEXECUTION_GUARD_WINDOW`, sized for the continuation turn rather
-        than for the park's whole 24h TTL — a day-wide guard would silently
-        refuse a legitimate repeat of the same action.
+        Narrow on purpose, on three axes.
+
+        The outcome must be one where the tool RAN. That is both
+        `PARK_STATUS_APPROVED` and `PARK_STATUS_FAILED`: `apply()` records
+        `approved_but_failed` whenever `execute_tool` *raises*, which covers the
+        ticket that was created before the API returned 500 and the write that
+        landed before the client timed out. Treating that as "nothing happened"
+        is what re-opened the double-execution hole for the worst case — the
+        operator sees "it failed", approves the re-proposal, and gets two
+        tickets. A denial is genuinely different: nothing ran, and DP-297
+        deliberately supports asking for a denied action again.
+
+        Only inside `PARK_REEXECUTION_GUARD_WINDOW`, sized for the continuation
+        turn rather than for the park's whole 24h TTL.
+
+        And only ON a continuation turn — see `ChatSystem._already_resolved`,
+        which is where that scoping lives, because this manager cannot see what
+        kind of turn is running.
         """
         name, args = write_call_identity(write_call)
         # Typed `Any` deliberately: the isinstance check below is dead code
@@ -336,7 +421,7 @@ class ConfirmationManager:
         row: Any = self.memory_manager.find_resolved_parked_write(
             key[0], key[1], MemoryManager.parked_write_identity(name, args),
             time.time() - PARK_REEXECUTION_GUARD_WINDOW,
-            (PARK_STATUS_APPROVED,),
+            (PARK_STATUS_APPROVED, PARK_STATUS_FAILED),
         )
         if row is None:
             return None
@@ -369,10 +454,20 @@ class ConfirmationManager:
           re-executed: the write may or may not have run, and re-running an
           irreversible call on a guess is worse than either outcome. Terminated
           as `interrupted_by_restart` so the model re-checks state instead.
+          Only the *resolve* path ever claims a row; the expiry sweep pops in
+          memory and does its DB work afterwards, so a crash mid-sweep leaves a
+          `pending` row that expires normally here rather than a `claimed` one
+          that would fabricate a decision nobody made.
+
+        Every per-row step is wrapped. Boot is the wrong place to be strict: an
+        unreadable or unpatchable row raising out of here takes
+        `create_chat_system` with it, and a durable store that stops the bot
+        booting is worse than the one that reloads nothing.
         """
-        counts = {"restored": 0, "expired": 0, "interrupted": 0}
+        counts = {"restored": 0, "expired": 0, "interrupted": 0,
+                  "quarantined": 0}
         try:
-            rows = self.memory_manager.load_parked_writes(("pending", "claimed"))
+            rows = self.memory_manager.load_parked_writes(PARK_DB_LIVE)
         except Exception as e:
             logger.error("Could not reload parked writes at boot: %s", e,
                          exc_info=True)
@@ -380,35 +475,90 @@ class ConfirmationManager:
 
         now = time.time()
         for row in rows:
-            try:
-                parked = ParkedWrite.from_row(row)
-            except (KeyError, TypeError, ValueError) as e:
-                logger.error("Skipping unreadable parked write row %s: %s",
-                             row.get("token"), e)
-                continue
-
-            if row.get("status") == "claimed":
-                self._terminate_interrupted(parked)
-                counts["interrupted"] += 1
-            elif self.is_expired(parked, now):
-                self.expire(parked, "Expired while the process was down")
-                counts["expired"] += 1
-            else:
-                self.pending[parked.token] = parked
-                self._by_key.setdefault(parked.key, []).append(parked.token)
-                counts["restored"] += 1
+            outcome = self._reconcile_row(row, now)
+            if outcome is not None:
+                counts[outcome] += 1
 
         if any(counts.values()):
             logger.info(
                 "Parked writes reloaded: %d restored, %d expired, %d "
-                "interrupted by the restart", counts["restored"],
-                counts["expired"], counts["interrupted"],
+                "interrupted by the restart, %d quarantined",
+                counts["restored"], counts["expired"], counts["interrupted"],
+                counts["quarantined"],
             )
+        self._purge_old_rows(now)
+        return counts
+
+    def _reconcile_row(self, row: Dict[str, Any],
+                       now: float) -> Optional[str]:
+        """Decide one durable row's fate at boot. Returns the counter to bump.
+
+        Every step is inside a `try`, including the terminal work. Both
+        `_terminate_interrupted` and `expire` reach into `tool_context` and the
+        store, and an exception from either used to travel straight out of
+        `rebuild_from_store` into `create_chat_system` — one bad row and the bot
+        does not start, discarding every park reconciled before it. A durable
+        store that blocks boot is worse than one that reloads nothing.
+        """
         try:
-            self.memory_manager.purge_parked_writes(now - PARK_ROW_RETENTION)
+            parked = ParkedWrite.from_row(row)
+        except (KeyError, TypeError, ValueError) as e:
+            logger.error("Quarantining unreadable parked write row %s: %s",
+                         row.get("token"), e)
+            return "quarantined" if self._quarantine(row, str(e)) else None
+
+        try:
+            if row.get("status") == PARK_DB_CLAIMED:
+                self._terminate_interrupted(parked)
+                return "interrupted"
+            if self.is_expired(parked, now):
+                self.expire(parked, PARK_STATUS_EXPIRED,
+                            "Expired while the process was down")
+                return "expired"
+            self._reinstate(parked)
+            return "restored"
+        except Exception as e:
+            logger.error("Could not reconcile parked write %s at boot: %s",
+                         parked.token, e, exc_info=True)
+            return None
+
+    def _quarantine(self, row: Dict[str, Any], why: str) -> bool:
+        """Force an unreadable row terminal so it stops being reloaded.
+
+        Skipping it instead — which is what this did — leaves it `pending`
+        forever: never loaded, never expired, and never purged, since
+        `purge_parked_writes` only deletes terminal rows. That is not merely an
+        ERROR line on every boot for the life of the database. `write_call` on
+        a pending row holds the REAL argument values (it has to; an approved
+        call executes with them), and `finalize_parked_write` is the only thing
+        that ever erases them — so one malformed row parks whatever secret that
+        call carried on disk permanently.
+        """
+        token = row.get("token")
+        if not isinstance(token, str) or not token:
+            logger.error(
+                "Unreadable parked write has no usable token; its payload "
+                "cannot be erased and it will be re-read on every boot.",
+            )
+            return False
+        try:
+            return self.memory_manager.finalize_parked_write(
+                token, PARK_DB_INTERRUPTED, PARK_STATUS_INTERRUPTED,
+                f"Row could not be read at boot: {why}",
+            )
+        except Exception as e:
+            logger.error("Could not quarantine parked write %s: %s", token, e)
+            return False
+
+    def _purge_old_rows(self, now: Optional[float] = None) -> int:
+        """Drop terminal park rows past their retention. Returns how many."""
+        now = time.time() if now is None else now
+        try:
+            return self.memory_manager.purge_parked_writes(
+                now - PARK_ROW_RETENTION)
         except Exception as e:
             logger.warning("Could not purge old parked-write rows: %s", e)
-        return counts
+            return 0
 
     def _terminate_interrupted(self, parked: ParkedWrite) -> None:
         """Close out a park whose resolution died with the process."""
@@ -417,12 +567,13 @@ class ConfirmationManager:
             {"error": INTERRUPTED_INSTRUCTION},
         )
         self.memory_manager.finalize_parked_write(
-            parked.token, "interrupted", "Process restarted mid-resolution",
+            parked.token, PARK_DB_INTERRUPTED, PARK_STATUS_INTERRUPTED,
+            "Process restarted mid-resolution",
         )
         self.memory_manager.log_audit_event(
             event_type="audit_park_interrupted",
             operator_id=parked.user_identifier,
-            prior_state="claimed",
+            prior_state=PARK_DB_CLAIMED,
             new_state=PARK_STATUS_INTERRUPTED,
             reason="Process restarted after the decision was claimed; the "
                    "write was NOT re-executed",
@@ -516,7 +667,10 @@ class ConfirmationManager:
         # columns are erased, so the arguments stop living on disk the moment
         # they stop being needed to execute.
         self.memory_manager.finalize_parked_write(
-            park.token, "resolved", decision.status,
+            park.token, PARK_DB_RESOLVED, decision.status,
+            decision.note or ("Human approved tool execution"
+                              if decision.approved
+                              else "Human denied tool execution"),
         )
         if not decision.patched:
             logger.error(
@@ -618,7 +772,8 @@ class ConfirmationManager:
         """
         stale = self._take_expired(now)
         for parked in stale:
-            self.expire(parked, f"No decision within {PENDING_ACTION_TTL}s")
+            self.expire(parked, PARK_STATUS_EXPIRED,
+                        f"No decision within {PENDING_ACTION_TTL}s")
         return len(stale)
 
     def _take_expired(self, now: Optional[float] = None) -> List[ParkedWrite]:
@@ -629,30 +784,60 @@ class ConfirmationManager:
         also running SELECT + UPDATE + INSERT inline. Those calls sit inside
         the token stream and the SSE routes, where a single day-old park was
         enough to stall every other stream on the loop.
+
+        `_pop`, not `take`: `take` commits a claim, which would put that split
+        straight back (one fsync per stale token, on the loop thread, while the
+        previous sweep's worker may already hold the store lock) and would also
+        make a crash mid-sweep look like an operator decision that was in
+        flight. Nothing needs these rows claimed — the very next thing that
+        happens to them is `expire`, which is terminal either way.
         """
         now = time.time() if now is None else now
         tokens = [t for t, p in self.pending.items()
                   if now - p.created_at > PENDING_ACTION_TTL]
-        stale = [p for p in (self.take(t) for t in tokens) if p is not None]
+        stale = [p for p in (self._pop(t) for t in tokens) if p is not None]
         if stale:
             logger.info("Expired %d unanswered gated write(s)", len(stale))
         return stale
 
+    def _purge_due(self, now: Optional[float] = None) -> bool:
+        """True at most once per interval; marks the clock as it answers.
+
+        The mark happens here, synchronously, rather than after the delete —
+        the purge itself runs off-thread, so checking-then-marking later would
+        let every read in the interim schedule its own redundant DELETE.
+        """
+        now = time.time() if now is None else now
+        if now - self._last_purge < PARK_PURGE_INTERVAL:
+            return False
+        self._last_purge = now
+        return True
+
     def _sweep_off_thread(self) -> None:
         """Evict expired parks now; do their DB writes off the event loop.
+
+        Also carries the retention purge. That used to run only in
+        `rebuild_from_store`, i.e. once at boot — so the process durability was
+        added for (one that stays up for months) was the one process that never
+        purged anything, and `PARK_ROW_RETENTION` went unenforced for as long as
+        the bot kept running. Hanging it off the lazy sweep matches how
+        `expire_stale_proposals` is driven.
 
         Fire-and-forget by design — an expiry fires no continuation, so nothing
         downstream waits on the patch. Falls back to inline when there is no
         running loop (sync callers, tests).
         """
         stale = self._take_expired()
-        if not stale:
+        purge = self._purge_due()
+        if not stale and not purge:
             return
         reason = f"No decision within {PENDING_ACTION_TTL}s"
 
         def _finish() -> None:
             for parked in stale:
-                self.expire(parked, reason)
+                self.expire(parked, PARK_STATUS_EXPIRED, reason)
+            if purge:
+                self._purge_old_rows()
 
         try:
             loop = asyncio.get_running_loop()
@@ -664,25 +849,31 @@ class ConfirmationManager:
         self._sweep_tasks.add(task)
         task.add_done_callback(self._sweep_tasks.discard)
 
-    def expire(self, parked: ParkedWrite, reason: str) -> None:
+    def expire(self, parked: ParkedWrite, resolution: str,
+               reason: str) -> None:
         """Terminate an already-taken park as expired: patch, then audit.
 
-        Shared by the lazy sweep and the resolve path. The click path used to
-        inline the patch with a hardcoded "expired" and log nothing, which made
-        it the only park-terminating path leaving no audit trail — so the fact
-        that a human actually tried to approve an expired irreversible action
-        was recorded nowhere, and its writer was decoupled from the constant
-        every other consumer keys off.
+        Shared by the lazy sweep, the boot reload and the resolve path. The
+        click path used to inline the patch with a hardcoded "expired" and log
+        nothing, which made it the only park-terminating path leaving no audit
+        trail — so the fact that a human actually tried to approve an expired
+        irreversible action was recorded nowhere, and its writer was decoupled
+        from the constant every other consumer keys off.
+
+        `resolution` is the filterable outcome, `reason` the sentence that says
+        which of the three ways it got here. Passing the sentence as the
+        resolution — the original shape — made every future query over expired
+        rows match nothing.
         """
         self.patch_parked_entry(parked, PARK_STATUS_EXPIRED,
                                 {"reason": "expired before review"})
         self.memory_manager.finalize_parked_write(
-            parked.token, "expired", reason,
+            parked.token, PARK_DB_EXPIRED, resolution, reason,
         )
         self.memory_manager.log_audit_event(
             event_type="audit_park_expired",
             operator_id=parked.user_identifier,
-            prior_state="pending",
+            prior_state=PARK_DB_PENDING,
             new_state=PARK_STATUS_EXPIRED,
             reason=reason,
             metadata=parked.audit_info,

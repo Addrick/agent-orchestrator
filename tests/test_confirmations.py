@@ -8,13 +8,14 @@ tests/integration/test_resume_kernel_convergence.py.
 """
 
 import json
+import sqlite3
 import time
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from config.global_config import PENDING_ACTION_TTL
+from config.global_config import PARK_ROW_RETENTION, PENDING_ACTION_TTL
 from src.confirmations import (
     DENIAL_INSTRUCTION, ConfirmationManager, Decision, ParkedWrite,
 )
@@ -739,3 +740,287 @@ async def test_the_guard_is_scoped_to_one_conversation(manager, mem_manager):
 
     assert manager.already_resolved(
         ("bob", "p"), dict(parked.write_call)) is None
+
+
+# ---- DP-319 review: the durable store's own failure modes ------------------
+#
+# Everything below covers a way the durable half can be WORSE than no durable
+# half: a park lost from memory while its row says pending, a decided write
+# resurrected as approvable, a boot that never completes, secrets kept forever,
+# a decision fabricated for a park nobody touched. The suite above does not
+# distinguish any of these from correct behaviour.
+
+
+class _BrokenConnection:
+    """A connection whose every statement raises, like a locked database."""
+
+    def cursor(self):
+        return self
+
+    def execute(self, *_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    def commit(self):
+        raise sqlite3.OperationalError("database is locked")
+
+    def rollback(self):
+        return None
+
+
+def test_take_does_not_raise_when_the_store_is_unavailable(
+        manager, mem_manager, monkeypatch):
+    """A DB error after the in-memory pop must not lose the park.
+
+    `take` pops first and claims second, so an exception from the claim escapes
+    with the park already removed from `pending`: the operator's approval 500s,
+    the park is gone from this process entirely, and its row still reads
+    `pending` — so it silently reappears as an unanswered proposal on the next
+    restart. `claim_parked_write` swallows `sqlite3.Error` for exactly that
+    reason; nothing in `stream_resolve_park` would have caught it.
+    """
+    manager.park(_park(token="a"))
+    monkeypatch.setattr(mem_manager, "_get_connection", _BrokenConnection)
+
+    parked = manager.take("a")
+
+    assert parked is not None, "the caller must still get its park"
+    assert manager.pending == {}, "and the pop must still have happened"
+
+
+def test_restore_refuses_to_resurrect_a_decided_park(manager, mem_manager):
+    """A terminal row must win over the in-memory restore.
+
+    `release_parked_write` returns False both when the row is missing and when
+    it is already terminal, and the missing-row branch re-INSERTs with
+    `status='pending'` — which, being `INSERT OR REPLACE`, rewinds `resolved_at`
+    and `resolution` to NULL. Treating the two alike turns an irreversible write
+    that ALREADY RAN back into an approvable affordance that survives the next
+    restart.
+    """
+    parked = _park(token="a")
+    manager.park(parked)
+    manager.take("a")
+    # Decided by some other path between the take and the restore.
+    mem_manager.finalize_parked_write("a", "resolved", "approved", "ran")
+
+    manager.restore(parked)
+
+    assert manager.list_for("u", "p") == [], \
+        "a write that already ran must not be offered again"
+    row = _park_row(mem_manager, "a")
+    assert row["status"] == "resolved"
+    assert row["resolution"] == "approved"
+    assert row["resolved_at"] is not None, "the decision must not be rewound"
+
+
+def test_restore_reinserts_a_park_whose_row_vanished(manager, mem_manager):
+    """The other half of that branch, so the fix is not merely "never
+    re-insert": a genuinely missing row still has to come back, or the restored
+    park would vanish on the next restart."""
+    parked = _park(token="a")
+    manager.park(parked)
+    manager.take("a")
+    conn = mem_manager._get_connection()
+    conn.execute("DELETE FROM Parked_Writes WHERE token = 'a'")
+    conn.commit()
+
+    manager.restore(parked)
+
+    assert [p.token for p in manager.list_for("u", "p")] == ["a"]
+    assert _park_row(mem_manager, "a")["status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_an_approved_but_failed_write_is_not_parkable_again(
+        manager, mem_manager):
+    """`approved_but_failed` means the tool RAN and then raised.
+
+    A ticket created before the API returned 500; a write that landed before
+    the client timed out. Excluding it from the guard reopens the exact
+    double-execution hole for the worst case — the operator reads "it failed",
+    approves the re-proposal, and gets two tickets.
+    """
+    manager._tool_manager.execute_tool = AsyncMock(
+        side_effect=RuntimeError("500 after the ticket was created"))
+    parked = _park(token="a", call_id="c1")
+    manager.park(parked)
+    manager.take("a")
+    decision = Decision(park=parked, approved=True)
+    await manager.apply(decision)
+
+    assert decision.status == "approved_but_failed"
+    hit = manager.already_resolved(("u", "p"), dict(parked.write_call, id="c2"))
+    assert hit is not None, "a call that may have taken effect must not re-park"
+    assert hit["resolution"] == "approved_but_failed"
+
+
+# ---- boot must not be the strictest path in the system --------------------
+
+def _corrupt_write_call(mem_manager, token):
+    conn = mem_manager._get_connection()
+    conn.execute("UPDATE Parked_Writes SET write_call = ? WHERE token = ?",
+                 ('{"id": "c1", "name": "update_tic', token))
+    conn.commit()
+
+
+def test_a_row_with_an_undecodable_payload_is_quarantined(
+        manager, mem_manager):
+    """An unreadable call must not come back as an approvable park.
+
+    Defaulting it to `{}` produces a park that renders a perfectly normal
+    approve/deny affordance, executes tool "unknown" if approved, and — having
+    no `call_id` — can never have its history entry patched, so that entry
+    reads `awaiting_human_approval` forever. That orphan state is precisely what
+    the boot expiry branch exists to eliminate.
+    """
+    manager.park(_park(token="a"))
+    _corrupt_write_call(mem_manager, "a")
+
+    revived = _fresh_manager(mem_manager)
+    counts = revived.rebuild_from_store()
+
+    assert counts["quarantined"] == 1
+    assert counts["restored"] == 0
+    assert revived.list_for("u", "p") == []
+
+
+def test_a_quarantined_row_stops_holding_its_arguments(manager, mem_manager):
+    """Skipping the row instead leaves it `pending` FOREVER.
+
+    `purge_parked_writes` only deletes terminal rows, so a row nothing can read
+    is never loaded, never expired and never purged — and `write_call` on a
+    pending row is the *unscrubbed* payload, because an approved call has to
+    execute with the real values. One malformed row therefore parks whatever
+    secret that call carried on disk for the life of the database, plus an
+    ERROR log line on every single boot.
+    """
+    manager.park(_park(token="a"))
+    _corrupt_write_call(mem_manager, "a")
+
+    _fresh_manager(mem_manager).rebuild_from_store()
+
+    row = _park_row(mem_manager, "a")
+    assert row["status"] == "interrupted", "it must reach a terminal state"
+    assert row["write_call"] is None, "the payload must stop living on disk"
+    assert row["resolved_at"] is not None, "or purge can never collect it"
+
+    # And a second boot no longer sees it at all.
+    assert _fresh_manager(mem_manager).rebuild_from_store()["quarantined"] == 0
+
+
+def test_one_unreconcilable_row_does_not_stop_the_boot(manager, mem_manager,
+                                                       monkeypatch):
+    """`rebuild_from_store` runs inside `create_chat_system`.
+
+    An exception from the terminal work — `patch_parked_entry` reaching into a
+    corrupt `tool_context`, a locked store — used to travel straight out into
+    the bootstrap, so one bad row meant the bot refused to start AND every park
+    reconciled before it was discarded.
+    """
+    manager.park(_park(token="bad"))
+    manager.park(_park(token="good"))
+    # Backdated in the DB, not at park() time: `park` sweeps before it inserts,
+    # so a park born stale is expired by the very next park() call and would
+    # already be terminal before the boot pass ever reads it — the test would
+    # then pass against the unguarded code it exists to catch.
+    conn = mem_manager._get_connection()
+    conn.execute("UPDATE Parked_Writes SET created_at = ? WHERE token = 'bad'",
+                 (time.time() - PENDING_ACTION_TTL - 60,))
+    conn.commit()
+
+    revived = _fresh_manager(mem_manager)
+    real_patch = revived.patch_parked_entry
+
+    def _explode(park, *args, **kwargs):
+        if park.token == "bad":
+            raise RuntimeError("tool_context is unreadable")
+        return real_patch(park, *args, **kwargs)
+
+    monkeypatch.setattr(revived, "patch_parked_entry", _explode)
+
+    counts = revived.rebuild_from_store()
+
+    assert counts["restored"] == 1, "the healthy park must survive the bad one"
+    assert [p.token for p in revived.list_for("u", "p")] == ["good"]
+
+
+# ---- the sweep must not fabricate a decision, or block the loop ------------
+
+def test_the_expiry_sweep_does_not_claim_rows(manager, mem_manager):
+    """`claimed` means "an operator's decision was in flight".
+
+    The sweep claiming up front — before handing `expire` to a worker thread —
+    made a crash inside that window reboot as `interrupted_by_restart`: history
+    patched with "whether it ran is unknown" and an audit row reading "Process
+    restarted after the decision was claimed", for a park no operator ever saw
+    and that provably never ran. It also put a commit back on the hot path the
+    `_take_expired` / `_sweep_off_thread` split exists to keep clear.
+    """
+    manager.park(_park(token="a",
+                       created_at=time.time() - PENDING_ACTION_TTL - 60))
+
+    stale = manager._take_expired()
+
+    assert [p.token for p in stale] == ["a"]
+    assert _park_row(mem_manager, "a")["status"] == "pending", \
+        "the DB half belongs to the off-thread finish, not to the eviction"
+
+
+def test_a_crash_mid_sweep_reboots_as_expired_not_interrupted(
+        manager, mem_manager):
+    """The consequence of the above, stated as the restart it protects."""
+    row_id = _row_with_awaiting_entries(mem_manager, ["c1"])
+    manager.park(_park(token="tok-c1", call_id="c1", row_id=row_id,
+                       created_at=time.time() - PENDING_ACTION_TTL - 60))
+    manager._take_expired()  # the process dies here, before `_finish`
+
+    counts = _fresh_manager(mem_manager).rebuild_from_store()
+
+    assert counts["expired"] == 1
+    assert counts["interrupted"] == 0, \
+        "nobody decided this park; the audit trail must not say they did"
+    entry = json.loads(json.loads(
+        mem_manager.get_tool_context(row_id))[1]["content"])
+    assert entry["status"] == "expired"
+
+
+def test_retention_is_enforced_while_the_process_runs(manager, mem_manager):
+    """The purge ran only in `rebuild_from_store` — i.e. once, at boot.
+
+    So the deployment durability was added for (a bot that stays up for months)
+    was the one deployment that never purged anything, and
+    `PARK_ROW_RETENTION` went unenforced for as long as it kept running.
+    """
+    manager.park(_park(token="old"))
+    manager.take("old")
+    mem_manager.finalize_parked_write(
+        "old", "resolved", "approved", "ran",
+        now=time.time() - PARK_ROW_RETENTION - 100)
+
+    # A read on the hot path — no restart, no boot pass.
+    manager._last_purge = 0.0
+    manager.list_for("u", "p")
+
+    assert _park_row(mem_manager, "old") is None
+
+
+def test_the_purge_is_throttled(manager):
+    """It hangs off a sweep that fires once per write call and once per portal
+    transcript load, which is far too often for a DELETE."""
+    manager._last_purge = 0.0
+    assert manager._purge_due() is True
+    assert manager._purge_due() is False, "the clock is marked as it answers"
+
+
+def test_expiry_records_a_filterable_outcome_and_a_separate_reason(
+        manager, mem_manager):
+    """`resolution` is an enum the guard filters on; the sentence is its own
+    column. Writing the prose into `resolution` made every future query over
+    expired rows match nothing."""
+    manager.park(_park(token="a",
+                       created_at=time.time() - PENDING_ACTION_TTL - 60))
+    manager.sweep_expired()
+
+    row = _park_row(mem_manager, "a")
+    assert row["resolution"] == "expired", "machine-readable"
+    assert "No decision within" in row["resolution_reason"], "human-readable"

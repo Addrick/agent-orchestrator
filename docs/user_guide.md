@@ -442,7 +442,14 @@ the bot happened to stay up. Three details worth knowing:
 - *Discord re-posts on your next message.* Reaction buttons live on Discord
   messages the restarted bot no longer recognizes, so the old checkmarks go dead.
   The next time you talk to that persona in that channel, anything still pending
-  is posted again with fresh buttons. Answer the new message, not the old one.
+  is posted again with fresh buttons. Answer the new message, not the old one. If
+  you click a dead button in the meantime the bot tells you so rather than
+  ignoring you — it will not silently swallow an approval.
+- *A proposal whose stored details cannot be read is not offered.* In the rare
+  case that a proposal's record is damaged on disk, it is closed out at startup
+  instead of being restored as an approvable-looking button with nothing behind
+  it. If an action you expected to still be waiting is gone after a restart,
+  ask for it again.
 - *An approval interrupted mid-flight is not retried.* If the bot dies in the
   seconds between your click and the action running, it will not guess. The
   proposal is closed as "interrupted", the persona is told the outcome is unknown,
@@ -453,9 +460,18 @@ the bot happened to stay up. Three details worth knowing:
 once. If the persona re-proposes the same action while reporting on the one you
 just approved — which is when it is most likely to, since it is re-reading its own
 work — you are not given a second button for it; it is told the action already ran
-and what the outcome was. Asking for the same action again later is still allowed:
-after about fifteen minutes it counts as a fresh request, and a *denied* action can
-be re-proposed immediately, since nothing happened the first time.
+and what the outcome was. This applies only while the persona is reporting back on
+your decision. **Asking for something again yourself always reaches you**: say
+"restart that service again" a minute after the first restart and you get a fresh
+proposal to approve, because a request you typed is a request, not the model
+repeating itself. A *denied* action can likewise be re-proposed immediately, since
+nothing happened the first time.
+
+An action that was approved and then *errored* counts as having run for this
+purpose. The tool may have taken effect before it failed — a ticket created just
+before the API returned an error — so the persona is told the outcome is unknown
+and asked to check the current state rather than being handed a second button that
+would create the ticket twice.
 
 **Gated actions stay in the model's memory (DP-296).** A persona remembers the tool calls it made and the writes it proposed, even when the turn did not finish cleanly — a proposal you approved, denied, or simply never answered, a turn that died on a provider error, or one that hit the tool-iteration cap. Previously only turns that ended with the model writing text carried their tool calls forward, so gated actions were invisible on the next turn: ask "did you see the error you got?" after a parked proposal and the persona had no record of ever calling anything, and would re-propose or invent an answer. Unfinished calls are recorded as *not executed* with a reason (`awaiting_approval`, `denied`, `error`), so a persona can tell "I did this" from "I asked to do this and it didn't happen" and stops re-proposing denied actions. This holds for regenerated turns too: retrying a reply that then proposes a write records the proposal against the regenerated message, without disturbing the text that message already shows or the version history behind it.
 
