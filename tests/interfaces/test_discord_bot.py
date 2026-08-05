@@ -465,13 +465,20 @@ async def test_send_failure_registers_nothing():
 # --- DP-319 review: the registry no longer dies with the park store ---------
 
 
-def _reaction_on_our_own_message(emoji, client, message_id=99):
-    reaction = MagicMock()
-    reaction.emoji = emoji
-    reaction.message.id = message_id
-    reaction.message.author.id = client.user.id
-    reaction.message.channel.send = AsyncMock()
-    return reaction
+def _our_message(client, message_id=99, ours_reacted=True):
+    """A message the bot authored, optionally carrying OUR proposal buttons."""
+    message = MagicMock()
+    message.id = message_id
+    message.author.id = client.user.id
+    message.channel.send = AsyncMock()
+    message.reactions = []
+    if ours_reacted:
+        for emoji in ('✅', '❌'):
+            reaction = MagicMock()
+            reaction.emoji = emoji
+            reaction.me = True
+            message.reactions.append(reaction)
+    return message
 
 
 @pytest.mark.asyncio
@@ -486,17 +493,17 @@ async def test_an_unmapped_approve_click_is_answered_not_dropped():
 
     client = MagicMock()
     client.user.id = 1
-    reaction = _reaction_on_our_own_message('✅', client)
+    message = _our_message(client)
 
     db._stale_button_notified.clear()
     try:
-        await db._notify_stale_button(reaction, '✅', client)
-        reaction.message.channel.send.assert_awaited_once()
-        assert "restarted" in reaction.message.channel.send.await_args[0][0]
+        await db._notify_stale_button(message, '✅', client)
+        message.channel.send.assert_awaited_once()
+        assert "restarted" in message.channel.send.await_args[0][0]
 
         # Once per message: a second click must not repeat it.
-        await db._notify_stale_button(reaction, '✅', client)
-        assert reaction.message.channel.send.await_count == 1
+        await db._notify_stale_button(message, '✅', client)
+        assert message.channel.send.await_count == 1
     finally:
         db._stale_button_notified.clear()
 
@@ -512,13 +519,92 @@ async def test_unrelated_reactions_are_still_ignored():
 
     db._stale_button_notified.clear()
     try:
-        other = _reaction_on_our_own_message('🎉', client, message_id=101)
+        other = _our_message(client, message_id=101)
         await db._notify_stale_button(other, '🎉', client)
-        other.message.channel.send.assert_not_awaited()
+        other.channel.send.assert_not_awaited()
 
-        someone_else = _reaction_on_our_own_message('✅', client, message_id=102)
-        someone_else.message.author.id = 2
+        someone_else = _our_message(client, message_id=102)
+        someone_else.author.id = 2
         await db._notify_stale_button(someone_else, '✅', client)
-        someone_else.message.channel.send.assert_not_awaited()
+        someone_else.channel.send.assert_not_awaited()
     finally:
         db._stale_button_notified.clear()
+
+
+@pytest.mark.asyncio
+async def test_a_thumbs_up_on_an_ordinary_answer_is_not_a_stale_button():
+    """The notice claims two things — that the bot restarted, and that a
+    proposal is awaiting the operator. On any message we authored that is NOT a
+    proposal, both are false.
+
+    `_post_pending_proposals` is the only thing that puts ✅/❌ on a message of
+    ours, so OUR OWN reaction is what identifies a proposal — and Discord stores
+    it, so it survives the restart the notice is about.
+    """
+    from src.interfaces import discord_bot as db
+
+    client = MagicMock()
+    client.user.id = 1
+    plain_answer = _our_message(client, message_id=103, ours_reacted=False)
+
+    db._stale_button_notified.clear()
+    try:
+        await db._notify_stale_button(plain_answer, '✅', client)
+        plain_answer.channel.send.assert_not_awaited()
+    finally:
+        db._stale_button_notified.clear()
+
+
+@pytest.mark.asyncio
+async def test_the_proposal_handler_is_raw(mock_discord_client):
+    """discord.py dispatches `on_reaction_add` ONLY for messages still in the
+    client's in-memory message cache — a deque filled by MESSAGE_CREATE while
+    connected, and empty after a restart.
+
+    So the cooked handler could not fire for a proposal posted before the
+    restart, which since DP-319 is exactly the case the stale-button notice
+    exists for, and it stopped resolving live 24h parks on a busy guild as soon
+    as their message aged out of the deque. Durable parks outlive the cache, so
+    the handler has to as well.
+    """
+    assert hasattr(mock_discord_client, "on_raw_reaction_add")
+    assert not hasattr(mock_discord_client, "on_reaction_add"), (
+        "a cooked handler alongside the raw one double-resolves every "
+        "cache-hit click"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_raw_click_on_a_live_park_resolves_it(mock_discord_client,
+                                                      mock_chat_system):
+    """The working path, driven the way Discord actually delivers it."""
+    from src.interfaces import discord_bot as db
+
+    mock_chat_system.resolve_park = AsyncMock(
+        return_value=("Done.", None, None, None))
+
+    message = AsyncMock(spec=discord.Message)
+    channel = AsyncMock(spec=discord.TextChannel, typing=MagicMock())
+    channel.fetch_message = AsyncMock(return_value=message)
+    channel.send = AsyncMock(return_value=MagicMock(id=7))
+
+    payload = MagicMock(spec=discord.RawReactionActionEvent)
+    payload.user_id = 123
+    payload.member = None
+    payload.emoji = '✅'
+    payload.message_id = 4242
+    payload.channel_id = 77
+
+    db._confirm_registry.clear()
+    db._confirm_registry[4242] = ("tok", "123", "p")
+    try:
+        with patch.object(db, "_resolve_channel",
+                          AsyncMock(return_value=channel)), \
+                patch.object(db, "_post_pending_proposals", AsyncMock()):
+            await mock_discord_client.on_raw_reaction_add(payload)
+
+        mock_chat_system.resolve_park.assert_awaited_once()
+        assert mock_chat_system.resolve_park.await_args.kwargs["approved"] is True
+        assert 4242 not in db._confirm_registry
+    finally:
+        db._confirm_registry.clear()

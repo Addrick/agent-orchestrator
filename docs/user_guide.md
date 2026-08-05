@@ -444,7 +444,9 @@ the bot happened to stay up. Three details worth knowing:
   The next time you talk to that persona in that channel, anything still pending
   is posted again with fresh buttons. Answer the new message, not the old one. If
   you click a dead button in the meantime the bot tells you so rather than
-  ignoring you — it will not silently swallow an approval.
+  ignoring you — it will not silently swallow an approval. That reply only
+  appears on an actual proposal message; reacting ✅ to an ordinary answer is
+  still just a reaction.
 - *A proposal whose stored details cannot be read is not offered.* In the rare
   case that a proposal's record is damaged on disk, it is closed out at startup
   instead of being restored as an approvable-looking button with nothing behind

@@ -19,7 +19,10 @@ from config.global_config import PARK_ROW_RETENTION, PENDING_ACTION_TTL
 from src.confirmations import (
     DENIAL_INSTRUCTION, ConfirmationManager, Decision, ParkedWrite,
 )
-from src.memory.memory_manager import MemoryManager
+from src.memory.memory_manager import MemoryManager, PARK_DB_UNKNOWN
+from src.tools.tool_loop import (
+    PARK_STATUS_APPROVED, PARK_STATUS_QUARANTINED,
+)
 
 
 @pytest.fixture
@@ -900,12 +903,66 @@ def test_a_quarantined_row_stops_holding_its_arguments(manager, mem_manager):
     _fresh_manager(mem_manager).rebuild_from_store()
 
     row = _park_row(mem_manager, "a")
-    assert row["status"] == "interrupted", "it must reach a terminal state"
+    assert row["status"] == "quarantined", "it must reach a terminal state"
     assert row["write_call"] is None, "the payload must stop living on disk"
     assert row["resolved_at"] is not None, "or purge can never collect it"
+    assert row["resolution"] == PARK_STATUS_QUARANTINED, (
+        "an unreadable row must not be filterable as a decision that was "
+        "in flight — that one may have executed, this one provably did not"
+    )
 
     # And a second boot no longer sees it at all.
     assert _fresh_manager(mem_manager).rebuild_from_store()["quarantined"] == 0
+
+
+def test_quarantining_a_row_leaves_an_audit_trail(manager, mem_manager):
+    """Every other park-terminating path writes one; this was the only one that
+    did not.
+
+    After `PARK_ROW_RETENTION` the row itself is purged, so without this the
+    only durable trace of a proposed irreversible action would be its
+    `audit_parked` row — with nothing anywhere saying it was ever terminated,
+    or why.
+    """
+    manager.park(_park(token="a"))
+    _corrupt_write_call(mem_manager, "a")
+
+    _fresh_manager(mem_manager).rebuild_from_store()
+
+    events = mem_manager._get_connection().execute(
+        "SELECT * FROM Audit_Log WHERE event_type = 'audit_park_quarantined'"
+    ).fetchall()
+    assert len(events) == 1
+    assert events[0]["new_state"] == PARK_STATUS_QUARANTINED
+    assert "NOT executed" in events[0]["reason"]
+
+
+def test_a_row_that_cannot_be_reconciled_is_also_quarantined(
+        manager, mem_manager, monkeypatch):
+    """Same trap as the unreadable row, reached through the other branch.
+
+    Logging and returning left the row `pending`/`claimed` forever: never
+    loaded, never expired, never purged (purge only deletes terminal rows), so
+    it failed identically on every subsequent boot while its unscrubbed
+    arguments stayed on disk permanently.
+    """
+    manager.park(_park(token="bad"))
+    conn = mem_manager._get_connection()
+    conn.execute("UPDATE Parked_Writes SET created_at = ? WHERE token = 'bad'",
+                 (time.time() - PENDING_ACTION_TTL - 60,))
+    conn.commit()
+
+    revived = _fresh_manager(mem_manager)
+    monkeypatch.setattr(
+        revived, "patch_parked_entry",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("unreadable")))
+
+    counts = revived.rebuild_from_store()
+
+    assert counts["quarantined"] == 1
+    row = _park_row(mem_manager, "bad")
+    assert row["status"] == "quarantined"
+    assert row["write_call"] is None, "the payload must stop living on disk"
 
 
 def test_one_unreconcilable_row_does_not_stop_the_boot(manager, mem_manager,
@@ -942,6 +999,140 @@ def test_one_unreconcilable_row_does_not_stop_the_boot(manager, mem_manager,
 
     assert counts["restored"] == 1, "the healthy park must survive the bad one"
     assert [p.token for p in revived.list_for("u", "p")] == ["good"]
+
+
+# ---- DP-319 review: failure modes that silently reopen the guard ----------
+
+def test_restore_will_not_reinsert_when_the_store_cannot_be_read(
+        manager, mem_manager, monkeypatch):
+    """"Could not tell" must fail CLOSED, not read as "no row".
+
+    `release_parked_write` answers False on a transient `database is locked`,
+    and the status read used to answer None for both that and a genuinely
+    missing row. The re-insert branch then rewrote `status='pending'` and NULLed
+    `resolved_at` — resurrecting an already-executed irreversible write as an
+    approvable affordance, by way of the branch that looks like the safe one.
+    """
+    parked = _park(token="a")
+    manager.park(parked)
+    manager.take("a")
+    mem_manager.finalize_parked_write("a", "resolved", PARK_STATUS_APPROVED,
+                                      "ran")
+
+    # A real locked store, not a stubbed return value: the defect was that the
+    # sqlite3.Error was CAUGHT and reported as None, so stubbing the answer
+    # would skip the very code under test.
+    real_connection = mem_manager._get_connection
+
+    class _LockedCursor:
+        def execute(self, *a, **k):
+            raise sqlite3.OperationalError("database is locked")
+
+    class _LockedConnection:
+        def cursor(self):
+            return _LockedCursor()
+
+        def execute(self, *a, **k):
+            raise sqlite3.OperationalError("database is locked")
+
+        def rollback(self):
+            pass
+
+    monkeypatch.setattr(mem_manager, "_get_connection",
+                        lambda: _LockedConnection())
+    try:
+        manager.restore(parked)
+    finally:
+        monkeypatch.setattr(mem_manager, "_get_connection", real_connection)
+
+    assert manager.list_for("u", "p") == [], \
+        "an unknown durable state must not become an approvable affordance"
+    assert _park_row(mem_manager, "a")["status"] == "resolved"
+
+
+def test_rebuild_twice_does_not_duplicate_a_park(manager, mem_manager):
+    """`_reinstate` appended unconditionally, so `_by_key` grew a second copy
+    of the token while `pending` was merely overwritten.
+
+    `list_for` filters on membership, not uniqueness, so it yielded the same
+    park twice: two pending chunks sharing one `ephemeral_chunk_id`.
+    """
+    manager.park(_park(token="a"))
+
+    revived = _fresh_manager(mem_manager)
+    revived.rebuild_from_store()
+    revived.rebuild_from_store()
+
+    assert [p.token for p in revived.list_for("u", "p")] == ["a"]
+
+
+def test_the_boot_purge_marks_the_purge_clock(manager, mem_manager):
+    """`_last_purge` starts at "never" and only `_purge_due` assigns it, so a
+    boot purge that bypassed it left the very next park() or list_for()
+    scheduling a second, identical DELETE milliseconds later."""
+    revived = _fresh_manager(mem_manager)
+    revived.rebuild_from_store()
+
+    assert revived._last_purge > 0
+    assert revived._purge_due() is False, \
+        "the boot pass already purged; the next read must not repeat it"
+
+
+def test_a_park_whose_row_was_refused_still_guards_re_execution(
+        manager, mem_manager, monkeypatch):
+    """`insert_parked_write` refuses a call it cannot serialize losslessly.
+
+    `park()` discarded that answer, so the park went live with no row —
+    `finalize_parked_write` then matched nothing and `already_resolved` found
+    nothing, silently disabling the double-execution guard for exactly the calls
+    that could not be persisted. The park is still offered (pre-DP-319
+    behaviour); what must not happen is the guard failing open.
+    """
+    monkeypatch.setattr(mem_manager, "insert_parked_write",
+                        lambda **kwargs: False)
+    parked = _park(token="a", call_id="c1")
+    manager.park(parked)
+
+    assert parked.persisted is False
+    assert [p.token for p in manager.list_for("u", "p")] == ["a"], \
+        "a park that could not be stored is still the operator's to decide"
+
+    manager.take("a")
+    import asyncio
+    asyncio.run(manager.apply(Decision(park=parked, approved=True)))
+
+    hit = manager.already_resolved(("u", "p"),
+                                   dict(parked.write_call, id="c2"))
+    assert hit is not None, (
+        "with no durable row the store answers None forever, so the model's "
+        "re-proposal parks a second copy and an approval runs the write twice"
+    )
+    assert hit["resolution"] == PARK_STATUS_APPROVED
+
+
+def test_unreadable_duplicate_refs_do_not_destroy_the_park(
+        manager, mem_manager, caplog):
+    """Not fatal — quarantining would discard an executable park to protect a
+    pointer list — but not silent either.
+
+    Every reference lost here is a `duplicate_of_pending` entry claiming the
+    action is still awaiting the operator that nothing will ever correct.
+    """
+    manager.park(_park(token="a"))
+    conn = mem_manager._get_connection()
+    conn.execute("UPDATE Parked_Writes SET duplicate_refs = ? "
+                 "WHERE token = 'a'", ('[[1, "c1"',))
+    conn.commit()
+
+    revived = _fresh_manager(mem_manager)
+    with caplog.at_level("ERROR"):
+        counts = revived.rebuild_from_store()
+
+    assert counts["restored"] == 1
+    assert revived.pending["a"].duplicate_refs == []
+    assert any("suppressed-duplicate pointers" in r.message
+               for r in caplog.records), \
+        "a permanently wrong history entry must not be logged nowhere"
 
 
 # ---- the sweep must not fabricate a decision, or block the loop ------------

@@ -7,7 +7,10 @@ import os
 import time
 from datetime import datetime, timezone
 
-from memory.memory_manager import MemoryManager
+from memory.memory_manager import (
+    MemoryManager, PARK_DB_QUARANTINED, PARK_DB_TERMINAL, PARK_DB_UNKNOWN,
+)
+from src.tools.tool_loop import write_call_identity_hash
 from config.global_config import TEST_DATABASE_DIR, EMBEDDING_MODEL
 
 
@@ -2941,9 +2944,9 @@ def _insert_park(manager, token="tok", user="u", persona="p",
         persona_name=persona, channel="c", server_id=None,
         write_call={"id": "c1", "name": "update_ticket",
                     "arguments": args if args is not None else {"x": 1}},
-        call_identity=MemoryManager.parked_write_identity(
-            "update_ticket", json.dumps(args if args is not None else {"x": 1},
-                                        sort_keys=True)),
+        call_identity=write_call_identity_hash(
+            {"id": "c1", "name": "update_ticket",
+             "arguments": args if args is not None else {"x": 1}}),
         audit_info={"actions": [{"tool": "update_ticket"}]},
         confirmation_text="Run it?", turn_tainted=False,
         parked_assistant_id=5, duplicate_refs=[],
@@ -3044,10 +3047,10 @@ def test_resolved_lookup_matches_on_arguments_not_just_tool_name():
         manager.claim_parked_write("a")
         manager.finalize_parked_write("a", "resolved", "approved", now=2000.0)
 
-        same = MemoryManager.parked_write_identity(
-            "update_ticket", json.dumps({"ticket": 1}, sort_keys=True))
-        other = MemoryManager.parked_write_identity(
-            "update_ticket", json.dumps({"ticket": 2}, sort_keys=True))
+        same = write_call_identity_hash(
+            {"name": "update_ticket", "arguments": {"ticket": 1}})
+        other = write_call_identity_hash(
+            {"name": "update_ticket", "arguments": {"ticket": 2}})
 
         assert manager.find_resolved_parked_write(
             "u", "p", same, 0.0, ("approved",)) is not None
@@ -3143,10 +3146,73 @@ def test_park_writes_swallow_store_errors_instead_of_raising():
         assert manager.release_parked_write("a") is False
         assert manager.finalize_parked_write("a", "resolved", "approved") is False
         assert manager.update_parked_write_duplicate_refs("a", [[1, "c"]]) is False
-        assert manager.get_parked_write_status("a") is None
+        assert manager.get_parked_write_status("a") == PARK_DB_UNKNOWN, (
+            "a failed read must NOT answer None — None means 'definitively no "
+            "row', which makes `restore` re-INSERT a decided park as pending"
+        )
         assert manager.load_parked_writes(("pending",)) == []
         assert manager.find_resolved_parked_write(
             "u", "p", "hash", 0.0, ("approved",)) is None
         assert manager.purge_parked_writes(time.time()) == 0
+    finally:
+        manager.close()
+
+
+def test_unserializable_duplicate_refs_return_false_instead_of_raising():
+    """`json.dumps` raising is a TypeError, not a `sqlite3.Error`.
+
+    Serialized inline in the parameter tuple it escaped the guard around the
+    statement entirely, so a method whose whole contract is "returns False,
+    never raises" raised — out through `ConfirmationManager.park` and into
+    `ChatSystem._register_parks`, aborting registration for every remaining
+    park in that turn.
+    """
+    manager = MemoryManager(db_path=":memory:")
+    manager.create_schema()
+    try:
+        assert manager.insert_parked_write(
+            token="a", created_at=1000.0, user_identifier="u",
+            persona_name="p", channel="c", server_id=None,
+            write_call={"id": "c1", "name": "update_ticket", "arguments": {}},
+            call_identity="h", audit_info={}, confirmation_text="?",
+            turn_tainted=False, parked_assistant_id=None,
+            duplicate_refs=[{object()}],
+        ) is False
+        assert manager.get_parked_write_status("a") is None, \
+            "a row refused for its refs must not land half-written"
+
+        _insert_park(manager, token="b")
+        assert manager.update_parked_write_duplicate_refs(
+            "b", [{object()}]) is False
+    finally:
+        manager.close()
+
+
+def test_quarantined_is_its_own_terminal_state():
+    """A row that could not be read and a decision cut short by a restart are
+    both closed at boot, but only one of them may have executed.
+
+    `resolution` is the column a forensic query filters on, so writing
+    `interrupted_by_restart` for an unreadable row made "which gated writes may
+    have run during the outage?" return rows whose write provably never ran.
+    """
+    manager = MemoryManager(db_path=":memory:")
+    manager.create_schema()
+    try:
+        _insert_park(manager, token="a")
+        assert manager.finalize_parked_write(
+            "a", PARK_DB_QUARANTINED, "quarantined_unreadable",
+            "unreadable at boot") is True
+        assert manager.get_parked_write_status("a") == PARK_DB_QUARANTINED
+        assert PARK_DB_QUARANTINED in PARK_DB_TERMINAL, \
+            "a state outside PARK_DB_TERMINAL is never purged"
+
+        row = manager._get_connection().execute(
+            "SELECT * FROM Parked_Writes WHERE token = 'a'").fetchone()
+        assert row["resolution"] == "quarantined_unreadable"
+        assert row["write_call"] is None, "the payload must still be erased"
+
+        # And it is reachable by the purge, not stranded like a live row.
+        assert manager.purge_parked_writes(time.time() + 1) == 1
     finally:
         manager.close()

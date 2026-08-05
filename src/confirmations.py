@@ -25,14 +25,15 @@ from config.global_config import (
 )
 from src.memory.memory_manager import (
     PARK_DB_CLAIMED, PARK_DB_EXPIRED, PARK_DB_INTERRUPTED, PARK_DB_LIVE,
-    PARK_DB_PENDING, PARK_DB_RESOLVED, MemoryManager,
+    PARK_DB_PENDING, PARK_DB_QUARANTINED, PARK_DB_RESOLVED, PARK_DB_UNKNOWN,
+    MemoryManager,
 )
 from src.security.scrubber import get_scrubber
 from src.tools.definitions import get_tool_capabilities
 from src.tools.tool_loop import (
     PARK_STATUS_APPROVED, PARK_STATUS_AWAITING, PARK_STATUS_DENIED,
     PARK_STATUS_EXPIRED, PARK_STATUS_FAILED, PARK_STATUS_INTERRUPTED,
-    write_call_identity,
+    PARK_STATUS_QUARANTINED, write_call_identity_hash,
 )
 from src.tools.tool_manager import ToolManager
 
@@ -91,6 +92,11 @@ class ParkedWrite:
     # which is why one `parked_assistant_id` cannot cover them.
     duplicate_refs: List[Tuple[int, str]] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
+    # False when the durable row was refused (unserializable arguments, a store
+    # error). The park is still live in memory — pre-DP-319 behaviour — but its
+    # re-execution guard cannot read a row that does not exist, so `apply` has
+    # to remember the outcome in-process instead.
+    persisted: bool = True
 
     @property
     def key(self) -> ConversationKey:
@@ -104,8 +110,7 @@ class ParkedWrite:
     @property
     def identity_hash(self) -> str:
         """Storage form of this call's duplicate-detection identity."""
-        name, args = write_call_identity(self.write_call)
-        return MemoryManager.parked_write_identity(name, args)
+        return write_call_identity_hash(self.write_call)
 
     @classmethod
     def from_row(cls, row: Dict[str, Any]) -> "ParkedWrite":
@@ -122,6 +127,13 @@ class ParkedWrite:
         history entry reads `awaiting_human_approval` forever. That orphan state
         is exactly what the boot-time expiry branch exists to eliminate; a row
         whose payload cannot be read must be quarantined, not restored.
+
+        An unreadable `duplicate_refs` is NOT fatal, deliberately: quarantining
+        over it would destroy a perfectly executable park to protect a cosmetic
+        pointer list. But it is not silent either. Every reference lost here is
+        a `duplicate_of_pending` entry saying the action is "still awaiting the
+        operator" that nothing will ever correct — permanently wrong history,
+        and this log line is the only signal it happened.
         """
         undecodable = row.get("_undecodable") or []
         if "write_call" in undecodable:
@@ -130,6 +142,17 @@ class ParkedWrite:
         if not isinstance(write_call, dict) or not write_call:
             raise ValueError("write_call is missing or empty")
         refs = row.get("duplicate_refs") or []
+        kept = [(int(r[0]), str(r[1])) for r in refs if len(r) == 2]
+        if "duplicate_refs" in undecodable or len(kept) != len(refs):
+            logger.error(
+                "Parked write %s lost suppressed-duplicate pointers at load "
+                "(%d of %d usable%s). Their history entries will keep claiming "
+                "the action is awaiting an operator; nothing else corrects "
+                "them.",
+                row.get("token"), len(kept), len(refs),
+                "; the column did not decode"
+                if "duplicate_refs" in undecodable else "",
+            )
         return cls(
             token=str(row["token"]),
             write_call=write_call,
@@ -141,7 +164,7 @@ class ParkedWrite:
             server_id=row.get("server_id"),
             turn_tainted=bool(row.get("turn_tainted")),
             parked_assistant_id=row.get("parked_assistant_id"),
-            duplicate_refs=[(int(r[0]), str(r[1])) for r in refs if len(r) == 2],
+            duplicate_refs=kept,
             created_at=float(row["created_at"]),
         )
 
@@ -210,6 +233,16 @@ class ConfirmationManager:
         # sweep after boot does one — a process that is restarted often would
         # otherwise never reach the interval.
         self._last_purge: float = 0.0
+        # Outcomes of parks whose durable row never existed, keyed
+        # `(conversation, identity hash) -> (resolved_at, resolution)`. The
+        # DB-backed duplicate guard cannot see those, and a guard that fails
+        # open here means an approved irreversible write can be re-proposed and
+        # executed a SECOND time — the one outcome this subsystem exists to
+        # prevent. Bounded by the same guard window as the durable lookup, and
+        # process-lifetime by definition: a park that was never persisted has
+        # nothing to survive a restart with anyway.
+        self._resolved_fallback: Dict[Tuple[ConversationKey, str],
+                                      Tuple[float, str]] = {}
 
     # ---- store -----------------------------------------------------------
 
@@ -219,11 +252,25 @@ class ConfirmationManager:
         Nothing is evicted: since DP-297 a second park for the same
         conversation is a sibling, not a replacement, so the
         `audit_parked_evicted` event this used to emit no longer exists.
+
+        A refused durable write does NOT refuse the park — the operator still
+        gets the affordance, exactly as before DP-319. It is recorded on the
+        park instead, because the consequence is not "it will not survive a
+        restart": with no row, `finalize_parked_write` matches nothing and
+        `already_resolved` finds nothing, so the re-execution guard is silently
+        off for this call. `apply` closes that with an in-process fallback.
         """
         self._sweep_off_thread()
         self.pending[parked.token] = parked
         self._by_key.setdefault(parked.key, []).append(parked.token)
-        self._persist_new(parked)
+        parked.persisted = self._persist_new(parked)
+        if not parked.persisted:
+            logger.error(
+                "Parked write %s (%s) has no durable row: it will not survive a "
+                "restart, and its double-execution guard falls back to "
+                "in-process memory only.",
+                parked.token, parked.write_call.get("name"),
+            )
         self.memory_manager.log_audit_event(
             event_type="audit_parked",
             operator_id=parked.user_identifier,
@@ -289,17 +336,33 @@ class ConfirmationManager:
         as an approvable affordance that survived the next restart. That is the
         precise outcome durable parks exist to prevent, so a terminal row wins
         over the in-memory restore instead of the other way round.
+
+        Three answers, and "could not tell" fails CLOSED. A transient
+        `database is locked` makes `release_parked_write` answer False and the
+        status read answer nothing — and if that is read as "no row", the
+        re-INSERT rewrites `status='pending'` and NULLs `resolved_at`, which is
+        the resurrection this branch exists to forbid, reached by a route that
+        looks like the safe one. Dropping a park that may have been live is
+        recoverable by a human; re-offering an executed irreversible write is
+        not.
         """
         if self.memory_manager.release_parked_write(parked.token):
             self._reinstate(parked)
             return
 
         status = self.memory_manager.get_parked_write_status(parked.token)
-        if status is None:
+        if status == PARK_DB_UNKNOWN:
+            logger.error(
+                "park %s: the store could not say what state its row is in, so "
+                "it is NOT being restored. Re-inserting on a failed read can "
+                "resurrect an already-executed write as approvable.",
+                parked.token,
+            )
+        elif status is None:
             # Genuinely gone: re-insert, or the restored park would outlive its
             # durable record and vanish on the next restart.
             self._reinstate(parked)
-            self._persist_new(parked)
+            parked.persisted = self._persist_new(parked)
         elif status in PARK_DB_LIVE:
             # Already `pending` (a concurrent release, or it was never claimed).
             self._reinstate(parked)
@@ -311,9 +374,19 @@ class ConfirmationManager:
             )
 
     def _reinstate(self, parked: ParkedWrite) -> None:
-        """Put a park back into the in-memory index, without touching the DB."""
+        """Put a park back into the in-memory index, without touching the DB.
+
+        Idempotent. `self.pending[token] = parked` overwrites harmlessly, but an
+        unconditional append to `_by_key` does not: a second `rebuild_from_store`
+        (or a rebuild over a manager that already holds the park) left the token
+        in the list twice, and `list_for` filters on membership rather than
+        uniqueness — so it yielded the same park twice, and the portal rendered
+        two pending chunks sharing one `ephemeral_chunk_id`.
+        """
         self.pending[parked.token] = parked
-        self._by_key.setdefault(parked.key, []).append(parked.token)
+        tokens = self._by_key.setdefault(parked.key, [])
+        if parked.token not in tokens:
+            tokens.append(parked.token)
 
     def list_for(self, user_identifier: str,
                  persona_name: str) -> List[ParkedWrite]:
@@ -350,9 +423,15 @@ class ConfirmationManager:
     # process would need the DB to become the authority, and the locks to move
     # with it.
 
-    def _persist_new(self, parked: ParkedWrite) -> None:
-        """Write-through for a park entering (or re-entering) the pending set."""
-        self.memory_manager.insert_parked_write(
+    def _persist_new(self, parked: ParkedWrite) -> bool:
+        """Write-through for a park entering (or re-entering) the pending set.
+
+        Returns whether the row actually landed. The caller must not discard
+        that: `insert_parked_write` refuses a call it cannot serialize
+        losslessly, and a park with no row is one the durable duplicate guard
+        cannot see.
+        """
+        return self.memory_manager.insert_parked_write(
             token=parked.token,
             created_at=parked.created_at,
             user_identifier=parked.user_identifier,
@@ -412,19 +491,19 @@ class ConfirmationManager:
         which is where that scoping lives, because this manager cannot see what
         kind of turn is running.
         """
-        name, args = write_call_identity(write_call)
+        identity = write_call_identity_hash(write_call)
         # Typed `Any` deliberately: the isinstance check below is dead code
         # against the declared return type, and it is kept anyway because what
         # it guards is a write the operator never gets offered. A truthy
         # non-row here (a test double, a swapped store) would suppress every
         # park silently, which looks exactly like the gate working.
+        since = time.time() - PARK_REEXECUTION_GUARD_WINDOW
         row: Any = self.memory_manager.find_resolved_parked_write(
-            key[0], key[1], MemoryManager.parked_write_identity(name, args),
-            time.time() - PARK_REEXECUTION_GUARD_WINDOW,
+            key[0], key[1], identity, since,
             (PARK_STATUS_APPROVED, PARK_STATUS_FAILED),
         )
         if row is None:
-            return None
+            return self._resolved_fallback_row(key, identity, since)
         if not isinstance(row, dict):
             # A non-row here would suppress the park — and a suppressed park is
             # a write the operator is never offered, i.e. this guard silently
@@ -436,6 +515,44 @@ class ConfirmationManager:
             )
             return None
         return row
+
+    def _remember_unpersisted_outcome(self, park: ParkedWrite, status: str,
+                                      when: float) -> None:
+        """Record a decided park that has no durable row to be found in.
+
+        `finalize_parked_write` answering False means the row is missing (or was
+        never written), so `find_resolved_parked_write` will answer None for
+        this call forever. Without this the model can re-propose the same
+        irreversible write on the continuation turn, get a fresh park, and an
+        approval executes it twice — the failure DP-319 exists to close, reached
+        by the one path where durability was never achieved.
+        """
+        self._resolved_fallback[(park.key, park.identity_hash)] = (when, status)
+
+    def _resolved_fallback_row(self, key: ConversationKey, identity: str,
+                               since: float) -> Optional[Dict[str, Any]]:
+        """The in-process twin of `find_resolved_parked_write`, row-shaped.
+
+        Same window and same shape as the durable lookup, so the caller cannot
+        tell which one answered. Expired entries are dropped as they are read —
+        the map is tiny (only parks whose row was refused) and bounded by the
+        guard window, so nothing else needs to sweep it.
+        """
+        entry = self._resolved_fallback.get((key, identity))
+        if entry is None:
+            return None
+        resolved_at, resolution = entry
+        if resolved_at < since:
+            self._resolved_fallback.pop((key, identity), None)
+            return None
+        return {
+            "token": None,
+            "status": PARK_DB_RESOLVED,
+            "resolution": resolution,
+            "resolution_reason": "Decided in this process; the park had no "
+                                 "durable row",
+            "resolved_at": resolved_at,
+        }
 
     def rebuild_from_store(self) -> Dict[str, int]:
         """Reload durable parks at boot; returns a counts summary.
@@ -486,6 +603,11 @@ class ConfirmationManager:
                 counts["restored"], counts["expired"], counts["interrupted"],
                 counts["quarantined"],
             )
+        # Mark the clock as well as running the purge. `_last_purge` starts at
+        # "never", and only `_purge_due` assigns it — so a boot purge that
+        # bypassed it left the very next `park()` or `list_for()` scheduling a
+        # second, identical DELETE milliseconds later.
+        self._last_purge = now
         self._purge_old_rows(now)
         return counts
 
@@ -499,6 +621,15 @@ class ConfirmationManager:
         `rebuild_from_store` into `create_chat_system` — one bad row and the bot
         does not start, discarding every park reconciled before it. A durable
         store that blocks boot is worse than one that reloads nothing.
+
+        A row that could not be reconciled is quarantined rather than skipped,
+        for the same reason an unreadable one is. Returning without finalizing
+        left it `pending`/`claimed` forever — never loaded, never expired, and
+        never purged, since `purge_parked_writes` only deletes terminal rows —
+        so it failed identically on every subsequent boot and its unscrubbed
+        `write_call` arguments stayed on disk permanently. That is precisely the
+        trap `_quarantine` was written to eliminate, reached through the
+        reconcile branch instead of the decode branch.
         """
         try:
             parked = ParkedWrite.from_row(row)
@@ -520,6 +651,11 @@ class ConfirmationManager:
         except Exception as e:
             logger.error("Could not reconcile parked write %s at boot: %s",
                          parked.token, e, exc_info=True)
+            # Best-effort terminal close-out. If the failure came *after* the
+            # row was already finalized (an audit write, say), this answers
+            # False and the row is correctly left alone.
+            if self._quarantine(row, f"could not be reconciled at boot: {e}"):
+                return "quarantined"
             return None
 
     def _quarantine(self, row: Dict[str, Any], why: str) -> bool:
@@ -533,6 +669,14 @@ class ConfirmationManager:
         call executes with them), and `finalize_parked_write` is the only thing
         that ever erases them — so one malformed row parks whatever secret that
         call carried on disk permanently.
+
+        Its own terminal state, and its own audit event. Writing
+        `PARK_STATUS_INTERRUPTED` here made a corrupt row indistinguishable from
+        a genuine decision-in-flight in the one column a query filters on, and
+        every other park-terminating path (`park`, `apply`, `expire`,
+        `_terminate_interrupted`) logs an audit row while this one logged none —
+        so after `PARK_ROW_RETENTION` the only durable trace that the action was
+        ever proposed said nothing about it being terminated.
         """
         token = row.get("token")
         if not isinstance(token, str) or not token:
@@ -542,13 +686,24 @@ class ConfirmationManager:
             )
             return False
         try:
-            return self.memory_manager.finalize_parked_write(
-                token, PARK_DB_INTERRUPTED, PARK_STATUS_INTERRUPTED,
-                f"Row could not be read at boot: {why}",
+            closed = self.memory_manager.finalize_parked_write(
+                token, PARK_DB_QUARANTINED, PARK_STATUS_QUARANTINED,
+                f"Row could not be used at boot: {why}",
             )
         except Exception as e:
             logger.error("Could not quarantine parked write %s: %s", token, e)
             return False
+        if closed:
+            self.memory_manager.log_audit_event(
+                event_type="audit_park_quarantined",
+                operator_id=str(row.get("user_identifier") or "unknown"),
+                prior_state=str(row.get("status") or PARK_DB_PENDING),
+                new_state=PARK_STATUS_QUARANTINED,
+                reason=f"Durable park row could not be used at boot: {why}. "
+                       f"The write was NOT executed and its payload was erased.",
+                metadata={"token": token},
+            )
+        return closed
 
     def _purge_old_rows(self, now: Optional[float] = None) -> int:
         """Drop terminal park rows past their retention. Returns how many."""
@@ -666,12 +821,25 @@ class ConfirmationManager:
         # recognize a re-proposal of an action that already ran) but its payload
         # columns are erased, so the arguments stop living on disk the moment
         # they stop being needed to execute.
-        self.memory_manager.finalize_parked_write(
+        finalized = self.memory_manager.finalize_parked_write(
             park.token, PARK_DB_RESOLVED, decision.status,
             decision.note or ("Human approved tool execution"
                               if decision.approved
                               else "Human denied tool execution"),
         )
+        if not finalized and decision.status in (PARK_STATUS_APPROVED,
+                                                 PARK_STATUS_FAILED):
+            # No durable row to find later, and the tool RAN. The duplicate
+            # guard reads the store, so without an in-process record the model's
+            # re-proposal on the continuation turn parks a fresh copy and an
+            # approval executes the irreversible write a second time.
+            logger.error(
+                "Parked write %s (%s) resolved as %s with no durable row to "
+                "finalize; falling back to an in-process re-execution guard.",
+                park.token, tool_name, decision.status,
+            )
+            self._remember_unpersisted_outcome(park, decision.status,
+                                               time.time())
         if not decision.patched:
             logger.error(
                 "History entry for %s (token %s) could not be patched; the "

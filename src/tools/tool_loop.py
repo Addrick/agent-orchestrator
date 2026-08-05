@@ -12,6 +12,7 @@ the security framework in the sibling plan).
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import uuid
@@ -121,6 +122,14 @@ PARK_STATUS_EXPIRED = "expired"
 # subsystem exists to prevent. The model is told to re-check state and re-propose
 # rather than assume either outcome.
 PARK_STATUS_INTERRUPTED = "interrupted_by_restart"
+# DP-319 review: a durable row whose payload could not be read at boot. Distinct
+# from PARK_STATUS_INTERRUPTED even though both are terminated by the same boot
+# pass, because `resolution` is the column a forensic query filters on and the
+# two answer opposite questions. An interrupted park is one a human decided and
+# the process may have executed; a quarantined one was never readable, so its
+# write provably never ran. Collapsing them made "which gated writes may have
+# executed during the outage?" return rows that certainly did not.
+PARK_STATUS_QUARANTINED = "quarantined_unreadable"
 # The model re-proposed a write that was already decided in an earlier turn.
 # Distinct from PARK_STATUS_DUPLICATE, which answers a still-*pending* twin: this
 # one says the action has already been executed or refused, so a second park
@@ -154,6 +163,30 @@ def write_call_identity(call: Dict[str, Any]) -> Tuple[str, str]:
         # unserializable write without ever surfacing an affordance.
         args = f"<unserializable:{uuid.uuid4().hex}>"
     return (name, args)
+
+
+def write_call_identity_hash(call: Dict[str, Any]) -> str:
+    """Storage form of `write_call_identity`: one hash of name + args.
+
+    Lives HERE, next to the canonicalization it hashes, rather than on
+    `MemoryManager` where DP-319 first put it. The identity contract was spread
+    over three modules — the canonicalizer in `src.tools`, the digest in
+    `src.memory`, and two call sites in `src.confirmations` that re-composed
+    them by hand — and any one of them drifting produces a hash that matches
+    nothing. That failure is silent and it fails OPEN: the duplicate guard
+    simply stops recognizing re-proposals, which is a second execution of an
+    irreversible write.
+
+    Hashed rather than stored raw because the canonical args are the same
+    secret-bearing payload `finalize_parked_write` exists to erase; equality is
+    all the duplicate guard needs.
+    """
+    name, args = write_call_identity(call)
+    digest = hashlib.sha256()
+    digest.update(name.encode("utf-8"))
+    digest.update(b"\x00")
+    digest.update(args.encode("utf-8"))
+    return digest.hexdigest()
 
 
 # Reasons a tool call can be left without a real result when the turn ends.

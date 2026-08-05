@@ -1,7 +1,6 @@
 # src/memory/memory_manager.py
 
 import sqlite3
-import hashlib
 import json
 import logging
 import threading
@@ -81,12 +80,46 @@ PARK_DB_CLAIMED = "claimed"
 PARK_DB_RESOLVED = "resolved"
 PARK_DB_EXPIRED = "expired"
 PARK_DB_INTERRUPTED = "interrupted"
+# The row could not be read back at boot, so it was forced terminal to stop it
+# being reloaded (and to erase its payload). Its own state, not a flavour of
+# `interrupted`: an interrupted park is one a human decided and the process may
+# have executed, while a quarantined one was never readable, so its write
+# provably never ran. A query asking which gated writes may have run during an
+# outage must be able to exclude these.
+PARK_DB_QUARANTINED = "quarantined"
 # Still answerable: the two states a park can be reloaded from.
 PARK_DB_LIVE: Tuple[str, ...] = (PARK_DB_PENDING, PARK_DB_CLAIMED)
 # Decided, one way or another: payload erased, row kept for the duplicate guard.
 PARK_DB_TERMINAL: Tuple[str, ...] = (
     PARK_DB_RESOLVED, PARK_DB_EXPIRED, PARK_DB_INTERRUPTED,
+    PARK_DB_QUARANTINED,
 )
+# `get_parked_write_status` could not tell — distinct from None, which means
+# "there is definitively no such row". The two need opposite handling and
+# collapsing them let a transient `database is locked` be read as "gone", which
+# re-INSERTed a decided park as `pending`.
+PARK_DB_UNKNOWN = "__unknown__"
+
+
+def _dump_duplicate_refs(duplicate_refs: List[Any],
+                         token: str) -> Optional[str]:
+    """Serialize suppressed-duplicate pointers, or None if they will not go.
+
+    Every parked-write method promises to return False rather than raise —
+    `take`, `restore` and the boot reconciler all resolve state *after* an
+    irrecoverable in-memory step, so an exception out of the store strands a
+    park. `json.dumps` raising `TypeError` is not a `sqlite3.Error`, so doing
+    this inline in the parameter tuple put a raise inside that promise.
+    """
+    try:
+        return json.dumps(duplicate_refs)
+    except (TypeError, ValueError) as e:
+        logger.error(
+            "Parked write %s has unserializable duplicate_refs (%s); refusing "
+            "to store the row rather than losing the pointers silently.",
+            token, e,
+        )
+        return None
 
 
 class MemoryManager:
@@ -333,7 +366,8 @@ class MemoryManager:
                 created_at REAL NOT NULL,
                 status TEXT NOT NULL DEFAULT 'pending'
                     CHECK(status IN ('pending', 'claimed', 'resolved',
-                                     'expired', 'interrupted')),
+                                     'expired', 'interrupted',
+                                     'quarantined')),
                 user_identifier TEXT NOT NULL,
                 persona_name TEXT NOT NULL,
                 channel TEXT NOT NULL DEFAULT '',
@@ -1805,20 +1839,11 @@ class MemoryManager:
     # identity, so the duplicate guard still works and the args stop living on
     # disk for the rest of the row's retention.
 
-    @staticmethod
-    def parked_write_identity(name: str, canonical_args: str) -> str:
-        """Hash of `write_call_identity` output, for storage.
-
-        Hashed rather than stored raw because the canonical args are the same
-        secret-bearing payload `finalize_parked_write` exists to erase — a
-        plaintext identity column would quietly preserve what that erasure
-        removes. Equality is all the duplicate guard needs.
-        """
-        digest = hashlib.sha256()
-        digest.update(name.encode("utf-8"))
-        digest.update(b"\x00")
-        digest.update(canonical_args.encode("utf-8"))
-        return digest.hexdigest()
+    # The `call_identity` column stores `tool_loop.write_call_identity_hash`.
+    # That helper used to live here as a staticmethod, which split one contract
+    # across two layers for no storage reason — the digest is part of the
+    # duplicate-detection rule, not of persistence, and drift between the two
+    # halves fails open as a silently disabled double-execution guard.
 
     def insert_parked_write(self, *, token: str, created_at: float,
                             user_identifier: str, persona_name: str,
@@ -1842,7 +1867,17 @@ class MemoryManager:
         pre-DP-319 behaviour) rather than being stored in a form that could
         execute something other than what the operator approved. `audit_info`
         is advisory, so it degrades instead of blocking.
+
+        `duplicate_refs` is serialized up here rather than inline in the
+        parameter tuple. Inline, its `TypeError` escaped the `except
+        sqlite3.Error` around the INSERT and travelled out of a method whose
+        whole contract — relied on by `take`, `restore` and the boot path — is
+        "returns False, never raises", aborting park registration for every
+        remaining park in the turn.
         """
+        refs_json = _dump_duplicate_refs(duplicate_refs, token)
+        if refs_json is None:
+            return False
         try:
             write_call_json = json.dumps(write_call)
         except (TypeError, ValueError) as e:
@@ -1871,7 +1906,7 @@ class MemoryManager:
                      server_id, write_call_json, call_identity,
                      audit_json, confirmation_text,
                      1 if turn_tainted else 0, parked_assistant_id,
-                     json.dumps(duplicate_refs)),
+                     refs_json),
                 )
                 conn.commit()
                 return True
@@ -1895,6 +1930,9 @@ class MemoryManager:
         real value and a second write path would only be dead code claiming
         otherwise.
         """
+        refs_json = _dump_duplicate_refs(duplicate_refs, token)
+        if refs_json is None:
+            return False
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
@@ -1902,7 +1940,7 @@ class MemoryManager:
                 cursor.execute(
                     """UPDATE Parked_Writes SET duplicate_refs = ?
                        WHERE token = ? AND status IN (?, ?)""",
-                    (json.dumps(duplicate_refs), token,
+                    (refs_json, token,
                      PARK_DB_PENDING, PARK_DB_CLAIMED),
                 )
                 conn.commit()
@@ -1962,13 +2000,21 @@ class MemoryManager:
                 return False
 
     def get_parked_write_status(self, token: str) -> Optional[str]:
-        """This park's lifecycle state, or None when there is no such row.
+        """This park's lifecycle state, `None` for no such row, or
+        `PARK_DB_UNKNOWN` when the store could not answer.
 
         Exists because `release_parked_write` returning False is ambiguous —
         "no row" and "already terminal" are the same rowcount and they need
         opposite handling. Treating them alike let `ConfirmationManager.restore`
         re-INSERT a decided park as `pending`, i.e. resurrect an irreversible
         write that already ran as an approvable affordance.
+
+        THREE answers, not two, for the same reason. Returning `None` on a
+        `sqlite3.Error` re-opened exactly that hole one level down: a transient
+        `database is locked` (which also made `release_parked_write` answer
+        False) read as "the row is genuinely gone", and the caller re-INSERTed
+        the decided park. The caller cannot distinguish what it is not told, so
+        "could not tell" has to be its own value and has to fail closed.
         """
         with self._lock:
             conn = self._get_connection()
@@ -1982,7 +2028,7 @@ class MemoryManager:
             except sqlite3.Error as e:
                 logger.error(f"Failed to read parked write status "
                              f"for {token}: {e}")
-                return None
+                return PARK_DB_UNKNOWN
         return str(row["status"]) if row else None
 
     def finalize_parked_write(self, token: str, status: str,
