@@ -6,6 +6,7 @@ import discord
 import asyncio
 import io
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Dict, Optional, List, Set, Tuple
 
 from config.global_config import DISCORD_CHAR_LIMIT, DISCORD_STATUS_LIMIT, DISCORD_DEBUG_CHANNEL, \
@@ -283,11 +284,113 @@ async def _safe_typing(channel: discord.abc.Messageable) -> AsyncIterator[None]:
 # message a reaction lands on is the ONLY thing that identifies which proposal
 # the operator meant.
 #
-# In-memory, like the park store itself: both die on restart together, so a
-# stranded button cannot outlive the park it points at.
+# In-memory, and since DP-319 the park store is NOT — the durable store
+# outlives this map rather than dying with it. So a stranded button IS now
+# possible: after a restart the park is reloaded and fully resolvable while the
+# ✅ still visible on the old message maps to nothing. `on_raw_reaction_add`
+# answers that click explicitly instead of dropping it, because the alternative
+# is an operator clicking a live-looking button on a live proposal and getting
+# silence.
 _confirm_registry: Dict[int, Tuple[str, str, str]] = {}
 # Tokens already rendered, so re-posting the pending list cannot double up.
 _rendered_park_tokens: Set[str] = set()
+# Message ids already answered with the stale-button notice, so a second click
+# (or the operator removing and re-adding the reaction) does not repeat it.
+_stale_button_notified: Set[int] = set()
+
+
+PROPOSAL_EMOJI = ('✅', '❌')
+
+# When this process came up. A "stale button" is by definition a reaction on a
+# message posted by an EARLIER process, and a Discord snowflake carries its own
+# creation time — so this is what lets the unmapped-reaction path reject the
+# ordinary case (someone ✅-ing a message from this session) without spending a
+# `fetch_message` REST call on every proposal-emoji reaction in every visible
+# channel.
+_PROCESS_STARTED_AT = datetime.now(timezone.utc)
+
+
+def _channel_key(channel: discord.abc.Messageable) -> str:
+    """The `channel` value parks made from this channel were stored under.
+
+    Must stay identical to the expression `on_message` passes to
+    `generate_response`, because it is matched against `ParkedWrite.channel`.
+    """
+    if isinstance(channel, discord.abc.GuildChannel):
+        return channel.name
+    return "DM"
+
+
+async def _resolve_channel(
+        client: discord.Client, channel_id: int,
+) -> Optional[discord.abc.Messageable]:
+    """The channel a raw reaction event happened in, cache or API.
+
+    `get_channel` reads the same client cache the non-raw reaction path depends
+    on, so it has to be able to miss — a DM channel is not cached until the bot
+    sees traffic in it, which after a restart is exactly the proposal case.
+    """
+    channel = client.get_channel(channel_id)
+    if channel is None:
+        try:
+            channel = await client.fetch_channel(channel_id)
+        except discord.HTTPException as e:
+            logger.warning(f"Could not resolve channel {channel_id}: {e}")
+            return None
+    if not isinstance(channel, discord.abc.Messageable):
+        return None
+    return channel
+
+
+async def _notify_stale_button(
+        message: discord.Message, emoji: str, client: discord.Client,
+) -> None:
+    """Answer an approve/deny click that maps to no live registry entry.
+
+    Narrow on purpose, on four axes: only our own message, only the two proposal
+    emoji, only a message we ourselves reacted to with one of them, and only
+    once. The registry is in-memory and the park store is not, so this is the
+    restart case: the proposal may well still be awaiting a decision, and the
+    operator has to be told where it went rather than left watching a button
+    that does nothing.
+
+    The `reaction.me` check is what keeps it from lying. Without it, ANY ✅ on
+    ANY message the bot ever authored — a user thumbs-upping an answer — drew a
+    reply asserting both that the bot had restarted and that a proposal was
+    awaiting them, neither of which had to be true. `_post_pending_proposals` is
+    the only thing that puts these two emoji on a message of ours, so their
+    presence *from us* is what identifies a proposal, and it survives a restart
+    because Discord stores it, not this process.
+    """
+    if emoji not in PROPOSAL_EMOJI:
+        return
+    if client.user is None or message.author.id != client.user.id:
+        return
+    if not any(r.me and str(r.emoji) in PROPOSAL_EMOJI
+               for r in message.reactions):
+        return
+    if message.id in _stale_button_notified:
+        return
+    if len(_stale_button_notified) >= 1024:
+        # Bounded: this is keyed by message id and nothing ever removes an
+        # entry, so an unbounded set is a slow leak for the life of the process.
+        # Clearing wholesale can at worst repeat one notice.
+        _stale_button_notified.clear()
+    _stale_button_notified.add(message.id)
+    try:
+        await message.channel.send(
+            # Deliberately conditional about the proposal. Nothing here can see
+            # the pending set, and the bot's ✅/❌ outlive the park: a park that
+            # expired, or one resolved in a DM (where `clear_reactions` is
+            # impossible and its Forbidden is swallowed), leaves the buttons in
+            # place. Asserting "any proposal still awaiting you is intact" told
+            # the operator something this function cannot know.
+            "That approve/deny button is no longer live — I restarted since "
+            "posting it. If that proposal is still awaiting a decision, send "
+            "me a message and I'll re-post it with working buttons."
+        )
+    except discord.HTTPException as e:
+        logger.warning(f"Could not answer a stale proposal reaction: {e}")
 
 
 async def _post_pending_proposals(
@@ -303,8 +406,20 @@ async def _post_pending_proposals(
         logger.error(f"Could not list pending proposals: {e}", exc_info=True)
         return
 
+    here = _channel_key(channel)
     for park in parks:
         if park.token in _rendered_park_tokens:
+            continue
+        # Channel-scoped. `list_for` is keyed `(user_identifier, persona_name)`
+        # only, so without this every live park for the operator is posted into
+        # whatever channel they happened to speak in — and `confirmation_text`
+        # carries the tool name and its full JSON arguments. Before DP-319 that
+        # needed a channel switch inside one process lifetime; a durable park
+        # lives 24h across restarts, so a proposal raised in a DM would be
+        # re-posted into a public guild channel on the next message there.
+        # user_guide.md states this scoping ("talk to that persona in that
+        # channel"); nothing implemented it.
+        if park.channel and park.channel != here:
             continue
         try:
             confirm_msg = await channel.send(park.confirmation_text)
@@ -326,8 +441,8 @@ async def _post_pending_proposals(
         _rendered_park_tokens.add(park.token)
 
         try:
-            await confirm_msg.add_reaction('✅')
-            await confirm_msg.add_reaction('❌')
+            for proposal_emoji in PROPOSAL_EMOJI:
+                await confirm_msg.add_reaction(proposal_emoji)
         except discord.HTTPException as e:
             logger.error(
                 f"Posted proposal {park.token} but could not add its "
@@ -356,39 +471,81 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
         await reset_discord_status(client, chat_system)
 
     @client.event
-    async def on_reaction_add(reaction: discord.Reaction,
-                              user: discord.abc.User) -> None:
+    async def on_raw_reaction_add(
+            payload: discord.RawReactionActionEvent) -> None:
         """Resolve one gated write (DP-297).
 
         Replaces the inline `wait_for` this used to block on. A global handler
         is what makes out-of-order approval possible: the reaction carries its
         own message id, so a proposal from three turns ago is as answerable as
         the newest one, and nothing has to still be awaiting it.
+
+        RAW, not `on_reaction_add`. discord.py dispatches the non-raw event only
+        for messages still in the client's in-memory message cache — a deque of
+        `max_messages` (1000 by default) filled by MESSAGE_CREATE while
+        connected, and empty after a restart. So the cooked handler could not
+        fire for a proposal posted before the restart, which since DP-319 is the
+        exact case the stale-button notice exists for, and it silently stopped
+        resolving *live* 24h parks on a busy guild once their message aged out
+        of the deque. Durable parks outlive the cache, so the handler has to as
+        well. The `reactions` intent this needs is already in `Intents.default`.
         """
-        if user.bot:
+        if client.user is not None and payload.user_id == client.user.id:
             return
-        entry = _confirm_registry.get(reaction.message.id)
+        if payload.member is not None and payload.member.bot:
+            return
+        emoji = str(payload.emoji)
+        if emoji not in PROPOSAL_EMOJI:
+            return
+
+        entry = _confirm_registry.get(payload.message_id)
+        if entry is None and (discord.utils.snowflake_time(payload.message_id)
+                              >= _PROCESS_STARTED_AT):
+            # An unmapped reaction on a message THIS process posted is not a
+            # stale button — it is someone ✅-ing an ordinary answer. Rejecting
+            # it from the snowflake costs nothing, where the path below spends a
+            # `fetch_channel` + `fetch_message` REST call before it can even
+            # look at the author. Without this, every proposal-emoji reaction on
+            # any message in any visible channel bought two API calls, and the
+            # once-per-message guard could not dedupe them because it is only
+            # marked for messages that turn out to be ours.
+            return
+
+        channel = await _resolve_channel(client, payload.channel_id)
+        if channel is None:
+            return
+
         if entry is None:
+            # DP-319: the registry no longer dies with the park store, so an
+            # unmapped ✅ on one of our own proposal messages is most likely a
+            # park that survived a restart — still live, still resolvable, just
+            # not through this button. Say so rather than dropping the click:
+            # the only other affordance is `_post_pending_proposals`, which does
+            # not fire until the operator's next message to that persona, so
+            # until then the sole thing on screen is a dead button.
+            try:
+                message = await channel.fetch_message(payload.message_id)
+            except discord.HTTPException:
+                return
+            await _notify_stale_button(message, emoji, client)
             return
         token, owner_id, persona_name = entry
         # Only the operator who owns the conversation may resolve it.
-        if str(user.id) != owner_id:
-            return
-        emoji = str(reaction.emoji)
-        if emoji not in ('✅', '❌'):
+        if str(payload.user_id) != owner_id:
             return
 
         # Claim it locally before awaiting anything, so a double-click cannot
         # start two resolutions. (`ConfirmationManager.take` is the real
         # guard; this just avoids the wasted round trip and a second reply.)
-        _confirm_registry.pop(reaction.message.id, None)
+        _confirm_registry.pop(payload.message_id, None)
         try:
-            await reaction.message.clear_reactions()
+            message = await channel.fetch_message(payload.message_id)
+            await message.clear_reactions()
         except discord.HTTPException:
             pass
 
         try:
-            async with _safe_typing(reaction.message.channel):
+            async with _safe_typing(channel):
                 final_text, _final_type, final_assistant_id, _ = \
                     await chat_system.resolve_park(
                         owner_id, persona_name, token,
@@ -396,7 +553,7 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                     )
         except Exception as e:
             logger.error(f"Error resolving proposal {token}: {e}", exc_info=True)
-            await reaction.message.channel.send(
+            await channel.send(
                 "A critical error occurred resolving that action. "
                 "Please check the logs."
             )
@@ -405,7 +562,7 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
         if final_text and final_text.strip():
             last_reply: Optional[discord.Message] = None
             for chunk in split_string_by_limit(final_text, DISCORD_CHAR_LIMIT):
-                last_reply = await reaction.message.channel.send(chunk)
+                last_reply = await channel.send(chunk)
             if last_reply and final_assistant_id is not None:
                 await asyncio.to_thread(
                     chat_system.memory_manager.update_platform_message_id,
@@ -414,7 +571,7 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
 
         # The continuation may itself have proposed more writes.
         await _post_pending_proposals(
-            chat_system, reaction.message.channel, owner_id, persona_name,
+            chat_system, channel, owner_id, persona_name,
         )
 
     @client.event

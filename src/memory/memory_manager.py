@@ -4,6 +4,7 @@ import sqlite3
 import json
 import logging
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import (Any, Coroutine, Dict, List, Callable, Optional, Sequence, Set, Union, cast,
@@ -60,6 +61,74 @@ DATABASE_FILE: Path = DB_DIR / "user_memory.db"
 ALLOWED_STANDING_ORDER_SOURCES: "frozenset[str]" = frozenset({"operator"})
 # Hard page cap for list_standing_orders; the table is never pruned.
 MAX_STANDING_ORDER_PAGE = 200
+
+# --- Parked-write lifecycle states (DP-319) ---
+# The `Parked_Writes.status` vocabulary, named once. These were bare literals
+# spread over the CHECK constraint, seven method bodies and one caller in
+# `confirmations`, which is a trap rather than a style nit: a typo in any single
+# one of them produces a row that no reconciliation path — reload, expiry,
+# purge — ever selects again, and only the CHECK constraint would catch it (and
+# only for a value it does not already list).
+#
+# Deliberately NOT the same vocabulary as `tool_loop`'s `PARK_STATUS_*`, which
+# describes what the MODEL reads in history. They overlap by accident
+# (`"expired"`) and diverge on purpose (`PARK_STATUS_INTERRUPTED` is
+# `"interrupted_by_restart"`, never a DB value), so the near-homonyms must not
+# be used interchangeably.
+PARK_DB_PENDING = "pending"
+PARK_DB_CLAIMED = "claimed"
+PARK_DB_RESOLVED = "resolved"
+PARK_DB_EXPIRED = "expired"
+PARK_DB_INTERRUPTED = "interrupted"
+# The row could not be read back at boot, so it was forced terminal to stop it
+# being reloaded (and to erase its payload). Its own state, not a flavour of
+# `interrupted`: an interrupted park is one a human decided and the process may
+# have executed, while a quarantined one was never readable, so its write
+# provably never ran. A query asking which gated writes may have run during an
+# outage must be able to exclude these.
+PARK_DB_QUARANTINED = "quarantined"
+# Still answerable: the two states a park can be reloaded from.
+PARK_DB_LIVE: Tuple[str, ...] = (PARK_DB_PENDING, PARK_DB_CLAIMED)
+# Decided, one way or another: payload erased, row kept for the duplicate guard.
+PARK_DB_TERMINAL: Tuple[str, ...] = (
+    PARK_DB_RESOLVED, PARK_DB_EXPIRED, PARK_DB_INTERRUPTED,
+    PARK_DB_QUARANTINED,
+)
+# `get_parked_write_status` could not tell — distinct from None, which means
+# "there is definitively no such row". The two need opposite handling and
+# collapsing them let a transient `database is locked` be read as "gone", which
+# re-INSERTed a decided park as `pending`.
+PARK_DB_UNKNOWN = "__unknown__"
+# Rendered into the `Parked_Writes` CHECK constraint so the DDL cannot drift
+# from the vocabulary above. Hand-writing that list meant adding a state here
+# produced an IntegrityError inside `finalize_parked_write`'s
+# `except sqlite3.Error` — which answers False, so the park silently never
+# reaches a terminal state and is re-read on every boot forever. That is the
+# precise failure these constants were introduced to prevent, reintroduced by
+# the one copy of the vocabulary they did not cover.
+_PARK_DB_STATUS_SQL = ", ".join(
+    f"'{s}'" for s in PARK_DB_LIVE + PARK_DB_TERMINAL)
+
+
+def _dump_duplicate_refs(duplicate_refs: List[Any],
+                         token: str) -> Optional[str]:
+    """Serialize suppressed-duplicate pointers, or None if they will not go.
+
+    Every parked-write method promises to return False rather than raise —
+    `take`, `restore` and the boot reconciler all resolve state *after* an
+    irrecoverable in-memory step, so an exception out of the store strands a
+    park. `json.dumps` raising `TypeError` is not a `sqlite3.Error`, so doing
+    this inline in the parameter tuple put a raise inside that promise.
+    """
+    try:
+        return json.dumps(duplicate_refs)
+    except (TypeError, ValueError) as e:
+        logger.error(
+            "Parked write %s has unserializable duplicate_refs (%s); refusing "
+            "to store the row rather than losing the pointers silently.",
+            token, e,
+        )
+        return None
 
 
 class MemoryManager:
@@ -300,6 +369,38 @@ class MemoryManager:
             );
             CREATE INDEX IF NOT EXISTS idx_proposal_status ON Proposals (status, created_at);
             CREATE INDEX IF NOT EXISTS idx_proposal_acceptance ON Proposals (agent_name, action_type, status);
+
+            CREATE TABLE IF NOT EXISTS Parked_Writes (
+                token TEXT PRIMARY KEY,
+                created_at REAL NOT NULL,
+                status TEXT NOT NULL DEFAULT '{PARK_DB_PENDING}'
+                    CHECK(status IN ({_PARK_DB_STATUS_SQL})),
+                user_identifier TEXT NOT NULL,
+                persona_name TEXT NOT NULL,
+                channel TEXT NOT NULL DEFAULT '',
+                server_id TEXT,
+                write_call TEXT,
+                call_identity TEXT NOT NULL,
+                audit_info TEXT,
+                confirmation_text TEXT NOT NULL DEFAULT '',
+                turn_tainted INTEGER NOT NULL DEFAULT 0,
+                parked_assistant_id INTEGER,
+                duplicate_refs TEXT NOT NULL DEFAULT '[]',
+                resolved_at REAL,
+                -- Two columns, not one. `resolution` is a machine-readable
+                -- outcome the duplicate guard filters on; `resolution_reason`
+                -- is the human sentence explaining it. They were one column
+                -- briefly, which made every future filter over expired or
+                -- interrupted rows match nothing: the approve path wrote
+                -- constants and the expire path wrote prose. Same split
+                -- `Audit_Log` already makes between `new_state` and `reason`.
+                resolution TEXT,
+                resolution_reason TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_parked_write_conversation
+                ON Parked_Writes (user_identifier, persona_name, status, created_at);
+            CREATE INDEX IF NOT EXISTS idx_parked_write_status
+                ON Parked_Writes (status, created_at);
 
             CREATE TABLE IF NOT EXISTS Standing_Orders (
                 order_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1723,6 +1824,378 @@ class MemoryManager:
                 except (TypeError, json.JSONDecodeError):
                     pass
         return row
+
+    # ---- parked writes (DP-319) -----------------------------------------
+    #
+    # Durable backing for `ConfirmationManager`. Before DP-319 the pending set
+    # was a process-lifetime dict, so the effective TTL was
+    # `min(PENDING_ACTION_TTL, uptime)` — a 24h promise on a store that dies
+    # with the process. These rows are what make the promise keepable.
+    #
+    # Deliberately NOT the `Proposals` table. `ProposalExecutor` dispatches a
+    # whitelist of `action_type`s and that whitelist IS the ADR-2026-07-04
+    # privilege separation; a chat park is an *arbitrary* tool call, so sharing
+    # storage would put rows shaped like "call any tool" one executor bug away
+    # from that whitelist. Separate table, separate executor, same DB.
+    #
+    # Secret handling: `write_call` holds the real argument values, because the
+    # approved call must execute with them and not with a literal "[REDACTED]"
+    # (same reason `Audit_Log` scrubs at its sink instead of at its callers).
+    # That is why `finalize_parked_write` NULLs the payload columns the moment
+    # the park reaches a terminal state — a decided park keeps only its hashed
+    # identity, so the duplicate guard still works and the args stop living on
+    # disk for the rest of the row's retention.
+
+    # The `call_identity` column stores `tool_loop.write_call_identity_hash`.
+    # That helper used to live here as a staticmethod, which split one contract
+    # across two layers for no storage reason — the digest is part of the
+    # duplicate-detection rule, not of persistence, and drift between the two
+    # halves fails open as a silently disabled double-execution guard.
+
+    def insert_parked_write(self, *, token: str, created_at: float,
+                            user_identifier: str, persona_name: str,
+                            channel: str, server_id: Optional[str],
+                            write_call: Dict[str, Any], call_identity: str,
+                            audit_info: Dict[str, Any],
+                            confirmation_text: str, turn_tainted: bool,
+                            parked_assistant_id: Optional[int],
+                            duplicate_refs: List[Any]) -> bool:
+        """Persist a newly parked write as `pending`. Returns False on failure.
+
+        `INSERT OR REPLACE` so a token re-registered after a restore is not an
+        error; tokens are uuid4 hex, so a genuine collision is not the case
+        being handled.
+
+        `write_call` is serialized STRICTLY — no `default=str` fallback. It is
+        the payload an approved write executes with after a restart, so a
+        lossy encoding would mean running the tool with the repr of an argument
+        instead of the argument. A call that cannot round-trip is therefore not
+        persisted at all: it stays live in memory for this process (exactly the
+        pre-DP-319 behaviour) rather than being stored in a form that could
+        execute something other than what the operator approved. `audit_info`
+        is advisory, so it degrades instead of blocking.
+
+        `duplicate_refs` is serialized up here rather than inline in the
+        parameter tuple. Inline, its `TypeError` escaped the `except
+        sqlite3.Error` around the INSERT and travelled out of a method whose
+        whole contract — relied on by `take`, `restore` and the boot path — is
+        "returns False, never raises", aborting park registration for every
+        remaining park in the turn.
+        """
+        refs_json = _dump_duplicate_refs(duplicate_refs, token)
+        if refs_json is None:
+            return False
+        try:
+            write_call_json = json.dumps(write_call)
+        except (TypeError, ValueError) as e:
+            logger.error(
+                "Parked write %s has unserializable arguments (%s); it will "
+                "not survive a restart. Refusing to store a lossy copy.",
+                token, e,
+            )
+            return False
+        try:
+            audit_json = json.dumps(audit_info)
+        except (TypeError, ValueError):
+            audit_json = json.dumps(audit_info, default=str)
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                conn.execute(
+                    """INSERT OR REPLACE INTO Parked_Writes
+                       (token, created_at, status, user_identifier, persona_name,
+                        channel, server_id, write_call, call_identity, audit_info,
+                        confirmation_text, turn_tainted, parked_assistant_id,
+                        duplicate_refs)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (token, created_at, PARK_DB_PENDING, user_identifier,
+                     persona_name, channel,
+                     server_id, write_call_json, call_identity,
+                     audit_json, confirmation_text,
+                     1 if turn_tainted else 0, parked_assistant_id,
+                     refs_json),
+                )
+                conn.commit()
+                return True
+            except sqlite3.Error as e:
+                logger.error(f"Failed to persist parked write {token}: {e}")
+                conn.rollback()
+                return False
+
+    def update_parked_write_duplicate_refs(self, token: str,
+                                           duplicate_refs: List[Any]) -> bool:
+        """Patch the suppressed-duplicate pointers of a live park.
+
+        Learned after the row exists — whenever a later turn re-proposes the
+        same action and the pending guard folds it into this park. Scoped to
+        non-terminal rows so a late duplicate cannot resurrect pointers on a
+        park that was already decided.
+
+        `parked_assistant_id` is deliberately NOT patchable here. It looks like
+        the same kind of late-learned column, but `ChatSystem._register_parks`
+        assigns it *before* calling `park()`, so the INSERT already carries the
+        real value and a second write path would only be dead code claiming
+        otherwise.
+        """
+        refs_json = _dump_duplicate_refs(duplicate_refs, token)
+        if refs_json is None:
+            return False
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    """UPDATE Parked_Writes SET duplicate_refs = ?
+                       WHERE token = ? AND status IN (?, ?)""",
+                    (refs_json, token,
+                     PARK_DB_PENDING, PARK_DB_CLAIMED),
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+            except sqlite3.Error as e:
+                logger.error(f"Failed to update duplicate refs for parked "
+                             f"write {token}: {e}")
+                conn.rollback()
+                return False
+
+    def claim_parked_write(self, token: str) -> bool:
+        """`pending` -> `claimed`. False when the row is missing or not pending.
+
+        The conditional UPDATE is the durable half of `ConfirmationManager.take`
+        — it is what stops a park surviving a restart from being resolvable
+        twice, in the window where the in-memory index has been rebuilt but a
+        stale surface still holds the old affordance.
+
+        Swallows `sqlite3.Error` like every other method here. That is not
+        defensive habit: `take()` calls this *after* it has already popped the
+        park out of the in-memory index, so an exception escaping would lose
+        the park from the process while its row stayed `pending` — the operator
+        gets a 500 and the proposal silently reappears on the next boot.
+        """
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    """UPDATE Parked_Writes SET status = ?
+                       WHERE token = ? AND status = ?""",
+                    (PARK_DB_CLAIMED, token, PARK_DB_PENDING),
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+            except sqlite3.Error as e:
+                logger.error(f"Failed to claim parked write {token}: {e}")
+                conn.rollback()
+                return False
+
+    def release_parked_write(self, token: str) -> bool:
+        """`claimed` -> `pending`, for a claim that turned out to be invalid."""
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    """UPDATE Parked_Writes SET status = ?
+                       WHERE token = ? AND status = ?""",
+                    (PARK_DB_PENDING, token, PARK_DB_CLAIMED),
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+            except sqlite3.Error as e:
+                logger.error(f"Failed to release parked write {token}: {e}")
+                conn.rollback()
+                return False
+
+    def get_parked_write_status(self, token: str) -> Optional[str]:
+        """This park's lifecycle state, `None` for no such row, or
+        `PARK_DB_UNKNOWN` when the store could not answer.
+
+        Exists because `release_parked_write` returning False is ambiguous —
+        "no row" and "already terminal" are the same rowcount and they need
+        opposite handling. Treating them alike let `ConfirmationManager.restore`
+        re-INSERT a decided park as `pending`, i.e. resurrect an irreversible
+        write that already ran as an approvable affordance.
+
+        THREE answers, not two, for the same reason. Returning `None` on a
+        `sqlite3.Error` re-opened exactly that hole one level down: a transient
+        `database is locked` (which also made `release_parked_write` answer
+        False) read as "the row is genuinely gone", and the caller re-INSERTed
+        the decided park. The caller cannot distinguish what it is not told, so
+        "could not tell" has to be its own value and has to fail closed.
+        """
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    "SELECT status FROM Parked_Writes WHERE token = ?",
+                    (token,),
+                )
+                row = cursor.fetchone()
+            except sqlite3.Error as e:
+                logger.error(f"Failed to read parked write status "
+                             f"for {token}: {e}")
+                return PARK_DB_UNKNOWN
+        return str(row["status"]) if row else None
+
+    def finalize_parked_write(self, token: str, status: str,
+                              resolution: Optional[str] = None,
+                              reason: Optional[str] = None,
+                              now: Optional[float] = None) -> bool:
+        """Move a park to a terminal state and erase its payload columns.
+
+        The row is kept rather than deleted: a *resolved* park is what lets the
+        duplicate guard recognize a re-proposal of an action that already ran,
+        which a deleted row cannot do (the guard would see nothing pending, park
+        a fresh copy, and an approval would execute the write a second time).
+
+        What is kept is only `call_identity` — a hash — plus the outcome. The
+        arguments, the audit blob and the operator-facing confirmation text all
+        go to NULL here, so the decided park stops holding anything sensitive.
+
+        `resolution` is machine-readable and filterable; `reason` is the
+        sentence a human reads. Keep them apart — see the schema comment.
+        """
+        if status not in PARK_DB_TERMINAL:
+            raise ValueError(f"Not a terminal park status: {status}")
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    """UPDATE Parked_Writes
+                       SET status = ?, resolved_at = ?, resolution = ?,
+                           resolution_reason = ?, write_call = NULL,
+                           audit_info = NULL, confirmation_text = ''
+                       WHERE token = ? AND status IN (?, ?)""",
+                    (status, time.time() if now is None else now,
+                     resolution, reason, token,
+                     PARK_DB_PENDING, PARK_DB_CLAIMED),
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+            except sqlite3.Error as e:
+                logger.error(f"Failed to finalize parked write {token}: {e}")
+                conn.rollback()
+                return False
+
+    def load_parked_writes(self, statuses: Sequence[str]) -> List[Dict[str, Any]]:
+        """Every park in the given states, oldest first, payloads decoded.
+
+        A payload that will not decode is left as None rather than guessed at.
+        For `write_call` that is not a cosmetic loss — it is the call an
+        approval would execute — so the key is also recorded in `_undecodable`,
+        which is how the caller tells "no arguments" apart from "arguments we
+        could not read" and quarantines the row instead of reinstating a park
+        with an empty call in it.
+        """
+        if not statuses:
+            return []
+        placeholders = ", ".join("?" for _ in statuses)
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    f"""SELECT * FROM Parked_Writes
+                        WHERE status IN ({placeholders})
+                        ORDER BY created_at ASC""",
+                    tuple(statuses),
+                )
+                rows = [dict(r) for r in cursor.fetchall()]
+            except sqlite3.Error as e:
+                logger.error(f"Failed to load parked writes: {e}")
+                return []
+        for row in rows:
+            undecodable: List[str] = []
+            for key in ("write_call", "audit_info", "duplicate_refs"):
+                if row.get(key):
+                    try:
+                        row[key] = json.loads(row[key])
+                    except (TypeError, json.JSONDecodeError):
+                        row[key] = None
+                        undecodable.append(key)
+            if undecodable:
+                logger.error(
+                    "Parked write %s has undecodable column(s): %s",
+                    row.get("token"), ", ".join(undecodable),
+                )
+            row["_undecodable"] = undecodable
+        return rows
+
+    def find_resolved_parked_write(self, user_identifier: str,
+                                   persona_name: str, call_identity: str,
+                                   since: float,
+                                   resolutions: Sequence[str]) -> Optional[Dict[str, Any]]:
+        """Most recent decided park matching this call identity.
+
+        Both filters are load-bearing. `since` because "this action was decided
+        at some point in history" is no reason to suppress a fresh proposal — a
+        user who asks for the same write again next week means it. `resolutions`
+        because only an outcome where the tool actually RAN makes a second park
+        a double execution; a denied one executed nothing, so re-proposing it is
+        a new request (DP-297 supports that case explicitly).
+
+        A DB error answers None — fail OPEN. The two failure shapes are not
+        symmetric: answering None parks a second copy the operator still has to
+        approve (they see it, and can deny it), while answering a row would
+        suppress a proposal the operator is never shown at all. Losing the
+        backstop is recoverable by a human; silently disabling the gate's only
+        affordance is not.
+        """
+        if not resolutions:
+            return None
+        placeholders = ", ".join("?" for _ in resolutions)
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    f"""SELECT token, status, resolution, resolution_reason,
+                               resolved_at
+                        FROM Parked_Writes
+                        WHERE user_identifier = ? AND persona_name = ?
+                          AND call_identity = ? AND status = ?
+                          AND resolution IN ({placeholders})
+                          AND resolved_at IS NOT NULL AND resolved_at >= ?
+                        ORDER BY resolved_at DESC LIMIT 1""",
+                    (user_identifier, persona_name, call_identity,
+                     PARK_DB_RESOLVED, *resolutions, since),
+                )
+                row = cursor.fetchone()
+            except sqlite3.Error as e:
+                logger.error(f"Resolved-park lookup failed for "
+                             f"{user_identifier}/{persona_name}: {e}")
+                return None
+            return dict(row) if row else None
+
+    def purge_parked_writes(self, before: float) -> int:
+        """Drop terminal park rows older than `before`. Returns how many.
+
+        Terminal rows are retained only to answer the duplicate guard, whose
+        window is bounded, so nothing needs them forever. Without this the
+        table is the one park structure that grows without limit — which is why
+        the caller must run it on the lazy sweep and not only at boot: a bot
+        that stays up for months would otherwise never purge anything, in
+        exactly the long-lived deployment durability was added for.
+        """
+        placeholders = ", ".join("?" for _ in PARK_DB_TERMINAL)
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    f"""DELETE FROM Parked_Writes
+                        WHERE status IN ({placeholders})
+                          AND resolved_at IS NOT NULL AND resolved_at < ?""",
+                    (*PARK_DB_TERMINAL, before),
+                )
+                conn.commit()
+                return cursor.rowcount
+            except sqlite3.Error as e:
+                logger.error(f"Failed to purge parked writes: {e}")
+                conn.rollback()
+                return 0
 
     def add_standing_order(self, order_text: str, source: str,
                            agent: str = "managr") -> int:

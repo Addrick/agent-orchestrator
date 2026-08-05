@@ -460,3 +460,228 @@ async def test_send_failure_registers_nothing():
     finally:
         db._confirm_registry.clear()
         db._rendered_park_tokens.clear()
+
+
+# --- DP-319 review: the registry no longer dies with the park store ---------
+
+
+def _our_message(client, message_id=99, ours_reacted=True):
+    """A message the bot authored, optionally carrying OUR proposal buttons."""
+    message = MagicMock()
+    message.id = message_id
+    message.author.id = client.user.id
+    message.channel.send = AsyncMock()
+    message.reactions = []
+    if ours_reacted:
+        for emoji in ('✅', '❌'):
+            reaction = MagicMock()
+            reaction.emoji = emoji
+            reaction.me = True
+            message.reactions.append(reaction)
+    return message
+
+
+@pytest.mark.asyncio
+async def test_an_unmapped_approve_click_is_answered_not_dropped():
+    """Before DP-319 the registry and the park store died together, so an
+    unmapped button could not point at a live park. Now the store survives a
+    restart and the registry does not, so the ✅ on the old message is a dead
+    control on a proposal that is still fully resolvable — and dropping the
+    event leaves the operator clicking silently at the only affordance on
+    screen until their next message re-posts it."""
+    from src.interfaces import discord_bot as db
+
+    client = MagicMock()
+    client.user.id = 1
+    message = _our_message(client)
+
+    db._stale_button_notified.clear()
+    try:
+        await db._notify_stale_button(message, '✅', client)
+        message.channel.send.assert_awaited_once()
+        assert "restarted" in message.channel.send.await_args[0][0]
+
+        # Once per message: a second click must not repeat it.
+        await db._notify_stale_button(message, '✅', client)
+        assert message.channel.send.await_count == 1
+    finally:
+        db._stale_button_notified.clear()
+
+
+@pytest.mark.asyncio
+async def test_unrelated_reactions_are_still_ignored():
+    """Narrow on purpose — only our own message, only the proposal emoji.
+    Anything wider turns every reaction in the channel into a bot reply."""
+    from src.interfaces import discord_bot as db
+
+    client = MagicMock()
+    client.user.id = 1
+
+    db._stale_button_notified.clear()
+    try:
+        other = _our_message(client, message_id=101)
+        await db._notify_stale_button(other, '🎉', client)
+        other.channel.send.assert_not_awaited()
+
+        someone_else = _our_message(client, message_id=102)
+        someone_else.author.id = 2
+        await db._notify_stale_button(someone_else, '✅', client)
+        someone_else.channel.send.assert_not_awaited()
+    finally:
+        db._stale_button_notified.clear()
+
+
+@pytest.mark.asyncio
+async def test_a_thumbs_up_on_an_ordinary_answer_is_not_a_stale_button():
+    """The notice claims two things — that the bot restarted, and that a
+    proposal is awaiting the operator. On any message we authored that is NOT a
+    proposal, both are false.
+
+    `_post_pending_proposals` is the only thing that puts ✅/❌ on a message of
+    ours, so OUR OWN reaction is what identifies a proposal — and Discord stores
+    it, so it survives the restart the notice is about.
+    """
+    from src.interfaces import discord_bot as db
+
+    client = MagicMock()
+    client.user.id = 1
+    plain_answer = _our_message(client, message_id=103, ours_reacted=False)
+
+    db._stale_button_notified.clear()
+    try:
+        await db._notify_stale_button(plain_answer, '✅', client)
+        plain_answer.channel.send.assert_not_awaited()
+    finally:
+        db._stale_button_notified.clear()
+
+
+@pytest.mark.asyncio
+async def test_the_proposal_handler_is_raw(mock_discord_client):
+    """discord.py dispatches `on_reaction_add` ONLY for messages still in the
+    client's in-memory message cache — a deque filled by MESSAGE_CREATE while
+    connected, and empty after a restart.
+
+    So the cooked handler could not fire for a proposal posted before the
+    restart, which since DP-319 is exactly the case the stale-button notice
+    exists for, and it stopped resolving live 24h parks on a busy guild as soon
+    as their message aged out of the deque. Durable parks outlive the cache, so
+    the handler has to as well.
+    """
+    assert hasattr(mock_discord_client, "on_raw_reaction_add")
+    assert not hasattr(mock_discord_client, "on_reaction_add"), (
+        "a cooked handler alongside the raw one double-resolves every "
+        "cache-hit click"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_raw_click_on_a_live_park_resolves_it(mock_discord_client,
+                                                      mock_chat_system):
+    """The working path, driven the way Discord actually delivers it."""
+    from src.interfaces import discord_bot as db
+
+    mock_chat_system.resolve_park = AsyncMock(
+        return_value=("Done.", None, None, None))
+
+    message = AsyncMock(spec=discord.Message)
+    channel = AsyncMock(spec=discord.TextChannel, typing=MagicMock())
+    channel.fetch_message = AsyncMock(return_value=message)
+    channel.send = AsyncMock(return_value=MagicMock(id=7))
+
+    payload = MagicMock(spec=discord.RawReactionActionEvent)
+    payload.user_id = 123
+    payload.member = None
+    payload.emoji = '✅'
+    payload.message_id = 4242
+    payload.channel_id = 77
+
+    db._confirm_registry.clear()
+    db._confirm_registry[4242] = ("tok", "123", "p")
+    try:
+        with patch.object(db, "_resolve_channel",
+                          AsyncMock(return_value=channel)), \
+                patch.object(db, "_post_pending_proposals", AsyncMock()):
+            await mock_discord_client.on_raw_reaction_add(payload)
+
+        mock_chat_system.resolve_park.assert_awaited_once()
+        assert mock_chat_system.resolve_park.await_args.kwargs["approved"] is True
+        assert 4242 not in db._confirm_registry
+    finally:
+        db._confirm_registry.clear()
+
+
+# --- DP-319 review: durable parks outlive the channel they were made in -----
+
+
+@pytest.mark.asyncio
+async def test_a_park_is_only_reposted_in_its_own_channel():
+    """`list_for` is keyed `(user, persona)` — it does not know about channels.
+
+    So every live park for the operator was posted into whatever channel they
+    next spoke in, and `confirmation_text` carries the tool name and its full
+    JSON arguments. Before DP-319 that needed a channel switch inside one
+    process lifetime; a durable park lives 24h across restarts, so a proposal
+    raised in a DM would be re-posted into a public guild channel on the
+    operator's next message there. user_guide.md states this scoping ("talk to
+    that persona in that channel"); nothing implemented it.
+    """
+    from src.interfaces import discord_bot as db
+
+    chat_system = MagicMock()
+    dm_park = MagicMock(token="t-dm", channel="DM",
+                        confirmation_text="delete_user(id=42)")
+    here_park = MagicMock(token="t-here", channel="general",
+                          confirmation_text="update_ticket(id=7)")
+    chat_system.confirmations.list_for.return_value = [dm_park, here_park]
+
+    channel = AsyncMock(spec=discord.TextChannel)
+    channel.name = "general"
+    channel.send = AsyncMock(
+        return_value=MagicMock(id=1, add_reaction=AsyncMock()))
+
+    db._rendered_park_tokens.clear()
+    db._confirm_registry.clear()
+    try:
+        await db._post_pending_proposals(chat_system, channel, "u", "p")
+
+        posted = [c.args[0] for c in channel.send.await_args_list]
+        assert posted == ["update_ticket(id=7)"], \
+            "a DM proposal must not be re-posted into a guild channel"
+        assert "t-dm" not in db._rendered_park_tokens, \
+            "and it must stay un-rendered so its own channel still gets it"
+    finally:
+        db._rendered_park_tokens.clear()
+        db._confirm_registry.clear()
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_unmapped_reaction_costs_no_api_calls(mock_chat_system):
+    """A stale button is by definition on a message an EARLIER process posted.
+
+    The unmapped-reaction path spends `fetch_channel` + `fetch_message` before
+    it can even look at the author, so without a cheap pre-filter every ✅/❌ on
+    any message in any visible channel bought two REST calls — and the
+    once-per-message guard cannot dedupe them, because it is only marked for
+    messages that turn out to be ours. A Discord snowflake carries its own
+    creation time, so this costs nothing.
+    """
+    from src.interfaces import discord_bot as db
+
+    client = create_discord_bot(mock_chat_system)
+    payload = MagicMock(spec=discord.RawReactionActionEvent)
+    payload.user_id = 123
+    payload.member = None
+    payload.emoji = '✅'
+    payload.channel_id = 77
+    payload.message_id = discord.utils.time_snowflake(discord.utils.utcnow())
+
+    resolve = AsyncMock(return_value=None)
+    db._confirm_registry.clear()
+    try:
+        with patch.object(type(client), 'user', new_callable=PropertyMock,
+                          return_value=MagicMock(id=999)), \
+                patch.object(db, "_resolve_channel", resolve):
+            await client.on_raw_reaction_add(payload)
+        resolve.assert_not_awaited()
+    finally:
+        db._confirm_registry.clear()

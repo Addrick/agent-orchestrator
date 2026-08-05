@@ -108,10 +108,53 @@ MAX_CACHED_API_REQUESTS = 128
 # is staring at (5 minutes was sized for "answer the prompt in front of you")
 # and became a queue an operator works through later.
 #
-# ⚠️ The store is in-memory, so the effective TTL is min(this, process uptime).
-# A multi-day value here is not a promise the system can keep across a restart —
-# closing that gap is the motivation for the durability follow-up.
+# DP-319 made the store durable (`Parked_Writes`), so this is now the whole
+# deadline rather than min(this, process uptime) as it was under DP-297.
 PENDING_ACTION_TTL = 24 * 60 * 60
+
+# How long a DECIDED park's row is kept after it resolves.
+#
+# NOT sized for the duplicate guard, despite being adjacent to it. That guard
+# reads nothing older than PARK_REEXECUTION_GUARD_WINDOW (15 minutes), so
+# retention could be minutes as far as correctness goes. This is a forensics
+# window: a terminal row is the only place that records an irreversible write
+# was proposed, who decided it, and how it came out, in a form you can query
+# after the fact — a week is how long "what did the bot do to my ticket
+# queue on Tuesday" stays answerable. Sizing it off the guard instead would be
+# resizing the wrong knob.
+#
+# The payload is already gone by then: `finalize_parked_write` NULLs the
+# arguments and the audit blob at the moment of decision, so what is retained
+# is a hash plus an outcome.
+PARK_ROW_RETENTION = 7 * 24 * 60 * 60
+
+# How often the retention purge above is allowed to run.
+#
+# The purge hangs off the lazy expiry sweep, which fires on read (`park`,
+# `list_for`) — that is once per write call and once per portal transcript
+# load, far too often for a DELETE. This throttles it to something matched to
+# a 7-day retention. It ran only at boot before DP-319 review, which meant a
+# long-lived process never enforced retention at all.
+PARK_PURGE_INTERVAL = 60 * 60
+
+# How long after an APPROVED write actually ran an identical re-proposal is
+# answered with its outcome instead of being parked again.
+#
+# Deliberately short, and deliberately not PENDING_ACTION_TTL. The case being
+# closed is narrow: during the continuation turn the model re-reads its own tool
+# span and re-proposes the write it just got approved, and approving the second
+# park would execute an irreversible action twice. That window is seconds.
+#
+# Making it a day instead would break a legitimate case DP-297 explicitly
+# supports — the operator asking for the same action again on purpose. The
+# guard is confined to continuation turns for the same reason: on an ordinary
+# turn a repeat request is a request, and suppressing it would answer the
+# operator with "that already happened" and no affordance to force it through.
+#
+# `approved_but_failed` counts as ran (the tool raised *after* it may have had
+# an effect). Denied and expired parks are never suppressed: nothing ran, so a
+# second proposal is a new request, not a double execution.
+PARK_REEXECUTION_GUARD_WINDOW = 15 * 60
 
 # DP-118: `ingest_path` agent tool — global kill switch + hash-cache location.
 # Set INGEST_PATH_ENABLED=0 to disable the tool everywhere. Per-persona gating

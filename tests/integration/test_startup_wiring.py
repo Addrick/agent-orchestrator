@@ -135,6 +135,40 @@ def test_models_available_injected_by_bootstrap():
     assert system.models_available == {"Local": ["local"]}
 
 
+def test_bootstrap_reloads_parked_writes(tmp_path):
+    """The composition root must reinstate durable parks (DP-319).
+
+    Tested at the entry point, not on `ConfirmationManager`: a rebuild that
+    works but is never called produces an empty pending set over a table full
+    of live proposals, and every affordance the operator still has on screen
+    answers "no such pending action". That failure looks exactly like the
+    feature working, which is why the wiring gets its own test.
+    """
+    db_path = str(tmp_path / "parks.db")
+    mm = MemoryManager(db_path=db_path)
+    mm.create_schema()
+    mm.insert_parked_write(
+        token="tok-boot", created_at=time.time(), user_identifier="u",
+        persona_name="test_persona", channel="c", server_id=None,
+        write_call={"id": "c1", "name": "update_ticket", "arguments": {"x": 1}},
+        call_identity="deadbeef", audit_info={},
+        confirmation_text="Run it?", turn_tainted=False,
+        parked_assistant_id=1, duplicate_refs=[],
+    )
+
+    try:
+        with patch("src.bootstrap.load_personas_from_file", return_value={}), \
+                patch("src.bootstrap.load_system_personas_from_file",
+                      return_value={}):
+            system = create_chat_system(
+                memory_manager=mm, text_engine=MagicMock(spec=TextEngine),
+            )
+        parks = system.confirmations.list_for("u", "test_persona")
+        assert [p.token for p in parks] == ["tok-boot"]
+    finally:
+        mm.close()
+
+
 def test_get_service_returns_registered_integration(wired_system):
     """Public service lookup replaces reaching into ChatSystem._services."""
     zammad = wired_system.get_service("zammad")
