@@ -1261,26 +1261,10 @@ async def test_a_real_tool_manager_records_a_raised_write_as_failed(
     assert hit is not None and hit["resolution"] == "approved_but_failed"
 
 
-@pytest.mark.asyncio
-async def test_a_successful_tool_is_still_recorded_as_approved(mem_manager):
-    """The other half, so the fix is not "everything is a failure now"."""
-    from src.tools.tool_manager import ToolManager
-
-    async def fine(**_kwargs):
-        return {"ticket": 7}
-
-    tool_manager = ToolManager()
-    tool_manager.register("update_ticket", fine)
-    mgr = ConfirmationManager(lambda: tool_manager, mem_manager)
-
-    parked = _park(token="a", call_id="c1")
-    mgr.park(parked)
-    mgr.take("a")
-    decision = Decision(park=parked, approved=True)
-    await mgr.apply(decision)
-
-    assert decision.ok is True
-    assert decision.status == "approved"
+# The success-path control for the same fix landed on master with DP-322
+# (`test_a_real_tool_manager_records_a_successful_write_as_approved`), so it is
+# not repeated here. What this section keeps is the half master cannot assert:
+# that the failed status reaches the durable row and the re-execution guard.
 
 
 @pytest.mark.asyncio
