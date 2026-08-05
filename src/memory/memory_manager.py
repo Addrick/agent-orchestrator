@@ -99,6 +99,15 @@ PARK_DB_TERMINAL: Tuple[str, ...] = (
 # collapsing them let a transient `database is locked` be read as "gone", which
 # re-INSERTed a decided park as `pending`.
 PARK_DB_UNKNOWN = "__unknown__"
+# Rendered into the `Parked_Writes` CHECK constraint so the DDL cannot drift
+# from the vocabulary above. Hand-writing that list meant adding a state here
+# produced an IntegrityError inside `finalize_parked_write`'s
+# `except sqlite3.Error` — which answers False, so the park silently never
+# reaches a terminal state and is re-read on every boot forever. That is the
+# precise failure these constants were introduced to prevent, reintroduced by
+# the one copy of the vocabulary they did not cover.
+_PARK_DB_STATUS_SQL = ", ".join(
+    f"'{s}'" for s in PARK_DB_LIVE + PARK_DB_TERMINAL)
 
 
 def _dump_duplicate_refs(duplicate_refs: List[Any],
@@ -364,10 +373,8 @@ class MemoryManager:
             CREATE TABLE IF NOT EXISTS Parked_Writes (
                 token TEXT PRIMARY KEY,
                 created_at REAL NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending'
-                    CHECK(status IN ('pending', 'claimed', 'resolved',
-                                     'expired', 'interrupted',
-                                     'quarantined')),
+                status TEXT NOT NULL DEFAULT '{PARK_DB_PENDING}'
+                    CHECK(status IN ({_PARK_DB_STATUS_SQL})),
                 user_identifier TEXT NOT NULL,
                 persona_name TEXT NOT NULL,
                 channel TEXT NOT NULL DEFAULT '',

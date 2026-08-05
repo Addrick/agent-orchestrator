@@ -435,7 +435,7 @@ ask for it directly, it reaches you again rather than being silently swallowed.
 
 **Approvals survive a restart (DP-319).** Pending proposals are stored on disk, so
 the 24-hour window is the real deadline rather than a ceiling capped by how long
-the bot happened to stay up. Three details worth knowing:
+the bot happened to stay up. Four details worth knowing:
 
 - *The portal recovers on its own.* Reloading a conversation re-renders every
   proposal still waiting, with its approve/deny bar intact.

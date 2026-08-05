@@ -142,8 +142,28 @@ class ParkedWrite:
         if not isinstance(write_call, dict) or not write_call:
             raise ValueError("write_call is missing or empty")
         refs = row.get("duplicate_refs") or []
-        kept = [(int(r[0]), str(r[1])) for r in refs if len(r) == 2]
-        if "duplicate_refs" in undecodable or len(kept) != len(refs):
+        wrong_shape = not isinstance(refs, list)
+        if wrong_shape:
+            # JSON that decoded to a scalar or an object: not iterable as pairs,
+            # and iterating it would raise straight into the quarantine branch.
+            refs = []
+        # Each ref is converted defensively rather than in a comprehension.
+        # `len(r)` raises TypeError on a bare int and `int(r[0])` raises
+        # ValueError on a non-numeric row id — both escaped `from_row` and were
+        # caught by `_reconcile_row`'s (KeyError, TypeError, ValueError) handler,
+        # which QUARANTINES the park. That is the exact opposite of the rule
+        # stated two paragraphs up: a decodable-but-malformed pointer list would
+        # have destroyed a perfectly executable irreversible write to protect a
+        # cosmetic list. Malformed entries are dropped and reported instead.
+        kept: List[Tuple[int, str]] = []
+        for r in refs:
+            try:
+                if len(r) == 2:
+                    kept.append((int(r[0]), str(r[1])))
+            except (TypeError, ValueError):
+                continue
+        if ("duplicate_refs" in undecodable or wrong_shape
+                or len(kept) != len(refs)):
             logger.error(
                 "Parked write %s lost suppressed-duplicate pointers at load "
                 "(%d of %d usable%s). Their history entries will keep claiming "
@@ -261,8 +281,12 @@ class ConfirmationManager:
         off for this call. `apply` closes that with an in-process fallback.
         """
         self._sweep_off_thread()
-        self.pending[parked.token] = parked
-        self._by_key.setdefault(parked.key, []).append(parked.token)
+        # Through `_reinstate`, not a bare append: `_by_key` holding one token
+        # twice makes `list_for` yield the same park twice (it filters on
+        # membership, not uniqueness), which the portal renders as two pending
+        # chunks sharing an `ephemeral_chunk_id`. `_reinstate` was made
+        # idempotent for exactly that reason and this path was left unguarded.
+        self._reinstate(parked)
         parked.persisted = self._persist_new(parked)
         if not parked.persisted:
             logger.error(
@@ -457,9 +481,20 @@ class ConfirmationManager:
         keep claiming the action is still awaiting an operator forever.
         """
         parked.duplicate_refs.append((row_id, call_id))
-        self.memory_manager.update_parked_write_duplicate_refs(
-            parked.token, [list(r) for r in parked.duplicate_refs],
-        )
+        if not self.memory_manager.update_parked_write_duplicate_refs(
+                parked.token, [list(r) for r in parked.duplicate_refs]):
+            # Discarding this answer defeated the entire reason the caller was
+            # routed through the manager instead of appending to the list: the
+            # in-memory park now carries a pointer its durable row does not, so
+            # a restart reloads the park without it and the duplicate's history
+            # entry claims the action is awaiting an operator forever — the
+            # failure this method exists to prevent, silently.
+            logger.error(
+                "Parked write %s: suppressed-duplicate pointer (row %s, call "
+                "%s) did not reach the durable row. It will be lost on a "
+                "restart and that entry will keep reading as pending.",
+                parked.token, row_id, call_id,
+            )
 
     def already_resolved(self, key: ConversationKey,
                          write_call: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -526,7 +561,16 @@ class ConfirmationManager:
         irreversible write on the continuation turn, get a fresh park, and an
         approval executes it twice — the failure DP-319 exists to close, reached
         by the one path where durability was never achieved.
+
+        Prunes as it writes. Entries were only ever dropped when the SAME key
+        was read back and found stale, so a park that was never re-proposed —
+        the common case — left its entry for the life of the process, and the
+        map grew without the bound its own comment claims.
         """
+        cutoff = when - PARK_REEXECUTION_GUARD_WINDOW
+        for stale_key in [k for k, (at, _) in self._resolved_fallback.items()
+                          if at < cutoff]:
+            self._resolved_fallback.pop(stale_key, None)
         self._resolved_fallback[(park.key, park.identity_hash)] = (when, status)
 
     def _resolved_fallback_row(self, key: ConversationKey, identity: str,
@@ -759,10 +803,12 @@ class ConfirmationManager:
                 # `ok` from reaching this line recorded a Zammad 500 that fired
                 # *after* the ticket was created as a plain `approved`.
                 # `PARK_STATUS_FAILED` was therefore unreachable in production,
-                # and with it every consumer keyed off it: the "approved but
-                # FAILED" continuation line, and the `executed_ok` flag in the
-                # audit row. The unit tests missed it because they mock a raise
-                # the real ToolManager cannot emit.
+                # and with it everything keyed off it: the guard's
+                # `approved_but_failed` arm, the "whether it took effect is
+                # unknown" instruction in `tool_loop`, and the user_guide's
+                # promise that an errored write is treated as having run. The
+                # unit tests missed it because they mock a raise the real
+                # ToolManager cannot emit.
                 decision.ok = not (isinstance(decision.result, dict)
                                    and "error" in decision.result)
             except Exception as e:
@@ -814,32 +860,47 @@ class ConfirmationManager:
                 "executed_ok": decision.ok,
             },
         )
-        decision.patched = self.patch_parked_entry(
-            park, decision.status, decision.result,
-        )
-        # Terminal, durably: the row survives (the duplicate guard reads it to
-        # recognize a re-proposal of an action that already ran) but its payload
-        # columns are erased, so the arguments stop living on disk the moment
-        # they stop being needed to execute.
-        finalized = self.memory_manager.finalize_parked_write(
-            park.token, PARK_DB_RESOLVED, decision.status,
-            decision.note or ("Human approved tool execution"
-                              if decision.approved
-                              else "Human denied tool execution"),
-        )
-        if not finalized and decision.status in (PARK_STATUS_APPROVED,
-                                                 PARK_STATUS_FAILED):
-            # No durable row to find later, and the tool RAN. The duplicate
-            # guard reads the store, so without an in-process record the model's
-            # re-proposal on the continuation turn parks a fresh copy and an
-            # approval executes the irreversible write a second time.
-            logger.error(
-                "Parked write %s (%s) resolved as %s with no durable row to "
-                "finalize; falling back to an in-process re-execution guard.",
-                park.token, tool_name, decision.status,
+        # `patched` starts False so an exception out of the patch leaves it
+        # False rather than at its optimistic default — `_render_resolution_nudge`
+        # keys off it to tell the model not to trust the tool context.
+        decision.patched = False
+        try:
+            decision.patched = self.patch_parked_entry(
+                park, decision.status, decision.result,
             )
-            self._remember_unpersisted_outcome(park, decision.status,
-                                               time.time())
+        finally:
+            # Terminal, durably, in a `finally`: the row survives (the duplicate
+            # guard reads it to recognize a re-proposal of an action that
+            # already ran) but its payload columns are erased, so the arguments
+            # stop living on disk the moment they stop being needed to execute.
+            #
+            # `patch_parked_entry` can raise — `_patch_one` json-encodes an
+            # arbitrary tool result — and `stream_resolve_park` catches that and
+            # continues into the continuation turn anyway. Finalizing outside
+            # the `finally` meant such a raise left the row `claimed` with the
+            # write ALREADY EXECUTED: `find_resolved_parked_write` filters on
+            # `resolved`, so the re-execution guard went blind on exactly the
+            # turn it exists for, and the in-process fallback below was skipped
+            # too. The next boot then reported a known outcome as `interrupted`.
+            finalized = self.memory_manager.finalize_parked_write(
+                park.token, PARK_DB_RESOLVED, decision.status,
+                decision.note or ("Human approved tool execution"
+                                  if decision.approved
+                                  else "Human denied tool execution"),
+            )
+            if not finalized and decision.status in (PARK_STATUS_APPROVED,
+                                                     PARK_STATUS_FAILED):
+                # No durable row to find later, and the tool RAN. The duplicate
+                # guard reads the store, so without an in-process record the
+                # model's re-proposal on the continuation turn parks a fresh
+                # copy and an approval executes the write a second time.
+                logger.error(
+                    "Parked write %s (%s) resolved as %s with no durable row "
+                    "to finalize; falling back to an in-process re-execution "
+                    "guard.", park.token, tool_name, decision.status,
+                )
+                self._remember_unpersisted_outcome(park, decision.status,
+                                                   time.time())
         if not decision.patched:
             logger.error(
                 "History entry for %s (token %s) could not be patched; the "

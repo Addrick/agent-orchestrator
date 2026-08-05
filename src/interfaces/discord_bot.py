@@ -6,6 +6,7 @@ import discord
 import asyncio
 import io
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Dict, Optional, List, Set, Tuple
 
 from config.global_config import DISCORD_CHAR_LIMIT, DISCORD_STATUS_LIMIT, DISCORD_DEBUG_CHANNEL, \
@@ -300,6 +301,25 @@ _stale_button_notified: Set[int] = set()
 
 PROPOSAL_EMOJI = ('✅', '❌')
 
+# When this process came up. A "stale button" is by definition a reaction on a
+# message posted by an EARLIER process, and a Discord snowflake carries its own
+# creation time — so this is what lets the unmapped-reaction path reject the
+# ordinary case (someone ✅-ing a message from this session) without spending a
+# `fetch_message` REST call on every proposal-emoji reaction in every visible
+# channel.
+_PROCESS_STARTED_AT = datetime.now(timezone.utc)
+
+
+def _channel_key(channel: discord.abc.Messageable) -> str:
+    """The `channel` value parks made from this channel were stored under.
+
+    Must stay identical to the expression `on_message` passes to
+    `generate_response`, because it is matched against `ParkedWrite.channel`.
+    """
+    if isinstance(channel, discord.abc.GuildChannel):
+        return channel.name
+    return "DM"
+
 
 async def _resolve_channel(
         client: discord.Client, channel_id: int,
@@ -351,12 +371,23 @@ async def _notify_stale_button(
         return
     if message.id in _stale_button_notified:
         return
+    if len(_stale_button_notified) >= 1024:
+        # Bounded: this is keyed by message id and nothing ever removes an
+        # entry, so an unbounded set is a slow leak for the life of the process.
+        # Clearing wholesale can at worst repeat one notice.
+        _stale_button_notified.clear()
     _stale_button_notified.add(message.id)
     try:
         await message.channel.send(
+            # Deliberately conditional about the proposal. Nothing here can see
+            # the pending set, and the bot's ✅/❌ outlive the park: a park that
+            # expired, or one resolved in a DM (where `clear_reactions` is
+            # impossible and its Forbidden is swallowed), leaves the buttons in
+            # place. Asserting "any proposal still awaiting you is intact" told
+            # the operator something this function cannot know.
             "That approve/deny button is no longer live — I restarted since "
-            "posting it. Any proposal still awaiting you is intact; send me a "
-            "message and I'll re-post it with working buttons."
+            "posting it. If that proposal is still awaiting a decision, send "
+            "me a message and I'll re-post it with working buttons."
         )
     except discord.HTTPException as e:
         logger.warning(f"Could not answer a stale proposal reaction: {e}")
@@ -375,8 +406,20 @@ async def _post_pending_proposals(
         logger.error(f"Could not list pending proposals: {e}", exc_info=True)
         return
 
+    here = _channel_key(channel)
     for park in parks:
         if park.token in _rendered_park_tokens:
+            continue
+        # Channel-scoped. `list_for` is keyed `(user_identifier, persona_name)`
+        # only, so without this every live park for the operator is posted into
+        # whatever channel they happened to speak in — and `confirmation_text`
+        # carries the tool name and its full JSON arguments. Before DP-319 that
+        # needed a channel switch inside one process lifetime; a durable park
+        # lives 24h across restarts, so a proposal raised in a DM would be
+        # re-posted into a public guild channel on the next message there.
+        # user_guide.md states this scoping ("talk to that persona in that
+        # channel"); nothing implemented it.
+        if park.channel and park.channel != here:
             continue
         try:
             confirm_msg = await channel.send(park.confirmation_text)
@@ -455,11 +498,23 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
         if emoji not in PROPOSAL_EMOJI:
             return
 
+        entry = _confirm_registry.get(payload.message_id)
+        if entry is None and (discord.utils.snowflake_time(payload.message_id)
+                              >= _PROCESS_STARTED_AT):
+            # An unmapped reaction on a message THIS process posted is not a
+            # stale button — it is someone ✅-ing an ordinary answer. Rejecting
+            # it from the snowflake costs nothing, where the path below spends a
+            # `fetch_channel` + `fetch_message` REST call before it can even
+            # look at the author. Without this, every proposal-emoji reaction on
+            # any message in any visible channel bought two API calls, and the
+            # once-per-message guard could not dedupe them because it is only
+            # marked for messages that turn out to be ours.
+            return
+
         channel = await _resolve_channel(client, payload.channel_id)
         if channel is None:
             return
 
-        entry = _confirm_registry.get(payload.message_id)
         if entry is None:
             # DP-319: the registry no longer dies with the park store, so an
             # unmapped ✅ on one of our own proposal messages is most likely a

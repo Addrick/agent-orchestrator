@@ -1215,3 +1215,127 @@ def test_expiry_records_a_filterable_outcome_and_a_separate_reason(
     row = _park_row(mem_manager, "a")
     assert row["resolution"] == "expired", "machine-readable"
     assert "No decision within" in row["resolution_reason"], "human-readable"
+
+
+# ---- review: the guard's "it may already have run" arm was unreachable -----
+
+
+@pytest.mark.asyncio
+async def test_a_real_tool_manager_records_a_raised_write_as_failed(
+        mem_manager):
+    """`approved_but_failed` must be reachable through the REAL ToolManager.
+
+    Every other test in this file produces that status by giving a mocked
+    `execute_tool` a `side_effect`, i.e. by asserting a raise the production
+    class cannot emit: `ToolManager.execute_tool` catches every handler
+    exception and RETURNS `{"error": ...}`. So `decision.ok` was True for a
+    Zammad 500 that fired after the ticket was created, history recorded
+    `approved`, and every branch keyed off `PARK_STATUS_FAILED` — the guard's
+    "may have run" arm, tool_loop's "whether it took effect is unknown"
+    instruction, the user_guide's promise — was dead code in production.
+
+    Drives the real class on purpose. A mock here would re-assert the defect.
+    """
+    from src.tools.tool_manager import ToolManager
+
+    async def boom(**_kwargs):
+        raise RuntimeError("zammad 500 after the ticket was created")
+
+    tool_manager = ToolManager()
+    tool_manager.register("update_ticket", boom)
+    mgr = ConfirmationManager(lambda: tool_manager, mem_manager)
+
+    parked = _park(token="a", call_id="c1")
+    mgr.park(parked)
+    mgr.take("a")
+    decision = Decision(park=parked, approved=True)
+    await mgr.apply(decision)
+
+    assert decision.ok is False
+    assert decision.status == "approved_but_failed"
+    assert _park_row(mem_manager, "a")["resolution"] == "approved_but_failed"
+
+    # And the guard now answers with the arm the model is told to be careful
+    # about, rather than a plain "approved".
+    hit = mgr.already_resolved(("u", "p"), dict(parked.write_call, id="c2"))
+    assert hit is not None and hit["resolution"] == "approved_but_failed"
+
+
+@pytest.mark.asyncio
+async def test_a_successful_tool_is_still_recorded_as_approved(mem_manager):
+    """The other half, so the fix is not "everything is a failure now"."""
+    from src.tools.tool_manager import ToolManager
+
+    async def fine(**_kwargs):
+        return {"ticket": 7}
+
+    tool_manager = ToolManager()
+    tool_manager.register("update_ticket", fine)
+    mgr = ConfirmationManager(lambda: tool_manager, mem_manager)
+
+    parked = _park(token="a", call_id="c1")
+    mgr.park(parked)
+    mgr.take("a")
+    decision = Decision(park=parked, approved=True)
+    await mgr.apply(decision)
+
+    assert decision.ok is True
+    assert decision.status == "approved"
+
+
+@pytest.mark.asyncio
+async def test_a_raising_patch_still_finalizes_the_durable_row(
+        manager, mem_manager, monkeypatch):
+    """The write RAN, so the row must reach `resolved` even if the patch dies.
+
+    `stream_resolve_park` catches exceptions out of `apply` and carries on into
+    the continuation. With `finalize_parked_write` after the patch and outside
+    any guard, such a raise left the row `claimed`:
+    `find_resolved_parked_write` filters on `resolved`, so the re-execution
+    guard went blind on exactly the turn it exists for, the in-process fallback
+    was skipped too, and the next boot reported a known outcome as
+    `interrupted`.
+    """
+    parked = _park(token="a", call_id="c1")
+    manager.park(parked)
+    manager.take("a")
+    monkeypatch.setattr(
+        manager, "patch_parked_entry",
+        MagicMock(side_effect=RuntimeError("tool_context unreadable")))
+
+    decision = Decision(park=parked, approved=True)
+    with pytest.raises(RuntimeError):
+        await manager.apply(decision)
+
+    row = _park_row(mem_manager, "a")
+    assert row["status"] == "resolved", \
+        "a claimed row would reboot as `interrupted` for a KNOWN outcome"
+    assert row["resolution"] == "approved"
+    assert decision.patched is False, "the nudge keys off this"
+    assert manager.already_resolved(
+        ("u", "p"), dict(parked.write_call, id="c2")) is not None
+
+
+def test_a_malformed_duplicate_ref_does_not_destroy_the_park(
+        manager, mem_manager):
+    """Decodable but wrong-shaped pointers must not quarantine the park.
+
+    `from_row` documents unreadable `duplicate_refs` as explicitly NOT fatal,
+    but `len(r)` raises TypeError on a bare int and `int(r[0])` raises
+    ValueError on a non-numeric row id — both escaped into `_reconcile_row`'s
+    (KeyError, TypeError, ValueError) handler, which quarantines. A cosmetic
+    pointer list would have destroyed an executable irreversible write.
+    """
+    manager.park(_park(token="a"))
+    conn = mem_manager._get_connection()
+    conn.execute("UPDATE Parked_Writes SET duplicate_refs = ? "
+                 "WHERE token = 'a'", ('[5, ["x", "c1"], [1, "c2"]]',))
+    conn.commit()
+
+    revived = _fresh_manager(mem_manager)
+    counts = revived.rebuild_from_store()
+
+    assert counts["restored"] == 1, "the park must survive its pointer list"
+    assert counts["quarantined"] == 0
+    assert revived.pending["a"].duplicate_refs == [(1, "c2")], \
+        "the usable pointer is kept; the malformed ones are dropped"
