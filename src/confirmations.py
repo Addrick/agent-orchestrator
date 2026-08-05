@@ -248,9 +248,17 @@ class ConfirmationManager:
                 # continuation line and `executed_ok` in the audit row.
                 decision.ok = tool_error(decision.result) is None
             except Exception as e:
+                # Narrower than it looks, and NOT the handler-failure path:
+                # `execute_tool` swallows everything the handler raises, so the
+                # only way to land here is the call itself failing to be made —
+                # `**arguments` not unpacking because the model (or a patched
+                # history entry) supplied something that is not a string-keyed
+                # mapping. Reading this as "handler exceptions are covered here"
+                # is exactly the inference that let the defect above survive
+                # four reviews; it covers the frame, not the callee.
                 logger.error(
                     f"Approved write {tool_name} (token {park.token}) "
-                    f"failed: {e}", exc_info=True,
+                    f"could not be invoked: {e}", exc_info=True,
                 )
                 decision.result = {"error": f"Tool execution failed: {e}"}
                 decision.ok = False

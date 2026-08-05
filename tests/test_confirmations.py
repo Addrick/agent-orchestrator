@@ -38,6 +38,20 @@ def manager(mem_manager):
     return mgr
 
 
+def _handler_raised(message, tool="update_ticket"):
+    """What `ToolManager.execute_tool` ACTUALLY returns when a handler raises.
+
+    It catches every handler exception and returns this envelope
+    (`tool_manager.py:70-73`) — it does not propagate. These tests used to give
+    the mock `side_effect = RuntimeError(...)`, asserting a raise the
+    production class cannot emit, which is how `approved_but_failed` stayed
+    simultaneously green and unreachable for a whole release (DP-322). Mocking
+    a collaborator means reproducing its contract, not a convenient fiction.
+    """
+    return {"error": f"An unexpected error occurred while executing "
+                     f"{tool}: {message}"}
+
+
 def _park(token="t1", user="u", persona="p", tool="update_ticket",
           call_id="c1", row_id=None, created_at=None):
     return ParkedWrite(
@@ -375,7 +389,8 @@ async def test_apply_records_an_approved_failure_distinctly(
     row_id = _row_with_awaiting_entries(mem_manager, ["c1"])
     parked = _park(token="tok-c1", call_id="c1", row_id=row_id)
     manager.park(parked)
-    manager._tool_manager.execute_tool.side_effect = RuntimeError("zammad 500")
+    manager._tool_manager.execute_tool.return_value = _handler_raised(
+        "zammad 500")
 
     decision = Decision(park=parked, approved=True)
     await manager.apply(decision)
@@ -395,7 +410,7 @@ async def test_audit_row_carries_the_failed_status(manager, mem_manager):
     row_id = _row_with_awaiting_entries(mem_manager, ["c1"])
     parked = _park(token="tok-c1", call_id="c1", row_id=row_id)
     manager.park(parked)
-    manager._tool_manager.execute_tool.side_effect = RuntimeError("boom")
+    manager._tool_manager.execute_tool.return_value = _handler_raised("boom")
 
     await manager.apply(Decision(park=parked, approved=True))
 
@@ -567,3 +582,41 @@ async def test_a_write_that_succeeds_stays_approved(
 
     assert decision.ok is True, f"{shape} must not be recorded as a failure"
     assert decision.status == "approved"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arguments, why", [
+    (["not", "a", "mapping"], "arguments is a list"),
+    ({1: "not a string key"}, "non-string keyword"),
+])
+async def test_an_uninvokable_call_is_recorded_as_failed(
+        mem_manager, arguments, why):
+    """The `except` in `apply` is reachable, and this is the only way in.
+
+    `execute_tool` swallows everything the *handler* raises, so nothing the
+    tool does can land there — only the call failing to be made, i.e.
+    `**arguments` not unpacking. Pinned because the branch reads like the
+    handler-failure path, and believing that is what let `ok = True` sit
+    unchallenged through four reviews (DP-322).
+    """
+    from src.tools.tool_manager import ToolManager
+
+    ran = []
+
+    async def never(**_kwargs):
+        ran.append(True)
+        return {"ok": True}
+
+    tool_manager = ToolManager()
+    tool_manager.register("update_ticket", never)
+    mgr = ConfirmationManager(lambda: tool_manager, mem_manager)
+
+    parked = _park(token="a", call_id="c1")
+    parked.write_call["arguments"] = arguments
+    mgr.park(parked)
+    decision = Decision(park=parked, approved=True)
+    await mgr.apply(decision)
+
+    assert ran == [], f"{why}: the handler must never have run"
+    assert decision.ok is False
+    assert decision.status == "approved_but_failed"

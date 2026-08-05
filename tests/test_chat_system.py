@@ -854,11 +854,21 @@ async def test_apply_records_a_denial_without_executing(chat_system_with_mocks):
 
 @pytest.mark.asyncio
 async def test_apply_survives_a_failing_tool(chat_system_with_mocks):
-    """A raising tool must not escape `apply` — the decision is still resolved,
+    """A failing tool must not escape `apply` — the decision is still resolved,
     marked failed, and reported, or the park would be consumed with the
-    operator told nothing."""
+    operator told nothing.
+
+    The mock returns the envelope `ToolManager.execute_tool` actually produces
+    for a handler that raised (`tool_manager.py:70-73`); it does not raise.
+    Giving it `side_effect = RuntimeError(...)` asserted a contract the real
+    class cannot exhibit, which is how this status stayed green and unreachable
+    at the same time (DP-322/DP-323).
+    """
     system, _, _, _, tool_manager_mock = chat_system_with_mocks
-    tool_manager_mock.execute_tool.side_effect = RuntimeError("zammad down")
+    tool_manager_mock.execute_tool.return_value = {
+        "error": "An unexpected error occurred while executing update_ticket: "
+                 "zammad down",
+    }
 
     decision = _decision(approved=True)
     await system.confirmations.apply(decision)
