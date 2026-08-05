@@ -30,8 +30,9 @@ from src.persona import Persona
 from src.request_builder import AssembledRequest, RequestBuilder, RequestContext
 from src.security.scrubber import get_scrubber
 from src.tools.tool_loop import (
-    ToolLoop, WriteParkedEvent, _ApiPayloadEvent, _LoopFinishedEvent,
-    _ToolContextEvent, _WriteDuplicateEvent, write_call_identity,
+    PARK_STATUS_EXPIRED, ToolLoop, WriteParkedEvent, _ApiPayloadEvent,
+    _LoopFinishedEvent, _ToolContextEvent, _WriteDuplicateEvent,
+    write_call_identity,
 )
 from src.turn_persistence import TurnPersistence
 from src.tools.tool_manager import ToolManager
@@ -441,6 +442,37 @@ class ChatSystem:
                         return park.token
                 return None
 
+            def _already_resolved(
+                    write_call: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+                """The decided twin of this proposal, if there is a recent one.
+
+                Covers what `_already_pending` structurally cannot: on a
+                continuation turn the park being resolved has already been
+                taken, so it is in neither scope above — and that is the turn
+                where the model is re-reading its own tool span and most likely
+                to re-propose. Durable since DP-319, which is why this lookup
+                can exist at all.
+
+                CONTINUATION TURNS ONLY, and that scoping is the whole
+                correctness argument. Unlike the pending guard, this one
+                suppresses with no affordance at all: no park, no
+                `PendingConfirmationEvent`, nothing on Discord or the portal.
+                Left running on ordinary turns it would answer "restart that
+                service again" — four minutes after the first restart hung —
+                with "that already happened", silently, for fifteen minutes,
+                breaking the property `user_guide.md` states for the pending
+                guard ("a persona can legitimately propose the same action
+                again later"). A continuation is the only turn nobody asked
+                for, so it is the only turn where a re-proposal can be assumed
+                to be the model re-reading itself rather than a human meaning
+                it.
+                """
+                if continuation is None:
+                    return None
+                return self.confirmations.already_resolved(
+                    (ctx.user_identifier, ctx.persona_name), write_call,
+                )
+
             # Construct per-call so tests that swap `chat_system.text_engine`
             # post-init still see the new engine; ToolLoop is stateless.
             tool_loop = ToolLoop(self.text_engine, self.tool_manager)
@@ -455,6 +487,7 @@ class ChatSystem:
                     turn_tainted=ctx.turn_tainted,
                     initial_taint_sources=ctx.taint_sources,
                     pending_lookup=_already_pending,
+                    resolved_lookup=_already_resolved,
                 ):
                     if isinstance(ev, _ApiPayloadEvent):
                         self.turn_persistence.store_api_request(
@@ -654,7 +687,13 @@ class ChatSystem:
                     "leaving its entry as-is", dup.token,
                 )
                 continue
-            parked.duplicate_refs.append((assistant_id, dup.call_id))
+            # Through the manager, not by appending to the list directly: the
+            # reference has to reach the durable row too, or a restart reloads
+            # the park without it and the duplicate's history entry keeps
+            # claiming the action is still awaiting an operator forever.
+            self.confirmations.note_duplicate_ref(
+                parked, assistant_id, dup.call_id,
+            )
 
     async def stream_response(
             self,
@@ -803,7 +842,8 @@ class ChatSystem:
 
         if self.confirmations.is_expired(parked):
             self.confirmations.expire(
-                parked, "Operator answered after the TTL had passed",
+                parked, PARK_STATUS_EXPIRED,
+                "Operator answered after the TTL had passed",
             )
             yield DoneEvent(
                 text="That action expired before it was reviewed.",

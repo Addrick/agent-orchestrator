@@ -12,6 +12,7 @@ the security framework in the sibling plan).
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import uuid
@@ -114,6 +115,26 @@ PARK_STATUS_DENIED = "denied"
 # operator said yes — the model must not read it as a refusal to re-argue.
 PARK_STATUS_FAILED = "approved_but_failed"
 PARK_STATUS_EXPIRED = "expired"
+# DP-319: the process died between the operator's decision being claimed and the
+# write running, so whether it ran is unknown. Deliberately NOT re-executed on
+# the next boot — a gated write is gated because it is irreversible, and
+# re-running an "it might already have happened" call is the one failure this
+# subsystem exists to prevent. The model is told to re-check state and re-propose
+# rather than assume either outcome.
+PARK_STATUS_INTERRUPTED = "interrupted_by_restart"
+# DP-319 review: a durable row whose payload could not be read at boot. Distinct
+# from PARK_STATUS_INTERRUPTED even though both are terminated by the same boot
+# pass, because `resolution` is the column a forensic query filters on and the
+# two answer opposite questions. An interrupted park is one a human decided and
+# the process may have executed; a quarantined one was never readable, so its
+# write provably never ran. Collapsing them made "which gated writes may have
+# executed during the outage?" return rows that certainly did not.
+PARK_STATUS_QUARANTINED = "quarantined_unreadable"
+# The model re-proposed a write that was already decided in an earlier turn.
+# Distinct from PARK_STATUS_DUPLICATE, which answers a still-*pending* twin: this
+# one says the action has already been executed or refused, so a second park
+# would be a second execution rather than a redundant affordance.
+PARK_STATUS_ALREADY_RESOLVED = "already_resolved"
 # Not a park outcome — the answer to a write the model proposed while an
 # identical one was already waiting. No second park is created.
 PARK_STATUS_DUPLICATE = "duplicate_of_pending"
@@ -142,6 +163,30 @@ def write_call_identity(call: Dict[str, Any]) -> Tuple[str, str]:
         # unserializable write without ever surfacing an affordance.
         args = f"<unserializable:{uuid.uuid4().hex}>"
     return (name, args)
+
+
+def write_call_identity_hash(call: Dict[str, Any]) -> str:
+    """Storage form of `write_call_identity`: one hash of name + args.
+
+    Lives HERE, next to the canonicalization it hashes, rather than on
+    `MemoryManager` where DP-319 first put it. The identity contract was spread
+    over three modules — the canonicalizer in `src.tools`, the digest in
+    `src.memory`, and two call sites in `src.confirmations` that re-composed
+    them by hand — and any one of them drifting produces a hash that matches
+    nothing. That failure is silent and it fails OPEN: the duplicate guard
+    simply stops recognizing re-proposals, which is a second execution of an
+    irreversible write.
+
+    Hashed rather than stored raw because the canonical args are the same
+    secret-bearing payload `finalize_parked_write` exists to erase; equality is
+    all the duplicate guard needs.
+    """
+    name, args = write_call_identity(call)
+    digest = hashlib.sha256()
+    digest.update(name.encode("utf-8"))
+    digest.update(b"\x00")
+    digest.update(args.encode("utf-8"))
+    return digest.hexdigest()
 
 
 # Reasons a tool call can be left without a real result when the turn ends.
@@ -291,6 +336,9 @@ class ToolLoop:
         pending_lookup: Optional[
             Callable[[Dict[str, Any]], Optional[str]]
         ] = None,
+        resolved_lookup: Optional[
+            Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]
+        ] = None,
     ) -> AsyncIterator[LoopEvent]:
         """Yield generation events for one turn. Mutates
         `conversation_history` in-place so the orchestrator (and any
@@ -306,6 +354,12 @@ class ToolLoop:
         because the pending set lives in `ConfirmationManager`, which sits
         ABOVE this module in the layer order — the loop stays policy-free and
         the caller decides what counts as already-pending.
+
+        `resolved_lookup(write_call) -> row | None` is the same question for an
+        already-DECIDED proposal (DP-319). Separate from `pending_lookup`
+        because the answer differs: a pending twin is answered "wait for it",
+        a decided one is answered with its outcome, and only the first has a
+        history entry that will need correcting later.
         """
         persona_config = persona.get_config_for_engine()
         history_start = (
@@ -512,6 +566,65 @@ class ToolLoop:
                         yield _WriteDuplicateEvent(
                             token=existing, call_id=wc.get("id"),
                         )
+                        continue
+
+                    # DP-319: the same guard for a proposal that was already
+                    # DECIDED. `pending_lookup` cannot see this case — during the
+                    # continuation turn the park being resolved has already been
+                    # taken out of the pending set, and that turn is precisely
+                    # when the model re-proposes, because it is re-reading its
+                    # own tool span. Parking a second copy and approving it
+                    # executes an irreversible write twice.
+                    #
+                    # No `_WriteDuplicateEvent`: that event exists so a later
+                    # resolution can correct a "still awaiting" entry, and this
+                    # entry is already terminal.
+                    #
+                    # The caller decides WHEN to consult this — it is scoped to
+                    # continuation turns, because suppressing here produces no
+                    # affordance on any surface, so on an ordinary turn it would
+                    # swallow a repeat the operator meant.
+                    resolved = resolved_lookup(wc) if resolved_lookup else None
+                    if resolved is not None:
+                        outcome = resolved.get("resolution")
+                        logger.info(
+                            "tool-loop iter %d: %s re-proposed after token %s "
+                            "was already resolved (%s) — not parking it again",
+                            iter_idx, wc.get("name"), resolved.get("token"),
+                            outcome,
+                        )
+                        # An outcome of `approved_but_failed` means the tool ran
+                        # and then raised, so the effect is genuinely unknown —
+                        # the same shape as INTERRUPTED_INSTRUCTION, and for the
+                        # same reason: "it failed" reads as a plain retryable
+                        # error, and the retry is a possible second execution of
+                        # an irreversible action.
+                        if outcome == PARK_STATUS_FAILED:
+                            instruction = (
+                                "You already proposed this exact action; the "
+                                "operator approved it and the tool then errored, "
+                                "so whether it took effect is unknown. It was "
+                                "NOT queued again. Do NOT assume either outcome "
+                                "— check the current state and report what you "
+                                "find."
+                            )
+                        else:
+                            instruction = (
+                                "You already proposed this exact action and "
+                                "the operator decided it. It was NOT queued "
+                                "again. Report the outcome above; do not "
+                                "re-propose it."
+                            )
+                        conversation_history.append({
+                            "role": "tool",
+                            "tool_call_id": wc.get("id"),
+                            "name": wc.get("name"),
+                            "content": json.dumps({
+                                "status": PARK_STATUS_ALREADY_RESOLVED,
+                                "outcome": outcome,
+                                "instruction": instruction,
+                            }),
+                        })
                         continue
 
                     token = uuid.uuid4().hex
