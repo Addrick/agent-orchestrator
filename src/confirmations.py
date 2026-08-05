@@ -27,7 +27,7 @@ from src.tools.tool_loop import (
     PARK_STATUS_APPROVED, PARK_STATUS_AWAITING, PARK_STATUS_DENIED,
     PARK_STATUS_EXPIRED, PARK_STATUS_FAILED,
 )
-from src.tools.tool_manager import ToolManager
+from src.tools.tool_manager import ToolManager, tool_error
 
 logger = logging.getLogger(__name__)
 
@@ -232,18 +232,21 @@ class ConfirmationManager:
                 decision.result = await tool_manager.execute_tool(
                     tool_name, **(park.write_call.get("arguments") or {}),
                 )
-                # `ok` is "did the tool succeed", NOT "did the call return".
-                # `ToolManager.execute_tool` never raises — it catches every
-                # handler exception and RETURNS `{"error": ...}` — so deriving
-                # `ok` from reaching this line recorded a Zammad 500 that fired
-                # *after* the ticket was created as a plain `approved`.
-                # `PARK_STATUS_FAILED` was therefore unreachable in production,
-                # and with it every consumer keyed off it: the "approved but
-                # FAILED" continuation line, and the `executed_ok` flag in the
-                # audit row. The unit tests missed it because they mock a raise
-                # the real ToolManager cannot emit.
-                decision.ok = not (isinstance(decision.result, dict)
-                                   and "error" in decision.result)
+                # `ok` is "did the tool succeed", NOT "did the call return"
+                # and NOT "did the envelope carry an error". Two ways a write
+                # fails without raising, and DP-322 only closed the first:
+                #   - `execute_tool` catches every handler exception and
+                #     RETURNS `{"error": ...}`, so a Zammad 500 that fired
+                #     *after* the ticket was created was a plain `approved`;
+                #   - seven gated writes never raise at all. The proxmox tools
+                #     return `{"status": "error", ...}` and `approve_proposal`
+                #     returns `{"executed": False, ...}` — both nested under
+                #     the envelope's `result` key, where an envelope-level
+                #     check cannot see them.
+                # Either way `PARK_STATUS_FAILED` was unreachable, and with it
+                # every consumer keyed off it: the "approved but FAILED"
+                # continuation line and `executed_ok` in the audit row.
+                decision.ok = tool_error(decision.result) is None
             except Exception as e:
                 logger.error(
                     f"Approved write {tool_name} (token {park.token}) "

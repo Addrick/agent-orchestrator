@@ -464,3 +464,106 @@ async def test_a_real_tool_manager_records_a_successful_write_as_approved(
 
     assert decision.ok is True
     assert decision.status == "approved"
+
+
+# ---- DP-323: the writes that fail by RETURNING, never by raising ----------
+#
+# DP-322 closed the raise path. Seven of the 23 gated write tools never take
+# it: they report failure in the payload, which `execute_tool` nests under
+# `{"result": ...}` where an envelope-level check cannot see it. Each case
+# below reproduces a real handler's shape at its file:line, so the test fails
+# if that handler's convention changes out from under the predicate.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload, shape", [
+    # proxmox/handler.py:36 — `_err()`, used by reboot_node, reboot_guest,
+    # start_guest, stop_guest, set_active_model.
+    ({"status": "error", "message": "ssh failed: timeout"}, "_err()"),
+    # proxmox/handler.py:78 — the non-zero-exit shape from `_run`.
+    ({"status": "error", "message": "remote command exited 1",
+      "stderr": "no such guest", "stdout": ""}, "_run non-zero exit"),
+    # self_edit/fixr_tools.py:78 — dispatch_fix.
+    ({"status": "error", "message": "worktree already exists"}, "dispatch_fix"),
+    # proposals/service.py:105-124 — approve_proposal catches its executor's
+    # exception ON PURPOSE (so the row is never stranded in 'approved'), so it
+    # is structurally incapable of signalling failure by raising.
+    ({"proposal_id": 4, "action_type": "update_ticket", "executed": False,
+      "result": "executor error: connection refused"}, "approve_proposal"),
+])
+async def test_a_write_that_fails_by_returning_is_recorded_as_failed(
+        mem_manager, payload, shape):
+    """A returned failure must reach `approved_but_failed`, like a raised one.
+
+    Reaching this status was the whole point of DP-322, but its check ran on
+    the envelope — and `execute_tool` wraps a normal return as
+    `{"result": <payload>}`, so a handler's own error marker sits one level
+    below where it looked. Every tool here executes an irreversible action
+    (reboot a guest, dispatch an agent, run an approved proposal) and then
+    reports the failure in-band; recording that as `approved` tells the
+    operator's audit row `executed_ok=True` for a write that did not happen.
+    """
+    from src.tools.tool_manager import ToolManager
+
+    async def soft_fail(**_kwargs):
+        return payload
+
+    tool_manager = ToolManager()
+    tool_manager.register("update_ticket", soft_fail)
+    mgr = ConfirmationManager(lambda: tool_manager, mem_manager)
+
+    parked = _park(token="a", call_id="c1")
+    mgr.park(parked)
+    decision = Decision(park=parked, approved=True)
+    await mgr.apply(decision)
+
+    assert decision.ok is False, f"{shape} must not be recorded as success"
+    assert decision.status == "approved_but_failed"
+
+    row = mem_manager._get_connection().execute(
+        "SELECT metadata FROM Audit_Log WHERE event_type = 'audit_decision'"
+    ).fetchone()
+    assert json.loads(row["metadata"])["executed_ok"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload, shape", [
+    # The success halves of the same handlers — the predicate keys on markers
+    # a handler cannot mean anything else by, because over-reporting is the
+    # DANGEROUS direction here: a successful irreversible write recorded as
+    # `approved_but_failed` tells the model the action may not have happened
+    # and invites it to re-propose.
+    ({"status": "ok", "stdout": "", "stderr": ""}, "proxmox _run ok"),
+    ({"status": "dispatched", "agent": {"id": "a1"}}, "dispatch_fix ok"),
+    ({"status": "success", "message": "Agent started."}, "manage_agent"),
+    ({"proposal_id": 4, "executed": True, "result": "ticket 8 updated"},
+     "approve_proposal ok"),
+    # deny_proposal reports a DENIED proposal as its own success: `status` is
+    # a domain value here, not a health signal. Nothing about it may read as
+    # failure.
+    ({"proposal_id": 4, "status": "denied", "reason": "not now"},
+     "deny_proposal"),
+    ({"order_id": 2, "status": "retired", "note": ""}, "retire_standing_order"),
+    # A Zammad ticket comes back as a raw domain object.
+    ({"id": 8, "number": "12008", "state": "closed", "title": "printer"},
+     "zammad ticket"),
+])
+async def test_a_write_that_succeeds_stays_approved(
+        mem_manager, payload, shape):
+    """The control side: no domain payload may be misread as a failure."""
+    from src.tools.tool_manager import ToolManager
+
+    async def fine(**_kwargs):
+        return payload
+
+    tool_manager = ToolManager()
+    tool_manager.register("update_ticket", fine)
+    mgr = ConfirmationManager(lambda: tool_manager, mem_manager)
+
+    parked = _park(token="a", call_id="c1")
+    mgr.park(parked)
+    decision = Decision(park=parked, approved=True)
+    await mgr.apply(decision)
+
+    assert decision.ok is True, f"{shape} must not be recorded as a failure"
+    assert decision.status == "approved"
