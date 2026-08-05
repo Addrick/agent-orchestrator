@@ -405,3 +405,62 @@ async def test_audit_row_carries_the_failed_status(manager, mem_manager):
     ).fetchone()
     assert row is not None, "apply() must log an audit_decision row"
     assert row["new_state"] == "approved_but_failed"
+
+
+# ---- the ok-derivation: PARK_STATUS_FAILED was unreachable in production ----
+
+
+@pytest.mark.asyncio
+async def test_a_real_tool_manager_records_a_failed_write_as_failed(
+        mem_manager):
+    """`approved_but_failed` must be reachable through the REAL ToolManager.
+
+    Every other test producing that status gives a *mocked* `execute_tool` a
+    `side_effect`, i.e. asserts a raise the production class cannot emit:
+    `ToolManager.execute_tool` catches every handler exception and RETURNS
+    `{"error": ...}`. Deriving `decision.ok` from reaching the line after the
+    call therefore made it unconditionally True — a Zammad 500 that fired
+    *after* the ticket was created was recorded as a plain `approved`, and
+    every consumer keyed off `PARK_STATUS_FAILED` (the "approved but FAILED"
+    continuation line, `executed_ok` in the audit row) was dead code.
+
+    Drives the real class on purpose. A mock here would re-assert the defect.
+    """
+    from src.tools.tool_manager import ToolManager
+
+    async def boom(**_kwargs):
+        raise RuntimeError("zammad 500 after the ticket was created")
+
+    tool_manager = ToolManager()
+    tool_manager.register("update_ticket", boom)
+    mgr = ConfirmationManager(lambda: tool_manager, mem_manager)
+
+    parked = _park(token="a", call_id="c1")
+    mgr.park(parked)
+    decision = Decision(park=parked, approved=True)
+    await mgr.apply(decision)
+
+    assert decision.ok is False
+    assert decision.status == "approved_but_failed"
+
+
+@pytest.mark.asyncio
+async def test_a_real_tool_manager_records_a_successful_write_as_approved(
+        mem_manager):
+    """The other half, so the fix is not "everything is a failure now"."""
+    from src.tools.tool_manager import ToolManager
+
+    async def fine(**_kwargs):
+        return {"ticket": 7}
+
+    tool_manager = ToolManager()
+    tool_manager.register("update_ticket", fine)
+    mgr = ConfirmationManager(lambda: tool_manager, mem_manager)
+
+    parked = _park(token="a", call_id="c1")
+    mgr.park(parked)
+    decision = Decision(park=parked, approved=True)
+    await mgr.apply(decision)
+
+    assert decision.ok is True
+    assert decision.status == "approved"
