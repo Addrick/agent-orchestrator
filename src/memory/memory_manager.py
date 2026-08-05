@@ -1,9 +1,11 @@
 # src/memory/memory_manager.py
 
 import sqlite3
+import hashlib
 import json
 import logging
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import (Any, Coroutine, Dict, List, Callable, Optional, Sequence, Set, Union, cast,
@@ -300,6 +302,31 @@ class MemoryManager:
             );
             CREATE INDEX IF NOT EXISTS idx_proposal_status ON Proposals (status, created_at);
             CREATE INDEX IF NOT EXISTS idx_proposal_acceptance ON Proposals (agent_name, action_type, status);
+
+            CREATE TABLE IF NOT EXISTS Parked_Writes (
+                token TEXT PRIMARY KEY,
+                created_at REAL NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(status IN ('pending', 'claimed', 'resolved',
+                                     'expired', 'interrupted')),
+                user_identifier TEXT NOT NULL,
+                persona_name TEXT NOT NULL,
+                channel TEXT NOT NULL DEFAULT '',
+                server_id TEXT,
+                write_call TEXT,
+                call_identity TEXT NOT NULL,
+                audit_info TEXT,
+                confirmation_text TEXT NOT NULL DEFAULT '',
+                turn_tainted INTEGER NOT NULL DEFAULT 0,
+                parked_assistant_id INTEGER,
+                duplicate_refs TEXT NOT NULL DEFAULT '[]',
+                resolved_at REAL,
+                resolution TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_parked_write_conversation
+                ON Parked_Writes (user_identifier, persona_name, status, created_at);
+            CREATE INDEX IF NOT EXISTS idx_parked_write_status
+                ON Parked_Writes (status, created_at);
 
             CREATE TABLE IF NOT EXISTS Standing_Orders (
                 order_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1723,6 +1750,271 @@ class MemoryManager:
                 except (TypeError, json.JSONDecodeError):
                     pass
         return row
+
+    # ---- parked writes (DP-319) -----------------------------------------
+    #
+    # Durable backing for `ConfirmationManager`. Before DP-319 the pending set
+    # was a process-lifetime dict, so the effective TTL was
+    # `min(PENDING_ACTION_TTL, uptime)` — a 24h promise on a store that dies
+    # with the process. These rows are what make the promise keepable.
+    #
+    # Deliberately NOT the `Proposals` table. `ProposalExecutor` dispatches a
+    # whitelist of `action_type`s and that whitelist IS the ADR-2026-07-04
+    # privilege separation; a chat park is an *arbitrary* tool call, so sharing
+    # storage would put rows shaped like "call any tool" one executor bug away
+    # from that whitelist. Separate table, separate executor, same DB.
+    #
+    # Secret handling: `write_call` holds the real argument values, because the
+    # approved call must execute with them and not with a literal "[REDACTED]"
+    # (same reason `Audit_Log` scrubs at its sink instead of at its callers).
+    # That is why `finalize_parked_write` NULLs the payload columns the moment
+    # the park reaches a terminal state — a decided park keeps only its hashed
+    # identity, so the duplicate guard still works and the args stop living on
+    # disk for the rest of the row's retention.
+
+    @staticmethod
+    def parked_write_identity(name: str, canonical_args: str) -> str:
+        """Hash of `write_call_identity` output, for storage.
+
+        Hashed rather than stored raw because the canonical args are the same
+        secret-bearing payload `finalize_parked_write` exists to erase — a
+        plaintext identity column would quietly preserve what that erasure
+        removes. Equality is all the duplicate guard needs.
+        """
+        digest = hashlib.sha256()
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\x00")
+        digest.update(canonical_args.encode("utf-8"))
+        return digest.hexdigest()
+
+    def insert_parked_write(self, *, token: str, created_at: float,
+                            user_identifier: str, persona_name: str,
+                            channel: str, server_id: Optional[str],
+                            write_call: Dict[str, Any], call_identity: str,
+                            audit_info: Dict[str, Any],
+                            confirmation_text: str, turn_tainted: bool,
+                            parked_assistant_id: Optional[int],
+                            duplicate_refs: List[Any]) -> bool:
+        """Persist a newly parked write as `pending`. Returns False on failure.
+
+        `INSERT OR REPLACE` so a token re-registered after a restore is not an
+        error; tokens are uuid4 hex, so a genuine collision is not the case
+        being handled.
+
+        `write_call` is serialized STRICTLY — no `default=str` fallback. It is
+        the payload an approved write executes with after a restart, so a
+        lossy encoding would mean running the tool with the repr of an argument
+        instead of the argument. A call that cannot round-trip is therefore not
+        persisted at all: it stays live in memory for this process (exactly the
+        pre-DP-319 behaviour) rather than being stored in a form that could
+        execute something other than what the operator approved. `audit_info`
+        is advisory, so it degrades instead of blocking.
+        """
+        try:
+            write_call_json = json.dumps(write_call)
+        except (TypeError, ValueError) as e:
+            logger.error(
+                "Parked write %s has unserializable arguments (%s); it will "
+                "not survive a restart. Refusing to store a lossy copy.",
+                token, e,
+            )
+            return False
+        try:
+            audit_json = json.dumps(audit_info)
+        except (TypeError, ValueError):
+            audit_json = json.dumps(audit_info, default=str)
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                conn.execute(
+                    """INSERT OR REPLACE INTO Parked_Writes
+                       (token, created_at, status, user_identifier, persona_name,
+                        channel, server_id, write_call, call_identity, audit_info,
+                        confirmation_text, turn_tainted, parked_assistant_id,
+                        duplicate_refs)
+                       VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (token, created_at, user_identifier, persona_name, channel,
+                     server_id, write_call_json, call_identity,
+                     audit_json, confirmation_text,
+                     1 if turn_tainted else 0, parked_assistant_id,
+                     json.dumps(duplicate_refs)),
+                )
+                conn.commit()
+                return True
+            except sqlite3.Error as e:
+                logger.error(f"Failed to persist parked write {token}: {e}")
+                conn.rollback()
+                return False
+
+    def update_parked_write_refs(self, token: str, *,
+                                 parked_assistant_id: Optional[int] = None,
+                                 duplicate_refs: Optional[List[Any]] = None) -> bool:
+        """Patch the history-pointer columns of a live park.
+
+        Both are learned after the row exists: `parked_assistant_id` when the
+        turn commits, `duplicate_refs` whenever a later turn re-proposes the
+        same action. Scoped to non-terminal rows so a late duplicate cannot
+        resurrect pointers on a park that was already decided.
+        """
+        sets: List[str] = []
+        values: List[Any] = []
+        if parked_assistant_id is not None:
+            sets.append("parked_assistant_id = ?")
+            values.append(parked_assistant_id)
+        if duplicate_refs is not None:
+            sets.append("duplicate_refs = ?")
+            values.append(json.dumps(duplicate_refs))
+        if not sets:
+            return False
+        values.append(token)
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""UPDATE Parked_Writes SET {', '.join(sets)}
+                    WHERE token = ? AND status IN ('pending', 'claimed')""",
+                tuple(values),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def claim_parked_write(self, token: str) -> bool:
+        """`pending` -> `claimed`. False when the row is missing or not pending.
+
+        The conditional UPDATE is the durable half of `ConfirmationManager.take`
+        — it is what stops a park surviving a restart from being resolvable
+        twice, in the window where the in-memory index has been rebuilt but a
+        stale surface still holds the old affordance.
+        """
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                """UPDATE Parked_Writes SET status = 'claimed'
+                   WHERE token = ? AND status = 'pending'""",
+                (token,),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def release_parked_write(self, token: str) -> bool:
+        """`claimed` -> `pending`, for a claim that turned out to be invalid."""
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                """UPDATE Parked_Writes SET status = 'pending'
+                   WHERE token = ? AND status = 'claimed'""",
+                (token,),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def finalize_parked_write(self, token: str, status: str,
+                              resolution: Optional[str] = None,
+                              now: Optional[float] = None) -> bool:
+        """Move a park to a terminal state and erase its payload columns.
+
+        The row is kept rather than deleted: a *resolved* park is what lets the
+        duplicate guard recognize a re-proposal of an action that already ran,
+        which a deleted row cannot do (the guard would see nothing pending, park
+        a fresh copy, and an approval would execute the write a second time).
+
+        What is kept is only `call_identity` — a hash — plus the outcome. The
+        arguments, the audit blob and the operator-facing confirmation text all
+        go to NULL here, so the decided park stops holding anything sensitive.
+        """
+        if status not in ("resolved", "expired", "interrupted"):
+            raise ValueError(f"Not a terminal park status: {status}")
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                """UPDATE Parked_Writes
+                   SET status = ?, resolved_at = ?, resolution = ?,
+                       write_call = NULL, audit_info = NULL,
+                       confirmation_text = ''
+                   WHERE token = ? AND status IN ('pending', 'claimed')""",
+                (status, time.time() if now is None else now,
+                 resolution, token),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def load_parked_writes(self, statuses: Sequence[str]) -> List[Dict[str, Any]]:
+        """Every park in the given states, oldest first, payloads decoded."""
+        if not statuses:
+            return []
+        placeholders = ", ".join("?" for _ in statuses)
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""SELECT * FROM Parked_Writes WHERE status IN ({placeholders})
+                    ORDER BY created_at ASC""",
+                tuple(statuses),
+            )
+            rows = [dict(r) for r in cursor.fetchall()]
+        for row in rows:
+            for key in ("write_call", "audit_info", "duplicate_refs"):
+                if row.get(key):
+                    try:
+                        row[key] = json.loads(row[key])
+                    except (TypeError, json.JSONDecodeError):
+                        row[key] = None
+        return rows
+
+    def find_resolved_parked_write(self, user_identifier: str,
+                                   persona_name: str, call_identity: str,
+                                   since: float,
+                                   resolutions: Sequence[str]) -> Optional[Dict[str, Any]]:
+        """Most recent decided park matching this call identity.
+
+        Both filters are load-bearing. `since` because "this action was decided
+        at some point in history" is no reason to suppress a fresh proposal — a
+        user who asks for the same write again next week means it. `resolutions`
+        because only an outcome where the tool actually RAN makes a second park
+        a double execution; a denied one executed nothing, so re-proposing it is
+        a new request (DP-297 supports that case explicitly).
+        """
+        if not resolutions:
+            return None
+        placeholders = ", ".join("?" for _ in resolutions)
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""SELECT token, status, resolution, resolved_at
+                    FROM Parked_Writes
+                    WHERE user_identifier = ? AND persona_name = ?
+                      AND call_identity = ? AND status = 'resolved'
+                      AND resolution IN ({placeholders})
+                      AND resolved_at IS NOT NULL AND resolved_at >= ?
+                    ORDER BY resolved_at DESC LIMIT 1""",
+                (user_identifier, persona_name, call_identity,
+                 *resolutions, since),
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def purge_parked_writes(self, before: float) -> int:
+        """Drop terminal park rows older than `before`. Returns how many.
+
+        Terminal rows are retained only to answer the duplicate guard, whose
+        window is bounded, so nothing needs them forever. Without this the
+        table is the one park structure that grows without limit.
+        """
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                """DELETE FROM Parked_Writes
+                   WHERE status IN ('resolved', 'expired', 'interrupted')
+                     AND resolved_at IS NOT NULL AND resolved_at < ?""",
+                (before,),
+            )
+            conn.commit()
+            return cursor.rowcount
 
     def add_standing_order(self, order_text: str, source: str,
                            agent: str = "managr") -> int:

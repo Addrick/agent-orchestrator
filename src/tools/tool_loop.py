@@ -114,6 +114,18 @@ PARK_STATUS_DENIED = "denied"
 # operator said yes — the model must not read it as a refusal to re-argue.
 PARK_STATUS_FAILED = "approved_but_failed"
 PARK_STATUS_EXPIRED = "expired"
+# DP-319: the process died between the operator's decision being claimed and the
+# write running, so whether it ran is unknown. Deliberately NOT re-executed on
+# the next boot — a gated write is gated because it is irreversible, and
+# re-running an "it might already have happened" call is the one failure this
+# subsystem exists to prevent. The model is told to re-check state and re-propose
+# rather than assume either outcome.
+PARK_STATUS_INTERRUPTED = "interrupted_by_restart"
+# The model re-proposed a write that was already decided in an earlier turn.
+# Distinct from PARK_STATUS_DUPLICATE, which answers a still-*pending* twin: this
+# one says the action has already been executed or refused, so a second park
+# would be a second execution rather than a redundant affordance.
+PARK_STATUS_ALREADY_RESOLVED = "already_resolved"
 # Not a park outcome — the answer to a write the model proposed while an
 # identical one was already waiting. No second park is created.
 PARK_STATUS_DUPLICATE = "duplicate_of_pending"
@@ -291,6 +303,9 @@ class ToolLoop:
         pending_lookup: Optional[
             Callable[[Dict[str, Any]], Optional[str]]
         ] = None,
+        resolved_lookup: Optional[
+            Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]
+        ] = None,
     ) -> AsyncIterator[LoopEvent]:
         """Yield generation events for one turn. Mutates
         `conversation_history` in-place so the orchestrator (and any
@@ -306,6 +321,12 @@ class ToolLoop:
         because the pending set lives in `ConfirmationManager`, which sits
         ABOVE this module in the layer order — the loop stays policy-free and
         the caller decides what counts as already-pending.
+
+        `resolved_lookup(write_call) -> row | None` is the same question for an
+        already-DECIDED proposal (DP-319). Separate from `pending_lookup`
+        because the answer differs: a pending twin is answered "wait for it",
+        a decided one is answered with its outcome, and only the first has a
+        history entry that will need correcting later.
         """
         persona_config = persona.get_config_for_engine()
         history_start = (
@@ -512,6 +533,42 @@ class ToolLoop:
                         yield _WriteDuplicateEvent(
                             token=existing, call_id=wc.get("id"),
                         )
+                        continue
+
+                    # DP-319: the same guard for a proposal that was already
+                    # DECIDED. `pending_lookup` cannot see this case — during the
+                    # continuation turn the park being resolved has already been
+                    # taken out of the pending set, and that turn is precisely
+                    # when the model re-proposes, because it is re-reading its
+                    # own tool span. Parking a second copy and approving it
+                    # executes an irreversible write twice.
+                    #
+                    # No `_WriteDuplicateEvent`: that event exists so a later
+                    # resolution can correct a "still awaiting" entry, and this
+                    # entry is already terminal.
+                    resolved = resolved_lookup(wc) if resolved_lookup else None
+                    if resolved is not None:
+                        logger.info(
+                            "tool-loop iter %d: %s re-proposed after token %s "
+                            "was already resolved (%s) — not parking it again",
+                            iter_idx, wc.get("name"), resolved.get("token"),
+                            resolved.get("resolution"),
+                        )
+                        conversation_history.append({
+                            "role": "tool",
+                            "tool_call_id": wc.get("id"),
+                            "name": wc.get("name"),
+                            "content": json.dumps({
+                                "status": PARK_STATUS_ALREADY_RESOLVED,
+                                "outcome": resolved.get("resolution"),
+                                "instruction": (
+                                    "You already proposed this exact action and "
+                                    "the operator decided it. It was NOT queued "
+                                    "again. Report the outcome above; do not "
+                                    "re-propose it."
+                                ),
+                            }),
+                        })
                         continue
 
                     token = uuid.uuid4().hex

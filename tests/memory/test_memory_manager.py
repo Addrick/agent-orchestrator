@@ -2926,3 +2926,131 @@ def test_standing_orders_scoped_by_agent():
         assert len(manager.list_standing_orders()) == 2
     finally:
         manager.close()
+
+
+# --- Parked_Writes table migration (DP-319) ---
+#
+# The live production DB predates this table, and a `:memory:` DB always starts
+# fresh — so only these tests can show that an existing database picks the table
+# up rather than throwing "no such table" the first time a write is gated.
+
+def _insert_park(manager, token="tok", user="u", persona="p",
+                 args=None, created_at=1000.0):
+    return manager.insert_parked_write(
+        token=token, created_at=created_at, user_identifier=user,
+        persona_name=persona, channel="c", server_id=None,
+        write_call={"id": "c1", "name": "update_ticket",
+                    "arguments": args if args is not None else {"x": 1}},
+        call_identity=MemoryManager.parked_write_identity(
+            "update_ticket", json.dumps(args if args is not None else {"x": 1},
+                                        sort_keys=True)),
+        audit_info={"actions": [{"tool": "update_ticket"}]},
+        confirmation_text="Run it?", turn_tainted=False,
+        parked_assistant_id=5, duplicate_refs=[],
+    )
+
+
+def test_migration_creates_parked_writes_table(legacy_mem_manager):
+    """create_schema() on a legacy DB (no Parked_Writes table) creates it."""
+    legacy_mem_manager.create_schema()
+    cursor = legacy_mem_manager._get_connection().cursor()
+    cursor.execute("PRAGMA table_info(Parked_Writes)")
+    columns = {row['name'] for row in cursor.fetchall()}
+    assert {'token', 'created_at', 'status', 'user_identifier', 'persona_name',
+            'channel', 'server_id', 'write_call', 'call_identity', 'audit_info',
+            'confirmation_text', 'turn_tainted', 'parked_assistant_id',
+            'duplicate_refs', 'resolved_at', 'resolution'} == columns
+
+    cursor.execute("PRAGMA index_list(Parked_Writes)")
+    names = {row['name'] for row in cursor.fetchall()}
+    assert 'idx_parked_write_conversation' in names
+    assert 'idx_parked_write_status' in names
+
+
+def test_migration_parked_writes_preserves_existing_data(legacy_mem_manager):
+    """Adding the table must not disturb the rows already in the DB.
+
+    Parks a write first, deliberately: asserting only that the legacy rows
+    survived would pass on a build where the table was never created at all,
+    which is exactly the migration this test exists to cover.
+    """
+    legacy_mem_manager.create_schema()
+    assert _insert_park(legacy_mem_manager, token="a") is True
+
+    assert len(legacy_mem_manager.get_agent_actions("dispatch")) == 2
+
+
+def test_migration_parked_writes_usable_on_a_migrated_db(legacy_mem_manager):
+    """The whole lifecycle works against a DB that was created without it."""
+    legacy_mem_manager.create_schema()
+
+    assert _insert_park(legacy_mem_manager, token="a") is True
+    assert [r["token"] for r in
+            legacy_mem_manager.load_parked_writes(("pending",))] == ["a"]
+    assert legacy_mem_manager.claim_parked_write("a") is True
+    assert legacy_mem_manager.claim_parked_write("a") is False, \
+        "a claimed park must not be claimable twice"
+    assert legacy_mem_manager.finalize_parked_write(
+        "a", "resolved", "approved") is True
+
+
+def test_migration_parked_writes_idempotent(legacy_mem_manager):
+    """A second create_schema() must not drop the table or its rows."""
+    legacy_mem_manager.create_schema()
+    _insert_park(legacy_mem_manager, token="a")
+
+    legacy_mem_manager.create_schema()
+
+    assert [r["token"] for r in
+            legacy_mem_manager.load_parked_writes(("pending",))] == ["a"]
+
+
+def test_parked_write_status_check_rejects_a_bogus_state():
+    """The CHECK constraint is the schema's own guard against a typo'd status
+    silently creating a park state nothing reconciles."""
+    manager = MemoryManager(db_path=":memory:")
+    manager.create_schema()
+    import sqlite3
+
+    try:
+        _insert_park(manager, token="a")
+        with pytest.raises(sqlite3.IntegrityError):
+            conn = manager._get_connection()
+            conn.execute("UPDATE Parked_Writes SET status = 'whatever' "
+                         "WHERE token = 'a'")
+    finally:
+        manager.close()
+
+
+def test_finalize_rejects_a_non_terminal_status():
+    manager = MemoryManager(db_path=":memory:")
+    manager.create_schema()
+    try:
+        _insert_park(manager, token="a")
+        with pytest.raises(ValueError, match="terminal"):
+            manager.finalize_parked_write("a", "pending")
+    finally:
+        manager.close()
+
+
+def test_resolved_lookup_matches_on_arguments_not_just_tool_name():
+    """Two calls to the same tool with different arguments are different
+    actions — collapsing them would suppress a legitimate second write."""
+    manager = MemoryManager(db_path=":memory:")
+    manager.create_schema()
+    try:
+        _insert_park(manager, token="a", args={"ticket": 1})
+        manager.claim_parked_write("a")
+        manager.finalize_parked_write("a", "resolved", "approved", now=2000.0)
+
+        same = MemoryManager.parked_write_identity(
+            "update_ticket", json.dumps({"ticket": 1}, sort_keys=True))
+        other = MemoryManager.parked_write_identity(
+            "update_ticket", json.dumps({"ticket": 2}, sort_keys=True))
+
+        assert manager.find_resolved_parked_write(
+            "u", "p", same, 0.0, ("approved",)) is not None
+        assert manager.find_resolved_parked_write(
+            "u", "p", other, 0.0, ("approved",)) is None
+    finally:
+        manager.close()

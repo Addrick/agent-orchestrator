@@ -19,7 +19,7 @@ If neither matches, the message is ignored (unless in an ambient logging channel
 2. After the reply, the bot posts one message per proposed action with checkmark/X reactions
 3. React to approve or deny **any** of them, in any order — they are independent
 4. Each decision executes (or refuses) that one action, then the persona reports what happened
-5. Timeout: 24 hours, and only while the bot stays up (pending approvals are in memory, so a restart drops them)
+5. Timeout: 24 hours, and it survives a restart of the bot
 
 A turn can therefore end with several proposals waiting at once. Approving one does
 not touch the others, and answering the third before the first is fine. The
@@ -393,7 +393,7 @@ Determines the autonomy level for a persona's tool-use capabilities.
 | Mode | Behavior |
 |------|----------|
 | **AUTONOMOUS** | **Read-only** tools execute immediately. **Write tools still require audit** (see [Tool Security](#tool-security) below). The user sees the final response after all automated steps. |
-| **CONFIRM** | Standard mode. All write tools are presented for approval. Provides a consistent point of review for all state-changing actions. On Discord, approval uses reaction buttons; proposals wait up to 24 hours (or until restart) and are answered independently. |
+| **CONFIRM** | Standard mode. All write tools are presented for approval. Provides a consistent point of review for all state-changing actions. On Discord, approval uses reaction buttons; proposals wait up to 24 hours, survive a restart, and are answered independently. |
 
 ## Tool Security
 
@@ -433,9 +433,29 @@ Once you have answered a proposal it is no longer pending, so a persona can
 legitimately propose the same action again later — if you denied a write and then
 ask for it directly, it reaches you again rather than being silently swallowed.
 
-**Approvals do not survive a restart.** Pending proposals live in memory only. If
-the bot restarts, anything unanswered is gone and must be re-requested — which is
-why the 24-hour window is a ceiling, not a promise.
+**Approvals survive a restart (DP-319).** Pending proposals are stored on disk, so
+the 24-hour window is the real deadline rather than a ceiling capped by how long
+the bot happened to stay up. Three details worth knowing:
+
+- *The portal recovers on its own.* Reloading a conversation re-renders every
+  proposal still waiting, with its approve/deny bar intact.
+- *Discord re-posts on your next message.* Reaction buttons live on Discord
+  messages the restarted bot no longer recognizes, so the old checkmarks go dead.
+  The next time you talk to that persona in that channel, anything still pending
+  is posted again with fresh buttons. Answer the new message, not the old one.
+- *An approval interrupted mid-flight is not retried.* If the bot dies in the
+  seconds between your click and the action running, it will not guess. The
+  proposal is closed as "interrupted", the persona is told the outcome is unknown,
+  and it checks the current state before offering to do it again — because the
+  alternative is running an irreversible action twice.
+
+**One approval, one execution.** Approving a proposal runs its action exactly
+once. If the persona re-proposes the same action while reporting on the one you
+just approved — which is when it is most likely to, since it is re-reading its own
+work — you are not given a second button for it; it is told the action already ran
+and what the outcome was. Asking for the same action again later is still allowed:
+after about fifteen minutes it counts as a fresh request, and a *denied* action can
+be re-proposed immediately, since nothing happened the first time.
 
 **Gated actions stay in the model's memory (DP-296).** A persona remembers the tool calls it made and the writes it proposed, even when the turn did not finish cleanly — a proposal you approved, denied, or simply never answered, a turn that died on a provider error, or one that hit the tool-iteration cap. Previously only turns that ended with the model writing text carried their tool calls forward, so gated actions were invisible on the next turn: ask "did you see the error you got?" after a parked proposal and the persona had no record of ever calling anything, and would re-propose or invent an answer. Unfinished calls are recorded as *not executed* with a reason (`awaiting_approval`, `denied`, `error`), so a persona can tell "I did this" from "I asked to do this and it didn't happen" and stops re-proposing denied actions. This holds for regenerated turns too: retrying a reply that then proposes a write records the proposal against the regenerated message, without disturbing the text that message already shows or the version history behind it.
 

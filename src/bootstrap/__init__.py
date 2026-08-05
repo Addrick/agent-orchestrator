@@ -107,7 +107,7 @@ def create_chat_system(
     )
     personas, system_persona_names = load_all_personas(user_personas)
     tool_manager = build_tool_manager(memory_manager, personas)
-    return ChatSystem(
+    chat_system = ChatSystem(
         memory_manager=memory_manager,
         text_engine=text_engine,
         embedding_service=embedding_service,
@@ -116,3 +116,15 @@ def create_chat_system(
         tool_manager=tool_manager,
         models_available=get_model_list() or {},
     )
+    # DP-319: reinstate gated writes that outlived the last process, expire the
+    # ones whose TTL passed while it was down, and close out any whose decision
+    # was in flight when it died.
+    #
+    # In the composition root rather than in `main`, for the same reason
+    # `register_credentials` is: an entrypoint that assembles a ChatSystem and
+    # forgets this step comes up with an empty pending set and durable rows
+    # nothing will ever resolve — the operator's affordance is on screen and
+    # answers "no such pending action". A durable store nobody reloads is worse
+    # than no durable store, because it looks like it works.
+    chat_system.confirmations.rebuild_from_store()
+    return chat_system

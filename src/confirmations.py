@@ -19,13 +19,16 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from config.global_config import PENDING_ACTION_TTL
+from config.global_config import (
+    PARK_REEXECUTION_GUARD_WINDOW, PARK_ROW_RETENTION, PENDING_ACTION_TTL,
+)
 from src.memory.memory_manager import MemoryManager
 from src.security.scrubber import get_scrubber
 from src.tools.definitions import get_tool_capabilities
 from src.tools.tool_loop import (
     PARK_STATUS_APPROVED, PARK_STATUS_AWAITING, PARK_STATUS_DENIED,
-    PARK_STATUS_EXPIRED, PARK_STATUS_FAILED,
+    PARK_STATUS_EXPIRED, PARK_STATUS_FAILED, PARK_STATUS_INTERRUPTED,
+    write_call_identity,
 )
 from src.tools.tool_manager import ToolManager
 
@@ -39,6 +42,16 @@ ConversationKey = Tuple[str, str]
 # recoverable tool failure and invites a retry.
 DENIAL_INSTRUCTION = (
     "Tool call denied by operator. Wait for corrections or further instruction."
+)
+
+# The same shape for a park whose resolution was cut short by a restart. It says
+# "unknown", not "failed", on purpose: a bare failure invites the retry every
+# other `error` in this loop invites, and here a retry is a possible second
+# execution of an irreversible action.
+INTERRUPTED_INSTRUCTION = (
+    "The service restarted while this action was being decided, so whether it "
+    "ran is unknown. Do NOT assume either outcome — check the current state "
+    "before proposing it again."
 )
 
 
@@ -83,6 +96,36 @@ class ParkedWrite:
     def call_id(self) -> Optional[str]:
         cid = self.write_call.get("id")
         return str(cid) if cid is not None else None
+
+    @property
+    def identity_hash(self) -> str:
+        """Storage form of this call's duplicate-detection identity."""
+        name, args = write_call_identity(self.write_call)
+        return MemoryManager.parked_write_identity(name, args)
+
+    @classmethod
+    def from_row(cls, row: Dict[str, Any]) -> "ParkedWrite":
+        """Rebuild a park from its durable row (DP-319 restart path).
+
+        `duplicate_refs` comes back from JSON as lists, not tuples — converted
+        here because `_patch_one` unpacks them positionally and a silent shape
+        drift would only surface as an unpatched history entry hours later.
+        """
+        refs = row.get("duplicate_refs") or []
+        return cls(
+            token=str(row["token"]),
+            write_call=row.get("write_call") or {},
+            audit_info=row.get("audit_info") or {},
+            confirmation_text=row.get("confirmation_text") or "",
+            user_identifier=str(row["user_identifier"]),
+            persona_name=str(row["persona_name"]),
+            channel=row.get("channel") or "",
+            server_id=row.get("server_id"),
+            turn_tainted=bool(row.get("turn_tainted")),
+            parked_assistant_id=row.get("parked_assistant_id"),
+            duplicate_refs=[(int(r[0]), str(r[1])) for r in refs if len(r) == 2],
+            created_at=float(row["created_at"]),
+        )
 
 
 @dataclass
@@ -158,6 +201,7 @@ class ConfirmationManager:
         self._sweep_off_thread()
         self.pending[parked.token] = parked
         self._by_key.setdefault(parked.key, []).append(parked.token)
+        self._persist_new(parked)
         self.memory_manager.log_audit_event(
             event_type="audit_parked",
             operator_id=parked.user_identifier,
@@ -181,12 +225,22 @@ class ConfirmationManager:
             tokens.remove(token)
             if not tokens:
                 self._by_key.pop(parked.key, None)
+        # DP-319: mark the durable row claimed. The in-memory pop above is
+        # still the authority within this process — the DB claim is what stops
+        # a park that survived a restart being resolved twice, and what tells a
+        # later boot that a decision was in flight when the process died.
+        self.memory_manager.claim_parked_write(token)
         return parked
 
     def restore(self, parked: ParkedWrite) -> None:
         """Put a taken park back (a claim that turned out to be invalid)."""
         self.pending[parked.token] = parked
         self._by_key.setdefault(parked.key, []).append(parked.token)
+        if not self.memory_manager.release_parked_write(parked.token):
+            # The row is gone or already terminal, so the restored in-memory
+            # park would outlive its durable record and vanish on the next
+            # restart. Re-insert rather than leave the two stores disagreeing.
+            self._persist_new(parked)
 
     def list_for(self, user_identifier: str,
                  persona_name: str) -> List[ParkedWrite]:
@@ -213,6 +267,167 @@ class ConfirmationManager:
         deliberate, spaced approvals produce one each.
         """
         return self._queued.pop(key, [])
+
+    # ---- durability (DP-319) ---------------------------------------------
+    #
+    # The in-memory structures above stay the live index: `take` must remain a
+    # pure synchronous pop to keep its atomicity, and the per-conversation locks
+    # cannot be persisted at all. The DB is written through on every mutation
+    # and read back once, at boot. Single-process by assumption — a second
+    # process would need the DB to become the authority, and the locks to move
+    # with it.
+
+    def _persist_new(self, parked: ParkedWrite) -> None:
+        """Write-through for a park entering (or re-entering) the pending set."""
+        self.memory_manager.insert_parked_write(
+            token=parked.token,
+            created_at=parked.created_at,
+            user_identifier=parked.user_identifier,
+            persona_name=parked.persona_name,
+            channel=parked.channel,
+            server_id=parked.server_id,
+            write_call=parked.write_call,
+            call_identity=parked.identity_hash,
+            audit_info=parked.audit_info,
+            confirmation_text=parked.confirmation_text,
+            turn_tainted=parked.turn_tainted,
+            parked_assistant_id=parked.parked_assistant_id,
+            duplicate_refs=[list(r) for r in parked.duplicate_refs],
+        )
+
+    def note_duplicate_ref(self, parked: ParkedWrite,
+                           row_id: int, call_id: str) -> None:
+        """Record a suppressed duplicate against a live park, durably.
+
+        The caller used to append straight to `parked.duplicate_refs`, which
+        after DP-319 would leave the durable row stale: a restart would reload
+        the park without the reference, and the duplicate's history entry would
+        keep claiming the action is still awaiting an operator forever.
+        """
+        parked.duplicate_refs.append((row_id, call_id))
+        self.memory_manager.update_parked_write_refs(
+            parked.token, duplicate_refs=[list(r) for r in parked.duplicate_refs],
+        )
+
+    def already_resolved(self, key: ConversationKey,
+                         write_call: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """The recently-EXECUTED park matching this proposal, if there is one.
+
+        Closes the hole the in-memory store could not: during a continuation the
+        park being resolved has already been `take`n, so `list_for` no longer
+        contains it and the pending-duplicate guard is blind at exactly the
+        moment the model is most likely to re-propose — it is re-reading its own
+        tool span. A fresh park would then be created, and approving it would run
+        the write a SECOND time.
+
+        Narrow on both axes on purpose. Only `PARK_STATUS_APPROVED` counts (the
+        tool actually ran); a denial executed nothing, and DP-297 deliberately
+        supports the operator asking for a denied action again. And only inside
+        `PARK_REEXECUTION_GUARD_WINDOW`, sized for the continuation turn rather
+        than for the park's whole 24h TTL — a day-wide guard would silently
+        refuse a legitimate repeat of the same action.
+        """
+        name, args = write_call_identity(write_call)
+        # Typed `Any` deliberately: the isinstance check below is dead code
+        # against the declared return type, and it is kept anyway because what
+        # it guards is a write the operator never gets offered. A truthy
+        # non-row here (a test double, a swapped store) would suppress every
+        # park silently, which looks exactly like the gate working.
+        row: Any = self.memory_manager.find_resolved_parked_write(
+            key[0], key[1], MemoryManager.parked_write_identity(name, args),
+            time.time() - PARK_REEXECUTION_GUARD_WINDOW,
+            (PARK_STATUS_APPROVED,),
+        )
+        if row is None:
+            return None
+        if not isinstance(row, dict):
+            # A non-row here would suppress the park — and a suppressed park is
+            # a write the operator is never offered, i.e. this guard silently
+            # disabling the gate's only affordance. Refuse to act on a shape
+            # the store does not promise.
+            logger.warning(
+                "Resolved-park lookup returned %s, not a row; ignoring it",
+                type(row).__name__,
+            )
+            return None
+        return row
+
+    def rebuild_from_store(self) -> Dict[str, int]:
+        """Reload durable parks at boot; returns a counts summary.
+
+        Three populations, three different answers:
+
+        - `pending` and still inside its TTL — reinstated, resolvable exactly as
+          before the restart.
+        - `pending` and past its TTL — expired properly, which means patching the
+          history entry and writing the audit row. This is the half the lazy
+          sweep can never do after a restart: `sweep_expired` only walks
+          `self.pending`, so a park it never loaded is a park it never expires,
+          and the model would read `awaiting_human_approval` on every subsequent
+          turn and wait forever for a result no code path can produce.
+        - `claimed` — a decision was in flight when the process died. NOT
+          re-executed: the write may or may not have run, and re-running an
+          irreversible call on a guess is worse than either outcome. Terminated
+          as `interrupted_by_restart` so the model re-checks state instead.
+        """
+        counts = {"restored": 0, "expired": 0, "interrupted": 0}
+        try:
+            rows = self.memory_manager.load_parked_writes(("pending", "claimed"))
+        except Exception as e:
+            logger.error("Could not reload parked writes at boot: %s", e,
+                         exc_info=True)
+            return counts
+
+        now = time.time()
+        for row in rows:
+            try:
+                parked = ParkedWrite.from_row(row)
+            except (KeyError, TypeError, ValueError) as e:
+                logger.error("Skipping unreadable parked write row %s: %s",
+                             row.get("token"), e)
+                continue
+
+            if row.get("status") == "claimed":
+                self._terminate_interrupted(parked)
+                counts["interrupted"] += 1
+            elif self.is_expired(parked, now):
+                self.expire(parked, "Expired while the process was down")
+                counts["expired"] += 1
+            else:
+                self.pending[parked.token] = parked
+                self._by_key.setdefault(parked.key, []).append(parked.token)
+                counts["restored"] += 1
+
+        if any(counts.values()):
+            logger.info(
+                "Parked writes reloaded: %d restored, %d expired, %d "
+                "interrupted by the restart", counts["restored"],
+                counts["expired"], counts["interrupted"],
+            )
+        try:
+            self.memory_manager.purge_parked_writes(now - PARK_ROW_RETENTION)
+        except Exception as e:
+            logger.warning("Could not purge old parked-write rows: %s", e)
+        return counts
+
+    def _terminate_interrupted(self, parked: ParkedWrite) -> None:
+        """Close out a park whose resolution died with the process."""
+        self.patch_parked_entry(
+            parked, PARK_STATUS_INTERRUPTED,
+            {"error": INTERRUPTED_INSTRUCTION},
+        )
+        self.memory_manager.finalize_parked_write(
+            parked.token, "interrupted", "Process restarted mid-resolution",
+        )
+        self.memory_manager.log_audit_event(
+            event_type="audit_park_interrupted",
+            operator_id=parked.user_identifier,
+            prior_state="claimed",
+            new_state=PARK_STATUS_INTERRUPTED,
+            reason="Process restarted after the decision was claimed; the "
+                   "write was NOT re-executed",
+            metadata=parked.audit_info,
+        )
 
     # ---- resolution ------------------------------------------------------
 
@@ -295,6 +510,13 @@ class ConfirmationManager:
         )
         decision.patched = self.patch_parked_entry(
             park, decision.status, decision.result,
+        )
+        # Terminal, durably: the row survives (the duplicate guard reads it to
+        # recognize a re-proposal of an action that already ran) but its payload
+        # columns are erased, so the arguments stop living on disk the moment
+        # they stop being needed to execute.
+        self.memory_manager.finalize_parked_write(
+            park.token, "resolved", decision.status,
         )
         if not decision.patched:
             logger.error(
@@ -454,6 +676,9 @@ class ConfirmationManager:
         """
         self.patch_parked_entry(parked, PARK_STATUS_EXPIRED,
                                 {"reason": "expired before review"})
+        self.memory_manager.finalize_parked_write(
+            parked.token, "expired", reason,
+        )
         self.memory_manager.log_audit_event(
             event_type="audit_park_expired",
             operator_id=parked.user_identifier,
@@ -477,4 +702,5 @@ def new_token() -> str:
 __all__ = [
     "ConfirmationManager", "ParkedWrite", "Decision", "new_token",
     "PARK_STATUS_AWAITING", "PARK_STATUS_FAILED", "DENIAL_INSTRUCTION",
+    "INTERRUPTED_INSTRUCTION",
 ]

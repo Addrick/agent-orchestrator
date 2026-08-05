@@ -630,6 +630,43 @@ async def test_reproposal_after_resolution_parks_again(mocked_chat_system):
     assert parks[0].token != token, "a new decision needs a new token"
 
 
+@pytest.mark.asyncio
+async def test_reproposal_during_the_continuation_cannot_double_execute(
+        mocked_chat_system):
+    """DP-319: the write already RAN, so a second park is a second execution.
+
+    This is the hole `pending_lookup` structurally cannot cover. The
+    continuation begins after `take()` has removed the park, so both scopes the
+    pending guard consults are empty — and the continuation is precisely when
+    the model re-proposes, because it is re-reading its own tool span. Before
+    DP-319 a fresh park appeared here and approving it ran the irreversible
+    write a second time.
+    """
+    chat_system, _ = mocked_chat_system
+    _confirm_persona(chat_system)
+    executed = _recording_tool_manager(chat_system)
+
+    write = {"id": "w1", "name": "create_ticket",
+             "arguments": {"title": "t", "body": "b"}}
+    (token,) = await _park_writes(
+        chat_system, user="u11", channel="c11", write_calls=[write],
+    )
+
+    # The continuation re-proposes the identical action before summarizing.
+    _set_engine(chat_system, [
+        _calls({"id": "w2", "name": "create_ticket",
+                "arguments": {"title": "t", "body": "b"}}),
+        _text("Done."),
+    ])
+    await _drain(chat_system.stream_resolve_park(
+        "u11", "test_persona", token, approved=True,
+    ))
+
+    assert executed == ["create_ticket"], "the write must run exactly once"
+    assert chat_system.confirmations.list_for("u11", "test_persona") == [], \
+        "the re-proposal must not leave a second approvable affordance"
+
+
 def _tool_entries(mem_manager):
     """Every sealed tool entry across the conversation, keyed by call id."""
     cursor = mem_manager._get_connection().cursor()

@@ -464,3 +464,278 @@ async def test_a_real_tool_manager_records_a_successful_write_as_approved(
 
     assert decision.ok is True
     assert decision.status == "approved"
+
+# ---- DP-319: durability ---------------------------------------------------
+#
+# The property under test throughout this section is the one DP-297 could not
+# offer: a park outlives the process. Every test here therefore either inspects
+# the durable row directly or rebuilds a SECOND manager over the same database,
+# because a test that only exercises `manager` proves nothing about a restart —
+# the in-memory dict passes it either way.
+
+def _fresh_manager(mem_manager):
+    """A manager with EMPTY in-memory state over the same database.
+
+    This is the restart: same DB, no dict, no indexes, no locks.
+    """
+    tm = MagicMock()
+    tm.execute_tool = AsyncMock(return_value={"ok": True})
+    mgr = ConfirmationManager(lambda: tm, mem_manager)
+    mgr._tool_manager = tm
+    return mgr
+
+
+def _park_row(mem_manager, token):
+    conn = mem_manager._get_connection()
+    return conn.execute(
+        "SELECT * FROM Parked_Writes WHERE token = ?", (token,)).fetchone()
+
+
+def test_park_writes_a_durable_row(manager, mem_manager):
+    manager.park(_park(token="a", row_id=7))
+
+    row = _park_row(mem_manager, "a")
+    assert row is not None, "the park must exist outside the process"
+    assert row["status"] == "pending"
+    assert row["parked_assistant_id"] == 7
+    assert json.loads(row["write_call"])["name"] == "update_ticket"
+
+
+def test_take_claims_the_durable_row(manager, mem_manager):
+    manager.park(_park(token="a"))
+    manager.take("a")
+
+    assert _park_row(mem_manager, "a")["status"] == "claimed"
+
+
+def test_restore_releases_the_durable_row(manager, mem_manager):
+    manager.park(_park(token="a"))
+    manager.restore(manager.take("a"))
+
+    assert _park_row(mem_manager, "a")["status"] == "pending"
+
+
+def test_a_park_survives_a_restart(manager, mem_manager):
+    """The whole ticket, in one test: park, lose the process, resolve it.
+
+    `_fresh_manager` shares only the database, so everything the original
+    manager held in memory is gone — which is what a restart does.
+    """
+    manager.park(_park(token="a", row_id=3))
+
+    revived = _fresh_manager(mem_manager)
+    assert revived.list_for("u", "p") == [], "nothing is loaded until rebuild"
+
+    revived.rebuild_from_store()
+
+    parks = revived.list_for("u", "p")
+    assert [p.token for p in parks] == ["a"]
+    assert parks[0].parked_assistant_id == 3, \
+        "without the row id the revived park cannot patch its history entry"
+    assert parks[0].write_call["arguments"] == {"x": 1}
+    assert revived.take("a") is not None, "the revived park must be resolvable"
+
+
+def test_a_restart_preserves_duplicate_refs(manager, mem_manager):
+    """A suppressed duplicate's pointer has to survive too.
+
+    It is the only thing that will ever correct that duplicate's "still
+    awaiting the operator" entry, so losing it on restart leaves history
+    asserting a decided action is queued, permanently.
+    """
+    parked = _park(token="a")
+    manager.park(parked)
+    manager.note_duplicate_ref(parked, 41, "c-dup")
+
+    revived = _fresh_manager(mem_manager)
+    revived.rebuild_from_store()
+
+    assert revived.list_for("u", "p")[0].duplicate_refs == [(41, "c-dup")]
+
+
+def test_restart_expires_a_park_whose_ttl_passed_while_down(
+        manager, mem_manager):
+    """The orphaned-`awaiting_human_approval` bug, from the PR #189 review.
+
+    The lazy sweep only walks `self.pending`, so a park a restart never loaded
+    is a park it never expires: the DB row keeps saying "awaiting", and the
+    model reads that every turn and waits forever for a result no code path can
+    produce.
+    """
+    row_id = _row_with_awaiting_entries(mem_manager, ["c1"])
+    manager.park(_park(token="tok-c1", call_id="c1", row_id=row_id,
+                       created_at=time.time() - PENDING_ACTION_TTL - 60))
+
+    revived = _fresh_manager(mem_manager)
+    counts = revived.rebuild_from_store()
+
+    assert counts["expired"] == 1
+    assert revived.list_for("u", "p") == []
+    entry = json.loads(json.loads(
+        mem_manager.get_tool_context(row_id))[1]["content"])
+    assert entry["status"] == "expired", \
+        "history must stop claiming the write is awaiting an operator"
+    assert _park_row(mem_manager, "tok-c1")["status"] == "expired"
+
+
+def test_restart_does_not_re_execute_a_claimed_park(manager, mem_manager):
+    """A decision in flight when the process died is NOT retried.
+
+    The write may already have run; a gated write is gated because it is
+    irreversible, so re-running it on a guess is the failure this subsystem
+    exists to prevent. The park is terminated as `interrupted_by_restart` and
+    the model is told to re-check state instead.
+    """
+    row_id = _row_with_awaiting_entries(mem_manager, ["c1"])
+    manager.park(_park(token="tok-c1", call_id="c1", row_id=row_id))
+    manager.take("tok-c1")  # claimed — the process dies here
+
+    revived = _fresh_manager(mem_manager)
+    counts = revived.rebuild_from_store()
+
+    assert counts["interrupted"] == 1
+    revived._tool_manager.execute_tool.assert_not_called()
+    assert revived.list_for("u", "p") == []
+    entry = json.loads(json.loads(
+        mem_manager.get_tool_context(row_id))[1]["content"])
+    assert entry["status"] == "interrupted_by_restart"
+    assert "unknown" in entry["result"]["error"], \
+        "the model must not read this as a plain failure and retry"
+
+    conn = mem_manager._get_connection()
+    assert conn.execute(
+        "SELECT COUNT(*) FROM Audit_Log "
+        "WHERE event_type='audit_park_interrupted'").fetchone()[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_resolving_erases_the_payload_but_keeps_the_row(
+        manager, mem_manager):
+    """A decided park keeps its identity hash and loses its arguments.
+
+    The row survives because the re-execution guard reads it; the arguments do
+    not, because nothing needs them once the write has run and this table sits
+    on disk for a week.
+    """
+    row_id = _row_with_awaiting_entries(mem_manager, ["c1"])
+    parked = _park(token="tok-c1", call_id="c1", row_id=row_id)
+    manager.park(parked)
+    manager.take("tok-c1")
+
+    await manager.apply(Decision(park=parked, approved=True))
+
+    row = _park_row(mem_manager, "tok-c1")
+    assert row["status"] == "resolved"
+    assert row["resolution"] == "approved"
+    assert row["write_call"] is None, "arguments must not outlive the decision"
+    assert row["audit_info"] is None
+    assert row["call_identity"], "the identity hash is what the guard needs"
+
+
+def test_expiry_finalizes_the_durable_row(manager, mem_manager):
+    manager.park(_park(token="a",
+                       created_at=time.time() - PENDING_ACTION_TTL - 60))
+    manager.sweep_expired()
+
+    row = _park_row(mem_manager, "a")
+    assert row["status"] == "expired"
+    assert row["write_call"] is None
+
+
+def test_purge_drops_only_old_terminal_rows(manager, mem_manager):
+    manager.park(_park(token="live"))
+    manager.park(_park(token="old"))
+    manager.take("old")
+    mem_manager.finalize_parked_write(
+        "old", "resolved", "approved", now=time.time() - 1000)
+
+    assert mem_manager.purge_parked_writes(time.time() - 500) == 1
+    assert _park_row(mem_manager, "old") is None
+    assert _park_row(mem_manager, "live") is not None, \
+        "a pending park has no resolved_at and must never be purged"
+
+
+def test_an_unserializable_write_call_is_not_persisted(manager, mem_manager):
+    """Better in-memory-only than stored lossily.
+
+    The stored payload is what an approved write executes with after a restart,
+    so a `default=str` fallback would mean running the tool with the repr of an
+    argument instead of the argument itself.
+    """
+    parked = _park(token="a")
+    parked.write_call = {"id": "c1", "name": "update_ticket",
+                         "arguments": {"blob": object()}}
+    manager.park(parked)
+
+    assert _park_row(mem_manager, "a") is None
+    assert [p.token for p in manager.list_for("u", "p")] == ["a"], \
+        "it still works for this process; only durability is given up"
+
+
+# ---- DP-319: the re-execution guard (PR #189 review finding B) -------------
+
+@pytest.mark.asyncio
+async def test_an_executed_write_is_not_parkable_again(manager, mem_manager):
+    """The double-execution path this ticket closes.
+
+    During the continuation the park has already been taken, so `list_for` is
+    blind to it — and that turn is exactly when the model re-proposes, since it
+    is re-reading its own tool span.
+    """
+    parked = _park(token="a", call_id="c1")
+    manager.park(parked)
+    manager.take("a")
+    await manager.apply(Decision(park=parked, approved=True))
+
+    assert manager.list_for("u", "p") == [], "the park is gone from the index"
+    hit = manager.already_resolved(("u", "p"), dict(parked.write_call, id="c2"))
+    assert hit is not None and hit["resolution"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_a_denied_write_may_be_proposed_again(manager, mem_manager):
+    """Nothing ran, so a second proposal is a new request, not a repeat.
+
+    DP-297 supports this explicitly: an operator who denies a write and then
+    asks for it on purpose must be able to reach it.
+    """
+    parked = _park(token="a", call_id="c1")
+    manager.park(parked)
+    manager.take("a")
+    await manager.apply(Decision(park=parked, approved=False))
+
+    assert manager.already_resolved(("u", "p"), dict(parked.write_call)) is None
+
+
+@pytest.mark.asyncio
+async def test_the_reexecution_guard_expires(manager, mem_manager):
+    """Sized for the continuation turn, not for the park's whole TTL.
+
+    A day-wide guard would silently refuse a legitimate repeat of the same
+    action hours later.
+    """
+    from config.global_config import PARK_REEXECUTION_GUARD_WINDOW
+
+    parked = _park(token="a", call_id="c1")
+    manager.park(parked)
+    manager.take("a")
+    await manager.apply(Decision(park=parked, approved=True))
+
+    conn = mem_manager._get_connection()
+    conn.execute("UPDATE Parked_Writes SET resolved_at = ? WHERE token = 'a'",
+                 (time.time() - PARK_REEXECUTION_GUARD_WINDOW - 60,))
+    conn.commit()
+
+    assert manager.already_resolved(("u", "p"), dict(parked.write_call)) is None
+
+
+@pytest.mark.asyncio
+async def test_the_guard_is_scoped_to_one_conversation(manager, mem_manager):
+    """Another operator's decision must not suppress this one's proposal."""
+    parked = _park(token="a", user="alice", call_id="c1")
+    manager.park(parked)
+    manager.take("a")
+    await manager.apply(Decision(park=parked, approved=True))
+
+    assert manager.already_resolved(
+        ("bob", "p"), dict(parked.write_call)) is None

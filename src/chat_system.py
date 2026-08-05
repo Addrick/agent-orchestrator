@@ -441,6 +441,21 @@ class ChatSystem:
                         return park.token
                 return None
 
+            def _already_resolved(
+                    write_call: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+                """The decided twin of this proposal, if there is a recent one.
+
+                Covers what `_already_pending` structurally cannot: on a
+                continuation turn the park being resolved has already been
+                taken, so it is in neither scope above — and that is the turn
+                where the model is re-reading its own tool span and most likely
+                to re-propose. Durable since DP-319, which is why this lookup
+                can exist at all.
+                """
+                return self.confirmations.already_resolved(
+                    (ctx.user_identifier, ctx.persona_name), write_call,
+                )
+
             # Construct per-call so tests that swap `chat_system.text_engine`
             # post-init still see the new engine; ToolLoop is stateless.
             tool_loop = ToolLoop(self.text_engine, self.tool_manager)
@@ -455,6 +470,7 @@ class ChatSystem:
                     turn_tainted=ctx.turn_tainted,
                     initial_taint_sources=ctx.taint_sources,
                     pending_lookup=_already_pending,
+                    resolved_lookup=_already_resolved,
                 ):
                     if isinstance(ev, _ApiPayloadEvent):
                         self.turn_persistence.store_api_request(
@@ -654,7 +670,13 @@ class ChatSystem:
                     "leaving its entry as-is", dup.token,
                 )
                 continue
-            parked.duplicate_refs.append((assistant_id, dup.call_id))
+            # Through the manager, not by appending to the list directly: the
+            # reference has to reach the durable row too, or a restart reloads
+            # the park without it and the duplicate's history entry keeps
+            # claiming the action is still awaiting an operator forever.
+            self.confirmations.note_duplicate_ref(
+                parked, assistant_id, dup.call_id,
+            )
 
     async def stream_response(
             self,

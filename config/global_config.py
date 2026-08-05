@@ -108,10 +108,33 @@ MAX_CACHED_API_REQUESTS = 128
 # is staring at (5 minutes was sized for "answer the prompt in front of you")
 # and became a queue an operator works through later.
 #
-# ⚠️ The store is in-memory, so the effective TTL is min(this, process uptime).
-# A multi-day value here is not a promise the system can keep across a restart —
-# closing that gap is the motivation for the durability follow-up.
+# DP-319 made the store durable (`Parked_Writes`), so this is now the whole
+# deadline rather than min(this, process uptime) as it was under DP-297.
 PENDING_ACTION_TTL = 24 * 60 * 60
+
+# How long a DECIDED park's row is kept after it resolves.
+#
+# Terminal rows are retained for one reason: the duplicate guard has to be able
+# to see that an action already ran, or a re-proposal during the continuation
+# turn creates a second park and approving it executes an irreversible write
+# twice. That need is bounded by the same window a live park has, so this is
+# PENDING_ACTION_TTL plus slack rather than an independent knob — beyond it the
+# rows are only a growing table.
+PARK_ROW_RETENTION = 7 * 24 * 60 * 60
+
+# How long after an APPROVED write actually ran an identical re-proposal is
+# answered with its outcome instead of being parked again.
+#
+# Deliberately short, and deliberately not PENDING_ACTION_TTL. The case being
+# closed is narrow: during the continuation turn the model re-reads its own tool
+# span and re-proposes the write it just got approved, and approving the second
+# park would execute an irreversible action twice. That window is seconds.
+#
+# Making it a day instead would break a legitimate case DP-297 explicitly
+# supports — the operator asking for the same action again on purpose. Denied,
+# failed and expired parks are never suppressed at all, for the same reason:
+# nothing ran, so a second proposal is a new request, not a double execution.
+PARK_REEXECUTION_GUARD_WINDOW = 15 * 60
 
 # DP-118: `ingest_path` agent tool — global kill switch + hash-cache location.
 # Set INGEST_PATH_ENABLED=0 to disable the tool everywhere. Per-persona gating
