@@ -232,7 +232,18 @@ class ConfirmationManager:
                 decision.result = await tool_manager.execute_tool(
                     tool_name, **(park.write_call.get("arguments") or {}),
                 )
-                decision.ok = True
+                # `ok` is "did the tool succeed", NOT "did the call return".
+                # `ToolManager.execute_tool` never raises — it catches every
+                # handler exception and RETURNS `{"error": ...}` — so deriving
+                # `ok` from reaching this line recorded a Zammad 500 that fired
+                # *after* the ticket was created as a plain `approved`.
+                # `PARK_STATUS_FAILED` was therefore unreachable in production,
+                # and with it every consumer keyed off it: the "approved but
+                # FAILED" continuation line, and the `executed_ok` flag in the
+                # audit row. The unit tests missed it because they mock a raise
+                # the real ToolManager cannot emit.
+                decision.ok = not (isinstance(decision.result, dict)
+                                   and "error" in decision.result)
             except Exception as e:
                 logger.error(
                     f"Approved write {tool_name} (token {park.token}) "
