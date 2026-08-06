@@ -1,8 +1,9 @@
 # src/engine/providers/cc.py
 """Claude Code (cc-*) provider (DP-222, extracted DP-244).
 
-Structural parity with the agy route (subprocess-per-call, one-shot, POSIX-only,
-persistent per-persona workspace, dedicated rate limiter), but with a deliberate
+Structural parity with the agy route (subprocess-per-call, one-shot, persistent
+per-persona workspace, dedicated rate limiter — though cc stays POSIX-only while
+its OS sandbox is on, see `ensure_cc_supported`), but with a deliberate
 behavioural divergence: the agy route CLAMPS tools off and round-trips derpr's
 `<tool_call>` text protocol, whereas Claude Code runs its OWN sandboxed tools
 autonomously (`--dangerously-skip-permissions` bounded by the built-in OS

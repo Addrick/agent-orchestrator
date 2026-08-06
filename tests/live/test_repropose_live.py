@@ -20,9 +20,10 @@
 # model-dependent, which is the whole point:
 #        DERPR_REPROPOSE_MODEL=claude-sonnet-5 pytest -m llm_live ... -s
 #
-# ⚠️ agy is POSIX-only (subprocess CLI route, see providers/_subprocess.py), so
-# on Windows these skip. That is a real constraint, not a harness bug: prod the
-# default model from a POSIX box, or name a hosted model via the env var.
+# agy runs on any host with the `agy` CLI, Windows included (DP-324 removed the
+# POSIX-only guard). These probes therefore run wherever the CLI is installed;
+# `agy` not being on PATH surfaces as a spawn failure, which is the honest
+# signal. Name a hosted model via the env var to prod from a box without it.
 #
 # agy also reaches the tool loop through derpr's <tool_call> TEXT protocol
 # rather than a native tool-calling API — it is a clamped text provider. So a
@@ -35,7 +36,6 @@
 import json
 import os
 import random
-import sys
 from typing import Any, Dict, List
 
 import pytest
@@ -48,7 +48,7 @@ from src.memory.memory_manager import MemoryManager
 from src.persona import ExecutionMode, MemoryMode, Persona
 from src.tools.tool_loop import PARK_STATUS_DUPLICATE
 from tests.helpers import make_chat_system
-from tests.live.conftest import LLM_LIVE_MAX_TOKENS, LLM_LIVE_MODEL
+from tests.live.conftest import LLM_LIVE_MAX_TOKENS
 
 pytestmark = pytest.mark.llm_live
 
@@ -68,27 +68,9 @@ PROBE_PROMPT = (
 
 
 def _model_name() -> str:
-    """Default to the agent model (agy). `LLM_LIVE_MODEL` is imported only as
-    the documented hosted alternative — name it via the env var when prodding
-    from a box where agy cannot run."""
+    """Default to the agent model (agy). Set DERPR_REPROPOSE_MODEL to a hosted
+    model to prod from a box that has no `agy` CLI installed."""
     return os.environ.get("DERPR_REPROPOSE_MODEL", DEFAULT_AGENT_MODEL)
-
-
-@pytest.fixture(autouse=True)
-def _requires_posix_for_agy():
-    """agy spawns a CLI through the POSIX-only subprocess route.
-
-    Skipping loudly beats a confusing spawn failure, and beats silently
-    substituting a different model — which model answered is the single most
-    load-bearing fact about any result this file produces.
-    """
-    model = _model_name()
-    if model.startswith("agy") and sys.platform == "win32":
-        pytest.skip(
-            f"{model} is POSIX-only; run these probes from a POSIX box, or set "
-            f"DERPR_REPROPOSE_MODEL to a hosted model "
-            f"(e.g. {LLM_LIVE_MODEL})."
-        )
 
 
 class _TurnReport:

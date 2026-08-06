@@ -404,8 +404,10 @@ AGY_SANDBOX = os.environ.get("AGY_SANDBOX", "True").lower() in ("true", "1", "ye
 # local `claude -p` headless CLI on the user's OAuth/subscription tier, running
 # as an autonomous agent with its OWN sandboxed tools (vs the agy route, which
 # clamps tools off and uses derpr's <tool_call> text protocol). Structural
-# parity with the agy provider: subprocess-per-call, one-shot, POSIX-only,
-# per-persona persistent workspace, dedicated rate limiter.
+# parity with the agy provider: subprocess-per-call, one-shot, per-persona
+# persistent workspace, dedicated rate limiter. Unlike agy (platform-agnostic
+# since DP-324) cc is POSIX-only while CC_SANDBOX is on, since the confinement
+# it depends on is Seatbelt/bubblewrap.
 RATE_LIMIT_CC_RPM = int(os.environ.get("RATE_LIMIT_CC_RPM", "15"))
 
 # Workspace persistence (mirrors the AGY_* knobs). CC_WORKSPACE_DIR is an

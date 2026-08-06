@@ -473,10 +473,6 @@ class TextEngine:
         return agy_provider.parse_agy_tool_call(text)
 
     @staticmethod
-    def _ensure_agy_supported() -> None:
-        agy_provider.ensure_agy_supported()
-
-    @staticmethod
     def _sanitize_agy_workspace_name(persona_name: Optional[str]) -> Optional[str]:
         """Engine seam (DP-244). Shared by agy and cc workspace resolution;
         logic in `providers._subprocess.sanitize_workspace_name`."""
@@ -516,8 +512,8 @@ class TextEngine:
     # Claude Code (cc-*) provider — DP-222
     #
     # Structural parity with the agy route (subprocess-per-call, one-shot,
-    # POSIX-only, persistent per-persona workspace, dedicated rate limiter),
-    # but with a deliberate behavioural divergence: the agy route CLAMPS tools
+    # persistent per-persona workspace, dedicated rate limiter), but with a
+    # deliberate behavioural divergence: the agy route CLAMPS tools
     # off and round-trips derpr's <tool_call> text protocol, whereas Claude
     # Code runs its OWN sandboxed tools autonomously (`--dangerously-skip-
     # permissions` bounded by the built-in OS sandbox). So the cc route ignores
@@ -530,8 +526,9 @@ class TextEngine:
     # Claude Code (cc-*) provider — DP-222, engine seams DP-244.
     #
     # Structural parity with the agy route (subprocess-per-call, one-shot,
-    # POSIX-only, persistent per-persona workspace, dedicated rate limiter), but
-    # cc runs its OWN sandboxed tools autonomously and ignores the engine's
+    # persistent per-persona workspace, dedicated rate limiter), but cc is
+    # POSIX-only while sandboxed (see `ensure_cc_supported`) and runs its OWN
+    # sandboxed tools autonomously, ignoring the engine's
     # `tools` argument (agy clamps tools to the <tool_call> text protocol).
     # Logic lives in providers/cc.py; these are thin delegators (the seams tests
     # call/patch on the engine directly).
