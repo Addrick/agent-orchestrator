@@ -242,10 +242,11 @@ support.
 Each call is executed inside a persistent workspace directory (by default, persona-specific under `data/workspaces/agy_{persona_name}` or fallback to `data/workspaces/agy_global`), preserving `agy` indexing/auth state caches. Persona names are sanitized to a filesystem-safe slug for the directory name, and concurrent calls sharing a workspace are serialized so they can't clobber each other's CLI state. You can configure this behavior in `.env` or `config/global_config.py`:
 - `AGY_PERSISTENT_WORKSPACES` (default `True`): Set to `False` to revert to stateless throwaway temporary directories.
 - `AGY_WORKSPACE_MODE` (default `"persona"`): Set to `"global"` to share a single derpr-wide workspace.
-- `AGY_SANDBOX` (default `True`): Run `agy` under its built-in OS-level sandbox (`--sandbox`; nsjail on Linux, sandbox-exec on macOS). Set to `False` if the sandbox is unavailable in your environment (e.g. a container without the needed privileges).
+- `AGY_SANDBOX` (default `True`): Run `agy` under its built-in OS-level sandbox (`--sandbox`; nsjail on Linux, sandbox-exec on macOS — see the platform note below for Windows). Set to `False` if the sandbox is unavailable in your environment (e.g. a container without the needed privileges).
 
 > **Prompt size.** The `agy` and `cc-*` CLIs take the whole prompt as a single
-> command-line argument, and the OS caps one argument at 128 KiB. A very long
+> command-line argument, and the OS caps that (128 KiB per argument on POSIX;
+> 32767 characters for the entire command line on Windows). A very long
 > conversation (or a single huge tool result) is therefore trimmed before the
 > call: the persona prompt is kept, then whole messages are dropped oldest-first
 > and replaced with an `[...older conversation elided...]` marker. Trimming is
@@ -254,15 +255,19 @@ Each call is executed inside a persistent workspace directory (by default, perso
 > fits, your most recent question is what is kept. The other providers, which
 > send the history over HTTP, are unaffected.
 
-> **Platform: POSIX only.** The `agy` provider works on Linux/macOS (and WSL or
-> Docker). It does **not** work on **native Windows**: `agy` is a TUI that only
-> writes its response to a TTY, while the engine captures `stdout` through a
-> pipe — on Windows that capture comes back empty (agy renders to the console
-> and emits nothing to a non-TTY stdout/file; no flag or env var changes this).
-> The engine therefore refuses the `agy` route on native Windows with a clear
-> error rather than returning silent empty responses. To test the `agy` route
-> from a Windows dev box, run the engine on the POSIX host (e.g. the Docker
-> deployment) or under WSL, where it behaves normally.
+> **Platform: any host with the `agy` CLI.** Linux, macOS, WSL, Docker **and
+> native Windows** all work. Windows used to be refused: older `agy` builds only
+> wrote the response to a TTY, so the engine's piped capture came back empty.
+> `agy` 1.1.9 writes to a pipe on Windows too, so that guard is gone. Two
+> practical differences on Windows:
+> - **Less prompt fits.** Windows caps the *whole* command line at 32767
+>   characters (POSIX caps each argument at 128 KiB), so the prompt budget is
+>   20 KiB there instead of 96 KiB — long conversations are trimmed sooner, by
+>   the same oldest-first rule described above.
+> - **Sandbox enforcement is unverified.** `agy --sandbox` is accepted and the
+>   call succeeds, but the documented sandbox backends (nsjail, sandbox-exec) are
+>   POSIX; treat the sandbox as defense-in-depth you should not rely on when
+>   running the engine on Windows.
 
 Tools work via an **inline protocol**: the engine injects the tool descriptions
 into the prompt and asks the model to emit a `<tool_call>{…}</tool_call>` block to

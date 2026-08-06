@@ -1,11 +1,18 @@
 # src/engine/providers/agy.py
 """Antigravity (agy) provider (DP-244).
 
-agy is a TUI CLI invoked as a subprocess (POSIX-only — see `ensure_agy_supported`)
-whose entire response arrives at process exit; there is no token stream to make
-canonical, so the route stays one-shot and is adapted into the unified event
-shape via `_events_from_one_shot`. agy CLAMPS tools off and round-trips derpr's
-`<tool_call>` text protocol (contrast cc.py, which runs its own tools).
+agy is a TUI CLI invoked as a subprocess whose entire response arrives at process
+exit; there is no token stream to make canonical, so the route stays one-shot and
+is adapted into the unified event shape via `_events_from_one_shot`. agy CLAMPS
+tools off and round-trips derpr's `<tool_call>` text protocol (contrast cc.py,
+which runs its own tools).
+
+DP-324: the route used to be POSIX-only. `agy --print` wrote its response only to
+a TTY on native Windows, so derpr's piped capture came back empty and the engine
+refused the route outright. agy >= 1.1.9 writes to a pipe on Windows too
+(verified against 1.1.9 on Windows 10: `-p` and `--sandbox --p` both return the
+text on a piped stdout), so the guard is gone and the platform differences that
+remain are handled in `_subprocess.py` (command-line budget, process teardown).
 
 The logic bodies live here; ``TextEngine`` keeps thin delegators for every method
 (the seams the driver routes through and the existing tests call/patch directly).
@@ -85,23 +92,6 @@ def parse_agy_tool_call(text: str) -> Optional[List[Dict[str, Any]]]:
     }]
 
 
-def ensure_agy_supported() -> None:
-    """agy is a TUI CLI that only emits its response to a TTY. DERPR captures
-    stdout via a pipe — fine on POSIX, but on native Windows agy renders to the
-    console and writes *nothing* to a non-TTY stdout/file, so the route silently
-    returns empty. Fail loudly instead and point at the docs; run the engine on
-    the POSIX host (Linux/macOS/WSL/Docker) to use agy.
-    """
-    if os.name != "posix":
-        raise LLMCommunicationError(
-            "The 'agy' provider is unsupported on native Windows: agy only "
-            "writes its response to a TTY, but DERPR captures stdout via a "
-            "pipe, so the response is always empty. Run the engine on the "
-            "POSIX host (Linux/macOS/WSL/Docker) to use agy. "
-            "See docs/user_guide.md (Antigravity / agy provider)."
-        )
-
-
 def resolve_agy_workspace(engine: "TextEngine", persona_name: Optional[str]) -> Optional[str]:
     """Returns the persistent workspace dir for this call, or None when
     persistence is disabled (caller uses a throwaway temp dir). Does not create
@@ -132,8 +122,6 @@ def remove_agy_cli_link_targets(workspace_dir: str) -> None:
 
 async def run_agy_cli(engine: "TextEngine", prompt: str, timeout: float = AGY_CALL_TIMEOUT_SECONDS,
                       persona_name: Optional[str] = None) -> str:
-    engine._ensure_agy_supported()
-
     binary = os.environ.get("ANTIGRAVITY_HARNESS_PATH") or shutil.which("agy")
     if not binary:
         raise LLMCommunicationError("Antigravity harness/agy binary not found.")
@@ -172,8 +160,8 @@ async def generate_agy(
     tools: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """One-shot agy path. DP-206 decision: agy stays one-shot-only — it is a TUI
-    CLI invoked as a subprocess (POSIX-only) whose entire response arrives at
-    process exit; there is no token stream to make canonical. Streaming consumers
+    CLI invoked as a subprocess whose entire response arrives at process exit;
+    there is no token stream to make canonical. Streaming consumers
     get it via `stream_messages`' generate_response wrap (single text_delta)."""
     system_prompt, history = engine._extract_system_prompt(history_object)
 
@@ -187,11 +175,12 @@ async def generate_agy(
             prompt_parts.append(rendered_tools)
 
     # The whole prompt travels as ONE argv entry (`agy --print <prompt>` — the CLI
-    # has no stdin/prompt-file transport), and execve caps a single argument at
-    # 128 KiB. The engine bounds history by tokens (~131k ≈ 0.5 MB of text), so an
-    # unclamped prompt fails the *spawn* with OSError [Errno 7] "Argument list too
-    # long" before agy ever runs. Keep the system prompt + tool protocol whole and
-    # elide the oldest history messages to fit.
+    # has no stdin/prompt-file transport), and the OS caps that: 128 KiB per
+    # argument under execve, 32767 chars for the entire command line under
+    # CreateProcess. The engine bounds history by tokens (~131k ≈ 0.5 MB of
+    # text), so an unclamped prompt fails the *spawn* before agy ever runs. Keep
+    # the system prompt + tool protocol whole and elide the oldest history
+    # messages to fit this host's budget.
     prompt, elided = fit_cli_prompt(
         "\n\n".join(prompt_parts), render_transcript_blocks(history),
     )
@@ -243,8 +232,10 @@ async def stream_agy(
 
 
 class AgyProvider(Provider):
-    """Antigravity (agy-*) provider. POSIX-only subprocess CLI, one-shot,
-    dedicated rate limiter, clamps tools to the <tool_call> text protocol."""
+    """Antigravity (agy-*) provider. Subprocess CLI, one-shot, dedicated rate
+    limiter, clamps tools to the <tool_call> text protocol. Runs on any platform
+    the `agy` CLI itself supports (DP-324); `ensure_supported` stays the base
+    class's no-op."""
 
     def __init__(self, engine: "TextEngine") -> None:
         self._engine = engine
@@ -257,10 +248,6 @@ class AgyProvider(Provider):
 
     def limiters_for(self, model_name: str) -> List[AsyncLimiter]:
         return [self._engine._agy_limiter]
-
-    def ensure_supported(self, model_name: str) -> None:
-        # Looked up live so per-test monkeypatches of the guard take effect.
-        self._engine._ensure_agy_supported()
 
     async def stream(
         self,

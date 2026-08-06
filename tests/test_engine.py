@@ -1,6 +1,7 @@
 # tests/test_engine.py
 
 import os
+import subprocess
 import pytest
 from unittest.mock import patch, AsyncMock, MagicMock
 import base64
@@ -1112,7 +1113,7 @@ class TestAgyHandler:
         _, api_payload = await text_engine._generate_agy_response({"model_name": "agy-flash"}, ctx)
 
         prompt_arg = mock_cli.call_args[0][0]
-        assert len(prompt_arg.encode("utf-8")) <= _subprocess.MAX_CLI_PROMPT_BYTES
+        assert len(prompt_arg.encode("utf-8")) <= _subprocess.cli_prompt_budget()
         assert len(prompt_arg.encode("utf-8")) < _subprocess.MAX_ARG_STRLEN
         # System prompt and the newest turn survive; the oldest turn is elided.
         assert "You are a test bot." in prompt_arg
@@ -1143,25 +1144,23 @@ class TestAgyHandler:
         assert prompt_arg == "You are a test bot.\n\nUser: Hello"
 
     def test_route_resolves_to_agy_handler(self, text_engine, monkeypatch):
-        # route resolution now calls the POSIX-only guard; no-op it so the
-        # route-table assertion itself runs on any host
-        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
         handler, limiters = text_engine._get_provider_route("agy-flash")
         assert handler == text_engine._stream_agy_response
         assert limiters == [text_engine._agy_limiter]
 
-    def test_route_refuses_agy_on_windows(self, text_engine, monkeypatch):
-        """Selecting an agy model on native Windows fails at route resolution —
-        before any temp dir or subprocess is created."""
+    def test_route_resolves_to_agy_handler_on_windows(self, text_engine, monkeypatch):
+        """DP-324: agy is no longer refused on native Windows. agy >= 1.1.9
+        writes its response to a pipe there, so route resolution must hand back
+        the same handler it does on POSIX instead of raising."""
         import src.engine as engine_mod
 
         monkeypatch.setattr(engine_mod.os, "name", "nt")
-        with pytest.raises(LLMCommunicationError, match="native Windows"):
-            text_engine._get_provider_route("agy-flash")
+        handler, limiters = text_engine._get_provider_route("agy-flash")
+        assert handler == text_engine._stream_agy_response
+        assert limiters == [text_engine._agy_limiter]
 
     @pytest.mark.asyncio
     async def test_generate_response_end_to_end_text(self, text_engine, base_context, monkeypatch):
-        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
         mock_cli = AsyncMock(return_value="end-to-end text answer")
         monkeypatch.setattr(text_engine, "_run_agy_cli", mock_cli)
 
@@ -1173,13 +1172,13 @@ class TestAgyHandler:
 
 
 class TestAgyCliInvocation:
-    """Covers the real subprocess wiring of ``_run_agy_cli`` and the POSIX-only
-    guard — the parts the mocked handler tests above skip.
+    """Covers the real subprocess wiring of ``_run_agy_cli`` — the parts the
+    mocked handler tests above skip.
 
-    agy works on POSIX (macOS/Docker); on native Windows it is a TUI that only
-    emits its response to a TTY, so DERPR's piped capture comes back empty.
-    ``_ensure_agy_supported`` refuses the route on Windows rather than returning
-    silent empty responses. We deliberately do NOT pass
+    The route runs on every platform the `agy` CLI itself supports (DP-324
+    dropped the POSIX-only guard: agy >= 1.1.9 writes its response to a pipe on
+    native Windows too, which is what the guard existed for). Only the process
+    isolation differs per platform. We deliberately do NOT pass
     --dangerously-skip-permissions: agy must keep its own tools gated so it can
     never run them (DERPR drives every tool itself).
     """
@@ -1214,8 +1213,10 @@ class TestAgyCliInvocation:
         monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
         monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/agy")
         monkeypatch.delenv("ANTIGRAVITY_HARNESS_PATH", raising=False)
-        # bypass the POSIX-only guard so the subprocess wiring runs on any host
-        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
+        # this test pins the POSIX spawn shape; the Windows shape has its own
+        # test (test_run_agy_cli_spawns_on_windows), so force the branch rather
+        # than letting it follow the host the suite happens to run on.
+        monkeypatch.setattr(engine_mod.os, "name", "posix")
 
         out = await text_engine._run_agy_cli("say hi", timeout=5)
 
@@ -1244,7 +1245,6 @@ class TestAgyCliInvocation:
 
         monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
         monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/agy")
-        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
 
         await text_engine._run_agy_cli("hi", timeout=5)
         assert "--sandbox" not in captured["args"]
@@ -1267,7 +1267,6 @@ class TestAgyCliInvocation:
 
         monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
         monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/agy")
-        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
 
         with pytest.raises(LLMCommunicationError, match="argv payload was"):
             await text_engine._run_agy_cli("hi", timeout=5)
@@ -1290,7 +1289,6 @@ class TestAgyCliInvocation:
 
         monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
         monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/agy")
-        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
 
         with pytest.raises(LLMCommunicationError) as exc:
             await text_engine._run_agy_cli("hi", timeout=5)
@@ -1298,38 +1296,39 @@ class TestAgyCliInvocation:
         assert "No such file or directory" in str(exc.value)
         assert "argv payload" not in str(exc.value)
 
-    def test_agy_unsupported_on_windows_raises_clear_error(self, text_engine, monkeypatch):
-        import src.engine as engine_mod
-
-        monkeypatch.setattr(engine_mod.os, "name", "nt")
-        with pytest.raises(LLMCommunicationError, match="native Windows"):
-            text_engine._ensure_agy_supported()
-
-    def test_agy_supported_on_posix(self, text_engine, monkeypatch):
-        import src.engine as engine_mod
-
-        monkeypatch.setattr(engine_mod.os, "name", "posix")
-        text_engine._ensure_agy_supported()  # no raise
-
     @pytest.mark.asyncio
-    async def test_run_agy_cli_aborts_before_spawn_on_windows(self, text_engine, monkeypatch):
-        """On Windows the guard must fire before any temp dir or subprocess."""
+    async def test_run_agy_cli_spawns_on_windows(self, text_engine, monkeypatch, tmp_path):
+        """DP-324: the route must actually spawn on native Windows — the old
+        guard aborted before the temp dir, so a regression that restores it
+        would show up as no spawn at all rather than as a bad argv."""
         import src.engine as engine_mod
+        from config import global_config
 
+        monkeypatch.setattr(global_config, "AGY_WORKSPACES_DIR", tmp_path / "workspaces")
         monkeypatch.setattr(engine_mod.os, "name", "nt")
-        spawned = []
-        made_dirs = []
+        captured = {}
 
-        async def fake_exec(*a, **k):
-            spawned.append(True)
-            raise AssertionError("should not spawn agy on Windows")
+        async def fake_exec(*args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return self._FakeProc(stdout=b"hello from agy on windows")
 
         monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
-        monkeypatch.setattr(engine_mod.tempfile, "mkdtemp", lambda: made_dirs.append(True) or "x")
+        monkeypatch.setattr(engine_mod.shutil, "which", lambda name: r"C:\agy\agy.EXE")
+        monkeypatch.delenv("ANTIGRAVITY_HARNESS_PATH", raising=False)
 
-        with pytest.raises(LLMCommunicationError, match="native Windows"):
-            await text_engine._run_agy_cli("hi", timeout=5)
-        assert spawned == [] and made_dirs == []
+        out = await text_engine._run_agy_cli("say hi", timeout=5)
+
+        assert out == "hello from agy on windows"
+        assert captured["args"][0] == r"C:\agy\agy.EXE"
+        # Windows has no setsid: isolation is a new process group instead, and
+        # passing start_new_session there would be silently ignored.
+        assert "start_new_session" not in captured["kwargs"]
+        # getattr: the constant only exists in the Windows subprocess module, so
+        # this assertion has to survive the suite running on the Linux CI host.
+        assert captured["kwargs"]["creationflags"] == getattr(
+            subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+        )
 
     @pytest.mark.asyncio
     async def test_run_agy_cli_persistent_workspaces_persona(self, text_engine, monkeypatch, tmp_path):
@@ -1343,7 +1342,6 @@ class TestAgyCliInvocation:
 
         monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
         monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/agy")
-        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
         
         monkeypatch.setattr(global_config, "AGY_PERSISTENT_WORKSPACES", True)
         monkeypatch.setattr(global_config, "AGY_WORKSPACE_MODE", "persona")
@@ -1368,7 +1366,6 @@ class TestAgyCliInvocation:
 
         monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
         monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/agy")
-        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
         
         monkeypatch.setattr(global_config, "AGY_PERSISTENT_WORKSPACES", True)
         monkeypatch.setattr(global_config, "AGY_WORKSPACE_MODE", "global")
@@ -1393,7 +1390,6 @@ class TestAgyCliInvocation:
 
         monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
         monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/agy")
-        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
         
         monkeypatch.setattr(global_config, "AGY_PERSISTENT_WORKSPACES", False)
         
@@ -1416,7 +1412,6 @@ class TestAgyCliInvocation:
 
         monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
         monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/agy")
-        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
         monkeypatch.setattr(global_config, "AGY_PERSISTENT_WORKSPACES", True)
         monkeypatch.setattr(global_config, "AGY_WORKSPACE_MODE", "persona")
         monkeypatch.setattr(global_config, "AGY_WORKSPACES_DIR", tmp_path / "workspaces")
@@ -1469,7 +1464,6 @@ class TestAgyCliInvocation:
 
         monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
         monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/agy")
-        monkeypatch.setattr(text_engine, "_ensure_agy_supported", lambda: None)
         monkeypatch.setattr(global_config, "AGY_PERSISTENT_WORKSPACES", True)
         monkeypatch.setattr(global_config, "AGY_WORKSPACE_MODE", "persona")
         monkeypatch.setattr(global_config, "AGY_WORKSPACES_DIR", tmp_path / "workspaces")
@@ -1665,6 +1659,124 @@ class TestClampCliArg:
         out = clamp_cli_arg("S" * 5000, max_bytes=1000)
         assert len(out.encode("utf-8")) <= 1000
         assert TRUNCATION_NOTICE in out
+
+
+class TestCliPlatformDifferences:
+    """DP-324: the agy/cc subprocess runner is platform-agnostic, but the two
+    platforms disagree about the command-line ceiling and about how you kill a
+    process and its children. Each branch is pinned here so the suite asserts
+    both regardless of the host it runs on."""
+
+    def test_prompt_budget_fits_windows_command_line(self, monkeypatch):
+        """Windows caps the WHOLE command line at 32767 chars — a shared pool.
+        The prompt and the cc route's `--system-prompt` are the two large
+        entries, so together they must still leave room for the flags."""
+        from src.engine.providers import _subprocess
+
+        monkeypatch.setattr(_subprocess.os, "name", "nt")
+        total = _subprocess.cli_prompt_budget() + _subprocess.cli_arg_budget()
+        assert total < _subprocess.MAX_COMMAND_LINE_CHARS - 4096
+
+    def test_posix_budget_stays_under_per_arg_cap(self, monkeypatch):
+        from src.engine.providers import _subprocess
+
+        monkeypatch.setattr(_subprocess.os, "name", "posix")
+        assert _subprocess.cli_prompt_budget() < _subprocess.MAX_ARG_STRLEN
+        assert _subprocess.cli_arg_budget() < _subprocess.MAX_ARG_STRLEN
+
+    def test_isolation_kwargs_posix(self, monkeypatch):
+        from src.engine.providers import _subprocess
+
+        monkeypatch.setattr(_subprocess.os, "name", "posix")
+        assert _subprocess._spawn_isolation_kwargs() == {"start_new_session": True}
+
+    def test_isolation_kwargs_windows(self, monkeypatch):
+        """`start_new_session` is silently IGNORED by the Windows implementation,
+        so passing it there would look like isolation while providing none."""
+        from src.engine.providers import _subprocess
+
+        monkeypatch.setattr(_subprocess.os, "name", "nt")
+        kwargs = _subprocess._spawn_isolation_kwargs()
+        assert "start_new_session" not in kwargs
+        assert kwargs["creationflags"] == getattr(
+            subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+        )
+
+    def test_kill_process_tree_posix_kills_session(self, monkeypatch):
+        from src.engine.providers import _subprocess
+
+        import signal
+
+        monkeypatch.setattr(_subprocess.os, "name", "posix")
+        killed = []
+        # SIGKILL/getpgid/killpg do not exist on a Windows dev host; supply them
+        # so the POSIX branch is exercised wherever the suite runs.
+        monkeypatch.setattr(signal, "SIGKILL", getattr(signal, "SIGKILL", 9), raising=False)
+        monkeypatch.setattr(_subprocess.os, "getpgid", lambda pid: pid, raising=False)
+        monkeypatch.setattr(
+            _subprocess.os, "killpg", lambda pgid, sig: killed.append((pgid, sig)),
+            raising=False,
+        )
+
+        proc = MagicMock(pid=4321, returncode=0)
+        _subprocess._kill_process_tree(proc)
+
+        assert killed and killed[0][0] == 4321
+
+    def test_kill_process_tree_windows_kills_live_tree(self, monkeypatch):
+        from src.engine.providers import _subprocess
+
+        monkeypatch.setattr(_subprocess.os, "name", "nt")
+        calls = []
+        monkeypatch.setattr(
+            _subprocess.subprocess, "run", lambda cmd, **kw: calls.append(cmd)
+        )
+
+        proc = MagicMock(pid=4321, returncode=None)  # still running
+        _subprocess._kill_process_tree(proc)
+
+        assert calls == [["taskkill", "/F", "/T", "/PID", "4321"]]
+
+    def test_kill_process_tree_windows_skips_exited_process(self, monkeypatch):
+        """`taskkill /T` walks the tree from a LIVE parent pid; after exit the
+        link is gone, so calling it would only spawn a doomed taskkill per turn."""
+        from src.engine.providers import _subprocess
+
+        monkeypatch.setattr(_subprocess.os, "name", "nt")
+        calls = []
+        monkeypatch.setattr(
+            _subprocess.subprocess, "run", lambda cmd, **kw: calls.append(cmd)
+        )
+
+        proc = MagicMock(pid=4321, returncode=0)  # already exited
+        _subprocess._kill_process_tree(proc)
+
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_windows_oversized_command_line_reports_payload_size(self, monkeypatch):
+        """Windows signals a too-long command line as WinError 206 raised as a
+        FileNotFoundError — matching on errno alone reads that as 'binary not
+        found' and sends the investigation the wrong way."""
+        from src.engine.providers import _subprocess
+
+        # `winerror` is a read-only getset on real Windows OSErrors, so the
+        # 206 is supplied by a subclass attribute — that keeps the test
+        # constructible on the Linux CI host too.
+        class _TooLongCommandLine(FileNotFoundError):
+            winerror = 206
+
+        err = _TooLongCommandLine(2, "The filename or extension is too long")
+
+        async def fake_exec(*a, **k):
+            raise err
+
+        monkeypatch.setattr(_subprocess.asyncio, "create_subprocess_exec", fake_exec)
+
+        with pytest.raises(LLMCommunicationError) as exc:
+            await _subprocess.exec_cli("agy.EXE", ["-p", "hi"], ".", 5)
+
+        assert "argv payload was" in str(exc.value)
 
 
 class TestClaudeCodeProvider:
@@ -1956,6 +2068,9 @@ class TestClaudeCodeProvider:
         monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/claude")
         monkeypatch.delenv("CLAUDE_CLI_PATH", raising=False)
         monkeypatch.setattr(text_engine, "_ensure_cc_supported", lambda: None)
+        # cc sandboxed is POSIX-only; pin the branch so the shared runner's
+        # Windows spawn shape can't make this assertion host-dependent.
+        monkeypatch.setattr(engine_mod.os, "name", "posix")
 
         out = await text_engine._run_cc_cli("say hi", "be terse", "sonnet", persona_name="alice")
 
