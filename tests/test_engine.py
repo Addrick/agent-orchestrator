@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+import sys
 import pytest
 from unittest.mock import patch, AsyncMock, MagicMock
 import base64
@@ -1499,7 +1500,18 @@ class TestAgyCliInvocation:
 
 
 class TestFitCliPrompt:
-    """DP-299: byte-bounding the single argv entry the agy/cc CLIs take."""
+    """DP-299: bounding the single argv entry the agy/cc CLIs take.
+
+    The budget's unit is platform-dependent (DP-324): UTF-8 bytes on POSIX,
+    escaped command-line characters on Windows. These cases assert the POSIX
+    unit, so they pin `os.name` rather than inheriting whatever host the suite
+    runs on; the Windows unit has its own cases in TestCliPlatformDifferences.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _posix_budget_unit(self, monkeypatch):
+        from src.engine.providers import _subprocess
+        monkeypatch.setattr(_subprocess.os, "name", "posix")
 
     @staticmethod
     def _blocks(*pairs):
@@ -1648,6 +1660,12 @@ class TestRenderTranscriptBlocks:
 class TestClampCliArg:
     """DP-299: `--system-prompt` is a second unbounded argv entry on the cc route."""
 
+    @pytest.fixture(autouse=True)
+    def _posix_budget_unit(self, monkeypatch):
+        # See TestFitCliPrompt: `max_bytes` is only literally bytes on POSIX.
+        from src.engine.providers import _subprocess
+        monkeypatch.setattr(_subprocess.os, "name", "posix")
+
     def test_under_budget_is_verbatim(self):
         from src.engine.providers._subprocess import clamp_cli_arg
 
@@ -1667,15 +1685,88 @@ class TestCliPlatformDifferences:
     process and its children. Each branch is pinned here so the suite asserts
     both regardless of the host it runs on."""
 
+    # --- what an argv entry costs ------------------------------------------
+
+    @staticmethod
+    def _quote_dense(n):
+        """n characters of the quote-dense text these routes actually carry: a
+        rendered JSON tool result. `list2cmdline` escapes every `"`."""
+        return ('{"ticket":"12345","state":"open"}, ' * (n // 34 + 1))[:n]
+
     def test_prompt_budget_fits_windows_command_line(self, monkeypatch):
         """Windows caps the WHOLE command line at 32767 chars — a shared pool.
         The prompt and the cc route's `--system-prompt` are the two large
-        entries, so together they must still leave room for the flags."""
+        entries, so together they must still leave room for the flags.
+
+        Measured on the ESCAPED command line, not on raw byte counts: Windows
+        applies the cap to what `list2cmdline` produces, and asserting the raw
+        sum passes happily while the real spawn dies with WinError 206.
+        """
         from src.engine.providers import _subprocess
 
         monkeypatch.setattr(_subprocess.os, "name", "nt")
-        total = _subprocess.cli_prompt_budget() + _subprocess.cli_arg_budget()
-        assert total < _subprocess.MAX_COMMAND_LINE_CHARS - 4096
+        prompt = _subprocess.fit_cli_prompt(
+            "", [_subprocess.TranscriptBlock(
+                role="tool", text=self._quote_dense(200_000))],
+        )[0]
+        system_prompt = _subprocess.clamp_cli_arg(self._quote_dense(60_000))
+        argv = [r"C:\agy\agy.EXE", "--sandbox", "--print-timeout", "150s",
+                "-p", prompt, "--system-prompt", system_prompt,
+                "--model", "sonnet", "--output-format", "text"]
+        assert len(subprocess.list2cmdline(argv)) < _subprocess.MAX_COMMAND_LINE_CHARS
+
+    def test_cmdline_cost_is_bytes_on_posix_escaped_chars_on_windows(self, monkeypatch):
+        """The budget unit differs because the OS contract does. POSIX passes an
+        argv vector and caps a single entry in bytes; Windows passes ONE string
+        built by `list2cmdline` and caps that, so embedded quotes cost double."""
+        from src.engine.providers import _subprocess
+
+        text = '{"a":"b"}'                      # 9 chars, 9 bytes, 4 quotes
+        monkeypatch.setattr(_subprocess.os, "name", "posix")
+        assert _subprocess._cmdline_cost(text) == 9
+        monkeypatch.setattr(_subprocess.os, "name", "nt")
+        assert _subprocess._cmdline_cost(text) == len(
+            subprocess.list2cmdline([text])) == 13
+
+    def test_windows_trim_accounts_for_escaping(self, monkeypatch):
+        """Regression (DP-324 review): the budget was counted in raw UTF-8 bytes
+        while CreateProcess measures the escaped command line. Quote-dense
+        history passed the byte check and then failed the spawn — the exact
+        failure fit_cli_prompt exists to prevent, and unfixable by trimming
+        because the trimmer already believed it fit."""
+        from src.engine.providers import _subprocess
+
+        monkeypatch.setattr(_subprocess.os, "name", "nt")
+        budget = _subprocess.cli_prompt_budget()
+        blocks = [_subprocess.TranscriptBlock(
+            role="tool", text="Tool(zammad): " + self._quote_dense(80_000))]
+
+        prompt, dropped = _subprocess.fit_cli_prompt("SYS", blocks)
+
+        assert len(subprocess.list2cmdline([prompt])) <= budget
+        # ...and the raw text is meaningfully SHORTER than the budget, which is
+        # what a byte-counting implementation would have handed back instead.
+        assert len(prompt.encode("utf-8")) < budget
+
+    def test_windows_clamp_cli_arg_accounts_for_escaping(self, monkeypatch):
+        from src.engine.providers import _subprocess
+
+        monkeypatch.setattr(_subprocess.os, "name", "nt")
+        out = _subprocess.clamp_cli_arg(self._quote_dense(60_000))
+        assert len(subprocess.list2cmdline([out])) <= _subprocess.cli_arg_budget()
+
+    def test_truncate_block_never_exceeds_its_budget_on_either_platform(self, monkeypatch):
+        """_truncate_block appends its marker AFTER cutting, so the split cost
+        accounting has to stay conservative — on Windows the quoting is applied
+        once to the joined string, not to each half."""
+        from src.engine.providers import _subprocess
+
+        for name in ("posix", "nt"):
+            monkeypatch.setattr(_subprocess.os, "name", name)
+            for text in (self._quote_dense(4000), '"' * 4000, "plain " * 700):
+                for budget in (120, 300, 1000, 2500):
+                    out = _subprocess._truncate_block(text, budget)
+                    assert _subprocess._cmdline_cost(out) <= budget, (name, budget)
 
     def test_posix_budget_stays_under_per_arg_cap(self, monkeypatch):
         from src.engine.providers import _subprocess
@@ -1723,35 +1814,147 @@ class TestCliPlatformDifferences:
 
         assert killed and killed[0][0] == 4321
 
-    def test_kill_process_tree_windows_kills_live_tree(self, monkeypatch):
+    def test_kill_process_tree_windows_falls_back_to_taskkill_without_a_job(
+            self, monkeypatch):
         from src.engine.providers import _subprocess
 
         monkeypatch.setattr(_subprocess.os, "name", "nt")
         calls = []
         monkeypatch.setattr(
-            _subprocess.subprocess, "run", lambda cmd, **kw: calls.append(cmd)
+            _subprocess.subprocess, "Popen", lambda cmd, **kw: calls.append(cmd)
         )
 
         proc = MagicMock(pid=4321, returncode=None)  # still running
-        _subprocess._kill_process_tree(proc)
+        _subprocess._kill_process_tree(proc, job=None)
 
         assert calls == [["taskkill", "/F", "/T", "/PID", "4321"]]
 
-    def test_kill_process_tree_windows_skips_exited_process(self, monkeypatch):
+    def test_kill_process_tree_windows_does_not_block_the_event_loop(self, monkeypatch):
+        """The fallback runs in the `finally` of an async call. `subprocess.run`
+        would park the one event loop that also serves Discord, the portal and
+        every other provider for up to its timeout; spawn and let go instead."""
+        from src.engine.providers import _subprocess
+
+        monkeypatch.setattr(_subprocess.os, "name", "nt")
+        monkeypatch.setattr(_subprocess.subprocess, "Popen", lambda cmd, **kw: None)
+        monkeypatch.setattr(
+            _subprocess.subprocess, "run",
+            lambda *a, **k: pytest.fail("teardown must not wait on taskkill"),
+        )
+
+        _subprocess._kill_process_tree(MagicMock(pid=4321, returncode=None), job=None)
+
+    def test_kill_process_tree_windows_skips_exited_process_without_a_job(
+            self, monkeypatch):
         """`taskkill /T` walks the tree from a LIVE parent pid; after exit the
-        link is gone, so calling it would only spawn a doomed taskkill per turn."""
+        link is gone, so calling it would only spawn a doomed taskkill per turn.
+        This is the degraded path — with a job the helpers still get killed."""
         from src.engine.providers import _subprocess
 
         monkeypatch.setattr(_subprocess.os, "name", "nt")
         calls = []
         monkeypatch.setattr(
-            _subprocess.subprocess, "run", lambda cmd, **kw: calls.append(cmd)
+            _subprocess.subprocess, "Popen", lambda cmd, **kw: calls.append(cmd)
         )
 
         proc = MagicMock(pid=4321, returncode=0)  # already exited
-        _subprocess._kill_process_tree(proc)
+        _subprocess._kill_process_tree(proc, job=None)
 
         assert calls == []
+
+    # --- the Windows analogue of setsid + killpg ---------------------------
+
+    def test_adopt_process_tree_is_a_noop_on_posix(self, monkeypatch):
+        """setsid at spawn already made the descendants reachable by killpg."""
+        from src.engine.providers import _subprocess
+
+        monkeypatch.setattr(_subprocess.os, "name", "posix")
+        assert _subprocess._adopt_process_tree(MagicMock(pid=4321)) is None
+
+    def test_kill_process_tree_windows_closes_the_job_and_skips_taskkill(
+            self, monkeypatch):
+        """Closing a KILL_ON_JOB_CLOSE job kills every process still inside it,
+        which is what reaches the helpers a cleanly-exited CLI orphaned. taskkill
+        cannot: verified on Windows, a grandchild outlives its parent and the
+        walk then reports "process not found"."""
+        from src.engine.providers import _subprocess
+
+        monkeypatch.setattr(_subprocess.os, "name", "nt")
+        closed, spawned = [], []
+        monkeypatch.setattr(_subprocess, "_win_close_job", closed.append)
+        monkeypatch.setattr(
+            _subprocess.subprocess, "Popen", lambda cmd, **kw: spawned.append(cmd)
+        )
+
+        # returncode 0 = the clean-exit path the old code skipped entirely
+        _subprocess._kill_process_tree(MagicMock(pid=4321, returncode=0), job=0xABCD)
+
+        assert closed == [0xABCD]
+        assert spawned == []
+
+    @pytest.mark.asyncio
+    async def test_exec_cli_adopts_then_releases_the_tree(self, monkeypatch):
+        """The job has to be claimed right after the spawn and closed in the
+        `finally`, or the whole mechanism is inert."""
+        from src.engine.providers import _subprocess
+
+        monkeypatch.setattr(_subprocess.os, "name", "nt")
+        order = []
+
+        class _Proc:
+            pid, returncode = 4321, 0
+
+            async def communicate(self):
+                order.append("ran")
+                return b"out", b""
+
+        async def fake_exec(*a, **k):
+            order.append("spawn")
+            return _Proc()
+
+        monkeypatch.setattr(_subprocess.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(_subprocess, "_adopt_process_tree",
+                            lambda proc: order.append("adopt") or 0xABCD)
+        monkeypatch.setattr(_subprocess, "_win_close_job",
+                            lambda job: order.append(f"close:{job:#x}"))
+
+        assert await _subprocess.exec_cli("agy.EXE", ["-p", "hi"], ".", 5) == "out"
+        assert order == ["spawn", "adopt", "ran", "close:0xabcd"]
+
+    @pytest.mark.skipif(os.name != "nt", reason="job objects are a Windows API")
+    def test_job_object_really_kills_an_orphaned_grandchild(self):
+        """The load-bearing claim, against the real kernel: a helper whose parent
+        already exited is still killed when the job handle closes."""
+        import time
+        from src.engine.providers import _subprocess
+
+        parent = subprocess.Popen(
+            [sys.executable, "-c",
+             "import subprocess,sys;"
+             "p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)']);"
+             "print(p.pid,flush=True)"],
+            stdout=subprocess.PIPE, text=True,
+        )
+        job = _subprocess._adopt_process_tree(parent)
+        assert job, "could not create the job object"
+        grandchild = int(parent.stdout.readline().strip())
+        parent.wait(timeout=15)          # the parent exits; the helper does not
+
+        def alive():
+            out = subprocess.run(["tasklist", "/FI", f"PID eq {grandchild}", "/NH"],
+                                 capture_output=True, text=True).stdout
+            return str(grandchild) in out
+
+        try:
+            assert alive(), "grandchild should outlive its parent (the whole point)"
+            _subprocess._kill_process_tree(parent, job)
+            deadline = time.monotonic() + 10
+            while alive() and time.monotonic() < deadline:
+                time.sleep(0.2)
+            assert not alive(), "closing the job did not kill the orphaned helper"
+        finally:
+            subprocess.run(["taskkill", "/F", "/PID", str(grandchild)],
+                           capture_output=True)
 
     @pytest.mark.asyncio
     async def test_windows_oversized_command_line_reports_payload_size(self, monkeypatch):

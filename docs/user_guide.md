@@ -263,7 +263,10 @@ Each call is executed inside a persistent workspace directory (by default, perso
 > - **Less prompt fits.** Windows caps the *whole* command line at 32767
 >   characters (POSIX caps each argument at 128 KiB), so the prompt budget is
 >   20 KiB there instead of 96 KiB — long conversations are trimmed sooner, by
->   the same oldest-first rule described above.
+>   the same oldest-first rule described above. Windows also measures the
+>   command line *after* escaping, and quotes inside the text are escaped, so
+>   quote-dense history (JSON tool results) uses up the budget faster than its
+>   character count suggests — up to twice as fast in the worst case.
 > - **Sandbox enforcement is unverified.** `agy --sandbox` is accepted and the
 >   call succeeds, but the documented sandbox backends (nsjail, sandbox-exec) are
 >   POSIX; treat the sandbox as defense-in-depth you should not rely on when
@@ -280,9 +283,11 @@ providers. The model never executes tools itself.
 
 `cc-*` models (`set model cc-sonnet`, `cc-opus`, `cc-haiku`) route through the
 local `claude -p` headless CLI instead of an API, running on the user's Claude
-**subscription/OAuth tier**. Like `agy` it is a subprocess-per-call, one-shot,
-**POSIX-only** provider with a persistent per-persona workspace and its own rate
-limiter — but it differs from every other provider in one important way:
+**subscription/OAuth tier**. Like `agy` it is a subprocess-per-call, one-shot
+provider with a persistent per-persona workspace and its own rate limiter —
+though unlike `agy` it is **POSIX-only while its sandbox is on** (see the
+platform note further down) — but it differs from every other provider in one
+important way:
 
 > **Claude Code runs its *own* tools.** The other providers (including `agy`)
 > only generate text; DERPR's tool loop executes any tools. The `cc` provider
