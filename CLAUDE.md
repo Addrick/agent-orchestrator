@@ -50,7 +50,7 @@ python -m src.main
 
 Async, provider-agnostic LLM orchestration engine for chatbot automation (IT support, ticketing, conversational AI). Full architectural detail lives in:
 
-- **`memory/codebase/architecture.md`** — component reference, data flows, schemas, startup sequence
+- **`docs/architecture/architecture.md`** — component reference, data flows, schemas, startup sequence. **Canonical.** (`memory/codebase/architecture.md` is now only a pointer stub — the two forked for months, each getting half the updates, and were converged here 2026-08-06 because the doc describes code and must version with it.)
 - **`docs/user_guide.md`** — user-facing behavior spec (commands, personas, tools, interfaces)
 
 ### Testing
@@ -150,12 +150,12 @@ To support multiple agents working concurrently, the following rules are mandato
 Three living documents track the system's design:
 
 - **`docs/user_guide.md`** — Describes what users can do. Serves as both end-user reference and **spec for new features**. When planning new behavior, describe it here first in plain language before implementing. This ensures alignment on what we're building.
-- **`memory/codebase/architecture.md`** — Describes how the system works internally. Component reference for Claude's use across sessions.
+- **`docs/architecture/architecture.md`** — Describes how the system works internally. Component reference, in the code repo so it versions in the same PR as the code it describes, and is visible to CI, to the public repo, and to Antigravity.
 - **`docs/capability_map.md`** — capability → implementations. The **inverse index** of the other two, which are both organized by module and therefore cannot show you that a capability now has two implementations (the second one just gets its own new section). Read it before building anything that parks, schedules, stores, notifies, retries, or spawns.
 
 **Update rules:**
 - When implementing a new feature, update `user_guide.md` with the user-facing behavior (commands, tools, modes, etc.)
-- When changing internal architecture (new components, changed data flows, new config), update `architecture.md`
+- When changing internal architecture (new components, changed data flows, new config), update `docs/architecture/architecture.md` **in the same commit as the code**. Do not re-grow structural content in `memory/codebase/architecture.md` — that file is a pointer stub holding only rationale and traps.
 - When adding a capability — or a second implementation of one — update `docs/capability_map.md` **in the same commit**. A second implementation must be recorded as `by design` with a decision record, or not written.
 - When you notice any doc is stale relative to the code, fix it — don't wait to be asked
 - Spec-before-implement: if a design conversation produces a concrete behavior description, add it to `user_guide.md` before writing code
@@ -181,7 +181,8 @@ memory/
 ├── MEMORY.md              # L0 — always loaded, directory summaries
 ├── codebase/
 │   ├── _overview.md       # L1 — component map, pipeline, key patterns
-│   └── architecture.md    # L2 — full structural detail
+│   └── architecture.md    # L2 — POINTER STUB → docs/architecture/architecture.md
+│                          #      (rationale + traps only; structure lives in the code repo)
 ├── user/
 │   ├── _overview.md       # L1 — who Adam is, collaboration guide
 │   ├── profile.md         # L2 — full background

@@ -211,7 +211,15 @@ All commands are entered as the message body when addressing a persona. Commands
 | `memory_mode <mode>` | See Memory Modes below | History retrieval scope |
 | `service_bindings <list\|none>` | Comma-separated service names | e.g., `set service_bindings zammad,agents` |
 | `max_context_tokens <integer>` | Integer >= 100 | Total context budget — prompt + reserved response (matches kobold-lite's `max_context_length` slider). Effective prompt prune budget = this minus `tokens`. Oldest non-system messages drop until prompt fits; system messages and the latest user message are always preserved. Default 131072. |
+| `chat_template <name>` | An instruct-preset name | Prompt template used by the **local** (kobold-native) engine — e.g. `chatml` (default), `alpaca`, and the other kobold-sourced presets including thinking variants. Unknown names are rejected. `GET /api/v1/chat_templates` lists the valid values, and the persona editor renders them as a dropdown. Only affects `model local`. |
+| `thinking_level <value>` | e.g. `minimal` | Extended-thinking level passed through to the provider (e.g. Gemma). Clears when set to a non-value. |
+| `long_term_memory <on\|off>` | on/off | Per-persona long-term-memory switch. Off disables both retrieval *and* retain for this persona — it stops contributing to and drawing from the memory store. |
+| `include_ambient_memory <on\|off>` | on/off | Whether ambient-channel memories (messages logged under persona `ambient`) are eligible for this persona's retrieval. Default on. |
+| `inject_timestamp <on\|off>` | on/off | Prepend a timestamp to each turn. Defaults on for user personas, off for system personas. |
+| `ingest_bank <name>` | Bank name | Hindsight bank the `ingest_path` tool targets for this persona when the tool call omits `bank`. |
 | `<provider>.<key> <value>` | Any provider id + scalar value | Fallback dotted-path setter for provider-specific knobs that have no first-class command (e.g. `set kobold.mirostat 2`, `set kobold.rep_pen 1.15`). Stored in `params.provider_extras[<provider>][<key>]`. Value is coerced to int / float / bool when possible, otherwise kept as a string. Use `set <provider>.<key> none` (or `null`/`clear`) to remove the key. Mirror read: `what <provider>.<key>`. |
+
+Every `set <name>` above has a matching `what <name>` read. The full settable set is the `src/persona_fields.py` registry — **26 fields, 24 CLI-settable, 16 also exposed on the persona PATCH route**. `set model` is the one bespoke setter (it needs an async fuzzy-match lookup); `model` is therefore PATCH-able but generated from a hand-written CLI handler.
 
 ### Persona Management
 
@@ -227,7 +235,7 @@ All commands are entered as the message body when addressing a persona. Commands
 | Command | Description |
 |---------|-------------|
 | `dump_last` | Summary of the last API request (model, context size, tools, generation params) |
-| `dump_context` | Full context dump as downloadable file (config, tools, conversation history) |
+| `dump_history` | Full context dump as a downloadable file — the exact history array sent to the model on the last request. (This command was previously documented here as `dump_context`, which has never existed.) |
 | `help` | Show command list and active personas |
 | `update_models` | Refresh available model list from configuration |
 
@@ -577,6 +585,7 @@ Tools are capabilities the LLM can invoke during a conversation. Available tools
 |------|------|-------------|
 | `get_agent_status` | Read | View running state, deploy counts, error rates for agents |
 | `get_agent_history` | Read | Recent action log with optional ticket/customer filters |
+| `lookup_agent_history` | Read | Dereference one action series by `action_id` — returns the root row plus its child steps and context tags. Used to recover a full trajectory after a memory recall surfaces an `action_id:<n>` reference from a bridged agent experience. |
 | `manage_agent` | Write | Start, stop, or restart an agent |
 
 ### fixr Tools (requires `service_bindings: ["fixr"]`)
@@ -1063,11 +1072,15 @@ The retain path is fire-and-forget through a per-bank async queue: user turns en
 
 ## System Defaults
 
-| Setting | Value |
-|---------|-------|
-| Default model | gemini-2.5-flash-lite |
-| Default context limit | 15 messages |
-| Context hard cap | 30 messages |
-| Max tool calls per request | 5 |
-| Max response tokens | 4096 |
-| Confirmation timeout | 300 seconds (5 min) |
+| Setting | Value | Constant |
+|---------|-------|----------|
+| Default model | `gemini-3.1-flash-lite` | `DEFAULT_MODEL_NAME` |
+| Default agent model | `agy-flash` | `DEFAULT_AGENT_MODEL` |
+| Default context limit | 15 messages | `DEFAULT_HISTORY_MESSAGES` |
+| Context hard cap | 30 messages | `GLOBAL_HISTORY_MESSAGES` |
+| Max tool calls per request | 10 | `MAX_TOOL_CALLS` — raised from 5 in DP-297, because a parked write now costs an iteration instead of ending the turn |
+| Max response tokens | 4096 | `DEFAULT_TOKEN_LIMIT` |
+| Default total context budget | 131072 tokens | `DEFAULT_MAX_CONTEXT_TOKENS` |
+| Proposal approval window | 24 hours | `PENDING_ACTION_TTL` — DP-297 renamed and raised this from `PENDING_CONFIRMATION_TIMEOUT` (300s), since a park became a queue worked through later rather than a blocking modal. DP-319 made the store durable, so this is now the real deadline rather than min(this, uptime) |
+| Decided-proposal retention | 7 days | `PARK_ROW_RETENTION` — how long a resolved park's row is kept so a re-proposal can be recognized |
+| Re-execution guard window | 15 minutes | `PARK_REEXECUTION_GUARD_WINDOW` |
