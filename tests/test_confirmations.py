@@ -42,6 +42,20 @@ def manager(mem_manager):
     return mgr
 
 
+def _handler_raised(message, tool="update_ticket"):
+    """What `ToolManager.execute_tool` ACTUALLY returns when a handler raises.
+
+    It catches every handler exception and returns this envelope
+    (`tool_manager.py:70-73`) — it does not propagate. These tests used to give
+    the mock `side_effect = RuntimeError(...)`, asserting a raise the
+    production class cannot emit, which is how `approved_but_failed` stayed
+    simultaneously green and unreachable for a whole release (DP-322). Mocking
+    a collaborator means reproducing its contract, not a convenient fiction.
+    """
+    return {"error": f"An unexpected error occurred while executing "
+                     f"{tool}: {message}"}
+
+
 def _park(token="t1", user="u", persona="p", tool="update_ticket",
           call_id="c1", row_id=None, created_at=None):
     return ParkedWrite(
@@ -379,7 +393,8 @@ async def test_apply_records_an_approved_failure_distinctly(
     row_id = _row_with_awaiting_entries(mem_manager, ["c1"])
     parked = _park(token="tok-c1", call_id="c1", row_id=row_id)
     manager.park(parked)
-    manager._tool_manager.execute_tool.side_effect = RuntimeError("zammad 500")
+    manager._tool_manager.execute_tool.return_value = _handler_raised(
+        "zammad 500")
 
     decision = Decision(park=parked, approved=True)
     await manager.apply(decision)
@@ -399,7 +414,7 @@ async def test_audit_row_carries_the_failed_status(manager, mem_manager):
     row_id = _row_with_awaiting_entries(mem_manager, ["c1"])
     parked = _park(token="tok-c1", call_id="c1", row_id=row_id)
     manager.park(parked)
-    manager._tool_manager.execute_tool.side_effect = RuntimeError("boom")
+    manager._tool_manager.execute_tool.return_value = _handler_raised("boom")
 
     await manager.apply(Decision(park=parked, approved=True))
 
@@ -469,6 +484,146 @@ async def test_a_real_tool_manager_records_a_successful_write_as_approved(
     assert decision.ok is True
     assert decision.status == "approved"
 
+
+# ---- DP-323: the writes that fail by RETURNING, never by raising ----------
+#
+# DP-322 closed the raise path. Seven of the 23 gated write tools never take
+# it: they report failure in the payload, which `execute_tool` nests under
+# `{"result": ...}` where an envelope-level check cannot see it. Each case
+# below reproduces a real handler's shape at its file:line, so the test fails
+# if that handler's convention changes out from under the predicate.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload, shape", [
+    # proxmox/handler.py:36 — `_err()`, used by reboot_node, reboot_guest,
+    # start_guest, stop_guest, set_active_model.
+    ({"status": "error", "message": "ssh failed: timeout"}, "_err()"),
+    # proxmox/handler.py:78 — the non-zero-exit shape from `_run`.
+    ({"status": "error", "message": "remote command exited 1",
+      "stderr": "no such guest", "stdout": ""}, "_run non-zero exit"),
+    # self_edit/fixr_tools.py:78 — dispatch_fix.
+    ({"status": "error", "message": "worktree already exists"}, "dispatch_fix"),
+    # proposals/service.py:105-124 — approve_proposal catches its executor's
+    # exception ON PURPOSE (so the row is never stranded in 'approved'), so it
+    # is structurally incapable of signalling failure by raising.
+    ({"proposal_id": 4, "action_type": "update_ticket", "executed": False,
+      "result": "executor error: connection refused"}, "approve_proposal"),
+])
+async def test_a_write_that_fails_by_returning_is_recorded_as_failed(
+        mem_manager, payload, shape):
+    """A returned failure must reach `approved_but_failed`, like a raised one.
+
+    Reaching this status was the whole point of DP-322, but its check ran on
+    the envelope — and `execute_tool` wraps a normal return as
+    `{"result": <payload>}`, so a handler's own error marker sits one level
+    below where it looked. Every tool here executes an irreversible action
+    (reboot a guest, dispatch an agent, run an approved proposal) and then
+    reports the failure in-band; recording that as `approved` tells the
+    operator's audit row `executed_ok=True` for a write that did not happen.
+    """
+    from src.tools.tool_manager import ToolManager
+
+    async def soft_fail(**_kwargs):
+        return payload
+
+    tool_manager = ToolManager()
+    tool_manager.register("update_ticket", soft_fail)
+    mgr = ConfirmationManager(lambda: tool_manager, mem_manager)
+
+    parked = _park(token="a", call_id="c1")
+    mgr.park(parked)
+    decision = Decision(park=parked, approved=True)
+    await mgr.apply(decision)
+
+    assert decision.ok is False, f"{shape} must not be recorded as success"
+    assert decision.status == "approved_but_failed"
+
+    row = mem_manager._get_connection().execute(
+        "SELECT metadata FROM Audit_Log WHERE event_type = 'audit_decision'"
+    ).fetchone()
+    assert json.loads(row["metadata"])["executed_ok"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload, shape", [
+    # The success halves of the same handlers — the predicate keys on markers
+    # a handler cannot mean anything else by, because over-reporting is the
+    # DANGEROUS direction here: a successful irreversible write recorded as
+    # `approved_but_failed` tells the model the action may not have happened
+    # and invites it to re-propose.
+    ({"status": "ok", "stdout": "", "stderr": ""}, "proxmox _run ok"),
+    ({"status": "dispatched", "agent": {"id": "a1"}}, "dispatch_fix ok"),
+    ({"status": "success", "message": "Agent started."}, "manage_agent"),
+    ({"proposal_id": 4, "executed": True, "result": "ticket 8 updated"},
+     "approve_proposal ok"),
+    # deny_proposal reports a DENIED proposal as its own success: `status` is
+    # a domain value here, not a health signal. Nothing about it may read as
+    # failure.
+    ({"proposal_id": 4, "status": "denied", "reason": "not now"},
+     "deny_proposal"),
+    ({"order_id": 2, "status": "retired", "note": ""}, "retire_standing_order"),
+    # A Zammad ticket comes back as a raw domain object.
+    ({"id": 8, "number": "12008", "state": "closed", "title": "printer"},
+     "zammad ticket"),
+])
+async def test_a_write_that_succeeds_stays_approved(
+        mem_manager, payload, shape):
+    """The control side: no domain payload may be misread as a failure."""
+    from src.tools.tool_manager import ToolManager
+
+    async def fine(**_kwargs):
+        return payload
+
+    tool_manager = ToolManager()
+    tool_manager.register("update_ticket", fine)
+    mgr = ConfirmationManager(lambda: tool_manager, mem_manager)
+
+    parked = _park(token="a", call_id="c1")
+    mgr.park(parked)
+    decision = Decision(park=parked, approved=True)
+    await mgr.apply(decision)
+
+    assert decision.ok is True, f"{shape} must not be recorded as a failure"
+    assert decision.status == "approved"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arguments, why", [
+    (["not", "a", "mapping"], "arguments is a list"),
+    ({1: "not a string key"}, "non-string keyword"),
+])
+async def test_an_uninvokable_call_is_recorded_as_failed(
+        mem_manager, arguments, why):
+    """The `except` in `apply` is reachable, and this is the only way in.
+
+    `execute_tool` swallows everything the *handler* raises, so nothing the
+    tool does can land there — only the call failing to be made, i.e.
+    `**arguments` not unpacking. Pinned because the branch reads like the
+    handler-failure path, and believing that is what let `ok = True` sit
+    unchallenged through four reviews (DP-322).
+    """
+    from src.tools.tool_manager import ToolManager
+
+    ran = []
+
+    async def never(**_kwargs):
+        ran.append(True)
+        return {"ok": True}
+
+    tool_manager = ToolManager()
+    tool_manager.register("update_ticket", never)
+    mgr = ConfirmationManager(lambda: tool_manager, mem_manager)
+
+    parked = _park(token="a", call_id="c1")
+    parked.write_call["arguments"] = arguments
+    mgr.park(parked)
+    decision = Decision(park=parked, approved=True)
+    await mgr.apply(decision)
+
+    assert ran == [], f"{why}: the handler must never have run"
+    assert decision.ok is False
+    assert decision.status == "approved_but_failed"
 # ---- DP-319: durability ---------------------------------------------------
 #
 # The property under test throughout this section is the one DP-297 could not
@@ -836,15 +991,23 @@ def test_restore_reinserts_a_park_whose_row_vanished(manager, mem_manager):
 @pytest.mark.asyncio
 async def test_an_approved_but_failed_write_is_not_parkable_again(
         manager, mem_manager):
-    """`approved_but_failed` means the tool RAN and then raised.
+    """`approved_but_failed` means the tool RAN and then failed.
 
     A ticket created before the API returned 500; a write that landed before
     the client timed out. Excluding it from the guard reopens the exact
     double-execution hole for the worst case — the operator reads "it failed",
     approves the re-proposal, and gets two tickets.
+
+    Mocks the envelope the real `execute_tool` returns for a handler that
+    raised, not a raise (DP-323): the production class catches everything and
+    returns `{"error": ...}`, so a mocked `side_effect` asserts a contract it
+    cannot exhibit. Since DP-323 this arm also covers the writes that fail by
+    *returning* — every proxmox write, `dispatch_fix`, `approve_proposal` —
+    which is a widening of what the guard protects, in the safe direction: a
+    soft-failed reboot may equally have taken effect.
     """
     manager._tool_manager.execute_tool = AsyncMock(
-        side_effect=RuntimeError("500 after the ticket was created"))
+        return_value=_handler_raised("500 after the ticket was created"))
     parked = _park(token="a", call_id="c1")
     manager.park(parked)
     manager.take("a")
@@ -1225,10 +1388,12 @@ async def test_a_real_tool_manager_records_a_raised_write_as_failed(
         mem_manager):
     """`approved_but_failed` must be reachable through the REAL ToolManager.
 
-    Every other test in this file produces that status by giving a mocked
-    `execute_tool` a `side_effect`, i.e. by asserting a raise the production
-    class cannot emit: `ToolManager.execute_tool` catches every handler
-    exception and RETURNS `{"error": ...}`. So `decision.ok` was True for a
+    Every other test in this file used to produce that status by giving a
+    mocked `execute_tool` a `side_effect`, i.e. by asserting a raise the
+    production class cannot emit: `ToolManager.execute_tool` catches every
+    handler exception and RETURNS `{"error": ...}`. (DP-323 converted them to
+    `_handler_raised`, the envelope production actually returns.) So
+    `decision.ok` was True for a
     Zammad 500 that fired after the ticket was created, history recorded
     `approved`, and every branch keyed off `PARK_STATUS_FAILED` — the guard's
     "may have run" arm, tool_loop's "whether it took effect is unknown"

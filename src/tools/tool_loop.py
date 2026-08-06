@@ -34,7 +34,7 @@ from src.tools.definitions import (
     ALWAYS_CONFIRM_TOOLS,
     get_tool_capabilities, is_irreversible, get_tool_definition, is_write_tool
 )
-from src.tools.tool_manager import ToolManager
+from src.tools.tool_manager import ToolManager, tool_error
 
 logger = logging.getLogger(__name__)
 
@@ -732,12 +732,19 @@ class ToolLoop:
             # and the UI event, so both stay consistent and secret-free.
             result_str = cast(str, get_scrubber().scrub(json.dumps(tool_result)))
             err_str: Optional[str] = None
-            if isinstance(tool_result, dict) and tool_result.get("error"):
+            # Shared with the gated-write path (DP-323): both used to re-derive
+            # "did this fail" from the envelope's `error` key alone, and both
+            # therefore read a handler that reports failure by *returning*
+            # (`{"status": "error"}`, `{"executed": False}`) as a success. Here
+            # that only mis-coloured a ToolCard; there it wrote a failed
+            # irreversible write into history as `approved`.
+            failure = tool_error(tool_result)
+            if failure:
                 # Egress scrub (DP-225 boundary 1): the error is surfaced raw in
                 # ToolCallResultEvent.error (portal SSE / ToolCard), so redact it
                 # exactly like result_str above — the sibling result field being
                 # scrubbed is not enough on its own.
-                err_str = cast(str, get_scrubber().scrub(str(tool_result["error"])))
+                err_str = cast(str, get_scrubber().scrub(failure))
 
             conversation_history.append({
                 "role": "tool",

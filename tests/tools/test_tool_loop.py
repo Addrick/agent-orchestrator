@@ -238,6 +238,43 @@ async def test_tool_error_surfaces_in_result_event():
 
 
 @pytest.mark.asyncio
+async def test_a_soft_failure_also_surfaces_in_result_event():
+    """DP-323: a handler that reports failure by RETURNING must colour the
+    ToolCard too, not only one that raises.
+
+    Read tools use the same `{"status": "error"}` shape their write siblings
+    do (`proxmox.handler._err`), so before this the portal rendered a failed
+    remote command as a clean success and the operator had to read the JSON.
+    Same predicate as the gated-write path — one definition of "this failed".
+    """
+    engine = _make_engine([
+        [
+            {"type": "tool_calls", "calls": [
+                {"id": "c1", "name": "soft_fail", "arguments": {}}
+            ]},
+            {"type": "done", "full_text": ""},
+        ],
+        [
+            {"type": "text_delta", "text": "recovered"},
+            {"type": "done", "full_text": "recovered"},
+        ],
+    ])
+    tools = _make_tool_manager({
+        "soft_fail": {"result": {"status": "error",
+                                 "message": "ssh failed: timeout"}},
+    })
+    loop = ToolLoop(engine, tools, max_iterations=5)
+
+    events = await _drain(loop.run(
+        persona=_make_persona(), conversation_history=[],
+        params=MagicMock(), tools=[],
+    ))
+
+    [result] = [e for e in events if isinstance(e, ToolCallResultEvent)]
+    assert result.error == "ssh failed: timeout"
+
+
+@pytest.mark.asyncio
 async def test_llm_communication_error_yields_error_event():
     """Provider errors terminate the loop with ErrorEvent."""
     async def boom(*args, **kwargs):

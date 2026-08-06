@@ -8,6 +8,60 @@ from src.tools.definitions import get_all_tool_definitions
 
 logger = logging.getLogger(__name__)
 
+# Keys a handler may use to report failure by *returning* instead of raising.
+# `execute_tool` wraps a normal return as `{"result": <payload>}`, so a
+# handler's own error marker is nested one level down and can never collide
+# with the envelope's own `error` key — which is exactly why looking only at
+# the envelope classified every soft failure as a success (DP-322/DP-323).
+#
+# Deliberately narrow. Over-reporting is not the safe direction here: a
+# successful irreversible write recorded as `approved_but_failed` tells the
+# model the action may not have happened and invites a re-proposal. So this
+# matches only markers a handler cannot mean anything else by, and new
+# handlers are expected to raise or use one of these — not to invent a third
+# idiom (see `docs/capability_map.md`).
+_FAILURE_STATUSES = frozenset({"error", "failed", "failure"})
+
+
+def tool_error(envelope: Any) -> Optional[str]:
+    """The failure message in an `execute_tool` envelope, or None if it succeeded.
+
+    The single definition of "this tool call failed" for every consumer:
+    `ToolLoop` (which surfaces it on the ToolCard) and `ConfirmationManager`
+    (which turns it into `approved_but_failed` in durable history and
+    `executed_ok=False` in the audit row). Both used to re-derive it, and both
+    re-derived only the envelope half.
+
+    Recognized failures, in order:
+      1. `{"error": <truthy>}` — the envelope's own key: an unregistered tool,
+         or a handler that raised (`execute_tool` catches everything).
+      2. a returned payload carrying `{"error": <truthy>}`.
+      3. a returned payload whose `status` is error/failed/failure — the
+         proxmox handler's `_err()` shape and `dispatch_fix`.
+      4. a returned payload with `executed is False` — `approve_proposal`,
+         which catches its executor's exception on purpose so the proposal row
+         is never stranded, and therefore *cannot* signal failure by raising.
+    """
+    if not isinstance(envelope, dict):
+        return None
+    if envelope.get("error"):
+        return str(envelope["error"])
+    return _payload_error(envelope.get("result"))
+
+
+def _payload_error(payload: Any) -> Optional[str]:
+    """The failure message inside a handler's returned payload, or None."""
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("error"):
+        return str(payload["error"])
+    status = payload.get("status")
+    if isinstance(status, str) and status.lower() in _FAILURE_STATUSES:
+        return str(payload.get("message") or payload.get("result") or status)
+    if payload.get("executed") is False:
+        return str(payload.get("result") or "tool reported executed=False")
+    return None
+
 
 class ToolManager:
     """

@@ -35,7 +35,7 @@ from src.tools.tool_loop import (
     PARK_STATUS_EXPIRED, PARK_STATUS_FAILED, PARK_STATUS_INTERRUPTED,
     PARK_STATUS_QUARANTINED, write_call_identity_hash,
 )
-from src.tools.tool_manager import ToolManager
+from src.tools.tool_manager import ToolManager, tool_error
 
 logger = logging.getLogger(__name__)
 
@@ -797,24 +797,37 @@ class ConfirmationManager:
                 decision.result = await tool_manager.execute_tool(
                     tool_name, **(park.write_call.get("arguments") or {}),
                 )
-                # `ok` is "did the tool succeed", NOT "did the call return".
-                # `ToolManager.execute_tool` never raises — it catches every
-                # handler exception and RETURNS `{"error": ...}` — so deriving
-                # `ok` from reaching this line recorded a Zammad 500 that fired
-                # *after* the ticket was created as a plain `approved`.
-                # `PARK_STATUS_FAILED` was therefore unreachable in production,
-                # and with it everything keyed off it: the guard's
+                # `ok` is "did the tool succeed", NOT "did the call return"
+                # and NOT "did the envelope carry an error". Two ways a write
+                # fails without raising, and DP-322 only closed the first:
+                #   - `execute_tool` catches every handler exception and
+                #     RETURNS `{"error": ...}`, so a Zammad 500 that fired
+                #     *after* the ticket was created was a plain `approved`;
+                #   - seven gated writes never raise at all. The proxmox tools
+                #     return `{"status": "error", ...}` and `approve_proposal`
+                #     returns `{"executed": False, ...}` — both nested under
+                #     the envelope's `result` key, where an envelope-level
+                #     check cannot see them.
+                # Either way `PARK_STATUS_FAILED` was unreachable, and with it
+                # everything keyed off it: the DP-319 re-execution guard's
                 # `approved_but_failed` arm, the "whether it took effect is
-                # unknown" instruction in `tool_loop`, and the user_guide's
-                # promise that an errored write is treated as having run. The
-                # unit tests missed it because they mock a raise the real
-                # ToolManager cannot emit.
-                decision.ok = not (isinstance(decision.result, dict)
-                                   and "error" in decision.result)
+                # unknown" instruction in `tool_loop`, the user_guide's promise
+                # that an errored write is treated as having run, the "approved
+                # but FAILED" continuation line, and `executed_ok` in the audit
+                # row.
+                decision.ok = tool_error(decision.result) is None
             except Exception as e:
+                # Narrower than it looks, and NOT the handler-failure path:
+                # `execute_tool` swallows everything the handler raises, so the
+                # only way to land here is the call itself failing to be made —
+                # `**arguments` not unpacking because the model (or a patched
+                # history entry) supplied something that is not a string-keyed
+                # mapping. Reading this as "handler exceptions are covered here"
+                # is exactly the inference that let the defect above survive
+                # four reviews; it covers the frame, not the callee.
                 logger.error(
                     f"Approved write {tool_name} (token {park.token}) "
-                    f"failed: {e}", exc_info=True,
+                    f"could not be invoked: {e}", exc_info=True,
                 )
                 decision.result = {"error": f"Tool execution failed: {e}"}
                 decision.ok = False
