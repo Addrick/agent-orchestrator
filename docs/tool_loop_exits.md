@@ -47,15 +47,40 @@ flowchart TD
   loop -- no --> stuck[_LoopFinishedEvent\nDEV_COMMAND 'stuck in a loop']
 ```
 
+**Two guards sit in front of the park branch** (both inject a synthetic result and
+create *no* second affordance):
+
+- `pending_lookup` → `duplicate_of_pending`. The model re-proposed a write while
+  an identical one is still waiting. Keyed on `write_call_identity` (name +
+  canonicalized args, provider call id excluded — two re-proposals of the same
+  action always carry different ids, which is exactly the case to catch). The
+  suppressed call is emitted as a `_WriteDuplicateEvent` so the orchestrator can
+  patch its history entry when the *original* resolves.
+- `resolved_lookup` → `already_resolved` (DP-319). The model re-proposed a write
+  that was already **executed or refused**. Backed by `Parked_Writes` rows within
+  `PARK_REEXECUTION_GUARD_WINDOW` (15 min). **Continuation turns only** — the
+  pending guard is structurally blind during a continuation (the park was already
+  taken), which is precisely when the model re-reads its own tool span and
+  re-proposes. Left running on ordinary turns it would answer a legitimate
+  "restart that service again" with "that already happened", silently.
+
+Because `MAX_TOOL_CALLS` is 10 (raised from 5 in DP-297 — a parked write now
+costs an iteration instead of ending the turn), a turn can park several writes
+and still finish on ordinary text.
+
 ## _orchestrate exit paths × invariants
+
+Line numbers below are `src/chat_system.py` as of DP-324 (`963c074`) — treat them
+as a starting point, not a contract.
 
 | Exit path (line) | Terminal event | I1 reset? | Notes |
 |------------------|----------------|-----------|-------|
-| dev-command short-circuit (770) | DoneEvent | n/a | returns before ctx is set |
-| persona not found (783) | DoneEvent | n/a | returns before ctx is set |
-| `request_builder.prepare_request` raises (811) | ErrorEvent | ✅ explicit reset | guarded |
-| loop emits ErrorEvent (885) | ErrorEvent | ✅ explicit reset | covers `LLMCommunicationError` |
-| `CancelledError` (899) | re-raises | ✅ explicit reset | flushes partial assistant text |
+| dev-command short-circuit (300) | DoneEvent | n/a | returns before `turn_scope` is entered |
+| persona not found (308) | DoneEvent | n/a | returns before `turn_scope` is entered |
+| DP-128 quarantine gate (325) | DoneEvent (DEV_COMMAND) | n/a | returns before `turn_scope` is entered; sits *after* the dev-command branch on purpose, so `set tools …` can repair the persona in-band without a restart |
+| `request_builder.prepare_request` raises (359) | ErrorEvent | ✅ `turn_scope` | inside the scope since the `turn_scope` rework — no separate manual reset |
+| loop emits ErrorEvent (561) | ErrorEvent | ✅ `turn_scope` | covers `LLMCommunicationError`; commits the assistant row from the sealed tool context first, then `_register_parks` / `_register_duplicates` against that row — writes gated before the loop died are still real proposals |
+| `CancelledError` (571) | re-raises | ✅ `turn_scope` | flushes partial assistant text |
 | normal LLM_GENERATION | DoneEvent | ✅ `turn_scope` | guaranteed on full drain *and* early break |
 | parked write(s) | DoneEvent (LLM_GENERATION) | ✅ `turn_scope` | DP-297: parking is mid-turn, not an exit — the loop continues and the turn ends normally |
 | `turn_persistence.log_user_turn` raises | propagates | ✅ `turn_scope` | now inside the scope |
