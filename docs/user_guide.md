@@ -386,18 +386,38 @@ These ship with the bot (defined in `config/default_personas.json`):
 | arbitr | gemini-2.5-flash | Directive communication, Discord markdown only | AUTONOMOUS | google_grounding_search |
 | dispatchr | gemini-2.5-flash | Zammad ticket management | CONFIRM | Zammad toolset (`zammad` binding) |
 | fixr | default | Self-repair supervisor — dispatches Claude Code agents, never edits code itself | AUTONOMOUS | fixr toolset (`fixr` binding) |
-| hypr | default | Infra operator — audits the Proxmox node's topology, powers guests, swaps the koboldcpp model on `:5001` | AUTONOMOUS | Proxmox toolset (`proxmox` binding) |
 | it-help | gemini-2.5-flash | Testing/dev persona for Zammad integration | AUTONOMOUS | All |
 | gemini | gemini-2.5-flash | General-purpose Gemini | AUTONOMOUS | google_grounding_search |
 | chatgpt | gpt-5 | General-purpose GPT | AUTONOMOUS | None |
 | claude | claude-haiku-4-5-20251001 | General-purpose Claude | AUTONOMOUS | None |
 | testr | gemini-2.5-flash | Test persona (responds "success") | AUTONOMOUS | None |
 
-#### hypr — the infra operator
+#### hypr — the infra operator (opt-in, not seeded)
 
-`hypr` is the persona to talk to about the box itself, from **any** interface that
-routes to a persona (Discord, the web portal, `/derpr`). It holds the `proxmox`
-binding and nothing else: it can read the node's topology and power/model state,
+`hypr` is **not** a default persona and is **not** created on a fresh deploy. It
+ships as a standalone definition at `config/optional_personas/hypr.json`, and an
+operator adds it to a specific instance on purpose.
+
+That is deliberate. `hypr` is the only persona holding the `proxmox` binding, and
+a parked write is approved by whoever raised it — so *who can address `hypr`* is
+the authorization boundary for node power operations. Seeding it would put that
+surface on every deployment, including ones whose Discord guild has other people
+in it.
+
+**To add it to a running instance:** copy the entry from
+`config/optional_personas/hypr.json` into that instance's live
+`data/personas.json` (`personas` array) and restart, or create it through the
+persona-management commands. The shipped prompt carries an **OPERATOR NOTE** with
+two `<unset>` placeholders — fill in the guest that hosts derpr and the guest that
+serves the model on `:5001` for *your* node. The template deliberately names no
+guests, so until you fill those in `hypr` can only warn in general terms about
+powering off its own host. Auto-seeding only ever writes `data/personas.json`
+when the file does not already exist, so merging a release never adds a persona
+to an instance that is already running.
+
+Once present, `hypr` is the persona to talk to about the box itself, from **any**
+interface that routes to a persona (Discord, the web portal, `/derpr`). It holds
+the `proxmox` binding and nothing else: it can read the node's topology and power/model state,
 and it can act on them — but every destructive action is a write tool, so it
 **parks for your approval** on whatever surface you asked from. `reboot_node` is
 additionally flagged irreversible.
@@ -407,13 +427,22 @@ What it can do:
 - **Audit** — "what's running on the box?" → `pve_status` returns uptime plus every
   guest with its `vmid`, `name`, `kind`, and `status`. "what models can I load?" →
   `list_models`.
-- **Power** — "restart the GPU container", "stop win-3080", "reboot the whole box".
+- **Power** — "restart the GPU container", "stop the idle VM", "reboot the whole box".
   Guests are addressable by name; see [Addressing a guest by name](#addressing-a-guest-by-name).
 - **koboldcpp** — "switch :5001 to gemma" → `set_active_model`.
 
 It is `AUTONOMOUS` on purpose: the execution mode is not what protects you here —
 the write-audit is, and that fires regardless of mode. Making it `CONFIRM` would
 only add a second prompt in front of the same park.
+
+**It operates the node it runs on.** derpr's own container is a guest on that
+node, as are the services around it, so `stop_guest`/`reboot_guest` against that
+guest — and `reboot_node` always — take derpr down mid-conversation along with
+the approval gate that parks these very actions, and `set_active_model` can cut
+off derpr's own inference if it is served by the node's koboldcpp. Nothing in the
+toolset refuses a self-directed power-off; the persona prompt names the guest it
+lives inside so it has to say what an action costs before proposing it. Read the
+park prompt with that in mind.
 
 `hypr` is inert unless `PVE_TOOLS_ENABLED=true` and the pve SSH key is mounted;
 without those, every tool call returns a "disabled" error rather than attempting
@@ -778,10 +807,17 @@ required.
 
 - `kind` is optional when addressing by name — the lookup determines whether the
   guest is a container or a VM.
-- `kind` is **required** with a bare `vmid`, because `100` can name both a
-  container and a VM and the tools will not guess which one to power off.
+- `kind` is **required** with a bare `vmid`. Proxmox ids are unique across CTs
+  and VMs, but *derpr* cannot tell which CLI (`pct` or `qm`) owns an id without
+  asking the node — and guessing wrong on a power-off is not worth risking.
+- Passing **both** `name` and `vmid` is allowed but they must refer to the same
+  guest; if they disagree the call is refused rather than silently acting on the
+  `vmid` while the approval prompt shows the `name`.
 - An unknown name is refused with the list of names that do exist. A name held by
   both a CT and a VM is refused as ambiguous until you add `kind`.
+- If a listing itself failed (`pct list` or `qm list` errored), a name that did
+  not match is reported as **not confirmable**, not as absent — on a power path
+  "could not tell" and "does not exist" are different answers.
 - Names are resolved **locally**, from parsed `pct list` / `qm list` output — a
   name is never sent to the node. Only the resolved digits cross the SSH boundary,
   so the argv/metacharacter guard in `proxmox/ssh.py` still sees nothing but

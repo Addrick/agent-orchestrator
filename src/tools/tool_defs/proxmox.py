@@ -32,7 +32,7 @@ _GUEST_PARAMS = {
         "name": {
             "type": "string",
             "description": (
-                "Guest hostname as pve_status reports it (e.g. \"docker\", \"gpu\"), "
+                "Guest hostname exactly as pve_status reports it, "
                 "case-insensitive. Preferred over vmid — it needs no kind and reads "
                 "back clearly in the approval prompt."
             ),
@@ -41,7 +41,8 @@ _GUEST_PARAMS = {
             "type": "string",
             "description": (
                 "Numeric Proxmox guest id (e.g. \"100\", \"101\"). Alternative to "
-                "name; requires kind."
+                "name; requires kind. Pass one address form or the other — if you "
+                "pass both they must refer to the same guest or the call is refused."
             ),
         },
         "kind": {

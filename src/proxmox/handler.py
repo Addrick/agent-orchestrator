@@ -185,6 +185,15 @@ class ProxmoxToolHandler:
         on a power-off is not a mistake worth risking. Addressing by name needs no
         ``kind`` — the lookup supplies it.
         """
+        if not self._enabled():
+            # Short-circuit before the inventory. Without this the two listings
+            # each fail with the disabled error and resolution reports "no guest
+            # named X" — a false statement about the node, on the path that is
+            # about to power something off.
+            return _err(
+                "Proxmox tools are disabled (set PVE_TOOLS_ENABLED=true and mount "
+                "the pve SSH key to enable)."
+            )
         kind_in = (str(kind).strip().lower() or None) if kind else None
         if kind_in is not None and kind_in not in _GUEST_CLI:
             return _err(f"kind must be one of {sorted(_GUEST_CLI)}, got {kind!r}")
@@ -193,21 +202,43 @@ class ProxmoxToolHandler:
         name_in = str(name).strip() if name is not None else ""
 
         if vmid_in:
-            try:
-                resolved_vmid = _validate_vmid(vmid_in)
-            except ValueError as e:
-                return _err(str(e))
-            if kind_in is None:
-                return _err(
-                    "kind is required when addressing a guest by vmid "
-                    f"(got vmid={resolved_vmid!r}); pass kind=\"ct\" or \"vm\", or "
-                    "address the guest by name instead."
-                )
-            return {"status": "ok", "vmid": resolved_vmid, "kind": kind_in, "name": name_in or None}
+            return await self._resolve_by_vmid(vmid_in, name_in, kind_in)
 
         if not name_in:
             return _err("pass either a guest name or a numeric vmid.")
         return await self._resolve_by_name(name_in, kind_in)
+
+    async def _resolve_by_vmid(
+        self, vmid: str, name: str, kind: Optional[str]
+    ) -> Dict[str, Any]:
+        """Address by numeric id, cross-checking a ``name`` if one came too."""
+        try:
+            resolved_vmid = _validate_vmid(vmid)
+        except ValueError as e:
+            return _err(str(e))
+        if kind is None:
+            return _err(
+                "kind is required when addressing a guest by vmid "
+                f"(got vmid={resolved_vmid!r}); pass kind=\"ct\" or \"vm\", or "
+                "address the guest by name instead."
+            )
+        if not name:
+            return {"status": "ok", "vmid": resolved_vmid, "kind": kind, "name": None}
+        # Both address forms given. The vmid decides what runs, so an unchecked
+        # `name` would be echoed into `target` — and into the approval prompt —
+        # describing a guest we are not touching. That is the audit record lying,
+        # which is worse than either address form being wrong on its own. Resolve
+        # the name too and refuse unless the two agree.
+        by_name = await self._resolve_by_name(name, kind)
+        if by_name.get("status") != "ok":
+            return by_name
+        if by_name["vmid"] != resolved_vmid:
+            return _err(
+                f"name and vmid disagree: {name!r} is {by_name['kind']} "
+                f"{by_name['vmid']}, not {kind} {resolved_vmid}. Re-issue with "
+                "just one of them."
+            )
+        return by_name
 
     async def _resolve_by_name(self, name: str, kind: Optional[str]) -> Dict[str, Any]:
         """Match a hostname against the live inventory. Exact, case-insensitive.
@@ -233,12 +264,21 @@ class ProxmoxToolHandler:
                 'kind="ct" or kind="vm".'
             )
         known = sorted(g["name"] for g in inventory["guests"] if g["name"])
+        if inventory["errors"]:
+            # A listing failed, so "not found" is not something we know — the
+            # guest may be sitting in the half we could not read. On a power
+            # path, unknown and absent are different answers and must not be
+            # collapsed: reporting "no such guest" invites the model to go
+            # looking for a near neighbour to act on instead.
+            return _err(
+                f"could not confirm whether a guest named {name!r} exists — the "
+                f"node listing failed: {inventory['errors']}. Guests read "
+                f"successfully: {known}. Fix the listing before acting."
+            )
         msg = f"no guest named {name!r}"
         if kind is not None:
             msg += f" of kind {kind!r}"
         msg += f"; known guests: {known}" if known else "; the node reported no guests"
-        if inventory["errors"]:
-            msg += f" (listing errors: {inventory['errors']})"
         return _err(msg)
 
     # -- model availability helpers ------------------------------------------

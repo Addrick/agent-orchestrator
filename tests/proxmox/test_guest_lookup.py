@@ -274,3 +274,67 @@ async def test_lookup_is_skipped_entirely_when_tools_are_disabled(monkeypatch):
     assert res["status"] == "error"
     assert "disabled" in res["message"]
     assert runner.calls == []
+
+
+@pytest.mark.asyncio
+async def test_name_and_vmid_that_disagree_are_refused(handler):
+    """A mismatched pair must not act on the vmid while the audit row — and the
+    approval prompt the human read — names a different guest."""
+    h, runner = handler
+    res = await h._stop_guest(vmid="100", kind="ct", name="gpu")
+    assert res["status"] == "error"
+    assert "disagree" in res["message"]
+    assert not any(c[:2] == ["pct", "stop"] for c in runner.calls)
+
+
+@pytest.mark.asyncio
+async def test_name_and_vmid_that_agree_resolve_to_the_named_guest(handler):
+    h, runner = handler
+    res = await h._stop_guest(vmid="101", kind="ct", name="gpu")
+    assert res["status"] == "ok"
+    assert res["target"] == {"vmid": "101", "kind": "ct", "name": "gpu"}
+    assert ["pct", "stop", "101"] in runner.calls
+
+
+@pytest.mark.asyncio
+async def test_vmid_only_does_not_invent_a_name_for_the_audit_row(handler):
+    h, _ = handler
+    res = await h._reboot_guest(vmid="100", kind="ct")
+    assert res["target"] == {"vmid": "100", "kind": "ct", "name": None}
+
+
+@pytest.mark.asyncio
+async def test_disabled_tools_say_disabled_not_no_such_guest(monkeypatch):
+    """The old message led with 'no guest named X' — a false claim about the
+    node — because both listings failed with the disabled error."""
+    monkeypatch.setattr(global_config, "PVE_TOOLS_ENABLED", False)
+    runner = InventoryRunner()
+    h = ProxmoxToolHandler(runner)  # type: ignore[arg-type]
+    res = await h._stop_guest(name="gpu")
+    assert res["status"] == "error"
+    assert "disabled" in res["message"]
+    assert "no guest named" not in res["message"]
+    assert runner.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_listing_is_not_reported_as_the_guest_not_existing(enabled):
+    """`pct list` down + a CT name must not read as 'that guest does not exist' —
+    on a power path, unknown and absent are different answers."""
+
+    class NoPct(InventoryRunner):
+        async def run(self, argv):
+            a = list(argv)
+            if a == ["pct", "list"]:
+                self.calls.append(a)
+                return SSHResult(1, "", "pct: connection refused")
+            return await super().run(argv)
+
+    runner = NoPct()
+    h = ProxmoxToolHandler(runner)  # type: ignore[arg-type]
+    res = await h._stop_guest(name="gpu")
+    assert res["status"] == "error"
+    assert "could not confirm" in res["message"]
+    assert "pct: connection refused" in res["message"]
+    assert "no guest named" not in res["message"]
+    assert not any(c[:2] == ["pct", "stop"] for c in runner.calls)
