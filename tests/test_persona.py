@@ -642,3 +642,58 @@ def test_load_persona_json_without_retain_fields(tmp_path):
     assert p.get_retain_mission() is None
     assert p.get_enable_observations() is None
     assert p.get_disposition() is None
+
+
+# --- DP-327: the hypr infra-operator persona ships in the seed config --------
+
+def _seed_persona(name):
+    """One entry from the versioned seed file, by name."""
+    import json
+    import os
+
+    path = os.path.join(global_config.CONFIG_DIR, "default_personas.json")
+    with open(path, "r", encoding="utf-8") as fh:
+        seed = json.load(fh)
+    return next((p for p in seed["personas"] if p.get("name") == name), None)
+
+
+def test_hypr_ships_in_default_personas():
+    """A fresh deploy seeds an infra operator wired to the proxmox binding."""
+    hypr = _seed_persona("hypr")
+    assert hypr is not None, "hypr missing from config/default_personas.json"
+    assert hypr["service_bindings"] == ["proxmox"]
+    # Binding and tool list are two independent gates (request_builder filters on
+    # the binding, ToolPolicy on the names) — a persona with only one of them
+    # loads fine and then silently has no tools, so pin both.
+    assert hypr["tool_policy"]["default"] == "deny"
+    assert set(hypr["tool_policy"]["allow"]) == set(hypr["enabled_tools"])
+
+
+def test_hypr_enabled_tools_are_all_real_proxmox_tools():
+    """Guards the rename/typo case: a tool name that no longer exists is inert."""
+    from src.tools.tool_defs.proxmox import PROXMOX_TOOLS
+
+    hypr = _seed_persona("hypr")
+    real = {t["function"]["name"] for t in PROXMOX_TOOLS}
+    assert set(hypr["enabled_tools"]) == real
+
+
+def test_hypr_holds_no_binding_beyond_proxmox():
+    """Blast radius: the box operator must not also reach zammad/fixr/agents."""
+    hypr = _seed_persona("hypr")
+    assert hypr["service_bindings"] == ["proxmox"]
+    assert "*" not in hypr["enabled_tools"]
+
+
+def test_hypr_loads_unquarantined():
+    """DP-128 loads a composition-violating persona quarantined rather than
+    dropping it — so 'it loaded' is not evidence it works. Assert the empty
+    block-reason list explicitly."""
+    from src.personas import store
+
+    loaded = store.load_personas_from_file(
+        __import__("os").path.join(global_config.CONFIG_DIR, "default_personas.json")
+    )
+    assert loaded is not None and "hypr" in loaded
+    assert loaded["hypr"].get_security_block_reasons() == []
+    assert loaded["hypr"].get_service_bindings() == ["proxmox"]

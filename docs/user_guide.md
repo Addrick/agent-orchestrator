@@ -384,12 +384,42 @@ These ship with the bot (defined in `config/default_personas.json`):
 | Name | Model | Purpose | Execution Mode | Tools |
 |------|-------|---------|----------------|-------|
 | arbitr | gemini-2.5-flash | Directive communication, Discord markdown only | AUTONOMOUS | google_grounding_search |
-| joy | gemini-2.5-flash | Production Zammad ticket management | CONFIRM | All (zammad + agents bindings) |
+| dispatchr | gemini-2.5-flash | Zammad ticket management | CONFIRM | Zammad toolset (`zammad` binding) |
+| fixr | default | Self-repair supervisor — dispatches Claude Code agents, never edits code itself | AUTONOMOUS | fixr toolset (`fixr` binding) |
+| hypr | default | Infra operator — audits the Proxmox node's topology, powers guests, swaps the koboldcpp model on `:5001` | AUTONOMOUS | Proxmox toolset (`proxmox` binding) |
 | it-help | gemini-2.5-flash | Testing/dev persona for Zammad integration | AUTONOMOUS | All |
 | gemini | gemini-2.5-flash | General-purpose Gemini | AUTONOMOUS | google_grounding_search |
 | chatgpt | gpt-5 | General-purpose GPT | AUTONOMOUS | None |
 | claude | claude-haiku-4-5-20251001 | General-purpose Claude | AUTONOMOUS | None |
 | testr | gemini-2.5-flash | Test persona (responds "success") | AUTONOMOUS | None |
+
+#### hypr — the infra operator
+
+`hypr` is the persona to talk to about the box itself, from **any** interface that
+routes to a persona (Discord, the web portal, `/derpr`). It holds the `proxmox`
+binding and nothing else: it can read the node's topology and power/model state,
+and it can act on them — but every destructive action is a write tool, so it
+**parks for your approval** on whatever surface you asked from. `reboot_node` is
+additionally flagged irreversible.
+
+What it can do:
+
+- **Audit** — "what's running on the box?" → `pve_status` returns uptime plus every
+  guest with its `vmid`, `name`, `kind`, and `status`. "what models can I load?" →
+  `list_models`.
+- **Power** — "restart the GPU container", "stop win-3080", "reboot the whole box".
+  Guests are addressable by name; see [Addressing a guest by name](#addressing-a-guest-by-name).
+- **koboldcpp** — "switch :5001 to gemma" → `set_active_model`.
+
+It is `AUTONOMOUS` on purpose: the execution mode is not what protects you here —
+the write-audit is, and that fires regardless of mode. Making it `CONFIRM` would
+only add a second prompt in front of the same park.
+
+`hypr` is inert unless `PVE_TOOLS_ENABLED=true` and the pve SSH key is mounted;
+without those, every tool call returns a "disabled" error rather than attempting
+SSH. Downloading and deploying a *new* model from HuggingFace is not part of the
+toolset (tracked separately as DP-265) — `set_active_model` only switches between
+models already on disk.
 
 ### System Personas
 
@@ -732,13 +762,33 @@ straight through.
 
 | Tool | Type | Description |
 |------|------|-------------|
-| `pve_status` | Read | Node uptime + `pct list` (containers) + `qm list` (VMs) with run state. Use to find guest ids before acting. |
+| `pve_status` | Read | Node uptime plus every guest as **structured data** — `vmid`, `name`, `kind` (`ct`/`vm`), `status`, `lock` — alongside the raw `pct list` / `qm list` text. This is the infra-topology audit: one call answers "what exists and what's up". |
 | `list_models` | Read | koboldcpp models for `:5001` that are **immediately available** (their model file is on disk) and which one is active. Configured units whose model file is missing are omitted — they can't be loaded. |
 | `reboot_node` | **Write (parked, irreversible)** | Reboot the metal — takes down every guest on it. Last resort. |
-| `reboot_guest` | **Write (parked)** | Reboot one guest by `vmid` + `kind` (`ct`/`vm`). |
-| `start_guest` | **Write (parked)** | Start a stopped guest. |
-| `stop_guest` | **Write (parked)** | Hard-stop a running guest (power-off, not graceful shutdown). |
+| `reboot_guest` | **Write (parked)** | Reboot one guest, by `name` or by `vmid`. |
+| `start_guest` | **Write (parked)** | Start a stopped guest, by `name` or by `vmid`. |
+| `stop_guest` | **Write (parked)** | Hard-stop a running guest (power-off, not graceful shutdown), by `name` or by `vmid`. |
 | `set_active_model` | **Write (parked)** | Swap the active model on `:5001`: disables the current unit, enables+starts the target (only one runs at a time). Pass a `name` from `list_models`. Pre-flight guard: if the target's model file isn't on disk it **refuses and leaves the current model running** (never takes `:5001` down). |
+
+#### Addressing a guest by name
+
+The three guest tools accept **either** `name` (the guest's hostname as `pve_status`
+reports it, case-insensitive) **or** `vmid` (the numeric id). At least one is
+required.
+
+- `kind` is optional when addressing by name — the lookup determines whether the
+  guest is a container or a VM.
+- `kind` is **required** with a bare `vmid`, because `100` can name both a
+  container and a VM and the tools will not guess which one to power off.
+- An unknown name is refused with the list of names that do exist. A name held by
+  both a CT and a VM is refused as ambiguous until you add `kind`.
+- Names are resolved **locally**, from parsed `pct list` / `qm list` output — a
+  name is never sent to the node. Only the resolved digits cross the SSH boundary,
+  so the argv/metacharacter guard in `proxmox/ssh.py` still sees nothing but
+  integers and config-pinned unit names.
+- Resolution happens at **execution** time (after you approve the park), and the
+  result echoes the `vmid`, `kind`, and `name` actually acted on, so the audit
+  record shows the resolved target rather than only what the model typed.
 
 Disabled by default. Enable with `PVE_TOOLS_ENABLED=true` and mount the pve SSH
 key into the container. Config knobs: `PVE_SSH_HOST`/`PVE_SSH_USER`/`PVE_SSH_KEY`/
