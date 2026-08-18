@@ -259,6 +259,27 @@ class KoboldEngineAdapter:
         operator token (DERPR_CONTROL_TOKEN). No token configured = the whole
         control plane answers 401 (fail closed) until the operator sets one.
         Reads stay open; OPTIONS passes for CORS preflight.
+
+        ⚠️ DP-333 — "reads stay open" is broader than it sounds, and is an
+        ACCEPTED RISK CONDITIONAL ON A LAN-ONLY DEPLOYMENT, not a claim that
+        reads are harmless. The GET exemption below covers
+        `/api/v1/persona/{name}` (the persona's system prompt),
+        `/session/{p}/assemble` (the fully assembled request),
+        `/session/{p}/transcript` (history, plus live park tokens and their
+        confirmation text), `/kobold_export`, `/session/{p}/ltm_block`
+        (long-term-memory search on a caller-supplied query),
+        `/interaction/{id}/versions`, and the Hindsight bank listings — none of
+        which consult a persona's DP-330 `origin_allowlist`, because none of
+        them route through `BotLogic.preprocess_message`. The boundary holding
+        this closed is the network: `Caddyfile` serves private addresses with
+        `tls internal`.
+
+        If that stops being true, the fix belongs HERE, in the exemption — an
+        allowlist of genuinely-public GET paths, mirroring how
+        DATA_PLANE_POST_PATHS carves out the data plane, so a new route is
+        private by omission. Do NOT gate route-by-route: DP-330 shipped an
+        authz check that covered some call paths and not others, and the ones
+        it missed were a hole rather than a to-do.
         """
         @self.app.middleware("http")
         async def control_plane_auth(request: Request, call_next: Any) -> Any:
