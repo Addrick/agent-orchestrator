@@ -6,6 +6,7 @@ from typing import Optional, Dict, Any, List, Type, TypeVar, Union
 
 from config import global_config
 from src.generation_params import GenerationParams
+from src.origin import Origin, is_origin_allowed, parse_operator_allowlist
 from src.tool_policy import KNOWN_OVERRIDES, ToolPolicy
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,7 @@ class Persona:
             observations_mission: Optional[str] = None,
             enable_observations: Optional[bool] = None,
             disposition: Optional[Dict[str, Any]] = None,
+            origin_allowlist: Optional[List[str]] = None,
     ) -> None:
         self._name: str = persona_name
         self._model_name: str = model_name
@@ -128,6 +130,15 @@ class Persona:
             bool(enable_observations) if enable_observations is not None else None
         )
         self._disposition: Optional[Dict[str, int]] = self._sanitize_disposition(disposition)
+
+        # DP-330: which origins may address this persona at all. Empty (the
+        # default, and what every pre-DP-330 persona file loads with) means
+        # unrestricted. Parsed once here so a malformed entry is warned about
+        # at load rather than on every turn; parse_operator_allowlist fails
+        # closed, so a typo narrows reachability and never widens it.
+        self._origin_allowlist: List[str] = list(origin_allowlist) if origin_allowlist else []
+        self._origin_allowlist_parsed = parse_operator_allowlist(
+            ','.join(self._origin_allowlist))
 
         try:
             self._max_context_tokens: int = int(max_context_tokens) if max_context_tokens is not None else global_config.DEFAULT_MAX_CONTEXT_TOKENS
@@ -248,6 +259,21 @@ class Persona:
     def get_service_bindings(self) -> List[str]:
         """Returns the list of service integrations this persona is bound to."""
         return self._service_bindings
+
+    def get_origin_allowlist(self) -> List[str]:
+        """DP-330: origins allowed to address this persona, as authored
+        (``server_id[/channel_id[/author_id]]`` entries). Empty =
+        unrestricted."""
+        return list(self._origin_allowlist)
+
+    def is_addressable_from(self, origin: Origin) -> bool:
+        """DP-330: may `origin` talk to this persona at all?
+
+        True for every persona with no allowlist. With one set, only a
+        matching Discord guild passes — DMs and every non-Discord transport
+        fail closed (see ``src.origin.is_origin_allowed``).
+        """
+        return is_origin_allowed(self._origin_allowlist_parsed, origin)
 
     def is_security_blocked(self) -> bool:
         """True if this persona is quarantined for an insecure tool composition.
@@ -588,6 +614,29 @@ class Persona:
         """
         self._chat_template = value if value else None
         logger.info(f"Persona '{self._name}' chat_template set to {value!r}.")
+
+    def set_origin_allowlist(self, entries: List[str]) -> List[str]:
+        """DP-330: replace the origin allowlist. Returns the accepted
+        entries — malformed ones are dropped by the parser (fail closed), so
+        the caller can report what actually took effect. An empty list
+        clears the restriction.
+
+        Privileged: reachable only from the operator-gated ``set
+        origin_allowlist`` dev command, never from the PATCH route (this
+        field decides who may reach the persona, exactly like
+        ``explicit_overrides`` decides what it may do)."""
+        parsed = parse_operator_allowlist(','.join(str(e) for e in entries))
+        self._origin_allowlist = [
+            srv if (chan, auth) == ('*', '*')
+            else f"{srv}/{chan}" if auth == '*'
+            else f"{srv}/{chan}/{auth}"
+            for srv, chan, auth in parsed
+        ]
+        self._origin_allowlist_parsed = parsed
+        logger.info(
+            f"Persona '{self._name}' origin_allowlist set to "
+            f"{self._origin_allowlist or 'unrestricted'}.")
+        return list(self._origin_allowlist)
 
     def set_service_bindings(self, bindings: List[str]) -> None:
         """Sets the list of service integrations this persona is bound to."""

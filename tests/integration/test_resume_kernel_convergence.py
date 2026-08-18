@@ -836,3 +836,69 @@ async def test_distinct_writes_across_turns_both_park(mocked_chat_system):
     parks = chat_system.confirmations.list_for("u11", "test_persona")
     assert len(parks) == 2
     assert {p.token for p in parks} >= {first}
+
+
+@pytest.mark.asyncio
+async def test_continuation_survives_an_origin_allowlist(mocked_chat_system):
+    """DP-330: the origin gate must not fire on the continuation turn.
+
+    A gated persona's whole point is park -> approve -> summarize. The park is
+    raised from an allowed origin, but `stream_resolve_park` re-enters the
+    kernel with no origin (ANONYMOUS). Gating that turn would execute the
+    approved write and then refuse to report it — the operator would see a
+    refusal for an action that already ran.
+    """
+    from src.origin import Origin
+
+    chat_system, _ = mocked_chat_system
+    persona = _confirm_persona(chat_system)
+    persona.set_origin_allowlist(["12345"])
+    executed = _recording_tool_manager(chat_system)
+
+    allowed = Origin(transport="discord", server_id="12345",
+                     channel_id="c1", author_id="a1")
+    _set_engine(chat_system, [
+        _calls({"id": "w1", "name": "create_ticket",
+                "arguments": {"title": "t", "body": "b"}}),
+        _text("Proposed."),
+    ])
+    await _drain(chat_system.stream_response(
+        "test_persona", "ugate", "c1", "do the thing", origin=allowed))
+    parks = chat_system.confirmations.list_for("ugate", "test_persona")
+    assert len(parks) == 1, "allowed origin should have reached the tool loop"
+
+    _set_engine(chat_system, [_text("Ticket opened.")])
+    text, rtype, _, _ = await chat_system.resolve_park(
+        "ugate", "test_persona", parks[0].token, approved=True)
+
+    assert "create_ticket" in executed
+    assert text == "Ticket opened."
+    assert rtype == ResponseType.LLM_GENERATION
+
+
+@pytest.mark.asyncio
+async def test_disallowed_origin_never_reaches_the_tool_loop(mocked_chat_system):
+    """The flip side: a non-allowlisted origin cannot raise a park at all, so
+    it never receives a token to resolve — which is what keeps the ungated
+    resolve path from being a way around the gate."""
+    from src.origin import Origin
+
+    chat_system, _ = mocked_chat_system
+    persona = _confirm_persona(chat_system)
+    persona.set_origin_allowlist(["12345"])
+    executed = _recording_tool_manager(chat_system)
+
+    _set_engine(chat_system, [
+        _calls({"id": "w1", "name": "create_ticket",
+                "arguments": {"title": "t", "body": "b"}}),
+        _text("Proposed."),
+    ])
+    events = await _drain(chat_system.stream_response(
+        "test_persona", "ublocked", "c1", "do the thing",
+        origin=Origin(transport="discord", server_id="99999",
+                      channel_id="c1", author_id="a1")))
+
+    assert chat_system.confirmations.list_for("ublocked", "test_persona") == []
+    assert executed == []
+    done = [e for e in events if isinstance(e, DoneEvent)]
+    assert done and "not available from this channel" in done[0].text

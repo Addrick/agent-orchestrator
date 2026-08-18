@@ -163,3 +163,57 @@ def test_inject_timestamp_field(persona):
     assert not rejected
     assert persona.get_inject_timestamp() is False
 
+
+
+# --- DP-330: origin_allowlist is a gated, non-patchable field ---------------
+
+def test_origin_allowlist_is_not_patchable():
+    """It decides WHO may reach the persona, so the PATCH route the portal
+    exposes must never carry it — same reasoning as explicit_overrides."""
+    field = next(f for f in PERSONA_FIELDS if f.name == 'origin_allowlist')
+    assert field.patch_key is None
+    assert 'origin_allowlist' not in registry_patch_keys()
+
+
+def test_set_origin_allowlist_via_cli(persona):
+    handler = cli_set_handlers()['origin_allowlist']
+    response, mutated = handler(['origin_allowlist', '12345', '9/8'], persona)
+    assert mutated is True
+    assert '12345' in response and '9/8' in response
+    assert persona.get_origin_allowlist() == ['12345', '9/8']
+
+
+def test_set_origin_allowlist_accepts_json_and_commas(persona):
+    handler = cli_set_handlers()['origin_allowlist']
+    handler(['origin_allowlist', '["12345", "9/8"]'], persona)
+    assert persona.get_origin_allowlist() == ['12345', '9/8']
+    handler(['origin_allowlist', '77,88'], persona)
+    assert persona.get_origin_allowlist() == ['77', '88']
+
+
+def test_set_origin_allowlist_clears(persona):
+    handler = cli_set_handlers()['origin_allowlist']
+    handler(['origin_allowlist', '12345'], persona)
+    response, mutated = handler(['origin_allowlist', 'none'], persona)
+    assert mutated is True
+    assert 'unrestricted' in response
+    assert persona.get_origin_allowlist() == []
+
+
+def test_set_origin_allowlist_reports_an_all_malformed_list(persona):
+    """The parser fails closed by DROPPING entries, which for this field means
+    the persona silently becomes unrestricted — the operator must be told."""
+    handler = cli_set_handlers()['origin_allowlist']
+    response, mutated = handler(['origin_allowlist', '*'], persona)
+    assert 'Error' in response and 'unrestricted' in response
+    assert persona.get_origin_allowlist() == []
+
+
+def test_what_origin_allowlist(persona):
+    what = cli_what_handlers()['origin_allowlist']
+    response, mutated = what(['origin_allowlist'], persona)
+    assert mutated is False
+    assert 'unrestricted' in response
+    persona.set_origin_allowlist(['12345'])
+    response, _ = what(['origin_allowlist'], persona)
+    assert '12345' in response

@@ -152,6 +152,10 @@ def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
             persona_json["enable_observations"] = persona.get_enable_observations()
         if persona.get_disposition() is not None:
             persona_json["disposition"] = persona.get_disposition()
+        # DP-330: only written when the persona is actually restricted, so an
+        # unrestricted persona round-trips to the exact shape it loaded with.
+        if persona.get_origin_allowlist():
+            persona_json["origin_allowlist"] = persona.get_origin_allowlist()
         persona_list.append(persona_json)
     return persona_list
 
@@ -268,6 +272,7 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
                 observations_mission=new_persona.get("observations_mission"),
                 enable_observations=new_persona.get("enable_observations"),
                 disposition=new_persona.get("disposition"),
+                origin_allowlist=new_persona.get("origin_allowlist"),
                 **_resolve_params_kwargs(new_persona),
             )
 
@@ -348,6 +353,7 @@ def load_system_personas_from_file() -> Dict[str, Any]:
                 observations_mission=new_persona.get("observations_mission"),
                 enable_observations=new_persona.get("enable_observations"),
                 disposition=new_persona.get("disposition"),
+                origin_allowlist=new_persona.get("origin_allowlist"),
                 **params_kwargs,
             )
 

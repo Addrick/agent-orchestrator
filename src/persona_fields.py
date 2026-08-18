@@ -309,6 +309,47 @@ def _set_explicit_overrides(args: List[str], persona: Persona) -> Tuple[Optional
     return f"Explicit overrides for {persona.get_name()} set to: {shown}.", True
 
 
+def _set_origin_allowlist(args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
+    """`set origin_allowlist <entry ...|json list|none>` — DP-330.
+
+    Entries use the OPERATOR_ALLOWLIST form `server_id[/channel_id[/author_id]]`.
+    Deliberately NOT patchable: this field decides who may reach the persona at
+    all, so the operator-gated dev command is its only mutation surface (same
+    reasoning as `set explicit_overrides`).
+    """
+    if len(args) < 2:
+        return (
+            "Usage: set origin_allowlist <server_id[/channel_id[/author_id]] ...|"
+            "json list|none>. Empty means unrestricted.",
+            False,
+        )
+    raw = ' '.join(args[1:]).strip()
+    entries: List[str]
+    if raw.lower() in ('none', 'clear', 'null', '[]'):
+        entries = []
+    elif raw.startswith('['):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return "Error: Invalid JSON list for origin_allowlist.", False
+        if not isinstance(parsed, list) or not all(isinstance(x, str) for x in parsed):
+            return "Error: origin_allowlist must be a JSON list of strings.", False
+        entries = parsed
+    else:
+        entries = [e for chunk in raw.split() for e in chunk.split(',') if e]
+    accepted = persona.set_origin_allowlist(entries)
+    if entries and not accepted:
+        # The parser drops malformed entries silently (fail closed); saying so
+        # matters because the persona just became UNRESTRICTED, not narrower.
+        return (
+            f"Error: no valid origin_allowlist entries in {raw!r}; "
+            f"{persona.get_name()} is now unrestricted.",
+            True,
+        )
+    shown = ', '.join(accepted) or 'unrestricted'
+    return f"Origin allowlist for {persona.get_name()} set to: {shown}.", True
+
+
 def _mission_setter(
         *,
         apply: Callable[[Persona, Optional[str]], Any],
@@ -657,6 +698,19 @@ PERSONA_FIELDS: List[PersonaField] = [
             + f". Valid: {', '.join(sorted(KNOWN_OVERRIDES))}."
         ),
         set_cli=_set_explicit_overrides,
+    ),
+    PersonaField(
+        # DP-330: privileged field — no patch_key on purpose. It decides which
+        # origins may address the persona at all, so it must not be settable
+        # from the PATCH route the portal exposes.
+        name='origin_allowlist',
+        describe=lambda p: (
+            f"Origin allowlist for '{p.get_name()}': "
+            + (', '.join(p.get_origin_allowlist()) if p.get_origin_allowlist()
+               else 'unrestricted (any origin may address it)')
+            + "."
+        ),
+        set_cli=_set_origin_allowlist,
     ),
 ]
 

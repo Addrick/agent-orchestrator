@@ -160,6 +160,29 @@ Each ingested document is tagged `date:<YYYY-MM-DD>` and `date_source:<regex|llm
 
 All commands are entered as the message body when addressing a persona. Commands are case-insensitive.
 
+**Persona origin allowlist (DP-330):** a persona can additionally declare *which
+origins may address it at all*, independent of what any command may do. Set it
+with the operator command `set origin_allowlist <entry ...>`, where each entry is
+`server_id[/channel_id[/author_id]]` — the same syntax as `OPERATOR_ALLOWLIST`, so
+a bare guild id means "that whole Discord server, any channel, any user". Read it
+back with `what origin_allowlist`; clear it with `set origin_allowlist none`.
+
+- **Empty (the default) means unrestricted** — every persona that never sets the
+  field behaves exactly as before.
+- A persona **with** an allowlist is Discord-only: entries are guild ids, and no
+  other transport has a gateway-asserted one. DMs, the web portal, email, ticket
+  bodies and agent-initiated turns are all refused with `Persona '<name>' is not
+  available from this channel.` The refusal never says what the allowlist holds.
+- The gate sits above dev-command handling, so a disallowed origin cannot read a
+  restricted persona's configuration with `what prompt` either.
+- Malformed entries are dropped rather than honored (a wildcard server would
+  grant every guild the bot is in). If *every* entry you supply is malformed the
+  persona ends up **unrestricted**, and the command says so explicitly.
+- This is not the same gate as operator gating: operator gating asks *may this
+  command reconfigure things*, the allowlist asks *may you talk to this persona*.
+  A persona can be reachable but non-operator, and it can be operator-authenticated
+  in a guild that its allowlist excludes.
+
 **Operator gating (DP-277):** commands that reconfigure a persona or the system — `set`, `add`, `delete`, `remember`, `trust`, `untrust`, `update_models` — are **control-plane** and only honored from an authenticated operator origin: an allowlisted Discord server/channel/user (`OPERATOR_ALLOWLIST`, matched against gateway-asserted ids) or the portal's operator-authenticated control surface. From any other origin (unlisted Discord channels, email, ticket bodies, anonymous portal chat) they are refused with `Refused: '<command>' is an operator command…` — this is the structural defense against injected instructions trying to reconfigure an agent. Read and lifecycle commands (`what`, `detail`, `help`, `dump_last`, `dump_history`, `hello`, `goodbye`) stay open to everyone.
 
 ### Conversation Control
@@ -469,8 +492,22 @@ powering off its own host. Auto-seeding only ever writes `data/personas.json`
 when the file does not already exist, so merging a release never adds a persona
 to an instance that is already running.
 
+**Restrict who can reach it (recommended).** Because reachability *is* the authz
+boundary here, set `hypr`'s [origin allowlist](#commands) to the one Discord
+server you administer:
+
+```
+hypr set origin_allowlist <your_guild_id>
+```
+
+It ships with `origin_allowlist: []` (unrestricted) because the shipped file is
+public and the guild id is yours — fill it in on your own instance. Note the
+trade-off: an allowlisted `hypr` is Discord-only, so its parked actions can only
+be approved in Discord, not from the portal.
+
 Once present, `hypr` is the persona to talk to about the box itself, from **any**
-interface that routes to a persona (Discord, the web portal, `/derpr`). It holds
+interface that routes to a persona (Discord, the web portal, `/derpr`) — unless
+you narrow that with an origin allowlist as above. It holds
 the `proxmox` binding and nothing else: it can read the node's topology and power/model state,
 and it can act on them — but every destructive action is a write tool, so it
 **parks for your approval** on whatever surface you asked from. `reboot_node` is

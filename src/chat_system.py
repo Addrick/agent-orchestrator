@@ -281,6 +281,38 @@ class ChatSystem:
         user-turn logging are skipped, but history is built normally — the
         resolved writes are already patched into it.
         """
+        # DP-330: persona origin allowlist — WHICH persona this origin may
+        # address at all, above the dev-command gate (DP-277 gates what a
+        # command may *do*; this gates whether the persona is reachable, so a
+        # read-only `what prompt` must not disclose a restricted persona's
+        # config either). Personas with no allowlist are unrestricted, which is
+        # every persona that predates this field.
+        #
+        # Skipped on a continuation: no fresh inbound message exists to gate —
+        # the addressing decision was made on the turn that raised the park,
+        # and the approved write has already executed by the time we get here,
+        # so refusing would only suppress the summary of an action that ran.
+        # A park is still unreachable from a disallowed origin by construction:
+        # its token is only ever handed to the origin that raised it, and
+        # `stream_resolve_park` binds the token to that (user, persona) key.
+        gated_persona: Optional[Persona] = self.personas.get(persona_name)
+        if continuation is None and gated_persona is not None:
+            if not gated_persona.is_addressable_from(origin or ANONYMOUS):
+                caller = origin or ANONYMOUS
+                logger.warning(
+                    f"Refused addressing persona '{persona_name}': origin not "
+                    f"in its allowlist (transport={caller.transport}, "
+                    f"server={caller.server_id}, channel={caller.channel_id}, "
+                    f"author={caller.author_id}, user={user_identifier})."
+                )
+                yield DoneEvent(
+                    # Deliberately says nothing about what the allowlist holds.
+                    text=(f"Persona '{persona_name}' is not available from "
+                          "this channel."),
+                    response_type=ResponseType.DEV_COMMAND,
+                )
+                return
+
         # 1. Dev command preprocessing — short-circuits before any LLM call.
         #    Skipped on a continuation: there is no fresh user message to
         #    interpret, only the synthetic nudge built by the caller.

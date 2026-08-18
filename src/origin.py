@@ -88,3 +88,30 @@ def is_discord_operator(
             continue
         return True
     return False
+
+
+def is_origin_allowed(
+    allowlist: List[Tuple[str, str, str]],
+    origin: Origin,
+) -> bool:
+    """DP-330: may this origin address a persona carrying ``allowlist``?
+
+    An **empty allowlist is unrestricted** — every persona that never set the
+    field is unchanged by construction.
+
+    A non-empty allowlist is Discord-only: entries are guild ids, and no other
+    transport has a gateway-asserted one, so portal / gmail / zammad /
+    internal-agent turns and Discord DMs all fail closed. The transport check
+    is belt-and-braces on top of that: ``is_discord_operator`` already returns
+    False without a ``server_id``, and today no non-Discord adapter populates
+    one — but the portal *does* receive a caller-supplied ``server_id`` in its
+    request body, so an adapter that ever starts copying it into an Origin must
+    not thereby widen a persona allowlist.
+    """
+    if not allowlist:
+        return True
+    if origin.transport != "discord":
+        return False
+    return is_discord_operator(
+        allowlist, origin.server_id, origin.channel_id, origin.author_id,
+    )
