@@ -624,8 +624,16 @@ VOICE_VAD_SILENCE_MS = int(os.environ.get("VOICE_VAD_SILENCE_MS", "700"))
 # PVE_MODEL_UNITS — JSON object mapping a friendly model name → its systemd unit
 #   on PVE_MODEL_HOST_VMID. Exactly one unit is enabled/active at a time (all bind
 #   :5001). Swapping = disable --now the current, enable --now the target.
-#   Defaults are the real CT101 units verified 2026-07-01 (`systemctl list-unit-files`
-#   + each unit's --model path); override in .env when units change.
+#   Re-verified 2026-08-17 against `systemctl list-unit-files 'koboldcpp*'` plus each
+#   unit's --model path. ⚠️ THIS MAP DRIFTS AND THE DRIFT IS SILENT. Units are added
+#   and removed on the box without touching this file, and both directions break a
+#   swap in a way no test catches, because every test injects its own map:
+#     - a unit here that no longer exists  → list_models silently omits it;
+#     - a unit on the box that is NOT here → set_active_model never disables it, so
+#       it keeps :5001 and `enable --now` on the target fails to bind.
+#   The second one is how this map was found stale: the running unit was unmapped,
+#   so list_models reported every model "inactive" and a swap could not succeed.
+#   Re-check whenever units change on the GPU container; override in .env per host.
 PVE_TOOLS_ENABLED = os.environ.get("PVE_TOOLS_ENABLED", "False").lower() in ("true", "1", "yes", "on")
 PVE_SSH_HOST = os.environ.get("PVE_SSH_HOST", "10.0.0.71")
 PVE_SSH_USER = os.environ.get("PVE_SSH_USER", "root")
@@ -635,13 +643,12 @@ PVE_MODEL_HOST_VMID = os.environ.get("PVE_MODEL_HOST_VMID", "101")
 PVE_MODEL_UNITS: Dict[str, str] = json.loads(
     os.environ.get("PVE_MODEL_UNITS", "")
     or json.dumps({
-        "fable": "koboldcpp-fable-q6xl.service",       # Gemma-4-31B-Fable-5 Q6_K_XL (active)
-        "fable-q5": "koboldcpp-fable-q5.service",       # Fable-5 Q5_K_M
-        "fable-q8": "koboldcpp-fable-q8.service",       # Fable-5 Q8_0
-        "fable-q4": "koboldcpp.service",                # Fable-5 Q4_K_M (generic unit name)
-        "gemma": "koboldcpp-gemma-abliterated.service",  # gemma-4-31b-abliterated Q4_K_M
-        "qwen-27b": "koboldcpp-qwen.service",           # Qwen3.5-27B-Uncensored Q4_K_M
-        "qwen-a3b": "koboldcpp-qwen36a3b.service",      # Qwen3.6-35B-A3B-Uncensored Q4_K_M
+        "ff711": "koboldcpp-ff711-q6k.service",         # Qwen3.6-27B Fable-Fusion-711 AMD-MTP Q6_K
+        "deckard": "koboldcpp-deckard-q4km.service",     # Qwen3.6-40B Deckard-Opus NEO-CODE Q4_K_M
+        "fable": "koboldcpp-fable-q6xl.service",         # Gemma-4-31B-Fable-5 UD-Q6_K_XL
+        "gemma": "koboldcpp-gemma-abliterated.service",  # gemma-4-31b-abliterated Q4_K_M (fallback)
+        "qwen-27b": "koboldcpp-qwen.service",            # Qwen3.5-27B-Uncensored HauhauCS Q4_K_M
+        "qwen-a3b": "koboldcpp-qwen36a3b.service",       # Qwen3.6-35B-A3B-Uncensored MoE Q4_K_M
     })
 )
 
