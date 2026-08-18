@@ -152,9 +152,13 @@ def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
             persona_json["enable_observations"] = persona.get_enable_observations()
         if persona.get_disposition() is not None:
             persona_json["disposition"] = persona.get_disposition()
-        # DP-330: only written when the persona is actually restricted, so an
-        # unrestricted persona round-trips to the exact shape it loaded with.
-        if persona.get_origin_allowlist():
+        # DP-330: written whenever the field was DECLARED, including as an
+        # explicit `[]`. Keying off truthiness instead erased the shipped
+        # `"origin_allowlist": []` from a persona the operator had not filled
+        # in yet — the one in-file hint that the knob exists — on the first
+        # mutating dev command. A persona that never carried the key still
+        # round-trips to the exact shape it loaded with.
+        if persona.origin_allowlist_is_declared():
             persona_json["origin_allowlist"] = persona.get_origin_allowlist()
         persona_list.append(persona_json)
     return persona_list

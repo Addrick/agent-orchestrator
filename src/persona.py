@@ -2,7 +2,7 @@
 
 import logging
 from enum import Enum, auto
-from typing import Optional, Dict, Any, List, Type, TypeVar, Union
+from typing import Optional, Dict, Any, List, Tuple, Type, TypeVar, Union
 
 from config import global_config
 from src.generation_params import GenerationParams
@@ -12,6 +12,12 @@ from src.tool_policy import KNOWN_OVERRIDES, ToolPolicy
 logger = logging.getLogger(__name__)
 
 E = TypeVar('E', bound=Enum)
+
+# DP-330: the fail-closed allowlist entry. A Discord guild id is a decimal
+# snowflake, so this can never match one — a persona whose authored allowlist
+# is entirely malformed carries this and is unreachable, rather than parsing
+# down to an empty (== unrestricted) list.
+_UNMATCHABLE_ORIGIN: Tuple[str, str, str] = ('\x00malformed', '\x00', '\x00')
 
 
 class ExecutionMode(Enum):
@@ -131,14 +137,18 @@ class Persona:
         )
         self._disposition: Optional[Dict[str, int]] = self._sanitize_disposition(disposition)
 
-        # DP-330: which origins may address this persona at all. Empty (the
+        # DP-330: which origins may address this persona at all. Absent (the
         # default, and what every pre-DP-330 persona file loads with) means
-        # unrestricted. Parsed once here so a malformed entry is warned about
-        # at load rather than on every turn; parse_operator_allowlist fails
-        # closed, so a typo narrows reachability and never widens it.
-        self._origin_allowlist: List[str] = list(origin_allowlist) if origin_allowlist else []
-        self._origin_allowlist_parsed = parse_operator_allowlist(
-            ','.join(self._origin_allowlist))
+        # unrestricted. Normalized once here so a malformed entry is diagnosed
+        # at load rather than on every turn. The declared flag is what lets an
+        # explicitly-empty `"origin_allowlist": []` survive a save/load round
+        # trip — it is the operator's only in-file hint that the knob exists.
+        self._origin_allowlist_declared: bool = origin_allowlist is not None
+        (
+            self._origin_allowlist,
+            self._origin_allowlist_parsed,
+            self._origin_allowlist_malformed,
+        ) = self._normalize_origin_allowlist(origin_allowlist, persona_name)
 
         try:
             self._max_context_tokens: int = int(max_context_tokens) if max_context_tokens is not None else global_config.DEFAULT_MAX_CONTEXT_TOKENS
@@ -260,11 +270,111 @@ class Persona:
         """Returns the list of service integrations this persona is bound to."""
         return self._service_bindings
 
+    @staticmethod
+    def _normalize_origin_allowlist(
+            value: Any,
+            persona_name: str,
+    ) -> Tuple[List[str], List[Tuple[str, str, str]], bool]:
+        """DP-330: coerce an authored or CLI-supplied allowlist into
+        ``(authored_entries, parsed_entries, malformed)``.
+
+        The declared type is ``List[str]``, but this value comes straight out
+        of a hand-edited JSON file, so nothing about it can be trusted:
+
+        - **Ints are accepted.** A Discord guild id is a number and the
+          natural way to write one in JSON is unquoted. Rejecting it is not an
+          option — the raw value used to reach ``','.join`` and raise
+          ``TypeError``, which ``load_personas_from_file`` swallowed into a
+          ``None`` return, which dropped *every* user persona and let the next
+          mutating dev command rewrite ``personas.json`` with an empty list.
+        - **A bare string is one authored value, not five characters.**
+          ``"12345"`` splits on whitespace/commas the way the CLI setter
+          does, never into ``list("12345")``.
+        - **Entries are parsed one at a time.** Joining them with ``','``
+          first meant a comma *inside* an entry silently added a guild that
+          was never authored — a typo that widens reachability, the exact
+          opposite of the fail-closed property this field is supposed to have.
+
+        Fail-closed on malformed input: if entries were authored but none of
+        them parse, the persona becomes unreachable rather than unrestricted.
+        An empty allowlist means "no restriction", so leaving a typo'd list to
+        parse down to empty would turn a restriction into a wide-open persona
+        while ``what origin_allowlist`` kept reporting the authored entries as
+        if they were in force. Unreachable is loud, recoverable by editing the
+        file, and confined to this one persona.
+        """
+        if value is None:
+            return [], [], False
+
+        raw_entries: List[Any]
+        if isinstance(value, str):
+            raw_entries = [e for chunk in value.split() for e in chunk.split(',') if e]
+        elif isinstance(value, (list, tuple)):
+            raw_entries = list(value)
+        else:
+            logger.warning(
+                f"Persona '{persona_name}': origin_allowlist must be a list of "
+                f"strings, got {type(value).__name__}; persona is unreachable "
+                "until it is fixed."
+            )
+            return [], [_UNMATCHABLE_ORIGIN], True
+
+        authored: List[str] = []
+        parsed: List[Tuple[str, str, str]] = []
+        rejected: List[Any] = []
+        for entry in raw_entries:
+            if isinstance(entry, bool) or not isinstance(entry, (str, int)):
+                rejected.append(entry)
+                continue
+            text = str(entry).strip()
+            if not text:
+                continue
+            authored.append(text)
+            # One entry at a time: a comma inside `text` must not become two
+            # grants. parse_operator_allowlist splits on commas, so anything
+            # that yields more than one tuple was a malformed single entry.
+            entry_parsed = parse_operator_allowlist(text)
+            if len(entry_parsed) == 1 and ',' not in text:
+                parsed.append(entry_parsed[0])
+            else:
+                rejected.append(entry)
+
+        if rejected:
+            logger.warning(
+                f"Persona '{persona_name}': dropped malformed origin_allowlist "
+                f"entries {rejected!r} (expected "
+                "'server_id[/channel_id[/author_id]]')."
+            )
+        if authored and not parsed:
+            logger.error(
+                f"Persona '{persona_name}': every origin_allowlist entry is "
+                f"malformed ({authored!r}); it is now unreachable from every "
+                "origin. Fix the entries or clear the field to make it "
+                "unrestricted."
+            )
+            return authored, [_UNMATCHABLE_ORIGIN], True
+        return authored, parsed, bool(rejected)
+
     def get_origin_allowlist(self) -> List[str]:
         """DP-330: origins allowed to address this persona, as authored
         (``server_id[/channel_id[/author_id]]`` entries). Empty =
-        unrestricted."""
+        unrestricted. Identical after a load and after a `set` — both paths
+        run the same normalizer, so a persona's on-disk shape does not depend
+        on which happened last."""
         return list(self._origin_allowlist)
+
+    def origin_allowlist_is_declared(self) -> bool:
+        """DP-330: True if the field was authored at all, including as an
+        explicit empty list. `to_dict` persists it on that basis so a shipped
+        `"origin_allowlist": []` is not erased by the first mutating dev
+        command."""
+        return self._origin_allowlist_declared
+
+    def origin_allowlist_is_malformed(self) -> bool:
+        """DP-330: True if entries were authored but at least one was
+        unusable. When nothing parsed the persona is unreachable (fail
+        closed), so callers reporting the field must say so."""
+        return self._origin_allowlist_malformed
 
     def is_addressable_from(self, origin: Origin) -> bool:
         """DP-330: may `origin` talk to this persona at all?
@@ -616,23 +726,23 @@ class Persona:
         logger.info(f"Persona '{self._name}' chat_template set to {value!r}.")
 
     def set_origin_allowlist(self, entries: List[str]) -> List[str]:
-        """DP-330: replace the origin allowlist. Returns the accepted
-        entries — malformed ones are dropped by the parser (fail closed), so
-        the caller can report what actually took effect. An empty list
-        clears the restriction.
+        """DP-330: replace the origin allowlist. Returns the stored entries;
+        pair it with ``origin_allowlist_is_malformed()`` to report what
+        actually took effect. An empty list clears the restriction.
+
+        Runs the same normalizer as the load path, so the field reads back
+        identically however it was last written.
 
         Privileged: reachable only from the operator-gated ``set
         origin_allowlist`` dev command, never from the PATCH route (this
         field decides who may reach the persona, exactly like
         ``explicit_overrides`` decides what it may do)."""
-        parsed = parse_operator_allowlist(','.join(str(e) for e in entries))
-        self._origin_allowlist = [
-            srv if (chan, auth) == ('*', '*')
-            else f"{srv}/{chan}" if auth == '*'
-            else f"{srv}/{chan}/{auth}"
-            for srv, chan, auth in parsed
-        ]
-        self._origin_allowlist_parsed = parsed
+        (
+            self._origin_allowlist,
+            self._origin_allowlist_parsed,
+            self._origin_allowlist_malformed,
+        ) = self._normalize_origin_allowlist(list(entries), self._name)
+        self._origin_allowlist_declared = True
         logger.info(
             f"Persona '{self._name}' origin_allowlist set to "
             f"{self._origin_allowlist or 'unrestricted'}.")

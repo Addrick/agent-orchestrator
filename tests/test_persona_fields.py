@@ -201,12 +201,23 @@ def test_set_origin_allowlist_clears(persona):
 
 
 def test_set_origin_allowlist_reports_an_all_malformed_list(persona):
-    """The parser fails closed by DROPPING entries, which for this field means
-    the persona silently becomes unrestricted — the operator must be told."""
+    """An all-malformed list fails CLOSED — the persona is unreachable, not
+    unrestricted — and the operator must be told, including how to undo it."""
     handler = cli_set_handlers()['origin_allowlist']
     response, mutated = handler(['origin_allowlist', '*'], persona)
-    assert 'Error' in response and 'unrestricted' in response
-    assert persona.get_origin_allowlist() == []
+    assert mutated is True
+    assert 'unreachable' in response
+    assert 'set origin_allowlist none' in response
+    assert persona.origin_allowlist_is_malformed() is True
+
+
+def test_set_origin_allowlist_accepts_unquoted_json_numbers(persona):
+    """A guild id is a number; `set origin_allowlist [12345]` must not be
+    rejected as 'not a list of strings'."""
+    handler = cli_set_handlers()['origin_allowlist']
+    response, mutated = handler(['origin_allowlist', '[12345, 99999]'], persona)
+    assert mutated is True
+    assert persona.get_origin_allowlist() == ['12345', '99999']
 
 
 def test_what_origin_allowlist(persona):
@@ -217,3 +228,14 @@ def test_what_origin_allowlist(persona):
     persona.set_origin_allowlist(['12345'])
     response, _ = what(['origin_allowlist'], persona)
     assert '12345' in response
+
+
+def test_what_origin_allowlist_flags_a_policy_that_is_not_in_force(persona):
+    """Reporting the authored entries alone described a policy the persona was
+    not running: a wholly-malformed list makes it unreachable, and `what` must
+    not read as 'restricted to these guilds'."""
+    what = cli_what_handlers()['origin_allowlist']
+    persona.set_origin_allowlist(['*'])
+    response, _ = what(['origin_allowlist'], persona)
+    assert 'malformed' in response
+    assert 'unreachable' in response

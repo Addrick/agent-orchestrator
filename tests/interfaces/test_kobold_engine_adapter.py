@@ -2953,3 +2953,45 @@ def test_confirm_relay_closes_the_generator_on_disconnect():
     # test_aclose_mid_stream_releases_the_conversation_lock.
     assert _contextlib.aclosing is not None
     mm.close()
+
+
+# -------- DP-330: the origin allowlist holds on the portal dev_command route -
+
+def test_dev_command_refused_for_a_restricted_persona():
+    """This route resolves dev commands through `preprocess_message` and
+    returns without entering the kernel, so a kernel-side gate did nothing
+    here. The portal carries no gateway-asserted guild, so a persona with any
+    allowlist fails closed on this surface.
+    """
+    adapter, mm, persona, chat_system = _make_real_adapter()
+    del chat_system.bot_logic.preprocess_message  # restore the real BotLogic
+    persona.set_origin_allowlist(["12345"])
+
+    with patch("src.interfaces.kobold_engine_adapter.save_personas_to_file") as mock_save:
+        with TestClient(adapter.app) as client:
+            r = client.post("/api/v1/persona/test_persona/dev_command",
+                            json={"command": "what prompt"})
+
+    assert r.status_code == 200
+    body = r.json()
+    assert "not available from this channel" in body["response"]
+    assert body["mutated"] is False
+    assert "you are test" not in body["response"]
+    assert "12345" not in body["response"]
+    mock_save.assert_not_called()
+    mm.close()
+
+
+def test_dev_command_unaffected_for_an_unrestricted_persona():
+    """The gate is inert for every persona that never set the field — the
+    portal must keep working for all of them."""
+    adapter, mm, persona, chat_system = _make_real_adapter()
+    del chat_system.bot_logic.preprocess_message
+
+    with TestClient(adapter.app) as client:
+        r = client.post("/api/v1/persona/test_persona/dev_command",
+                        json={"command": "what prompt"})
+
+    assert r.status_code == 200
+    assert "you are test" in r.json()["response"]
+    mm.close()

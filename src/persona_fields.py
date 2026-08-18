@@ -276,6 +276,36 @@ def _set_tool_policy(args: List[str], persona: Persona) -> Tuple[Optional[str], 
         return f"Error: {e}", False
 
 
+def _parse_string_list_arg(
+        field: str,
+        raw: str,
+        *,
+        split_commas: bool = False,
+) -> Tuple[Optional[List[str]], Optional[str]]:
+    """Shared `<value ...|json list|none>` argument shape for the string-list
+    fields. Returns ``(values, error)`` — exactly one is non-None.
+
+    `none`/`clear`/`null`/`[]` all mean the empty list. JSON members may be
+    strings or numbers (a Discord guild id is naturally written unquoted) and
+    are stringified; `split_commas` additionally splits bare `a,b` input, for
+    fields whose entries can be pasted comma-separated.
+    """
+    if raw.lower() in ('none', 'clear', 'null', '[]'):
+        return [], None
+    if raw.startswith('['):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return None, f"Error: Invalid JSON list for {field}."
+        if not isinstance(parsed, list) or not all(
+                isinstance(x, (str, int)) and not isinstance(x, bool) for x in parsed):
+            return None, f"Error: {field} must be a JSON list of strings."
+        return [str(x) for x in parsed], None
+    if split_commas:
+        return [e for chunk in raw.split() for e in chunk.split(',') if e], None
+    return raw.split(), None
+
+
 def _set_explicit_overrides(args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
     """`set explicit_overrides <name ...|json list|none>` — the DP-277 gated
     path for the composition-invariant overrides. Deliberately NOT patchable
@@ -288,25 +318,34 @@ def _set_explicit_overrides(args: List[str], persona: Persona) -> Tuple[Optional
             False,
         )
     raw = ' '.join(args[1:]).strip()
-    overrides: List[str]
-    if raw.lower() in ('none', 'clear', 'null', '[]'):
-        overrides = []
-    elif raw.startswith('['):
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            return "Error: Invalid JSON list for explicit_overrides.", False
-        if not isinstance(parsed, list) or not all(isinstance(x, str) for x in parsed):
-            return "Error: explicit_overrides must be a JSON list of strings.", False
-        overrides = parsed
-    else:
-        overrides = raw.split()
+    overrides, error = _parse_string_list_arg('explicit_overrides', raw)
+    if error is not None or overrides is None:
+        return error, False
     try:
         persona.set_explicit_overrides(overrides)
     except ValueError as e:
         return f"Error: {e}", False
     shown = ', '.join(persona.get_explicit_overrides()) or 'none'
     return f"Explicit overrides for {persona.get_name()} set to: {shown}.", True
+
+
+def _describe_origin_allowlist(persona: Persona) -> str:
+    """`what origin_allowlist` — DP-330. Reports the authored entries AND
+    whether they are actually in force: a wholly-malformed list fails closed,
+    so printing the entries alone would describe a policy the persona is not
+    running."""
+    entries = persona.get_origin_allowlist()
+    if not entries:
+        return (f"Origin allowlist for '{persona.get_name()}': "
+                "unrestricted (any origin may address it).")
+    shown = ', '.join(entries)
+    if persona.origin_allowlist_is_malformed():
+        return (
+            f"Origin allowlist for '{persona.get_name()}': {shown} — ⚠️ one or "
+            "more entries are malformed and were dropped; if none parsed the "
+            "persona is unreachable from every origin."
+        )
+    return f"Origin allowlist for '{persona.get_name()}': {shown}."
 
 
 def _set_origin_allowlist(args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
@@ -324,29 +363,24 @@ def _set_origin_allowlist(args: List[str], persona: Persona) -> Tuple[Optional[s
             False,
         )
     raw = ' '.join(args[1:]).strip()
-    entries: List[str]
-    if raw.lower() in ('none', 'clear', 'null', '[]'):
-        entries = []
-    elif raw.startswith('['):
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            return "Error: Invalid JSON list for origin_allowlist.", False
-        if not isinstance(parsed, list) or not all(isinstance(x, str) for x in parsed):
-            return "Error: origin_allowlist must be a JSON list of strings.", False
-        entries = parsed
-    else:
-        entries = [e for chunk in raw.split() for e in chunk.split(',') if e]
-    accepted = persona.set_origin_allowlist(entries)
-    if entries and not accepted:
-        # The parser drops malformed entries silently (fail closed); saying so
-        # matters because the persona just became UNRESTRICTED, not narrower.
+    entries, error = _parse_string_list_arg(
+        'origin_allowlist', raw, split_commas=True)
+    if error is not None or entries is None:
+        return error, False
+    stored = persona.set_origin_allowlist(entries)
+    if persona.origin_allowlist_is_malformed():
+        # The normalizer fails CLOSED on a wholly-malformed list, so the
+        # persona is now unreachable rather than silently unrestricted. Say so
+        # — the operator is the only one who can fix it, and from another
+        # persona if they locked themselves out of this one.
         return (
-            f"Error: no valid origin_allowlist entries in {raw!r}; "
-            f"{persona.get_name()} is now unrestricted.",
+            f"⚠️ origin_allowlist for {persona.get_name()} set to {raw!r}, but "
+            "some entries are not 'server_id[/channel_id[/author_id]]'. If "
+            "none of them parse the persona is now unreachable from every "
+            "origin; `set origin_allowlist none` clears the restriction.",
             True,
         )
-    shown = ', '.join(accepted) or 'unrestricted'
+    shown = ', '.join(stored) or 'unrestricted'
     return f"Origin allowlist for {persona.get_name()} set to: {shown}.", True
 
 
@@ -704,12 +738,7 @@ PERSONA_FIELDS: List[PersonaField] = [
         # origins may address the persona at all, so it must not be settable
         # from the PATCH route the portal exposes.
         name='origin_allowlist',
-        describe=lambda p: (
-            f"Origin allowlist for '{p.get_name()}': "
-            + (', '.join(p.get_origin_allowlist()) if p.get_origin_allowlist()
-               else 'unrestricted (any origin may address it)')
-            + "."
-        ),
+        describe=_describe_origin_allowlist,
         set_cli=_set_origin_allowlist,
     ),
 ]

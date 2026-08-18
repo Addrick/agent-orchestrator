@@ -173,11 +173,23 @@ back with `what origin_allowlist`; clear it with `set origin_allowlist none`.
   other transport has a gateway-asserted one. DMs, the web portal, email, ticket
   bodies and agent-initiated turns are all refused with `Persona '<name>' is not
   available from this channel.` The refusal never says what the allowlist holds.
-- The gate sits above dev-command handling, so a disallowed origin cannot read a
-  restricted persona's configuration with `what prompt` either.
+- The gate sits above dev-command handling, so a disallowed origin cannot address
+  a restricted persona with `what prompt` either — not on Discord, not from the
+  portal's dev-command surface. It does **not** cover the portal's read-only HTTP
+  endpoints (`/api/v1/persona/<name>`, `/assemble`, `/transcript`,
+  `/kobold_export`), which anyone who can reach the portal may still call; if
+  your portal is exposed beyond your own machine, treat that as the wider
+  boundary and restrict it at the network.
 - Malformed entries are dropped rather than honored (a wildcard server would
-  grant every guild the bot is in). If *every* entry you supply is malformed the
-  persona ends up **unrestricted**, and the command says so explicitly.
+  grant every guild the bot is in). If *every* entry you supply is malformed, the
+  persona becomes **unreachable from every origin** rather than unrestricted —
+  the safe direction — and the command says so. Fix it with a corrected list, or
+  `set origin_allowlist none` to clear the restriction. If you locked yourself
+  out of that persona, run the command while addressing a different one.
+- Guild ids may be written unquoted in a persona file (`"origin_allowlist":
+  [347812763093172225]`) — they are numbers, and the file accepts them as such.
+- Changing the field is recorded in the audit log (`origin_allowlist_change`,
+  with the operator, the previous list and the new one), like `explicit_overrides`.
 - This is not the same gate as operator gating: operator gating asks *may this
   command reconfigure things*, the allowlist asks *may you talk to this persona*.
   A persona can be reachable but non-operator, and it can be operator-authenticated
@@ -501,9 +513,11 @@ hypr set origin_allowlist <your_guild_id>
 ```
 
 It ships with `origin_allowlist: []` (unrestricted) because the shipped file is
-public and the guild id is yours — fill it in on your own instance. Note the
-trade-off: an allowlisted `hypr` is Discord-only, so its parked actions can only
-be approved in Discord, not from the portal.
+public and the guild id is yours — fill it in on your own instance. The empty
+list is kept on save, so the key stays visible in your `data/personas.json` as a
+reminder that the knob exists. Note the trade-off: an allowlisted `hypr` is
+Discord-only, so its parked actions can only be approved in Discord, not from the
+portal.
 
 Once present, `hypr` is the persona to talk to about the box itself, from **any**
 interface that routes to a persona (Discord, the web portal, `/derpr`) — unless

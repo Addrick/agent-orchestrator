@@ -109,6 +109,45 @@ class BotLogic:
             user_identifier: str,
             message: str
     ) -> Optional[Dict[str, Any]]:
+        # DP-330: persona origin allowlist — WHICH persona this origin may
+        # address at all. It lives here, not in the generation kernel, because
+        # `preprocess_message` is the one seam every message-bearing surface
+        # already passes through: the kernel's step 1, Discord's `on_message`
+        # short-circuit, and the portal's `dev_command` route. Gating in the
+        # kernel alone left both adapters able to resolve a dev command and
+        # return before the kernel was ever reached, so `what prompt` answered
+        # in full from a disallowed guild.
+        #
+        # Above the DP-277 control-plane gate, and above command parsing, on
+        # purpose: DP-277 gates what a command may *do*, this gates whether the
+        # persona is reachable at all, so a read-only `what prompt` must not
+        # disclose a restricted persona's config either — and a plain chat turn
+        # (which never reaches a handler) must be refused too.
+        #
+        # Personas with no allowlist are unrestricted — every persona that
+        # predates this field. An unknown persona falls through untouched so
+        # the callers' existing not-found handling is unchanged.
+        #
+        # A continuation turn never reaches here at all: the kernel skips
+        # preprocessing entirely when resuming a resolved park, so the
+        # addressing decision stays the one made on the turn that raised the
+        # park — by then the approved write has already executed, and refusing
+        # would only suppress the summary of an action that ran.
+        gated_persona: Optional[Persona] = self.personas().get(persona_name)
+        if gated_persona is not None and not gated_persona.is_addressable_from(origin):
+            logger.warning(
+                f"Refused addressing persona '{persona_name}': origin not in "
+                f"its allowlist (transport={origin.transport}, "
+                f"server={origin.server_id}, channel={origin.channel_id}, "
+                f"author={origin.author_id}, user={user_identifier})."
+            )
+            return {
+                # Deliberately says nothing about what the allowlist holds.
+                "response": (f"Persona '{persona_name}' is not available from "
+                             "this channel."),
+                "mutated": False,
+            }
+
         # Preserve the original case of VALUE args — only the dispatch keys are
         # matched case-insensitively (lowercased at each lookup site below).
         # Blanket-lowercasing the whole message (an early-project shortcut for
@@ -492,11 +531,18 @@ class BotLogic:
         set_handler: Any = self.set_handlers.get(sub_command)
 
         if set_handler:
-            # DP-277: the explicit_overrides mutation is audited (operator +
-            # prior/new state) — capture the prior value at the edit boundary.
+            # DP-277 / DP-330: the two privileged persona fields are audited
+            # (operator + prior/new state) — capture the prior value at the
+            # edit boundary. `explicit_overrides` decides what the persona may
+            # do; `origin_allowlist` decides who may reach it, so a change to
+            # either needs a durable record and not just a log line.
             prior_overrides: Optional[List[str]] = (
                 persona.get_explicit_overrides()
                 if sub_command == 'explicit_overrides' else None
+            )
+            prior_allowlist: Optional[List[str]] = (
+                persona.get_origin_allowlist()
+                if sub_command == 'origin_allowlist' else None
             )
 
             result: Tuple[Optional[str], bool]
@@ -518,6 +564,18 @@ class BotLogic:
                     new_state=json.dumps(persona.get_explicit_overrides()),
                     reason="dev command: set explicit_overrides",
                     metadata={"persona": persona.get_name()},
+                )
+            if mutated and sub_command == 'origin_allowlist':
+                self.memory_manager.log_audit_event(
+                    event_type="origin_allowlist_change",
+                    operator_id=user_identifier,
+                    prior_state=json.dumps(prior_allowlist),
+                    new_state=json.dumps(persona.get_origin_allowlist()),
+                    reason="dev command: set origin_allowlist",
+                    metadata={
+                        "persona": persona.get_name(),
+                        "malformed": persona.origin_allowlist_is_malformed(),
+                    },
                 )
             if mutated and sub_command in ('tools', 'tool_policy', 'explicit_overrides'):
                 if revalidate_persona_security(persona):
