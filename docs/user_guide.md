@@ -221,6 +221,60 @@ All commands are entered as the message body when addressing a persona. Commands
 
 Every `set <name>` above has a matching `what <name>` read. The full settable set is the `src/persona_fields.py` registry — **26 fields, 24 CLI-settable, 16 also exposed on the persona PATCH route**. `set model` is the one bespoke setter (it needs an async fuzzy-match lookup); `model` is therefore PATCH-able but generated from a hand-written CLI handler.
 
+### Configuring by conversation — `configr` (DP-331)
+
+The `set` table above is the exact-syntax path: it is fast, deterministic, and needs
+no LLM. `configr` is the fallback for the two cases that path handles badly — you
+don't remember the exact field name, or you are speaking rather than typing.
+
+**It activates on a near-miss, not on a keyword.** You do not address `configr`
+directly. It is a system persona the command layer hands off to when a control-plane
+command is recognized but its arguments are not:
+
+| You send | Today | With configr |
+|----------|-------|--------------|
+| `set randomness lower` | `Error: Unknown 'set' command: randomness` | reads it as `set temp`, proposes a lower value |
+| `set temp` (value omitted) | silently falls through to the persona | asks for a value, or infers one |
+| `who won the game` | goes to the persona you addressed | unchanged — never reaches configr |
+
+A message the command layer does not recognize at all is untouched. `configr` only
+ever sees input that already looked like configuration and failed.
+
+**It writes commands, not settings.** `configr` translates what you said into ordinary
+commands from the table above and runs them through the same path a typed command
+takes. It has no private route into a persona. That is deliberate: the operator gate,
+the audit log for privileged fields, and the tool-composition quarantine re-check all
+behave identically whether you typed `set temp 0.9` or said "make it less random."
+
+It can target a persona other than the one you are talking to — "give managr more
+history" works from any conversation.
+
+**Every change it makes is parked for your approval.** One utterance produces one
+pending approval carrying the whole change list, not one per field: "make managr less
+random and give it more history" is a single decision and takes a single ✅. The
+change list is shown as before → after, so you can see what it understood before
+agreeing to it. Approve from Discord or the portal the same way you approve any
+other parked action; approving by voice is not supported yet.
+
+**It can decide you were not configuring anything.** A near-miss is not proof of
+intent — `set aside some time for me` parses as a failed `set`. When `configr`
+concludes the message was not a configuration request, it yields the turn and your
+message reaches the persona you addressed, unchanged and in full. Nothing is applied
+and nothing is parked.
+
+**It gets one attempt.** If what `configr` produces is still not a valid command, you
+get the plain error message you would have gotten anyway. It does not retry, and its
+own output never re-enters it.
+
+**Operator origins only.** `configr` sits behind the same DP-277 control-plane gate as
+`set` itself — a non-operator origin is refused before `configr` is ever consulted.
+It cannot be used to reach configuration from a channel that could not already
+reach it.
+
+**Cost.** A failed `set` now costs one call to a small local model (temperature 0,
+~100 tokens) before you see the error. This is the same trade `set model` already
+makes for fuzzy model matching.
+
 ### Persona Management
 
 | Command | Description |
@@ -456,6 +510,7 @@ Defined in `config/system_personas.json`. Not directly user-accessible — used 
 
 - **model_selector** — Fuzzy model name matching for `set model`
 - **tool_selector** — Fuzzy tool name matching for `set tools`
+- **configr** — Interprets a failed `set` as a configuration request and rewrites it as valid commands (DP-331)
 - **triage_analyst** — Ticket analysis and internal note generation
 - **triage_scout** — Keyword extraction from tickets for search
 - **triage_filter** — Relevance scoring between historical and new tickets
