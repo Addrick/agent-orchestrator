@@ -29,17 +29,37 @@ def _caps(*, irreversible: bool = False, exfil_capable: bool = True) -> Dict[str
 _GUEST_PARAMS = {
     "type": "object",
     "properties": {
+        "name": {
+            "type": "string",
+            "description": (
+                "Guest hostname exactly as pve_status reports it, "
+                "case-insensitive. Preferred over vmid — it needs no kind and reads "
+                "back clearly in the approval prompt."
+            ),
+        },
         "vmid": {
             "type": "string",
-            "description": "Numeric Proxmox guest id (e.g. \"100\", \"101\").",
+            "description": (
+                "Numeric Proxmox guest id (e.g. \"100\", \"101\"). Alternative to "
+                "name; requires kind. Pass one address form or the other — if you "
+                "pass both they must refer to the same guest or the call is refused."
+            ),
         },
         "kind": {
             "type": "string",
             "enum": ["ct", "vm"],
-            "description": "\"ct\" for an LXC container (pct) or \"vm\" for a QEMU VM (qm).",
+            "description": (
+                "\"ct\" for an LXC container (pct) or \"vm\" for a QEMU VM (qm). "
+                "Required with vmid. Optional with name — omit it unless the same "
+                "name exists as both a container and a VM."
+            ),
         },
     },
-    "required": ["vmid", "kind"],
+    # Neither is individually required, but one of them is: enforced in the
+    # handler rather than the schema, because providers vary in how (and whether)
+    # they honour anyOf/oneOf in a function schema, and a constraint the provider
+    # silently drops is worse than no constraint at all — it reads as enforced.
+    "required": [],
 }
 
 
@@ -52,9 +72,10 @@ PROXMOX_TOOLS: List[Dict[str, Any]] = [
         "function": {
             "name": "pve_status",
             "description": (
-                "Read the Proxmox node's health: uptime plus the list of LXC "
-                "containers (pct list) and QEMU VMs (qm list) with their run "
-                "state. Use this before acting to find guest ids and see what's up."
+                "Audit the Proxmox node: uptime plus every guest as structured "
+                "data (vmid, name, kind ct/vm, status, lock), with the raw "
+                "pct list / qm list text alongside. Use this to answer what is "
+                "running and to find a guest's name or id before acting."
             ),
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
@@ -97,8 +118,8 @@ PROXMOX_TOOLS: List[Dict[str, Any]] = [
         "function": {
             "name": "reboot_guest",
             "description": (
-                "Reboot one VM or container by id. Requires human approval. Get "
-                "the id/kind from pve_status."
+                "Reboot one VM or container. Address it by name (preferred) or by "
+                "vmid + kind. Requires human approval. Get names/ids from pve_status."
             ),
             "parameters": _GUEST_PARAMS,
         },
@@ -111,7 +132,8 @@ PROXMOX_TOOLS: List[Dict[str, Any]] = [
         "function": {
             "name": "start_guest",
             "description": (
-                "Start a stopped VM or container by id. Requires human approval."
+                "Start a stopped VM or container. Address it by name (preferred) "
+                "or by vmid + kind. Requires human approval."
             ),
             "parameters": _GUEST_PARAMS,
         },
@@ -124,8 +146,9 @@ PROXMOX_TOOLS: List[Dict[str, Any]] = [
         "function": {
             "name": "stop_guest",
             "description": (
-                "Stop a running VM or container by id. Requires human approval. "
-                "This is a hard stop (like power-off), not a graceful shutdown."
+                "Stop a running VM or container. Address it by name (preferred) or "
+                "by vmid + kind. Requires human approval. This is a hard stop (like "
+                "power-off), not a graceful shutdown."
             ),
             "parameters": _GUEST_PARAMS,
         },

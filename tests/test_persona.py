@@ -642,3 +642,99 @@ def test_load_persona_json_without_retain_fields(tmp_path):
     assert p.get_retain_mission() is None
     assert p.get_enable_observations() is None
     assert p.get_disposition() is None
+
+
+# --- DP-327: the hypr infra-operator persona (opt-in, not seeded) -----------
+
+HYPR_FILE = "optional_personas/hypr.json"
+
+
+def _hypr_entry():
+    """The hypr definition as it ships — deliberately NOT in the seed file."""
+    import json
+    import os
+
+    path = os.path.join(global_config.CONFIG_DIR, HYPR_FILE)
+    with open(path, "r", encoding="utf-8") as fh:
+        return json.load(fh)["personas"][0]
+
+
+def test_hypr_is_not_seeded_into_fresh_deployments():
+    """Opt-in on purpose: seeding it would put node power ops on every deploy.
+
+    hypr is the only persona holding the `proxmox` binding, and a park is
+    approved by whoever raised it — so persona reachability *is* the authz
+    boundary. An operator adds it to a live instance by hand.
+    """
+    import json
+    import os
+
+    path = os.path.join(global_config.CONFIG_DIR, "default_personas.json")
+    with open(path, "r", encoding="utf-8") as fh:
+        seed = json.load(fh)
+    assert not [p for p in seed["personas"] if p.get("name") == "hypr"]
+
+
+def test_hypr_declares_the_proxmox_binding_and_matching_policy():
+    hypr = _hypr_entry()
+    assert hypr["name"] == "hypr"
+    assert hypr["service_bindings"] == ["proxmox"]
+    # Binding and tool list are two independent gates (request_builder filters on
+    # the binding, ToolPolicy on the names) — a persona with only one of them
+    # loads fine and then silently has no tools, so pin both.
+    assert hypr["tool_policy"]["default"] == "deny"
+    assert set(hypr["tool_policy"]["allow"]) == set(hypr["enabled_tools"])
+
+
+def test_hypr_enabled_tools_are_all_real_proxmox_tools():
+    """Guards the rename/typo case: a tool name that no longer exists is inert."""
+    from src.tools.tool_defs.proxmox import PROXMOX_TOOLS
+
+    hypr = _hypr_entry()
+    real = {t["function"]["name"] for t in PROXMOX_TOOLS}
+    assert set(hypr["enabled_tools"]) == real
+
+
+def test_hypr_holds_no_binding_beyond_proxmox():
+    """Blast radius: the box operator must not also reach zammad/fixr/agents."""
+    hypr = _hypr_entry()
+    assert hypr["service_bindings"] == ["proxmox"]
+    assert "*" not in hypr["enabled_tools"]
+
+
+def test_hypr_prompt_warns_that_it_operates_its_own_host():
+    """It operates the node it lives on: stopping the guest derpr runs in kills
+    derpr *and* the approval gate that parks its own writes. The prompt has to
+    say so, because nothing in the toolset refuses a self-directed power-off."""
+    prompt = _hypr_entry()["prompt"]
+    assert "YOU RUN ON THE MACHINE YOU OPERATE" in prompt
+    assert "approval gate" in prompt
+    assert "reboot_node" in prompt
+
+
+def test_hypr_template_names_no_real_guest_and_keeps_the_operator_slots():
+    """The template ships in a public repo, so it must describe roles, not any
+    deployment's actual topology — the operator fills the two `<unset>` slots in
+    their own instance. A concrete name creeping back in is the regression."""
+    prompt = _hypr_entry()["prompt"]
+    assert prompt.count("<unset>") == 2
+    assert "OPERATOR NOTE" in prompt
+    # The lookup is live-state driven, so the template needs no example names at
+    # all — and every name that appeared here previously was a real guest.
+    assert "pve_status" in prompt
+
+
+def test_hypr_loads_unquarantined():
+    """DP-128 loads a composition-violating persona quarantined rather than
+    dropping it — so 'it loaded' is not evidence it works. Assert the empty
+    block-reason list explicitly."""
+    import os
+
+    from src.personas import store
+
+    loaded = store.load_personas_from_file(
+        os.path.join(global_config.CONFIG_DIR, HYPR_FILE)
+    )
+    assert loaded is not None and "hypr" in loaded
+    assert loaded["hypr"].get_security_block_reasons() == []
+    assert loaded["hypr"].get_service_bindings() == ["proxmox"]

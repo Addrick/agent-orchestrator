@@ -2,7 +2,8 @@
 
 Seven tools behind the ``proxmox`` service binding:
 
-- ``pve_status``      (read):  node uptime + `pct list` + `qm list`.
+- ``pve_status``      (read):  node uptime + `pct list` + `qm list`, both raw and
+  parsed into a structured guest inventory (DP-327).
 - ``list_models``     (read):  configured unit map + which is active on the GPU CT.
 - ``reboot_node``     (WRITE, irreversible → parked): reboot the metal.
 - ``reboot_guest``    (WRITE → parked): reboot one VM/CT.
@@ -13,13 +14,21 @@ Seven tools behind the ``proxmox`` service binding:
 Every handler returns a JSON-able dict. Transport failures and disabled state are
 returned as ``{"status": "error", ...}`` rather than raised, so the model gets a
 clean message instead of a tool crash.
+
+DP-327 — guests are addressable by ``name`` as well as ``vmid``. The lookup is
+deliberately **local**: the inventory comes from parsing `pct list` / `qm list`
+output, the name is matched here, and only the resolved digits are ever handed to
+``SSHRunner``. A model-supplied hostname therefore never crosses the SSH boundary,
+which keeps ``ssh.py``'s metacharacter guard seeing nothing but integers and
+config-pinned unit names — the property the whole transport's safety argument
+rests on.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from config import global_config
 from src.proxmox.ssh import SSHError, SSHRunner
@@ -43,6 +52,50 @@ def _validate_vmid(vmid: str) -> str:
     if not s.isdigit():
         raise ValueError(f"vmid must be a positive integer, got {vmid!r}")
     return s
+
+
+def _parse_table(text: str) -> List[Dict[str, str]]:
+    """Parse one of Proxmox's fixed-width CLI tables into row dicts.
+
+    `pct list` and `qm list` disagree on both column order and column set, and
+    `pct list`'s ``Lock`` column is usually blank — so whitespace-splitting a data
+    row silently shifts ``Name`` into ``Lock``'s slot. Instead we read the real
+    header line and slice each row at the header tokens' own column offsets, which
+    is correct by construction for fixed-width output and tolerates a PVE version
+    that adds or reorders a column.
+
+    Keys are the lowercased header tokens (``vmid``, ``name``, ``status``, ``lock``
+    …). Rows whose ``vmid`` is not numeric are dropped as unparseable rather than
+    guessed at.
+    """
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return []
+    header = lines[0]
+    # (start column, lowercased key) for every header token, in order.
+    spans: List[Tuple[int, str]] = []
+    pos = 0
+    for token in header.split():
+        start = header.index(token, pos)
+        pos = start + len(token)
+        spans.append((start, token.lower()))
+    if not spans:
+        return []
+    # `qm list` right-aligns VMID under a header that is indented, so a vmid with
+    # more digits than the header token is wide starts to the LEFT of the header's
+    # column. Nothing precedes the first field, so anchor it at 0 and the overflow
+    # is captured instead of truncated.
+    spans[0] = (0, spans[0][1])
+
+    rows: List[Dict[str, str]] = []
+    for line in lines[1:]:
+        row: Dict[str, str] = {}
+        for i, (start, key) in enumerate(spans):
+            end = spans[i + 1][0] if i + 1 < len(spans) else len(line)
+            row[key] = line[start:end].strip()
+        if row.get("vmid", "").isdigit():
+            rows.append(row)
+    return rows
 
 
 class ProxmoxToolHandler:
@@ -83,6 +136,151 @@ class ProxmoxToolHandler:
             }
         return {"status": "ok", "stdout": res.stdout, "stderr": res.stderr}
 
+    # -- guest inventory / name resolution (DP-327) ---------------------------
+
+    async def _guest_inventory(self) -> Dict[str, Any]:
+        """Every guest on the node as ``{vmid, name, kind, status, lock}`` dicts.
+
+        One `pct list` and one `qm list`, gathered concurrently and parsed. A
+        listing that fails is reported in ``errors`` rather than aborting the
+        whole inventory — a dead `qm list` should not hide the containers.
+        """
+        cts, vms = await asyncio.gather(
+            self._run(["pct", "list"]),
+            self._run(["qm", "list"]),
+        )
+        guests: List[Dict[str, str]] = []
+        errors: List[str] = []
+        for res, kind in ((cts, "ct"), (vms, "vm")):
+            if res.get("status") != "ok":
+                # Keep both: `message` says how it failed ("exited 1"), `stderr`
+                # says why. Reporting only the first is what makes an inventory
+                # failure look like a mystery in the logs.
+                detail = " — ".join(
+                    p for p in (res.get("message"), res.get("stderr")) if p
+                ) or "unknown error"
+                errors.append(f"{kind}: {detail}")
+                continue
+            for row in _parse_table(res.get("stdout") or ""):
+                guests.append({
+                    "vmid": row.get("vmid", ""),
+                    "name": row.get("name", ""),
+                    "kind": kind,
+                    "status": row.get("status", ""),
+                    "lock": row.get("lock", ""),
+                })
+        return {"guests": guests, "errors": errors, "raw": {"ct": cts, "vm": vms}}
+
+    async def _resolve_guest(
+        self,
+        vmid: Optional[str],
+        name: Optional[str],
+        kind: Optional[str],
+    ) -> Dict[str, Any]:
+        """Turn (vmid | name) [+ kind] into a concrete ``{vmid, kind, name}``.
+
+        Errors are returned, never raised, so a bad target reads as a tool result.
+        A bare ``vmid`` still requires ``kind``: Proxmox ids are unique per guest,
+        but *we* cannot tell which CLI owns one without asking, and guessing wrong
+        on a power-off is not a mistake worth risking. Addressing by name needs no
+        ``kind`` — the lookup supplies it.
+        """
+        if not self._enabled():
+            # Short-circuit before the inventory. Without this the two listings
+            # each fail with the disabled error and resolution reports "no guest
+            # named X" — a false statement about the node, on the path that is
+            # about to power something off.
+            return _err(
+                "Proxmox tools are disabled (set PVE_TOOLS_ENABLED=true and mount "
+                "the pve SSH key to enable)."
+            )
+        kind_in = (str(kind).strip().lower() or None) if kind else None
+        if kind_in is not None and kind_in not in _GUEST_CLI:
+            return _err(f"kind must be one of {sorted(_GUEST_CLI)}, got {kind!r}")
+
+        vmid_in = str(vmid).strip() if vmid is not None else ""
+        name_in = str(name).strip() if name is not None else ""
+
+        if vmid_in:
+            return await self._resolve_by_vmid(vmid_in, name_in, kind_in)
+
+        if not name_in:
+            return _err("pass either a guest name or a numeric vmid.")
+        return await self._resolve_by_name(name_in, kind_in)
+
+    async def _resolve_by_vmid(
+        self, vmid: str, name: str, kind: Optional[str]
+    ) -> Dict[str, Any]:
+        """Address by numeric id, cross-checking a ``name`` if one came too."""
+        try:
+            resolved_vmid = _validate_vmid(vmid)
+        except ValueError as e:
+            return _err(str(e))
+        if kind is None:
+            return _err(
+                "kind is required when addressing a guest by vmid "
+                f"(got vmid={resolved_vmid!r}); pass kind=\"ct\" or \"vm\", or "
+                "address the guest by name instead."
+            )
+        if not name:
+            return {"status": "ok", "vmid": resolved_vmid, "kind": kind, "name": None}
+        # Both address forms given. The vmid decides what runs, so an unchecked
+        # `name` would be echoed into `target` — and into the approval prompt —
+        # describing a guest we are not touching. That is the audit record lying,
+        # which is worse than either address form being wrong on its own. Resolve
+        # the name too and refuse unless the two agree.
+        by_name = await self._resolve_by_name(name, kind)
+        if by_name.get("status") != "ok":
+            return by_name
+        if by_name["vmid"] != resolved_vmid:
+            return _err(
+                f"name and vmid disagree: {name!r} is {by_name['kind']} "
+                f"{by_name['vmid']}, not {kind} {resolved_vmid}. Re-issue with "
+                "just one of them."
+            )
+        return by_name
+
+    async def _resolve_by_name(self, name: str, kind: Optional[str]) -> Dict[str, Any]:
+        """Match a hostname against the live inventory. Exact, case-insensitive.
+
+        Deliberately **not** fuzzy: a near-miss is refused with the list of names
+        that do exist, because the caller of this is about to power something off
+        and the friendly behaviour — picking the closest match — is how you stop
+        the wrong guest.
+        """
+        inventory = await self._guest_inventory()
+        candidates = [
+            g for g in inventory["guests"]
+            if g["name"].lower() == name.lower()
+            and (kind is None or g["kind"] == kind)
+        ]
+        if len(candidates) == 1:
+            hit = candidates[0]
+            return {"status": "ok", "vmid": hit["vmid"], "kind": hit["kind"], "name": hit["name"]}
+        if candidates:
+            where = ", ".join(f"{c['kind']} {c['vmid']}" for c in candidates)
+            return _err(
+                f"{name!r} is ambiguous — it matches {where}. Re-issue with "
+                'kind="ct" or kind="vm".'
+            )
+        known = sorted(g["name"] for g in inventory["guests"] if g["name"])
+        if inventory["errors"]:
+            # A listing failed, so "not found" is not something we know — the
+            # guest may be sitting in the half we could not read. On a power
+            # path, unknown and absent are different answers and must not be
+            # collapsed: reporting "no such guest" invites the model to go
+            # looking for a near neighbour to act on instead.
+            return _err(
+                f"could not confirm whether a guest named {name!r} exists — the "
+                f"node listing failed: {inventory['errors']}. Guests read "
+                f"successfully: {known}. Fix the listing before acting."
+            )
+        msg = f"no guest named {name!r}"
+        if kind is not None:
+            msg += f" of kind {kind!r}"
+        msg += f"; known guests: {known}" if known else "; the node reported no guests"
+        return _err(msg)
+
     # -- model availability helpers ------------------------------------------
 
     async def _model_path(self, vmid: str, unit: str) -> Optional[str]:
@@ -111,20 +309,30 @@ class ProxmoxToolHandler:
         logger.info("Tool pve_status")
         if not self._enabled():
             return _err("Proxmox tools are disabled (set PVE_TOOLS_ENABLED=true).")
-        # Three metacharacter-free argv reads — no remote shell string is ever
-        # built (the SSH runner rejects shell metacharacters), so these run as
-        # separate round trips gathered concurrently.
-        uptime, cts, vms = await asyncio.gather(
+        # Metacharacter-free argv reads — no remote shell string is ever built
+        # (the SSH runner rejects shell metacharacters), so these run as separate
+        # round trips gathered concurrently.
+        uptime, inventory = await asyncio.gather(
             self._run(["uptime"]),
-            self._run(["pct", "list"]),
-            self._run(["qm", "list"]),
+            self._guest_inventory(),
         )
-        return {
+        cts = inventory["raw"]["ct"]
+        vms = inventory["raw"]["vm"]
+        result: Dict[str, Any] = {
             "status": "ok",
             "uptime": uptime.get("stdout") or uptime.get("message"),
+            # Structured inventory (DP-327) — this is what makes pve_status a
+            # topology audit rather than two blobs of text to re-read every turn.
+            "guests": inventory["guests"],
+            # Raw listings kept alongside: they carry columns the parse drops
+            # (memory, bootdisk, pid) and are the ground truth if a PVE version
+            # ever formats a table the parser cannot read.
             "containers": cts.get("stdout") or cts.get("message"),
             "vms": vms.get("stdout") or vms.get("message"),
         }
+        if inventory["errors"]:
+            result["inventory_errors"] = inventory["errors"]
+        return result
 
     async def _list_models(self) -> Dict[str, Any]:
         logger.info("Tool list_models")
@@ -153,27 +361,52 @@ class ProxmoxToolHandler:
         logger.info("Tool reboot_node")
         return await self._run(["reboot"])
 
-    async def _guest_action(self, vmid: str, kind: str, action: str) -> Dict[str, Any]:
-        cli = _GUEST_CLI.get(str(kind).lower())
-        if cli is None:
-            return _err(f"kind must be one of {sorted(_GUEST_CLI)}, got {kind!r}")
-        try:
-            vmid = _validate_vmid(vmid)
-        except ValueError as e:
-            return _err(str(e))
-        return await self._run([cli, action, vmid])
+    async def _guest_action(
+        self,
+        action: str,
+        vmid: Optional[str] = None,
+        kind: Optional[str] = None,
+        name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Resolve the target, then run ``<pct|qm> <action> <vmid>`` on it.
 
-    async def _reboot_guest(self, vmid: str, kind: str) -> Dict[str, Any]:
-        logger.info("Tool reboot_guest: %s %s", kind, vmid)
-        return await self._guest_action(vmid, kind, "reboot")
+        Resolution happens here, at execution — i.e. *after* a human approved the
+        park — so the guest acted on is the one that exists now, and the returned
+        target is echoed back into the audit record rather than only the argument
+        the model typed.
+        """
+        target = await self._resolve_guest(vmid, name, kind)
+        if target.get("status") != "ok":
+            return target
+        cli = _GUEST_CLI[target["kind"]]
+        res = await self._run([cli, action, target["vmid"]])
+        res["target"] = {
+            "vmid": target["vmid"],
+            "kind": target["kind"],
+            "name": target.get("name"),
+        }
+        return res
 
-    async def _start_guest(self, vmid: str, kind: str) -> Dict[str, Any]:
-        logger.info("Tool start_guest: %s %s", kind, vmid)
-        return await self._guest_action(vmid, kind, "start")
+    async def _reboot_guest(
+        self, vmid: Optional[str] = None, kind: Optional[str] = None,
+        name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        logger.info("Tool reboot_guest: kind=%s vmid=%s name=%s", kind, vmid, name)
+        return await self._guest_action("reboot", vmid, kind, name)
 
-    async def _stop_guest(self, vmid: str, kind: str) -> Dict[str, Any]:
-        logger.info("Tool stop_guest: %s %s", kind, vmid)
-        return await self._guest_action(vmid, kind, "stop")
+    async def _start_guest(
+        self, vmid: Optional[str] = None, kind: Optional[str] = None,
+        name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        logger.info("Tool start_guest: kind=%s vmid=%s name=%s", kind, vmid, name)
+        return await self._guest_action("start", vmid, kind, name)
+
+    async def _stop_guest(
+        self, vmid: Optional[str] = None, kind: Optional[str] = None,
+        name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        logger.info("Tool stop_guest: kind=%s vmid=%s name=%s", kind, vmid, name)
+        return await self._guest_action("stop", vmid, kind, name)
 
     async def _set_active_model(self, name: str) -> Dict[str, Any]:
         logger.info("Tool set_active_model: %s", name)
