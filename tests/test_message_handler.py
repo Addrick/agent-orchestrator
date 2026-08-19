@@ -819,6 +819,15 @@ _GETTER_EXCEPTIONS = {
     # meta_visible is Sprint-4 groundwork (DP-111); no production caller reads
     # it yet. Sprint 5 (metabank) will wire a command if/when it ships.
     'get_meta_visible',
+    # DP-330 internals behind `what origin_allowlist`, which reports all three
+    # as one sentence. Deliberately not separately queryable: an operator
+    # asking "what is the allowlist" needs the authored entries, which of them
+    # are in force, and whether the persona is reachable *together* — that
+    # combination is the whole point, and three commands returning fragments of
+    # it is how the field got reported as "unrestricted" while unreachable.
+    'get_origin_allowlist_raw',
+    'get_origin_allowlist_rejected',
+    'get_origin_allowlist_for_persist',
 }
 
 

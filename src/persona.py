@@ -144,10 +144,17 @@ class Persona:
         # explicitly-empty `"origin_allowlist": []` survive a save/load round
         # trip — it is the operator's only in-file hint that the knob exists.
         self._origin_allowlist_declared: bool = origin_allowlist is not None
+        # The value exactly as authored, kept so a fail-closed persona persists
+        # back as the input that closed it. Writing the *normalized* list
+        # instead dropped the entries the normalizer could not stringify, so
+        # `[null]` saved as `[]` — unreachable in memory, unrestricted on the
+        # next load. See `get_origin_allowlist_for_persist`.
+        self._origin_allowlist_raw: Any = origin_allowlist
         (
             self._origin_allowlist,
             self._origin_allowlist_parsed,
             self._origin_allowlist_malformed,
+            self._origin_allowlist_rejected,
         ) = self._normalize_origin_allowlist(origin_allowlist, persona_name)
 
         try:
@@ -274,9 +281,16 @@ class Persona:
     def _normalize_origin_allowlist(
             value: Any,
             persona_name: str,
-    ) -> Tuple[List[str], List[Tuple[str, str, str]], bool]:
+    ) -> Tuple[List[str], List[Tuple[str, str, str]], bool, List[Any]]:
         """DP-330: coerce an authored or CLI-supplied allowlist into
-        ``(authored_entries, parsed_entries, malformed)``.
+        ``(authored_entries, parsed_entries, malformed, rejected_entries)``.
+
+        ``authored`` keeps every entry that stringified, **including ones that
+        were then rejected** — it is what gets written back to disk, and
+        silently dropping the operator's typo from the file would hide the
+        thing they have to fix. ``rejected`` is therefore not derivable from
+        ``authored``, and reporting needs it: "12345, \\*" are the authored
+        entries but only "12345" is in force.
 
         The declared type is ``List[str]``, but this value comes straight out
         of a hand-edited JSON file, so nothing about it can be trusted:
@@ -295,16 +309,27 @@ class Persona:
           was never authored — a typo that widens reachability, the exact
           opposite of the fail-closed property this field is supposed to have.
 
-        Fail-closed on malformed input: if entries were authored but none of
-        them parse, the persona becomes unreachable rather than unrestricted.
+        Fail-closed on malformed input: if *anything* was supplied but none of
+        it parses, the persona becomes unreachable rather than unrestricted.
         An empty allowlist means "no restriction", so leaving a typo'd list to
         parse down to empty would turn a restriction into a wide-open persona
         while ``what origin_allowlist`` kept reporting the authored entries as
         if they were in force. Unreachable is loud, recoverable by editing the
         file, and confined to this one persona.
+
+        **The trigger is "an entry was supplied", not "an entry survived
+        stringification".** Keying it off ``authored`` inverted the guarantee
+        for the two shapes that never reach that list: a wholly-unstringifiable
+        list (``[None]``, ``[True]``, ``[["12345"]]``) and a blank-only one
+        (``["", "   "]``) both left ``authored`` empty, so the fail-closed
+        branch never fired and the persona came out **unrestricted** — the
+        widening this whole function exists to prevent, on input it had already
+        diagnosed as bad. Blank entries are rejections, not nothing: an entry
+        the operator typed and this function cannot use is exactly what
+        ``rejected`` means.
         """
         if value is None:
-            return [], [], False
+            return [], [], False, []
 
         raw_entries: List[Any]
         if isinstance(value, str):
@@ -317,7 +342,7 @@ class Persona:
                 f"strings, got {type(value).__name__}; persona is unreachable "
                 "until it is fixed."
             )
-            return [], [_UNMATCHABLE_ORIGIN], True
+            return [], [_UNMATCHABLE_ORIGIN], True, [value]
 
         authored: List[str] = []
         parsed: List[Tuple[str, str, str]] = []
@@ -328,6 +353,12 @@ class Persona:
                 continue
             text = str(entry).strip()
             if not text:
+                # An authored-but-empty entry is a rejection, not an absence.
+                # Skipping it silently let `["", "  "]` fall through as an
+                # unrestricted persona with malformed=False — no warning, no
+                # fail-closed, and nothing in `what origin_allowlist` to say
+                # the intended restriction had evaporated.
+                rejected.append(entry)
                 continue
             authored.append(text)
             # One entry at a time: a comma inside `text` must not become two
@@ -345,15 +376,15 @@ class Persona:
                 f"entries {rejected!r} (expected "
                 "'server_id[/channel_id[/author_id]]')."
             )
-        if authored and not parsed:
+        if (authored or rejected) and not parsed:
             logger.error(
                 f"Persona '{persona_name}': every origin_allowlist entry is "
-                f"malformed ({authored!r}); it is now unreachable from every "
-                "origin. Fix the entries or clear the field to make it "
-                "unrestricted."
+                f"malformed ({authored or rejected!r}); it is now unreachable "
+                "from every origin. Fix the entries or clear the field to make "
+                "it unrestricted."
             )
-            return authored, [_UNMATCHABLE_ORIGIN], True
-        return authored, parsed, bool(rejected)
+            return authored, [_UNMATCHABLE_ORIGIN], True, rejected
+        return authored, parsed, bool(rejected), rejected
 
     def get_origin_allowlist(self) -> List[str]:
         """DP-330: origins allowed to address this persona, as authored
@@ -375,6 +406,51 @@ class Persona:
         unusable. When nothing parsed the persona is unreachable (fail
         closed), so callers reporting the field must say so."""
         return self._origin_allowlist_malformed
+
+    def origin_allowlist_is_unreachable(self) -> bool:
+        """DP-330: True if the allowlist failed closed — something was
+        authored, nothing parsed, and the persona now matches no origin at all.
+
+        Distinct from ``origin_allowlist_is_malformed()``, which is also True
+        when *some* entries parsed and the rest were dropped. Reporting and
+        persistence need the difference: "three entries in force, one dropped"
+        and "unreachable from everywhere" are opposite states and were being
+        described with the same string."""
+        return _UNMATCHABLE_ORIGIN in self._origin_allowlist_parsed
+
+    def get_origin_allowlist_rejected(self) -> List[Any]:
+        """DP-330: the authored entries this persona is NOT enforcing.
+
+        Not derivable from ``get_origin_allowlist()``, which deliberately keeps
+        rejected entries so the operator's typo survives the next save. Without
+        this, reporting could only print the authored list and call it "in
+        force" — for `["12345", "*"]` that names a guild the persona does not
+        actually admit."""
+        return list(self._origin_allowlist_rejected)
+
+    def get_origin_allowlist_raw(self) -> Any:
+        """DP-330: the allowlist exactly as authored, before normalization.
+
+        Only for reporting an unreachable persona and for persisting one — the
+        normalized list is what every other caller wants."""
+        return self._origin_allowlist_raw
+
+    def get_origin_allowlist_for_persist(self) -> Any:
+        """DP-330: what ``store.to_dict`` must write for this field.
+
+        Normally the normalized entries. When the persona failed closed, the
+        **raw authored value** instead: the normalizer drops what it cannot
+        stringify, so persisting the normalized list turned every fail-closed
+        shape into ``[]`` — which reloads as *unrestricted*. A save then
+        silently converted "unreachable until you fix this" into "reachable
+        from everywhere", and the first `set temp 0.8` on that persona was
+        enough to trigger it. Round-tripping the operator's broken input keeps
+        the reload idempotent and leaves the thing they have to fix visible in
+        the file."""
+        if self.origin_allowlist_is_unreachable():
+            raw = self._origin_allowlist_raw
+            return list(raw) if isinstance(raw, tuple) else raw
+        return list(self._origin_allowlist)
 
     def is_addressable_from(self, origin: Origin) -> bool:
         """DP-330: may `origin` talk to this persona at all?
@@ -737,10 +813,12 @@ class Persona:
         origin_allowlist`` dev command, never from the PATCH route (this
         field decides who may reach the persona, exactly like
         ``explicit_overrides`` decides what it may do)."""
+        self._origin_allowlist_raw = list(entries)
         (
             self._origin_allowlist,
             self._origin_allowlist_parsed,
             self._origin_allowlist_malformed,
+            self._origin_allowlist_rejected,
         ) = self._normalize_origin_allowlist(list(entries), self._name)
         self._origin_allowlist_declared = True
         logger.info(

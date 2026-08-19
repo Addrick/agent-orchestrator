@@ -202,13 +202,19 @@ def test_set_origin_allowlist_clears(persona):
 
 def test_set_origin_allowlist_reports_an_all_malformed_list(persona):
     """An all-malformed list fails CLOSED — the persona is unreachable, not
-    unrestricted — and the operator must be told, including how to undo it."""
+    unrestricted — and the operator must be told, including how to undo it.
+
+    The undo is NOT `set origin_allowlist none`, which this reply used to
+    offer: that command can only arrive addressed to the persona it just made
+    unreachable, so the gate refuses it. Only a file edit gets out."""
     handler = cli_set_handlers()['origin_allowlist']
     response, mutated = handler(['origin_allowlist', '*'], persona)
     assert mutated is True
-    assert 'unreachable' in response
-    assert 'set origin_allowlist none' in response
+    assert 'UNREACHABLE' in response
+    assert 'data/personas.json' in response
+    assert 'set origin_allowlist none' not in response
     assert persona.origin_allowlist_is_malformed() is True
+    assert persona.origin_allowlist_is_unreachable() is True
 
 
 def test_set_origin_allowlist_accepts_unquoted_json_numbers(persona):
@@ -233,9 +239,23 @@ def test_what_origin_allowlist(persona):
 def test_what_origin_allowlist_flags_a_policy_that_is_not_in_force(persona):
     """Reporting the authored entries alone described a policy the persona was
     not running: a wholly-malformed list makes it unreachable, and `what` must
-    not read as 'restricted to these guilds'."""
+    not read as 'restricted to these guilds' — nor, as it did for every
+    fail-closed shape that left the normalized list empty, as 'unrestricted'."""
     what = cli_what_handlers()['origin_allowlist']
     persona.set_origin_allowlist(['*'])
     response, _ = what(['origin_allowlist'], persona)
-    assert 'malformed' in response
-    assert 'unreachable' in response
+    assert 'UNREACHABLE' in response
+    assert 'unrestricted (any origin may address it)' not in response
+
+
+def test_what_origin_allowlist_names_the_entries_it_dropped(persona):
+    """A partly-malformed list is a different state from an unreachable one:
+    some entries are in force. The authored list keeps the rejected entry (it
+    has to survive the next save), so `what` has to say which of the ids it
+    just printed are not actually grants."""
+    what = cli_what_handlers()['origin_allowlist']
+    persona.set_origin_allowlist(['12345', '*'])
+    response, _ = what(['origin_allowlist'], persona)
+    assert 'UNREACHABLE' not in response
+    assert '12345' in response
+    assert 'NOT in force' in response and "'*'" in response

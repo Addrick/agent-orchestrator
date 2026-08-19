@@ -27,6 +27,8 @@ from unittest.mock import MagicMock
 
 from src.origin import ANONYMOUS, Origin
 from src.persona import Persona
+from src.persona_fields import _describe_origin_allowlist
+from src.personas import store
 from tests.helpers import make_bot_logic
 
 GUILD = "12345"
@@ -180,11 +182,175 @@ async def test_a_wholly_malformed_allowlist_is_unreachable_not_open(chat_state,
 
 @pytest.mark.asyncio
 async def test_clearing_the_allowlist_restores_reachability(chat_state, bot_logic):
-    """The recovery path out of a lockout, from a persona the operator can
-    still reach."""
+    """Clearing the field re-opens the persona. Unit-level only — this asserts
+    the setter's effect, NOT that any operator can still deliver it. See
+    `test_clearing_a_different_persona_does_not_recover_the_locked_out_one`
+    for what the routing actually does."""
     chat_state.personas["gated"].set_origin_allowlist([])
     assert await bot_logic.preprocess_message(
         DISALLOWED, "gated", "u", "hi") is None
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed, for every shape a hand-edited JSON file can produce
+#
+# `[]` means UNRESTRICTED, so any input the normalizer diagnoses as unusable
+# and then reduces to `[]` inverts the field. The first cut only fail-closed
+# on entries that survived `str()`, which is none of the shapes below.
+# ---------------------------------------------------------------------------
+
+UNUSABLE_ALLOWLISTS = [
+    pytest.param([None], id="null-entry"),
+    pytest.param([True], id="bool-entry"),
+    pytest.param([["12345"]], id="nested-list-entry"),
+    pytest.param([None, ["12345"], True], id="all-entries-unstringifiable"),
+    pytest.param(["", "   "], id="blank-entries"),
+    pytest.param(["*"], id="wildcard-server"),
+    pytest.param({"guild": "12345"}, id="dict-instead-of-list"),
+    pytest.param(12345, id="bare-int-instead-of-list"),
+]
+
+
+@pytest.mark.parametrize("value", UNUSABLE_ALLOWLISTS)
+def test_an_unusable_allowlist_is_unreachable_never_unrestricted(value):
+    """The core inversion. Every one of these was diagnosed as bad AND then
+    admitted every origin in the world, because the fail-closed branch keyed
+    off entries that had survived stringification — which for most of these is
+    none of them."""
+    persona = Persona("p", "m", "pr", origin_allowlist=value)
+    assert persona.origin_allowlist_is_unreachable() is True
+    assert persona.origin_allowlist_is_malformed() is True
+    for origin in (ALLOWED, DISALLOWED, ANONYMOUS, _origin(transport="portal")):
+        assert persona.is_addressable_from(origin) is False
+
+
+@pytest.mark.parametrize("value", UNUSABLE_ALLOWLISTS)
+def test_an_unusable_allowlist_survives_a_save_load_round_trip(value):
+    """A fail-closed persona must still be fail-closed after the next restart.
+    `to_dict` used to write the NORMALIZED list, which drops what it cannot
+    stringify — so `[null]` saved as `[]`, and `[]` is unrestricted. Any
+    mutating dev command (`set temp 0.8`) rewrites personas.json, so the
+    unreachable state lasted exactly until the next unrelated edit."""
+    persona = Persona("p", "m", "pr", origin_allowlist=value)
+    saved = store.to_dict({"p": persona})[0]
+    assert "origin_allowlist" in saved
+    assert saved["origin_allowlist"] != []
+
+    reloaded = Persona("p", "m", "pr",
+                       origin_allowlist=saved["origin_allowlist"])
+    assert reloaded.origin_allowlist_is_unreachable() is True
+    for origin in (ALLOWED, DISALLOWED, ANONYMOUS):
+        assert reloaded.is_addressable_from(origin) is False
+
+
+def test_a_usable_allowlist_still_round_trips_as_the_normalized_list():
+    """The raw value is persisted ONLY when the persona failed closed —
+    otherwise the normalized entries are still what lands on disk, so ints
+    keep coming back as the strings everything downstream expects."""
+    persona = Persona("p", "m", "pr", origin_allowlist=[12345, " 777 "])
+    assert store.to_dict({"p": persona})[0]["origin_allowlist"] == ["12345", "777"]
+
+
+def test_a_partly_malformed_allowlist_keeps_the_entries_that_parsed():
+    """Malformed is not the same as unreachable: some entries in force and the
+    rest dropped is a real, non-terminal state, and conflating the two is what
+    made the reporting wrong."""
+    persona = Persona("p", "m", "pr", origin_allowlist=[GUILD, "*", ""])
+    assert persona.origin_allowlist_is_malformed() is True
+    assert persona.origin_allowlist_is_unreachable() is False
+    # The authored list KEEPS the rejected entry — it is what gets written back
+    # to the file, and dropping the typo would hide what has to be fixed. Which
+    # is exactly why `rejected` has to be tracked separately: `"*"` is stored
+    # but is not a grant.
+    assert persona.get_origin_allowlist() == [GUILD, "*"]
+    assert persona.get_origin_allowlist_rejected() == ["*", ""]
+    assert persona.is_addressable_from(ALLOWED) is True
+    assert persona.is_addressable_from(DISALLOWED) is False
+
+
+def test_a_partly_malformed_allowlist_does_not_report_dropped_entries_as_grants():
+    """`what origin_allowlist` prints the authored list, which includes entries
+    that were rejected. Printing it alone credits the persona with a grant it
+    is not enforcing — the same 'describes a policy the persona is not running'
+    failure as the unrestricted/unreachable mixup, one severity down."""
+    persona = Persona("p", "m", "pr", origin_allowlist=[GUILD, "*"])
+    described = _describe_origin_allowlist(persona)
+    assert "NOT in force" in described
+    assert "'*'" in described
+
+
+# ---------------------------------------------------------------------------
+# What the operator is TOLD about the state they are in
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("value", UNUSABLE_ALLOWLISTS)
+def test_an_unreachable_persona_is_not_reported_as_unrestricted(value):
+    """`what origin_allowlist` checked malformed only INSIDE its non-empty
+    branch, so every shape above — including the ones where the persona
+    matches no origin at all — printed 'unrestricted (any origin may address
+    it)'. The operator was told the exact opposite of the truth.
+
+    Called directly, not through `preprocess_message`, because the gate refuses
+    the addressing attempt before the `what` handler runs: once a persona is
+    unreachable you cannot ask it about itself either. The string still has one
+    live delivery path — the setter's reply on the turn that caused it (see
+    `test_locking_yourself_out_says_the_command_cannot_undo_it`) — and this
+    pins the branch for every other caller that renders field state."""
+    persona = Persona("p", "m", "pr", origin_allowlist=value)
+    described = _describe_origin_allowlist(persona)
+    assert "UNREACHABLE" in described
+    assert "unrestricted (any origin may address it)" not in described
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_persona_cannot_even_be_queried(chat_state, bot_logic):
+    """The corollary, pinned because it is the operator's actual experience and
+    the reason the setter's reply has to carry the full recovery instructions:
+    after a lockout, `what origin_allowlist` is refused like everything else."""
+    chat_state.personas["gated"].set_origin_allowlist(["*"])
+    result = await bot_logic.preprocess_message(
+        OPERATOR_IN_GUILD, "gated", "operator", "what origin_allowlist")
+    assert result is not None
+    assert "not available from this channel" in result["response"]
+
+
+@pytest.mark.asyncio
+async def test_locking_yourself_out_says_the_command_cannot_undo_it(bot_logic):
+    """The setter used to offer `set origin_allowlist none` as the fix. That
+    command can only arrive through the persona it just made unreachable."""
+    result = await bot_logic.preprocess_message(
+        OPERATOR_IN_GUILD, "gated", "operator", "set origin_allowlist *")
+    assert result is not None
+    assert "UNREACHABLE" in result["response"]
+    assert "data/personas.json" in result["response"]
+
+
+@pytest.mark.asyncio
+async def test_clearing_a_different_persona_does_not_recover_the_locked_out_one(
+        chat_state, bot_logic):
+    """`set origin_allowlist` targets the ADDRESSED persona — there is no
+    cross-persona form. user_guide.md, architecture.md, the setter docstring
+    and a test docstring all told operators to recover from a lockout by
+    'running the command while addressing a different one', which removes a
+    real restriction from an unrelated persona and leaves the locked-out one
+    exactly as locked. Nothing exercised the routing, so the claim survived."""
+    chat_state.personas["open"].set_origin_allowlist([GUILD])
+    await bot_logic.preprocess_message(
+        OPERATOR_IN_GUILD, "gated", "operator", "set origin_allowlist *")
+    assert chat_state.personas["gated"].origin_allowlist_is_unreachable() is True
+
+    # The documented "recovery", performed exactly as written.
+    result = await bot_logic.preprocess_message(
+        OPERATOR_IN_GUILD, "open", "operator", "set origin_allowlist none")
+    assert result is not None and result["mutated"] is True
+
+    # It cleared the WRONG persona and did nothing for the locked-out one.
+    assert chat_state.personas["open"].get_origin_allowlist() == []
+    assert chat_state.personas["gated"].origin_allowlist_is_unreachable() is True
+    refused = await bot_logic.preprocess_message(
+        ALLOWED, "gated", "u", "hi")
+    assert refused is not None
+    assert "not available from this channel" in refused["response"]
 
 
 # ---------------------------------------------------------------------------

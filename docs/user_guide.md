@@ -175,17 +175,31 @@ back with `what origin_allowlist`; clear it with `set origin_allowlist none`.
   available from this channel.` The refusal never says what the allowlist holds.
 - The gate sits above dev-command handling, so a disallowed origin cannot address
   a restricted persona with `what prompt` either — not on Discord, not from the
-  portal's dev-command surface. It does **not** cover the portal's read-only HTTP
-  endpoints (`/api/v1/persona/<name>`, `/assemble`, `/transcript`,
-  `/kobold_export`), which anyone who can reach the portal may still call; if
-  your portal is exposed beyond your own machine, treat that as the wider
-  boundary and restrict it at the network.
+  portal's dev-command surface. It does **not** cover the portal's unauthenticated
+  `GET` routes, which return a restricted persona's prompt and history to anyone
+  who can reach `:5003`. That gap and the LAN-only precondition it depends on are
+  spelled out in [Portal Control Plane](#portal-control-plane-dp-277) — read it
+  before relying on this field to keep a persona private.
 - Malformed entries are dropped rather than honored (a wildcard server would
-  grant every guild the bot is in). If *every* entry you supply is malformed, the
-  persona becomes **unreachable from every origin** rather than unrestricted —
-  the safe direction — and the command says so. Fix it with a corrected list, or
-  `set origin_allowlist none` to clear the restriction. If you locked yourself
-  out of that persona, run the command while addressing a different one.
+  grant every guild the bot is in). If *nothing* you supply parses, the persona
+  becomes **unreachable from every origin** rather than unrestricted — the safe
+  direction — and both `set` and `what origin_allowlist` say so in those words.
+  This holds for every unusable shape, including a list of blanks (`["", " "]`)
+  and one whose entries are not text at all (`[null]`, `[true]`, `[["12345"]]`).
+  A file that fails closed is also **saved** as you wrote it, so a later
+  `set temp 0.8` cannot quietly rewrite it to `[]` and reopen the persona.
+
+> **⚠️ You can lock yourself out, and `set origin_allowlist` cannot undo it.**
+> The command always targets the persona you are addressing — there is no
+> cross-persona form, so running it against a *different* persona clears that
+> persona's restriction and leaves the locked-out one exactly as it was. And
+> because an allowlisted persona is Discord-only, setting one from the portal
+> immediately locks the portal's own dev-command route out of it.
+>
+> Recovery is a **Discord origin the allowlist admits**, or editing that
+> persona's `origin_allowlist` in `data/personas.json` and restarting. Set the
+> field from a Discord channel that the list itself allows, and this cannot
+> happen.
 - Guild ids may be written unquoted in a persona file (`"origin_allowlist":
   [347812763093172225]`) — they are numbers, and the file accepts them as such.
 - Changing the field is recorded in the audit log (`origin_allowlist_change`,

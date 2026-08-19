@@ -334,18 +334,35 @@ def _describe_origin_allowlist(persona: Persona) -> str:
     whether they are actually in force: a wholly-malformed list fails closed,
     so printing the entries alone would describe a policy the persona is not
     running."""
+    name = persona.get_name()
+    # Unreachable is checked FIRST and independently of `entries`. Both
+    # fail-closed shapes that leave the normalized list empty — a non-list
+    # value, and a list whose every entry was rejected — used to fall into the
+    # branch below and be reported as "unrestricted (any origin may address
+    # it)", which is the exact opposite of the persona's actual state and the
+    # failure this function's docstring says it exists to prevent.
+    if persona.origin_allowlist_is_unreachable():
+        return (
+            f"Origin allowlist for '{name}': ⚠️ UNREACHABLE from every origin "
+            f"— nothing in {persona.get_origin_allowlist_raw()!r} parsed as "
+            "'server_id[/channel_id[/author_id]]'. Fix the entries, or clear "
+            "the field to make it unrestricted."
+        )
     entries = persona.get_origin_allowlist()
     if not entries:
-        return (f"Origin allowlist for '{persona.get_name()}': "
+        return (f"Origin allowlist for '{name}': "
                 "unrestricted (any origin may address it).")
     shown = ', '.join(entries)
     if persona.origin_allowlist_is_malformed():
+        # Name the dropped entries specifically. The authored list is what is
+        # stored (so the typo stays visible in the file), which means printing
+        # it alone credits the persona with grants it is not enforcing.
+        dropped = ', '.join(repr(e) for e in persona.get_origin_allowlist_rejected())
         return (
-            f"Origin allowlist for '{persona.get_name()}': {shown} — ⚠️ one or "
-            "more entries are malformed and were dropped; if none parsed the "
-            "persona is unreachable from every origin."
+            f"Origin allowlist for '{name}': {shown} — ⚠️ dropped as malformed "
+            f"and NOT in force: {dropped}."
         )
-    return f"Origin allowlist for '{persona.get_name()}': {shown}."
+    return f"Origin allowlist for '{name}': {shown}."
 
 
 def _set_origin_allowlist(args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
@@ -355,6 +372,17 @@ def _set_origin_allowlist(args: List[str], persona: Persona) -> Tuple[Optional[s
     Deliberately NOT patchable: this field decides who may reach the persona at
     all, so the operator-gated dev command is its only mutation surface (same
     reasoning as `set explicit_overrides`).
+
+    ⚠️ **This command always targets the ADDRESSED persona** — there is no
+    cross-persona form. So it is possible to lock yourself out with it, and the
+    undo is not reachable from the surface that did it: `is_origin_allowed`
+    refuses every non-Discord transport once the list is non-empty, so setting
+    one from the portal makes the portal's own `dev_command` route answer
+    "Persona '<name>' is not available from this channel." on the next call.
+    Recovery is a Discord origin the list admits, or editing
+    `data/personas.json` and restarting — NOT "run it while addressing a
+    different persona", which docs claimed for a while and which silently
+    clears the *other* persona's restriction instead.
     """
     if len(args) < 2:
         return (
@@ -368,20 +396,30 @@ def _set_origin_allowlist(args: List[str], persona: Persona) -> Tuple[Optional[s
     if error is not None or entries is None:
         return error, False
     stored = persona.set_origin_allowlist(entries)
-    if persona.origin_allowlist_is_malformed():
-        # The normalizer fails CLOSED on a wholly-malformed list, so the
-        # persona is now unreachable rather than silently unrestricted. Say so
-        # — the operator is the only one who can fix it, and from another
-        # persona if they locked themselves out of this one.
+    name = persona.get_name()
+    if persona.origin_allowlist_is_unreachable():
+        # Fail-closed: nothing parsed, so the persona now matches no origin.
+        # Report it as the terminal state it is, and name the only recovery
+        # that actually exists — `set origin_allowlist none` is offered, but
+        # only a Discord origin can deliver it, and not this one.
         return (
-            f"⚠️ origin_allowlist for {persona.get_name()} set to {raw!r}, but "
-            "some entries are not 'server_id[/channel_id[/author_id]]'. If "
-            "none of them parse the persona is now unreachable from every "
-            "origin; `set origin_allowlist none` clears the restriction.",
+            f"⚠️ origin_allowlist for {name} set to {raw!r}, but NONE of it "
+            "parsed as 'server_id[/channel_id[/author_id]]'. The persona is "
+            f"now UNREACHABLE from every origin. Fix it by editing {name}'s "
+            "`origin_allowlist` in data/personas.json and restarting — this "
+            "command can no longer reach the persona to undo itself.",
+            True,
+        )
+    if persona.origin_allowlist_is_malformed():
+        shown = ', '.join(stored)
+        return (
+            f"⚠️ origin_allowlist for {name} set to {raw!r}, but some entries "
+            "are not 'server_id[/channel_id[/author_id]]' and were dropped. "
+            f"In force: {shown}.",
             True,
         )
     shown = ', '.join(stored) or 'unrestricted'
-    return f"Origin allowlist for {persona.get_name()} set to: {shown}.", True
+    return f"Origin allowlist for {name} set to: {shown}.", True
 
 
 def _mission_setter(

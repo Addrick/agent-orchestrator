@@ -158,8 +158,15 @@ def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
         # in yet — the one in-file hint that the knob exists — on the first
         # mutating dev command. A persona that never carried the key still
         # round-trips to the exact shape it loaded with.
+        # The value comes from `get_origin_allowlist_for_persist`, not
+        # `get_origin_allowlist`: a fail-closed persona must reload fail-closed.
+        # The normalized list omits entries that could not be stringified, so
+        # writing it turned `[null]` / `{"guild": "x"}` into `[]` — and `[]`
+        # means UNRESTRICTED. The persona was unreachable in memory and wide
+        # open after the next restart, with one `set temp 0.8` enough to
+        # trigger the rewrite.
         if persona.origin_allowlist_is_declared():
-            persona_json["origin_allowlist"] = persona.get_origin_allowlist()
+            persona_json["origin_allowlist"] = persona.get_origin_allowlist_for_persist()
         persona_list.append(persona_json)
     return persona_list
 
