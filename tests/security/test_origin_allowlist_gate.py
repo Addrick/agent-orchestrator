@@ -393,6 +393,55 @@ async def test_clearing_the_allowlist_is_audited(bot_logic, chat_state):
 
 
 @pytest.mark.asyncio
+async def test_clearing_a_field_that_was_never_set_is_not_a_mutation(
+        bot_logic, chat_state):
+    """`mutated` drives the audit row AND a full personas.json rewrite, so it
+    has to mean "the field changed", not "a set command ran".
+
+    `set origin_allowlist none` on a persona that never carried the key used to
+    report True: an audit row with identical prior/new state, and
+    `origin_allowlist_is_declared()` flipped forever so `to_dict` began emitting
+    `"origin_allowlist": []` for a persona whose policy did not change. Audit
+    rows for changes that did not happen dilute the one signal this ticket
+    added for spotting a real widening."""
+    assert chat_state.personas["open"].origin_allowlist_is_declared() is False
+    result = await bot_logic.preprocess_message(
+        OPERATOR_IN_GUILD, "open", "operator", "set origin_allowlist none")
+    assert result is not None and result["mutated"] is False
+    bot_logic.memory_manager.log_audit_event.assert_not_called()
+    # And the persona's on-disk shape is untouched — no key appears.
+    assert chat_state.personas["open"].origin_allowlist_is_declared() is False
+    assert "origin_allowlist" not in store.to_dict(
+        {"open": chat_state.personas["open"]})[0]
+
+
+@pytest.mark.asyncio
+async def test_setting_the_same_allowlist_again_is_not_a_mutation(
+        bot_logic, chat_state):
+    """Re-asserting the value already in force changes no policy, so it earns
+    no audit row and no file rewrite."""
+    result = await bot_logic.preprocess_message(
+        OPERATOR_IN_GUILD, "gated", "operator", f"set origin_allowlist {GUILD}")
+    assert result is not None and result["mutated"] is False
+    bot_logic.memory_manager.log_audit_event.assert_not_called()
+    assert chat_state.personas["gated"].get_origin_allowlist() == [GUILD]
+
+
+@pytest.mark.asyncio
+async def test_an_explicitly_declared_empty_allowlist_still_round_trips(
+        bot_logic, chat_state):
+    """The no-op guard must not undo the reason `declared` exists: a persona
+    SHIPPED with `"origin_allowlist": []` keeps the key, which is the
+    operator's only in-file hint that the knob exists."""
+    chat_state.personas["shipped"] = Persona("shipped", "m", "pr",
+                                             origin_allowlist=[])
+    await bot_logic.preprocess_message(
+        OPERATOR_IN_GUILD, "shipped", "operator", "set origin_allowlist none")
+    saved = store.to_dict({"shipped": chat_state.personas["shipped"]})[0]
+    assert saved["origin_allowlist"] == []
+
+
+@pytest.mark.asyncio
 async def test_a_lockout_is_recorded_as_malformed(bot_logic):
     """An all-malformed list leaves the persona unreachable; the audit row has
     to say so, because after this the operator cannot ask the persona."""

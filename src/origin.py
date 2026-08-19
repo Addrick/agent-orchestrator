@@ -42,11 +42,50 @@ class Origin:
 ANONYMOUS = Origin(transport="unknown", operator=False)
 
 
+def split_allowlist_entries(raw: str) -> List[str]:
+    """Split a user-typed allowlist string into entries on whitespace OR commas.
+
+    One home for the separator grammar. It was copied verbatim into
+    ``persona_fields._parse_string_list_arg`` and ``Persona._normalize_origin_
+    allowlist`` — the two write paths that are documented as producing identical
+    results — so a change to how entries are separated had to be made in three
+    places or the CLI and the file would drift.
+    """
+    return [e for chunk in raw.split() for e in chunk.split(',') if e]
+
+
+def parse_operator_allowlist_entry(entry: str) -> Optional[Tuple[str, str, str]]:
+    """Parse ONE allowlist entry, ``server_id[/channel_id[/author_id]]``.
+    Returns None if it is malformed.
+
+    This is the entry grammar, and it is the only thing that knows it. Callers
+    used to infer "the parser did not split this" from
+    ``len(parse_operator_allowlist(text)) == 1 and ',' not in text``, which is a
+    proxy for a rule that lives here: **a comma is the entry separator, so an
+    entry containing one is two grants glued together** and honouring it would
+    widen reachability by a typo. With the rule inlined at the call site, adding
+    a separator here would silently turn those rejections into grants.
+
+    A missing or ``*`` component matches anything at that level, so a
+    whole-server grant is just the bare server id — but a ``*`` *server* is
+    refused outright, since it would grant every guild the bot is in.
+    """
+    entry = entry.strip()
+    if not entry or ',' in entry:
+        return None
+    parts = [p.strip() for p in entry.split("/")]
+    if len(parts) > 3 or not parts[0] or parts[0] == "*":
+        return None
+    server = parts[0]
+    channel = parts[1] if len(parts) > 1 and parts[1] else "*"
+    author = parts[2] if len(parts) > 2 and parts[2] else "*"
+    return (server, channel, author)
+
+
 def parse_operator_allowlist(raw: str) -> List[Tuple[str, str, str]]:
     """Parse ``OPERATOR_ALLOWLIST`` into (server_id, channel_id, author_id)
     tuples. Entry format: ``server_id[/channel_id[/author_id]]`` separated by
-    commas; a missing or ``*`` component matches anything at that level, so a
-    whole-server grant is just the bare server id.
+    commas.
 
     Malformed entries are dropped with a warning (fail closed: a typo narrows
     access, never widens it).
@@ -56,15 +95,11 @@ def parse_operator_allowlist(raw: str) -> List[Tuple[str, str, str]]:
         chunk = chunk.strip()
         if not chunk:
             continue
-        parts = [p.strip() for p in chunk.split("/")]
-        if len(parts) > 3 or not parts[0] or parts[0] == "*":
-            # a wildcard server would grant every guild the bot is in
+        parsed = parse_operator_allowlist_entry(chunk)
+        if parsed is None:
             logger.warning(f"Ignoring malformed OPERATOR_ALLOWLIST entry {chunk!r}.")
             continue
-        server = parts[0]
-        channel = parts[1] if len(parts) > 1 and parts[1] else "*"
-        author = parts[2] if len(parts) > 2 and parts[2] else "*"
-        entries.append((server, channel, author))
+        entries.append(parsed)
     return entries
 
 

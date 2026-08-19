@@ -15,7 +15,14 @@ import pytest
 from unittest.mock import MagicMock
 
 from src.message_handler import BotLogic
-from src.origin import ANONYMOUS, Origin, is_discord_operator, parse_operator_allowlist
+from src.origin import (
+    ANONYMOUS,
+    Origin,
+    is_discord_operator,
+    parse_operator_allowlist,
+    parse_operator_allowlist_entry,
+    split_allowlist_entries,
+)
 from src.persona import Persona
 from tests.helpers import ANON_ORIGIN, OPERATOR_ORIGIN, make_bot_logic
 
@@ -165,6 +172,36 @@ def test_parse_allowlist_rejects_wildcard_server():
 def test_parse_allowlist_rejects_malformed():
     assert parse_operator_allowlist("1/2/3/4") == []
     assert parse_operator_allowlist("") == []
+
+
+def test_parse_entry_rejects_an_embedded_comma():
+    """DP-330: the comma is the entry SEPARATOR, so an entry containing one is
+    two grants glued together — honouring it widens reachability by a typo.
+
+    The rule lives in `parse_operator_allowlist_entry` because
+    `Persona._normalize_origin_allowlist` parses entries one at a time and used
+    to infer it from `len(parse_operator_allowlist(text)) == 1 and ',' not in
+    text` — a re-derivation of this function's internals that a change to the
+    separator would silently turn into a grant."""
+    assert parse_operator_allowlist_entry("12345,99999") is None
+    assert parse_operator_allowlist_entry("12345") == ("12345", "*", "*")
+
+
+def test_parse_entry_and_parse_allowlist_agree_on_every_shape():
+    """One grammar, two callers (the env var and the persona field). Anything
+    `parse_operator_allowlist` accepts from a single chunk, the entry parser
+    must accept identically — otherwise the CLI and the file drift."""
+    for chunk in ("111", "222/333", "444/555/666", "777//888",
+                  "*/123", "*", "1/2/3/4", "", "   "):
+        whole = parse_operator_allowlist(chunk)
+        entry = parse_operator_allowlist_entry(chunk)
+        assert whole == ([] if entry is None else [entry]), chunk
+
+
+def test_split_allowlist_entries_takes_whitespace_or_commas():
+    """The separator grammar, previously copy-pasted into two other modules."""
+    assert split_allowlist_entries("111 222,333  444") == ["111", "222", "333", "444"]
+    assert split_allowlist_entries("") == []
 
 
 def test_discord_operator_matching():

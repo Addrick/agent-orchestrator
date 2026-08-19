@@ -6,7 +6,12 @@ from typing import Optional, Dict, Any, List, Tuple, Type, TypeVar, Union
 
 from config import global_config
 from src.generation_params import GenerationParams
-from src.origin import Origin, is_origin_allowed, parse_operator_allowlist
+from src.origin import (
+    Origin,
+    is_origin_allowed,
+    parse_operator_allowlist_entry,
+    split_allowlist_entries,
+)
 from src.tool_policy import KNOWN_OVERRIDES, ToolPolicy
 
 logger = logging.getLogger(__name__)
@@ -333,7 +338,7 @@ class Persona:
 
         raw_entries: List[Any]
         if isinstance(value, str):
-            raw_entries = [e for chunk in value.split() for e in chunk.split(',') if e]
+            raw_entries = split_allowlist_entries(value)
         elif isinstance(value, (list, tuple)):
             raw_entries = list(value)
         else:
@@ -361,12 +366,14 @@ class Persona:
                 rejected.append(entry)
                 continue
             authored.append(text)
-            # One entry at a time: a comma inside `text` must not become two
-            # grants. parse_operator_allowlist splits on commas, so anything
-            # that yields more than one tuple was a malformed single entry.
-            entry_parsed = parse_operator_allowlist(text)
-            if len(entry_parsed) == 1 and ',' not in text:
-                parsed.append(entry_parsed[0])
+            # One entry at a time, through the single-entry parser: a comma
+            # inside `text` is two grants glued together and must not be
+            # honoured. That rule lives in `parse_operator_allowlist_entry`, so
+            # a change to the separator cannot quietly turn a rejection here
+            # into a grant.
+            entry_parsed = parse_operator_allowlist_entry(text)
+            if entry_parsed is not None:
+                parsed.append(entry_parsed)
             else:
                 rejected.append(entry)
 
@@ -812,14 +819,27 @@ class Persona:
         Privileged: reachable only from the operator-gated ``set
         origin_allowlist`` dev command, never from the PATCH route (this
         field decides who may reach the persona, exactly like
-        ``explicit_overrides`` decides what it may do)."""
-        self._origin_allowlist_raw = list(entries)
-        (
-            self._origin_allowlist,
-            self._origin_allowlist_parsed,
-            self._origin_allowlist_malformed,
-            self._origin_allowlist_rejected,
-        ) = self._normalize_origin_allowlist(list(entries), self._name)
+        ``explicit_overrides`` decides what it may do).
+
+        **A no-op set changes nothing, including the declared flag.** Clearing
+        an already-clear field used to flip ``declared`` to True, which makes
+        ``to_dict`` emit ``"origin_allowlist": []`` for a persona that never
+        carried the key — a file-shape change from a command that changed no
+        policy. Callers diff before/after to decide ``mutated``; this keeps
+        that diff honest."""
+        requested = list(entries)
+        authored, parsed, malformed, rejected = self._normalize_origin_allowlist(
+            requested, self._name)
+        if (authored == self._origin_allowlist
+                and parsed == self._origin_allowlist_parsed
+                and malformed == self._origin_allowlist_malformed):
+            return list(self._origin_allowlist)
+
+        self._origin_allowlist_raw = requested
+        self._origin_allowlist = authored
+        self._origin_allowlist_parsed = parsed
+        self._origin_allowlist_malformed = malformed
+        self._origin_allowlist_rejected = rejected
         self._origin_allowlist_declared = True
         logger.info(
             f"Persona '{self._name}' origin_allowlist set to "

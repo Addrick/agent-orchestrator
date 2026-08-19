@@ -2,7 +2,9 @@
 
 import json
 import logging
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+from typing import (
+    TYPE_CHECKING, Any, Callable, Dict, List, NamedTuple, Optional, Tuple,
+)
 
 from config.global_config import (
     DEFAULT_MODEL_NAME,
@@ -24,6 +26,14 @@ if TYPE_CHECKING:
     from src.turn_persistence import TurnPersistence
 
 logger = logging.getLogger(__name__)
+
+
+class _AuditedField(NamedTuple):
+    """A `set <field>` whose changes get a durable audit row, not just a log
+    line. See `BotLogic._AUDITED_FIELDS`."""
+    read: Callable[[Persona], Any]
+    event_type: str
+    extra_metadata: Optional[Callable[[Persona], Dict[str, Any]]] = None
 
 
 class BotLogic:
@@ -101,6 +111,28 @@ class BotLogic:
     CONTROL_PLANE_COMMANDS = frozenset({
         'add', 'delete', 'set', 'trust', 'untrust', 'remember', 'update_models',
     })
+
+    # DP-277 / DP-330: the privileged persona fields whose edits earn a durable
+    # audit row. `explicit_overrides` decides what a persona may DO;
+    # `origin_allowlist` decides WHO may reach it — so both need a record that
+    # outlives a log line. A table rather than a branch per field: the two
+    # hand-written blocks this replaces were nine lines of copy-paste that had
+    # already diverged (only one carried extra metadata), and "is this field
+    # audited?" was answerable only by reading the body of `_handle_set`.
+    _AUDITED_FIELDS: Dict[str, _AuditedField] = {
+        'explicit_overrides': _AuditedField(
+            read=Persona.get_explicit_overrides,
+            event_type='explicit_overrides_change',
+        ),
+        'origin_allowlist': _AuditedField(
+            read=Persona.get_origin_allowlist,
+            event_type='origin_allowlist_change',
+            extra_metadata=lambda p: {
+                'malformed': p.origin_allowlist_is_malformed(),
+                'unreachable': p.origin_allowlist_is_unreachable(),
+            },
+        ),
+    }
 
     async def preprocess_message(
             self,
@@ -531,19 +563,10 @@ class BotLogic:
         set_handler: Any = self.set_handlers.get(sub_command)
 
         if set_handler:
-            # DP-277 / DP-330: the two privileged persona fields are audited
-            # (operator + prior/new state) — capture the prior value at the
-            # edit boundary. `explicit_overrides` decides what the persona may
-            # do; `origin_allowlist` decides who may reach it, so a change to
-            # either needs a durable record and not just a log line.
-            prior_overrides: Optional[List[str]] = (
-                persona.get_explicit_overrides()
-                if sub_command == 'explicit_overrides' else None
-            )
-            prior_allowlist: Optional[List[str]] = (
-                persona.get_origin_allowlist()
-                if sub_command == 'origin_allowlist' else None
-            )
+            # Capture the prior value at the edit boundary, before the setter
+            # runs. See `_AUDITED_FIELDS` for which fields these are and why.
+            audited: Optional[_AuditedField] = self._AUDITED_FIELDS.get(sub_command)
+            prior_state: Any = audited.read(persona) if audited else None
 
             result: Tuple[Optional[str], bool]
             if sub_command in ('model', 'tools'):
@@ -556,26 +579,17 @@ class BotLogic:
             # here — the operator-edit boundary — rather than in the pure setters,
             # which internal callers use for many non-policy reasons.
             message, mutated = result
-            if mutated and sub_command == 'explicit_overrides':
+            if mutated and audited is not None:
+                metadata: Dict[str, Any] = {"persona": persona.get_name()}
+                if audited.extra_metadata is not None:
+                    metadata.update(audited.extra_metadata(persona))
                 self.memory_manager.log_audit_event(
-                    event_type="explicit_overrides_change",
+                    event_type=audited.event_type,
                     operator_id=user_identifier,
-                    prior_state=json.dumps(prior_overrides),
-                    new_state=json.dumps(persona.get_explicit_overrides()),
-                    reason="dev command: set explicit_overrides",
-                    metadata={"persona": persona.get_name()},
-                )
-            if mutated and sub_command == 'origin_allowlist':
-                self.memory_manager.log_audit_event(
-                    event_type="origin_allowlist_change",
-                    operator_id=user_identifier,
-                    prior_state=json.dumps(prior_allowlist),
-                    new_state=json.dumps(persona.get_origin_allowlist()),
-                    reason="dev command: set origin_allowlist",
-                    metadata={
-                        "persona": persona.get_name(),
-                        "malformed": persona.origin_allowlist_is_malformed(),
-                    },
+                    prior_state=json.dumps(prior_state),
+                    new_state=json.dumps(audited.read(persona)),
+                    reason=f"dev command: set {sub_command}",
+                    metadata=metadata,
                 )
             if mutated and sub_command in ('tools', 'tool_policy', 'explicit_overrides'):
                 if revalidate_persona_security(persona):

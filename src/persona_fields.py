@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type
 
 from config.global_config import DEFAULT_PERSONA
+from src.origin import split_allowlist_entries
 from src.persona import ExecutionMode, MemoryMode, Persona
 from src.tool_policy import KNOWN_OVERRIDES
 
@@ -302,7 +303,7 @@ def _parse_string_list_arg(
             return None, f"Error: {field} must be a JSON list of strings."
         return [str(x) for x in parsed], None
     if split_commas:
-        return [e for chunk in raw.split() for e in chunk.split(',') if e], None
+        return split_allowlist_entries(raw), None
     return raw.split(), None
 
 
@@ -395,7 +396,18 @@ def _set_origin_allowlist(args: List[str], persona: Persona) -> Tuple[Optional[s
         'origin_allowlist', raw, split_commas=True)
     if error is not None or entries is None:
         return error, False
+    # `mutated` drives the audit row AND a full personas.json rewrite, so it has
+    # to mean "the field changed", not "a set command ran". Returning True
+    # unconditionally logged an `origin_allowlist_change` with identical
+    # prior/new state for `set origin_allowlist none` on a persona that never
+    # had the key — and permanently added `"origin_allowlist": []` to its
+    # on-disk shape — diluting the one signal this ticket added for spotting a
+    # real widening.
+    prior = persona.get_origin_allowlist()
+    prior_declared = persona.origin_allowlist_is_declared()
     stored = persona.set_origin_allowlist(entries)
+    mutated = (stored != prior
+               or persona.origin_allowlist_is_declared() != prior_declared)
     name = persona.get_name()
     if persona.origin_allowlist_is_unreachable():
         # Fail-closed: nothing parsed, so the persona now matches no origin.
@@ -408,7 +420,7 @@ def _set_origin_allowlist(args: List[str], persona: Persona) -> Tuple[Optional[s
             f"now UNREACHABLE from every origin. Fix it by editing {name}'s "
             "`origin_allowlist` in data/personas.json and restarting — this "
             "command can no longer reach the persona to undo itself.",
-            True,
+            mutated,
         )
     if persona.origin_allowlist_is_malformed():
         shown = ', '.join(stored)
@@ -416,10 +428,10 @@ def _set_origin_allowlist(args: List[str], persona: Persona) -> Tuple[Optional[s
             f"⚠️ origin_allowlist for {name} set to {raw!r}, but some entries "
             "are not 'server_id[/channel_id[/author_id]]' and were dropped. "
             f"In force: {shown}.",
-            True,
+            mutated,
         )
     shown = ', '.join(stored) or 'unrestricted'
-    return f"Origin allowlist for {name} set to: {shown}.", True
+    return f"Origin allowlist for {name} set to: {shown}.", mutated
 
 
 def _mission_setter(
