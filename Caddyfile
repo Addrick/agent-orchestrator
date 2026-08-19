@@ -1,3 +1,14 @@
+# DP-333: this file is the network boundary for the portal's READS.
+#
+# The operator-token middleware gates writes only — every GET on :5003 is
+# unauthenticated, including persona prompts, assembled requests, transcripts
+# and long-term-memory search (see docs/user_guide.md, "Portal Control Plane").
+# That is an accepted risk EXACTLY BECAUSE the site addresses below are private
+# and the CA is internal.
+#
+# Do not add a public hostname, a real ACME certificate, or a tunnel here
+# without first gating the read routes. Same for `docker-compose.yml`, which
+# publishes the app's plaintext port on host :5004 behind this proxy.
 {
     debug
     default_sni 10.0.0.70

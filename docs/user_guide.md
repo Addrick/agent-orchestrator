@@ -696,7 +696,47 @@ The web portal (`:5003`) is the capability control surface — its persona/tools
 - **Operator token.** Every non-GET route except the generation/abort/token-count data plane requires the operator token (`DERPR_CONTROL_TOKEN`), presented as `Authorization: Bearer <token>` (or `X-Derpr-Token`). This covers persona create/edit (`POST /personas`, `PATCH /persona/{name}`), `dev_command`, **the `/confirm` HITL-approval endpoint**, active-persona switch (`PUT /model`), history reset, and interaction edits/deletes. Reads stay open. **If `DERPR_CONTROL_TOKEN` is unset the control plane is locked** (every mutating route answers 401) — set it to enable portal-side configuration. The token compares in constant time and is never surfaced to the model, a persona, or any tool result. In the portal UI, paste it once via the **operator** control in the top bar (stored in the browser, sent automatically thereafter).
 - **Deny-by-default routing.** New mutating routes are gated the moment they are added — the allowlist enumerates the *data plane* (generation, abort, token count), not the protected surface, so nothing is accidentally left open.
 - **Chat elevation.** Commands typed into the portal chat box are refused for anonymous callers (chat is data-plane), but a valid operator token on the request elevates the origin so the operator's own typed dev commands keep working.
-- **Network posture.** The adapter binds `KOBOLD_ADAPTER_HOST` (default `0.0.0.0`). In the containerized deploy the app is reached via Docker port publishing behind a Caddy TLS front, so the app's bind address is not the network boundary — the operator token gate is what protects the surface (including the plaintext host port that sits behind Caddy). Auto-generated API docs (`/docs`, `/openapi.json`) are disabled, and CORS no longer advertises `allow_credentials` with a wildcard origin (auth is a bearer token, not an ambient browser credential).
+- **Network posture.** The adapter binds `KOBOLD_ADAPTER_HOST` (default `0.0.0.0`). In the containerized deploy the app is reached via Docker port publishing behind a Caddy TLS front, so the app's bind address is not the network boundary — the operator token gate is what protects the surface **for writes** (including the plaintext host port that sits behind Caddy). Auto-generated API docs (`/docs`, `/openapi.json`) are disabled, and CORS no longer advertises `allow_credentials` with a wildcard origin (auth is a bearer token, not an ambient browser credential).
+
+> ### ⚠️ Reads are not authenticated — the portal must stay on a trusted network (DP-333)
+>
+> "Reads stay open" above is literal: the operator-token middleware exempts
+> **every** `GET`, so anyone who can reach `:5003` can read, with no credential:
+>
+> | route | what it returns |
+> |---|---|
+> | `GET /api/v1/persona/{name}` | the persona's full configuration, **including its system prompt** |
+> | `GET /api/v1/session/{p}/assemble` | the exact assembled system prompt, rebuilt history and resolved parameters a live submit would send |
+> | `GET /api/v1/session/{p}/transcript` | the conversation transcript, plus any live parked action's confirmation text and token |
+> | `GET /api/v1/session/{p}/kobold_export` | the persona's global history as a savefile |
+> | `GET /api/v1/session/{p}/ltm_block` | long-term-memory retrieval for a **caller-supplied query** — i.e. arbitrary search over stored memories |
+> | `GET /api/v1/interaction/{id}/versions` | per-message edit history |
+> | `GET /api/v1/memory/banks…` | Hindsight bank and document listings |
+>
+> There is no per-persona check on these, so a persona restricted with an
+> [origin allowlist](#commands) is as readable as any other. **The allowlist
+> gates who may *address* a persona; it does not gate these reads.**
+>
+> This is an **accepted risk, valid only while the portal is LAN-only.** The
+> shipped deployment satisfies that: `Caddyfile` serves `10.0.0.70:5003` /
+> `derpr-host:5003` with `tls internal` — a private address and a private CA,
+> no public hostname, no ACME certificate, no tunnel. `docker-compose.yml` also
+> publishes the app's plaintext port on host `:5004`, which is likewise
+> LAN-only and likewise unauthenticated for reads.
+>
+> **Revisit this before any of the following:** giving the host a public
+> interface or a port-forward; putting a public hostname or ACME certificate in
+> the `Caddyfile`; running a tunnel (Cloudflare/ngrok/Tailscale Funnel) to
+> `:5003` or `:5004`; or hosting a persona whose prompt or history would matter
+> to someone on the far side. Reads carrying the same authorization as writes is
+> a real change — the portal SPA, `/derpr`, and the kobold-lite integration all
+> issue these `GET`s with no token today and would each need to gain one.
+>
+> Note that a read cannot *change* anything: writes, `dev_command`, and the
+> `/confirm` approval endpoint are all `POST`/`PATCH`/`PUT` and remain
+> token-gated. Approving a parked action from the portal still requires
+> `DERPR_CONTROL_TOKEN`; approving one from Discord still requires the account
+> that raised it.
 
 Discord control commands use the separate `OPERATOR_ALLOWLIST` (see [Commands](#commands)); the two operator surfaces feed the same authorization gate, differing only in how each transport authenticates the origin.
 
