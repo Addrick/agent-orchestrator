@@ -108,10 +108,13 @@ PROXMOX_TOOLS: List[Dict[str, Any]] = [
             "name": "gpu_status",
             "description": (
                 "Read the GPU container's VRAM live from the card's sysfs: total, "
-                "used and free MiB per card. Use it to size a model or a context "
-                "window against what the card actually has free right now — the "
-                "active model already holds most of it, so never reason from the "
-                "card's advertised capacity or from a number you remember."
+                "used and free MiB per card. Free MiB is the headroom beside the "
+                "model that is already loaded — size a bigger context for the "
+                "running model against it. A model swap gets back whatever the "
+                "unit it replaces is holding, so size a set_active_model "
+                "candidate against total minus what stays resident, not against "
+                "free. Never reason from the card's advertised capacity or from "
+                "a number you remember."
             ),
             "parameters": {"type": "object", "properties": {}, "required": []},
         },

@@ -571,7 +571,9 @@ toolset (tracked separately as DP-265) — `set_active_model` only switches betw
 models already installed on the GPU container. It does not need to be told which
 those are: the model list is enumerated from the container's own systemd units on
 every call, so a model you install by hand shows up in `list_models` immediately,
-with no config edit and no redeploy.
+with no config edit and no redeploy. Write the unit however you like — `--model
+<path>` and `--model=<path>` are both read — and give it a `--port` if it is not
+meant to serve `:5001`, which keeps it out of the swap set entirely.
 
 ### System Personas
 
@@ -956,13 +958,13 @@ straight through.
 | Tool | Type | Description |
 |------|------|-------------|
 | `pve_status` | Read | Node uptime plus every guest as **structured data** — `vmid`, `name`, `kind` (`ct`/`vm`), `status`, `lock` — alongside the raw `pct list` / `qm list` text. This is the infra-topology audit: one call answers "what exists and what's up". |
-| `list_models` | Read | koboldcpp models for `:5001` that are **immediately available**, and which one is active. The list is **discovered**, not configured — every `koboldcpp-<name>.service` on the GPU container is enumerated per call, so a unit installed since the last deploy appears and a removed one disappears, with no config to keep in sync. Units whose model file is missing from disk are omitted — they can't be loaded. |
-| `gpu_status` | Read | Live VRAM per card on the GPU container, read straight from the card's sysfs: `vram_total_mib`, `vram_used_mib`, `vram_free_mib`. The card index is discovered too. Use it to size a model or a context window against what is actually free right now — the running model is already holding most of the card. |
+| `list_models` | Read | koboldcpp models for `:5001` that are **immediately available**, and which one is active. The list is **discovered**, not configured — every `koboldcpp-<name>.service` on the GPU container is enumerated per call, so a unit installed since the last deploy appears and a removed one disappears, with no config to keep in sync. Two kinds of unit are omitted: one whose model file is missing from disk (it can't be loaded), and one whose `ExecStart` binds a port other than `:5001` (it isn't a model this tool can swap to — an embedding or draft server, say). What you see here is exactly what `set_active_model` will act on. |
+| `gpu_status` | Read | Live VRAM per card on the GPU container, read straight from the card's sysfs: `vram_total_mib`, `vram_used_mib`, `vram_free_mib`. The card index is discovered too. **Mind which budget you are computing.** Free MiB is the headroom beside the model that is already loaded, so it is the right number for growing the *running* model's context. It is the wrong number for a swap: stopping the current unit releases everything it holds, so a `set_active_model` candidate is sized against total minus what stays resident. Size a swap against free MiB and you will rule out models that fit comfortably. |
 | `reboot_node` | **Write (parked, irreversible)** | Reboot the metal — takes down every guest on it. Last resort. |
 | `reboot_guest` | **Write (parked)** | Reboot one guest, by `name` or by `vmid`. |
 | `start_guest` | **Write (parked)** | Start a stopped guest, by `name` or by `vmid`. |
 | `stop_guest` | **Write (parked)** | Hard-stop a running guest (power-off, not graceful shutdown), by `name` or by `vmid`. |
-| `set_active_model` | **Write (parked)** | Swap the active model on `:5001`: disables every other discovered `koboldcpp-<name>.service`, then enables+starts the target (only one runs at a time). Pass a `name` from `list_models`. Pre-flight guard: if the target's model file isn't on disk it **refuses and leaves the current model running** (never takes `:5001` down). |
+| `set_active_model` | **Write (parked)** | Swap the active model on `:5001`: stops every other discovered `koboldcpp-<name>.service` that binds `:5001`, then enables+starts the target (only one may hold the port). Units serving another port are left alone. Pass a `name` from `list_models`. Two guards: if the target's model file isn't on disk it **refuses and leaves the current model running** (never takes `:5001` down); and if a unit that had to be stopped doesn't stop, the swap **aborts before enabling the target** and says so, rather than reporting a success the old model would go on contradicting. |
 
 #### Addressing a guest by name
 
@@ -1005,9 +1007,26 @@ quietly omitted, and a unit on the box but missing from the map was never
 disabled, so it kept `:5001` and every swap failed to bind with nothing reporting
 an error. The units are enumerated from `systemctl list-unit-files` on
 `PVE_MODEL_HOST_VMID` on every call instead. Only units matching
-`koboldcpp-<name>.service` are recognised, which is also what bounds the set
-`set_active_model` disables — a bare `koboldcpp.service`, or anything else on the
-container, is neither listed nor touched.
+`koboldcpp-<name>.service` are recognised — a bare `koboldcpp.service`, or
+anything else on the container, is neither listed nor touched.
+
+That name match is where the recognised set *starts*, not where it ends. A unit can be a perfectly real
+`koboldcpp-<name>.service` and still have nothing to do with `:5001` — an
+embedding server, a draft model for speculative decoding, a helper you wrote by
+hand and pointed at another port. The old config map could never name one of
+those; discovery reads whatever is on the box. So the swap looks at each unit's
+`--port` (koboldcpp's own default is `5001`, so a unit that names no port counts
+as competing) and stops only the ones actually holding the endpoint. Anything on
+another port is left running, and is left out of `list_models` for the same
+reason: the list you choose from and the set that gets stopped are the same set.
+
+If a unit that had to stop doesn't stop — `systemctl disable --now` can hang long
+enough on a busy container for the SSH call to be cut short — the swap **stops
+there and tells you**, rather than starting the new model into a port the old one
+still holds. Systemd would report that second start as a success, and `:5001`
+would go on serving the previous model with nothing anywhere saying so. The cost
+of stopping is that units already shut down stay shut down, so `:5001` may be
+serving nothing until a swap succeeds; the message says as much.
 
 ⚠️ **The friendly name is now the unit stem**, so it changed for existing units:
 `koboldcpp-fable-q6xl.service` is `fable-q6xl`, not the `fable` the old map

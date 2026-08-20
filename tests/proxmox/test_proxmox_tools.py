@@ -38,6 +38,10 @@ DEFAULT_DRM = "\n".join(
 DEFAULT_VRAM = {"card1": (34208743424, 29990813696)}
 
 
+#: Sentinel for "this test did not override this unit's ExecStart".
+_DEFAULT_EXEC_START = object()
+
+
 class FakeRunner:
     """Stand-in for SSHRunner: records calls, returns queued/canned results."""
 
@@ -48,6 +52,8 @@ class FakeRunner:
         unit_files: str | None = None,
         drm: str | None = None,
         vram: dict[str, tuple[int, int]] | None = None,
+        exec_start: dict[str, str | None] | None = None,
+        disable_failures: set[str] | None = None,
     ) -> None:
         self.calls: List[List[str]] = []
         self._result = result or SSHResult(0, "ok-stdout", "")
@@ -57,6 +63,12 @@ class FakeRunner:
         self._drm = DEFAULT_DRM if drm is None else drm
         # card -> (total_bytes, used_bytes); a card absent here has no mem_info.
         self._vram = DEFAULT_VRAM if vram is None else vram
+        # unit -> ExecStart stdout; a value of None makes `systemctl show` fail,
+        # which is a different thing from a unit that reports another port.
+        self._exec_start = exec_start or {}
+        # units whose `disable --now` exits non-zero (the D-Bus wait that
+        # PVE_SSH_TIMEOUT cuts short is the realistic cause).
+        self._disable_failures = disable_failures or set()
 
     async def run(self, argv: Sequence[str]) -> SSHResult:
         a = list(argv)
@@ -68,7 +80,17 @@ class FakeRunner:
         # embeds a --model path derived from the unit name.
         if "show" in a and "--property=ExecStart" in a:
             unit = next((x for x in a if x.endswith(".service")), "u.service")
+            override = self._exec_start.get(unit, _DEFAULT_EXEC_START)
+            if override is None:
+                return SSHResult(1, "", "Failed to get properties: Unit not loaded")
+            if override is not _DEFAULT_EXEC_START:
+                return SSHResult(0, str(override), "")
             return SSHResult(0, f"argv[]=/opt/kcpp --model /models/{unit}.gguf ;", "")
+        # `systemctl disable --now <unit>` → fails for the nominated units.
+        if "disable" in a and a[-1] in self._disable_failures:
+            return SSHResult(
+                1, "", f"Job for {a[-1]} timed out; terminated by signal TERM"
+            )
         # `test -f /models/<unit>.gguf` → present per self._present.
         if len(a) >= 2 and a[-2] == "-f":
             unit = a[-1].split("/")[-1][:-5]  # strip ".gguf"
@@ -434,3 +456,130 @@ async def test_gpu_status_never_raises_when_the_ct_is_unreachable(enabled):
     res = await h._gpu_status()
     assert res["status"] == "error"
     assert "no route to host" in res["message"]
+
+
+# -- DP-332: what may be disabled, and what a failed disable means ------------
+#
+# Discovery made the disable set come off the box, which opened two holes the
+# config map had closed by construction: the set can now contain units that have
+# nothing to do with :5001, and it is no longer small enough to eyeball. Both
+# end in the same place as DP-329 — a swap that reports ok while the previous
+# model is still the one answering.
+
+@pytest.mark.asyncio
+async def test_set_active_model_aborts_when_a_disable_fails(enabled):
+    """`systemctl disable --now` over `pct exec` can sit on a D-Bus job past
+    PVE_SSH_TIMEOUT and get SIGTERM'd. The unit then keeps :5001 — but
+    `enable --now` on a Type=simple target still exits 0, because "started" is
+    not "bound". Ignoring the disable's result therefore reports a swap that did
+    not happen, which is exactly the DP-329 failure. Abort before the enable."""
+    runner = FakeRunner(disable_failures={"koboldcpp-gemma.service"})
+    h = ProxmoxToolHandler(runner)  # type: ignore[arg-type]
+    res = await h._set_active_model("fable")
+    assert res["status"] == "error"
+    assert "koboldcpp-gemma.service" in res["message"]
+    # The target was never enabled: :5001 is left with whatever holds it, and
+    # the caller is told rather than being handed a false "active_model".
+    assert not any("enable" in c for c in runner.calls)
+
+
+@pytest.mark.asyncio
+async def test_set_active_model_leaves_a_unit_on_another_port_alone(enabled):
+    """`_UNIT_RE` bounds the set to koboldcpp units, but that was never the
+    dangerous half: a *genuine* koboldcpp unit serving something else on another
+    port — an embedding or draft server — matches the pattern perfectly. The
+    config map could not name one; discovery can, and `list_models` does not
+    show it, so disabling it would be an invisible side effect of every swap."""
+    runner = FakeRunner(
+        unit_files="\n".join([
+            "koboldcpp-fable.service   disabled  enabled",
+            "koboldcpp-gemma.service   disabled  enabled",
+            "koboldcpp-embed.service   enabled   enabled",
+        ]),
+        exec_start={
+            "koboldcpp-embed.service": (
+                "argv[]=/opt/kcpp --model /models/koboldcpp-embed.service.gguf "
+                "--port 5002 ;"
+            ),
+        },
+    )
+    h = ProxmoxToolHandler(runner)  # type: ignore[arg-type]
+    assert (await h._set_active_model("fable"))["status"] == "ok"
+    assert [c[-1] for c in runner.calls if "disable" in c] == [
+        "koboldcpp-gemma.service"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_models_omits_a_unit_on_another_port(enabled):
+    """The same set seen from the read side. `list_models` has to publish
+    exactly what `set_active_model` can switch to — a name in one and not the
+    other is what sends the model at a swap that then fails a pre-flight."""
+    runner = FakeRunner(
+        unit_files="\n".join([
+            "koboldcpp-fable.service   disabled  enabled",
+            "koboldcpp-embed.service   enabled   enabled",
+        ]),
+        exec_start={
+            "koboldcpp-embed.service": (
+                "argv[]=/opt/kcpp --model /models/koboldcpp-embed.service.gguf "
+                "--port 5002 ;"
+            ),
+        },
+    )
+    h = ProxmoxToolHandler(runner)  # type: ignore[arg-type]
+    res = await h._list_models()
+    assert [m["name"] for m in res["models"]] == ["fable"]
+
+
+@pytest.mark.asyncio
+async def test_a_unit_with_no_port_flag_still_counts_as_holding_5001(enabled):
+    """koboldcpp's own default is 5001, so "no --port" means "contends", not
+    "harmless" — the common case, since that is what the units on the box do."""
+    runner = FakeRunner(
+        exec_start={
+            "koboldcpp-gemma.service": (
+                "argv[]=/opt/kcpp --model /models/koboldcpp-gemma.service.gguf ;"
+            ),
+        },
+    )
+    h = ProxmoxToolHandler(runner)  # type: ignore[arg-type]
+    assert (await h._set_active_model("fable"))["status"] == "ok"
+    assert [c[-1] for c in runner.calls if "disable" in c] == [
+        "koboldcpp-gemma.service"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_set_active_model_stops_a_unit_it_could_not_read(enabled):
+    """An unreadable ExecStart is not evidence of innocence: that unit may be
+    the one holding :5001 right now, and skipping it is how a swap "succeeds"
+    while the old model keeps answering. Stop it — and say that we guessed."""
+    runner = FakeRunner(exec_start={"koboldcpp-gemma.service": None})
+    h = ProxmoxToolHandler(runner)  # type: ignore[arg-type]
+    res = await h._set_active_model("fable")
+    assert res["status"] == "ok"
+    assert [c[-1] for c in runner.calls if "disable" in c] == [
+        "koboldcpp-gemma.service"
+    ]
+    assert any("koboldcpp-gemma.service" in w for w in res["warnings"])
+
+
+@pytest.mark.asyncio
+async def test_model_path_accepts_the_equals_form(enabled):
+    """systemd echoes ExecStart back verbatim, so a hand-written unit may spell
+    it `--model=<path>`. DP-332 tells users a unit they install by hand shows up
+    immediately; parsing only the space form reported the gguf as missing and
+    refused the swap with a "not on disk" that was not true."""
+    runner = FakeRunner(
+        unit_files="koboldcpp-fable.service  disabled  enabled",
+        exec_start={
+            "koboldcpp-fable.service": (
+                "argv[]=/opt/kcpp --model=/models/koboldcpp-fable.service.gguf ;"
+            ),
+        },
+    )
+    h = ProxmoxToolHandler(runner)  # type: ignore[arg-type]
+    res = await h._list_models()
+    assert [m["name"] for m in res["models"]] == ["fable"]
+    assert (await h._set_active_model("fable"))["status"] == "ok"
