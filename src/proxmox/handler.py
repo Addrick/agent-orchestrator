@@ -1,10 +1,13 @@
 """Tool handlers for the Proxmox management service (DP-262).
 
-Seven tools behind the ``proxmox`` service binding:
+Eight tools behind the ``proxmox`` service binding:
 
 - ``pve_status``      (read):  node uptime + `pct list` + `qm list`, both raw and
   parsed into a structured guest inventory (DP-327).
-- ``list_models``     (read):  configured unit map + which is active on the GPU CT.
+- ``list_models``     (read):  koboldcpp units discovered on the GPU CT + which
+  one is active (DP-332).
+- ``gpu_status``      (read):  live VRAM total/used/free per card, straight from
+  the GPU CT's sysfs (DP-332).
 - ``reboot_node``     (WRITE, irreversible → parked): reboot the metal.
 - ``reboot_guest``    (WRITE → parked): reboot one VM/CT.
 - ``start_guest``     (WRITE → parked): start one VM/CT.
@@ -20,14 +23,23 @@ deliberately **local**: the inventory comes from parsing `pct list` / `qm list`
 output, the name is matched here, and only the resolved digits are ever handed to
 ``SSHRunner``. A model-supplied hostname therefore never crosses the SSH boundary,
 which keeps ``ssh.py``'s metacharacter guard seeing nothing but integers and
-config-pinned unit names — the property the whole transport's safety argument
-rests on.
+unit names matching ``_UNIT_RE`` — the property the whole transport's safety
+argument rests on.
+
+DP-332 — the koboldcpp units are **discovered**, not configured. The box is the
+authority on what it contains; the old ``PVE_MODEL_UNITS`` map asserted it and
+drifted silently in both directions (DP-329: the unit actually holding :5001 was
+unmapped, so ``list_models`` reported every model inactive and no swap could
+succeed). Discovery costs one property the map gave for free — the unit names
+are now *remote* values that get sent back over SSH — which is why every
+discovered name must match ``_UNIT_RE`` before it is used for anything.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from config import global_config
@@ -40,6 +52,24 @@ logger = logging.getLogger(__name__)
 
 #: Accepted guest kinds → the Proxmox CLI that manages them.
 _GUEST_CLI = {"ct": "pct", "vm": "qm"}
+
+#: A koboldcpp model unit on the GPU CT, and the friendly name inside it
+#: (``koboldcpp-<name>.service`` → ``<name>``). Two jobs, both load-bearing:
+#:
+#: 1. It is the anchor for ``set_active_model``'s "disable every *other* unit".
+#:    That set used to be a config map and is now whatever the box reports, so a
+#:    loose match here would disable something unrelated on the CT. This is the
+#:    one place where discovery is more dangerous than the map was.
+#: 2. Its character class is deliberately narrower than ``ssh._FORBIDDEN``
+#:    permits, because a discovered unit name is a remote value that we then send
+#:    back over SSH as an argv element.
+_UNIT_RE = re.compile(r"koboldcpp-([A-Za-z0-9._-]+)\.service")
+
+#: A DRM card directory under /sys/class/drm — ``card1``, not the connector
+#: nodes (``card1-DP-1``) or ``renderD128`` that sit beside it.
+_CARD_RE = re.compile(r"card\d+")
+
+_MIB = 1024 * 1024
 
 
 def _err(message: str) -> Dict[str, Any]:
@@ -105,6 +135,7 @@ class ProxmoxToolHandler:
     def register(self, manager: "ToolManager") -> None:
         manager.register("pve_status", self._pve_status)
         manager.register("list_models", self._list_models)
+        manager.register("gpu_status", self._gpu_status)
         manager.register("reboot_node", self._reboot_node)
         manager.register("reboot_guest", self._reboot_guest)
         manager.register("start_guest", self._start_guest)
@@ -281,6 +312,45 @@ class ProxmoxToolHandler:
         msg += f"; known guests: {known}" if known else "; the node reported no guests"
         return _err(msg)
 
+    # -- model discovery (DP-332) --------------------------------------------
+
+    async def _discover_units(self, vmid: str) -> Dict[str, Any]:
+        """Every ``koboldcpp-<name>.service`` that exists on the GPU CT *now*.
+
+        Returns ``{"status": "ok", "units": {name: unit}}`` or an error dict.
+
+        The listing is deliberately **unfiltered**, with the ``koboldcpp-``
+        anchoring done here in Python rather than as a ``'koboldcpp-*.service'``
+        argument: ``ssh._reject_bad_args`` forbids ``*`` outright, and pushing
+        the glob to the far side would mean trusting a remote shell to expand it
+        the way we meant. A literal prefix/suffix match (``_UNIT_RE``) has no
+        such ambiguity — which matters, because this set is exactly what
+        ``set_active_model`` disables.
+
+        A bare ``koboldcpp.service`` with no ``-<name>`` does not match, so it is
+        never listed *and never disabled*. That is the safe direction: it cannot
+        be selected, so it is never the thing we take ``:5001`` down for.
+        """
+        res = await self._run([
+            "pct", "exec", vmid, "--",
+            "systemctl", "list-unit-files", "--type=service",
+            "--no-legend", "--no-pager",
+        ])
+        if res.get("status") != "ok":
+            detail = " — ".join(
+                p for p in (res.get("message"), res.get("stderr")) if p
+            ) or "unknown error"
+            return _err(f"could not list koboldcpp units on CT {vmid}: {detail}")
+        units: Dict[str, str] = {}
+        for line in (res.get("stdout") or "").splitlines():
+            tokens = line.split()
+            if not tokens:
+                continue
+            match = _UNIT_RE.fullmatch(tokens[0])
+            if match:
+                units[match.group(1)] = tokens[0]
+        return {"status": "ok", "units": units}
+
     # -- model availability helpers ------------------------------------------
 
     async def _model_path(self, vmid: str, unit: str) -> Optional[str]:
@@ -336,16 +406,20 @@ class ProxmoxToolHandler:
 
     async def _list_models(self) -> Dict[str, Any]:
         logger.info("Tool list_models")
-        units = global_config.PVE_MODEL_UNITS
-        vmid = global_config.PVE_MODEL_HOST_VMID
         if not self._enabled():
             return _err("Proxmox tools are disabled (set PVE_TOOLS_ENABLED=true).")
+        vmid = global_config.PVE_MODEL_HOST_VMID
+        # Discovered, not configured (DP-332): a unit installed on the box since
+        # the last deploy is listed, and a unit that has been removed simply is
+        # not. Neither direction needs anyone to remember to edit config.
+        discovered = await self._discover_units(vmid)
+        if discovered.get("status") != "ok":
+            return discovered
         # Only surface models whose gguf is actually on disk (immediately
         # loadable). Units whose model file is missing are omitted — enabling one
-        # would fail to start and take :5001 down. (A separate future tool will
-        # download+deploy ggufs from HF — see DP-265 note.)
+        # would fail to start and take :5001 down (DP-264).
         models: List[Dict[str, Any]] = []
-        for name, unit in units.items():
+        for name, unit in sorted(discovered["units"].items()):
             if not await self._model_present(vmid, unit):
                 continue
             state_res = await self._run(
@@ -354,6 +428,80 @@ class ProxmoxToolHandler:
             state = (state_res.get("stdout") or state_res.get("message") or "unknown").strip()
             models.append({"name": name, "unit": unit, "state": state})
         return {"status": "ok", "host_vmid": vmid, "models": models}
+
+    async def _gpu_status(self) -> Dict[str, Any]:
+        """VRAM total/used/free per card on the GPU CT, read live from sysfs.
+
+        A read, not an assertion. A card's usable VRAM is site-specific and must
+        not be baked into a persona prompt or into config (DP-328) — the budget
+        *formula* is portable, the numbers are not. Reading them per call is also
+        the only answer that stays true when another process is already holding
+        VRAM, which is the case this exists to inform.
+
+        The card index is discovered for the same reason the units are: this box
+        exposes ``card1``, not ``card0``, so a hardcoded index reads a path that
+        does not exist.
+
+        Never raises: a dead CT, a missing sysfs path, or a non-amdgpu card all
+        come back as an error dict or an entry in ``errors``.
+        """
+        logger.info("Tool gpu_status")
+        if not self._enabled():
+            return _err("Proxmox tools are disabled (set PVE_TOOLS_ENABLED=true).")
+        vmid = global_config.PVE_MODEL_HOST_VMID
+        listing = await self._run(["pct", "exec", vmid, "--", "ls", "/sys/class/drm"])
+        if listing.get("status") != "ok":
+            detail = " — ".join(
+                p for p in (listing.get("message"), listing.get("stderr")) if p
+            ) or "unknown error"
+            return _err(f"could not read /sys/class/drm on CT {vmid}: {detail}")
+        # /sys/class/drm also holds connector nodes (card1-DP-1) and renderD128;
+        # only the bare cardN directories carry the amdgpu mem_info files.
+        cards = sorted(
+            n for n in (listing.get("stdout") or "").split() if _CARD_RE.fullmatch(n)
+        )
+        if not cards:
+            return _err(
+                f"no DRM card found on CT {vmid}: /sys/class/drm lists no cardN "
+                "entry (is the GPU passed through to this container?)"
+            )
+        gpus: List[Dict[str, Any]] = []
+        errors: List[str] = []
+        for card in cards:
+            base = f"/sys/class/drm/{card}/device"
+            res = await self._run([
+                "pct", "exec", vmid, "--", "cat",
+                f"{base}/mem_info_vram_total", f"{base}/mem_info_vram_used",
+            ])
+            values = [ln.strip() for ln in (res.get("stdout") or "").splitlines()]
+            if (
+                res.get("status") != "ok"
+                or len(values) != 2
+                or not all(v.isdigit() for v in values)
+            ):
+                # Only amdgpu exposes mem_info_vram_*. Report the odd card rather
+                # than failing the whole call — one unreadable device must not
+                # hide the card we actually care about.
+                detail = res.get("stderr") or res.get("message") or "unparseable output"
+                errors.append(f"{card}: no readable mem_info_vram_* ({detail})")
+                continue
+            total, used = int(values[0]), int(values[1])
+            # free is floored from the byte difference, not from
+            # total_mib - used_mib, so the three can disagree by 1 MiB. That is
+            # deliberate: overstating free VRAM is the direction that gets a
+            # context size picked too large.
+            gpus.append({
+                "card": card,
+                "vram_total_mib": total // _MIB,
+                "vram_used_mib": used // _MIB,
+                "vram_free_mib": (total - used) // _MIB,
+            })
+        if not gpus:
+            return _err(f"no VRAM readable on CT {vmid}: {errors}")
+        result: Dict[str, Any] = {"status": "ok", "host_vmid": vmid, "gpus": gpus}
+        if errors:
+            result["errors"] = errors
+        return result
 
     # -- write tools (parked for confirmation) -------------------------------
 
@@ -410,15 +558,23 @@ class ProxmoxToolHandler:
 
     async def _set_active_model(self, name: str) -> Dict[str, Any]:
         logger.info("Tool set_active_model: %s", name)
-        units = global_config.PVE_MODEL_UNITS
+        if not self._enabled():
+            return _err("Proxmox tools are disabled (set PVE_TOOLS_ENABLED=true).")
         vmid = global_config.PVE_MODEL_HOST_VMID
+        discovered = await self._discover_units(vmid)
+        if discovered.get("status") != "ok":
+            return discovered
+        units = discovered["units"]
+        # `name` is a lookup key and nothing else — what reaches SSH is the
+        # discovered unit, which matched `_UNIT_RE`. Nothing the model typed ever
+        # becomes an argv element, which is what keeps this tool's
+        # `exfil_capable: False` claim true now that the units are discovered
+        # rather than pinned in config.
         target = units.get(name)
         if target is None:
             return _err(
-                f"unknown model {name!r}; configured: {sorted(units)}"
+                f"unknown model {name!r}; CT {vmid} has: {sorted(units)}"
             )
-        if not self._enabled():
-            return _err("Proxmox tools are disabled (set PVE_TOOLS_ENABLED=true).")
         # Pre-flight: never disable the running model to enable a unit that can't
         # start. If the target's gguf isn't on disk, refuse and leave :5001 as-is.
         if not await self._model_present(vmid, target):
@@ -426,10 +582,13 @@ class ProxmoxToolHandler:
                 f"model file for {name!r} (unit {target}) is not on disk; "
                 "not switching — current model left running."
             )
-        # Disable every other configured unit (all bind :5001 — only one may run),
-        # then enable+start the target. Idempotent: re-selecting the active model
-        # just re-enables it.
-        for other_name, other_unit in units.items():
+        # Disable every other *discovered* koboldcpp unit (all bind :5001 — only
+        # one may run), then enable+start the target. Idempotent: re-selecting
+        # the active model just re-enables it. The set is bounded by `_UNIT_RE`,
+        # so nothing outside `koboldcpp-<name>.service` can land in this loop —
+        # that anchoring is the entire safety argument for disabling a discovered
+        # set rather than a config-pinned one.
+        for other_name, other_unit in sorted(units.items()):
             if other_unit == target:
                 continue
             await self._run([

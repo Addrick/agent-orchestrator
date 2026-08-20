@@ -545,7 +545,8 @@ What it can do:
 
 - **Audit** — "what's running on the box?" → `pve_status` returns uptime plus every
   guest with its `vmid`, `name`, `kind`, and `status`. "what models can I load?" →
-  `list_models`.
+  `list_models`, read live off the GPU container. "how much VRAM is free?" →
+  `gpu_status`.
 - **Power** — "restart the GPU container", "stop the idle VM", "reboot the whole box".
   Guests are addressable by name; see [Addressing a guest by name](#addressing-a-guest-by-name).
 - **koboldcpp** — "switch :5001 to gemma" → `set_active_model`.
@@ -567,7 +568,10 @@ park prompt with that in mind.
 without those, every tool call returns a "disabled" error rather than attempting
 SSH. Downloading and deploying a *new* model from HuggingFace is not part of the
 toolset (tracked separately as DP-265) — `set_active_model` only switches between
-models already on disk.
+models already installed on the GPU container. It does not need to be told which
+those are: the model list is enumerated from the container's own systemd units on
+every call, so a model you install by hand shows up in `list_models` immediately,
+with no config edit and no redeploy.
 
 ### System Personas
 
@@ -685,7 +689,7 @@ To prevent sophisticated injection attacks, the system refuses to load any perso
 - **`untrusted:read` + `network:write`**: Prevents untrusted data from being exfiltrated to a network endpoint.
 - **`pii:read` + `network:*`**: Prevents sensitive Personal Identifiable Information (PII) from being sent over the network.
 
-A `network` tool may opt out of the exfiltration rules (the last two above) with `capabilities.exfil_capable: false` when its egress carries no model-controlled payload — e.g. `set_active_model`, whose only argument is a name from a fixed config map, so nothing can ride out over its SSH. Such tools can freely combine with `untrusted:read`/`pii:read` tools. This affects only *exfiltration* accounting; any destructive effect is still gated by the write-audit (parked for confirmation). The default is `true`, so every other tool is unchanged.
+A `network` tool may opt out of the exfiltration rules (the last two above) with `capabilities.exfil_capable: false` when its egress carries no model-controlled payload — e.g. `set_active_model`, whose only argument is a lookup key against the units discovered on the box (the handler sends the discovered unit name, never the caller's string), and `gpu_status`, which takes no arguments at all — so nothing can ride out over their SSH. Such tools can freely combine with `untrusted:read`/`pii:read` tools. This affects only *exfiltration* accounting; any destructive effect is still gated by the write-audit (parked for confirmation). The default is `true`, so every other tool is unchanged.
 
 ### Explicit Overrides (privileged, DP-277)
 A composition rule can be deliberately suppressed for a persona with an **explicit override** (`network_read_local_write`, `untrusted_read_network_write`, `pii_read_network_any`). Because overrides are the kill switch for the whole composition framework, they are a **privileged field with a single mutation path**:
@@ -952,12 +956,13 @@ straight through.
 | Tool | Type | Description |
 |------|------|-------------|
 | `pve_status` | Read | Node uptime plus every guest as **structured data** — `vmid`, `name`, `kind` (`ct`/`vm`), `status`, `lock` — alongside the raw `pct list` / `qm list` text. This is the infra-topology audit: one call answers "what exists and what's up". |
-| `list_models` | Read | koboldcpp models for `:5001` that are **immediately available** (their model file is on disk) and which one is active. Configured units whose model file is missing are omitted — they can't be loaded. |
+| `list_models` | Read | koboldcpp models for `:5001` that are **immediately available**, and which one is active. The list is **discovered**, not configured — every `koboldcpp-<name>.service` on the GPU container is enumerated per call, so a unit installed since the last deploy appears and a removed one disappears, with no config to keep in sync. Units whose model file is missing from disk are omitted — they can't be loaded. |
+| `gpu_status` | Read | Live VRAM per card on the GPU container, read straight from the card's sysfs: `vram_total_mib`, `vram_used_mib`, `vram_free_mib`. The card index is discovered too. Use it to size a model or a context window against what is actually free right now — the running model is already holding most of the card. |
 | `reboot_node` | **Write (parked, irreversible)** | Reboot the metal — takes down every guest on it. Last resort. |
 | `reboot_guest` | **Write (parked)** | Reboot one guest, by `name` or by `vmid`. |
 | `start_guest` | **Write (parked)** | Start a stopped guest, by `name` or by `vmid`. |
 | `stop_guest` | **Write (parked)** | Hard-stop a running guest (power-off, not graceful shutdown), by `name` or by `vmid`. |
-| `set_active_model` | **Write (parked)** | Swap the active model on `:5001`: disables the current unit, enables+starts the target (only one runs at a time). Pass a `name` from `list_models`. Pre-flight guard: if the target's model file isn't on disk it **refuses and leaves the current model running** (never takes `:5001` down). |
+| `set_active_model` | **Write (parked)** | Swap the active model on `:5001`: disables every other discovered `koboldcpp-<name>.service`, then enables+starts the target (only one runs at a time). Pass a `name` from `list_models`. Pre-flight guard: if the target's model file isn't on disk it **refuses and leaves the current model running** (never takes `:5001` down). |
 
 #### Addressing a guest by name
 
@@ -988,10 +993,27 @@ required.
 
 Disabled by default. Enable with `PVE_TOOLS_ENABLED=true` and mount the pve SSH
 key into the container. Config knobs: `PVE_SSH_HOST`/`PVE_SSH_USER`/`PVE_SSH_KEY`/
-`PVE_SSH_TIMEOUT` (the node + how to reach it), `PVE_MODEL_HOST_VMID` (GPU
-container id whose systemd units bind `:5001`), and `PVE_MODEL_UNITS` (JSON map of
-friendly model name → systemd unit). When disabled, every tool call returns a
-clear "disabled" error instead of attempting SSH.
+`PVE_SSH_TIMEOUT` (the node + how to reach it) and `PVE_MODEL_HOST_VMID` (GPU
+container id whose systemd units bind `:5001`). When disabled, every tool call
+returns a clear "disabled" error instead of attempting SSH.
+
+There is deliberately **no model list to configure**. There used to be — a
+`PVE_MODEL_UNITS` map of friendly name → systemd unit — and it was config
+asserting what the box contained while the box was the actual authority. It
+drifted silently in both directions: a unit listed here but since removed was
+quietly omitted, and a unit on the box but missing from the map was never
+disabled, so it kept `:5001` and every swap failed to bind with nothing reporting
+an error. The units are enumerated from `systemctl list-unit-files` on
+`PVE_MODEL_HOST_VMID` on every call instead. Only units matching
+`koboldcpp-<name>.service` are recognised, which is also what bounds the set
+`set_active_model` disables — a bare `koboldcpp.service`, or anything else on the
+container, is neither listed nor touched.
+
+⚠️ **The friendly name is now the unit stem**, so it changed for existing units:
+`koboldcpp-fable-q6xl.service` is `fable-q6xl`, not the `fable` the old map
+happened to call it. The name a model passes comes from `list_models` in the same
+turn, so nothing has to be updated — but if *you* have a name memorised from
+before, check `list_models` rather than assuming.
 
 ### MCP Servers (requires `service_bindings: ["mcp"]` to manage; `["mcp:<server>"]` to use)
 
