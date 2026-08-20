@@ -1,0 +1,287 @@
+#!/bin/bash
+# derpr-model-install — the ONE node-side verb behind derpr's install_model tool.
+#
+# DP-265. Runs on the Proxmox node (not in a guest), because the models
+# directory is bind-mounted READ-ONLY into the GPU container — the container
+# cannot write the file it will later load.
+#
+# This script is the security boundary for the whole feature. derpr does not get
+# curl, systemctl, or file writes as separate SSH verbs; it gets this, and the
+# forced-command wrapper (derpr-pve-wrapper) admits exactly two of its
+# subcommands. Widening the key to arbitrary node write in order to simplify the
+# handler would trade the entire point away.
+#
+#   derpr-model-install install <repo> <file> <name> <ctx> <size> <sha256> <job>
+#   derpr-model-install status  <job>
+#   derpr-model-install run     <repo> <file> <name> <ctx> <size> <sha256> <job>
+#
+# `install` validates, prechecks free space, and hands the long download to
+# systemd-run so it survives the SSH disconnect; `run` is what systemd executes
+# and is NOT in the wrapper's allowlist — it is reachable only locally.
+#
+# Design rules that are load-bearing:
+#   * Size and sha256 are ARGUMENTS, read from the Hub by derpr and shown on the
+#     approval card. This script never asks HuggingFace what the file should be,
+#     so what a human approved is what gets enforced. (It also means the node
+#     needs no JSON parser — there is no jq on a stock PVE node.)
+#   * A sha mismatch DELETES the partial file. Size matching is not proof and
+#     has fooled this project before.
+#   * The unit is written DISABLED. Putting a model on :5001 is set_active_model's
+#     job and gets its own approval.
+#   * Refuse, never truncate, on insufficient space: /srv/models is a thin LV and
+#     filling it takes :5001 and every other guest's models down with it.
+
+set -uo pipefail
+
+MODELS_DIR="${MODELS_DIR:-/srv/models}"
+JOBS_DIR="${JOBS_DIR:-$MODELS_DIR/.jobs}"
+CT_VMID="${CT_VMID:-101}"
+CT_MODELS_DIR="${CT_MODELS_DIR:-/opt/koboldcpp/models}"
+KCPP_DIR="${KCPP_DIR:-/opt/koboldcpp}"
+KCPP_PORT="${KCPP_PORT:-5001}"
+TEMPLATE="${TEMPLATE:-/usr/local/share/derpr/koboldcpp-model.service.in}"
+GGUF_HEADER="${GGUF_HEADER:-/usr/local/share/derpr/gguf_header.py}"
+TOKEN_FILE="${TOKEN_FILE:-/etc/derpr-model-install.token}"
+HF_BASE="${HF_BASE:-https://huggingface.co}"
+# Headroom kept free beyond the model itself: the larger of 2 GiB and 5% of the
+# download. A thin pool that reaches 100% does not fail the write, it wedges the
+# guests using it.
+MIN_MARGIN_BYTES="${MIN_MARGIN_BYTES:-2147483648}"
+# How often the download loop republishes downloaded_bytes.
+PROGRESS_INTERVAL="${PROGRESS_INTERVAL:-5}"
+
+# shellcheck source=/dev/null
+[ -r /etc/default/derpr-model-install ] && . /etc/default/derpr-model-install
+
+log() { logger -t derpr-model-install -- "$1"; }
+die() { echo "derpr-model-install: $1" >&2; log "REFUSE: $1"; exit 1; }
+
+re_repo='^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$'
+re_file='^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*\.gguf$'
+re_name='^[a-z0-9][a-z0-9-]{0,48}$'
+re_job='^[a-z0-9][a-z0-9-]{0,63}$'
+re_sha='^[a-f0-9]{64}$'
+re_num='^[0-9]+$'
+
+# ---------------------------------------------------------------------------
+# job status
+# ---------------------------------------------------------------------------
+# Written as JSON because derpr reads it; assembled with printf because the node
+# has no jq and because every value here has already been regex-gated, so none
+# can carry a quote or a backslash into the document. Nothing from HuggingFace
+# (an HTTP body, a curl message) is ever interpolated — the `reason` field is a
+# fixed vocabulary. That is what lets install_status declare
+# produces_untrusted: False on derpr's side.
+write_status() {
+  local state="$1" step="$2" reason="$3" downloaded="$4"
+  local tmp="$JOBS_DIR/.$JOB.$$"
+  mkdir -p "$JOBS_DIR" || return 1
+  printf '{"job_id":"%s","state":"%s","step":"%s","reason":"%s",' \
+    "$JOB" "$state" "$step" "$reason" > "$tmp"
+  printf '"repo":"%s","file":"%s","name":"%s","unit":"koboldcpp-%s.service",' \
+    "$REPO" "$FILE" "$NAME" "$NAME" >> "$tmp"
+  printf '"size_bytes":%s,"downloaded_bytes":%s,"contextsize":%s,"sha256":"%s",' \
+    "$SIZE" "$downloaded" "$CTX" "$SHA" >> "$tmp"
+  printf '"started":"%s","finished":"%s"%s}\n' \
+    "$STARTED" "${FINISHED:-}" "${HEADER_JSON:-}" >> "$tmp"
+  # Rename into place so a poll never reads a half-written document.
+  mv -f "$tmp" "$JOBS_DIR/$JOB.json"
+}
+
+# ---------------------------------------------------------------------------
+# argument gate
+# ---------------------------------------------------------------------------
+parse_job_args() {
+  [ "$#" -eq 7 ] || die "expected 7 arguments, got $#"
+  REPO="$1"; FILE="$2"; NAME="$3"; CTX="$4"; SIZE="$5"; SHA="$6"; JOB="$7"
+  [[ "$REPO" =~ $re_repo ]] || die "invalid repo"
+  [[ "$FILE" =~ $re_file ]] || die "invalid file"
+  [[ "$FILE" != *".."* ]]   || die "invalid file"
+  [[ "$NAME" =~ $re_name ]] || die "invalid name"
+  [[ "$CTX"  =~ $re_num  ]] || die "invalid contextsize"
+  [[ "$SIZE" =~ $re_num  ]] || die "invalid size"
+  [[ "$SHA"  =~ $re_sha  ]] || die "invalid sha256"
+  [[ "$JOB"  =~ $re_job  ]] || die "invalid job id"
+  # The destination basename is derived from the repo path's last segment, and
+  # the regexes above already exclude "/" and ".." from reaching it — the model
+  # never names a path, only a file inside a repo.
+  BASENAME="${FILE##*/}"
+  DEST="$MODELS_DIR/$BASENAME"
+  UNIT="koboldcpp-$NAME.service"
+  STARTED="${STARTED:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+  FINISHED=""
+  HEADER_JSON=""
+}
+
+curl_auth() {
+  if [ -r "$TOKEN_FILE" ]; then
+    printf -- '--header\nAuthorization: Bearer %s\n' "$(cat "$TOKEN_FILE")"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# install — validate, precheck, detach
+# ---------------------------------------------------------------------------
+cmd_install() {
+  parse_job_args "$@"
+  [ -x "$0" ] || die "installer not executable"
+  [ -r "$TEMPLATE" ] || die "unit template missing at $TEMPLATE"
+  [ -d "$MODELS_DIR" ] || die "models dir $MODELS_DIR does not exist"
+
+  # Refuse to shadow an existing unit. Overwriting one would silently repoint a
+  # name list_models already publishes, which is the sort of change that gets
+  # discovered by a swap serving the wrong model.
+  if pct exec "$CT_VMID" -- test -f "/etc/systemd/system/$UNIT" 2>/dev/null; then
+    die "unit $UNIT already exists on CT $CT_VMID; choose another name"
+  fi
+  if [ -e "$JOBS_DIR/$JOB.json" ]; then
+    die "job $JOB already exists"
+  fi
+
+  # A file already on disk is only reusable if it is byte-identical to what was
+  # approved. Same name, different bytes is the dangerous case, so it is a
+  # refusal rather than an overwrite.
+  if [ -e "$DEST" ]; then
+    local have
+    have="$(sha256sum "$DEST" | cut -d' ' -f1)"
+    [ "$have" = "$SHA" ] || die "$BASENAME already exists with a different sha256"
+  else
+    local avail need
+    avail="$(df -B1 --output=avail "$MODELS_DIR" | tail -n1 | tr -dc '0-9')"
+    [ -n "$avail" ] || die "could not read free space on $MODELS_DIR"
+    need=$(( SIZE + (SIZE / 20) ))
+    [ "$need" -ge $(( SIZE + MIN_MARGIN_BYTES )) ] || need=$(( SIZE + MIN_MARGIN_BYTES ))
+    if [ "$avail" -lt "$need" ]; then
+      die "insufficient space on $MODELS_DIR: need $need bytes, have $avail"
+    fi
+  fi
+
+  write_status queued starting "" 0 || die "could not write job file"
+  # --collect so a finished unit does not linger in a failed state and block the
+  # next job that reuses the name (job ids are unique, but a re-run after a crash
+  # is exactly when that would bite).
+  systemd-run --collect --unit="modelinstall-$JOB" \
+    --setenv=STARTED="$STARTED" \
+    "$0" run "$REPO" "$FILE" "$NAME" "$CTX" "$SIZE" "$SHA" "$JOB" >/dev/null 2>&1 \
+    || die "could not start background job"
+  log "ALLOW install $REPO/$FILE as $NAME job=$JOB"
+  cat "$JOBS_DIR/$JOB.json"
+}
+
+# ---------------------------------------------------------------------------
+# status — the only other verb the wrapper admits
+# ---------------------------------------------------------------------------
+cmd_status() {
+  [ "$#" -eq 1 ] || die "status takes exactly one job id"
+  local job="$1"
+  [[ "$job" =~ $re_job ]] || die "invalid job id"
+  local path="$JOBS_DIR/$job.json"
+  [ -r "$path" ] || die "no such job: $job"
+  cat "$path"
+}
+
+# ---------------------------------------------------------------------------
+# run — executed by systemd, never by sshd
+# ---------------------------------------------------------------------------
+cmd_run() {
+  parse_job_args "$@"
+  local part="$DEST.part"
+
+  if [ -e "$DEST" ]; then
+    # Verified identical during `install`; nothing to fetch.
+    write_status running unit "" "$SIZE"
+  else
+    write_status running download "" 0
+    local url="$HF_BASE/$REPO/resolve/main/$FILE"
+    rm -f "$part"
+    local auth=()
+    mapfile -t auth < <(curl_auth)
+    curl -fL --retry 3 --retry-delay 5 --silent --show-error \
+      "${auth[@]}" -o "$part" "$url" &
+    local pid=$!
+    while kill -0 "$pid" 2>/dev/null; do
+      local got
+      got="$(stat -c %s "$part" 2>/dev/null || echo 0)"
+      write_status running download "" "$got"
+      sleep "$PROGRESS_INTERVAL"
+    done
+    wait "$pid"
+    local rc=$?
+    if [ "$rc" -ne 0 ]; then
+      rm -f "$part"
+      FINISHED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      write_status failed download "download_failed" 0
+      log "FAIL job=$JOB download rc=$rc"
+      exit 1
+    fi
+
+    # The verify, not the size, is the check. A truncated or substituted file can
+    # match a byte count; it cannot match the digest a human approved.
+    write_status running verify "" "$SIZE"
+    local got_sha
+    got_sha="$(sha256sum "$part" | cut -d' ' -f1)"
+    if [ "$got_sha" != "$SHA" ]; then
+      rm -f "$part"
+      FINISHED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      write_status failed verify "sha256_mismatch" 0
+      log "FAIL job=$JOB sha mismatch"
+      exit 1
+    fi
+    mv -f "$part" "$DEST"
+    # World-readable is what lets the UNPRIVILEGED container read the file;
+    # nobody:nogroup inside the CT is expected, not a bug.
+    chmod 644 "$DEST"
+  fi
+
+  # Header numbers, so the KV budget can be evaluated rather than only recited.
+  # Best effort: a parse failure must not fail an install whose bytes are good.
+  if [ -r "$GGUF_HEADER" ] && command -v python3 >/dev/null 2>&1; then
+    local hdr
+    hdr="$(python3 "$GGUF_HEADER" "$DEST" 2>/dev/null)"
+    case "$hdr" in
+      ,\"n_layer\":*) HEADER_JSON="$hdr" ;;
+      *) HEADER_JSON="" ;;
+    esac
+  fi
+
+  write_status running unit "" "$SIZE"
+  local tmp="/tmp/derpr-$UNIT.$$"
+  sed -e "s|@@NAME@@|$NAME|g" \
+      -e "s|@@JOB_ID@@|$JOB|g" \
+      -e "s|@@KCPP_DIR@@|$KCPP_DIR|g" \
+      -e "s|@@MODEL_PATH@@|$CT_MODELS_DIR/$BASENAME|g" \
+      -e "s|@@PORT@@|$KCPP_PORT|g" \
+      -e "s|@@CONTEXTSIZE@@|$CTX|g" \
+      "$TEMPLATE" > "$tmp" || { write_status failed unit "template_failed" "$SIZE"; exit 1; }
+
+  if ! pct push "$CT_VMID" "$tmp" "/etc/systemd/system/$UNIT" --perms 644; then
+    rm -f "$tmp"
+    FINISHED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    write_status failed unit "unit_write_failed" "$SIZE"
+    exit 1
+  fi
+  rm -f "$tmp"
+
+  # The shared logging drop-in: kcpp's progress records end in CR, and without
+  # this they land in the journal as one line per byte-batch.
+  pct exec "$CT_VMID" -- mkdir -p "/etc/systemd/system/$UNIT.d" >/dev/null 2>&1
+  local dropin="/tmp/derpr-log-$NAME.$$"
+  printf '[Service]\nStandardOutput=append:/var/log/kobold/current.log\nStandardError=append:/var/log/kobold/current.log\n' > "$dropin"
+  pct push "$CT_VMID" "$dropin" "/etc/systemd/system/$UNIT.d/log.conf" --perms 644 >/dev/null 2>&1
+  rm -f "$dropin"
+
+  pct exec "$CT_VMID" -- systemctl daemon-reload >/dev/null 2>&1
+
+  # Deliberately NOT enabled and NOT started. Taking :5001 is a separate,
+  # separately-approved action.
+  FINISHED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  write_status done installed "" "$SIZE"
+  log "DONE job=$JOB $REPO/$FILE -> $UNIT (disabled)"
+}
+
+case "${1:-}" in
+  install) shift; cmd_install "$@" ;;
+  status)  shift; cmd_status  "$@" ;;
+  run)     shift; cmd_run     "$@" ;;
+  *) die "usage: derpr-model-install install|status|run ..." ;;
+esac

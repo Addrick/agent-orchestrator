@@ -335,6 +335,15 @@ async def main() -> None:
     from src.proxmox import ProxmoxIntegration
     bot.register_service(ProxmoxIntegration())
 
+    # 7.3b Register the HuggingFace model-provisioning subsystem (DP-265).
+    # Registration-only. Hub metadata reads plus one parked install that runs a
+    # single node-side script over the *same* SSH transport as 7.3 — no second
+    # key, no second host. Registers even when HF_TOOLS_ENABLED is false so the
+    # startup-wiring contract holds. Personas opt in via
+    # service_bindings: ["huggingface"].
+    from src.huggingface import HuggingFaceIntegration
+    bot.register_service(HuggingFaceIntegration())
+
     # 7.4 Register the MCP client subsystem (DP-268). main.py owns the manager
     # (sessions/lifecycle — voice precedent); the integration only registers
     # the add/remove/list management tools behind the "mcp" binding. Registers

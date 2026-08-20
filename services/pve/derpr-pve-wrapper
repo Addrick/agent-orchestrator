@@ -1,0 +1,105 @@
+#!/bin/bash
+# derpr-pve-wrapper — forced-command allowlist for the derpr container's SSH key.
+#
+# sshd runs THIS instead of the client's command; the original request is in
+# $SSH_ORIGINAL_COMMAND. Default-deny; never eval. Args are metacharacter-free
+# (SSHRunner guarantees it) so whitespace-tokenizing is safe.
+#
+# Installed at /usr/local/bin/derpr-pve-wrapper, referenced from the
+# `derpr-container` line in /root/.ssh/authorized_keys. See README.md.
+#
+# ⚠️ THIS FILE IS THE SECOND HALF OF EVERY PROXMOX TOOL. A command shape that
+# derpr emits and this file does not admit fails in production and *only* in
+# production: a developer's own node key is unrestricted, so a live smoke test
+# run from a workstation proves nothing about the deployed path. That is not
+# hypothetical — DP-332 shipped `list_models` and `gpu_status` with three new
+# command shapes and no wrapper update, and both tools were dead on the deployed
+# container while passing every test and a live read-only smoke test.
+#
+# **When you add or change an argv in src/proxmox/handler.py or
+# src/huggingface/handler.py, change this file in the same commit, redeploy it,
+# and verify with the container's key — not with yours.**
+#
+# Version this file; the node copy is a deployment artifact of it (DP-265 moved
+# it into the repo for exactly the drift above).
+
+set -uo pipefail
+cmd="${SSH_ORIGINAL_COMMAND:-}"
+log()  { logger -t derpr-pve -- "$1"; }
+deny() { log "DENY: $cmd"; echo "derpr-pve: not allowed" >&2; exit 1; }
+
+# defensive: reject any shell metacharacter (legit cmds have none)
+case "$cmd" in
+  *[\;\&\|\`\$\<\>\(\)\{\}\!\*\?\~\\\'\"]*) deny ;;
+esac
+
+read -ra a <<< "$cmd"
+n=${#a[@]}
+vmid='^[0-9]+$'
+unit='^[A-Za-z0-9._@-]+$'
+gguf='^/opt/koboldcpp/models/[A-Za-z0-9._-]+\.gguf$'
+vram='^/sys/class/drm/card[0-9]+/device/mem_info_vram_(total|used)$'
+# DP-265 install arguments. These mirror, character for character, the gates in
+# src/huggingface/handler.py and in derpr-model-install itself. Three copies is
+# deliberate: sshd enforces this one server-side even if the container is
+# compromised, so it must not depend on either of the others being intact.
+repo='^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$'
+gfile='^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*\.gguf$'
+mname='^[a-z0-9][a-z0-9-]{0,48}$'
+jobid='^[a-z0-9][a-z0-9-]{0,63}$'
+sha='^[a-f0-9]{64}$'
+num='^[0-9]+$'
+installer='/usr/local/sbin/derpr-model-install'
+
+allow() { log "ALLOW: $cmd"; exec "${a[@]}"; }
+
+case "${a[0]:-}" in
+  uptime) [ "$n" -eq 1 ] && allow ;;
+  reboot) [ "$n" -eq 1 ] && allow ;;
+
+  # DP-265: the ONE node-side verb for HuggingFace model provisioning. `run` is
+  # deliberately absent — systemd invokes that locally; sshd must not.
+  "$installer")
+    if [ "${a[1]:-}" = install ] && [ "$n" -eq 9 ] \
+       && [[ "${a[2]}" =~ $repo ]] && [[ "${a[3]}" =~ $gfile ]] \
+       && [[ "${a[3]}" != *".."* ]] \
+       && [[ "${a[4]}" =~ $mname ]] && [[ "${a[5]}" =~ $num ]] \
+       && [[ "${a[6]}" =~ $num ]] && [[ "${a[7]}" =~ $sha ]] \
+       && [[ "${a[8]}" =~ $jobid ]]; then allow; fi
+    if [ "${a[1]:-}" = status ] && [ "$n" -eq 3 ] \
+       && [[ "${a[2]}" =~ $jobid ]]; then allow; fi
+    ;;
+
+  pct|qm)
+    [ "$n" -eq 2 ] && [ "${a[1]}" = list ] && allow
+    if [ "$n" -eq 3 ] && [[ "${a[1]}" =~ ^(reboot|start|stop)$ ]] && [[ "${a[2]}" =~ $vmid ]]; then allow; fi
+    ;;&
+  pct)
+    if [ "${a[1]:-}" = exec ] && [[ "${a[2]:-}" =~ $vmid ]] && [ "${a[3]}" = -- ]; then
+      if [ "${a[4]:-}" = systemctl ]; then
+        case "${a[5]:-}" in
+          is-active) [ "$n" -eq 7 ] && [[ "${a[6]}" =~ $unit ]] && allow ;;
+          enable|disable)
+            [ "$n" -eq 8 ] && [ "${a[6]}" = --now ] && [[ "${a[7]}" =~ $unit ]] && allow ;;
+          show)
+            [ "$n" -eq 9 ] && [[ "${a[6]}" =~ $unit ]] \
+              && [ "${a[7]}" = --property=ExecStart ] && [ "${a[8]}" = --value ] && allow ;;
+          # DP-332: the unit inventory list_models discovers from. Emitted
+          # UNFILTERED — SSHRunner rejects `*`, so the koboldcpp- anchoring
+          # happens in Python, not as a remote glob.
+          list-unit-files)
+            [ "$n" -eq 9 ] && [ "${a[6]}" = --type=service ] \
+              && [ "${a[7]}" = --no-legend ] && [ "${a[8]}" = --no-pager ] && allow ;;
+        esac
+      fi
+      if [ "${a[4]:-}" = test ] && [ "${a[5]:-}" = -f ] && [ "$n" -eq 7 ] \
+         && [[ "${a[6]}" =~ $gguf ]]; then allow; fi
+      # DP-332 gpu_status: discover the DRM card, then read its VRAM counters.
+      if [ "${a[4]:-}" = ls ] && [ "$n" -eq 6 ] \
+         && [ "${a[5]}" = /sys/class/drm ]; then allow; fi
+      if [ "${a[4]:-}" = cat ] && [ "$n" -eq 7 ] \
+         && [[ "${a[5]}" =~ $vram ]] && [[ "${a[6]}" =~ $vram ]]; then allow; fi
+    fi
+    ;;
+esac
+deny
