@@ -299,7 +299,8 @@ async def test_generate_response_exits_after_max_tool_calls(chat_system_with_moc
     text_engine_mock.generate_response.return_value = (tool_call, {})
     tool_manager_mock.execute_tool.return_value = {"result": "ok"}
     response, _, _ , _ = await system.generate_response("test_persona", "user", "channel", "test")
-    assert "stuck in a loop" in response
+    assert "tool steps" in response
+    assert "`test_tool`" in response
     # Called exactly MAX_TOOL_CALLS times
     assert text_engine_mock.generate_response.call_count == MAX_TOOL_CALLS
 

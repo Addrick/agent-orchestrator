@@ -44,7 +44,7 @@ flowchart TD
   park --> loop
   w -- no --> loop{iter < max?}
   loop -- yes --> start
-  loop -- no --> stuck[_LoopFinishedEvent\nDEV_COMMAND 'stuck in a loop']
+  loop -- no --> stuck[_LoopFinishedEvent\nDEV_COMMAND: render_max_iteration_text]
 ```
 
 **Two guards sit in front of the park branch** (both inject a synthetic result and
@@ -67,6 +67,28 @@ create *no* second affordance):
 Because `MAX_TOOL_CALLS` is 10 (raised from 5 in DP-297 — a parked write now
 costs an iteration instead of ending the turn), a turn can park several writes
 and still finish on ordinary text.
+
+### The cap-hit message (DP-335)
+
+`render_max_iteration_text(conversation_history, start, max_iterations)` builds
+the DEV_COMMAND text from the same history slice `seal_tool_context` seals: one
+numbered line per tool call, with its arguments and its outcome (`ok`, the
+failure message, `waiting for your approval`, `no result` for calls the cap cut
+off before their result landed), and a `(same call as #N)` marker on any call
+whose `write_call_identity` repeats one earlier in the turn.
+
+It replaced the single sentence *"I seem to be stuck in a loop. Could you please
+clarify your request?"*, which described a malfunction that generally has not
+happened: in the prod turn that motivated this, all ten calls returned `ok` — the
+turn ran out of steps before it reached the action the user asked for, and the
+only record of *which* calls spent the budget was the sealed `tool_context` in
+the database. Arguments are scrubbed on the way out (DP-225): they are
+model-authored and this string goes to a surface. The list is capped at 20 calls
+and each argument blob at 100 chars, because Discord's message limit is 2000.
+
+Note what this does **not** do: the budget is unchanged, and repeats are
+reported, not prevented. A read-side dedup guard and a per-persona budget are
+the rest of DP-335.
 
 ## _orchestrate exit paths × invariants
 

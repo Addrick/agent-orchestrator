@@ -283,6 +283,132 @@ def _render_confirmation_text(
     return "\n".join(lines)
 
 
+# Cap-hit summary rendering (DP-335). The iteration cap used to answer with one
+# canned sentence, and that sentence reads as a malfunction: in the prod turn
+# that motivated this, every one of the ten calls returned `ok` — the turn
+# simply ran out of steps before it reached the action the user asked for. The
+# sealed `tool_context` held the whole story and nothing put it in front of the
+# person who had to decide what to do next.
+_SUMMARY_ARG_LIMIT = 100
+_SUMMARY_ERROR_LIMIT = 80
+_SUMMARY_MAX_CALLS = 20
+
+
+def _truncate(text: str, limit: int) -> str:
+    """Flatten to one line and clip — a tool result can be kilobytes, and this
+    string is headed for a Discord message with a 2000-char ceiling."""
+    flat = " ".join(str(text).split())
+    return flat if len(flat) <= limit else flat[:limit - 1] + "…"
+
+
+def _summarize_outcome(content: Optional[str]) -> str:
+    """How one call turned out, read back from its history result.
+
+    The park statuses are spelled out rather than folded into "ok": a proposal
+    that is still waiting on the operator is the most likely thing the user
+    wants to act on, and `tool_error` reports it as a success.
+    """
+    if content is None:
+        # `seal_tool_context` synthesizes a result for these, but it runs after
+        # this does — the final iteration's calls are genuinely unanswered.
+        return "no result"
+    try:
+        payload = json.loads(content)
+    except (TypeError, ValueError):
+        return "ok"
+    if isinstance(payload, dict):
+        status = payload.get("status")
+        if status == PARK_STATUS_AWAITING:
+            return "waiting for your approval"
+        if status == PARK_STATUS_DUPLICATE:
+            return "skipped, an identical proposal is already waiting"
+        if status == PARK_STATUS_ALREADY_RESOLVED:
+            return "skipped, you already decided this one"
+    failure = tool_error(payload)
+    if failure:
+        return f"failed — {_truncate(failure, _SUMMARY_ERROR_LIMIT)}"
+    return "ok"
+
+
+def _summarize_args(call: Dict[str, Any]) -> str:
+    """A call's arguments as a short, scrubbed, leading-space-prefixed blob.
+
+    Empty arguments render as nothing at all: half the calls in a
+    budget-exhausting turn are zero-arg reads, and ten trailing `{}`s bury the
+    ones that carry the query that actually mattered.
+    """
+    try:
+        arg_str = json.dumps(
+            call.get("arguments") or {}, sort_keys=True, default=str,
+        )
+    except (TypeError, ValueError):
+        arg_str = "{...}"
+    if arg_str in ("{}", "null"):
+        return ""
+    # DP-225: arguments are model-authored and this string is headed for a
+    # surface, so it crosses the same egress boundary a tool result does.
+    scrubbed = cast(str, get_scrubber().scrub(arg_str))
+    return " " + _truncate(scrubbed, _SUMMARY_ARG_LIMIT)
+
+
+def render_max_iteration_text(
+    conversation_history: List[Dict[str, Any]],
+    start: int,
+    max_iterations: int,
+) -> str:
+    """User-facing text for the iteration-cap exit: what the turn actually did.
+
+    Reads the same history slice `seal_tool_context` seals, so the user sees
+    exactly what the model saw. Repeats are marked, because a turn that spends
+    its budget re-fetching bytes it already had is the common shape of this
+    exit and it is invisible in a bare list.
+    """
+    results: Dict[Any, Optional[str]] = {}
+    for msg in conversation_history[start:]:
+        if msg.get("role") == "tool":
+            results.setdefault(msg.get("tool_call_id"), msg.get("content"))
+
+    lines: List[str] = []
+    # `write_call_identity` is the name-plus-canonicalized-args key the write
+    # guards use; nothing about it is write-specific, and reusing it here means
+    # "the same call twice" means one thing across the module.
+    first_seen: Dict[Tuple[str, str], int] = {}
+    total = 0
+    for msg in conversation_history[start:]:
+        if msg.get("role") != "assistant":
+            continue
+        for call in msg.get("tool_calls") or []:
+            total += 1
+            if total > _SUMMARY_MAX_CALLS:
+                continue
+            name = str(call.get("name") or "unknown tool")
+            rendered_args = _summarize_args(call)
+            outcome = _summarize_outcome(results.get(call.get("id")))
+            identity = write_call_identity(call)
+            repeat = first_seen.get(identity)
+            marker = f" (same call as #{repeat})" if repeat else ""
+            first_seen.setdefault(identity, total)
+            lines.append(f"{total}. `{name}`{rendered_args} — {outcome}{marker}")
+
+    if not lines:
+        return (
+            f"I stopped after {max_iterations} tool steps without reaching an "
+            "answer. Could you clarify the request?"
+        )
+    if total > _SUMMARY_MAX_CALLS:
+        lines.append(f"…and {total - _SUMMARY_MAX_CALLS} more.")
+    return "\n".join([
+        f"I used all {max_iterations} of my tool steps on this turn without "
+        "getting to an answer, so I stopped instead of guessing. Here is what "
+        "I ran:",
+        "",
+        *lines,
+        "",
+        "Tell me which of these to build on, or narrow the request, and I'll "
+        "pick it up from there.",
+    ])
+
+
 def build_wire_messages(
     persona: Persona, conversation_history: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
@@ -675,7 +801,9 @@ class ToolLoop:
 
         logger.error(f"Exceeded max tool iterations ({self.max_iterations}).")
         yield _LoopFinishedEvent(
-            final_text="I seem to be stuck in a loop. Could you please clarify your request?",
+            final_text=render_max_iteration_text(
+                conversation_history, history_start, self.max_iterations,
+            ),
             response_type=ResponseType.DEV_COMMAND,
             tool_context_json=seal_tool_context(
                 conversation_history, history_start, SEAL_MAX_ITERATIONS,

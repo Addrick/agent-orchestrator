@@ -15,7 +15,7 @@ from src.persona import ExecutionMode
 from src.tools.tool_loop import (
     PARK_STATUS_AWAITING, PARK_STATUS_DUPLICATE, ToolLoop, WriteParkedEvent,
     _ApiPayloadEvent, _LoopFinishedEvent, _ToolContextEvent,
-    write_call_identity,
+    render_max_iteration_text, write_call_identity,
 )
 
 
@@ -317,7 +317,12 @@ async def test_max_iterations_cap():
     finished = events[-1]
     assert isinstance(finished, _LoopFinishedEvent)
     assert finished.response_type == ResponseType.DEV_COMMAND
-    assert "stuck in a loop" in finished.final_text
+    # DP-335: the cap-hit text lists what the turn actually spent its budget
+    # on. The old canned sentence named no tool, so a user (and the next
+    # session) could not tell an exhausted budget from a broken tool.
+    assert "3 of my tool steps" in finished.final_text
+    assert "`spinner`" in finished.final_text
+    assert "(same call as #1)" in finished.final_text
 
 
 @pytest.mark.asyncio
@@ -820,3 +825,109 @@ def test_write_call_identity_fallback_is_unique_in_bulk():
     call = {"name": "create_ticket", "arguments": {("k",): 1}}
     idents = [write_call_identity(call)[1] for _ in range(200)]
     assert len(set(idents)) == 200
+
+
+# --- DP-335: the iteration-cap message ---------------------------------------
+
+def _call_msg(call_id, name, args):
+    return {"role": "assistant", "tool_calls": [
+        {"id": call_id, "name": name, "arguments": args},
+    ]}
+
+
+def _result_msg(call_id, name, payload):
+    return {
+        "role": "tool", "tool_call_id": call_id, "name": name,
+        "content": json.dumps(payload),
+    }
+
+
+def _cap_history():
+    """The shape of the prod turn that motivated DP-335: reads, a verbatim
+    repeat, a park, a failure, and one call the cap cut off unanswered."""
+    return [
+        _call_msg("c0", "pve_status", {}),
+        _result_msg("c0", "pve_status", {"result": {"status": "ok"}}),
+        _call_msg("c1", "hf_search", {"query": "qwen 27b"}),
+        _result_msg("c1", "hf_search", {"result": {"models": []}}),
+        _call_msg("c2", "pve_status", {}),
+        _result_msg("c2", "pve_status", {"result": {"status": "ok"}}),
+        _call_msg("c3", "install_model", {"repo": "unsloth/X"}),
+        _result_msg("c3", "install_model",
+                    {"status": PARK_STATUS_AWAITING, "token": "t"}),
+        _call_msg("c4", "gpu_status", {}),
+        _result_msg("c4", "gpu_status", {"error": "ssh timeout after 30s"}),
+        _call_msg("c5", "list_models", {}),
+    ]
+
+
+def test_max_iteration_text_lists_every_call_with_its_outcome():
+    """The whole point of DP-335: the user can see what the budget bought.
+
+    Every tool returned `ok` in the turn this came from, so the canned "stuck
+    in a loop" sentence described a malfunction that had not happened, and the
+    one fact that mattered — which calls ate the budget — was only recoverable
+    by reading the sealed tool_context out of the database."""
+    text = render_max_iteration_text(_cap_history(), 0, 10)
+
+    assert "`pve_status`" in text
+    assert '`hf_search` {"query": "qwen 27b"}' in text
+    assert '`install_model` {"repo": "unsloth/X"}' in text
+    # Outcomes are distinguished, not flattened to "ran".
+    assert "waiting for your approval" in text
+    assert "failed" in text and "ssh timeout after 30s" in text
+    # The cap cut c5 off before its result landed; sealing synthesizes one
+    # later, so at render time it is genuinely unanswered.
+    assert "`list_models` — no result" in text
+    assert "10 of my tool steps" in text
+
+
+def test_max_iteration_text_marks_verbatim_repeats():
+    """A repeated read is the common shape of this exit (4 of 10 iterations in
+    the DP-335 turn) and is invisible in a flat list of names."""
+    text = render_max_iteration_text(_cap_history(), 0, 10)
+
+    assert "3. `pve_status` — ok (same call as #1)" in text
+    # Only the repeat is marked — the first occurrence and the distinct calls
+    # around it must not be.
+    assert text.count("same call as") == 1
+
+
+def test_max_iteration_text_respects_the_history_slice():
+    """`start` is the turn boundary — earlier turns' calls are not this turn's
+    spend, and listing them would misattribute the budget."""
+    history = [
+        _call_msg("old", "list_models", {}),
+        _result_msg("old", "list_models", {"result": {"models": []}}),
+    ] + _cap_history()
+
+    text = render_max_iteration_text(history, 2, 10)
+
+    assert text.count("`list_models`") == 1
+    assert "1. `pve_status`" in text
+
+
+def test_max_iteration_text_scrubs_arguments():
+    """Arguments are model-authored and this string goes to a surface, so it
+    crosses the same egress boundary tool results do (DP-225)."""
+    from src.security.scrubber import get_scrubber, reset_scrubber
+
+    reset_scrubber()
+    get_scrubber().register("hunter2-supersecret", "TEST_KEY")
+    try:
+        history = [_call_msg("c0", "set_active_model",
+                             {"token": "hunter2-supersecret"})]
+        text = render_max_iteration_text(history, 0, 10)
+    finally:
+        reset_scrubber()
+
+    assert "hunter2-supersecret" not in text
+
+
+def test_max_iteration_text_falls_back_when_no_calls_recorded():
+    """No tool calls in the slice means there is nothing to show; the message
+    must still be a sentence, not an empty list."""
+    text = render_max_iteration_text([], 0, 10)
+
+    assert "10 tool steps" in text
+    assert text.strip().endswith("?")
