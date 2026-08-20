@@ -42,9 +42,11 @@ flowchart TD
   reads --> w{write calls?}
   w -- yes --> park[WriteParkedEvent per call\n+ synthetic awaiting_human_approval result]
   park --> loop
-  w -- no --> loop{iter < max?}
+  w -- no --> loop{calls < MAX_TOOL_CALLS\nand iters < MAX_TOOL_ITERATIONS?}
   loop -- yes --> start
-  loop -- no --> stuck[_LoopFinishedEvent\nDEV_COMMAND: render_max_iteration_text]
+  loop -- no --> wrap[one stream_messages tools=None\n+ exhaustion nudge]
+  wrap -- text --> ans[_LoopFinishedEvent\nLLM_GENERATION: answer + call-list footer]
+  wrap -- failed/empty --> stuck[_LoopFinishedEvent\nDEV_COMMAND: render_max_iteration_text]
 ```
 
 **Two guards sit in front of the park branch** (both inject a synthetic result and
@@ -64,9 +66,38 @@ create *no* second affordance):
   re-proposes. Left running on ordinary turns it would answer a legitimate
   "restart that service again" with "that already happened", silently.
 
-Because `MAX_TOOL_CALLS` is 10 (raised from 5 in DP-297 — a parked write now
-costs an iteration instead of ending the turn), a turn can park several writes
-and still finish on ordinary text.
+Because `MAX_TOOL_CALLS` is 15 (DP-297 raised it 5 → 10 — a parked write now
+costs a step instead of ending the turn — and DP-335 moved the counter and
+resized it), a turn can park several writes and still finish on ordinary text.
+
+### Two limits, not one (DP-335)
+
+`ToolLoop.run`'s `while` condition tests both:
+
+| Constant | Counts | Purpose |
+|---|---|---|
+| `MAX_TOOL_CALLS` = 15 | tool calls **executed** | the turn's budget — what the user's request is measured against |
+| `MAX_TOOL_ITERATIONS` = 25 | LLM round trips | pure runaway guard |
+
+The split exists because one number cannot be both. `range(max_iterations)`
+bought a different amount of work per provider: live `hypr` (agy-flash) emits
+exactly one call per message, so 10 iterations were 10 calls, while a model that
+batches five got 50 from the same config value with no compensation anywhere.
+The number was therefore untunable — raising it to help hypr multiplied every
+batching persona's allowance by five. Counting calls makes the allowance
+provider-independent and turns batching into a pure latency win
+(`_execute_calls` already `asyncio.gather`s a read group).
+
+⚠️ **A batch is charged in full and never truncated to fit.** Five calls in one
+message against a remaining budget of three all run, and the *next* loop check
+ends the turn. Same rule the write path already follows for a burst of
+proposals: half of a coherent group is worse than one turn of overshoot, and the
+group is dispatched concurrently anyway, so the overshoot costs no extra round
+trip.
+
+The 15 is sized against hypr's model-provisioning floor — `pve_status` +
+`gpu_status` + `list_models` + `hf_search` + `hf_files` + `install_model` = six
+calls with zero missteps — plus room for two dead ends.
 
 ### The cap-hit message (DP-335)
 
@@ -86,9 +117,58 @@ the database. Arguments are scrubbed on the way out (DP-225): they are
 model-authored and this string goes to a surface. The list is capped at 20 calls
 and each argument blob at 100 chars, because Discord's message limit is 2000.
 
-Note what this does **not** do: the budget is unchanged, and repeats are
-reported, not prevented. A read-side dedup guard and a per-persona budget are
-the rest of DP-335.
+`render_call_summary_footer` renders the same list without the preamble, for the
+case below where prose sits above it.
+
+### The exhaustion answer (DP-335)
+
+Hitting the cap is no longer a terminal string. `ToolLoop._answer_without_tools`
+spends **one** completion — `stream_messages(tools=None)` over the turn's own
+transcript, with `_EXHAUSTION_NUDGE` appended to the wire messages — and the
+loop emits `LLM_GENERATION` with that prose plus the call list under it.
+
+Everything needed to answer was already in `conversation_history` at that
+moment: in the turn that motivated this, the answer sat in the *second* tool
+result (an `unsloth/…-GGUF` hit tagged `base_model:Qwen/Qwen3.8-27B`) and the
+turn still ended on a sentence that read as a malfunction.
+
+Load-bearing details:
+
+- **`LLM_GENERATION`, not `DEV_COMMAND`.** `chat_system.py` commits the
+  assistant row for any `response_type`, but gates **retention** into the memory
+  bank on `LLM_GENERATION`. A real answer shipped as `DEV_COMMAND` would persist
+  and never be remembered. The canned fault it replaces was correctly excluded.
+- **The nudge is never appended to `conversation_history`.** That list is what
+  gets sealed and persisted; a synthetic instruction inside it replays next turn
+  as something the user said. Same rule as `_render_resolution_nudge` on the
+  park-continuation path.
+- **Best-effort, and it degrades to the deterministic list.** Every exception is
+  swallowed: this already runs on an unhappy exit, and letting it raise would
+  turn a turn that merely ran long into an error the user has to interpret.
+  Empty text falls back the same way.
+- **`tools=None` and no `image_url`.** The budget is spent, so offering tools
+  invites a call this path cannot run; the image belongs to iteration 0.
+- **The seal is unchanged.** `seal_tool_context` still runs, so the reads and
+  parks the turn made survive whether or not the wrap-up succeeds.
+- **Taint is inherited.** The answer is generated from tool output that may be
+  `produces_untrusted`, and rides the same `turn_tainted` on
+  `_LoopFinishedEvent` as any other generation.
+
+### Repeat instrumentation (DP-335)
+
+`_log_turn_call_tally` logs one line per turn: total calls, iterations, distinct
+call identities, and the repeat count, with each repeated identity as
+`name#<8 hex>` (hashed — the canonical argument string is the same
+secret-bearing payload `write_call_identity_hash` exists to avoid storing).
+
+This is what a proposed per-turn read cache was **rejected** in favour of. The
+observed turn re-ran reads whose answers were already in `conversation_history`,
+but that is a legibility problem before it is an infrastructure one: iterations
+4-6 were a *restarted routine*, not a stutter, so serving them from a memo would
+have refunded the budget straight into the same fruitless re-spelling. And the
+opt-out list a cache needs is a new silent-failure surface — `install_status`
+exists to be polled, and memoizing it returns the first `downloading` forever.
+On n=1, measure first; a recurrence now arrives with numbers attached.
 
 ## _orchestrate exit paths × invariants
 
@@ -106,7 +186,8 @@ as a starting point, not a contract.
 | normal LLM_GENERATION | DoneEvent | ✅ `turn_scope` | guaranteed on full drain *and* early break |
 | parked write(s) | DoneEvent (LLM_GENERATION) | ✅ `turn_scope` | DP-297: parking is mid-turn, not an exit — the loop continues and the turn ends normally |
 | `turn_persistence.log_user_turn` raises | propagates | ✅ `turn_scope` | now inside the scope |
-| max-iter DEV_COMMAND | DoneEvent | ✅ `turn_scope` | |
+| budget exhausted, wrap-up answered | DoneEvent (LLM_GENERATION) | ✅ `turn_scope` | persisted **and** retained — the exhaustion answer is a real reply |
+| budget exhausted, wrap-up failed/empty | DoneEvent (DEV_COMMAND) | ✅ `turn_scope` | falls back to `render_max_iteration_text`; still exactly one terminal event |
 | `continuation` re-entry (DP-297) | DoneEvent / ErrorEvent | ✅ `turn_scope` | shares the kernel; history is rebuilt LIVE from the DB after each decision is patched |
 
 **Fix for #1 — `turn_scope` + `aclosing` (two non-obvious parts):**

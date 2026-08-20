@@ -18,7 +18,8 @@ Interface (Discord/Gmail/Zammad)
                                            (skips memories already in sliding window via
                                             exclude_after_interaction_id; respects include_ambient)
     -> ToolLoop.run()                 -- LLM call + tool execution loop
-                                         (max MAX_TOOL_CALLS = 10 iterations)
+                                         (budget: MAX_TOOL_CALLS = 15 tool calls,
+                                          guard: MAX_TOOL_ITERATIONS = 25 round trips)
       -> TextEngine.stream_messages()   -- provider-specific streaming API call
       -> ToolManager.execute_tool()     -- tool execution
       -- yields TokenEvent / ToolCallStartEvent / ToolCallResultEvent / ErrorEvent
@@ -116,7 +117,7 @@ Background (MemoryConsolidator, hourly daemon via app.register_task):
 
 ### `src/tools/tool_loop.py` -- ToolLoop
 - Stream-shaped tool loop extracted from `_orchestrate` (tool revamp v1, supersedes the old `plans/toolloop_extraction.md`).
-- `ToolLoop(text_engine, tool_manager, max_iterations=MAX_TOOL_CALLS)` — constructed per-call by `_orchestrate` so tests that swap `chat_system.text_engine` post-init still take effect.
+- `ToolLoop(text_engine, tool_manager, max_iterations=MAX_TOOL_ITERATIONS, max_tool_calls=MAX_TOOL_CALLS)` — constructed per-call by `_orchestrate` so tests that swap `chat_system.text_engine` post-init still take effect. **DP-335 split the two limits**: `max_tool_calls` is the turn's budget (counted in calls executed, so it means the same thing on a batching and a one-call-per-message model), `max_iterations` is the pure runaway guard on provider round trips.
 - `run(persona, conversation_history, params, tools, ...)` — async generator. Drives `text_engine.stream_messages` per iteration, forwards `TokenEvent`s, surfaces tool calls as `ToolCallStartEvent` / `ToolCallResultEvent`, mutates `conversation_history` in place (orchestrator + resume path read it back).
 - Implements **universal write-audit**: on any iteration where a batch contains a `WRITE_TOOLS` call, the loop runs the read calls, then emits one `WriteParkedEvent` **per write call** (each with its own token + `audit_info` block: per-action `irreversible` / `always_confirm` / `service_binding` / `sensitivity` / `enrichment`, plus turn `tainted` / `taint_sources` / `model_reasoning`). This is unconditional — execution mode is recorded in `audit_info` for display only, never gates parking. Taint (`turn_tainted` from `produces_untrusted` read tools) and irreversibility flags are computed here for the audit surface.
 - **DP-297: parking is no longer a terminal exit.** The loop answers each gated call inline with a synthetic `awaiting_human_approval` tool result and *falls through to the next iteration*, so the model keeps working — and may propose again — while the operator decides. A turn can therefore park several writes and still end on ordinary text. `write_call_identity` (name + canonicalized arguments, id excluded) backs a duplicate guard so a model ignoring the "do not re-submit" instruction cannot turn N iterations into N copies of one affordance; the suppressed call gets a `duplicate_of_pending` result and is patched when the original resolves.
@@ -618,7 +619,8 @@ Human-approval gating primitive for autonomous-agent writes — a **separate imp
 ### `config/global_config.py`
 - DEFAULT_HISTORY_MESSAGES = 15 (messages fetched from DB)
 - GLOBAL_HISTORY_MESSAGES = 30 (hard cap when history_limit passed)
-- MAX_TOOL_CALLS = 10 (per request; DP-297 raised it 5 → 10 because parking no longer ends the turn, so a parked write costs an iteration)
+- MAX_TOOL_CALLS = 15 (tool calls executed per request. DP-297 raised it 5 → 10 because parking no longer ends the turn; **DP-335 moved the counter from iterations to calls** — the old number bought 10 calls on a serial model and 50 on a batching one — and sized 15 against hypr's 6-call provisioning floor plus two dead ends)
+- MAX_TOOL_ITERATIONS = 25 (DP-335; pure runaway guard on LLM round trips, independent of how many calls each carries)
 - MAX_CACHED_API_REQUESTS = 128
 - DEFAULT_TOKEN_LIMIT = 4096 (LLM output)
 - PENDING_ACTION_TTL = 86400 (seconds; DP-297 renamed + raised it from PENDING_CONFIRMATION_TIMEOUT = 300, since a park became a queue worked through later rather than a blocking modal. DP-319 made the store durable (`Parked_Writes`), so this is now the real deadline rather than min(this, process uptime))

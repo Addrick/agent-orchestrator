@@ -80,24 +80,45 @@ UPDATE_MODELS_ON_STARTUP = True
 DISCORD_CHAR_LIMIT = 2000
 DISCORD_STATUS_LIMIT = 128
 
-# Tool use limit to avoid infinite loops. Counts LOOP ITERATIONS, not calls.
+# Tool budget for one turn. Counts TOOL CALLS EXECUTED, not LLM round trips.
 #
-# DP-297 raised this 5 → 10: a gated write no longer ends the turn, so every
-# proposal now costs an iteration that used to be the turn's last. At 5, an
-# ordinary turn (a couple of reads, a couple of proposals, then wrap-up) hit the
-# cap and answered with the "stuck in a loop" text.
+# DP-335 moved the counter. It used to bound loop iterations, which meant the
+# number bought a different amount of work on every model: live `hypr`
+# (agy-flash) emits exactly one call per message, so 10 iterations were 10
+# calls; a model that batches five per message got 50 from the same config
+# value, with no compensation anywhere. The budget could not be tuned because
+# it did not denote a fixed quantity. Counting calls makes the allowance
+# provider-independent and makes batching a pure latency win instead of a
+# silent 5x budget multiplier.
 #
-# ⚠️ This does NOT bound how many proposals a turn can emit. One model response
-# may carry any number of write calls and they all park inside a single
-# iteration. That is deliberate — six ticket updates proposed together are one
-# considered plan, not runaway behaviour, and capping them would split a
-# coherent batch for an arbitrary number's sake.
+# Sized against hypr's model-provisioning floor, which is the longest routine
+# any persona runs: pve_status + gpu_status + list_models + hf_search +
+# hf_files + install_model = 6 calls with zero missteps. 15 clears that with
+# room for two dead ends (a search that returns nothing useful plus the file
+# read that follows it costs ~2 calls each) and still ends the turn.
+#
+# ⚠️ This does NOT bound how many proposals a turn can emit, and a batch is
+# never split to fit. One model response may carry any number of calls; they
+# all run, even if the batch crosses the budget, and the turn ends after it.
+# That is deliberate — six ticket updates proposed together are one considered
+# plan, not runaway behaviour, and truncating a batch would execute half of a
+# coherent group for an arbitrary number's sake.
 #
 # What IS bounded is repetition: `tool_loop.write_call_identity` refuses to park
 # a proposal identical to one already awaiting the operator, so a model that
 # ignores the "do not re-submit" instruction cannot turn N iterations into N
 # copies of the same affordance.
-MAX_TOOL_CALLS = 10
+MAX_TOOL_CALLS = 15
+
+# Pure runaway guard: max LLM round trips in one turn, independent of how many
+# calls they carry. Separate from MAX_TOOL_CALLS because the two answer
+# different questions — that one is "how much work may this turn do", this one
+# is "how many times may we talk to the provider before declaring the loop
+# stuck". A model emitting one call per message reaches MAX_TOOL_CALLS first
+# and never sees this; a model that emits an empty tool-call list forever
+# reaches this one and never spends the budget. Only the second is a runaway,
+# and only this limit catches it.
+MAX_TOOL_ITERATIONS = 25
 # Max cached API request payloads (for dump commands); FIFO eviction beyond this
 MAX_CACHED_API_REQUESTS = 128
 # Seconds before a gated write expires unanswered.

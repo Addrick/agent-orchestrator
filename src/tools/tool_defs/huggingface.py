@@ -54,7 +54,14 @@ HUGGINGFACE_TOOLS: List[Dict[str, Any]] = [
                 "likes, gated flag and tags. A hit means the repo is tagged as "
                 "containing gguf — not that any particular file exists or will "
                 "fit. Follow up with hf_files to see the actual files and their "
-                "sizes before proposing an install."
+                "sizes before proposing an install. "
+                "ONLY gguf-tagged repos are searchable: an upstream publisher "
+                "shipping safetensors (most official model repos) can never be "
+                "returned, so asking for 'the official <model>' means finding "
+                "the community quant of it — match one by its "
+                "`base_model:<owner>/<name>` tag. If a search returns nothing, "
+                "broaden it rather than re-spelling the same name; the filter "
+                "will not change."
             ),
             "parameters": {
                 "type": "object",

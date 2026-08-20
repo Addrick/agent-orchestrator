@@ -15,7 +15,7 @@ from src.persona import ExecutionMode
 from src.tools.tool_loop import (
     PARK_STATUS_AWAITING, PARK_STATUS_DUPLICATE, ToolLoop, WriteParkedEvent,
     _ApiPayloadEvent, _LoopFinishedEvent, _ToolContextEvent,
-    render_max_iteration_text, write_call_identity,
+    render_call_summary_footer, render_max_iteration_text, write_call_identity,
 )
 
 
@@ -296,18 +296,31 @@ async def test_llm_communication_error_yields_error_event():
     assert "upstream 500" in events[-1].message
 
 
-@pytest.mark.asyncio
-async def test_max_iterations_cap():
-    """If the model never stops calling tools, loop bails after the cap."""
-    one_call_stream = lambda i: [
+def _spin(i: int, count: int = 1):
+    """One provider turn that asks for `count` calls to `spinner`."""
+    return [
         {"type": "tool_calls", "calls": [
-            {"id": f"c{i}", "name": "spinner", "arguments": {}}
+            {"id": f"c{i}_{n}", "name": "spinner", "arguments": {"n": n}}
+            for n in range(count)
         ]},
         {"type": "done", "full_text": ""},
     ]
-    engine = _make_engine([one_call_stream(i) for i in range(3)])
+
+
+_NO_WRAP_UP = [{"type": "done", "full_text": ""}]
+
+
+@pytest.mark.asyncio
+async def test_max_iterations_cap():
+    """If the model never stops calling tools, loop bails after the cap.
+
+    `max_iterations` is the runaway guard since DP-335, so this trips it by
+    keeping the call budget far out of reach. The wrap-up completion is scripted
+    empty, which is what drives the fallback to the deterministic list.
+    """
+    engine = _make_engine([_spin(i) for i in range(3)] + [_NO_WRAP_UP])
     tools = _make_tool_manager({"spinner": {"result": "spin"}})
-    loop = ToolLoop(engine, tools, max_iterations=3)
+    loop = ToolLoop(engine, tools, max_iterations=3, max_tool_calls=100)
 
     events = await _drain(loop.run(
         persona=_make_persona(), conversation_history=[],
@@ -317,12 +330,65 @@ async def test_max_iterations_cap():
     finished = events[-1]
     assert isinstance(finished, _LoopFinishedEvent)
     assert finished.response_type == ResponseType.DEV_COMMAND
+    assert tools.execute_tool.call_count == 3
     # DP-335: the cap-hit text lists what the turn actually spent its budget
     # on. The old canned sentence named no tool, so a user (and the next
     # session) could not tell an exhausted budget from a broken tool.
-    assert "3 of my tool steps" in finished.final_text
+    assert "of my tool steps" in finished.final_text
     assert "`spinner`" in finished.final_text
     assert "(same call as #1)" in finished.final_text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("per_message,messages", [(1, 10), (5, 2)])
+async def test_budget_is_the_same_for_a_batching_and_a_serial_model(
+        per_message, messages):
+    """S1, the whole point of counting calls instead of iterations.
+
+    Before DP-335 the budget was `range(max_iterations)`, so the identical
+    config value bought 10 tool calls from a model that emits one call per
+    message (live `hypr` on agy-flash — measured, not assumed) and 50 from one
+    that batches five. The number could not be tuned because it did not denote
+    a fixed quantity. Both shapes must now spend exactly the budget.
+    """
+    engine = _make_engine(
+        [_spin(i, per_message) for i in range(messages)] + [_NO_WRAP_UP]
+    )
+    tools = _make_tool_manager({"spinner": {"result": "spin"}})
+    loop = ToolLoop(engine, tools, max_iterations=50, max_tool_calls=10)
+
+    await _drain(loop.run(
+        persona=_make_persona(), conversation_history=[],
+        params=MagicMock(), tools=[],
+    ))
+
+    assert tools.execute_tool.call_count == 10
+    # And the batching model got there in a fifth of the round trips — the
+    # latency win that used to cost 5x the budget. +1 is the wrap-up.
+    assert engine.stream_messages.call_count == messages + 1
+
+
+@pytest.mark.asyncio
+async def test_a_batch_that_crosses_the_budget_still_runs_whole():
+    """A group the model proposed as one plan is never truncated to fit.
+
+    Same rule the write path already follows for a burst of proposals: half of
+    a coherent batch is worse than one turn of overshoot, and the group is
+    dispatched concurrently anyway, so the overshoot costs no extra round trip.
+    """
+    engine = _make_engine([_spin(0, 5), _NO_WRAP_UP])
+    tools = _make_tool_manager({"spinner": {"result": "spin"}})
+    loop = ToolLoop(engine, tools, max_iterations=50, max_tool_calls=3)
+
+    events = await _drain(loop.run(
+        persona=_make_persona(), conversation_history=[],
+        params=MagicMock(), tools=[],
+    ))
+
+    assert tools.execute_tool.call_count == 5
+    assert isinstance(events[-1], _LoopFinishedEvent)
+    # The overshoot ends the turn; it does not buy another iteration.
+    assert engine.stream_messages.call_count == 2
 
 
 @pytest.mark.asyncio
@@ -931,3 +997,182 @@ def test_max_iteration_text_falls_back_when_no_calls_recorded():
 
     assert "10 tool steps" in text
     assert text.strip().endswith("?")
+
+
+def test_call_summary_footer_pins_the_spend_under_a_prose_answer():
+    """The footer is the ground truth half of the exhaustion reply: the prose
+    above it is a generation and can be vague about what it ran, this is read
+    straight out of history and cannot be."""
+    footer = render_call_summary_footer(_cap_history(), 0, 15)
+
+    assert "6 of 15 used" in footer
+    assert "1. `pve_status` — ok" in footer
+    assert "3. `pve_status` — ok (same call as #1)" in footer
+    # No preamble sentence — that is the standalone renderer's job.
+    assert "I used all" not in footer
+
+
+def test_call_summary_footer_is_empty_when_the_turn_made_no_calls():
+    """Nothing to pin means no footer, not a header with an empty list under
+    it — the prose answer has to be able to stand alone."""
+    assert render_call_summary_footer([], 0, 15) == ""
+
+
+# --- DP-335 S2: the exhaustion answer ---------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_exhaustion_answers_from_the_transcript():
+    """The turn that motivated DP-335 had its answer in the second tool result
+    and still ended on a canned sentence that read as a fault. Budget
+    exhaustion now spends one toolless completion turning the transcript it
+    already has into a real answer."""
+    engine = _make_engine([
+        _spin(0),
+        [{"type": "text_delta", "text": "No gguf exists for that repo; "},
+         {"type": "text_delta", "text": "want the community quant?"},
+         {"type": "done",
+          "full_text": "No gguf exists for that repo; want the community quant?"}],
+    ])
+    tools = _make_tool_manager({"spinner": {"result": "spin"}})
+    loop = ToolLoop(engine, tools, max_iterations=50, max_tool_calls=1)
+
+    events = await _drain(loop.run(
+        persona=_make_persona(), conversation_history=[],
+        params=MagicMock(), tools=[],
+    ))
+
+    finished = events[-1]
+    assert isinstance(finished, _LoopFinishedEvent)
+    # LLM_GENERATION, not DEV_COMMAND: `_orchestrate` gates *retention* on this
+    # field, so a real answer that shipped as DEV_COMMAND would never reach the
+    # memory bank. The canned fault it replaces was correctly excluded.
+    assert finished.response_type == ResponseType.LLM_GENERATION
+    assert finished.final_text.startswith("No gguf exists for that repo")
+    # Prose first, ground-truth list under it — the two compose.
+    assert "1 of 1 used" in finished.final_text
+    assert "`spinner`" in finished.final_text
+
+
+@pytest.mark.asyncio
+async def test_exhaustion_wrap_up_is_toolless_and_nudged():
+    """Tools are withheld because the budget is spent — offering them invites a
+    call this path cannot run. The nudge rides in the wire messages only."""
+    engine = _make_engine([
+        _spin(0),
+        [{"type": "done", "full_text": "Here is what I found."}],
+    ])
+    tools = _make_tool_manager({"spinner": {"result": "spin"}})
+    loop = ToolLoop(engine, tools, max_iterations=50, max_tool_calls=1)
+    history: List[Dict[str, Any]] = []
+
+    await _drain(loop.run(
+        persona=_make_persona(), conversation_history=history,
+        params=MagicMock(), tools=[{"name": "spinner"}],
+    ))
+
+    first_call, wrap_call = engine.stream_messages.call_args_list
+    assert first_call.kwargs["tools"] == [{"name": "spinner"}]
+    assert wrap_call.kwargs["tools"] is None
+
+    wrap_messages = wrap_call.args[1]
+    assert wrap_messages[-1]["role"] == "user"
+    assert "entire tool budget" in wrap_messages[-1]["content"]
+    # And it is NOT in the history that gets sealed and persisted: replayed
+    # next turn it would read as something the user said.
+    assert not any("entire tool budget" in str(m.get("content") or "")
+                   for m in history)
+
+
+@pytest.mark.asyncio
+async def test_exhaustion_falls_back_when_the_wrap_up_generation_fails():
+    """Best-effort. A provider that is down must not turn a turn that merely
+    ran long into an error the user has to interpret."""
+    engine = MagicMock()
+    scripted = iter([_spin(0)])
+
+    def stream_messages(*args, **kwargs):
+        if kwargs.get("tools") is None:
+            raise LLMCommunicationError("upstream 503")
+        return _stream(next(scripted))
+    engine.stream_messages.side_effect = stream_messages
+
+    tools = _make_tool_manager({"spinner": {"result": "spin"}})
+    loop = ToolLoop(engine, tools, max_iterations=50, max_tool_calls=1)
+
+    events = await _drain(loop.run(
+        persona=_make_persona(), conversation_history=[],
+        params=MagicMock(), tools=[],
+    ))
+
+    finished = events[-1]
+    assert isinstance(finished, _LoopFinishedEvent)
+    assert finished.response_type == ResponseType.DEV_COMMAND
+    assert "of my tool steps" in finished.final_text
+    assert "`spinner`" in finished.final_text
+    # The exit is still an exit: exactly one terminal event, nothing trailing.
+    assert sum(isinstance(e, (_LoopFinishedEvent, ErrorEvent))
+               for e in events) == 1
+
+
+@pytest.mark.asyncio
+async def test_exhaustion_still_seals_the_tool_context():
+    """The wrap-up must not displace the seal — the parks and reads the turn
+    made are the only record those calls have."""
+    engine = _make_engine([
+        _spin(0),
+        [{"type": "done", "full_text": "Answering from what I have."}],
+    ])
+    tools = _make_tool_manager({"spinner": {"result": "spin"}})
+    loop = ToolLoop(engine, tools, max_iterations=50, max_tool_calls=1)
+
+    events = await _drain(loop.run(
+        persona=_make_persona(), conversation_history=[],
+        params=MagicMock(), tools=[],
+    ))
+
+    msgs = _tool_context(events[-1])
+    _assert_calls_all_answered(msgs)
+    assert {m.get("tool_call_id") for m in msgs if m.get("role") == "tool"} == {
+        "c0_0",
+    }
+
+
+# --- DP-335 instrumentation --------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_repeated_calls_are_counted_in_the_turn_log(caplog):
+    """The measurement that replaced a proposed per-turn read cache.
+
+    A cache sized on the single observed turn would have funded more wandering
+    while breaking `install_status`, which exists to be polled. So the repeat
+    rate is logged instead and a recurrence arrives with numbers attached.
+    Identities are hashed — the canonical argument string is secret-bearing.
+    """
+    engine = _make_engine([
+        [{"type": "tool_calls", "calls": [
+            {"id": "a", "name": "spinner", "arguments": {"q": "x"}},
+            {"id": "b", "name": "spinner", "arguments": {"q": "x"}},
+            {"id": "c", "name": "spinner", "arguments": {"q": "y"}},
+        ]},
+         {"type": "done", "full_text": ""}],
+        [{"type": "done", "full_text": "done"}],
+    ])
+    tools = _make_tool_manager({"spinner": {"result": "spin"}})
+    loop = ToolLoop(engine, tools, max_iterations=50, max_tool_calls=10)
+
+    with caplog.at_level("INFO", logger="src.tools.tool_loop"):
+        await _drain(loop.run(
+            persona=_make_persona(), conversation_history=[],
+            params=MagicMock(), tools=[],
+        ))
+
+    summary = next(r.getMessage() for r in caplog.records
+                   if "tool-loop turn:" in r.getMessage())
+    assert "3 call(s)" in summary
+    assert "2 distinct" in summary
+    assert "1 repeated call(s)" in summary
+    assert "spinner#" in summary and "x2" in summary
+    # Raw arguments never reach the log line.
+    assert '"q"' not in summary
