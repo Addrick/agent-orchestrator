@@ -743,6 +743,7 @@ _SETTER_TO_COMMAND = {
     'set_tool_policy': 'tool_policy',
     # DP-277: gated field — dedicated command, never part of tool_policy JSON.
     'set_explicit_overrides': 'explicit_overrides',
+    'set_origin_allowlist': 'origin_allowlist',
     'set_inject_timestamp': 'inject_timestamp',
     # DP-255: per-persona Hindsight retain-tuning knobs.
     'set_retain_mission': 'retain_mission',
@@ -790,6 +791,7 @@ _GETTER_TO_COMMAND = {
     'get_tool_policy': 'tool_policy',
     # DP-277: gated field — queryable via its own what command.
     'get_explicit_overrides': 'explicit_overrides',
+    'get_origin_allowlist': 'origin_allowlist',
     'get_security_block_reasons': 'security',
     'get_inject_timestamp': 'inject_timestamp',
     # DP-255: per-persona Hindsight retain-tuning knobs.
@@ -817,6 +819,15 @@ _GETTER_EXCEPTIONS = {
     # meta_visible is Sprint-4 groundwork (DP-111); no production caller reads
     # it yet. Sprint 5 (metabank) will wire a command if/when it ships.
     'get_meta_visible',
+    # DP-330 internals behind `what origin_allowlist`, which reports all three
+    # as one sentence. Deliberately not separately queryable: an operator
+    # asking "what is the allowlist" needs the authored entries, which of them
+    # are in force, and whether the persona is reachable *together* — that
+    # combination is the whole point, and three commands returning fragments of
+    # it is how the field got reported as "unrestricted" while unreachable.
+    'get_origin_allowlist_raw',
+    'get_origin_allowlist_rejected',
+    'get_origin_allowlist_for_persist',
 }
 
 

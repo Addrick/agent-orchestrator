@@ -112,6 +112,113 @@ async def test_quarantined_persona_still_accepts_dev_commands(chat_system_with_m
     text_engine_mock.generate_response.assert_not_called()
 
 
+# --- DP-330: persona origin allowlist gate ---------------------------------
+#
+# The gate itself lives in `BotLogic.preprocess_message` and is pinned there by
+# tests/security/test_origin_allowlist_gate.py — that is the seam Discord's
+# on_message and the portal's dev_command route pass through WITHOUT entering
+# this kernel, so gating here alone left both of them open. What these tests
+# pin is the kernel end of the contract: the refusal preprocessing hands back
+# stops the turn before any LLM call, and nothing else about step 1 changed.
+
+
+def _discord_origin(server="12345", channel="c1", author="a1"):
+    from src.origin import Origin
+
+    return Origin(transport="discord", server_id=server,
+                  channel_id=channel, author_id=author)
+
+
+def _with_real_preprocessing(system):
+    """Undo the fixture's blanket `preprocess_message` mock. The mock is an
+    instance attribute, so deleting it exposes the real BotLogic method again —
+    which is where the origin gate now lives."""
+    del system.bot_logic.preprocess_message
+    return system
+
+
+@pytest.mark.asyncio
+async def test_unrestricted_persona_is_reachable_from_any_origin(chat_system_with_mocks):
+    """The gate must be inert for every persona that never set the field."""
+    system, _, text_engine_mock, mock_persona, _ = chat_system_with_mocks
+    _with_real_preprocessing(system)
+    assert mock_persona.get_origin_allowlist() == []
+    response, _, _, _ = await system.generate_response(
+        "test_persona", "user", "channel", "hi")
+    assert response == "LLM Reply"
+    text_engine_mock.generate_response.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_allowlisted_persona_allows_matching_guild(chat_system_with_mocks):
+    system, _, text_engine_mock, mock_persona, _ = chat_system_with_mocks
+    _with_real_preprocessing(system)
+    mock_persona.set_origin_allowlist(["12345"])
+    response, _, _, _ = await system.generate_response(
+        "test_persona", "user", "channel", "hi", origin=_discord_origin())
+    assert response == "LLM Reply"
+    text_engine_mock.generate_response.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_allowlisted_persona_refuses_other_guild(chat_system_with_mocks):
+    system, _, text_engine_mock, mock_persona, _ = chat_system_with_mocks
+    _with_real_preprocessing(system)
+    mock_persona.set_origin_allowlist(["12345"])
+    response, rtype, _, _ = await system.generate_response(
+        "test_persona", "user", "channel", "hi",
+        origin=_discord_origin(server="99999"))
+    assert "not available from this channel" in response
+    assert rtype == ResponseType.DEV_COMMAND
+    text_engine_mock.generate_response.assert_not_called()
+    # The refusal must not disclose WHICH origins are allowed.
+    assert "12345" not in response
+
+
+@pytest.mark.asyncio
+async def test_allowlisted_persona_refuses_callers_asserting_no_origin(
+        chat_system_with_mocks):
+    """A caller that passes no origin at all gets ANONYMOUS (operator=False) —
+    agent-initiated turns and any un-migrated adapter must not bypass the gate
+    by omission."""
+    system, _, text_engine_mock, mock_persona, _ = chat_system_with_mocks
+    _with_real_preprocessing(system)
+    mock_persona.set_origin_allowlist(["12345"])
+    response, _, _, _ = await system.generate_response(
+        "test_persona", "user", "channel", "hi")
+    assert "not available from this channel" in response
+    text_engine_mock.generate_response.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_origin_gate_blocks_dev_commands_too(chat_system_with_mocks):
+    """A disallowed origin must not be able to read a restricted persona's
+    config with `what prompt` either — the gate is above command dispatch, not
+    beside it (unlike the DP-128 quarantine gate, which deliberately lets dev
+    commands through so the operator can repair the persona in-band)."""
+    system, _, text_engine_mock, mock_persona, _ = chat_system_with_mocks
+    _with_real_preprocessing(system)
+    mock_persona.set_origin_allowlist(["12345"])
+    response, _, _, _ = await system.generate_response(
+        "test_persona", "user", "channel", "what prompt",
+        origin=_discord_origin(server="99999"))
+    assert "not available from this channel" in response
+    assert mock_persona.get_prompt() not in response
+    text_engine_mock.generate_response.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_origin_gate_does_not_break_unknown_persona_error(chat_system_with_mocks):
+    """The gate only fires for personas that exist — an unknown name keeps its
+    own error rather than being masked as an origin refusal."""
+    system, _, _, _, _ = chat_system_with_mocks
+    _with_real_preprocessing(system)
+    response, _, _, _ = await system.generate_response(
+        "unknown_persona", "user", "channel", "hi",
+        origin=_discord_origin(server="99999"))
+    assert "Error: Persona not found" in response
+
+
 @pytest.mark.asyncio
 async def test_generate_response_handles_llm_communication_error(chat_system_with_mocks):
     system, _, text_engine_mock, _, _ = chat_system_with_mocks

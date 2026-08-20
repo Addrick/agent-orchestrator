@@ -685,3 +685,125 @@ async def test_a_fresh_unmapped_reaction_costs_no_api_calls(mock_chat_system):
         resolve.assert_not_awaited()
     finally:
         db._confirm_registry.clear()
+
+
+# --- DP-330: the origin allowlist must hold on the Discord surface ----------
+#
+# `on_message` resolves dev commands through `bot_logic.preprocess_message` and
+# RETURNS — it never enters `ChatSystem._orchestrate`. A gate placed in the
+# kernel therefore did nothing here: `gated what prompt` from an unlisted guild
+# answered in full, and `what origin_allowlist` printed the very ids the
+# refusal text withholds. These tests drive on_message with a REAL BotLogic so
+# the routing, not a mock, is what passes or fails.
+
+def _real_bot_logic_chat_system(allowlist):
+    from tests.helpers import make_bot_logic
+
+    gated = Persona("gated", "m", "SECRET SYSTEM PROMPT",
+                    origin_allowlist=allowlist)
+    state = MagicMock()
+    state.personas = {"gated": gated}
+    state.last_api_iterations = {}
+
+    chat_system = MagicMock(spec=ChatSystem)
+    chat_system.personas = state.personas
+    chat_system.system_persona_names = set()
+    chat_system.generate_response = AsyncMock()
+    chat_system.memory_manager = MagicMock(spec=MemoryManager)
+    chat_system.bot_logic = make_bot_logic(state)
+    return chat_system, gated
+
+
+def _guild_message(content, guild_id):
+    channel = AsyncMock(spec=discord.TextChannel, typing=MagicMock())
+    channel.name = "general"
+    reply = AsyncMock(spec=discord.Message)
+    reply.id = 2002
+    reply.created_at = datetime.now(timezone.utc)
+    channel.send.return_value = reply
+    return MagicMock(
+        id=1001, author=MagicMock(id=123, display_name="TestAuthor"),
+        content=content, channel=channel, guild=MagicMock(id=guild_id),
+        attachments=[], created_at=datetime.now(timezone.utc),
+        add_reaction=AsyncMock(),
+    )
+
+
+@pytest.mark.asyncio
+@patch('src.interfaces.discord_bot._send_dev_response', new_callable=AsyncMock)
+@patch('src.interfaces.discord_bot.reset_discord_status', new_callable=AsyncMock)
+async def test_dev_command_from_unlisted_guild_is_refused(mock_reset, mock_send_dev):
+    """The regression: a read-only dev command from a guild the persona does
+    not admit must be refused, and must disclose neither the prompt nor the
+    allowlist."""
+    chat_system, gated = _real_bot_logic_chat_system(["12345"])
+    mock_send_dev.return_value = True
+    client = create_discord_bot(chat_system)
+    message = _guild_message("gated what prompt", guild_id=99999)
+
+    with patch.object(type(client), 'user', new_callable=PropertyMock,
+                      return_value=MagicMock(id=999)):
+        await client.on_message(message)
+
+    mock_send_dev.assert_called_once()
+    sent = mock_send_dev.call_args[0][1]
+    assert "not available from this channel" in sent
+    assert "SECRET SYSTEM PROMPT" not in sent
+    assert "12345" not in sent
+    chat_system.generate_response.assert_not_called()
+
+
+@pytest.mark.asyncio
+@patch('src.interfaces.discord_bot._send_dev_response', new_callable=AsyncMock)
+@patch('src.interfaces.discord_bot.reset_discord_status', new_callable=AsyncMock)
+async def test_what_origin_allowlist_from_unlisted_guild_leaks_nothing(
+        mock_reset, mock_send_dev):
+    """`what origin_allowlist` is the worst case — it prints the guild ids the
+    refusal message is deliberately written not to name."""
+    chat_system, _ = _real_bot_logic_chat_system(["12345/678/90"])
+    mock_send_dev.return_value = True
+    client = create_discord_bot(chat_system)
+    message = _guild_message("gated what origin_allowlist", guild_id=99999)
+
+    with patch.object(type(client), 'user', new_callable=PropertyMock,
+                      return_value=MagicMock(id=999)):
+        await client.on_message(message)
+
+    sent = mock_send_dev.call_args[0][1]
+    assert "not available from this channel" in sent
+    for leaked in ("12345", "678", "90"):
+        assert leaked not in sent
+
+
+@pytest.mark.asyncio
+@patch('src.interfaces.discord_bot._send_dev_response', new_callable=AsyncMock)
+@patch('src.interfaces.discord_bot.reset_discord_status', new_callable=AsyncMock)
+async def test_dev_command_from_allowlisted_guild_still_works(mock_reset, mock_send_dev):
+    """The gate must not break the guild the persona IS scoped to."""
+    chat_system, _ = _real_bot_logic_chat_system(["12345"])
+    mock_send_dev.return_value = True
+    client = create_discord_bot(chat_system)
+    message = _guild_message("gated what prompt", guild_id=12345)
+
+    with patch.object(type(client), 'user', new_callable=PropertyMock,
+                      return_value=MagicMock(id=999)):
+        await client.on_message(message)
+
+    sent = mock_send_dev.call_args[0][1]
+    assert "SECRET SYSTEM PROMPT" in sent
+
+
+@pytest.mark.asyncio
+@patch('src.interfaces.discord_bot.reset_discord_status', new_callable=AsyncMock)
+async def test_chat_turn_from_unlisted_guild_never_reaches_generation(mock_reset):
+    """A plain chat message hits no command handler, so the gate has to catch
+    it above dispatch or the persona answers normally."""
+    chat_system, _ = _real_bot_logic_chat_system(["12345"])
+    client = create_discord_bot(chat_system)
+    message = _guild_message("gated hello there", guild_id=99999)
+
+    with patch.object(type(client), 'user', new_callable=PropertyMock,
+                      return_value=MagicMock(id=999)):
+        await client.on_message(message)
+
+    chat_system.generate_response.assert_not_called()

@@ -163,3 +163,99 @@ def test_inject_timestamp_field(persona):
     assert not rejected
     assert persona.get_inject_timestamp() is False
 
+
+
+# --- DP-330: origin_allowlist is a gated, non-patchable field ---------------
+
+def test_origin_allowlist_is_not_patchable():
+    """It decides WHO may reach the persona, so the PATCH route the portal
+    exposes must never carry it — same reasoning as explicit_overrides."""
+    field = next(f for f in PERSONA_FIELDS if f.name == 'origin_allowlist')
+    assert field.patch_key is None
+    assert 'origin_allowlist' not in registry_patch_keys()
+
+
+def test_set_origin_allowlist_via_cli(persona):
+    handler = cli_set_handlers()['origin_allowlist']
+    response, mutated = handler(['origin_allowlist', '12345', '9/8'], persona)
+    assert mutated is True
+    assert '12345' in response and '9/8' in response
+    assert persona.get_origin_allowlist() == ['12345', '9/8']
+
+
+def test_set_origin_allowlist_accepts_json_and_commas(persona):
+    handler = cli_set_handlers()['origin_allowlist']
+    handler(['origin_allowlist', '["12345", "9/8"]'], persona)
+    assert persona.get_origin_allowlist() == ['12345', '9/8']
+    handler(['origin_allowlist', '77,88'], persona)
+    assert persona.get_origin_allowlist() == ['77', '88']
+
+
+def test_set_origin_allowlist_clears(persona):
+    handler = cli_set_handlers()['origin_allowlist']
+    handler(['origin_allowlist', '12345'], persona)
+    response, mutated = handler(['origin_allowlist', 'none'], persona)
+    assert mutated is True
+    assert 'unrestricted' in response
+    assert persona.get_origin_allowlist() == []
+
+
+def test_set_origin_allowlist_reports_an_all_malformed_list(persona):
+    """An all-malformed list fails CLOSED — the persona is unreachable, not
+    unrestricted — and the operator must be told, including how to undo it.
+
+    The undo is NOT `set origin_allowlist none`, which this reply used to
+    offer: that command can only arrive addressed to the persona it just made
+    unreachable, so the gate refuses it. Only a file edit gets out."""
+    handler = cli_set_handlers()['origin_allowlist']
+    response, mutated = handler(['origin_allowlist', '*'], persona)
+    assert mutated is True
+    assert 'UNREACHABLE' in response
+    assert 'data/personas.json' in response
+    assert 'set origin_allowlist none' not in response
+    assert persona.origin_allowlist_is_malformed() is True
+    assert persona.origin_allowlist_is_unreachable() is True
+
+
+def test_set_origin_allowlist_accepts_unquoted_json_numbers(persona):
+    """A guild id is a number; `set origin_allowlist [12345]` must not be
+    rejected as 'not a list of strings'."""
+    handler = cli_set_handlers()['origin_allowlist']
+    response, mutated = handler(['origin_allowlist', '[12345, 99999]'], persona)
+    assert mutated is True
+    assert persona.get_origin_allowlist() == ['12345', '99999']
+
+
+def test_what_origin_allowlist(persona):
+    what = cli_what_handlers()['origin_allowlist']
+    response, mutated = what(['origin_allowlist'], persona)
+    assert mutated is False
+    assert 'unrestricted' in response
+    persona.set_origin_allowlist(['12345'])
+    response, _ = what(['origin_allowlist'], persona)
+    assert '12345' in response
+
+
+def test_what_origin_allowlist_flags_a_policy_that_is_not_in_force(persona):
+    """Reporting the authored entries alone described a policy the persona was
+    not running: a wholly-malformed list makes it unreachable, and `what` must
+    not read as 'restricted to these guilds' — nor, as it did for every
+    fail-closed shape that left the normalized list empty, as 'unrestricted'."""
+    what = cli_what_handlers()['origin_allowlist']
+    persona.set_origin_allowlist(['*'])
+    response, _ = what(['origin_allowlist'], persona)
+    assert 'UNREACHABLE' in response
+    assert 'unrestricted (any origin may address it)' not in response
+
+
+def test_what_origin_allowlist_names_the_entries_it_dropped(persona):
+    """A partly-malformed list is a different state from an unreachable one:
+    some entries are in force. The authored list keeps the rejected entry (it
+    has to survive the next save), so `what` has to say which of the ids it
+    just printed are not actually grants."""
+    what = cli_what_handlers()['origin_allowlist']
+    persona.set_origin_allowlist(['12345', '*'])
+    response, _ = what(['origin_allowlist'], persona)
+    assert 'UNREACHABLE' not in response
+    assert '12345' in response
+    assert 'NOT in force' in response and "'*'" in response

@@ -286,6 +286,16 @@ class ChatSystem:
         #    interpret, only the synthetic nudge built by the caller.
         #    DP-277: callers that don't assert an authenticated origin get
         #    ANONYMOUS (operator=False) — control-plane commands are refused.
+        #    DP-330: the same call also applies the persona origin allowlist —
+        #    a disallowed origin gets a refusal here, before the LLM and before
+        #    any dev command runs. The gate lives in `preprocess_message`
+        #    rather than in this kernel because the Discord and portal adapters
+        #    resolve dev commands through that seam WITHOUT entering the
+        #    kernel; putting it here gated only one of the three surfaces.
+        #    Skipping preprocessing on a continuation therefore also exempts
+        #    the resumed turn from the addressing check, which is intended:
+        #    the decision was made on the turn that raised the park, and the
+        #    approved write has already executed by the time we get here.
         if continuation is None:
             command_result: Optional[Dict[str, Any]] = await self.bot_logic.preprocess_message(
                 origin or ANONYMOUS, persona_name, user_identifier, message

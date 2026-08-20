@@ -738,3 +738,241 @@ def test_hypr_loads_unquarantined():
     assert loaded is not None and "hypr" in loaded
     assert loaded["hypr"].get_security_block_reasons() == []
     assert loaded["hypr"].get_service_bindings() == ["proxmox"]
+
+
+# --- DP-330: persona origin allowlist --------------------------------------
+#
+# Config-schema change, so per CLAUDE.md both states are pinned: the key ABSENT
+# (every persona file that predates this field) and the key PRESENT.
+
+def _origin(transport="discord", server=None, channel=None, author=None,
+            operator=False):
+    from src.origin import Origin
+
+    return Origin(transport=transport, server_id=server, channel_id=channel,
+                  author_id=author, operator=operator)
+
+
+def test_origin_allowlist_absent_is_unrestricted(persona):
+    """The field's default must leave every existing persona reachable — this
+    is what makes the gate a no-op for personas that never opt in."""
+    from src.origin import ANONYMOUS
+
+    assert persona.get_origin_allowlist() == []
+    assert persona.is_addressable_from(ANONYMOUS) is True
+    assert persona.is_addressable_from(_origin(server="999")) is True
+    assert persona.is_addressable_from(_origin(transport="portal")) is True
+
+
+def test_origin_allowlist_present_gates_by_guild(base_persona_args):
+    p = Persona(**base_persona_args, origin_allowlist=["12345"])
+    assert p.get_origin_allowlist() == ["12345"]
+    # bare guild id = whole server, any channel, any author
+    assert p.is_addressable_from(
+        _origin(server="12345", channel="c1", author="a1")) is True
+    assert p.is_addressable_from(
+        _origin(server="99999", channel="c1", author="a1")) is False
+
+
+def test_origin_allowlist_refuses_dms_and_non_discord_transports(base_persona_args):
+    """Everything without a gateway-asserted guild fails closed: DMs, the
+    portal, gmail/zammad bodies, and internal agent-initiated turns."""
+    from src.origin import ANONYMOUS
+
+    p = Persona(**base_persona_args, origin_allowlist=["12345"])
+    assert p.is_addressable_from(_origin(server=None, author="a1")) is False
+    assert p.is_addressable_from(ANONYMOUS) is False
+    for transport in ("portal", "gmail", "zammad", "internal", "test"):
+        assert p.is_addressable_from(
+            _origin(transport=transport, channel="portal")) is False
+    # A forged server_id on a non-Discord transport must not pass either: the
+    # portal takes server_id from a caller-supplied request body.
+    assert p.is_addressable_from(
+        _origin(transport="portal", server="12345")) is False
+
+
+def test_origin_allowlist_narrows_to_channel_and_author(base_persona_args):
+    p = Persona(**base_persona_args, origin_allowlist=["12345/678", "999/*/42"])
+    assert p.is_addressable_from(_origin(server="12345", channel="678")) is True
+    assert p.is_addressable_from(_origin(server="12345", channel="000")) is False
+    assert p.is_addressable_from(
+        _origin(server="999", channel="anything", author="42")) is True
+    assert p.is_addressable_from(
+        _origin(server="999", channel="anything", author="43")) is False
+
+
+def test_origin_allowlist_drops_malformed_entries(base_persona_args):
+    """Fail closed: a wildcard server would grant every guild the bot is in, so
+    the shared parser drops it rather than honouring it."""
+    p = Persona(**base_persona_args, origin_allowlist=["*", "12345/1/2/3", "77"])
+    assert p.get_origin_allowlist() == ["*", "12345/1/2/3", "77"]  # as authored
+    assert p.is_addressable_from(_origin(server="12345", channel="1")) is False
+    assert p.is_addressable_from(_origin(server="anything")) is False
+    assert p.is_addressable_from(_origin(server="77")) is True
+
+
+def test_set_origin_allowlist_normalizes_and_clears(persona):
+    assert persona.set_origin_allowlist(["12345", "9/8/7"]) == ["12345", "9/8/7"]
+    assert persona.is_addressable_from(_origin(server="12345")) is True
+    # A list whose entries are ALL malformed must not collapse to empty, which
+    # means unrestricted — the persona fails closed instead, and says so.
+    assert persona.set_origin_allowlist(["*"]) == ["*"]
+    assert persona.origin_allowlist_is_malformed() is True
+    assert persona.is_addressable_from(_origin(server="12345")) is False
+    assert persona.set_origin_allowlist([]) == []
+    assert persona.origin_allowlist_is_malformed() is False
+    assert persona.get_origin_allowlist() == []
+
+
+def test_set_and_load_report_the_same_allowlist(base_persona_args, persona):
+    """Both write paths run one normalizer, so the field reads back identically
+    however it was last written — a persona's on-disk shape must not depend on
+    whether it was last edited or last loaded."""
+    authored = ["12345/*", "9//7"]
+    persona.set_origin_allowlist(authored)
+    loaded = Persona(**base_persona_args, origin_allowlist=authored)
+    assert persona.get_origin_allowlist() == loaded.get_origin_allowlist()
+
+
+def test_origin_allowlist_accepts_unquoted_guild_ids(base_persona_args):
+    """A Discord guild id is a number, so the natural JSON authoring is
+    unquoted. It must not raise — the exception was swallowed by
+    load_personas_from_file's blanket except, which dropped EVERY user persona
+    and let the next mutating dev command save an empty list over the file."""
+    p = Persona(**base_persona_args, origin_allowlist=[347812763093172225])
+    assert p.get_origin_allowlist() == ["347812763093172225"]
+    assert p.is_addressable_from(_origin(server="347812763093172225")) is True
+    assert p.is_addressable_from(_origin(server="99999")) is False
+
+
+def test_persona_file_with_unquoted_guild_id_still_loads(tmp_path):
+    """The end-to-end version of the above: one unquoted number in the file
+    must not take the whole persona set down with it."""
+    import json
+
+    from src.personas import store
+
+    save_file = tmp_path / "personas.json"
+    save_file.write_text(json.dumps({"personas": [
+        {"name": "gated", "model_name": "m", "prompt": "p",
+         "origin_allowlist": [347812763093172225]},
+        {"name": "other", "model_name": "m", "prompt": "p"},
+    ], "models": {}}))
+    loaded = store.load_personas_from_file(str(save_file))
+    assert loaded is not None, "a bad allowlist must not drop every persona"
+    assert set(loaded) == {"gated", "other"}
+    assert loaded["gated"].is_addressable_from(
+        _origin(server="347812763093172225")) is True
+
+
+def test_origin_allowlist_bare_string_is_one_entry(base_persona_args):
+    """`"origin_allowlist": "12345"` (a one-character JSON typo) must not
+    explode into one entry per character, which bricked the persona from every
+    origin including the intended one."""
+    p = Persona(**base_persona_args, origin_allowlist="12345")
+    assert p.get_origin_allowlist() == ["12345"]
+    assert p.is_addressable_from(_origin(server="12345")) is True
+    assert p.is_addressable_from(_origin(server="1")) is False
+
+
+def test_origin_allowlist_comma_inside_an_entry_never_widens(base_persona_args):
+    """Entries are parsed one at a time. Joining them with ',' first let a
+    comma pasted INSIDE one entry grant a guild the operator never listed —
+    a typo that widens reachability, which this field must never do."""
+    p = Persona(**base_persona_args, origin_allowlist=["12345,99999"])
+    assert p.is_addressable_from(_origin(server="12345")) is False
+    assert p.is_addressable_from(_origin(server="99999")) is False
+    assert p.origin_allowlist_is_malformed() is True
+
+
+def test_origin_allowlist_rejects_non_list_values(base_persona_args):
+    """Anything that is not a list/tuple/str fails closed rather than being
+    coerced into a policy nobody wrote."""
+    p = Persona(**base_persona_args, origin_allowlist={"guild": "12345"})
+    assert p.origin_allowlist_is_malformed() is True
+    assert p.is_addressable_from(_origin(server="12345")) is False
+
+
+def test_declared_empty_origin_allowlist_survives_a_save(base_persona_args):
+    """A persona shipped with `"origin_allowlist": []` keeps the key on save —
+    it is the operator's only in-file hint that the knob exists, and erasing it
+    leaves the persona unrestricted with nothing suggesting it could be
+    otherwise."""
+    from src.personas import store
+
+    declared = Persona(**base_persona_args, origin_allowlist=[])
+    never_set = Persona(persona_name="plain", model_name="m", prompt="p")
+    assert declared.origin_allowlist_is_declared() is True
+    assert never_set.origin_allowlist_is_declared() is False
+
+    by_name = {e["name"]: e for e in
+               store.to_dict({"tester": declared, "plain": never_set})}
+    assert by_name["tester"]["origin_allowlist"] == []
+    assert "origin_allowlist" not in by_name["plain"]
+
+
+def test_origin_allowlist_roundtrips_through_store(tmp_path, base_persona_args):
+    import json
+
+    from src.personas import store
+
+    gated = Persona(**base_persona_args, origin_allowlist=["12345"])
+    plain = Persona(persona_name="plain", model_name="m", prompt="p")
+    serialized = store.to_dict({"tester": gated, "plain": plain})
+    by_name = {e["name"]: e for e in serialized}
+    assert by_name["tester"]["origin_allowlist"] == ["12345"]
+    # An unrestricted persona keeps its on-disk shape — no new key appears.
+    assert "origin_allowlist" not in by_name["plain"]
+
+    save_file = tmp_path / "personas.json"
+    save_file.write_text(json.dumps({"personas": serialized, "models": {}}))
+    loaded = store.load_personas_from_file(str(save_file))
+    assert loaded["tester"].get_origin_allowlist() == ["12345"]
+    assert loaded["tester"].is_addressable_from(_origin(server="12345")) is True
+    assert loaded["tester"].is_addressable_from(_origin(server="1")) is False
+    assert loaded["plain"].get_origin_allowlist() == []
+    assert loaded["plain"].is_addressable_from(_origin(server="1")) is True
+
+
+def test_load_persona_json_without_origin_allowlist(tmp_path):
+    """A persona file written before DP-330 loads unrestricted, not blocked."""
+    import json
+
+    from src.personas import store
+
+    save_file = tmp_path / "old.json"
+    save_file.write_text(json.dumps(
+        {"personas": [{"name": "legacy", "model_name": "m", "prompt": "hi"}],
+         "models": {}}))
+    loaded = store.load_personas_from_file(str(save_file))
+    assert loaded["legacy"].get_origin_allowlist() == []
+    assert loaded["legacy"].is_addressable_from(_origin(server="1")) is True
+
+
+def test_system_persona_load_accepts_origin_allowlist(tmp_path, monkeypatch):
+    """The system-persona loader is a second, independently maintained call
+    into Persona() — a field wired into only one of them is the classic miss."""
+    import json
+
+    from src.personas import store
+
+    sys_file = tmp_path / "system.json"
+    sys_file.write_text(json.dumps({"personas": [
+        {"name": "sysgated", "model_name": "m", "prompt": "p",
+         "origin_allowlist": ["12345"]},
+        {"name": "sysplain", "model_name": "m", "prompt": "p"},
+    ]}))
+    monkeypatch.setattr(global_config, "SYSTEM_PERSONA_FILE", str(sys_file))
+    loaded = store.load_system_personas_from_file()
+    assert loaded["sysgated"].get_origin_allowlist() == ["12345"]
+    assert loaded["sysgated"].is_addressable_from(_origin(server="1")) is False
+    assert loaded["sysplain"].is_addressable_from(_origin(server="1")) is True
+
+
+def test_hypr_ships_with_an_empty_origin_allowlist():
+    """DP-330: the guild id is the operator's, and this template lives in a
+    public repo — it ships with the field present but empty, and the operator
+    fills it in their own data/personas.json. `to_dict` keys off the field
+    being DECLARED so that empty list survives the first mutating dev
+    command."""
+    assert _hypr_entry()["origin_allowlist"] == []

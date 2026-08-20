@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type
 
 from config.global_config import DEFAULT_PERSONA
+from src.origin import split_allowlist_entries
 from src.persona import ExecutionMode, MemoryMode, Persona
 from src.tool_policy import KNOWN_OVERRIDES
 
@@ -276,6 +277,36 @@ def _set_tool_policy(args: List[str], persona: Persona) -> Tuple[Optional[str], 
         return f"Error: {e}", False
 
 
+def _parse_string_list_arg(
+        field: str,
+        raw: str,
+        *,
+        split_commas: bool = False,
+) -> Tuple[Optional[List[str]], Optional[str]]:
+    """Shared `<value ...|json list|none>` argument shape for the string-list
+    fields. Returns ``(values, error)`` — exactly one is non-None.
+
+    `none`/`clear`/`null`/`[]` all mean the empty list. JSON members may be
+    strings or numbers (a Discord guild id is naturally written unquoted) and
+    are stringified; `split_commas` additionally splits bare `a,b` input, for
+    fields whose entries can be pasted comma-separated.
+    """
+    if raw.lower() in ('none', 'clear', 'null', '[]'):
+        return [], None
+    if raw.startswith('['):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return None, f"Error: Invalid JSON list for {field}."
+        if not isinstance(parsed, list) or not all(
+                isinstance(x, (str, int)) and not isinstance(x, bool) for x in parsed):
+            return None, f"Error: {field} must be a JSON list of strings."
+        return [str(x) for x in parsed], None
+    if split_commas:
+        return split_allowlist_entries(raw), None
+    return raw.split(), None
+
+
 def _set_explicit_overrides(args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
     """`set explicit_overrides <name ...|json list|none>` — the DP-277 gated
     path for the composition-invariant overrides. Deliberately NOT patchable
@@ -288,25 +319,119 @@ def _set_explicit_overrides(args: List[str], persona: Persona) -> Tuple[Optional
             False,
         )
     raw = ' '.join(args[1:]).strip()
-    overrides: List[str]
-    if raw.lower() in ('none', 'clear', 'null', '[]'):
-        overrides = []
-    elif raw.startswith('['):
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            return "Error: Invalid JSON list for explicit_overrides.", False
-        if not isinstance(parsed, list) or not all(isinstance(x, str) for x in parsed):
-            return "Error: explicit_overrides must be a JSON list of strings.", False
-        overrides = parsed
-    else:
-        overrides = raw.split()
+    overrides, error = _parse_string_list_arg('explicit_overrides', raw)
+    if error is not None or overrides is None:
+        return error, False
     try:
         persona.set_explicit_overrides(overrides)
     except ValueError as e:
         return f"Error: {e}", False
     shown = ', '.join(persona.get_explicit_overrides()) or 'none'
     return f"Explicit overrides for {persona.get_name()} set to: {shown}.", True
+
+
+def _describe_origin_allowlist(persona: Persona) -> str:
+    """`what origin_allowlist` — DP-330. Reports the authored entries AND
+    whether they are actually in force: a wholly-malformed list fails closed,
+    so printing the entries alone would describe a policy the persona is not
+    running."""
+    name = persona.get_name()
+    # Unreachable is checked FIRST and independently of `entries`. Both
+    # fail-closed shapes that leave the normalized list empty — a non-list
+    # value, and a list whose every entry was rejected — used to fall into the
+    # branch below and be reported as "unrestricted (any origin may address
+    # it)", which is the exact opposite of the persona's actual state and the
+    # failure this function's docstring says it exists to prevent.
+    if persona.origin_allowlist_is_unreachable():
+        return (
+            f"Origin allowlist for '{name}': ⚠️ UNREACHABLE from every origin "
+            f"— nothing in {persona.get_origin_allowlist_raw()!r} parsed as "
+            "'server_id[/channel_id[/author_id]]'. Fix the entries, or clear "
+            "the field to make it unrestricted."
+        )
+    entries = persona.get_origin_allowlist()
+    if not entries:
+        return (f"Origin allowlist for '{name}': "
+                "unrestricted (any origin may address it).")
+    shown = ', '.join(entries)
+    if persona.origin_allowlist_is_malformed():
+        # Name the dropped entries specifically. The authored list is what is
+        # stored (so the typo stays visible in the file), which means printing
+        # it alone credits the persona with grants it is not enforcing.
+        dropped = ', '.join(repr(e) for e in persona.get_origin_allowlist_rejected())
+        return (
+            f"Origin allowlist for '{name}': {shown} — ⚠️ dropped as malformed "
+            f"and NOT in force: {dropped}."
+        )
+    return f"Origin allowlist for '{name}': {shown}."
+
+
+def _set_origin_allowlist(args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
+    """`set origin_allowlist <entry ...|json list|none>` — DP-330.
+
+    Entries use the OPERATOR_ALLOWLIST form `server_id[/channel_id[/author_id]]`.
+    Deliberately NOT patchable: this field decides who may reach the persona at
+    all, so the operator-gated dev command is its only mutation surface (same
+    reasoning as `set explicit_overrides`).
+
+    ⚠️ **This command always targets the ADDRESSED persona** — there is no
+    cross-persona form. So it is possible to lock yourself out with it, and the
+    undo is not reachable from the surface that did it: `is_origin_allowed`
+    refuses every non-Discord transport once the list is non-empty, so setting
+    one from the portal makes the portal's own `dev_command` route answer
+    "Persona '<name>' is not available from this channel." on the next call.
+    Recovery is a Discord origin the list admits, or editing
+    `data/personas.json` and restarting — NOT "run it while addressing a
+    different persona", which docs claimed for a while and which silently
+    clears the *other* persona's restriction instead.
+    """
+    if len(args) < 2:
+        return (
+            "Usage: set origin_allowlist <server_id[/channel_id[/author_id]] ...|"
+            "json list|none>. Empty means unrestricted.",
+            False,
+        )
+    raw = ' '.join(args[1:]).strip()
+    entries, error = _parse_string_list_arg(
+        'origin_allowlist', raw, split_commas=True)
+    if error is not None or entries is None:
+        return error, False
+    # `mutated` drives the audit row AND a full personas.json rewrite, so it has
+    # to mean "the field changed", not "a set command ran". Returning True
+    # unconditionally logged an `origin_allowlist_change` with identical
+    # prior/new state for `set origin_allowlist none` on a persona that never
+    # had the key — and permanently added `"origin_allowlist": []` to its
+    # on-disk shape — diluting the one signal this ticket added for spotting a
+    # real widening.
+    prior = persona.get_origin_allowlist()
+    prior_declared = persona.origin_allowlist_is_declared()
+    stored = persona.set_origin_allowlist(entries)
+    mutated = (stored != prior
+               or persona.origin_allowlist_is_declared() != prior_declared)
+    name = persona.get_name()
+    if persona.origin_allowlist_is_unreachable():
+        # Fail-closed: nothing parsed, so the persona now matches no origin.
+        # Report it as the terminal state it is, and name the only recovery
+        # that actually exists — `set origin_allowlist none` is offered, but
+        # only a Discord origin can deliver it, and not this one.
+        return (
+            f"⚠️ origin_allowlist for {name} set to {raw!r}, but NONE of it "
+            "parsed as 'server_id[/channel_id[/author_id]]'. The persona is "
+            f"now UNREACHABLE from every origin. Fix it by editing {name}'s "
+            "`origin_allowlist` in data/personas.json and restarting — this "
+            "command can no longer reach the persona to undo itself.",
+            mutated,
+        )
+    if persona.origin_allowlist_is_malformed():
+        shown = ', '.join(stored)
+        return (
+            f"⚠️ origin_allowlist for {name} set to {raw!r}, but some entries "
+            "are not 'server_id[/channel_id[/author_id]]' and were dropped. "
+            f"In force: {shown}.",
+            mutated,
+        )
+    shown = ', '.join(stored) or 'unrestricted'
+    return f"Origin allowlist for {name} set to: {shown}.", mutated
 
 
 def _mission_setter(
@@ -657,6 +782,14 @@ PERSONA_FIELDS: List[PersonaField] = [
             + f". Valid: {', '.join(sorted(KNOWN_OVERRIDES))}."
         ),
         set_cli=_set_explicit_overrides,
+    ),
+    PersonaField(
+        # DP-330: privileged field — no patch_key on purpose. It decides which
+        # origins may address the persona at all, so it must not be settable
+        # from the PATCH route the portal exposes.
+        name='origin_allowlist',
+        describe=_describe_origin_allowlist,
+        set_cli=_set_origin_allowlist,
     ),
 ]
 

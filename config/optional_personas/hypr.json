@@ -40,7 +40,8 @@
         "ask": [],
         "capabilities_required": []
       },
-      "meta_visible": false
+      "meta_visible": false,
+      "origin_allowlist": []
     }
   ]
 }
