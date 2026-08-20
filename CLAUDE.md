@@ -103,6 +103,14 @@ To support multiple agents working concurrently, the following rules are mandato
 - **Every** task must have a corresponding file in `memory/project/tasks/DP-XXX.md`.
 
 ### 2. Workspace Isolation
+- **Before touching anything, confirm the repo is current with the remote.**
+  `git fetch origin`, then compare: `git status -sb` /
+  `git log --oneline HEAD..origin/master`. If behind, fast-forward *before*
+  reading, planning, or editing — work done on a stale tree is wasted twice (the
+  bug may already be fixed upstream, and the file you reasoned about is not the
+  file that ships). Same for the notes repo: `git -C memory fetch` +
+  `git -C memory status -sb`. The SessionStart hook's git-sync line and the
+  status-line git mark are a stale hint, not proof — fetch anyway.
 - **MUST** use Git Worktrees — for *all* DP-XXX work, including solo single-task
   sessions, not just when agents run concurrently. The main repo directory is a
   shared mutable surface and may already hold another task's uncommitted edits.
