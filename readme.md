@@ -17,23 +17,23 @@ An async, provider-agnostic LLM orchestration engine for chatbot automation: IT 
 
 ```mermaid
 flowchart TB
-    IF["<b>Interfaces</b><br/>Discord · Gmail · Portal · Zammad"]
-    CORE["<b>ChatSystem</b> — orchestration kernel<br/>streaming · tool loop · personas"]
-    EXEC["<b>TextEngine</b> → LLM providers<br/><b>ToolManager</b> → Zammad · Web · Memory"]
-    DATA["<b>Memory</b> &nbsp;·&nbsp; <b>Background Agents</b><br/>SQLite + sqlite-vec / Hindsight &nbsp;·&nbsp; SqliteConsolidator · Triage · Dispatch"]
+    EDGE["<b>Client Interfaces &amp; Security Edge</b><br/>Discord · Gmail · Portal &nbsp;·&nbsp; Bootstrap · Vault · Scrubbers"]
+    CORE["<b>Core Orchestration Engine Monolith</b><br/>ChatSystem Kernel · RequestBuilder · PersonaStore · ConfirmationManager · TurnPersistence"]
+    DRIVERS["<b>Pluggable Drivers &amp; Tooling Engine</b><br/>ToolLoop · TextEngine → LLM Providers &nbsp;·&nbsp; ToolManager · MCP Bridge · Proposals"]
+    FLEET["<b>Autonomous Worker Fleet &amp; Storage Infrastructure</b><br/>Background Daemons (Consolidators/Triage/Dispatch) &nbsp;·&nbsp; Memory Subsystem · SQLite / Hindsight"]
 
-    IF   --> CORE
-    CORE --> EXEC
-    EXEC --> DATA
+    EDGE    --> CORE
+    CORE    --> DRIVERS
+    DRIVERS --> FLEET
 
-    classDef iface  fill:#E3F2FD,stroke:#455A64,color:#1A1A1A;
-    classDef core   fill:#FFF3E0,stroke:#455A64,color:#1A1A1A;
-    classDef exec   fill:#F3E5F5,stroke:#455A64,color:#1A1A1A;
-    classDef data   fill:#E8F5E9,stroke:#455A64,color:#1A1A1A;
-    class IF iface;
-    class CORE core;
-    class EXEC exec;
-    class DATA data;
+    classDef edge_s   fill:#E3F2FD,stroke:#455A64,color:#1A1A1A;
+    classDef core_s   fill:#FFF3E0,stroke:#455A64,color:#1A1A1A;
+    classDef driver_s fill:#F3E5F5,stroke:#455A64,color:#1A1A1A;
+    classDef fleet_s  fill:#E8F5E9,stroke:#455A64,color:#1A1A1A;
+    class EDGE edge_s;
+    class CORE core_s;
+    class DRIVERS driver_s;
+    class FLEET fleet_s;
 ```
 
 Async pipeline: any interface produces a request, `ChatSystem` runs a streaming tool loop over the configured persona's model, and resolved turns persist into a tiered memory store while background agents triage tickets and consolidate long-term memory out-of-band.

@@ -55,8 +55,12 @@ eval_harnesses/results/*.log
 .eval_cache/
 eval_harnesses/suites/memory_recall/fixtures/.test_persona_seeded.json
 
-# Local exploration artifacts (not for the public repo)
+# Local exploration artifacts & dev-machine configs (not for public repo)
 scratch/
+gatus_config.yaml
+services/zammad-webhook-proxy/
+run_derpr_hstest.cmd
 
 # Parallel-agent worktrees (each has a .venv junction to the shared venv)
 worktrees/
+
