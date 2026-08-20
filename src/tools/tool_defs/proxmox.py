@@ -4,7 +4,7 @@ Node/guest power ops + koboldcpp model swap on :5001, executed over SSH to the
 pve node. Destructive tools are ``is_write: True`` so the ConfirmationManager
 parks them for human approval regardless of persona execution mode;
 ``reboot_node`` is additionally ``irreversible``. Read tools (`pve_status`,
-`list_models`) are ungated.
+`list_models`, `gpu_status`) are ungated.
 
 All results originate from infra we control (not attacker text) →
 ``produces_untrusted: False``; ``locality: "network"`` (SSH to the node);
@@ -88,9 +88,33 @@ PROXMOX_TOOLS: List[Dict[str, Any]] = [
         "function": {
             "name": "list_models",
             "description": (
-                "List the koboldcpp models configured for the GPU container's "
-                ":5001 endpoint and which one is currently active. Only one model "
-                "runs at a time. Use before set_active_model to see the choices."
+                "List the koboldcpp models installed on the GPU container for its "
+                ":5001 endpoint, and which one is currently active. Read live off "
+                "the box, so a model installed since the last deploy appears here. "
+                "Only one runs at a time. Use before set_active_model to see the "
+                "choices."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "is_write": False,
+        "service_binding": "proxmox",
+        # exfil_capable=False: no arguments at all, so there is no channel for a
+        # model-controlled payload to ride out over the SSH (see DP-263).
+        "capabilities": _caps(exfil_capable=False),
+        "function": {
+            "name": "gpu_status",
+            "description": (
+                "Read the GPU container's VRAM live from the card's sysfs: total, "
+                "used and free MiB per card. Free MiB is the headroom beside the "
+                "model that is already loaded — size a bigger context for the "
+                "running model against it. A model swap gets back whatever the "
+                "unit it replaces is holding, so size a set_active_model "
+                "candidate against total minus what stays resident, not against "
+                "free. Never reason from the card's advertised capacity or from "
+                "a number you remember."
             ),
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
@@ -157,10 +181,12 @@ PROXMOX_TOOLS: List[Dict[str, Any]] = [
         "type": "function",
         "is_write": True,
         "service_binding": "proxmox",
-        # exfil_capable=False: arg is a name from a fixed config map, no payload
-        # can ride out over the SSH → not a data-exfil vector, so it must never
-        # trip the exfil-composition rules. Destruction risk is nil (reversible
-        # model swap) and any write still parks for confirmation.
+        # exfil_capable=False: the arg is only a lookup key against the units
+        # discovered on the box (DP-332) — the handler sends the *discovered* unit
+        # name, never the caller's string, so no payload can ride out over the
+        # SSH. Not a data-exfil vector, so it must never trip the
+        # exfil-composition rules. Destruction risk is nil (reversible model swap)
+        # and any write still parks for confirmation.
         "capabilities": _caps(exfil_capable=False),
         "function": {
             "name": "set_active_model",
@@ -175,7 +201,7 @@ PROXMOX_TOOLS: List[Dict[str, Any]] = [
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "Friendly model name from list_models (e.g. \"fable\", \"gemma\").",
+                        "description": "Friendly model name exactly as list_models reports it (e.g. \"fable\", \"gemma\").",
                     },
                 },
                 "required": ["name"],
