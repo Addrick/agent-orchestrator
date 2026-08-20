@@ -643,6 +643,33 @@ PVE_SSH_KEY = os.environ.get("PVE_SSH_KEY", "/run/secrets/pve_derpr")
 PVE_SSH_TIMEOUT = float(os.environ.get("PVE_SSH_TIMEOUT", "20"))
 PVE_MODEL_HOST_VMID = os.environ.get("PVE_MODEL_HOST_VMID", "101")
 
+# HuggingFace model provisioning (DP-265). Read-only HF Hub API searches plus a
+# parked `install_model` that hands ONE node-side script the repo/file/name and
+# the size+sha256 derpr itself read from HF. Rides the same SSH transport as the
+# proxmox tools (PVE_SSH_*) — there is no second key and no second host.
+#
+# HF_TOOLS_ENABLED — master switch for hf_search/hf_files/install_model/
+#   install_status. The HuggingFaceIntegration always registers (startup-wiring
+#   contract) and every call short-circuits with a clear error when this is off.
+#   Default-off for the same reason PVE_TOOLS_ENABLED is: an instance that has
+#   not deployed the node-side script must not be able to park an install that
+#   can only fail.
+# HF_API_BASE — HF Hub API root. Overridable so a test or a mirror can point
+#   elsewhere; never build a URL from a model-supplied string against a
+#   different host.
+# HF_API_TOKEN — optional. Only needed for gated/private repos. Register the
+#   ref in the vault so the egress scrubber redacts it (DP-225).
+# HF_HTTP_TIMEOUT — seconds for one HF API read. These are metadata calls only
+#   (search + file tree); the multi-GB download happens on the node, detached
+#   under systemd-run, and is never held open by the tool loop.
+# HF_SEARCH_LIMIT_MAX — ceiling on hf_search's `limit`. A model asking for 500
+#   results is asking to fill its own context with untrusted text.
+HF_TOOLS_ENABLED = os.environ.get("HF_TOOLS_ENABLED", "False").lower() in ("true", "1", "yes", "on")
+HF_API_BASE = os.environ.get("HF_API_BASE", "https://huggingface.co")
+HF_API_TOKEN = os.environ.get("HF_API_TOKEN", "")
+HF_HTTP_TIMEOUT = float(os.environ.get("HF_HTTP_TIMEOUT", "20"))
+HF_SEARCH_LIMIT_MAX = int(os.environ.get("HF_SEARCH_LIMIT_MAX", "20"))
+
 # =============================================================================
 # --- MCP Client (DP-268) ---
 # =============================================================================

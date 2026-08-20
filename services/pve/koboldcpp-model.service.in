@@ -1,0 +1,15 @@
+[Unit]
+Description=koboldcpp @@NAME@@ (installed by derpr-model-install, job @@JOB_ID@@)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@@KCPP_DIR@@
+ExecStart=@@KCPP_DIR@@/koboldcpp --model @@MODEL_PATH@@ --port @@PORT@@ --host 0.0.0.0 --usevulkan 0 --gpulayers 999 --contextsize @@CONTEXTSIZE@@ --quantkv 1 --blasbatchsize 1024 --flashattention --threads 7 --multiuser 4 --smartcache 4
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

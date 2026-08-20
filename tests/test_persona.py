@@ -678,7 +678,10 @@ def test_hypr_is_not_seeded_into_fresh_deployments():
 def test_hypr_declares_the_proxmox_binding_and_matching_policy():
     hypr = _hypr_entry()
     assert hypr["name"] == "hypr"
-    assert hypr["service_bindings"] == ["proxmox"]
+    # DP-265 added the second binding: hf_search/hf_files/install_model/
+    # install_status provision a model onto the same node. Ordered pin, because
+    # both are deliberate and a third would be a widening nobody reviewed.
+    assert hypr["service_bindings"] == ["proxmox", "huggingface"]
     # Binding and tool list are two independent gates (request_builder filters on
     # the binding, ToolPolicy on the names) — a persona with only one of them
     # loads fine and then silently has no tools, so pin both.
@@ -686,19 +689,35 @@ def test_hypr_declares_the_proxmox_binding_and_matching_policy():
     assert set(hypr["tool_policy"]["allow"]) == set(hypr["enabled_tools"])
 
 
-def test_hypr_enabled_tools_are_all_real_proxmox_tools():
-    """Guards the rename/typo case: a tool name that no longer exists is inert."""
+def test_hypr_enabled_tools_are_all_real_tools_of_its_bindings():
+    """Guards the rename/typo case: a tool name that no longer exists is inert.
+
+    Both binding's toolsets, exactly — not a subset. hypr is the only persona
+    holding either, so a tool added to one of those modules and not listed here
+    is a tool nothing can reach, and one listed here but deleted from the module
+    is a silently dead name in the allow list.
+    """
+    from src.tools.tool_defs.huggingface import HUGGINGFACE_TOOLS
     from src.tools.tool_defs.proxmox import PROXMOX_TOOLS
 
     hypr = _hypr_entry()
-    real = {t["function"]["name"] for t in PROXMOX_TOOLS}
+    real = {t["function"]["name"] for t in PROXMOX_TOOLS + HUGGINGFACE_TOOLS}
     assert set(hypr["enabled_tools"]) == real
 
 
-def test_hypr_holds_no_binding_beyond_proxmox():
-    """Blast radius: the box operator must not also reach zammad/fixr/agents."""
+def test_hypr_holds_no_binding_beyond_the_box_it_operates():
+    """Blast radius: the box operator must not also reach zammad/fixr/agents.
+
+    DP-265 widened this by one binding on purpose — `huggingface` provisions
+    models onto the very node `proxmox` operates, so it is the same blast
+    radius, not a new one. Everything that would cross into another subsystem
+    (tickets, code edits, subagents, arbitrary MCP servers) stays out.
+    """
     hypr = _hypr_entry()
-    assert hypr["service_bindings"] == ["proxmox"]
+    assert set(hypr["service_bindings"]) == {"proxmox", "huggingface"}
+    assert not set(hypr["service_bindings"]) & {
+        "zammad", "fixr", "agents", "voice", "mcp", "proposals",
+    }
     assert "*" not in hypr["enabled_tools"]
 
 
@@ -737,7 +756,7 @@ def test_hypr_loads_unquarantined():
     )
     assert loaded is not None and "hypr" in loaded
     assert loaded["hypr"].get_security_block_reasons() == []
-    assert loaded["hypr"].get_service_bindings() == ["proxmox"]
+    assert loaded["hypr"].get_service_bindings() == ["proxmox", "huggingface"]
 
 
 # --- DP-330: persona origin allowlist --------------------------------------

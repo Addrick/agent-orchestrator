@@ -3,3 +3,10 @@
 # "bad interpreter: /bin/sh^M".
 .githooks/** text eol=lf
 *.sh        text eol=lf
+
+# DP-265: the pve node artifacts are extensionless shell scripts and a systemd
+# unit template, deployed by scp straight from a checkout. A CRLF checkout on a
+# Windows dev box would ship "bad interpreter: /bin/bash^M" to the node.
+services/pve/derpr-model-install  text eol=lf
+services/pve/derpr-pve-wrapper    text eol=lf
+services/pve/*.in                 text eol=lf
