@@ -709,9 +709,13 @@ class HindsightBackend(MemoryBackend):
         source_persona: str,
         untrusted: bool = False,
         metadata: Optional[Dict[str, Any]] = None,
+        document_id: Optional[str] = None,
     ) -> str:
         # Fire-and-forget: enqueue + return. ID isn't known until the worker
         # POSTs; callers that need a synchronous handle use the legacy path.
+        # An explicit document_id makes the retain idempotent on that key
+        # (_build_item switches to update_mode='replace'), which is how a
+        # re-ingest supersedes a document instead of racing a delete.
         tags = list(scope_tags) + [
             f"persona:{source_persona}",
             f"role:{role}",
@@ -720,6 +724,7 @@ class HindsightBackend(MemoryBackend):
         item = self._build_item(
             bank_id=bank_id, content=content, tags=tags,
             scope_tags=scope_tags, timestamp=timestamp, metadata=metadata,
+            document_id=document_id,
         )
         q = await self._ensure_worker(bank_id)
         await q.put(item)

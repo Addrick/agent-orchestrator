@@ -89,6 +89,32 @@ async def test_retain_turn_threads_untrusted_tag(backend: HindsightBackend) -> N
 
 
 @pytest.mark.asyncio
+async def test_retain_turn_explicit_document_id_replaces_in_place(
+    backend: HindsightBackend,
+) -> None:
+    """A caller re-ingesting a known document supersedes it instead of deleting it."""
+    captured: Dict[str, Any] = {}
+
+    async def fake_aretain(bank_id: str, items, async_=True) -> Dict[str, Any]:
+        captured["items"] = items
+        return {"id": "x"}
+
+    client = backend._get_client()
+    with patch.object(client, "aretain", side_effect=fake_aretain):
+        await backend.retain_turn(
+            "alice", "conversation", "the full transcript this time",
+            timestamp=datetime.now(timezone.utc),
+            scope_tags=["channel:session_abc"],
+            source_persona="alice",
+            document_id="alice:session_abc:2026-08-20T20:35:51+00:00",
+        )
+        await backend.aclose()
+    item = captured["items"][0]
+    assert item["document_id"] == "alice:session_abc:2026-08-20T20:35:51+00:00"
+    assert item["update_mode"] == "replace"
+
+
+@pytest.mark.asyncio
 async def test_retain_turn_trusted_default(backend: HindsightBackend) -> None:
     captured: Dict[str, Any] = {}
 
