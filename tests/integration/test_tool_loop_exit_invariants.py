@@ -343,7 +343,29 @@ async def test_budget_exhaustion_answer_is_persisted_and_retained(
     # ...and RETAINED. This is the half that was structurally impossible
     # before: `_orchestrate` gates retention on response_type, so a real answer
     # shipped as DEV_COMMAND would never reach the memory bank.
-    assert any(k.get("role") == "assistant" for k in retained)
+    assistant_retained = [k for k in retained if k.get("role") == "assistant"]
+    assert assistant_retained
+
+    # And what reached the bank is the PROSE, not the footer under it.
+    #
+    # This spy existed before and asserted only that retention *happened*,
+    # which is a smoke test wearing an invariant's clothes: it passed while the
+    # embedded content was the whole reply, footer included. Tool names and
+    # arguments then become recallable semantic memories and replay to the
+    # model next turn as the persona's own prior words — so `_LoopFinishedEvent`
+    # carries `retain_text` and `_orchestrate` embeds that instead.
+    #
+    # `content` is read, not just counted. A captured payload nobody
+    # interrogates is a fixture, not a test.
+    embedded = assistant_retained[0]["content"]
+    assert embedded.startswith("Nothing installable matched.")
+    assert "`get_agent_status`" not in embedded, (
+        "the machine-generated call list was embedded into the memory bank"
+    )
+    assert f"of {MAX_TOOL_CALLS} used" not in embedded
+    # The footer is still SHOWN — the split is between display and recall, not
+    # a decision to hide the spend.
+    assert "`get_agent_status`" in done.text
 
 
 @pytest.mark.asyncio

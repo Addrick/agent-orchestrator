@@ -200,6 +200,18 @@ Load-bearing details:
   whose measured turn motivated this ticket**, after paying for the subprocess.
   The parse is now gated on `tools`. Relatedly, `_answer_without_tools` prefers
   its accumulated deltas over an empty `full_text` rather than the reverse.
+
+  **`local` had the same defect and it was invisible** — `_kobold_stream` also
+  parsed unconditionally, but sets `full_text = tool_parser.visible_text`, so
+  the prose survived and only a phantom `tool_calls` event was emitted. That
+  graceful degradation is exactly why the agy bug went unseen on the dev box.
+  `_kobold_stream` now takes `parse_tool_calls`, passed as `bool(tool_list)` /
+  `bool(tools_advertised)` by its two callers.
+
+  `tests/test_toolless_completion_contract.py` pins both halves across agy, cc
+  and local at their **transport** seams (CLI subprocess, HTTP stream), because
+  every other DP-335 test mocks `stream_messages` or `generate_response` —
+  above every provider adapter — and so could not see any of this.
 - **Best-effort, and it degrades to the deterministic list.** Every exception is
   swallowed: this already runs on an unhappy exit, and letting it raise would
   turn a turn that merely ran long into an error the user has to interpret.
