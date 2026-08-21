@@ -109,6 +109,19 @@ _STATUS_FIELDS: Dict[str, type] = {
 _MAX_STATUS_STR = 200
 
 _GIB = 1024 ** 3
+_MIB = 1024 ** 2
+
+#: Bytes per KV element in the units ``install_model`` writes. Deliberately a
+#: constant and not a parameter: ``koboldcpp-model.service.in`` hardcodes
+#: ``--quantkv 1``, and no tool in this module exposes a knob for it, so the
+#: model has no reachable action that could change it.
+_KV_BYTES_PER_ELEM = 1
+
+#: koboldcpp's compute buffer and the headroom to leave beside it, in MiB.
+#: Measured on the R9700; they are the two terms of the VRAM budget that are
+#: neither the model buffer nor the KV cache.
+_COMPUTE_BUFFER_MIB = 1010
+_VRAM_MARGIN_MIB = 500
 
 
 def _err(message: str) -> Dict[str, Any]:
@@ -276,7 +289,12 @@ class HuggingFaceToolHandler:
             )
         if not isinstance(payload, dict):
             return _err(f"job {value} returned a non-object status")
-        return {"status": "ok", "job": _clean_status(payload)}
+        job = _clean_status(payload)
+        result: Dict[str, Any] = {"status": "ok", "job": job}
+        note = _kv_budget_note(job)
+        if note:
+            result["note"] = note
+        return result
 
     # -- write tool (parked for confirmation) --------------------------------
 
@@ -365,6 +383,75 @@ class HuggingFaceToolHandler:
                 "against gpu_status first."
             ),
         }
+
+
+def _kv_budget_note(job: Dict[str, Any]) -> Optional[str]:
+    """The KV arithmetic for a finished install — evaluated, not recited.
+
+    DP-337: ``n_layer`` / ``n_kv_head`` / ``head_dim`` exist *only* in this
+    result (the node folds them in from ``gguf_header.py`` once the bytes
+    verify), so this is the one place the formula has its own inputs in hand.
+    It used to live in hypr's persona prompt, roughly four thousand tokens
+    upstream of the values it needs and unversioned relative to this code.
+
+    ``None`` while the job is unfinished: before the verify step the shape is
+    absent because it has not been read yet, which is "not yet" and not
+    "unreadable", and saying the wrong one of those is worse than saying
+    nothing.
+    """
+    if job.get("state") != "done":
+        return None
+    n_layer = job.get("n_layer")
+    n_kv_head = job.get("n_kv_head")
+    head_dim = job.get("head_dim")
+    if not (
+        isinstance(n_layer, int) and n_layer > 0
+        and isinstance(n_kv_head, int) and n_kv_head > 0
+        and isinstance(head_dim, int) and head_dim > 0
+    ):
+        # Best-effort by design on the node side — a header quirk must never
+        # fail an install whose bytes are good — so the absence is reported as
+        # a fact about this file rather than swallowed.
+        return (
+            "This gguf's header did not publish n_layer / n_kv_head / "
+            "head_dim, so the KV cache cannot be computed for it. Size the "
+            "contextsize by measurement instead: read gpu_status before and "
+            "after the unit is first enabled, and trust that difference over "
+            "any estimate."
+        )
+    per_token = 2 * n_layer * n_kv_head * head_dim * _KV_BYTES_PER_ELEM
+    note = (
+        f"KV cache for this model: {per_token} bytes per token "
+        f"(2 x n_layer {n_layer} x n_kv_head {n_kv_head} x head_dim "
+        f"{head_dim} x {_KV_BYTES_PER_ELEM} byte, the unit's --quantkv 1). "
+        "It scales linearly with contextsize, so halving the context halves "
+        "it."
+    )
+    ctx = job.get("contextsize")
+    if isinstance(ctx, int) and ctx > 0:
+        kv_mib = per_token * ctx / _MIB
+        size_bytes = job.get("size_bytes")
+        model_mib = (
+            size_bytes / _MIB if isinstance(size_bytes, int) and size_bytes > 0
+            else None
+        )
+        note += (
+            f" At the installed contextsize {ctx} that is {kv_mib:.0f} MiB."
+        )
+        if model_mib is not None:
+            total = (
+                model_mib + kv_mib + _COMPUTE_BUFFER_MIB + _VRAM_MARGIN_MIB
+            )
+            note += (
+                f" With the model buffer (~{model_mib:.0f} MiB, the gguf's own "
+                f"size), ~{_COMPUTE_BUFFER_MIB} MiB of compute buffer and "
+                f"~{_VRAM_MARGIN_MIB} MiB of margin, this unit wants roughly "
+                f"{total:.0f} MiB. Check that against gpu_status TOTAL MiB "
+                "before anyone enables it."
+            )
+        else:
+            note += " Check the total against gpu_status before enabling it."
+    return note
 
 
 def _clean_status(payload: Dict[str, Any]) -> Dict[str, Any]:

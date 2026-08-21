@@ -138,7 +138,11 @@ PROXMOX_TOOLS: List[Dict[str, Any]] = [
                 "unit it replaces is holding, so size a set_active_model "
                 "candidate against total minus what stays resident, not against "
                 "free. Never reason from the card's advertised capacity or from "
-                "a number you remember."
+                "a number you remember. Overcommitting VRAM does not raise an "
+                "error: it spills to GTT and decode throughput drops by roughly "
+                "half, so a unit that \"started fine\" can be the reason the box "
+                "went slow. That is why a context size is worked out against "
+                "these numbers and discussed, not simply picked."
             ),
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
