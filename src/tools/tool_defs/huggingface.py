@@ -178,8 +178,16 @@ HUGGINGFACE_TOOLS: List[Dict[str, Any]] = [
                             "koboldcpp --contextsize for the new unit. Defaults "
                             "to a deliberately small 8192, because the unit "
                             "lands disabled and a human tunes this against "
-                            "gpu_status before enabling it. KV cache scales "
-                            "linearly with this number."
+                            "gpu_status before enabling it. This is the ONLY "
+                            "VRAM knob any tool here exposes. What has to fit "
+                            "under gpu_status's TOTAL MiB is the model buffer "
+                            "(about the gguf's own byte size, from hf_files) "
+                            "plus the KV cache plus ~1010 MiB of compute "
+                            "buffer plus ~500 MiB of margin. The KV cache "
+                            "scales linearly with this number, so halving the "
+                            "context halves it; install_status reports the "
+                            "header numbers that make it computable rather "
+                            "than estimated."
                         ),
                     },
                 },
@@ -216,7 +224,10 @@ HUGGINGFACE_TOOLS: List[Dict[str, Any]] = [
                 "so far, and on failure a short reason such as a sha256 "
                 "mismatch or insufficient disk. A multi-GB download takes "
                 "minutes to hours — report progress when asked rather than "
-                "polling in a tight loop."
+                "polling in a tight loop. A finished job also carries the "
+                "model's KV shape and the cache size that follows from it, so "
+                "the contextsize can be checked against gpu_status with real "
+                "numbers."
             ),
             "parameters": {
                 "type": "object",

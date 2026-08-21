@@ -414,3 +414,116 @@ async def test_status_of_an_unwritten_job_reads_as_not_ready(enabled):
     res = await make(runner=runner)._install_status("j1")
     assert res["status"] == "error"
     assert "may not exist yet" in res["message"]
+
+
+# -- DP-337: the KV budget is evaluated here, not recited in a prompt ---------
+#
+# The three header numbers exist ONLY in this result, so this is the one layer
+# that can compute rather than estimate. These tests pin the arithmetic, the
+# two absence cases that must NOT read as "unreadable", and the invariant that
+# nothing model-facing mentions a flag no tool can pass.
+
+def _done_job(**over: Any) -> Dict[str, Any]:
+    job = {
+        "job_id": "newmodel-abc123", "state": "done", "step": "installed",
+        "reason": "", "repo": "owner/m-GGUF", "file": "model-Q6_K.gguf",
+        "name": "newmodel", "unit": "koboldcpp-newmodel.service",
+        "size_bytes": SIZE, "downloaded_bytes": SIZE, "contextsize": 8192,
+        "sha256": SHA, "started": "2026-08-20T00:00:00Z",
+        "finished": "2026-08-20T00:40:00Z",
+        "n_layer": 48, "n_kv_head": 8, "head_dim": 128,
+    }
+    job.update(over)
+    return job
+
+
+@pytest.mark.asyncio
+async def test_status_computes_the_kv_budget_from_the_header_numbers(enabled):
+    """2 x 48 x 8 x 128 x 1 byte = 98304 B/token; at 8192 ctx that is 768 MiB.
+
+    The point of the note is that these are *computed from this payload*, not
+    quoted from a prompt written before the model existed.
+    """
+    runner = FakeRunner(SSHResult(0, json.dumps(_done_job()), ""))
+    res = await make(runner=runner)._install_status("newmodel-abc123")
+    note = res["note"]
+    assert "98304 bytes per token" in note
+    assert "768 MiB" in note
+    # Model buffer + KV + 1010 compute + 500 margin, so the caller has one
+    # number to hold against gpu_status rather than four to add up.
+    assert "25166 MiB" in note
+    assert "gpu_status" in note
+
+
+@pytest.mark.asyncio
+async def test_status_kv_note_scales_linearly_with_contextsize(enabled):
+    """The claim the note makes about itself has to be true of the note."""
+    runner = FakeRunner(SSHResult(0, json.dumps(_done_job(contextsize=4096)), ""))
+    res = await make(runner=runner)._install_status("newmodel-abc123")
+    assert "384 MiB" in res["note"]
+
+
+@pytest.mark.asyncio
+async def test_status_of_a_running_job_carries_no_kv_note(enabled):
+    """Absent shape before the verify step means NOT YET, not unreadable.
+
+    The node folds the header in only once the bytes check out, so reporting
+    an unfinished job as "this gguf publishes no header" would be a confident
+    wrong answer — silence is the correct one.
+    """
+    payload = _done_job(state="running", step="download", finished="")
+    for k in ("n_layer", "n_kv_head", "head_dim"):
+        payload.pop(k)
+    runner = FakeRunner(SSHResult(0, json.dumps(payload), ""))
+    res = await make(runner=runner)._install_status("newmodel-abc123")
+    assert "note" not in res
+    assert res["job"]["state"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_status_says_so_when_a_finished_gguf_published_no_shape(enabled):
+    """`gguf_header.py` is best-effort by design — a header quirk must never
+    fail an install whose bytes verified. So the absence is a fact about the
+    file and gets reported, rather than leaving the caller to infer it."""
+    payload = _done_job()
+    payload.pop("head_dim")
+    runner = FakeRunner(SSHResult(0, json.dumps(payload), ""))
+    res = await make(runner=runner)._install_status("newmodel-abc123")
+    note = res["note"]
+    assert "did not publish" in note
+    assert "bytes per token" not in note
+    assert "gpu_status" in note
+
+
+@pytest.mark.asyncio
+async def test_status_note_survives_a_partial_shape_of_zeroes(enabled):
+    """A zero from the node is a parse artefact, not a real dimension — it
+    would divide the budget into nonsense rather than fail loudly."""
+    runner = FakeRunner(SSHResult(0, json.dumps(_done_job(n_kv_head=0)), ""))
+    res = await make(runner=runner)._install_status("newmodel-abc123")
+    assert "did not publish" in res["note"]
+
+
+def test_no_model_facing_string_names_a_flag_no_tool_can_pass():
+    """DP-337's placement rule, as an executable invariant.
+
+    `install_model` takes repo/file/name/contextsize; `set_active_model` takes
+    a name; `gpu_status` takes nothing. So --useswa, --quantkv 2 and the
+    full-attention KV ratio are context cost with no reachable action, and they
+    belong in the koboldcpp skill and the infra notes instead. `--quantkv 1`
+    survives only as the reason the bytes-per-element term is a constant.
+    """
+    import json as _json
+    import os
+
+    from src.tools.tool_defs.huggingface import HUGGINGFACE_TOOLS
+    from src.tools.tool_defs.proxmox import PROXMOX_TOOLS
+
+    blob = _json.dumps(PROXMOX_TOOLS + HUGGINGFACE_TOOLS)
+    with open(
+        os.path.join(global_config.CONFIG_DIR, "optional_personas/hypr.json"),
+        "r", encoding="utf-8",
+    ) as fh:
+        blob += fh.read()
+    for banned in ("useswa", "quantkv 2", "Q4 KV", "2.3x"):
+        assert banned not in blob, banned
