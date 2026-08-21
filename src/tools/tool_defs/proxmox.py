@@ -9,6 +9,30 @@ parks them for human approval regardless of persona execution mode;
 All results originate from infra we control (not attacker text) →
 ``produces_untrusted: False``; ``locality: "network"`` (SSH to the node);
 ``sensitivity: "internal"``.
+
+⚠️ **Every WRITE tool here is ``exfil_capable: False`` (DP-265).** Read the
+reasoning before adding one that is not. The claim these tools make is narrow and
+true: their arguments are vmids, guest names and model keys **discovered from the
+node itself**, and in every case the value that crosses SSH is the *resolved* one —
+``_resolve_guest`` matches a name locally and sends digits, ``set_active_model``
+sends the discovered unit rather than the caller's string. So no model-authored
+payload rides out over the SSH, and these are not data-exfil vectors. Destructive
+risk is unaffected: it is covered by ``is_write`` (parked for confirmation).
+
+The flag became load-bearing when DP-265 put untrusted HuggingFace reads on the
+same persona. Without it, ``ToolPolicy`` Rule 2 sees untrusted reads in the
+``huggingface`` domain beside network writes in the ``proxmox`` domain, calls
+that a foreign-domain write, and quarantines ``hypr``. The alternative fix — an
+``explicit_overrides`` entry — would disarm Rule 2 for that persona's whole
+toolset permanently, including for tools nobody has written yet. A future proxmox
+tool that genuinely does carry a model-authored string out to the node must NOT
+copy this flag; it must leave the default ``True`` and the composition must be
+re-reasoned.
+
+``pve_status`` and ``list_models`` keep the default ``True`` on purpose even
+though they take no arguments either: that is what sets ``has_network_read``, and
+Rule 1 (network read + local write) is the protection that should fire if a local
+write tool is ever added to this persona.
 """
 
 from typing import Any, Dict, List
@@ -123,7 +147,7 @@ PROXMOX_TOOLS: List[Dict[str, Any]] = [
         "type": "function",
         "is_write": True,
         "service_binding": "proxmox",
-        "capabilities": _caps(irreversible=True),
+        "capabilities": _caps(irreversible=True, exfil_capable=False),
         "function": {
             "name": "reboot_node",
             "description": (
@@ -138,7 +162,7 @@ PROXMOX_TOOLS: List[Dict[str, Any]] = [
         "type": "function",
         "is_write": True,
         "service_binding": "proxmox",
-        "capabilities": _caps(),
+        "capabilities": _caps(exfil_capable=False),
         "function": {
             "name": "reboot_guest",
             "description": (
@@ -152,7 +176,7 @@ PROXMOX_TOOLS: List[Dict[str, Any]] = [
         "type": "function",
         "is_write": True,
         "service_binding": "proxmox",
-        "capabilities": _caps(),
+        "capabilities": _caps(exfil_capable=False),
         "function": {
             "name": "start_guest",
             "description": (
@@ -166,7 +190,7 @@ PROXMOX_TOOLS: List[Dict[str, Any]] = [
         "type": "function",
         "is_write": True,
         "service_binding": "proxmox",
-        "capabilities": _caps(),
+        "capabilities": _caps(exfil_capable=False),
         "function": {
             "name": "stop_guest",
             "description": (

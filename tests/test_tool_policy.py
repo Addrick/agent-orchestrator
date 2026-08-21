@@ -254,13 +254,35 @@ def test_set_active_model_exempt_from_pii_read_exfil_rule():
     assert policy.validate_composition(tools) == []
 
 
-def test_other_proxmox_writes_still_trip_exfil_rule():
-    """The exemption is scoped: a normal proxmox network:write (reboot_guest,
-    exfil_capable defaults True) beside an untrusted read STILL trips Rule 2."""
+def test_a_default_network_write_still_trips_the_exfil_rule():
+    """The exemption is scoped: a network:write that keeps the default
+    exfil_capable=True beside an untrusted read STILL trips Rule 2.
+
+    Uses `add_mcp_server` rather than a proxmox write because DP-265 made every
+    proxmox write exempt — its arguments are vmids and guest names resolved from
+    the node's own listing, so nothing model-authored crosses the SSH. That was
+    the honest alternative to an `explicit_overrides` entry, which would have
+    disarmed this rule for hypr's whole toolset. `add_mcp_server` takes a URL the
+    model chooses, so it is exactly the shape the rule exists for.
+    """
     policy = ToolPolicy()
-    tools = _tools_by_name("web_search", "reboot_guest")
+    tools = _tools_by_name("web_search", "add_mcp_server")
     errors = policy.validate_composition(tools)
     assert any("untrusted:read + network:write" in e for e in errors)
+
+
+def test_every_proxmox_write_is_now_exempt_and_says_why():
+    """Pins the DP-265 counterpart edit as a set, not one tool at a time.
+
+    If a future proxmox write lands with the default True, this fails — which is
+    the intended prompt to re-reason the composition rather than to copy the flag
+    across because the test went red.
+    """
+    from src.tools.tool_defs.proxmox import PROXMOX_TOOLS
+
+    writes = [t for t in PROXMOX_TOOLS if t["is_write"]]
+    assert writes
+    assert all(t["capabilities"].get("exfil_capable") is False for t in writes)
 
 
 def test_exfil_capable_capability_validation():

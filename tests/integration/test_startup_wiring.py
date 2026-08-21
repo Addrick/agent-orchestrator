@@ -40,7 +40,8 @@ def wired_system():
             persona_name="test_persona", model_name="gemini-2.5-flash",
             prompt="test", enabled_tools=["*"],
             memory_mode=MemoryMode.CHANNEL_ISOLATED, history_messages=10,
-            service_bindings=["zammad", "agents", "fixr", "voice", "proxmox", "mcp", "proposals"],
+            service_bindings=["zammad", "agents", "fixr", "voice", "proxmox",
+                              "huggingface", "mcp", "proposals"],
         ),
     }
 
@@ -67,6 +68,12 @@ def wired_system():
     # DP-262 Proxmox management subsystem (tools behind the "proxmox" binding)
     from src.proxmox import ProxmoxIntegration
     chat_system.register_service(ProxmoxIntegration())
+
+    # DP-265 HuggingFace model provisioning (tools behind the "huggingface"
+    # binding). Shares the proxmox SSH transport; registers regardless of
+    # HF_TOOLS_ENABLED so the wiring contract holds.
+    from src.huggingface import HuggingFaceIntegration
+    chat_system.register_service(HuggingFaceIntegration())
 
     # DP-268 MCP client subsystem (management tools behind the "mcp" binding)
     from src.tools.mcp_client import MCPClientManager

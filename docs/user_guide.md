@@ -566,14 +566,21 @@ park prompt with that in mind.
 
 `hypr` is inert unless `PVE_TOOLS_ENABLED=true` and the pve SSH key is mounted;
 without those, every tool call returns a "disabled" error rather than attempting
-SSH. Downloading and deploying a *new* model from HuggingFace is not part of the
-toolset (tracked separately as DP-265) — `set_active_model` only switches between
-models already installed on the GPU container. It does not need to be told which
-those are: the model list is enumerated from the container's own systemd units on
-every call, so a model you install by hand shows up in `list_models` immediately,
-with no config edit and no redeploy. Write the unit however you like — `--model
-<path>` and `--model=<path>` are both read — and give it a `--port` if it is not
-meant to serve `:5001`, which keeps it out of the swap set entirely.
+SSH. `set_active_model` only switches between models already installed on the GPU
+container. It does not need to be told which those are: the model list is
+enumerated from the container's own systemd units on every call, so a model you
+install by hand shows up in `list_models` immediately, with no config edit and no
+redeploy. Write the unit however you like — `--model <path>` and
+`--model=<path>` are both read — and give it a `--port` if it is not meant to
+serve `:5001`, which keeps it out of the swap set entirely.
+
+- **Provision (DP-265)** — "find me a smaller gemma quant" → `hf_search` /
+  `hf_files`, then `install_model` downloads it onto the model host and writes a
+  **disabled** unit for it. See [HuggingFace Model Tools](#huggingface-model-tools-requires-service_bindings-huggingface).
+  This is the second binding `hypr` holds, and deliberately the only one: it
+  provisions models onto the very node `proxmox` operates, so it is the same
+  blast radius rather than a new one. It needs `HF_TOOLS_ENABLED=true` and the
+  node-side script from `services/pve/` deployed.
 
 ### System Personas
 
@@ -1033,6 +1040,84 @@ serving nothing until a swap succeeds; the message says as much.
 happened to call it. The name a model passes comes from `list_models` in the same
 turn, so nothing has to be updated — but if *you* have a name memorised from
 before, check `list_models` rather than assuming.
+
+### HuggingFace Model Tools (requires `service_bindings: ["huggingface"]`)
+
+Find a gguf on HuggingFace and provision it onto the model host, so it *becomes*
+one of the choices `list_models` offers and `set_active_model` can switch to.
+These are the companion to the Proxmox tools above and ride the same SSH key and
+the same node — there is no second credential and no second host.
+
+| Tool | Type | Description |
+|------|------|-------------|
+| `hf_search` | Read | Search HuggingFace for repos that publish gguf, most-downloaded first: repo id, downloads, likes, gated flag, tags. A hit means the *repo* is tagged as containing gguf, not that any particular file exists — follow up with `hf_files`. Results are third-party text, so this tool is flagged as producing untrusted content and taints the turn. |
+| `hf_files` | Read | One repo's gguf files with the exact **byte size** and **sha256** the Hub publishes for each. This is what you size a quant against (compare with `gpu_status`) and where the exact filename comes from. A file whose `sha256` is `null` — a non-LFS file, with no published digest — cannot be installed at all. |
+| `install_model` | **Write (parked)** | Download one gguf onto the model host and write a koboldcpp systemd unit for it. **The unit lands disabled and is not started.** Takes `repo`, `file`, `name`, and an optional `contextsize`. Returns a `job_id` immediately; the download continues on the node. |
+| `install_status` | Read | Poll one install job: `state` (running / done / failed), current step, bytes downloaded, and on failure a short fixed-vocabulary reason. Also reports `n_layer` / `n_kv_head` / `head_dim` read out of the downloaded gguf, so the KV-cache budget can be computed rather than guessed. |
+
+#### What the approval card shows
+
+`install_model` parks like every other write, and the card carries **the repo,
+the file, the byte size, and the sha256 that derpr read from HuggingFace
+itself** — not values the model typed. You are approving specific bytes. Those
+same two numbers are what the node then enforces: it refuses if the Hub's digest
+does not match, and it deletes the partial file and fails the job if the
+downloaded bytes do not hash to it.
+
+The Hub is re-read at execution time (after you approve), so if a repo replaces
+the file between park and approval the digest actually enforced can differ from
+the one on the card. The result reports the digest it enforced, so that shows up
+in the tool result rather than silently.
+
+#### Two approvals, not one
+
+Installing a model **does not** put it on `:5001` and does not disturb whatever
+is running. The unit is written `disabled`, `daemon-reload`ed, and left alone.
+Making it active is a separate `set_active_model` call with its own approval —
+and worth doing only after checking the `contextsize`, because `install_model`
+writes a deliberately small default (8192) on the assumption a human will tune it
+against `gpu_status` first.
+
+#### What the node refuses
+
+The whole feature runs **one** node-side script
+(`/usr/local/sbin/derpr-model-install`, versioned in `services/pve/`), reachable
+through exactly one entry in the SSH key's forced-command allowlist. derpr never
+gets `curl`, `systemctl`, or file writes as separate verbs. Before any bytes
+move, the node refuses:
+
+- a `name` whose `koboldcpp-<name>.service` already exists on the container —
+  overwriting one silently repoints a name `list_models` already publishes;
+- a destination file that already exists with a **different** sha256 (an
+  identical one is reused, so a retry costs nothing);
+- insufficient free space — the larger of 2 GiB or 5% of the download is kept
+  free. The models volume is a thin LV, and filling it takes `:5001` and every
+  other guest's models with it, so this refuses rather than truncating.
+
+And after downloading, a sha256 mismatch deletes the partial file and fails the
+job. Size matching is not proof.
+
+#### Long downloads
+
+A multi-GB download vastly outlives any tool timeout, so the node runs it
+detached under `systemd-run` and derpr polls. `install_model` returns as soon as
+the job starts; ask for progress with `install_status` rather than waiting.
+There is no background loop inside derpr — the node supervises its own job.
+
+Disabled by default. Enable with `HF_TOOLS_ENABLED=true` **and** deploy the
+node-side artifacts (`services/pve/README.md` has the steps, including the
+forced-command allowlist entry). Config knobs: `HF_API_BASE`, `HF_API_TOKEN`
+(only needed for gated repos), `HF_HTTP_TIMEOUT`, `HF_SEARCH_LIMIT_MAX`. The
+transport settings are the proxmox ones (`PVE_SSH_*`). When disabled, every tool
+returns a clear "disabled" error instead of reaching the Hub or the node.
+
+⚠️ **The persona holding this binding reads attacker-authored text and can write
+to the node.** That composition is checked, not assumed: the Hub reads and
+`install_model` share one egress domain (`huggingface`), which makes it a
+same-origin closed loop under the insecure-composition rules — so the protection
+stays *armed* for anything added later, rather than being switched off with an
+explicit override. Adding a tool with a different egress domain to that persona
+will quarantine it, which is the intended behaviour.
 
 ### MCP Servers (requires `service_bindings: ["mcp"]` to manage; `["mcp:<server>"]` to use)
 
