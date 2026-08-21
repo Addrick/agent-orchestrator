@@ -43,6 +43,26 @@ def _force_sqlite_backend_in_tests(monkeypatch):
             )
 
 
+@pytest.fixture(autouse=True)
+def _disable_notes_clone_in_tests(monkeypatch):
+    """Keep the shared notes clone out of the test tier.
+
+    `CC_NOTES_ENABLED` defaults to True and `CC_NOTES_DIR` defaults to
+    `DATA_DIR / "notes"`, which under APP_ENV=testing is `tests/test_data/notes`.
+    Any test that reaches `prepare_notes_clone()` without stubbing it therefore
+    ran a real `git clone`/`git fetch` of the private notes repo into the test
+    data dir — network I/O in the unit tier, and a persistent side effect that
+    made `test_create_worktree_links_venv` fail on every box where that clone
+    had already been created (it never exists in CI, so CI stayed green).
+
+    Tests that exercise the notes plumbing re-enable it explicitly; a fixture
+    set later in the test body wins over this one.
+    """
+    from config import global_config
+
+    monkeypatch.setattr(global_config, "CC_NOTES_ENABLED", False)
+
+
 def pytest_collection_modifyitems(config, items):
     """Auto-skip live tests when required env vars are missing."""
     has_zammad = bool(os.environ.get("ZAMMAD_URL") and os.environ.get("ZAMMAD_API_KEY"))

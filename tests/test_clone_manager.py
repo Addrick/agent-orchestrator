@@ -216,7 +216,7 @@ def test_create_worktree_links_venv(tmp_path, monkeypatch):
     source_root = tmp_path / "src_checkout"
     source_root.mkdir()
 
-    linked = {}
+    links = []
 
     def fake_run(cmd, **k):
         if cmd[1] == "worktree" and cmd[2] == "add":
@@ -226,8 +226,10 @@ def test_create_worktree_links_venv(tmp_path, monkeypatch):
     monkeypatch.setattr(cm.subprocess, "run", fake_run)
     monkeypatch.setattr(cm.os, "name", "posix")
 
+    # create_worktree links more than the venv (memory/, DP-314), so collect
+    # every call and assert on the venv one rather than on "the last link made".
     def fake_symlink(src, dst, target_is_directory=False):
-        linked["src"], linked["dst"] = src, dst
+        links.append((src, dst))
 
     monkeypatch.setattr(cm.os, "symlink", fake_symlink)
 
@@ -235,8 +237,12 @@ def test_create_worktree_links_venv(tmp_path, monkeypatch):
         "DP-999", clone_dir=str(clone_dir), source_root=str(source_root)
     )
 
-    assert linked["src"] == os.path.join(str(clone_dir), ".venv")
-    assert linked["dst"].endswith(os.path.join("DP-999", ".venv"))
+    venv_links = [
+        (src, dst) for src, dst in links
+        if dst.endswith(os.path.join("DP-999", ".venv"))
+    ]
+    assert len(venv_links) == 1, links
+    assert venv_links[0][0] == os.path.join(str(clone_dir), ".venv")
 
 
 def test_remove_worktree_drops_venv_link_before_remove(tmp_path, monkeypatch):
