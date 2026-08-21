@@ -210,7 +210,15 @@ async def generate_agy(
             e.api_payload = api_payload
         raise
 
-    calls = engine._parse_agy_tool_call(raw)
+    # Only parse the protocol we actually rendered. The `if tools:` guards above
+    # suppress *sending* the tool protocol but not parsing it back, so a
+    # toolless call whose prompt merely CONTAINS `<tool_call>` spans — which is
+    # exactly what DP-335's exhaustion wrap-up sends, a transcript of the
+    # turn's own tool calls plus a persona prompt naming tools by hand — came
+    # back classified as `tool_calls`. `_events_from_one_shot` then reports
+    # `full_text: ""` and the prose is discarded, dropping the caller back to
+    # its no-text fallback after paying for the subprocess.
+    calls = engine._parse_agy_tool_call(raw) if tools else None
     if calls:
         return {"type": "tool_calls", "calls": calls}, api_payload
     else:

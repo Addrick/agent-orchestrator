@@ -13,7 +13,9 @@ from src.huggingface.client import (
     HFClient,
     HFError,
     HFFile,
+    _MAX_SEARCH_TAGS,
     _next_cursor,
+    _select_tags,
     validate_file_path,
     validate_repo_id,
 )
@@ -168,3 +170,41 @@ def test_to_dict_reports_bytes_and_gib():
         "size_gib": 2.0,
         "sha256": "f" * 64,
     }
+
+
+# -- search payload ----------------------------------------------------------
+
+def test_search_tags_keep_base_model_ahead_of_the_truncation():
+    """`base_model:` survives the tag cap (DP-335 review).
+
+    The tool description, the handler note and hypr's prompt all tell the model
+    to match a quant repo to its upstream model by this tag. The cap used to be
+    a bare slice over the Hub's own unordered list, and `base_model:` sorts
+    late — so a model told three times to read the field searched hits that did
+    not carry it, concluded no quant corresponded to the model it was asked
+    about, and re-queried: the exact budget-burning loop DP-335 exists to
+    break.
+    """
+    raw = (
+        ["gguf", "transformers", "text-generation", "conversational"]
+        + [f"lang:{c}" for c in "abcdefghij"]
+        + ["base_model:Qwen/Qwen3.8-27B", "license:apache-2.0"]
+    )
+
+    tags = _select_tags(raw)
+
+    assert len(tags) == _MAX_SEARCH_TAGS
+    assert tags[0] == "base_model:Qwen/Qwen3.8-27B"
+    # Everything else keeps the Hub's own order, so a truncated list still
+    # reads like the source.
+    assert tags[1:4] == ["gguf", "transformers", "text-generation"]
+
+
+def test_search_tags_are_unchanged_when_there_is_no_base_model_tag():
+    tags = _select_tags(["gguf", "transformers"])
+    assert tags == ["gguf", "transformers"]
+
+
+def test_search_tags_tolerate_a_missing_or_non_string_tag_list():
+    assert _select_tags(None) == []
+    assert _select_tags([1, "gguf"]) == ["1", "gguf"]

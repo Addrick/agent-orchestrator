@@ -14,12 +14,39 @@ from typing import Any, Dict, List, Optional, Sequence
 import pytest
 
 from config import global_config
-from src.huggingface.client import HFError, HFFile
+from src.huggingface.client import HFError, HFFile, _select_tags
 from src.huggingface.handler import HuggingFaceToolHandler
 from src.proxmox.ssh import SSHError, SSHResult
 
 SHA = "a" * 64
 SIZE = 24_000_000_000
+
+# What the Hub actually attaches to a quant repo, in the Hub's own order. A
+# real row carries 20+ tags and `base_model:` sorts late — which is why the
+# client's truncation used to drop the one tag the tool description, the
+# handler note and hypr's prompt all tell the model to match on.
+RAW_HUB_TAGS = [
+    "transformers", "gguf", "qwen3", "text-generation", "conversational",
+    "en", "zh", "de", "fr", "es", "ja", "ko",
+    "base_model:Qwen/Qwen3.8-27B", "base_model:quantized:Qwen/Qwen3.8-27B",
+    "license:apache-2.0", "endpoints_compatible", "region:us",
+]
+
+# The fake's default row is built by running the REAL transform over the raw
+# tags, not hand-written. A hand-written fake is a second implementation of
+# the contract and drifts toward whatever the tests around it need: the old
+# default was `[{"repo": ...}]` with no `tags` key at all, so no test in this
+# file could see tags being dropped even while three of them asserted the note
+# tells the model to read one.
+def _hub_row(repo: str = "unsloth/Qwen3.8-27B-GGUF") -> Dict[str, Any]:
+    return {
+        "repo": repo,
+        "downloads": 12345,
+        "likes": 67,
+        "gated": False,
+        "last_modified": "2026-08-01T00:00:00.000Z",
+        "tags": _select_tags(RAW_HUB_TAGS),
+    }
 
 
 class FakeHF:
@@ -35,7 +62,7 @@ class FakeHF:
             HFFile(path="model-Q6_K.gguf", size_bytes=SIZE, sha256=SHA)
         ]
         self.error = error
-        self.search = search if search is not None else [{"repo": "owner/model-GGUF"}]
+        self.search = search if search is not None else [_hub_row()]
         self.search_calls: List[tuple] = []
 
     async def search_models(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
@@ -115,6 +142,66 @@ async def test_search_limit_is_capped(enabled, monkeypatch):
     res = await make(hf)._hf_search("gemma", limit=500)
     assert res["status"] == "ok"
     assert hf.search_calls == [("gemma", 5)]
+
+
+@pytest.mark.asyncio
+async def test_search_tells_the_model_the_gguf_filter_is_structural(enabled):
+    """DP-335's root cause. `filter=gguf` is pinned server-side, so a publisher
+    that ships only safetensors — most official repos — can never be returned,
+    and nothing in the payload said so. A live turn read the zero-hit result as
+    "wrong spelling", re-spelled the same name three ways, and spent its whole
+    tool budget against a filter that could never yield it.
+
+    `hf_files` has carried a note since DP-265 precisely so an empty list would
+    not be misread; the tool whose empty result is *structurally* unfixable by
+    re-querying had none.
+    """
+    res = await make(FakeHF(search=[]))._hf_search("Qwen/Qwen3.8-27B")
+
+    assert res["status"] == "ok"
+    note = res["note"]
+    # Why the query failed...
+    assert "gguf" in note and "safetensors" in note
+    # ...what to reach for instead...
+    assert "base_model:" in note
+    # ...and what NOT to do, which is the loop that actually happened.
+    assert "broaden" in note and "re-spelling" in note
+
+
+@pytest.mark.asyncio
+async def test_search_note_is_present_on_a_hit_too(enabled):
+    """The constraint explains a *narrow* result as much as an empty one: the
+    answer to "find the official X" was sitting in a hit's `base_model:` tag
+    the whole time, unremarked."""
+    res = await make()._hf_search("model")
+
+    assert res["models"]
+    assert "base_model:" in res["note"]
+
+
+@pytest.mark.asyncio
+async def test_search_payload_carries_the_tag_the_note_points_at(enabled):
+    """Guidance that names a field is only as good as the field surviving.
+
+    The note, the tool description and hypr's prompt all tell the model to
+    match a quant to its upstream model by `base_model:<owner>/<name>` — and
+    the client truncated tags to an unordered first 12, where that tag sorts
+    late and was routinely the one dropped. A model told three times to read a
+    field that is not there concludes no quant corresponds to the model it was
+    asked about and re-queries: the exact loop DP-335 set out to break.
+
+    Asserted on the payload the MODEL receives, not on the client's helper, so
+    a regression anywhere between the two fails here.
+    """
+    res = await make()._hf_search("qwen 27b")
+
+    tags = res["models"][0]["tags"]
+    assert any(t.startswith("base_model:") for t in tags), (
+        "the note tells the model to match on base_model:, and the payload "
+        "does not carry it"
+    )
+    # The upstream repo is recoverable from the tag, which is the whole job.
+    assert "base_model:Qwen/Qwen3.8-27B" in tags
 
 
 @pytest.mark.asyncio

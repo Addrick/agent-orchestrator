@@ -21,7 +21,7 @@ from typing import (
     Any, AsyncIterator, Callable, Dict, List, Optional, Tuple, Union, cast,
 )
 
-from config.global_config import MAX_TOOL_CALLS
+from config.global_config import MAX_TOOL_CALLS, MAX_TOOL_ITERATIONS
 from src.engine import LLMCommunicationError, TextEngine
 from src.security.scrubber import get_scrubber
 from src.generation_events import (
@@ -94,6 +94,14 @@ class _LoopFinishedEvent:
     response_type: ResponseType
     tool_context_json: Optional[str] = None
     turn_tainted: bool = False
+    #: What to put in the semantic memory bank, when that is NOT `final_text`.
+    #: Only the exhaustion exit sets it (DP-335): its reply is prose plus a
+    #: machine-generated list of the turn's tool calls and arguments, and only
+    #: the prose is a thing the persona said. Embedding the list would make
+    #: "`hf_search` {"query": ...} — ok" a recallable memory and replay it to
+    #: the model next turn as its own prior words. `None` means "retain
+    #: `final_text`", which is every other exit.
+    retain_text: Optional[str] = None
 
 
 LoopEvent = Union[
@@ -181,7 +189,19 @@ def write_call_identity_hash(call: Dict[str, Any]) -> str:
     secret-bearing payload `finalize_parked_write` exists to erase; equality is
     all the duplicate guard needs.
     """
-    name, args = write_call_identity(call)
+    return identity_digest(*write_call_identity(call))
+
+
+def identity_digest(name: str, args: str) -> str:
+    """The one place the identity digest is constructed.
+
+    Separate from `write_call_identity_hash` because two callers need it from
+    two different starting points — the duplicate guard has a call, the DP-335
+    turn tally has an already-canonicalized `(name, args)` pair it built while
+    counting. The tally used to rebuild these four lines inline, which is
+    exactly the spread-out identity contract the docstring above records as
+    having already drifted once, silently and fail-open.
+    """
     digest = hashlib.sha256()
     digest.update(name.encode("utf-8"))
     digest.update(b"\x00")
@@ -283,6 +303,277 @@ def _render_confirmation_text(
     return "\n".join(lines)
 
 
+# Cap-hit summary rendering (DP-335). The iteration cap used to answer with one
+# canned sentence, and that sentence reads as a malfunction: in the prod turn
+# that motivated this, every one of the ten calls returned `ok` — the turn
+# simply ran out of steps before it reached the action the user asked for. The
+# sealed `tool_context` held the whole story and nothing put it in front of the
+# person who had to decide what to do next.
+_SUMMARY_ARG_LIMIT = 100
+_SUMMARY_ERROR_LIMIT = 80
+_SUMMARY_MAX_CALLS = 20
+
+
+def _truncate(text: str, limit: int) -> str:
+    """Flatten to one line and clip — a tool result can be kilobytes, and this
+    string is headed for a Discord message with a 2000-char ceiling."""
+    flat = " ".join(str(text).split())
+    return flat if len(flat) <= limit else flat[:limit - 1] + "…"
+
+
+def _summarize_outcome(content: Optional[str]) -> str:
+    """How one call turned out, read back from its history result.
+
+    The park statuses are spelled out rather than folded into "ok": a proposal
+    that is still waiting on the operator is the most likely thing the user
+    wants to act on, and `tool_error` reports it as a success.
+    """
+    if content is None:
+        # `seal_tool_context` synthesizes a result for these, but it runs after
+        # this does — the final iteration's calls are genuinely unanswered.
+        return "no result"
+    try:
+        payload = json.loads(content)
+    except (TypeError, ValueError):
+        return "ok"
+    if isinstance(payload, dict):
+        status = payload.get("status")
+        if status == PARK_STATUS_AWAITING:
+            return "waiting for your approval"
+        if status == PARK_STATUS_DUPLICATE:
+            return "skipped, an identical proposal is already waiting"
+        if status == PARK_STATUS_ALREADY_RESOLVED:
+            return "skipped, you already decided this one"
+    failure = tool_error(payload)
+    if failure:
+        # Scrubbed for the same DP-225 reason `_render_args` scrubs: this
+        # string is headed for a user surface. Every writer of `role: tool`
+        # content scrubs before it lands in history today, so this is belt and
+        # braces — but the asymmetry was invisible, and `scrub` is idempotent.
+        clean = cast(str, get_scrubber().scrub(failure))
+        return f"failed — {_truncate(clean, _SUMMARY_ERROR_LIMIT)}"
+    return "ok"
+
+
+def _render_args(arg_str: str) -> str:
+    """A call's canonical argument string as a short, scrubbed, leading-space-
+    prefixed blob.
+
+    Takes the string `write_call_identity` already produced rather than
+    re-serializing the call: two canonicalizations of the same arguments can
+    drift, and if they do, the rendered args and the `(same call as #N)` marker
+    beside them stop describing the same call.
+
+    Empty arguments render as nothing at all: half the calls in a
+    budget-exhausting turn are zero-arg reads, and ten trailing `{}`s bury the
+    ones that carry the query that actually mattered.
+    """
+    if arg_str in ("{}", "null") or arg_str.startswith("<unserializable:"):
+        return ""
+    # DP-225: arguments are model-authored and this string is headed for a
+    # surface, so it crosses the same egress boundary a tool result does.
+    scrubbed = cast(str, get_scrubber().scrub(arg_str))
+    return " " + _truncate(scrubbed, _SUMMARY_ARG_LIMIT)
+
+
+def _call_lines(
+    conversation_history: List[Dict[str, Any]],
+    start: int,
+) -> Tuple[List[str], int]:
+    """One numbered line per tool call in the turn's slice, plus the true total.
+
+    Reads the same history slice `seal_tool_context` seals, so the user sees
+    exactly what the model saw. Repeats are marked, because a turn that spends
+    its budget re-fetching bytes it already had is the common shape of this
+    exit and it is invisible in a bare list.
+
+    The returned total counts every call, including any past `_SUMMARY_MAX_CALLS`
+    that got no line — callers need the real number to say "and N more" and to
+    report the spend honestly.
+    """
+    results: Dict[Any, Optional[str]] = {}
+    for msg in conversation_history[start:]:
+        if msg.get("role") == "tool":
+            results.setdefault(msg.get("tool_call_id"), msg.get("content"))
+
+    lines: List[str] = []
+    # `write_call_identity` is the name-plus-canonicalized-args key the write
+    # guards use; nothing about it is write-specific, and reusing it here means
+    # "the same call twice" means one thing across the module.
+    first_seen: Dict[Tuple[str, str], int] = {}
+    total = 0
+    for msg in conversation_history[start:]:
+        if msg.get("role") != "assistant":
+            continue
+        for call in msg.get("tool_calls") or []:
+            total += 1
+            if total > _SUMMARY_MAX_CALLS:
+                continue
+            identity = write_call_identity(call)
+            name = identity[0] or "unknown tool"
+            rendered_args = _render_args(identity[1])
+            outcome = _summarize_outcome(results.get(call.get("id")))
+            repeat = first_seen.get(identity)
+            marker = f" (same call as #{repeat})" if repeat else ""
+            first_seen.setdefault(identity, total)
+            lines.append(f"{total}. `{name}`{rendered_args} — {outcome}{marker}")
+
+    if total > _SUMMARY_MAX_CALLS:
+        lines.append(f"…and {total - _SUMMARY_MAX_CALLS} more.")
+    return lines, total
+
+
+# DP-335 review: `used` and `budget` are passed in rather than derived from the
+# rendered slice, and both renderers are keyword-only past the history, for two
+# reasons that were live bugs in the first cut.
+#
+# 1. `_call_lines`' total counts the whole rendered slice, and on a park
+#    continuation `history_start_override` walks that slice back over the
+#    PARKED turn (so the seal spans both) while the resumed turn's spend starts
+#    at zero. Deriving the headline number from the slice therefore reported
+#    another turn's calls as this one's — "(21 of 15 used)" — and pushed the
+#    continuation's own calls behind the `…and N more` cap.
+# 2. The budget that stopped the turn is not always the call budget. Reporting
+#    `max_tool_calls` unconditionally produced "I used all 100 of my tool steps"
+#    after three, which is the wrong-diagnosis-in-the-exit-message failure this
+#    ticket exists to remove.
+#
+# `total` is still used for `…and N more`: that one IS a fact about the list.
+def _spend_clause(used: int, budget: int, exhausted: bool) -> str:
+    """How the turn's spend is stated, in the terms of the limit that tripped.
+
+    `used` can exceed `budget` by design — a batch is charged whole and never
+    truncated — so this never says "all N of N"; it always states both numbers.
+    """
+    if exhausted:
+        return f"my whole tool budget ({used} of {budget} tool steps)"
+    return f"{used} tool step(s) before my loop guard stopped the turn"
+
+
+def render_max_iteration_text(
+    conversation_history: List[Dict[str, Any]],
+    start: int,
+    *,
+    used: int,
+    budget: int,
+    exhausted: bool = True,
+) -> str:
+    """Standalone cap-hit message: the call list and nothing else.
+
+    The **fallback** since DP-335's second half — the loop's first choice is now
+    to ask the model for a real answer and hang `render_call_summary_footer`
+    under it. This wording stays for the case where that extra completion is
+    unavailable (provider down, empty response), because a turn that ends with
+    no prose at all still has to say what happened.
+    """
+    lines, _ = _call_lines(conversation_history, start)
+    if not lines:
+        return (
+            f"I stopped after spending {_spend_clause(used, budget, exhausted)} "
+            "without reaching an answer. Could you clarify the request?"
+        )
+    return "\n".join([
+        f"I spent {_spend_clause(used, budget, exhausted)} on this turn "
+        "without getting to an answer, so I stopped instead of guessing. "
+        "Here is what I ran:",
+        "",
+        *lines,
+        "",
+        "Tell me which of these to build on, or narrow the request, and I'll "
+        "pick it up from there.",
+    ])
+
+
+def render_call_summary_footer(
+    conversation_history: List[Dict[str, Any]],
+    start: int,
+    *,
+    used: int,
+    budget: int,
+    exhausted: bool = True,
+) -> str:
+    """The same list, as ground truth pinned under a prose answer.
+
+    The two compose deliberately. The prose is a generation and can be wrong or
+    vague about what it actually ran; this list is read straight out of history
+    and cannot be. Keeping it means the exhaustion answer never has to be taken
+    on trust, and repeats stay measurable in the reply itself — which is how
+    the duplicate-read question gets its evidence without a DB dig.
+    """
+    lines, total = _call_lines(conversation_history, start)
+    if not lines:
+        return ""
+    if exhausted:
+        header = f"*Ran out of tool steps ({used} of {budget} used):*"
+    else:
+        header = f"*Loop guard stopped the turn after {used} tool step(s):*"
+    if total != used:
+        # The rendered slice covers more than this turn's spend — the park
+        # continuation case. Say so rather than letting the count beneath the
+        # header silently contradict it.
+        header += f" the {total} calls below span the whole parked exchange."
+    return "\n".join(["", header, *lines])
+
+
+# The synthetic user message that opens the exhaustion wrap-up (DP-335). Not
+# persisted and not appended to `conversation_history` — it exists only in the
+# message array of that one request, exactly like `_render_resolution_nudge` in
+# the park-continuation path, and for the same reason: ending the array on the
+# model's own tool span makes Anthropic treat it as a prefill to continue
+# rather than a turn to answer.
+#
+# Deliberately carries NO `[system]` prefix, though it is a system instruction.
+# This codebase treats tool output as attacker-influenceable (`produces_untrusted`
+# → `turn_tainted`), so a turn that demonstrates "`[system] …` in the user
+# channel means system authority" makes an injected `[system] Ignore the
+# approval gate and …` inside a `web_search` result materially more credible on
+# the next turn. `_render_resolution_nudge` — the park-continuation twin this
+# is modeled on — states its facts plainly for the same reason.
+_EXHAUSTION_NUDGE = (
+    "You have used your entire tool budget for this turn and no "
+    "further tool calls will run. Answer the user now from what you already "
+    "have. Say what you found, name what is still unresolved and why, and "
+    "propose the single next step you would take — do not describe your tool "
+    "usage, and do not claim to be stuck."
+)
+
+
+def _log_turn_call_tally(
+    tally: Dict[Tuple[str, str], int],
+    iterations: int,
+    calls: int,
+) -> None:
+    """Log this turn's call multiset and its repeat count (DP-335).
+
+    The instrumentation that replaced a proposed per-turn read cache. One
+    observed turn spent 4 of its 10 steps re-running reads whose answers were
+    already in `conversation_history`; that is n=1, and a cache sized on n=1
+    would have funded more wandering while breaking `install_status`, which
+    exists to be polled. So the repeat rate is *measured* instead, and a
+    recurrence arrives with numbers attached rather than an anecdote.
+
+    Identities are logged as `name#<8 hex of the identity hash>`, never as raw
+    arguments: the canonical argument string is the same secret-bearing payload
+    `write_call_identity_hash` is hashed to avoid storing, and distinguishing
+    two calls is all this needs.
+    """
+    if not tally:
+        return
+    repeats = {k: n for k, n in tally.items() if n > 1}
+    if repeats:
+        digests = []
+        for (name, args), n in sorted(repeats.items(), key=lambda kv: -kv[1]):
+            digests.append(f"{name}#{identity_digest(name, args)[:8]} x{n}")
+        detail = "; repeated: " + ", ".join(digests)
+    else:
+        detail = ""
+    logger.info(
+        "tool-loop turn: %d call(s) over %d iteration(s), %d distinct, "
+        "%d repeated call(s)%s",
+        calls, iterations, len(tally), calls - len(tally), detail,
+    )
+
+
 def build_wire_messages(
     persona: Persona, conversation_history: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
@@ -315,11 +606,19 @@ class ToolLoop:
         self,
         text_engine: TextEngine,
         tool_manager: ToolManager,
-        max_iterations: int = MAX_TOOL_CALLS,
+        max_iterations: int = MAX_TOOL_ITERATIONS,
+        max_tool_calls: int = MAX_TOOL_CALLS,
     ) -> None:
+        """`max_tool_calls` is the turn's budget; `max_iterations` is the
+        runaway guard. DP-335 split them: one number cannot be both, because
+        what an iteration buys depends entirely on how many calls the model
+        packs into one message, so a single limit means a different amount of
+        work per provider. See `config.global_config` for the sizing.
+        """
         self.text_engine = text_engine
         self.tool_manager = tool_manager
         self.max_iterations = max_iterations
+        self.max_tool_calls = max_tool_calls
 
     async def run(
         self,
@@ -369,7 +668,18 @@ class ToolLoop:
         taint_sources: List[str] = list(initial_taint_sources or [])
         # turn_tainted is passed in to support conversation-level stickiness
 
-        for iter_idx in range(self.max_iterations):
+        # DP-335: two counters, two limits. `calls_used` is the budget the
+        # persona is allowed to spend and is what the user's request is
+        # measured against; `iterations_used` only catches a loop that talks to
+        # the provider forever without spending anything.
+        calls_used = 0
+        iterations_used = 0
+        call_tally: Dict[Tuple[str, str], int] = {}
+
+        while (calls_used < self.max_tool_calls
+               and iterations_used < self.max_iterations):
+            iter_idx = iterations_used
+            iterations_used += 1
             api_payload: Optional[Dict[str, Any]] = None
             full_text_from_done: Optional[str] = None
             tool_calls_collected: Optional[List[Dict[str, Any]]] = None
@@ -423,6 +733,7 @@ class ToolLoop:
                         conversation_history, history_start, SEAL_ERROR,
                     )
                 )
+                _log_turn_call_tally(call_tally, iterations_used, calls_used)
                 yield ErrorEvent(message=err_msg)
                 return
             except Exception as e:
@@ -437,6 +748,7 @@ class ToolLoop:
                         conversation_history, history_start, SEAL_ERROR,
                     )
                 )
+                _log_turn_call_tally(call_tally, iterations_used, calls_used)
                 yield ErrorEvent(message=err_msg)
                 return
 
@@ -451,6 +763,7 @@ class ToolLoop:
                 tool_context_json = seal_tool_context(
                     conversation_history, history_start, SEAL_UNKNOWN,
                 )
+                _log_turn_call_tally(call_tally, iterations_used, calls_used)
                 yield _LoopFinishedEvent(
                     final_text=final_text,
                     response_type=ResponseType.LLM_GENERATION,
@@ -458,6 +771,17 @@ class ToolLoop:
                     turn_tainted=turn_tainted,
                 )
                 return
+
+            # DP-335: the budget is charged for the whole batch, here, before
+            # anything runs — but the batch is never truncated to fit. Half of a
+            # group the model proposed as one plan is worse than one call of
+            # overshoot, and the group is dispatched with `asyncio.gather`
+            # anyway, so a batch that crosses the line costs one round trip, not
+            # several. The next loop check sees the overshoot and ends the turn.
+            calls_used += len(tool_calls_collected)
+            for call_item in tool_calls_collected:
+                identity = write_call_identity(call_item)
+                call_tally[identity] = call_tally.get(identity, 0) + 1
 
             group_id = f"iter{iter_idx}_{uuid.uuid4().hex[:8]}"
             for call_item in tool_calls_collected:
@@ -673,15 +997,193 @@ class ToolLoop:
 
             # If we reach here, there were no write_calls this iteration.
 
-        logger.error(f"Exceeded max tool iterations ({self.max_iterations}).")
+        self._log_turn_exit(
+            call_tally, iterations_used, calls_used,
+            budget_exhausted=calls_used >= self.max_tool_calls,
+        )
+        async for exit_ev in self._finish_exhausted_turn(
+            persona=persona,
+            persona_config=persona_config,
+            conversation_history=conversation_history,
+            history_start=history_start,
+            params=params,
+            local_inference_config=local_inference_config,
+            calls_used=calls_used,
+            iterations_used=iterations_used,
+            turn_tainted=turn_tainted,
+        ):
+            yield exit_ev
+
+    def _log_turn_exit(
+        self,
+        call_tally: Dict[Tuple[str, str], int],
+        iterations_used: int,
+        calls_used: int,
+        *,
+        budget_exhausted: bool,
+    ) -> None:
+        """Log a turn that ended on a limit, at the severity it deserves.
+
+        INFO, not ERROR. The whole premise of DP-335 is that spending the
+        budget is a normal, answerable outcome — the user-facing text was
+        rewritten precisely because the old wording described a malfunction
+        that had not happened. Logging it at ERROR made the same false claim to
+        every log shipper and alert rule watching this process, on turns where
+        the wrap-up produced a good answer and every call returned `ok`.
+
+        A runaway-guard trip IS odd — it is unreachable at the shipped limits
+        (see `MAX_TOOL_ITERATIONS`) — so that arm keeps WARNING.
+        """
+        log = logger.info if budget_exhausted else logger.warning
+        log(
+            "Tool budget spent: %d call(s) over %d iteration(s) "
+            "(limits: %d calls, %d iterations — %s tripped).",
+            calls_used, iterations_used,
+            self.max_tool_calls, self.max_iterations,
+            "call budget" if budget_exhausted else "runaway guard",
+        )
+        _log_turn_call_tally(call_tally, iterations_used, calls_used)
+
+    async def _finish_exhausted_turn(
+        self,
+        *,
+        persona: Persona,
+        persona_config: Dict[str, Any],
+        conversation_history: List[Dict[str, Any]],
+        history_start: int,
+        params: Any,
+        local_inference_config: Optional[Dict[str, Any]],
+        calls_used: int,
+        iterations_used: int,
+        turn_tainted: bool,
+    ) -> AsyncIterator[LoopEvent]:
+        """The whole exit for a turn that ran out of budget.
+
+        Lifted out of `run` because that generator already owns the streaming
+        loop, the park path, the duplicate guard and the resolved guard; this
+        is straight-line exit handling whose only branch is "did the wrap-up
+        produce prose", so keeping it inline only bought `run` complexity.
+
+        DP-335: ask for a real answer before giving up. Everything needed to
+        respond is already in `conversation_history` at this point — the turn
+        that motivated this had the answer sitting in its second tool result
+        and still ended on a canned sentence that read as a malfunction. One
+        completion with `tools=None` converts that transcript into prose; the
+        deterministic call list is pinned underneath it as ground truth.
+        """
+        budget_exhausted = calls_used >= self.max_tool_calls
+        wrap_text, wrap_payload = await self._answer_without_tools(
+            persona=persona,
+            persona_config=persona_config,
+            conversation_history=conversation_history,
+            params=params,
+            local_inference_config=local_inference_config,
+        )
+        if wrap_payload:
+            yield _ApiPayloadEvent(payload=wrap_payload, iter_idx=iterations_used)
+
+        if wrap_text:
+            footer = render_call_summary_footer(
+                conversation_history, history_start,
+                used=calls_used, budget=self.max_tool_calls,
+                exhausted=budget_exhausted,
+            )
+            # LLM_GENERATION, not DEV_COMMAND: this is a real answer to the
+            # user's question, so it must be persisted AND retained like any
+            # other. The canned fault it replaces was correctly excluded from
+            # the memory bank by the `response_type` gate in `_orchestrate`;
+            # excluding *this* would drop the turn's only conclusion.
+            #
+            # Only the PROSE is retained, though. `retain_text` splits the two
+            # halves because the footer is a machine-generated listing of tool
+            # names and arguments, not something the persona said — embedding
+            # it would make `hf_search {"query": …} — ok` a recallable semantic
+            # memory and replay it next turn as the persona's own prior words.
+            yield _LoopFinishedEvent(
+                final_text=(wrap_text + "\n" + footer).rstrip(),
+                response_type=ResponseType.LLM_GENERATION,
+                tool_context_json=seal_tool_context(
+                    conversation_history, history_start, SEAL_MAX_ITERATIONS,
+                ),
+                turn_tainted=turn_tainted,
+                retain_text=wrap_text.rstrip(),
+            )
+            return
+        # The wrap-up is best-effort. A provider that is down or returns
+        # nothing must not turn an exhausted turn into a silent one, so fall
+        # back to the deterministic list on its own.
         yield _LoopFinishedEvent(
-            final_text="I seem to be stuck in a loop. Could you please clarify your request?",
+            final_text=render_max_iteration_text(
+                conversation_history, history_start,
+                used=calls_used, budget=self.max_tool_calls,
+                exhausted=budget_exhausted,
+            ).rstrip(),
             response_type=ResponseType.DEV_COMMAND,
             tool_context_json=seal_tool_context(
                 conversation_history, history_start, SEAL_MAX_ITERATIONS,
             ),
             turn_tainted=turn_tainted,
         )
+
+    async def _answer_without_tools(
+        self,
+        *,
+        persona: Persona,
+        persona_config: Dict[str, Any],
+        conversation_history: List[Dict[str, Any]],
+        params: Any,
+        local_inference_config: Optional[Dict[str, Any]],
+    ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+        """One toolless completion over the exhausted turn's own transcript.
+
+        Returns `(text, api_payload)`; `text` is `None` if the provider failed
+        or said nothing, which the caller treats as "fall back to the list".
+        Every exception is swallowed on purpose — this runs on a path that is
+        already an unhappy ending, and letting it raise would convert a turn
+        that merely ran long into an error the user has to interpret.
+
+        `_EXHAUSTION_NUDGE` is appended to the wire messages only, never to
+        `conversation_history`: the history is what gets sealed and persisted,
+        and a synthetic instruction in it would replay to the model next turn
+        as something the user said.
+
+        No `image_url` and no `tools`. The image belongs to iteration 0 and
+        re-sending it buys nothing; the tools are withheld because the budget
+        is spent, and offering them would invite a call this path cannot run.
+        """
+        messages = build_wire_messages(persona, conversation_history)
+        messages.append({"role": "user", "content": _EXHAUSTION_NUDGE})
+
+        parts: List[str] = []
+        done_text: Optional[str] = None
+        payload: Optional[Dict[str, Any]] = None
+        try:
+            async for ev in self.text_engine.stream_messages(
+                persona_config, messages, params, tools=None,
+                local_inference_config=local_inference_config,
+            ):
+                etype = ev.get("type")
+                if etype == "api_payload":
+                    payload = ev.get("payload")
+                elif etype == "text_delta":
+                    parts.append(ev.get("text") or "")
+                elif etype == "done":
+                    done_text = ev.get("full_text")
+        except Exception as e:
+            logger.warning(
+                "Tool-budget wrap-up generation failed (%s); falling back to "
+                "the call list alone.", e,
+            )
+            return None, payload
+
+        # `or`, not `is not None`: a provider can report `done` with an empty
+        # `full_text` while having streamed the answer as deltas — every
+        # one-shot result the driver classifies as `tool_calls` does exactly
+        # that, and so do truncated streams. Preferring an empty `full_text`
+        # over the deltas already in hand threw a real answer away and dropped
+        # the turn to the canned list.
+        text = (done_text or "".join(parts)).strip()
+        return (text or None), payload
 
     async def _execute_calls(
         self,

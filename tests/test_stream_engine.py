@@ -373,7 +373,14 @@ async def test_stream_local_extracts_tool_call_from_inline_block():
     ])
     engine, _ = _make_engine(resp)
 
-    events = await _drain(engine.stream_local(_persona_config(), _history()))
+    # `tools=` is what makes the `<tool_call>` protocol meaningful: since the
+    # DP-335 review the parser is gated on it, because a caller that advertised
+    # no tools has no way to run one and a toolless prompt can still CONTAIN
+    # the markup (the exhaustion wrap-up sends the turn's own transcript).
+    # This test is about the parser plumbing, so it states the precondition.
+    events = await _drain(engine.stream_local(
+        _persona_config(), _history(), [{"name": "get_weather"}],
+    ))
     visible = "".join(e["text"] for e in events if e["type"] == "text_delta")
     assert "<tool_call>" not in visible
     assert "</tool_call>" not in visible
