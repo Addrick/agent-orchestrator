@@ -1058,6 +1058,36 @@ class TestAgyHandler:
         assert isinstance(api_payload, dict)
 
     @pytest.mark.asyncio
+    async def test_no_tools_means_no_tool_call_parsing(
+            self, text_engine, base_context, monkeypatch):
+        """A toolless call must come back as text, even if the reply contains
+        a `<tool_call>` span (DP-335).
+
+        The `if tools:` guards suppress *rendering* the protocol, not parsing
+        it back, so this used to classify any reply containing the marker as
+        `tool_calls` and discard the prose alongside it. The caller that hit
+        this is the exhaustion wrap-up, whose prompt is a transcript of the
+        turn's own tool calls plus a persona prompt naming tools by hand — so
+        a `<tool_call>` reply is the likely output, and the whole DP-335
+        feature silently degraded to its fallback on agy-flash, the provider
+        whose measured turn motivated the ticket.
+        """
+        raw = (
+            "Here is what I found.\n"
+            '<tool_call>{"name": "get_weather", "arguments": {}}</tool_call>'
+        )
+        monkeypatch.setattr(
+            text_engine, "_run_agy_cli", AsyncMock(return_value=raw),
+        )
+
+        response, _ = await text_engine._generate_agy_response(
+            {"model_name": "agy-flash"}, base_context, tools=None,
+        )
+
+        assert response["type"] == "text"
+        assert "Here is what I found." in response["content"]
+
+    @pytest.mark.asyncio
     async def test_handler_injects_system_and_tools_into_prompt(self, text_engine, base_context, monkeypatch):
         mock_cli = AsyncMock(return_value="mocked output")
         monkeypatch.setattr(text_engine, "_run_agy_cli", mock_cli)

@@ -518,6 +518,15 @@ powering off its own host. Auto-seeding only ever writes `data/personas.json`
 when the file does not already exist, so merging a release never adds a persona
 to an instance that is already running.
 
+⚠️ **The same applies to prompt *edits*, and it has bitten three tickets.** When
+a release changes `hypr`'s shipped prompt — DP-332's `gpu_status`, DP-265's four
+`hf_*` tools, DP-335's read-batching and dead-end guidance — the running
+instance keeps the prompt in its own `data/personas.json` and never sees the
+change. Merging and redeploying the image is **not** enough. Splice the new
+paragraphs into the live record by hand (against its existing anchors, not by
+copying the template over it, which would discard whatever the operator has
+tuned), or the feature ships fully wired and behaves exactly as it did before.
+
 **Restrict who can reach it (recommended).** Because reachability *is* the authz
 boundary here, set `hypr`'s [origin allowlist](#commands) to the one Discord
 server you administer:
@@ -692,7 +701,9 @@ would create the ticket twice.
 - It writes a **real answer first**, from everything it already found — what it learned, what is still unresolved and why, and the one next step it would take. Hitting the cap usually does not mean anything broke; the common case is a persona that spent its budget searching and re-reading and simply never got to the action you asked for, and by then it generally knows enough to say something useful.
 - Under that it lists **every tool call it made**, in order, with the arguments it used and how each one turned out (succeeded, failed with the error, or still waiting for your approval), and marks any call it made twice with the same arguments. The prose can be vague about what it ran; this list is read straight from the record and cannot be, so you can check one against the other.
 
-That answer is a normal reply — it is remembered like any other, so you can follow up on it in the next message. If the model is unreachable at that moment, you still get the list on its own.
+That answer is a normal reply — it is remembered like any other, so you can follow up on it in the next message. (The prose is what gets remembered; the call list under it is shown to you but not filed away as something the persona said.) If the model is unreachable at that moment, you still get the list on its own.
+
+The 15 is a stopping condition, not a hard ceiling: if the persona asks for several tools in one message, that whole group runs even when it crosses the line, and the turn ends immediately after. Half of a group the persona proposed as one plan is worse than a call or two of overshoot, and the group runs concurrently anyway. So a turn can report having spent, say, 17 of its 15 steps — that is the overshoot, not a miscount. Size rate limits and costs against a small margin above 15 rather than exactly 15.
 
 ### Taint Tracking
 The system tracks the "trustworthiness" of the conversation context. If a persona uses a tool that retrieves potentially untrusted content (like `web_search` or `recall_memory` containing past external input), the current turn is marked as **tainted**. 

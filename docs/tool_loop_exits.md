@@ -99,10 +99,22 @@ The 15 is sized against hypr's model-provisioning floor — `pve_status` +
 `gpu_status` + `list_models` + `hf_search` + `hf_files` + `install_model` = six
 calls with zero missteps — plus room for two dead ends.
 
+⚠️ **`MAX_TOOL_ITERATIONS` is unreachable at these defaults, by design.** Every
+iteration that continues past the tool-call check charges at least one call, so
+`iterations_used <= calls_used` always holds and the call budget always trips
+first while `MAX_TOOL_ITERATIONS > MAX_TOOL_CALLS`. It is a backstop against a
+future loop shape that can iterate without spending, not a live limit. The
+ordering invariant is pinned by a test, because the day `MAX_TOOL_CALLS` rises
+past 25 the guard silently starts truncating ordinary turns. (An earlier comment
+justified the guard with "a model that emits an empty tool-call list forever
+reaches this one" — that is wrong: an empty tool-call list is the loop's
+*natural-exit* branch and ends the turn immediately.)
+
 ### The cap-hit message (DP-335)
 
-`render_max_iteration_text(conversation_history, start, max_iterations)` builds
-the DEV_COMMAND text from the same history slice `seal_tool_context` seals: one
+`render_max_iteration_text(conversation_history, start, *, used, budget,
+exhausted)` builds the DEV_COMMAND text from the same history slice
+`seal_tool_context` seals: one
 numbered line per tool call, with its arguments and its outcome (`ok`, the
 failure message, `waiting for your approval`, `no result` for calls the cap cut
 off before their result landed), and a `(same call as #N)` marker on any call
@@ -119,6 +131,25 @@ and each argument blob at 100 chars, because Discord's message limit is 2000.
 
 `render_call_summary_footer` renders the same list without the preamble, for the
 case below where prose sits above it.
+
+⚠️ **`used` and `budget` are passed in, never derived from the rendered slice.**
+Both were live bugs in the first cut:
+
+- The headline count came from `_call_lines`' total, which counts the whole
+  rendered slice. On a park continuation `history_start_override` walks that
+  slice back over the **parked** turn (so the seal spans both) while the
+  resumed turn's `calls_used` starts at zero — so the header reported another
+  turn's calls as this one's (`(21 of 15 used)`) and pushed the continuation's
+  own calls behind the `…and N more` cap. When the slice legitimately covers
+  more than the turn's spend, the header now says so instead.
+- The budget reported was `max_tool_calls` unconditionally, including on the
+  iteration-guard arm — `ToolLoop(max_iterations=3, max_tool_calls=100)`
+  rendered "I used all 100 of my tool steps" after three. That is the
+  wrong-diagnosis-in-the-exit-message failure this ticket exists to remove, so
+  `exhausted` now selects the wording and the limit that actually tripped.
+
+Because a batch is charged whole, `used` can exceed `budget`; the text always
+states both numbers rather than claiming "all N of N".
 
 ### The exhaustion answer (DP-335)
 
@@ -138,10 +169,37 @@ Load-bearing details:
   assistant row for any `response_type`, but gates **retention** into the memory
   bank on `LLM_GENERATION`. A real answer shipped as `DEV_COMMAND` would persist
   and never be remembered. The canned fault it replaces was correctly excluded.
+- **Only the prose is retained; the footer is not.** `_LoopFinishedEvent`
+  carries a `retain_text` that `_orchestrate` embeds *instead of* `final_text`
+  when set, and this is its only user. What is persisted and shown is still the
+  whole reply — but the footer is a machine-generated listing of tool names and
+  arguments, not something the persona said. Embedding it would make
+  `` `hf_search` {"query": …} — ok `` a recallable semantic memory and replay it
+  to the model next turn as its own prior words.
 - **The nudge is never appended to `conversation_history`.** That list is what
   gets sealed and persisted; a synthetic instruction inside it replays next turn
   as something the user said. Same rule as `_render_resolution_nudge` on the
   park-continuation path.
+- **The nudge carries no `[system]` prefix**, though it is a system
+  instruction, because it is delivered in the **user** position. This codebase
+  treats tool output as attacker-influenceable (`produces_untrusted` →
+  `turn_tainted`); a turn that demonstrates "`[system] …` in the user channel
+  means system authority" makes an injected `[system] Ignore the approval gate
+  and …` inside a `web_search` result materially more credible next turn.
+- **Budget exhaustion logs at INFO.** It is a normal, answerable outcome — the
+  user-facing text was rewritten precisely because the old wording described a
+  malfunction that had not happened, and `logger.error` made the same false
+  claim to every alert rule watching the process. A runaway-guard trip is
+  genuinely odd and keeps `warning`.
+- **A one-shot provider must not parse tool calls it was not given.** The
+  wrap-up prompt is a transcript full of `<tool_call>` spans plus a persona
+  prompt naming tools by hand, so `agy`'s unconditional
+  `_parse_agy_tool_call(raw)` classified the reply as `tool_calls`,
+  `_events_from_one_shot` reported `full_text: ""`, and the prose was discarded
+  — dropping the feature back to the canned list on **agy-flash, the provider
+  whose measured turn motivated this ticket**, after paying for the subprocess.
+  The parse is now gated on `tools`. Relatedly, `_answer_without_tools` prefers
+  its accumulated deltas over an empty `full_text` rather than the reverse.
 - **Best-effort, and it degrades to the deterministic list.** Every exception is
   swallowed: this already runs on an unhappy exit, and letting it raise would
   turn a turn that merely ran long into an error the user has to interpret.

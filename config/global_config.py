@@ -114,10 +114,20 @@ MAX_TOOL_CALLS = 15
 # calls they carry. Separate from MAX_TOOL_CALLS because the two answer
 # different questions — that one is "how much work may this turn do", this one
 # is "how many times may we talk to the provider before declaring the loop
-# stuck". A model emitting one call per message reaches MAX_TOOL_CALLS first
-# and never sees this; a model that emits an empty tool-call list forever
-# reaches this one and never spends the budget. Only the second is a runaway,
-# and only this limit catches it.
+# stuck".
+#
+# ⚠️ It is UNREACHABLE at these defaults, and that is the intended state. Every
+# iteration that continues past the tool-call check charges at least one call,
+# so `iterations_used <= calls_used` always holds and the call budget is always
+# the limit that trips first while MAX_TOOL_ITERATIONS > MAX_TOOL_CALLS. This
+# is a backstop against a future loop shape that can iterate without spending,
+# not a live limit. (The original justification here — "a model that emits an
+# empty tool-call list forever reaches this one" — was simply wrong: an empty
+# tool-call list is the loop's natural-exit branch and ends the turn at once.)
+#
+# `tests/tools/test_tool_loop.py` pins the ordering invariant, because the day
+# MAX_TOOL_CALLS rises past this number the guard silently starts truncating
+# ordinary turns.
 MAX_TOOL_ITERATIONS = 25
 # Max cached API request payloads (for dump commands); FIFO eviction beyond this
 MAX_CACHED_API_REQUESTS = 128

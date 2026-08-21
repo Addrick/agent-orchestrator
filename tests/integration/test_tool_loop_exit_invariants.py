@@ -381,5 +381,5 @@ async def test_budget_exhaustion_stays_one_terminal_event_when_wrap_up_dies(
     assert len(terminal) == 1
     assert isinstance(terminal[0], DoneEvent)
     assert terminal[0].response_type == ResponseType.DEV_COMMAND
-    assert "of my tool steps" in terminal[0].text
+    assert "my whole tool budget" in terminal[0].text
     assert "`get_agent_status`" in terminal[0].text

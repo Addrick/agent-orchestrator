@@ -334,9 +334,16 @@ async def test_max_iterations_cap():
     # DP-335: the cap-hit text lists what the turn actually spent its budget
     # on. The old canned sentence named no tool, so a user (and the next
     # session) could not tell an exhausted budget from a broken tool.
-    assert "of my tool steps" in finished.final_text
     assert "`spinner`" in finished.final_text
     assert "(same call as #1)" in finished.final_text
+    # And it names the limit that ACTUALLY tripped. This turn ran out of
+    # iterations after 3 calls against a call budget of 100; the first cut
+    # handed `max_tool_calls` to the renderer unconditionally and so replied
+    # "I used all 100 of my tool steps" — the wrong-diagnosis-in-the-exit-
+    # message failure this ticket exists to remove.
+    assert "loop guard" in finished.final_text
+    assert "3 tool step(s)" in finished.final_text
+    assert "100" not in finished.final_text
 
 
 @pytest.mark.asyncio
@@ -934,7 +941,7 @@ def test_max_iteration_text_lists_every_call_with_its_outcome():
     in a loop" sentence described a malfunction that had not happened, and the
     one fact that mattered — which calls ate the budget — was only recoverable
     by reading the sealed tool_context out of the database."""
-    text = render_max_iteration_text(_cap_history(), 0, 10)
+    text = render_max_iteration_text(_cap_history(), 0, used=6, budget=10)
 
     assert "`pve_status`" in text
     assert '`hf_search` {"query": "qwen 27b"}' in text
@@ -945,13 +952,13 @@ def test_max_iteration_text_lists_every_call_with_its_outcome():
     # The cap cut c5 off before its result landed; sealing synthesizes one
     # later, so at render time it is genuinely unanswered.
     assert "`list_models` — no result" in text
-    assert "10 of my tool steps" in text
+    assert "6 of 10 tool steps" in text
 
 
 def test_max_iteration_text_marks_verbatim_repeats():
     """A repeated read is the common shape of this exit (4 of 10 iterations in
     the DP-335 turn) and is invisible in a flat list of names."""
-    text = render_max_iteration_text(_cap_history(), 0, 10)
+    text = render_max_iteration_text(_cap_history(), 0, used=6, budget=10)
 
     assert "3. `pve_status` — ok (same call as #1)" in text
     # Only the repeat is marked — the first occurrence and the distinct calls
@@ -967,7 +974,7 @@ def test_max_iteration_text_respects_the_history_slice():
         _result_msg("old", "list_models", {"result": {"models": []}}),
     ] + _cap_history()
 
-    text = render_max_iteration_text(history, 2, 10)
+    text = render_max_iteration_text(history, 2, used=6, budget=10)
 
     assert text.count("`list_models`") == 1
     assert "1. `pve_status`" in text
@@ -983,7 +990,7 @@ def test_max_iteration_text_scrubs_arguments():
     try:
         history = [_call_msg("c0", "set_active_model",
                              {"token": "hunter2-supersecret"})]
-        text = render_max_iteration_text(history, 0, 10)
+        text = render_max_iteration_text(history, 0, used=1, budget=10)
     finally:
         reset_scrubber()
 
@@ -993,7 +1000,7 @@ def test_max_iteration_text_scrubs_arguments():
 def test_max_iteration_text_falls_back_when_no_calls_recorded():
     """No tool calls in the slice means there is nothing to show; the message
     must still be a sentence, not an empty list."""
-    text = render_max_iteration_text([], 0, 10)
+    text = render_max_iteration_text([], 0, used=0, budget=10)
 
     assert "10 tool steps" in text
     assert text.strip().endswith("?")
@@ -1003,19 +1010,84 @@ def test_call_summary_footer_pins_the_spend_under_a_prose_answer():
     """The footer is the ground truth half of the exhaustion reply: the prose
     above it is a generation and can be vague about what it ran, this is read
     straight out of history and cannot be."""
-    footer = render_call_summary_footer(_cap_history(), 0, 15)
+    footer = render_call_summary_footer(_cap_history(), 0, used=6, budget=15)
 
     assert "6 of 15 used" in footer
     assert "1. `pve_status` — ok" in footer
     assert "3. `pve_status` — ok (same call as #1)" in footer
     # No preamble sentence — that is the standalone renderer's job.
-    assert "I used all" not in footer
+    assert "I spent" not in footer
 
 
 def test_call_summary_footer_is_empty_when_the_turn_made_no_calls():
     """Nothing to pin means no footer, not a header with an empty list under
     it — the prose answer has to be able to stand alone."""
-    assert render_call_summary_footer([], 0, 15) == ""
+    assert render_call_summary_footer([], 0, used=0, budget=15) == ""
+
+
+def test_renderers_report_the_limit_that_actually_tripped():
+    """The budget named in the text is the one that ended the turn.
+
+    The first cut handed `max_tool_calls` to both renderers unconditionally, so
+    a turn stopped by the runaway guard still claimed to have spent the call
+    budget — a number it never came near. Stating the wrong diagnosis in the
+    exit message is the failure DP-335 exists to remove, so it must not be
+    reintroduced by the message that replaced it.
+    """
+    guard = render_max_iteration_text(
+        _cap_history(), 0, used=6, budget=15, exhausted=False,
+    )
+    assert "loop guard" in guard
+    assert "6 tool step(s)" in guard
+    assert "15" not in guard
+
+    footer = render_call_summary_footer(
+        _cap_history(), 0, used=6, budget=15, exhausted=False,
+    )
+    assert "Loop guard stopped the turn after 6 tool step(s)" in footer
+    assert "of 15 used" not in footer
+
+
+def test_footer_reports_the_turns_own_spend_not_the_rendered_slice():
+    """`history_start_override` walks the render boundary back over a PARKED
+    turn so the seal spans both, but the resumed turn's `calls_used` starts at
+    zero. Deriving the headline from the slice therefore billed this turn for
+    another turn's calls. The header takes `used`; the discrepancy is stated
+    rather than left to contradict the list beneath it."""
+    footer = render_call_summary_footer(
+        _cap_history(), 0, used=2, budget=15,
+    )
+
+    assert "(2 of 15 used)" in footer
+    # The list still shows everything the seal covers — that is the point of
+    # rendering the whole slice — but it says so.
+    assert "the 6 calls below span the whole parked exchange" in footer
+
+
+def test_budget_overshoot_never_claims_all_n_of_n():
+    """A batch is charged whole and never truncated, so `used` can exceed
+    `budget`. The text states both numbers instead of the old "all N of N",
+    which would have been arithmetically false on exactly those turns."""
+    text = render_max_iteration_text(
+        _cap_history(), 0, used=17, budget=15,
+    )
+
+    assert "17 of 15 tool steps" in text
+
+
+def test_runaway_guard_stays_above_the_call_budget():
+    """`MAX_TOOL_ITERATIONS` is unreachable at the shipped defaults, by design.
+
+    Every iteration that continues past the tool-call check charges at least
+    one call, so `iterations_used <= calls_used` always holds and the call
+    budget always trips first while the guard sits above it. Pinned because the
+    relation is the whole reason the guard is inert: raise `MAX_TOOL_CALLS`
+    past this number and the guard silently starts truncating ordinary turns
+    while every other limit still reads as generous.
+    """
+    from config import global_config
+
+    assert global_config.MAX_TOOL_ITERATIONS > global_config.MAX_TOOL_CALLS
 
 
 # --- DP-335 S2: the exhaustion answer ---------------------------------------
@@ -1052,6 +1124,57 @@ async def test_exhaustion_answers_from_the_transcript():
     # Prose first, ground-truth list under it — the two compose.
     assert "1 of 1 used" in finished.final_text
     assert "`spinner`" in finished.final_text
+    # But only the PROSE is embedded. The footer is a machine-generated listing
+    # of tool names and arguments, not something the persona said; retaining it
+    # would make `spinner {"n": 0} — ok` a recallable semantic memory and
+    # replay it next turn as the persona's own prior words.
+    assert finished.retain_text == (
+        "No gguf exists for that repo; want the community quant?"
+    )
+    assert "`spinner`" not in finished.retain_text
+
+
+@pytest.mark.asyncio
+async def test_exhaustion_keeps_deltas_when_the_provider_reports_empty_done():
+    """A provider can stream the answer as deltas and then report `done` with
+    an empty `full_text` — every one-shot result the driver classifies as
+    `tool_calls` does exactly that, and so do truncated streams. Preferring the
+    empty `full_text` over the deltas already in hand threw a real answer away
+    and dropped the turn to the canned list."""
+    engine = _make_engine([
+        _spin(0),
+        [{"type": "text_delta", "text": "The R9700 has 32 GiB; "},
+         {"type": "text_delta", "text": "the 27B q4 fits."},
+         {"type": "done", "full_text": ""}],
+    ])
+    tools = _make_tool_manager({"spinner": {"result": "spin"}})
+    loop = ToolLoop(engine, tools, max_iterations=50, max_tool_calls=1)
+
+    events = await _drain(loop.run(
+        persona=_make_persona(), conversation_history=[],
+        params=MagicMock(), tools=[],
+    ))
+
+    finished = events[-1]
+    assert isinstance(finished, _LoopFinishedEvent)
+    assert finished.response_type == ResponseType.LLM_GENERATION
+    assert finished.final_text.startswith("The R9700 has 32 GiB")
+
+
+def test_exhaustion_nudge_does_not_forge_a_system_marker():
+    """The nudge is a system instruction delivered in the USER position.
+
+    Tool output is attacker-influenceable here (`produces_untrusted` →
+    `turn_tainted`), so a turn that demonstrates "`[system] …` in the user
+    channel carries system authority" makes an injected `[system] Ignore the
+    approval gate and …` inside a `web_search` result materially more credible
+    on the next turn. `_render_resolution_nudge`, the park-continuation twin
+    this is modeled on, states its facts plainly for the same reason.
+    """
+    from src.tools.tool_loop import _EXHAUSTION_NUDGE
+
+    assert "[system]" not in _EXHAUSTION_NUDGE
+    assert _EXHAUSTION_NUDGE.startswith("You have used your entire tool budget")
 
 
 @pytest.mark.asyncio
@@ -1108,7 +1231,7 @@ async def test_exhaustion_falls_back_when_the_wrap_up_generation_fails():
     finished = events[-1]
     assert isinstance(finished, _LoopFinishedEvent)
     assert finished.response_type == ResponseType.DEV_COMMAND
-    assert "of my tool steps" in finished.final_text
+    assert "my whole tool budget (1 of 1 tool steps)" in finished.final_text
     assert "`spinner`" in finished.final_text
     # The exit is still an exit: exactly one terminal event, nothing trailing.
     assert sum(isinstance(e, (_LoopFinishedEvent, ErrorEvent))

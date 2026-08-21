@@ -421,6 +421,9 @@ class ChatSystem:
             final_text = ""
             response_type = ResponseType.LLM_GENERATION
             tool_context_json: Optional[str] = None
+            # What goes to the memory bank when that is not the whole reply.
+            # Only the DP-335 exhaustion exit sets it — see `_LoopFinishedEvent`.
+            retain_text: Optional[str] = None
             accumulated_parts: List[str] = []
             # Writes this turn gated for approval. Registered in the store only
             # after the assistant row commits, since each needs that row's id to
@@ -574,6 +577,7 @@ class ChatSystem:
                         final_text = ev.final_text
                         response_type = ev.response_type
                         tool_context_json = ev.tool_context_json
+                        retain_text = ev.retain_text
                         ctx.turn_tainted = ev.turn_tainted
                         # Persist back to the conversation cache for stickiness
                         taint_key = (ctx.user_identifier, ctx.persona_name, ctx.channel, ctx.server_id)
@@ -614,10 +618,17 @@ class ChatSystem:
             # DP-113: retain assistant turn through the backend boundary.
             # Inherit ctx.turn_tainted so the untrusted bit reaches the
             # store when the LLM consumed attacker-influenced tool output.
-            if assistant_id is not None and final_text and final_text.strip() \
+            #
+            # What is PERSISTED is the whole reply; what is EMBEDDED can be
+            # less. `retain_text` is the loop's opt-out for machine-generated
+            # text appended to a real answer — today only DP-335's tool-call
+            # footer, which is ground truth for the reader but would become a
+            # recallable "memory" of tool names and arguments if embedded.
+            to_retain = retain_text if retain_text is not None else final_text
+            if assistant_id is not None and to_retain and to_retain.strip() \
                     and response_type == ResponseType.LLM_GENERATION:
                 await self.turn_persistence.retain_turn_safe(
-                    persona_name=persona_name, role="assistant", content=final_text,
+                    persona_name=persona_name, role="assistant", content=to_retain,
                     user_identifier=user_identifier, channel=channel,
                     server_id=server_id, timestamp=datetime.now(),
                     interaction_id=assistant_id, untrusted=ctx.turn_tainted,
