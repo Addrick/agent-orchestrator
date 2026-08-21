@@ -669,10 +669,25 @@ def hindsight_live_url() -> str:
     url = os.environ.get("HINDSIGHT_LIVE_URL")
     if not url:
         pytest.skip("HINDSIGHT_LIVE_URL not set")
+    base = url.rstrip("/")
+    # An answered request proves the port is open, not that the service works:
+    # a Hindsight whose database is refusing connections still serves HTTP and
+    # then 500s every API call, which errored the live tier instead of skipping
+    # it. /health reports the backing store, so probe that.
     try:
-        httpx.get(url, timeout=1.0)
+        resp = httpx.get(f"{base}/health", timeout=5.0)
     except Exception:
         pytest.skip(f"Hindsight service at {url} is offline/unreachable")
+    if resp.status_code == 404:
+        return url  # older build with no /health — reachable is all we can tell
+    if not (200 <= resp.status_code < 300):
+        pytest.skip(f"Hindsight service at {url} is unhealthy: {resp.text[:200]}")
+    try:
+        status = resp.json().get("status")
+    except Exception:
+        status = None
+    if status not in (None, "healthy"):
+        pytest.skip(f"Hindsight service at {url} reports {status}: {resp.text[:200]}")
     return url
 
 
@@ -685,24 +700,30 @@ async def golden_hindsight_bank(hindsight_live_url: str) -> str:
     """
     backend = HindsightBackend(url=hindsight_live_url)
     bank = "golden-conformance-bank"
-    
-    # 1. Ensure bank exists
-    await backend.ensure_bank(bank, retain_mission="Persistent conformance test artifacts")
-    
-    # 2. Check if already seeded
-    hits = await backend.recall(bank, "fox", k=1)
-    if not hits:
-        # 3. Seed once if missing (fire-and-forget)
-        await backend.retain_turn(
-            bank, "user", "the quick brown fox jumps over the lazy dog",
-            timestamp=datetime.now(timezone.utc),
-            scope_tags=["test:conformance"],
-            source_persona="alice",
-            untrusted=True,
-        )
-        # No wait, no poll.
-    
-    await backend.aclose()
+
+    # A service that passed the /health probe can still degrade between the
+    # probe and here. Seeding failures are an environment fault, not a code
+    # regression, so skip rather than error the whole live tier.
+    try:
+        # 1. Ensure bank exists
+        await backend.ensure_bank(bank, retain_mission="Persistent conformance test artifacts")
+
+        # 2. Check if already seeded
+        hits = await backend.recall(bank, "fox", k=1)
+        if not hits:
+            # 3. Seed once if missing (fire-and-forget)
+            await backend.retain_turn(
+                bank, "user", "the quick brown fox jumps over the lazy dog",
+                timestamp=datetime.now(timezone.utc),
+                scope_tags=["test:conformance"],
+                source_persona="alice",
+                untrusted=True,
+            )
+            # No wait, no poll.
+    except (HindsightAPIError, httpx.RequestError) as e:
+        pytest.skip(f"Hindsight golden bank unavailable ({e}); service degraded")
+    finally:
+        await backend.aclose()
     return bank
 
 
