@@ -356,8 +356,14 @@ async def recover(
 
 async def ingest_sessions(
     sessions: List[Tuple[str, str, datetime, str]],
+    document_ids: Optional[Dict[str, str]] = None,
 ) -> List[str]:
-    """POST parsed sessions to Hindsight. Returns list of session IDs successfully enqueued."""
+    """POST parsed sessions to Hindsight. Returns list of session IDs successfully enqueued.
+
+    `document_ids` maps session id -> an existing document to supersede. Passing
+    one makes the retain `update_mode='replace'`, so a re-ingest reprocesses that
+    document in place instead of a delete followed by a hopeful re-POST.
+    """
     if not sessions:
         return []
     enqueued: List[str] = []
@@ -388,6 +394,7 @@ async def ingest_sessions(
                     f"project:{project}",
                 ],
                 source_persona="claudecode",
+                document_id=(document_ids or {}).get(session_id),
                 metadata={
                     "session_id": session_id,
                     "project": project,

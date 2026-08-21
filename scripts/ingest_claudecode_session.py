@@ -239,22 +239,6 @@ async def server_documents_by_session(bank_id: str = BANK_ID) -> Dict[str, Dict[
     return out
 
 
-async def delete_documents(doc_ids: List[str], bank_id: str = BANK_ID) -> int:
-    backend = HindsightBackend(url=HINDSIGHT_URL)
-    deleted = 0
-    try:
-        client = backend._get_client()
-        for doc_id in doc_ids:
-            try:
-                await client.adelete_document(bank_id, doc_id)
-                deleted += 1
-            except Exception as e:  # noqa: BLE001 - a stale document is not fatal
-                logger.warning("Could not delete document %s: %s", doc_id, e)
-    finally:
-        await backend.aclose()
-    return deleted
-
-
 def find_truncated(
     project_dir: Path,
     docs: Dict[str, Dict[str, Any]],
@@ -303,15 +287,9 @@ async def recheck(
     if dry_run or not stale:
         return 0
 
-    logger.info("Deleting %d stale document(s)...", len(stale))
-    await delete_documents([d for d, _p, _h, _w in stale])
-
-    enqueued = await ingest_sessions([p for _d, p, _h, _w in stale])
-    by_sid = {p[0]: p for _d, p, _h, _w in stale}
-    for sid in enqueued:
-        state[sid] = record_for(by_sid[sid])
-    save_state(state)
-    logger.info("Re-ingested %d session(s).", len(enqueued))
+    sessions = [p for _d, p, _h, _w in stale]
+    document_ids = {p[0]: doc_id for doc_id, p, _h, _w in stale}
+    await post_and_record(sessions, state, document_ids)
     return 0
 
 
@@ -332,21 +310,25 @@ def mark_only(project_dir: Path, state: Dict[str, Dict[str, Any]]) -> int:
     return 0
 
 
-async def replace_superseded(sessions: List[Session], state: Dict[str, Dict[str, Any]]) -> None:
-    """Delete the server documents for sessions being re-POSTed.
+async def superseded_document_ids(
+    sessions: List[Session],
+    state: Dict[str, Dict[str, Any]],
+) -> Dict[str, str]:
+    """Map session id -> the existing document a re-ingest should replace.
 
-    The document id is derived from the session tag and the first turn's
-    timestamp, both stable across a re-ingest, so without this the second POST
-    would collide with the first instead of replacing it.
+    Retaining with an explicit document_id sets `update_mode='replace'`, so the
+    server reprocesses that document in place. Deleting first and re-POSTing
+    would do the same thing with a window where the old facts are gone and the
+    new ones have not landed.
     """
     resend = [s for s in sessions if s[0] in state]
     if not resend:
-        return
+        return {}
     docs = await server_documents_by_session()
-    doc_ids = [docs[s[0][:8]]["id"] for s in resend if s[0][:8] in docs]
-    if doc_ids:
-        logger.info("Replacing %d superseded document(s).", len(doc_ids))
-        await delete_documents(doc_ids)
+    found = {s[0]: docs[s[0][:8]]["id"] for s in resend if s[0][:8] in docs}
+    if found:
+        logger.info("Replacing %d superseded document(s) in place.", len(found))
+    return found
 
 
 async def main_async(args: argparse.Namespace) -> int:
@@ -386,14 +368,18 @@ async def main_async(args: argparse.Namespace) -> int:
                         sid[:8], first_ts.isoformat(), len(content))
         return 0
 
-    await replace_superseded(sessions, state)
-    await post_and_record(sessions, state)
+    document_ids = await superseded_document_ids(sessions, state)
+    await post_and_record(sessions, state, document_ids)
     return 0
 
 
-async def post_and_record(sessions: List[Session], state: Dict[str, Dict[str, Any]]) -> None:
+async def post_and_record(
+    sessions: List[Session],
+    state: Dict[str, Dict[str, Any]],
+    document_ids: Optional[Dict[str, str]] = None,
+) -> None:
     logger.info("Ingesting %d session(s)...", len(sessions))
-    enqueued = await ingest_sessions(sessions)
+    enqueued = await ingest_sessions(sessions, document_ids)
     by_sid = {s[0]: s for s in sessions}
     for sid in enqueued:
         state[sid] = record_for(by_sid[sid])
