@@ -1070,8 +1070,8 @@ the same node — there is no second credential and no second host.
 |------|------|-------------|
 | `hf_search` | Read | Search HuggingFace for repos that publish gguf, most-downloaded first: repo id, downloads, likes, gated flag, tags. A hit means the *repo* is tagged as containing gguf, not that any particular file exists — follow up with `hf_files`. Results are third-party text, so this tool is flagged as producing untrusted content and taints the turn. |
 | `hf_files` | Read | One repo's gguf files with the exact **byte size** and **sha256** the Hub publishes for each. This is what you size a quant against (compare with `gpu_status`) and where the exact filename comes from. A file whose `sha256` is `null` — a non-LFS file, with no published digest — cannot be installed at all. |
-| `install_model` | **Write (parked)** | Download one gguf onto the model host and write a koboldcpp systemd unit for it. **The unit lands disabled and is not started.** Takes `repo`, `file`, `name`, and an optional `contextsize`. Returns a `job_id` immediately; the download continues on the node. |
-| `install_status` | Read | Poll one install job: `state` (running / done / failed), current step, bytes downloaded, and on failure a short fixed-vocabulary reason. Also reports `n_layer` / `n_kv_head` / `head_dim` read out of the downloaded gguf and, on a finished job, a `note` that **evaluates** the KV budget from them — bytes per token, the cache size at the installed `contextsize`, and what the unit wants in total once the model buffer, ~1010 MiB compute buffer and ~500 MiB margin are added (DP-337). A gguf whose header omits the three numbers says so instead, and asks for the budget to be measured against `gpu_status` rather than estimated. |
+| `install_model` | **Write (parked)** | Download one gguf onto the model host and write a koboldcpp systemd unit for it. **The unit lands disabled and is not started**, and the bytes land in the **cold** tier on the archive disk, not on the SSD (see [Where a model lives](#where-a-model-lives--hot-and-cold-storage-dp-340)) — so an install can never consume the space the running guests need. Takes `repo`, `file`, `name`, and an optional `contextsize`. Returns a `job_id` immediately; the download continues on the node. |
+| `install_status` | Read | Poll one node job — an install, or a promotion started by `set_active_model`: `state` (running / done / failed), current step, bytes downloaded, and on failure a short fixed-vocabulary reason. Also reports `n_layer` / `n_kv_head` / `head_dim` read out of the downloaded gguf and, on a finished job, a `note` that **evaluates** the KV budget from them — bytes per token, the cache size at the installed `contextsize`, and what the unit wants in total once the model buffer, ~1010 MiB compute buffer and ~500 MiB margin are added (DP-337). A gguf whose header omits the three numbers says so instead, and asks for the budget to be measured against `gpu_status` rather than estimated. |
 
 #### What the approval card shows
 
@@ -1096,6 +1096,63 @@ and worth doing only after checking the `contextsize`, because `install_model`
 writes a deliberately small default (8192) on the assumption a human will tune it
 against `gpu_status` first.
 
+#### Where a model lives — hot and cold storage (DP-340)
+
+A gguf on the model host lives in one of two tiers, and the difference is
+visible in `list_models` as a `tier` field.
+
+| tier | where | size | what it means |
+|---|---|---|---|
+| **hot** | `/srv/models`, on the SSD | ~120 GiB, ~4-5 models | koboldcpp can serve it right now |
+| **cold** | `/srv/archive/models`, on the archive HDD | ~840 GiB | installed and kept, but must be promoted before it can serve |
+
+**The cold copy is the authoritative one.** Every gguf that has ever been
+installed stays there; the hot tier is a cache of the handful currently worth
+keeping on fast storage. That is what makes eviction safe — dropping a model
+from the hot tier deletes a copy, never the model, and the worst case is the
+minutes it takes to copy it back.
+
+**Installing does not promote.** `install_model` writes the bytes to the cold
+tier and the unit disabled, exactly as before; nothing is put on the SSD and
+nothing on `:5001` changes. This is deliberate and it is the main protection
+against the failure that motivated the split: a download that never touches the
+SSD cannot exhaust the pool the running guests allocate from, whatever its size
+and whatever a space check does or does not catch.
+
+**Promotion happens when you activate.** Calling `set_active_model` on a cold
+model promotes it first: it makes room in the hot tier, copies the gguf across,
+re-verifies its sha256 at the destination, and only then switches `:5001`.
+
+⚠️ **A promotion takes minutes, and the tool tells you so rather than blocking.**
+A 24 GB gguf off a spinning archive disk is roughly three minutes. `set_active_model`
+therefore returns immediately with `state: "promoting"` and a `job_id` — the same
+shape `install_model` already uses — and you poll it with `install_status`. It
+does **not** hold the call open for the copy: a tool call that appears hung is one
+an agent will retry, and a retried model swap is how you get two promotions
+racing for the same hot-tier space.
+
+**What gets evicted.** The hot tier makes room by removing the
+**least recently served** model first, and it only ever removes enough to fit
+what is coming in — it is a capacity rule, not a fixed count, so the number that
+stays hot depends on their sizes.
+
+- "Least recently served" is tracked in a state file on the node, updated every
+  time a model is made active. It is **not** file access time: `/srv/models` is
+  mounted `noatime` and read-only-bound into the GPU container, so there is no
+  atime to read.
+- A model that has **never** been served sorts as oldest, so a model installed
+  and never used is the first thing evicted.
+- **Pinned models are never evicted.** Pin the ones that must always be ready;
+  the remaining slots rotate. If pins alone do not leave room for an incoming
+  model, the promotion **fails and says which pins to release** rather than
+  quietly evicting one — a pin the system may overrule is not a pin.
+- The **currently active** model is implicitly pinned and cannot be evicted.
+
+**What is never at risk.** Nothing is removed from the hot tier unless a
+verified cold copy exists — the eviction path checks for the archive file and
+its digest before it deletes anything, so a missing or corrupt archive copy makes
+eviction refuse rather than proceed.
+
 #### What the node refuses
 
 The whole feature runs **one** node-side script
@@ -1108,9 +1165,18 @@ move, the node refuses:
   overwriting one silently repoints a name `list_models` already publishes;
 - a destination file that already exists with a **different** sha256 (an
   identical one is reused, so a retry costs nothing);
-- insufficient free space — the larger of 2 GiB or 5% of the download is kept
-  free. The models volume is a thin LV, and filling it takes `:5001` and every
-  other guest's models with it, so this refuses rather than truncating.
+- insufficient free space on the **archive** disk — the larger of 2 GiB or 5% of
+  the download is kept free.
+
+  ⚠️ This check was long documented as protecting the models volume from being
+  filled, and it did not. It reads `df`, and until DP-340 it read `df` against
+  `/srv/models` — a **thin LV**, where `df` reports the volume's free space and
+  is structurally blind to the *pool* behind it running out. On 2026-08-21 it
+  saw 75 GiB free over a pool with 14 GiB left, passed a 22 GB download, and
+  wedged every guest on the node into a read-only filesystem. Downloads now
+  target the archive disk, which is an ordinary partition where `df` is the
+  truth, and the pool is protected by not being written to at all rather than by
+  a check. Promotion to the hot tier keeps a pool-aware check as a second line.
 
 And after downloading, a sha256 mismatch deletes the partial file and fails the
 job. Size matching is not proof.
