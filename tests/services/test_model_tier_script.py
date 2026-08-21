@@ -290,3 +290,93 @@ def test_promote_refuses_a_model_with_no_archive_copy(tier):
 ])
 def test_promote_rejects_bad_filenames(tier, bad):
     assert tier.run("promote", bad, "job1").returncode != 0
+
+
+# --- the active-model guard ------------------------------------------------
+#
+# Every test above runs with no `pct` on PATH, so active_hot_file() finds
+# nothing and no model counts as in-use. That is convenient and it is also how
+# a real bug shipped: the extraction only understood `--model=<path>`, the
+# units on the node spell it `--model <path>`, and so the one guard standing
+# between an eviction and deleting the weights out from under a running
+# koboldcpp returned empty on every real unit. These tests put a `pct` stub on
+# PATH that answers with systemd's actual `ExecStart` rendering.
+
+_PCT_STUB = """#!/bin/sh
+# Stands in for `pct exec <ct> -- ...` on a node.
+case "$*" in
+  *list-unit-files*) echo "koboldcpp-ff711-q6k.service enabled enabled" ;;
+  *ExecStart*)
+    echo "{ path=/opt/koboldcpp/koboldcpp ; argv[]=/opt/koboldcpp/koboldcpp \
+%(flags)s ; ignore_errors=no ; start_time=[n/a] ; pid=91 ; status=0/0 }" ;;
+  *) exit 1 ;;
+esac
+"""
+
+
+def _with_pct(tier, flags: str):
+    """Return a `run` that has a pct stub on PATH reporting `flags`."""
+    binpath = tier.root / "stubbin"
+    binpath.mkdir(exist_ok=True)
+    pct = binpath / "pct"
+    pct.write_text(_PCT_STUB % {"flags": flags})
+    pct.chmod(0o755)
+
+    def run(*args: str, **kw):
+        old = os.environ.get("PATH", "")
+        os.environ["PATH"] = str(binpath) + os.pathsep + old
+        try:
+            return tier.run(*args, **kw)
+        finally:
+            os.environ["PATH"] = old
+    return run
+
+
+@pytest.mark.parametrize("flags", [
+    "--model /opt/koboldcpp/models/live.gguf --port 5001",
+    "--model=/opt/koboldcpp/models/live.gguf --port 5001",
+])
+def test_the_served_model_is_never_evicted(tier, flags):
+    """Both `--model <path>` and `--model=<path>` must be understood.
+
+    The space-separated form is what the node actually emits; handling only
+    the `=` form is what made this guard a no-op in production.
+    """
+    for name in ("live.gguf", "other.gguf"):
+        tier.write(tier.hot, name, 4 * MB)
+        tier.write(tier.archive, name, 4 * MB)
+    # `live` is the least-recently-served, so LRU alone would take it first.
+    _set_served(tier, "live.gguf", 1000)
+    _set_served(tier, "other.gguf", 9000)
+    tier.write(tier.archive, "want.gguf", 4 * MB)
+
+    out = _with_pct(tier, flags)("run-promote", "want.gguf", "job1",
+                                 capacity=10 * MB)
+    assert out.returncode == 0, out.stderr
+    assert "live.gguf" in _hot_names(tier), "evicted the model being served"
+    assert "other.gguf" not in _hot_names(tier)
+
+
+def test_a_draft_model_flag_is_not_mistaken_for_the_served_weights(tier):
+    """`--draftmodel` also ends in .gguf and must not shadow `--model`."""
+    for name in ("live.gguf", "draft.gguf"):
+        tier.write(tier.hot, name, 4 * MB)
+        tier.write(tier.archive, name, 4 * MB)
+    _set_served(tier, "live.gguf", 1000)
+    _set_served(tier, "draft.gguf", 9000)
+    tier.write(tier.archive, "want.gguf", 4 * MB)
+
+    flags = ("--draftmodel /opt/koboldcpp/models/draft.gguf "
+             "--model /opt/koboldcpp/models/live.gguf --port 5001")
+    out = _with_pct(tier, flags)("run-promote", "want.gguf", "job1",
+                                 capacity=10 * MB)
+    assert out.returncode == 0, out.stderr
+    assert "live.gguf" in _hot_names(tier)
+
+
+def test_list_reports_the_active_model(tier):
+    tier.write(tier.hot, "live.gguf", MB)
+    flags = "--model /opt/koboldcpp/models/live.gguf --port 5001"
+    out = _with_pct(tier, flags)("list")
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout)["active"] == "live.gguf"

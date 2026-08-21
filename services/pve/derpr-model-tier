@@ -109,9 +109,16 @@ active_hot_file() {
         | awk '$2 == "enabled" && $1 ~ /^koboldcpp-.*\.service$/ { print $1; exit }')"
     [ -n "$unit" ] || return 0
     exec_line="$(pct exec "$MODEL_CT" -- systemctl show "$unit" --property=ExecStart --value 2>/dev/null)"
+    # Both spellings, because the units on this node use the space-separated
+    # one: `--model /opt/koboldcpp/models/x.gguf`. An earlier version handled
+    # only `--model=<path>` and so returned nothing on every real unit --
+    # which silently disabled the "never evict what is being served" guard.
+    # `$0 == "--model"` is exact on purpose: --draftmodel also ends in .gguf
+    # and must not be mistaken for the served weights.
     path="$(printf '%s\n' "$exec_line" | tr ' ' '\n' \
-        | sed -n 's/^--model=\{0,1\}//p' | grep -m1 '\.gguf$')"
-    [ -n "$path" ] && basename "$path"
+        | awk '/^--model=/ { sub(/^--model=/, ""); print; exit }
+               $0 == "--model" { getline; print; exit }')"
+    case "$path" in *.gguf) basename "$path" ;; esac
 }
 
 sha_of() { sha256sum "$1" 2>/dev/null | cut -d' ' -f1; }
