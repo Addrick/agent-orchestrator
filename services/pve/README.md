@@ -41,6 +41,12 @@ it, and verify with **the container's key**.
 
 ### Verifying against the real gate
 
+⚠️ **The gate check runs the command it admits.** `allow()` ends in `exec`, so a
+probe is not a dry run: probing `derpr-model-tier pin foo.gguf` *pins* it, and
+probing `promote` *starts a promotion job*. Redirecting stdout hides the output,
+not the side effect. Probe read-only shapes only, and reason about the mutating
+verbs from the `case` block.
+
 From the node, with no key involved at all:
 
 ```bash
@@ -49,6 +55,8 @@ for c in \
   "pct exec 101 -- systemctl list-unit-files --type=service --no-legend --no-pager" \
   "pct exec 101 -- ls /sys/class/drm" \
   "pct exec 101 -- cat /sys/class/drm/card1/device/mem_info_vram_total /sys/class/drm/card1/device/mem_info_vram_used" \
+  "/usr/local/sbin/derpr-model-tier list" \
+  "/usr/local/sbin/derpr-model-tier run-promote x.gguf j1" \
   "id"
 do
   printf '%s -> ' "$c"
@@ -57,7 +65,8 @@ do
 done
 ```
 
-The last one must print `DENY`. `journalctl -t derpr-pve` carries the audit trail.
+The last two must print `DENY` — `run-promote` is systemd's verb and sshd must
+never reach it. `journalctl -t derpr-pve` carries the audit trail.
 
 ---
 
