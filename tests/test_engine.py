@@ -1045,15 +1045,38 @@ class TestAgyHandler:
     def test_parse_skips_a_malformed_block_among_good_ones(self, text_engine):
         """One bad block must not cost the calls the model got right --
         dropping the batch puts it straight back in the loop this ticket
-        exists to remove. The 2nd block below is unparseable JSON and the
-        3rd is missing `arguments`."""
+        exists to remove. The 2nd block below is unparseable JSON; the 3rd
+        omits `arguments`, which is legal (a no-arg tool) and defaults to {},
+        matching the streaming parser."""
         text = """<tool_call>{"name": "pve_status", "arguments": {}}</tool_call>
 <tool_call>{"name": "gpu_status", "arguments": </tool_call>
 <tool_call>{"name": "list_models"}</tool_call>
 <tool_call>{"name": "hf_search", "arguments": {"q": "gguf"}}</tool_call>"""
         parsed = text_engine._parse_agy_tool_call(text)
         assert parsed is not None
-        assert [c["name"] for c in parsed] == ["pve_status", "hf_search"]
+        assert [c["name"] for c in parsed] == [
+            "pve_status", "list_models", "hf_search",
+        ]
+        assert parsed[1]["arguments"] == {}
+
+    def test_parse_decodes_a_stringified_arguments_object(self, text_engine):
+        """A small model that emits `arguments` as a JSON *string* is a common
+        slip, and the streaming parser has always decoded it. Passing the str
+        through reached `execute_tool(name, **args)` as a TypeError: one
+        budget slot spent on "Tool execution failed"."""
+        text = ('<tool_call>{"name": "hf_search", "arguments": '
+                '"{\\"q\\": \\"gguf\\"}"}</tool_call>')
+        parsed = text_engine._parse_agy_tool_call(text)
+        assert parsed is not None
+        assert parsed[0]["arguments"] == {"q": "gguf"}
+
+    def test_parse_coerces_a_non_object_arguments_to_empty(self, text_engine):
+        """Same fallback the streaming parser takes -- the call still runs,
+        with no arguments, instead of blowing up the executor."""
+        text = '<tool_call>{"name": "pve_status", "arguments": 42}</tool_call>'
+        parsed = text_engine._parse_agy_tool_call(text)
+        assert parsed is not None
+        assert parsed[0]["arguments"] == {}
 
     def test_parse_logs_every_block_it_drops(self, text_engine, caplog):
         """A skipped block must leave a trace. `strip_tool_call_blocks` removes
@@ -1062,14 +1085,14 @@ class TestAgyHandler:
         -- the same total invisibility that let the prod spin run unnoticed."""
         text = """<tool_call>{"name": "pve_status", "arguments": {}}</tool_call>
 <tool_call>{"name": "gpu_status", "arguments": </tool_call>
-<tool_call>{"name": "list_models"}</tool_call>"""
+<tool_call>{"arguments": {}}</tool_call>"""
         with caplog.at_level(logging.WARNING, logger="src.engine.providers.agy"):
             parsed = text_engine._parse_agy_tool_call(text)
 
         assert [c["name"] for c in parsed or []] == ["pve_status"]
         messages = [r.getMessage() for r in caplog.records]
         assert any("malformed <tool_call> block" in m for m in messages)
-        assert any("missing 'name'/'arguments'" in m for m in messages)
+        assert any("missing 'name'" in m for m in messages)
 
     def test_parse_all_blocks_malformed_still_returns_none(self, text_engine):
         """The retry path keys off None; a response that made no USABLE call

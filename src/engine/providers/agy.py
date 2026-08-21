@@ -20,6 +20,7 @@ Cross-method calls go back through the engine seams (e.g. `engine._run_agy_cli`)
 so a test's instance-level monkeypatch still intercepts.
 """
 
+import json
 import logging
 import os
 import re
@@ -123,16 +124,30 @@ def parse_agy_tool_call(text: str) -> Optional[List[Dict[str, Any]]]:
             # both of these (stream_engine._commit_call).
             logger.warning("Discarding malformed <tool_call> block: %r", inner[:200])
             continue
-        # agy policy: both keys must be present; id is a fresh uuid.
-        if "name" not in parsed or "arguments" not in parsed:
-            logger.warning(
-                "<tool_call> block missing 'name'/'arguments': %r", inner[:200],
-            )
+        # Same field policy as `_ToolCallStreamParser._commit_call`, which is
+        # the point of sharing the extraction: `name` is required, `arguments`
+        # defaults to {}, and a stringified args object (a common small-model
+        # slip) is decoded rather than passed through. Handing a str to
+        # `execute_tool(name, **args)` raises TypeError inside the loop, which
+        # costs a budget slot and returns "Tool execution failed" — and the
+        # divergence scaled with the batch size.
+        name = parsed.get("name")
+        if not name:
+            logger.warning("<tool_call> block missing 'name': %r", inner[:200])
             continue
+        args = parsed.get("arguments", {})
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                args = {}
         calls.append({
+            # id is agy's own: a fresh uuid, not the streaming path's
+            # positional `call_<name>_<n>`, because these are minted per
+            # response rather than per stream.
             "id": f"agy_{uuid.uuid4().hex}",
-            "name": parsed["name"],
-            "arguments": parsed["arguments"],
+            "name": name,
+            "arguments": args if isinstance(args, dict) else {},
         })
     return calls or None
 
