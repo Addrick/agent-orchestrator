@@ -626,3 +626,19 @@ async def test_one_shot_events_round_trip_back_to_the_same_result():
     )
     assert back == result
     assert payload == {"p": 1}
+
+
+@pytest.mark.asyncio
+async def test_call_only_result_round_trips_unchanged_too():
+    """The inverse claim has to hold for BOTH shapes. agy used to emit
+    `"content": ""` on a call-only response while `collect_stream` omitted the
+    key, so exactly the case with no prose was the one the round trip could
+    not reproduce."""
+    result = {
+        "type": "tool_calls",
+        "calls": [{"id": "c1", "name": "pve_status", "arguments": {}}],
+    }
+    back, _ = await TextEngine.collect_stream(
+        TextEngine._events_from_one_shot(result, {})
+    )
+    assert back == result

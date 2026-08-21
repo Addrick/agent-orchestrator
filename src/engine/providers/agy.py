@@ -54,6 +54,20 @@ logger = logging.getLogger(__name__)
 
 AGY_CALL_TIMEOUT_SECONDS = 120.0
 
+# agy wraps its own out-of-band notices in `<SYSTEM_MESSAGE>` spans. The calls
+# and the prose are both derived from the scrubbed text, so the pattern lives
+# in one place — two hand-copied literals could drift into disagreeing about
+# what was removed, and a tool call inside a span would then be executed while
+# the prose claimed it was stripped.
+_SYSTEM_MESSAGE_RE = re.compile(
+    r"<SYSTEM_MESSAGE>.*?</SYSTEM_MESSAGE>", flags=re.DOTALL,
+)
+
+
+def strip_system_messages(text: str) -> str:
+    """`text` with every `<SYSTEM_MESSAGE>…</SYSTEM_MESSAGE>` span removed."""
+    return _SYSTEM_MESSAGE_RE.sub("", text)
+
 
 def render_agy_tool_protocol(tools: Optional[List[Dict[str, Any]]]) -> str:
     if not tools:
@@ -96,7 +110,7 @@ def parse_agy_tool_call(text: str) -> Optional[List[Dict[str, Any]]]:
     """
     if not text:
         return None
-    cleaned = re.sub(r"<SYSTEM_MESSAGE>.*?</SYSTEM_MESSAGE>", "", text, flags=re.DOTALL)
+    cleaned = strip_system_messages(text)
     calls: List[Dict[str, Any]] = []
     for inner in extract_tool_call_blocks(cleaned):
         parsed = decode_tool_call_payload(inner)
@@ -250,9 +264,7 @@ async def generate_agy(
     # `full_text: ""` and the prose is discarded, dropping the caller back to
     # its no-text fallback after paying for the subprocess.
     calls = engine._parse_agy_tool_call(raw) if tools else None
-    cleaned_content = re.sub(
-        r"<SYSTEM_MESSAGE>.*?</SYSTEM_MESSAGE>", "", raw, flags=re.DOTALL,
-    ).strip()
+    cleaned_content = strip_system_messages(raw).strip()
     if calls:
         # DP-338: the prose beside the blocks travels with them. It is the
         # model's stated plan for the batch ("checking the node, the card and
@@ -260,11 +272,14 @@ async def generate_agy(
         # next iteration re-read a transcript in which the model appeared to
         # have called a tool for no stated reason — so it re-derived the plan
         # from scratch, every iteration, off an identical history.
-        return {
-            "type": "tool_calls",
-            "calls": calls,
-            "content": strip_tool_call_blocks(cleaned_content),
-        }, api_payload
+        result: Dict[str, Any] = {"type": "tool_calls", "calls": calls}
+        prose = strip_tool_call_blocks(cleaned_content)
+        if prose:
+            # Key omitted, not empty — `collect_stream` omits it on a call-only
+            # response, so emitting `"content": ""` here made the one-shot
+            # result something the event round trip could not reproduce.
+            result["content"] = prose
+        return result, api_payload
     else:
         return {"type": "text", "content": cleaned_content}, api_payload
 

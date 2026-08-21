@@ -10,7 +10,6 @@ from src.text_tool_protocol import (
     TOOL_CALL_CLOSE,
     TOOL_CALL_SYNTAX,
     decode_tool_call_payload,
-    extract_first_tool_call_block,
     extract_tool_call_blocks,
     render_tool_descriptions,
     strip_tool_call_blocks,
@@ -27,37 +26,39 @@ def test_tag_constants():
 
 def test_extract_valid_block():
     text = '<tool_call>{"name": "get_weather", "arguments": {"city": "Tokyo"}}</tool_call>'
-    inner = extract_first_tool_call_block(text)
-    assert inner == '{"name": "get_weather", "arguments": {"city": "Tokyo"}}'
+    assert extract_tool_call_blocks(text) == [
+        '{"name": "get_weather", "arguments": {"city": "Tokyo"}}'
+    ]
 
 
 def test_extract_strips_surrounding_whitespace():
     text = '<tool_call>\n  {"name": "ping"}  \n</tool_call>'
-    assert extract_first_tool_call_block(text) == '{"name": "ping"}'
+    assert extract_tool_call_blocks(text) == ['{"name": "ping"}']
 
 
-def test_extract_no_block_returns_none():
-    assert extract_first_tool_call_block("just plain text, no tools here") is None
+def test_extract_no_block_returns_empty():
+    assert extract_tool_call_blocks("just plain text, no tools here") == []
 
 
-def test_extract_empty_text_returns_none():
-    assert extract_first_tool_call_block("") is None
+def test_extract_empty_text_returns_empty():
+    assert extract_tool_call_blocks("") == []
 
 
-def test_extract_returns_first_of_multiple():
+def test_extract_keeps_blocks_separated_by_prose():
     text = (
         '<tool_call>{"name": "a"}</tool_call>'
         'middle prose'
         '<tool_call>{"name": "b"}</tool_call>'
     )
-    assert extract_first_tool_call_block(text) == '{"name": "a"}'
+    assert extract_tool_call_blocks(text) == [
+        '{"name": "a"}', '{"name": "b"}',
+    ]
 
 
 def test_extract_spans_newlines():
     text = '<tool_call>{"name": "a",\n "arguments": {}}</tool_call>'
-    inner = extract_first_tool_call_block(text)
-    assert inner is not None
-    assert '"name": "a"' in inner
+    blocks = extract_tool_call_blocks(text)
+    assert blocks and '"name": "a"' in blocks[0]
 
 
 def test_decode_valid_object():
@@ -101,9 +102,9 @@ def test_render_extract_decode_round_trip():
     line = render_tool_descriptions(tools)[0]
     assert "lookup" in line
     emitted = f'{TOOL_CALL_OPEN}{{"name": "lookup", "arguments": {{"q": "x"}}}}{TOOL_CALL_CLOSE}'
-    inner = extract_first_tool_call_block(emitted)
-    assert inner is not None
-    parsed = decode_tool_call_payload(inner)
+    blocks = extract_tool_call_blocks(emitted)
+    assert len(blocks) == 1
+    parsed = decode_tool_call_payload(blocks[0])
     assert parsed == {"name": "lookup", "arguments": {"q": "x"}}
 
 
@@ -133,13 +134,12 @@ def test_extract_blocks_no_block_returns_empty_list():
     assert extract_tool_call_blocks("") == []
 
 
-def test_extract_first_still_returns_only_the_first():
+def test_extract_blocks_keeps_emission_order():
     text = (
         '<tool_call>{"name": "a"}</tool_call>'
         '<tool_call>{"name": "b"}</tool_call>'
     )
-    assert extract_first_tool_call_block(text) == '{"name": "a"}'
-    assert len(extract_tool_call_blocks(text)) == 2
+    assert extract_tool_call_blocks(text) == ['{"name": "a"}', '{"name": "b"}']
 
 
 def test_strip_removes_every_block_and_keeps_the_prose():

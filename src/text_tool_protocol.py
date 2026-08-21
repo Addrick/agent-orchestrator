@@ -87,15 +87,6 @@ def extract_tool_call_blocks(text: str) -> List[str]:
     return [m.group(1).strip() for m in _TOOL_CALL_BLOCK_RE.finditer(text)]
 
 
-def extract_first_tool_call_block(text: str) -> Optional[str]:
-    """The first block only, or None. Kept for callers that genuinely want one
-    call (and for the `strip_tool_call_blocks` docstring's contrast); prefer
-    `extract_tool_call_blocks` on any path that executes what it parses.
-    """
-    blocks = extract_tool_call_blocks(text)
-    return blocks[0] if blocks else None
-
-
 def strip_tool_call_blocks(text: str) -> str:
     """`text` with every complete `<tool_call>…</tool_call>` block removed.
 

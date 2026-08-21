@@ -1178,8 +1178,11 @@ class TestAgyHandler:
         assert "<tool_call>" not in response["content"]
 
     @pytest.mark.asyncio
-    async def test_handler_call_only_response_carries_empty_prose(
+    async def test_handler_call_only_response_omits_the_content_key(
             self, text_engine, base_context, monkeypatch):
+        """No prose, no key. `collect_stream` omits it on a call-only
+        response, so emitting an empty string here made the one-shot result
+        something the event round trip could not reproduce."""
         raw = '<tool_call>{"name": "pve_status", "arguments": {}}</tool_call>'
         monkeypatch.setattr(
             text_engine, "_run_agy_cli", AsyncMock(return_value=raw),
@@ -1192,7 +1195,7 @@ class TestAgyHandler:
         )
 
         assert response["type"] == "tool_calls"
-        assert response["content"] == ""
+        assert "content" not in response
 
     @pytest.mark.asyncio
     async def test_no_tools_means_no_tool_call_parsing(
