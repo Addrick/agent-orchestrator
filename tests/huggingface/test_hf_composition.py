@@ -138,3 +138,51 @@ def test_install_model_is_a_gated_write():
         if t.get("function", {}).get("name") == "install_model"
     )
     assert tool["is_write"] is True
+
+
+# --- DP-335: the prompt-side half of the loop fix -----------------------------
+
+
+def test_hypr_prompt_carries_the_dp335_guidance():
+    """Pinned because a prompt is the one artifact here with no other guard.
+
+    Nothing imports it, no schema validates it, and a reformat or a re-generated
+    persona file drops a paragraph silently. These three exist for reasons the
+    ticket measured on a live turn:
+
+    - batching: DP-335 made the budget count CALLS, so asking for independent
+      reads together is now free. Before that it was a 5x budget multiplier and
+      the guidance would have been actively harmful.
+    - dead-end: iterations 4-6 of the incident were the opening routine
+      *restarted from the top* after a lookup failed, re-reading answers that
+      were already in `conversation_history`.
+    - official/quant: `hf_search` pins `filter=gguf`, so "the official <model>"
+      is unreachable by any spelling. The tool result says this too — belt and
+      braces, because the prompt is what shapes the plan before the first call.
+    """
+    prompt = _hypr_persona()["prompt"]
+
+    assert "ASK FOR YOUR READS TOGETHER." in prompt
+    assert "tool CALLS per turn, not per message" in prompt
+
+    assert "WHEN A LOOKUP DEAD-ENDS" in prompt
+    assert "DO NOT START OVER" in prompt
+
+    assert "base_model:<owner>/<name>" in prompt
+    assert "safetensors" in prompt
+
+
+def test_hypr_prompt_names_only_tools_it_is_actually_given():
+    """A prompt that instructs a routine over a tool the persona cannot call
+    produces a persona that confidently describes an action it will never take.
+    Cheap to check, and the DP-335 additions name four tools by hand."""
+    persona = _hypr_persona()
+    prompt = persona["prompt"]
+    _, tools = _hypr_tools()
+    available = {t["function"]["name"] for t in tools}
+
+    for name in ("pve_status", "gpu_status", "list_models", "hf_search",
+                 "hf_files", "install_model", "install_status",
+                 "set_active_model"):
+        if name in prompt:
+            assert name in available, f"prompt directs {name}, persona lacks it"

@@ -55,6 +55,9 @@ _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 #: long a tool call runs.
 _MAX_TREE_PAGES = 10
 
+#: How many of a search hit's tags survive into the payload the model reads.
+_MAX_SEARCH_TAGS = 12
+
 _GIB = 1024 ** 3
 
 
@@ -83,6 +86,29 @@ class HFFile:
             "size_gib": round(self.size_bytes / _GIB, 2),
             "sha256": self.sha256,
         }
+
+
+def _select_tags(raw: Any) -> List[str]:
+    """The tags a search hit carries into the payload, ``base_model:`` first.
+
+    The list is truncated because a quant repo routinely carries 20+ tags
+    (``gguf``, ``transformers``, ``text-generation``, a dozen language codes, a
+    license, quant-format tags) and the whole set on every hit crowds out the
+    hits themselves. But the truncation used to be a bare ``[:12]`` over the
+    Hub's own unordered list, and ``base_model:<owner>/<name>`` — the ONE tag
+    the tool description, the handler note and hypr's prompt all tell the model
+    to match on — sorts late and was routinely the tag that got dropped. A
+    model told three times to read a field that is not there concludes no quant
+    corresponds to the upstream model it was asked about, and re-queries: the
+    exact budget-burning loop DP-335 exists to break.
+
+    Order is otherwise preserved, so a truncated list still reads like the
+    Hub's own.
+    """
+    tags = [str(t) for t in (raw or [])]
+    primary = [t for t in tags if t.startswith("base_model:")]
+    rest = [t for t in tags if not t.startswith("base_model:")]
+    return (primary + rest)[:_MAX_SEARCH_TAGS]
 
 
 def validate_repo_id(repo: str) -> str:
@@ -192,7 +218,7 @@ class HFClient:
                 "likes": row.get("likes"),
                 "gated": row.get("gated", False),
                 "last_modified": row.get("lastModified"),
-                "tags": [str(t) for t in (row.get("tags") or [])][:12],
+                "tags": _select_tags(row.get("tags")),
             })
         return results
 

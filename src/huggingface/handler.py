@@ -209,7 +209,31 @@ class HuggingFaceToolHandler:
             models = await self._hf.search_models(query, capped)
         except HFError as e:
             return _err(str(e))
-        return {"status": "ok", "query": query, "models": models}
+        return {
+            "status": "ok",
+            "query": query,
+            "models": models,
+            # DP-335: the filter is the whole answer to "why isn't the model I
+            # asked for here", and until this note existed the payload said it
+            # nowhere. `hf_files` had carried a note since DP-265 precisely so
+            # an empty list would not be misread; `hf_search` — the tool whose
+            # empty result is *structurally* unfixable by re-querying — had
+            # none, so a zero-hit search read as "wrong spelling, try again"
+            # and a live turn spent its whole budget re-spelling one name
+            # against a filter that could never yield it.
+            "note": (
+                "Results are restricted to repos tagged `gguf`, the only "
+                "format install_model can install. A publisher that ships "
+                "only safetensors — which is most official/upstream model "
+                "repos — will NEVER appear here, however the query is "
+                "spelled. The community quant repos ARE the installable form "
+                "of those weights: match one to an upstream model by its "
+                "`base_model:<owner>/<name>` tag. Zero hits means broaden the "
+                "query (drop the version suffix, the parameter count, the "
+                "org) or accept that only a converted repo can satisfy it; "
+                "re-spelling the same name does not change the filter."
+            ),
+        }
 
     async def _hf_files(self, repo: str) -> Dict[str, Any]:
         logger.info("Tool hf_files: %s", repo)

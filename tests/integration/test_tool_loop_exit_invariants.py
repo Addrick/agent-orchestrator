@@ -270,3 +270,138 @@ async def test_read_group_executes_concurrently(mocked_chat_system):
     (s2, e2) = spans["get_agent_history"]
     # Concurrent ⇒ the second starts before the first finishes.
     assert s2 < e1, "#3: read group ran serially, not concurrently"
+
+
+# --------------------------------------------------------------------------
+# DP-335 — budget exhaustion is an ANSWER, not a fault.
+#
+# The max-iteration exit used to emit a canned sentence as DEV_COMMAND. I3 was
+# satisfied vacuously (a non-LLM_GENERATION turn is not retained, and the canned
+# string was correctly not worth retaining) — but the turn's real conclusion was
+# thrown away with it. The exit now spends one toolless completion, so it lands
+# on the LLM_GENERATION side of I3 and has to satisfy it for real.
+# --------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_budget_exhaustion_answer_is_persisted_and_retained(
+        mocked_chat_system):
+    """I3 + I5 for the exhausted-budget exit."""
+    from config.global_config import MAX_TOOL_CALLS
+
+    chat_system, memory_manager = mocked_chat_system
+    chat_system.personas["test_persona"].set_enabled_tools(["*"])
+    # One call per response, forever — the live `hypr` shape — then the
+    # wrap-up completion the loop asks for once the budget is gone.
+    _script_engine(chat_system, [
+        ({"type": "tool_calls", "calls": [
+            {"id": f"c{i}", "name": "get_agent_status",
+             "arguments": {"agent_id": "z"}}]}, {})
+        for i in range(MAX_TOOL_CALLS)
+    ] + [({"type": "text", "content": "Nothing installable matched."}, {})])
+
+    async def fake_execute(name, **kwargs):
+        return {"status": "running"}
+    chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[assignment]
+
+    retained = []
+    original_retain = chat_system.turn_persistence.retain_turn_safe
+
+    async def spy_retain(**kwargs):
+        retained.append(kwargs)
+        return await original_retain(**kwargs)
+    chat_system.turn_persistence.retain_turn_safe = spy_retain  # type: ignore[assignment]
+
+    events = await _drain(chat_system.stream_response(
+        "test_persona", "u_budget", "c_budget", "install the official model",
+    ))
+
+    # I5 — exactly one terminal event, nothing trailing it.
+    terminal = [e for e in events if isinstance(e, (DoneEvent, ErrorEvent))]
+    assert len(terminal) == 1
+    done = terminal[0]
+    assert isinstance(done, DoneEvent)
+    assert events[-1] is done
+
+    # The answer, with the deterministic spend pinned under it.
+    assert done.response_type == ResponseType.LLM_GENERATION
+    assert done.text.startswith("Nothing installable matched.")
+    assert f"of {MAX_TOOL_CALLS} used" in done.text
+    assert "`get_agent_status`" in done.text
+
+    # I3 — persisted, with the turn's tool span sealed onto the row.
+    assert done.assistant_id is not None
+    rows = memory_manager.get_channel_history(
+        channel="c_budget", persona_name="test_persona", limit=10,
+    )
+    assistant_rows = [r for r in rows if r["author_role"] == "assistant"]
+    assert any(r["content"].startswith("Nothing installable matched.")
+               for r in assistant_rows)
+    # The seal survives the wrap-up: the reads the turn made are the only
+    # record those calls have.
+    assert any(r["tool_context"] for r in assistant_rows)
+
+    # ...and RETAINED. This is the half that was structurally impossible
+    # before: `_orchestrate` gates retention on response_type, so a real answer
+    # shipped as DEV_COMMAND would never reach the memory bank.
+    assistant_retained = [k for k in retained if k.get("role") == "assistant"]
+    assert assistant_retained
+
+    # And what reached the bank is the PROSE, not the footer under it.
+    #
+    # This spy existed before and asserted only that retention *happened*,
+    # which is a smoke test wearing an invariant's clothes: it passed while the
+    # embedded content was the whole reply, footer included. Tool names and
+    # arguments then become recallable semantic memories and replay to the
+    # model next turn as the persona's own prior words — so `_LoopFinishedEvent`
+    # carries `retain_text` and `_orchestrate` embeds that instead.
+    #
+    # `content` is read, not just counted. A captured payload nobody
+    # interrogates is a fixture, not a test.
+    embedded = assistant_retained[0]["content"]
+    assert embedded.startswith("Nothing installable matched.")
+    assert "`get_agent_status`" not in embedded, (
+        "the machine-generated call list was embedded into the memory bank"
+    )
+    assert f"of {MAX_TOOL_CALLS} used" not in embedded
+    # The footer is still SHOWN — the split is between display and recall, not
+    # a decision to hide the spend.
+    assert "`get_agent_status`" in done.text
+
+
+@pytest.mark.asyncio
+async def test_budget_exhaustion_stays_one_terminal_event_when_wrap_up_dies(
+        mocked_chat_system):
+    """The wrap-up is best-effort, and a failing best-effort call on an exit
+    path is exactly where a second terminal event gets emitted. It must
+    degrade to the deterministic list, not to an ErrorEvent."""
+    from config.global_config import MAX_TOOL_CALLS
+    from src.engine import LLMCommunicationError
+
+    chat_system, _ = mocked_chat_system
+    chat_system.personas["test_persona"].set_enabled_tools(["*"])
+
+    calls = {"n": 0}
+
+    async def fake_generate_response(persona_config, history_object, *a, **k):
+        calls["n"] += 1
+        if calls["n"] > MAX_TOOL_CALLS:
+            raise LLMCommunicationError("upstream 503 during wrap-up")
+        return ({"type": "tool_calls", "calls": [
+            {"id": f"c{calls['n']}", "name": "get_agent_status",
+             "arguments": {"agent_id": "z"}}]}, {})
+    chat_system.text_engine.generate_response.side_effect = fake_generate_response
+
+    async def fake_execute(name, **kwargs):
+        return {"status": "running"}
+    chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[assignment]
+
+    events = await _drain(chat_system.stream_response(
+        "test_persona", "u_budget2", "c_budget2", "install it",
+    ))
+
+    terminal = [e for e in events if isinstance(e, (DoneEvent, ErrorEvent))]
+    assert len(terminal) == 1
+    assert isinstance(terminal[0], DoneEvent)
+    assert terminal[0].response_type == ResponseType.DEV_COMMAND
+    assert "my whole tool budget" in terminal[0].text
+    assert "`get_agent_status`" in terminal[0].text

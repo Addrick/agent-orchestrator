@@ -450,8 +450,23 @@ class StreamEngine:
         payload: Dict[str, Any],
         dump_payload: Dict[str, Any],
         genkey: str,
+        parse_tool_calls: bool = True,
     ) -> AsyncGenerator[Dict[str, Any], None]:
-        """Run the kobold native SSE stream and emit the unified event shape."""
+        """Run the kobold native SSE stream and emit the unified event shape.
+
+        `parse_tool_calls` is False when the caller advertised no tools, and
+        gating on it is the same rule `agy` needed: the `<tool_call>` protocol
+        is only meaningful if we rendered it into the prompt. A toolless
+        completion whose prompt merely CONTAINS the markup — DP-335's
+        exhaustion wrap-up sends a transcript of the turn's own tool calls —
+        would otherwise come back reporting a call the caller has no way to
+        run and did not ask for.
+
+        The span is still stripped from `visible_text` either way, so the
+        prose survives regardless; this path degraded gracefully where the
+        one-shot providers did not, which is exactly why the same bug there
+        went unseen on the dev box.
+        """
         yield {"type": "api_payload", "payload": dump_payload}
 
         url = f"{self._kobold_base_url()}/api/extra/generate/stream"
@@ -552,7 +567,7 @@ class StreamEngine:
         if tail:
             yield {"type": "text_delta", "text": tail}
 
-        calls = tool_parser.finalize()
+        calls = tool_parser.finalize() if parse_tool_calls else []
         logger.info(
             "kobold stream: %d SSE events, %d chars total, %d tool call(s) parsed",
             event_count, len(accumulated_text), len(calls),
@@ -616,7 +631,9 @@ class StreamEngine:
             tools_advertised=[(t.get("function") or t).get("name", "unknown")
                               for t in tool_list],
         )
-        inner = self._kobold_stream(payload, dump_payload, genkey)
+        inner = self._kobold_stream(
+            payload, dump_payload, genkey, parse_tool_calls=bool(tool_list),
+        )
         try:
             async for ev in inner:
                 yield ev
@@ -642,7 +659,10 @@ class StreamEngine:
             template_name="<caller>",
             tools_advertised=list(tools_advertised or []),
         )
-        return self._kobold_stream(payload, dump_payload, genkey)
+        return self._kobold_stream(
+            payload, dump_payload, genkey,
+            parse_tool_calls=bool(tools_advertised),
+        )
 
     def stream_local(
         self,

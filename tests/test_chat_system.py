@@ -299,9 +299,15 @@ async def test_generate_response_exits_after_max_tool_calls(chat_system_with_moc
     text_engine_mock.generate_response.return_value = (tool_call, {})
     tool_manager_mock.execute_tool.return_value = {"result": "ok"}
     response, _, _ , _ = await system.generate_response("test_persona", "user", "channel", "test")
-    assert "stuck in a loop" in response
-    # Called exactly MAX_TOOL_CALLS times
-    assert text_engine_mock.generate_response.call_count == MAX_TOOL_CALLS
+    assert "tool steps" in response
+    assert "`test_tool`" in response
+    # Exactly MAX_TOOL_CALLS tool calls executed. The mock emits one call per
+    # message, so that is also MAX_TOOL_CALLS round trips — plus one for the
+    # DP-335 exhaustion wrap-up, which is scripted to return the same tool-call
+    # dict and therefore produces no text, driving the fallback to the
+    # deterministic call list this asserts on.
+    assert tool_manager_mock.execute_tool.call_count == MAX_TOOL_CALLS
+    assert text_engine_mock.generate_response.call_count == MAX_TOOL_CALLS + 1
 
 
 # --- Existing High-Level and Formatting Tests ---
