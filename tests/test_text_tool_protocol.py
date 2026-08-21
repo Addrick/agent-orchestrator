@@ -168,3 +168,37 @@ def test_strip_of_a_call_only_response_is_empty():
         '<tool_call>{"name": "a", "arguments": {}}</tool_call>'
     ) == ""
     assert strip_tool_call_blocks("") == ""
+
+
+def test_strip_drops_a_truncated_trailing_block():
+    """The model hit its output cap mid-block. That fragment is not prose:
+    this string is persisted to `tool_context` and replayed verbatim into the
+    next request, so leaving it in self-poisons the model's own context with a
+    half-written marker."""
+    text = (
+        "Checking the node and the card before proposing a swap.\n"
+        '<tool_call>{"name": "pve_status", "arguments": {}}</tool_call>\n'
+        '<tool_call>{"name": "list_mo'
+    )
+    assert strip_tool_call_blocks(text) == (
+        "Checking the node and the card before proposing a swap."
+    )
+
+
+def test_strip_collapses_the_blank_run_on_crlf_too():
+    """agy runs on Windows since DP-324 and its responses come back CRLF. An
+    `\n`-only collapse never matched them, so the platform the route was
+    opened for got the four-empty-lines render the function claims to
+    prevent."""
+    text = (
+        "before\r\n\r\n"
+        '<tool_call>{"name": "a"}</tool_call>\r\n\r\n'
+        '<tool_call>{"name": "b"}</tool_call>\r\n\r\n'
+        "after"
+    )
+    assert strip_tool_call_blocks(text) == "before\n\nafter"
+
+
+def test_strip_of_an_inline_block_leaves_one_space_not_two():
+    text = 'I will check <tool_call>{"name": "a", "arguments": {}}</tool_call> now.'
+    assert strip_tool_call_blocks(text) == "I will check now."

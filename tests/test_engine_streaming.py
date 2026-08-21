@@ -357,6 +357,31 @@ async def test_collect_stream_carries_prose_beside_tool_calls():
 
 
 @pytest.mark.asyncio
+async def test_collect_stream_takes_prose_from_deltas_when_done_is_empty():
+    """The shape EVERY streaming provider actually sends on a tool turn.
+
+    anthropic/openai/google all delta the prose out and then report `done`
+    with `full_text: ""`. Reading `full_text` whenever it was merely non-None
+    picked the empty string, so the DP-338 fix landed for agy (whose prose
+    rides on `done`) and for nobody else — `generate_response` still handed
+    agents and BotLogic a batch with no stated plan.
+    """
+    events = [
+        {"type": "api_payload", "payload": {}},
+        {"type": "text_delta", "text": "Checking the node "},
+        {"type": "text_delta", "text": "and the card."},
+        {"type": "tool_calls", "calls": [
+            {"id": "c1", "name": "pve_status", "arguments": {}},
+            {"id": "c2", "name": "gpu_status", "arguments": {}},
+        ]},
+        {"type": "done", "full_text": ""},
+    ]
+    result, _ = await TextEngine.collect_stream(_aiter(events))
+    assert result["type"] == "tool_calls"
+    assert result["content"] == "Checking the node and the card."
+
+
+@pytest.mark.asyncio
 async def test_collect_stream_omits_content_when_calls_carry_no_prose():
     """A call-only response keeps the old two-key shape, so nothing
     downstream has to special-case an empty string."""

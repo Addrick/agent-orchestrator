@@ -47,6 +47,23 @@ _TOOL_CALL_BLOCK_RE = re.compile(
     flags=re.DOTALL,
 )
 
+# The same block plus the horizontal whitespace hugging it, so removing a block
+# from mid-sentence does not leave a double space behind.
+_TOOL_CALL_BLOCK_SPAN_RE = re.compile(
+    r"([ \t]*)"
+    + re.escape(TOOL_CALL_OPEN) + r".*?" + re.escape(TOOL_CALL_CLOSE)
+    + r"([ \t]*)",
+    flags=re.DOTALL,
+)
+
+# An open tag with no close after it. Only ever matches on text that has
+# already had its COMPLETE blocks removed, where a surviving open tag can only
+# be a block the model was cut off mid-emission.
+_TRUNCATED_TOOL_CALL_RE = re.compile(
+    r"[ \t]*" + re.escape(TOOL_CALL_OPEN) + r".*\Z",
+    flags=re.DOTALL,
+)
+
 
 def extract_tool_call_blocks(text: str) -> List[str]:
     """Return the inner (stripped) payload of EVERY complete
@@ -88,11 +105,23 @@ def strip_tool_call_blocks(text: str) -> str:
     arrives. Returned stripped; collapsing the blank run the removed blocks
     leave behind keeps a multi-call response from rendering as a paragraph
     followed by four empty lines.
+
+    A TRUNCATED trailing block — the model hit its output cap mid-`<tool_call>`
+    — is dropped too. That fragment is not prose: this result is persisted to
+    `tool_context` and replayed verbatim into the next request, so leaving it
+    in self-poisons the model's own future context with a half-written marker,
+    the hazard `stream_engine._strip_harmony` names for the streaming path.
     """
     if not text:
         return ""
-    without = _TOOL_CALL_BLOCK_RE.sub("", text)
-    return re.sub(r"\n{3,}", "\n\n", without).strip()
+    without = _TOOL_CALL_BLOCK_SPAN_RE.sub(
+        lambda m: " " if (m.group(1) and m.group(2)) else "", text,
+    )
+    without = _TRUNCATED_TOOL_CALL_RE.sub("", without)
+    # `\r?\n`: agy runs on Windows since DP-324 and its responses come back
+    # CRLF, which an `\n`-only pattern never matches — the collapse was a no-op
+    # on the exact platform the route was opened for.
+    return re.sub(r"(?:\r?\n){3,}", "\n\n", without).strip()
 
 
 def decode_tool_call_payload(raw_json: str) -> Optional[Dict[str, Any]]:

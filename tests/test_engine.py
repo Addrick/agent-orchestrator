@@ -1,5 +1,6 @@
 # tests/test_engine.py
 
+import logging
 import os
 import subprocess
 import sys
@@ -1053,6 +1054,22 @@ class TestAgyHandler:
         parsed = text_engine._parse_agy_tool_call(text)
         assert parsed is not None
         assert [c["name"] for c in parsed] == ["pve_status", "hf_search"]
+
+    def test_parse_logs_every_block_it_drops(self, text_engine, caplog):
+        """A skipped block must leave a trace. `strip_tool_call_blocks` removes
+        the malformed block from the prose too, so without a log line the call
+        vanishes from `calls`, from `content` and from the transcript at once
+        -- the same total invisibility that let the prod spin run unnoticed."""
+        text = """<tool_call>{"name": "pve_status", "arguments": {}}</tool_call>
+<tool_call>{"name": "gpu_status", "arguments": </tool_call>
+<tool_call>{"name": "list_models"}</tool_call>"""
+        with caplog.at_level(logging.WARNING, logger="src.engine.providers.agy"):
+            parsed = text_engine._parse_agy_tool_call(text)
+
+        assert [c["name"] for c in parsed or []] == ["pve_status"]
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("malformed <tool_call> block" in m for m in messages)
+        assert any("missing 'name'/'arguments'" in m for m in messages)
 
     def test_parse_all_blocks_malformed_still_returns_none(self, text_engine):
         """The retry path keys off None; a response that made no USABLE call

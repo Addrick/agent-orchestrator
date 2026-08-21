@@ -186,3 +186,69 @@ async def test_alternating_turns_preserved():
     assert history_for_api[3]['role'] == 'model'
 
     assert len(serializable_history) == 5  # system prompt + 4 history
+
+
+@pytest.mark.asyncio
+async def test_prose_beside_tool_calls_reaches_the_wire():
+    """DP-338: the plan the model wrote for its batch must survive the trip to
+    Gemini. The builder read `tool_calls` and never looked at `content`, so the
+    prose was stored in conversation_history and stripped again on the way
+    out — the next iteration read the same reason-free transcript the ticket
+    exists to remove."""
+    engine = TextEngine()
+
+    history = [
+        {
+            "role": "assistant",
+            "content": "Checking the node and the card before proposing a swap.",
+            "tool_calls": [
+                {"id": "c1", "name": "pve_status", "arguments": {}},
+                {"id": "c2", "name": "gpu_status", "arguments": {}},
+            ],
+        }
+    ]
+
+    with patch('src.engine.TextEngine._download_image', new_callable=AsyncMock):
+        history_for_api, serializable_history = await engine._build_google_history(
+            "system prompt", history, None
+        )
+
+    parts = history_for_api[0]['parts']
+    assert len(parts) == 3
+    assert parts[0].text == (
+        "Checking the node and the card before proposing a swap."
+    )
+    assert parts[1].function_call['name'] == 'pve_status'
+    assert parts[2].function_call['name'] == 'gpu_status'
+
+    ser_parts = serializable_history[1]['parts']
+    assert ser_parts[0] == {
+        'text': "Checking the node and the card before proposing a swap."
+    }
+    assert len(ser_parts) == 3
+
+
+@pytest.mark.asyncio
+async def test_call_only_model_turn_gains_no_empty_text_part():
+    """An empty/absent `content` must not add a blank Part — the Google API
+    rejects empty text parts and the old shape has to stay byte-identical."""
+    engine = TextEngine()
+
+    history = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "c1", "name": "pve_status", "arguments": {}},
+            ],
+        }
+    ]
+
+    with patch('src.engine.TextEngine._download_image', new_callable=AsyncMock):
+        history_for_api, _ = await engine._build_google_history(
+            "system prompt", history, None
+        )
+
+    parts = history_for_api[0]['parts']
+    assert len(parts) == 1
+    assert parts[0].function_call['name'] == 'pve_status'

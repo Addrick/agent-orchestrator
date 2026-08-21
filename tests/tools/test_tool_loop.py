@@ -1397,6 +1397,42 @@ async def test_one_shot_prose_on_done_lands_on_the_same_entry():
 
 
 @pytest.mark.asyncio
+async def test_prose_is_scrubbed_before_it_enters_history():
+    """This prose is a NEW persistence path (DP-225 boundary 2). It is sealed
+    into `tool_context`, written to `User_Interactions` and replayed to the
+    provider next turn, so scrubbing only the audit dialog would show the
+    operator a redacted sentence while storing the unredacted copy."""
+    from src.security.scrubber import get_scrubber, reset_scrubber
+
+    reset_scrubber()
+    get_scrubber().register("hunter2-supersecret", "TEST_KEY")
+    try:
+        engine = _make_engine([
+            [
+                {"type": "text_delta",
+                 "text": "Retrying with hunter2-supersecret."},
+                {"type": "tool_calls", "calls": [
+                    {"id": "c1", "name": "pve_status", "arguments": {}},
+                ]},
+                {"type": "done", "full_text": ""},
+            ],
+            [{"type": "done", "full_text": "Node is up."}],
+        ])
+        loop = ToolLoop(engine, _make_tool_manager({}))
+        history: List[Dict[str, Any]] = []
+
+        await _drain(loop.run(
+            persona=_make_persona(), conversation_history=history,
+            params=MagicMock(), tools=[],
+        ))
+    finally:
+        reset_scrubber()
+
+    assert "hunter2-supersecret" not in history[0]["content"]
+    assert "TEST_KEY" in history[0]["content"]
+
+
+@pytest.mark.asyncio
 async def test_call_only_iteration_writes_no_content_key():
     """No prose, no key — the history shape every other consumer already
     handles stays untouched when there is nothing to carry."""

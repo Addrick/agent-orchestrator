@@ -101,9 +101,19 @@ def parse_agy_tool_call(text: str) -> Optional[List[Dict[str, Any]]]:
     for inner in extract_tool_call_blocks(cleaned):
         parsed = decode_tool_call_payload(inner)
         if parsed is None:
+            # Log it, or the drop is invisible in exactly the way this ticket
+            # exists to fix: `strip_tool_call_blocks` removes the malformed
+            # block from the prose too, so a call the model made vanishes from
+            # `calls`, from `content` and from the transcript with nothing
+            # anywhere to say it existed. The streaming twin has always logged
+            # both of these (stream_engine._commit_call).
+            logger.warning("Discarding malformed <tool_call> block: %r", inner[:200])
             continue
         # agy policy: both keys must be present; id is a fresh uuid.
         if "name" not in parsed or "arguments" not in parsed:
+            logger.warning(
+                "<tool_call> block missing 'name'/'arguments': %r", inner[:200],
+            )
             continue
         calls.append({
             "id": f"agy_{uuid.uuid4().hex}",

@@ -800,6 +800,13 @@ class ToolLoop:
                 "".join(accumulated_parts).strip()
                 or (full_text_from_done or "").strip()
             )
+            # Egress scrub at the source (DP-225 boundary 2). This prose is
+            # persisted to `tool_context` and replayed to the provider on the
+            # next iteration, so it is a persistence path in its own right —
+            # scrubbing only the audit dialog below would have shown the
+            # operator a redacted sentence while sealing the unredacted copy
+            # into User_Interactions.
+            assistant_prose = cast(str, get_scrubber().scrub(assistant_prose))
             assistant_entry: Dict[str, Any] = {
                 "role": "assistant", "tool_calls": tool_calls_collected,
             }
