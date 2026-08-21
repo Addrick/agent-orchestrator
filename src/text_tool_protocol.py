@@ -14,7 +14,7 @@ This module owns only the genuinely-common core so the two paths cannot
 drift on the wire format:
 
   - the literal open/close tags (`TOOL_CALL_OPEN` / `TOOL_CALL_CLOSE`),
-  - extracting the first complete `<tool_call>…</tool_call>` block from text,
+  - extracting the complete `<tool_call>…</tool_call>` blocks from text,
   - JSON-decoding a block's inner payload into a dict.
 
 The differing parser *machinery* (the streaming buffer/lookahead vs. the
@@ -48,20 +48,51 @@ _TOOL_CALL_BLOCK_RE = re.compile(
 )
 
 
-def extract_first_tool_call_block(text: str) -> Optional[str]:
-    """Return the inner (stripped) payload of the first complete
-    `<tool_call>…</tool_call>` block in `text`, or None if there is none.
+def extract_tool_call_blocks(text: str) -> List[str]:
+    """Return the inner (stripped) payload of EVERY complete
+    `<tool_call>…</tool_call>` block in `text`, in emission order.
 
     Used by the complete-response path. The streaming path locates blocks
     incrementally instead, but decodes each block's payload via
     `decode_tool_call_payload`, so both share the same JSON semantics.
+
+    All of them, not the first (DP-338): a model asked to batch independent
+    reads answers with one block per call, and the first-match version of this
+    function silently dropped every block after block 1 — no execution, no
+    result, no error. The model then re-emitted the same batch to chase the
+    answers it never got, and since the batch's first block does not change,
+    that is a fixed point that spins until the turn's call budget trips. The
+    streaming parser has always returned every block; this is what made the two
+    paths agree.
     """
     if not text:
-        return None
-    match = _TOOL_CALL_BLOCK_RE.search(text)
-    if not match:
-        return None
-    return match.group(1).strip()
+        return []
+    return [m.group(1).strip() for m in _TOOL_CALL_BLOCK_RE.finditer(text)]
+
+
+def extract_first_tool_call_block(text: str) -> Optional[str]:
+    """The first block only, or None. Kept for callers that genuinely want one
+    call (and for the `strip_tool_call_blocks` docstring's contrast); prefer
+    `extract_tool_call_blocks` on any path that executes what it parses.
+    """
+    blocks = extract_tool_call_blocks(text)
+    return blocks[0] if blocks else None
+
+
+def strip_tool_call_blocks(text: str) -> str:
+    """`text` with every complete `<tool_call>…</tool_call>` block removed.
+
+    The prose a model writes beside its calls is the plan behind them, and the
+    complete-response path has to separate the two by hand — the streaming
+    parser gets `visible_text` for free because it splits the stream as it
+    arrives. Returned stripped; collapsing the blank run the removed blocks
+    leave behind keeps a multi-call response from rendering as a paragraph
+    followed by four empty lines.
+    """
+    if not text:
+        return ""
+    without = _TOOL_CALL_BLOCK_RE.sub("", text)
+    return re.sub(r"\n{3,}", "\n\n", without).strip()
 
 
 def decode_tool_call_payload(raw_json: str) -> Optional[Dict[str, Any]]:

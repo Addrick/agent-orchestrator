@@ -1299,3 +1299,150 @@ async def test_repeated_calls_are_counted_in_the_turn_log(caplog):
     assert "spinner#" in summary and "x2" in summary
     # Raw arguments never reach the log line.
     assert '"q"' not in summary
+
+
+# --------------------------------------------------------------------------
+# DP-338 — the assistant's own words go into history beside its calls.
+#
+# The prose a model writes before a batch is the plan for that batch. Dropping
+# it left the next iteration reading a transcript in which calls appeared with
+# no stated reason, so the model re-derived the plan from an identical history
+# and re-emitted the same batch — the same class of loss DP-335 fixed at the
+# END of a turn, one iteration earlier. Providers park the prose in two
+# different places, so both are pinned.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_batched_calls_run_in_one_iteration():
+    """Three calls in one provider message cost one round trip, not three."""
+    engine = _make_engine([
+        [
+            {"type": "tool_calls", "calls": [
+                {"id": "c1", "name": "pve_status", "arguments": {}},
+                {"id": "c2", "name": "gpu_status", "arguments": {}},
+                {"id": "c3", "name": "list_models", "arguments": {}},
+            ]},
+            {"type": "done", "full_text": ""},
+        ],
+        [{"type": "done", "full_text": "All three are healthy."}],
+    ])
+    tools = _make_tool_manager({})
+    loop = ToolLoop(engine, tools)
+    history: List[Dict[str, Any]] = []
+
+    await _drain(loop.run(
+        persona=_make_persona(), conversation_history=history,
+        params=MagicMock(), tools=[],
+    ))
+
+    assert engine.stream_messages.call_count == 2
+    assert tools.execute_tool.call_count == 3
+    # One assistant entry holding all three calls, then three paired results.
+    assert history[0]["role"] == "assistant"
+    assert [c["name"] for c in history[0]["tool_calls"]] == [
+        "pve_status", "gpu_status", "list_models",
+    ]
+    assert [m["tool_call_id"] for m in history[1:4]] == ["c1", "c2", "c3"]
+
+
+@pytest.mark.asyncio
+async def test_streamed_prose_lands_on_the_assistant_tool_call_entry():
+    """The streaming providers delta the prose out and zero `full_text` on a
+    tool turn, so the deltas are the only copy."""
+    engine = _make_engine([
+        [
+            {"type": "text_delta", "text": "Checking the node "},
+            {"type": "text_delta", "text": "and the card."},
+            {"type": "tool_calls", "calls": [
+                {"id": "c1", "name": "pve_status", "arguments": {}},
+            ]},
+            {"type": "done", "full_text": ""},
+        ],
+        [{"type": "done", "full_text": "Node is up."}],
+    ])
+    loop = ToolLoop(engine, _make_tool_manager({}))
+    history: List[Dict[str, Any]] = []
+
+    await _drain(loop.run(
+        persona=_make_persona(), conversation_history=history,
+        params=MagicMock(), tools=[],
+    ))
+
+    assert history[0]["content"] == "Checking the node and the card."
+
+
+@pytest.mark.asyncio
+async def test_one_shot_prose_on_done_lands_on_the_same_entry():
+    """agy's one-shot route emits no deltas at all — its prose arrives on
+    `done`, which is why reading `accumulated_parts` alone lost it."""
+    engine = _make_engine([
+        [
+            {"type": "tool_calls", "calls": [
+                {"id": "c1", "name": "pve_status", "arguments": {}},
+            ]},
+            {"type": "done", "full_text": "Checking the node first."},
+        ],
+        [{"type": "done", "full_text": "Node is up."}],
+    ])
+    loop = ToolLoop(engine, _make_tool_manager({}))
+    history: List[Dict[str, Any]] = []
+
+    await _drain(loop.run(
+        persona=_make_persona(), conversation_history=history,
+        params=MagicMock(), tools=[],
+    ))
+
+    assert history[0]["content"] == "Checking the node first."
+
+
+@pytest.mark.asyncio
+async def test_call_only_iteration_writes_no_content_key():
+    """No prose, no key — the history shape every other consumer already
+    handles stays untouched when there is nothing to carry."""
+    engine = _make_engine([
+        [
+            {"type": "tool_calls", "calls": [
+                {"id": "c1", "name": "pve_status", "arguments": {}},
+            ]},
+            {"type": "done", "full_text": ""},
+        ],
+        [{"type": "done", "full_text": "Node is up."}],
+    ])
+    loop = ToolLoop(engine, _make_tool_manager({}))
+    history: List[Dict[str, Any]] = []
+
+    await _drain(loop.run(
+        persona=_make_persona(), conversation_history=history,
+        params=MagicMock(), tools=[],
+    ))
+
+    assert "content" not in history[0]
+
+
+@pytest.mark.asyncio
+async def test_one_shot_prose_reaches_the_park_audit_reasoning():
+    """`model_reasoning` is the "why" on the operator's approve/deny dialog.
+    It read the deltas directly, so every agy-backed persona parked its writes
+    with a blank one."""
+    engine = _make_engine([
+        [
+            {"type": "tool_calls", "calls": [
+                {"id": "w1", "name": "create_ticket",
+                 "arguments": {"title": "x"}},
+            ]},
+            {"type": "done", "full_text": "Filing this so the outage is tracked."},
+        ],
+        [{"type": "done", "full_text": "Queued that for you."}],
+    ])
+    loop = ToolLoop(engine, _make_tool_manager({}))
+
+    events = await _drain(loop.run(
+        persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
+        conversation_history=[], params=MagicMock(), tools=[],
+    ))
+
+    park = [e for e in events if isinstance(e, WriteParkedEvent)][0]
+    assert park.audit_info["model_reasoning"] == (
+        "Filing this so the outage is tracked."
+    )

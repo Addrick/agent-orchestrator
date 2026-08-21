@@ -1019,6 +1019,56 @@ class TestAgyHandler:
         text = '<tool_call>{"name": "get_weather", "arguments": </tool_call>'
         assert text_engine._parse_agy_tool_call(text) is None
 
+    # ----------------------------------------------------------------
+    # DP-338 -- batched blocks. hypr's prompt asks for independent reads
+    # in one message; the parser kept block 1 and dropped the rest with
+    # no execution, result or log line, so the model re-emitted the same
+    # batch to chase answers it never got. The first block never changes,
+    # so that is a fixed point: 15 identical `pve_status` calls, prod
+    # 2026-08-21.
+    # ----------------------------------------------------------------
+
+    def test_parse_returns_every_block_not_just_the_first(self, text_engine):
+        text = """Checking the node, the card and the unit list.
+<tool_call>{"name": "pve_status", "arguments": {}}</tool_call>
+<tool_call>{"name": "gpu_status", "arguments": {}}</tool_call>
+<tool_call>{"name": "list_models", "arguments": {}}</tool_call>"""
+        parsed = text_engine._parse_agy_tool_call(text)
+        assert parsed is not None
+        assert [c["name"] for c in parsed] == [
+            "pve_status", "gpu_status", "list_models",
+        ]
+        # Distinct ids, or the loop pairs results to the wrong call.
+        assert len({c["id"] for c in parsed}) == 3
+
+    def test_parse_skips_a_malformed_block_among_good_ones(self, text_engine):
+        """One bad block must not cost the calls the model got right --
+        dropping the batch puts it straight back in the loop this ticket
+        exists to remove. The 2nd block below is unparseable JSON and the
+        3rd is missing `arguments`."""
+        text = """<tool_call>{"name": "pve_status", "arguments": {}}</tool_call>
+<tool_call>{"name": "gpu_status", "arguments": </tool_call>
+<tool_call>{"name": "list_models"}</tool_call>
+<tool_call>{"name": "hf_search", "arguments": {"q": "gguf"}}</tool_call>"""
+        parsed = text_engine._parse_agy_tool_call(text)
+        assert parsed is not None
+        assert [c["name"] for c in parsed] == ["pve_status", "hf_search"]
+
+    def test_parse_all_blocks_malformed_still_returns_none(self, text_engine):
+        """The retry path keys off None; a response that made no USABLE call
+        must stay indistinguishable from one that made no call at all."""
+        text = """<tool_call>{"name": "a", "arguments": </tool_call>
+<tool_call>not json at all</tool_call>"""
+        assert text_engine._parse_agy_tool_call(text) is None
+
+    def test_tool_protocol_no_longer_demands_exactly_one_block(
+            self, text_engine):
+        tools = [{"function": {"name": "pve_status", "description": "d",
+                               "parameters": {}}}]
+        protocol = text_engine._render_agy_tool_protocol(tools)
+        assert "EXACTLY one block" not in protocol
+        assert "one or more blocks" in protocol
+
     @pytest.mark.asyncio
     async def test_handler_text_path(self, text_engine, base_context, monkeypatch):
         mock_cli = AsyncMock(return_value="a plain answer")
@@ -1056,6 +1106,76 @@ class TestAgyHandler:
         assert isinstance(call["id"], str)
         assert len(call["id"]) > 0
         assert isinstance(api_payload, dict)
+
+    @pytest.mark.asyncio
+    async def test_handler_returns_the_whole_batch(
+            self, text_engine, base_context, monkeypatch):
+        """One provider round trip, three calls -- what the loop then runs
+        under `asyncio.gather`, and the only place batching's latency win
+        can come from."""
+        raw = """Checking the node, the card and the unit list.
+<tool_call>{"name": "pve_status", "arguments": {}}</tool_call>
+<tool_call>{"name": "gpu_status", "arguments": {}}</tool_call>
+<tool_call>{"name": "list_models", "arguments": {}}</tool_call>"""
+        monkeypatch.setattr(
+            text_engine, "_run_agy_cli", AsyncMock(return_value=raw),
+        )
+        tools = [{"function": {"name": n, "description": "d",
+                               "parameters": {}}}
+                 for n in ("pve_status", "gpu_status", "list_models")]
+
+        response, _ = await text_engine._generate_agy_response(
+            {"model_name": "agy-flash"}, base_context, tools=tools,
+        )
+
+        assert response["type"] == "tool_calls"
+        assert [c["name"] for c in response["calls"]] == [
+            "pve_status", "gpu_status", "list_models",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_handler_carries_the_prose_beside_the_calls(
+            self, text_engine, base_context, monkeypatch):
+        """DP-338: the plan the model states before a batch rides back with
+        it. Dropped, the next iteration re-read a transcript in which the
+        calls had no stated reason -- so the model re-derived the plan off an
+        identical history and re-emitted the same batch."""
+        raw = """Checking the node and the card before proposing a swap.
+<tool_call>{"name": "pve_status", "arguments": {}}</tool_call>
+<tool_call>{"name": "gpu_status", "arguments": {}}</tool_call>"""
+        monkeypatch.setattr(
+            text_engine, "_run_agy_cli", AsyncMock(return_value=raw),
+        )
+        tools = [{"function": {"name": n, "description": "d",
+                               "parameters": {}}}
+                 for n in ("pve_status", "gpu_status")]
+
+        response, _ = await text_engine._generate_agy_response(
+            {"model_name": "agy-flash"}, base_context, tools=tools,
+        )
+
+        assert response["content"] == (
+            "Checking the node and the card before proposing a swap."
+        )
+        # Blocks stripped: the markup is the calls, not the prose.
+        assert "<tool_call>" not in response["content"]
+
+    @pytest.mark.asyncio
+    async def test_handler_call_only_response_carries_empty_prose(
+            self, text_engine, base_context, monkeypatch):
+        raw = '<tool_call>{"name": "pve_status", "arguments": {}}</tool_call>'
+        monkeypatch.setattr(
+            text_engine, "_run_agy_cli", AsyncMock(return_value=raw),
+        )
+        tools = [{"function": {"name": "pve_status", "description": "d",
+                               "parameters": {}}}]
+
+        response, _ = await text_engine._generate_agy_response(
+            {"model_name": "agy-flash"}, base_context, tools=tools,
+        )
+
+        assert response["type"] == "tool_calls"
+        assert response["content"] == ""
 
     @pytest.mark.asyncio
     async def test_no_tools_means_no_tool_call_parsing(

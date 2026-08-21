@@ -11,7 +11,9 @@ from src.text_tool_protocol import (
     TOOL_CALL_SYNTAX,
     decode_tool_call_payload,
     extract_first_tool_call_block,
+    extract_tool_call_blocks,
     render_tool_descriptions,
+    strip_tool_call_blocks,
 )
 
 
@@ -103,3 +105,66 @@ def test_render_extract_decode_round_trip():
     assert inner is not None
     parsed = decode_tool_call_payload(inner)
     assert parsed == {"name": "lookup", "arguments": {"q": "x"}}
+
+
+# --------------------------------------------------------------------------
+# DP-338 — every block, and the prose beside them. `extract_first_...` kept
+# only block 1, which is what silently discarded a batched read on the agy
+# route; these pin the all-blocks contract the streaming parser always had.
+# --------------------------------------------------------------------------
+
+
+def test_extract_blocks_returns_every_block_in_order():
+    text = (
+        "Checking three things at once.\n"
+        '<tool_call>{"name": "a", "arguments": {}}</tool_call>\n'
+        '<tool_call>{"name": "b", "arguments": {}}</tool_call>\n'
+        '<tool_call>{"name": "c", "arguments": {}}</tool_call>'
+    )
+    assert extract_tool_call_blocks(text) == [
+        '{"name": "a", "arguments": {}}',
+        '{"name": "b", "arguments": {}}',
+        '{"name": "c", "arguments": {}}',
+    ]
+
+
+def test_extract_blocks_no_block_returns_empty_list():
+    assert extract_tool_call_blocks("plain prose, no tools") == []
+    assert extract_tool_call_blocks("") == []
+
+
+def test_extract_first_still_returns_only_the_first():
+    text = (
+        '<tool_call>{"name": "a"}</tool_call>'
+        '<tool_call>{"name": "b"}</tool_call>'
+    )
+    assert extract_first_tool_call_block(text) == '{"name": "a"}'
+    assert len(extract_tool_call_blocks(text)) == 2
+
+
+def test_strip_removes_every_block_and_keeps_the_prose():
+    text = (
+        "I need the node, the card and the units.\n"
+        '<tool_call>{"name": "a", "arguments": {}}</tool_call>\n'
+        '<tool_call>{"name": "b", "arguments": {}}</tool_call>'
+    )
+    assert strip_tool_call_blocks(text) == (
+        "I need the node, the card and the units."
+    )
+
+
+def test_strip_collapses_the_blank_run_the_blocks_leave_behind():
+    text = (
+        "before\n\n"
+        '<tool_call>{"name": "a"}</tool_call>\n\n'
+        '<tool_call>{"name": "b"}</tool_call>\n\n'
+        "after"
+    )
+    assert strip_tool_call_blocks(text) == "before\n\nafter"
+
+
+def test_strip_of_a_call_only_response_is_empty():
+    assert strip_tool_call_blocks(
+        '<tool_call>{"name": "a", "arguments": {}}</tool_call>'
+    ) == ""
+    assert strip_tool_call_blocks("") == ""

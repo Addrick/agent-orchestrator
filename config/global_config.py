@@ -83,13 +83,19 @@ DISCORD_STATUS_LIMIT = 128
 # Tool budget for one turn. Counts TOOL CALLS EXECUTED, not LLM round trips.
 #
 # DP-335 moved the counter. It used to bound loop iterations, which meant the
-# number bought a different amount of work on every model: live `hypr`
-# (agy-flash) emits exactly one call per message, so 10 iterations were 10
-# calls; a model that batches five per message got 50 from the same config
-# value, with no compensation anywhere. The budget could not be tuned because
-# it did not denote a fixed quantity. Counting calls makes the allowance
-# provider-independent and makes batching a pure latency win instead of a
-# silent 5x budget multiplier.
+# number bought a different amount of work on every model: a model answering
+# one call per message got 10 calls from 10 iterations; a model that batches
+# five per message got 50 from the same config value, with no compensation
+# anywhere. The budget could not be tuned because it did not denote a fixed
+# quantity. Counting calls makes the allowance provider-independent and makes
+# batching a pure latency win instead of a silent 5x budget multiplier.
+#
+# ⚠️ DP-335 wrote here that live `hypr` (agy-flash) "emits exactly one call per
+# message". DP-338 falsified that: agy-flash emits as many blocks as the
+# persona asks for, and the agy PARSER was keeping only the first — so the
+# observed one-call-per-message was derpr's ceiling, not the model's habit.
+# The number below still stands (it was never sized on that premise), but do
+# not re-derive anything from "hypr can only call one tool at a time".
 #
 # Sized against hypr's model-provisioning floor, which is the longest routine
 # any persona runs: pve_status + gpu_status + list_models + hf_search +

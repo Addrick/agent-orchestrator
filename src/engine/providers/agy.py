@@ -39,8 +39,9 @@ from src.text_tool_protocol import (
     TOOL_CALL_OPEN,
     TOOL_CALL_CLOSE,
     decode_tool_call_payload,
-    extract_first_tool_call_block,
+    extract_tool_call_blocks,
     render_tool_descriptions,
+    strip_tool_call_blocks,
 )
 
 from .base import Provider
@@ -58,11 +59,19 @@ def render_agy_tool_protocol(tools: Optional[List[Dict[str, Any]]]) -> str:
     if not tools:
         return ""
 
+    # DP-338: "EXACTLY one block, as the last thing" used to be the wording, and
+    # it was wrong in both directions — the parser only honoured the first block
+    # while personas ask for independent reads in one message, so a compliant
+    # model's 2nd and 3rd calls were dropped on the floor. Calls in one message
+    # are now dispatched together, which is also the only place batching's
+    # latency win can come from.
     protocol_desc = (
-        "You may request a tool by emitting EXACTLY "
+        "You may request tools by emitting one or more blocks of EXACTLY "
         f"{TOOL_CALL_OPEN}{{\"name\": \"<tool_name>\", \"arguments\": "
         f"{{<json args>}}}}{TOOL_CALL_CLOSE} "
-        "as the last thing. Answer in plain text otherwise, and use no other tools/files/shell/web."
+        "as the last thing, one block per call. Reads that do not depend on "
+        "each other belong in the same message — they run at the same time. "
+        "Answer in plain text otherwise, and use no other tools/files/shell/web."
     )
 
     # Shared renderer keeps the agy and streaming paths from drifting on how a
@@ -72,24 +81,36 @@ def render_agy_tool_protocol(tools: Optional[List[Dict[str, Any]]]) -> str:
 
 
 def parse_agy_tool_call(text: str) -> Optional[List[Dict[str, Any]]]:
+    """Every well-formed `<tool_call>` block in a complete agy response.
+
+    Returns None when the response contains no usable call at all, which is the
+    signal the driver's one-shot retry keys off; a response whose blocks are
+    ALL malformed must stay indistinguishable from one that made no call.
+
+    A malformed block sitting among well-formed ones is skipped rather than
+    failing the response (DP-338). Dropping the whole batch over one bad block
+    would discard calls the model got right and put it back in the loop this
+    ticket exists to remove; the skipped call simply goes unanswered, and the
+    model can re-ask for it — which is the one case where re-asking makes
+    progress, because the calls beside it did land.
+    """
     if not text:
         return None
     cleaned = re.sub(r"<SYSTEM_MESSAGE>.*?</SYSTEM_MESSAGE>", "", text, flags=re.DOTALL)
-    inner = extract_first_tool_call_block(cleaned)
-    if inner is None:
-        return None
-    parsed = decode_tool_call_payload(inner)
-    if parsed is None:
-        return None
-    # agy policy: both keys must be present; id is a fresh uuid.
-    if "name" not in parsed or "arguments" not in parsed:
-        return None
-    call_id = f"agy_{uuid.uuid4().hex}"
-    return [{
-        "id": call_id,
-        "name": parsed["name"],
-        "arguments": parsed["arguments"]
-    }]
+    calls: List[Dict[str, Any]] = []
+    for inner in extract_tool_call_blocks(cleaned):
+        parsed = decode_tool_call_payload(inner)
+        if parsed is None:
+            continue
+        # agy policy: both keys must be present; id is a fresh uuid.
+        if "name" not in parsed or "arguments" not in parsed:
+            continue
+        calls.append({
+            "id": f"agy_{uuid.uuid4().hex}",
+            "name": parsed["name"],
+            "arguments": parsed["arguments"],
+        })
+    return calls or None
 
 
 def resolve_agy_workspace(engine: "TextEngine", persona_name: Optional[str]) -> Optional[str]:
@@ -219,10 +240,22 @@ async def generate_agy(
     # `full_text: ""` and the prose is discarded, dropping the caller back to
     # its no-text fallback after paying for the subprocess.
     calls = engine._parse_agy_tool_call(raw) if tools else None
+    cleaned_content = re.sub(
+        r"<SYSTEM_MESSAGE>.*?</SYSTEM_MESSAGE>", "", raw, flags=re.DOTALL,
+    ).strip()
     if calls:
-        return {"type": "tool_calls", "calls": calls}, api_payload
+        # DP-338: the prose beside the blocks travels with them. It is the
+        # model's stated plan for the batch ("checking the node, the card and
+        # the unit list before proposing the swap"), and dropping it meant the
+        # next iteration re-read a transcript in which the model appeared to
+        # have called a tool for no stated reason — so it re-derived the plan
+        # from scratch, every iteration, off an identical history.
+        return {
+            "type": "tool_calls",
+            "calls": calls,
+            "content": strip_tool_call_blocks(cleaned_content),
+        }, api_payload
     else:
-        cleaned_content = re.sub(r"<SYSTEM_MESSAGE>.*?</SYSTEM_MESSAGE>", "", raw, flags=re.DOTALL).strip()
         return {"type": "text", "content": cleaned_content}, api_payload
 
 
