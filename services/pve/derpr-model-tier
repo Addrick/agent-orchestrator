@@ -1,0 +1,308 @@
+#!/bin/bash
+# derpr-model-tier — hot/cold gguf tiering on the Proxmox node (DP-340).
+#
+# Two tiers, and the COLD one is authoritative:
+#
+#   hot   /srv/models          SSD thin LV, ~120 GiB — koboldcpp serves from here
+#   cold  /srv/archive/models  1 TB HDD,   ~840 GiB — every gguf ever installed
+#
+# `derpr-model-install` writes downloads into the cold tier and never touches
+# the SSD. That is the point: on 2026-08-21 a 22 GB download filled the thin
+# pool and put CT100 *and* CT101 into ext4 emergency_ro at once, taking zammad,
+# the chatbot and hindsight's database down together. A download that never
+# allocates from that pool cannot do it again, whatever a space check says.
+#
+# Verbs: list | pin | unpin | promote <file> <jobid> | run-promote <file> <jobid>
+# `run-promote` is invoked by systemd locally and is deliberately NOT in the
+# SSH wrapper's allowlist.
+
+set -uo pipefail
+
+# Site settings, same convention as derpr-model-install. Note these are plain
+# assignments, so anything set here BEATS the environment -- put only
+# box-specific facts in it. Every setting below still carries a default, so an
+# unconfigured node works out of the box.
+[ -r /etc/default/derpr-model-tier ] && . /etc/default/derpr-model-tier
+
+HOT_DIR="${HOT_DIR:-/srv/models}"
+ARCHIVE_DIR="${ARCHIVE_DIR:-/srv/archive/models}"
+ARCHIVE_ROOT="${ARCHIVE_ROOT:-/srv/archive}"
+# Job records live on the ARCHIVE disk, never on the volume whose exhaustion
+# they exist to describe. When /srv/models wedged on 2026-08-21 the installer's
+# own `write_status failed` could not land -- the failure record was on the
+# filesystem the failure had just made read-only -- so install_status reported
+# `running` for 15 hours after the job was dead.
+JOBS_DIR="${JOBS_DIR:-$ARCHIVE_ROOT/.jobs}"
+STATE_DIR="${STATE_DIR:-$ARCHIVE_ROOT/.tier}"
+PINNED_FILE="$STATE_DIR/pinned"
+SERVED_DIR="$STATE_DIR/served"
+# Kept free in the hot tier beyond the incoming model itself.
+MARGIN_BYTES="${MARGIN_BYTES:-5368709120}"   # 5 GiB
+MODEL_CT="${MODEL_CT:-101}"
+POOL="${POOL:-pve/data}"
+
+gguf_re='^[A-Za-z0-9._-]+\.gguf$'
+
+die() { echo "derpr-model-tier: $*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# free space -- BOTH numbers, because df alone is a lie on a thin LV
+# ---------------------------------------------------------------------------
+# /srv/models is a thin logical volume. `df` reports the volume's free space and
+# is structurally blind to the pool behind it running out: on 2026-08-21 it said
+# 75 GiB free while the pool had 14 GiB, which is exactly how a 22 GB download
+# passed its preflight and wedged every guest on the node.
+#
+# So the usable figure is the MINIMUM of what the filesystem will accept and
+# what the pool can actually back. Once DP-341 sizes the volumes so they stop
+# over-committing the pool these converge, and this stays correct either way.
+hot_free_bytes() {
+    local fs_free pool_free used
+    # An explicit cap on the hot tier, independent of how big the volume
+    # happens to be. Two reasons it exists: the tier is meant to hold a working
+    # set (~4-5 models), not to grow until the disk complains; and until DP-341
+    # shrinks the LV, the volume is far larger than the tier should be, so
+    # without this the eviction rules would simply never fire.
+    if [ -n "${HOT_CAPACITY_BYTES:-}" ]; then
+        used="$(du -sb "$HOT_DIR" 2>/dev/null | cut -f1)"
+        used="${used:-0}"
+        if [ "$used" -ge "$HOT_CAPACITY_BYTES" ]; then echo 0; else
+            echo $(( HOT_CAPACITY_BYTES - used )); fi
+        return 0
+    fi
+    fs_free="$(df -B1 --output=avail "$HOT_DIR" 2>/dev/null | tail -n1 | tr -dc '0-9')"
+    [ -n "$fs_free" ] || return 1
+    pool_free="$(lvs --noheadings --nosuffix --units b -o lv_size,data_percent "$POOL" 2>/dev/null \
+        | awk '{ gsub(/B/,"",$1); printf "%.0f", $1 * (100 - $2) / 100 }')"
+    # No pool reading (not thin-provisioned, or lvs unavailable) -> fall back to
+    # df. Failing open is right here: the caller still gets a real check, and
+    # refusing every promotion because lvs moved would be worse.
+    if [ -z "$pool_free" ] || [ "$pool_free" = "0" ]; then
+        echo "$fs_free"; return 0
+    fi
+    if [ "$pool_free" -lt "$fs_free" ]; then echo "$pool_free"; else echo "$fs_free"; fi
+}
+
+# ---------------------------------------------------------------------------
+# state: pins and last-served
+# ---------------------------------------------------------------------------
+# "Last served" is a touch-file mtime, NOT the gguf's atime: /srv/models is
+# mounted noatime and read-only-bound into the model container, so there is no
+# access time to read. A model that has never been served has no touch-file and
+# sorts oldest, so an install nobody ever ran is evicted first.
+ensure_state() { mkdir -p "$STATE_DIR" "$SERVED_DIR" "$JOBS_DIR"; touch "$PINNED_FILE"; }
+
+is_pinned() { grep -Fxq -- "$1" "$PINNED_FILE" 2>/dev/null; }
+
+served_at() {
+    local f="$SERVED_DIR/$1"
+    [ -e "$f" ] && stat -c %Y "$f" 2>/dev/null || echo 0
+}
+
+mark_served() { ensure_state; : > "$SERVED_DIR/$1"; }
+
+# The gguf the model container is serving right now. Never evictable: dropping
+# it would delete the weights out from under a running koboldcpp.
+active_hot_file() {
+    local unit exec_line path
+    unit="$(pct exec "$MODEL_CT" -- systemctl list-unit-files --type=service --no-legend --no-pager 2>/dev/null \
+        | awk '$2 == "enabled" && $1 ~ /^koboldcpp-.*\.service$/ { print $1; exit }')"
+    [ -n "$unit" ] || return 0
+    exec_line="$(pct exec "$MODEL_CT" -- systemctl show "$unit" --property=ExecStart --value 2>/dev/null)"
+    path="$(printf '%s\n' "$exec_line" | tr ' ' '\n' \
+        | sed -n 's/^--model=\{0,1\}//p' | grep -m1 '\.gguf$')"
+    [ -n "$path" ] && basename "$path"
+}
+
+sha_of() { sha256sum "$1" 2>/dev/null | cut -d' ' -f1; }
+
+# Minimal JSON string escaping for values that are NOT charset-constrained.
+# gguf names are gated by $gguf_re and cannot contain either character, but the
+# directory paths are configuration and a single unescaped backslash makes the
+# whole document unparseable for the caller.
+jesc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+
+# ---------------------------------------------------------------------------
+# list
+# ---------------------------------------------------------------------------
+cmd_list() {
+    ensure_state
+    local active; active="$(active_hot_file)"
+    local first=1
+    printf '{"status":"ok","hot_dir":"%s","archive_dir":"%s",'         "$(jesc "$HOT_DIR")" "$(jesc "$ARCHIVE_DIR")"
+    printf '"hot_free_bytes":%s,"active":"%s","models":['         "$(hot_free_bytes || echo 0)" "$(jesc "${active:-}")"
+    # Union of both tiers, cold listed first so a hot copy overrides the tier.
+    local seen=() f base tier size pinned served
+    for f in "$ARCHIVE_DIR"/*.gguf "$HOT_DIR"/*.gguf; do
+        [ -e "$f" ] || continue
+        base="$(basename "$f")"
+        case " ${seen[*]:-} " in *" $base "*) continue ;; esac
+        seen+=("$base")
+        if [ -e "$HOT_DIR/$base" ]; then tier=hot; size="$(stat -c %s "$HOT_DIR/$base")"
+        else tier=cold; size="$(stat -c %s "$ARCHIVE_DIR/$base")"; fi
+        is_pinned "$base" && pinned=true || pinned=false
+        served="$(served_at "$base")"
+        [ $first -eq 1 ] && first=0 || printf ','
+        printf '{"file":"%s","tier":"%s","size_bytes":%s,"pinned":%s,"last_served":%s,"archived":%s}' \
+            "$base" "$tier" "$size" "$pinned" "$served" \
+            "$( [ -e "$ARCHIVE_DIR/$base" ] && echo true || echo false )"
+    done
+    printf ']}\n'
+}
+
+# ---------------------------------------------------------------------------
+# pin / unpin
+# ---------------------------------------------------------------------------
+cmd_pin() {
+    ensure_state
+    [[ "$1" =~ $gguf_re ]] || die "invalid file"
+    [ -e "$ARCHIVE_DIR/$1" ] || [ -e "$HOT_DIR/$1" ] || die "no such model: $1"
+    is_pinned "$1" || echo "$1" >> "$PINNED_FILE"
+    printf '{"status":"ok","file":"%s","pinned":true}\n' "$1"
+}
+
+cmd_unpin() {
+    ensure_state
+    [[ "$1" =~ $gguf_re ]] || die "invalid file"
+    grep -Fxv -- "$1" "$PINNED_FILE" > "$PINNED_FILE.tmp" 2>/dev/null
+    mv -f "$PINNED_FILE.tmp" "$PINNED_FILE"
+    printf '{"status":"ok","file":"%s","pinned":false}\n' "$1"
+}
+
+# ---------------------------------------------------------------------------
+# job record -- same schema and same directory the installer uses, so
+# `derpr-model-install status <jobid>` polls a promotion with no change at all.
+# ---------------------------------------------------------------------------
+write_status() {
+    local state="$1" step="$2" reason="$3" done_bytes="$4"
+    local tmp="$JOBS_DIR/.$JOB.$$"
+    mkdir -p "$JOBS_DIR" || return 1
+    printf '{"job_id":"%s","state":"%s","step":"%s","reason":"%s",' \
+        "$JOB" "$state" "$step" "$reason" > "$tmp"
+    printf '"repo":"","file":"%s","name":"%s","unit":"",' "$FILE" "${FILE%.gguf}" >> "$tmp"
+    printf '"size_bytes":%s,"downloaded_bytes":%s,"contextsize":0,"sha256":"%s",' \
+        "${SIZE:-0}" "$done_bytes" "${SHA:-}" >> "$tmp"
+    printf '"started":"%s","finished":"%s","kind":"promote"}\n' \
+        "$STARTED" "${FINISHED:-}" >> "$tmp"
+    mv -f "$tmp" "$JOBS_DIR/$JOB.json"
+}
+
+# ---------------------------------------------------------------------------
+# promote: detach, so the caller is never held open for a multi-minute copy
+# ---------------------------------------------------------------------------
+# A 24 GB gguf off a spinning archive disk is ~3 minutes. Held inside a tool
+# call that looks hung, and a hung-looking tool is one an agent retries -- two
+# promotions then race for the same hot-tier space. So this returns a job
+# record immediately and systemd owns the copy.
+cmd_promote() {
+    FILE="$1"; JOB="$2"
+    [[ "$FILE" =~ $gguf_re ]] || die "invalid file"
+    [[ "$FILE" != *".."* ]] || die "invalid file"
+    [[ "$JOB" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]] || die "invalid job id"
+    ensure_state
+    [ -e "$JOBS_DIR/$JOB.json" ] && die "job $JOB already exists"
+    [ -e "$ARCHIVE_DIR/$FILE" ] || die "no archived copy of $FILE"
+    STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    SIZE="$(stat -c %s "$ARCHIVE_DIR/$FILE")"
+    SHA=""
+    write_status queued starting "" 0 || die "could not write job file"
+    systemd-run --collect --unit="modelpromote-$JOB" \
+        --setenv=STARTED="$STARTED" \
+        "$0" run-promote "$FILE" "$JOB" >/dev/null 2>&1 \
+        || die "could not start promotion job"
+    cat "$JOBS_DIR/$JOB.json"
+}
+
+cmd_run_promote() {
+    FILE="$1"; JOB="$2"
+    ensure_state
+    STARTED="${STARTED:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+    local src="$ARCHIVE_DIR/$FILE" dst="$HOT_DIR/$FILE"
+    SIZE="$(stat -c %s "$src")"
+    SHA="$(sha_of "$src")"
+
+    # Already hot and byte-identical: nothing to do. Same-name-different-bytes
+    # is a refusal, never an overwrite -- koboldcpp may have it mapped.
+    if [ -e "$dst" ]; then
+        if [ "$(sha_of "$dst")" = "$SHA" ]; then
+            mark_served "$FILE"
+            FINISHED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            write_status done promoted "" "$SIZE"
+            return 0
+        fi
+        FINISHED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        write_status failed evict "hot_copy_differs" 0
+        return 1
+    fi
+
+    write_status running evict "" 0
+    local need=$((SIZE + MARGIN_BYTES))
+    local active; active="$(active_hot_file)"
+
+    # Evict least-recently-served first, and only enough to fit.
+    while [ "$(hot_free_bytes || echo 0)" -lt "$need" ]; do
+        local victim=""
+        local oldest=9999999999 f base t
+        for f in "$HOT_DIR"/*.gguf; do
+            [ -e "$f" ] || continue
+            base="$(basename "$f")"
+            [ "$base" = "$FILE" ] && continue
+            [ "$base" = "$active" ] && continue      # serving right now
+            is_pinned "$base" && continue            # human said keep it
+            t="$(served_at "$base")"
+            if [ "$t" -lt "$oldest" ]; then oldest="$t"; victim="$base"; fi
+        done
+        if [ -z "$victim" ]; then
+            # Refuse rather than overrule a pin. A pin the system may override
+            # is not a pin; the caller is told what to release.
+            FINISHED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            write_status failed evict "hot_tier_full_all_pinned" 0
+            return 1
+        fi
+        # THE invariant that makes eviction a cache operation and not data
+        # loss: never delete a hot copy without a verified archive copy.
+        if [ ! -e "$ARCHIVE_DIR/$victim" ] \
+           || [ "$(sha_of "$ARCHIVE_DIR/$victim")" != "$(sha_of "$HOT_DIR/$victim")" ]; then
+            FINISHED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            write_status failed evict "unarchived_victim" 0
+            return 1
+        fi
+        rm -f -- "$HOT_DIR/$victim" || { write_status failed evict "evict_failed" 0; return 1; }
+        sync
+    done
+
+    write_status running copy "" 0
+    if ! cp -f -- "$src" "$dst.part"; then
+        rm -f -- "$dst.part"
+        FINISHED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        write_status failed copy "copy_failed" 0
+        return 1
+    fi
+    sync
+
+    # Re-verify at the destination. A copy across two disks can rot in flight,
+    # and a corrupt gguf on :5001 fails in ways that look like a model problem.
+    write_status running verify "" "$SIZE"
+    if [ "$(sha_of "$dst.part")" != "$SHA" ]; then
+        rm -f -- "$dst.part"
+        FINISHED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        write_status failed verify "sha256_mismatch" 0
+        return 1
+    fi
+    mv -f -- "$dst.part" "$dst"
+    # World-readable is what lets the UNPRIVILEGED model container read it.
+    chmod 644 "$dst"
+    sync
+    mark_served "$FILE"
+    FINISHED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    write_status done promoted "" "$SIZE"
+}
+
+case "${1:-}" in
+    list)        [ "$#" -eq 1 ] || die "list takes no arguments"; cmd_list ;;
+    pin)         [ "$#" -eq 2 ] || die "pin takes one file"; cmd_pin "$2" ;;
+    unpin)       [ "$#" -eq 2 ] || die "unpin takes one file"; cmd_unpin "$2" ;;
+    promote)     [ "$#" -eq 3 ] || die "promote takes <file> <jobid>"; cmd_promote "$2" "$3" ;;
+    run-promote) [ "$#" -eq 3 ] || die "run-promote takes <file> <jobid>"; cmd_run_promote "$2" "$3" ;;
+    *) die "usage: derpr-model-tier list|pin|unpin|promote|run-promote ..." ;;
+esac

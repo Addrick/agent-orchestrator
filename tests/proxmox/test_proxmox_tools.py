@@ -6,12 +6,13 @@ results, so we assert on the exact commands + the disabled/validation guards.
 
 from __future__ import annotations
 
+import json
 from typing import List, Sequence
 
 import pytest
 
 from config import global_config
-from src.proxmox.handler import ProxmoxToolHandler
+from src.proxmox.handler import ProxmoxToolHandler, _TIER_SCRIPT as TIER_SCRIPT
 from src.proxmox.ssh import SSHError, SSHResult, SSHRunner, _reject_bad_args
 
 
@@ -54,6 +55,7 @@ class FakeRunner:
         vram: dict[str, tuple[int, int]] | None = None,
         exec_start: dict[str, str | None] | None = None,
         disable_failures: set[str] | None = None,
+        tiers: dict | str | None = None,
     ) -> None:
         self.calls: List[List[str]] = []
         self._result = result or SSHResult(0, "ok-stdout", "")
@@ -69,10 +71,37 @@ class FakeRunner:
         # units whose `disable --now` exits non-zero (the D-Bus wait that
         # PVE_SSH_TIMEOUT cuts short is the realistic cause).
         self._disable_failures = disable_failures or set()
+        # DP-340: gguf basename -> tier entry. None means this node has no
+        # `derpr-model-tier` at all, which is the pre-DP-340 node a freshly
+        # deployed container will meet, so the call falls through to the
+        # default result and the handler degrades to probing the hot path.
+        self._tiers = tiers
 
     async def run(self, argv: Sequence[str]) -> SSHResult:
         a = list(argv)
         self.calls.append(a)
+        # `derpr-model-tier list` -> the canned hot/cold inventory (DP-340).
+        if a[:2] == [TIER_SCRIPT, "list"]:
+            if self._tiers is None:
+                return SSHResult(1, "", "bash: derpr-model-tier: command not found")
+            # A str means "exited 0 and said this" — a script that ANSWERS but
+            # answers badly, which is a different failure from one that is absent.
+            if isinstance(self._tiers, str):
+                return SSHResult(0, self._tiers, "")
+            return SSHResult(0, json.dumps({
+                "status": "ok",
+                "hot_dir": "/srv/models",
+                "archive_dir": "/srv/archive/models",
+                "hot_free_bytes": 40_000_000_000,
+                "active": "",
+                "models": list(self._tiers.values()),
+            }), "")
+        # `derpr-model-tier promote <file> <job>` -> a queued job record.
+        if a[:2] == [TIER_SCRIPT, "promote"]:
+            return SSHResult(0, json.dumps({
+                "job_id": a[3], "state": "queued", "step": "starting",
+                "file": a[2], "kind": "promote",
+            }), "")
         # `systemctl list-unit-files ...` → the canned unit inventory (DP-332).
         if "list-unit-files" in a:
             return SSHResult(0, self._unit_files, "")

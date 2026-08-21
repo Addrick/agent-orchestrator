@@ -45,8 +45,11 @@ succeed). Discovery costs two properties the map gave for free:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import posixpath
 import re
+import uuid
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from config import global_config
@@ -92,6 +95,11 @@ _CARD_RE = re.compile(r"card\d+")
 _MAX_INFLIGHT_SSH = 4
 
 _MIB = 1024 * 1024
+
+#: The node-side tiering verb (DP-340). Hot ggufs live on the SSD where
+#: koboldcpp can serve them; cold ones live on the archive HDD. This is the only
+#: thing that knows which is which.
+_TIER_SCRIPT = "/usr/local/sbin/derpr-model-tier"
 
 
 def _err(message: str) -> Dict[str, Any]:
@@ -449,8 +457,52 @@ class ProxmoxToolHandler:
         res = await self._run(["pct", "exec", vmid, "--", "test", "-f", path])
         return res.get("status") == "ok"
 
+    async def _tier_inventory(self) -> Dict[str, Dict[str, Any]]:
+        """What the node holds, keyed by gguf basename, or ``{}`` when unknown.
+
+        Returning an empty dict on *any* failure is deliberate and is the whole
+        rollout story. The node artifacts in ``services/pve/`` and the container
+        image are two independent deploys (DP-332 shipped a handler against a
+        wrapper that was six weeks old), so a container running this code will
+        meet nodes that have never heard of ``derpr-model-tier``. Callers treat
+        ``{}`` as "no tiering here" and fall back to the pre-DP-340 behaviour of
+        probing the hot path directly, which is exactly right on such a node.
+
+        The failure is therefore silent by design — but only this one. A tier
+        script that *answers* and answers badly still raises.
+        """
+        res = await self._run([_TIER_SCRIPT, "list"])
+        if res.get("status") != "ok":
+            return {}
+        try:
+            payload = json.loads(res.get("stdout") or "")
+        except (ValueError, TypeError):
+            logger.warning("derpr-model-tier list returned unparseable output")
+            return {}
+        if payload.get("status") != "ok":
+            return {}
+        out: Dict[str, Dict[str, Any]] = {}
+        for entry in payload.get("models") or []:
+            f = entry.get("file")
+            if isinstance(f, str) and f:
+                out[f] = entry
+        return out
+
+    @staticmethod
+    def _gguf_basename(spec: Dict[str, Any]) -> str:
+        """The bare filename from a unit's ``--model`` path, or ``""``."""
+        path = spec.get("model")
+        if not isinstance(path, str) or not path:
+            return ""
+        return posixpath.basename(path)
+
     async def _model_row(
-        self, vmid: str, name: str, unit: str, spec: Dict[str, Any]
+        self,
+        vmid: str,
+        name: str,
+        unit: str,
+        spec: Dict[str, Any],
+        tiers: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Optional[Dict[str, Any]]:
         """One ``list_models`` row, or None when the unit is not a swappable model.
 
@@ -465,16 +517,36 @@ class ProxmoxToolHandler:
         """
         if spec["port"] != _KCPP_PORT:
             return None
-        present, state_res = await asyncio.gather(
-            self._model_present(vmid, unit, spec),
-            self._run(["pct", "exec", vmid, "--", "systemctl", "is-active", unit]),
-        )
-        if not present:
-            return None
+        is_active = ["pct", "exec", vmid, "--", "systemctl", "is-active", unit]
+        if tiers:
+            # Tiering is live. A gguf in neither tier does not exist at all, and
+            # a unit pointing at it would still take :5001 down (DP-264), so that
+            # stays hidden. A *cold* one is now listed rather than hidden: it is
+            # a legitimate `set_active_model` target that costs a promotion
+            # first, and hiding it would make an installed model look lost.
+            entry = tiers.get(self._gguf_basename(spec))
+            if entry is None:
+                return None
+            tier = entry.get("tier") or "cold"
+            pinned = bool(entry.get("pinned"))
+            state_res = await self._run(is_active)
+        else:
+            # Pre-DP-340 node: presence on the hot path is all there is to know.
+            present, state_res = await asyncio.gather(
+                self._model_present(vmid, unit, spec), self._run(is_active)
+            )
+            if not present:
+                return None
+            tier, pinned = "hot", False
         state = (
             state_res.get("stdout") or state_res.get("message") or "unknown"
         ).strip()
-        return {"name": name, "unit": unit, "state": state}
+        row: Dict[str, Any] = {
+            "name": name, "unit": unit, "state": state, "tier": tier,
+        }
+        if pinned:
+            row["pinned"] = True
+        return row
 
     @staticmethod
     def _port_contenders(
@@ -559,13 +631,33 @@ class ProxmoxToolHandler:
         # that binds :5001 and whose gguf is on disk. `_model_row` carries the
         # reasoning for each omission.
         units: Dict[str, str] = discovered["units"]
-        specs = await self._unit_specs(vmid, units)
+        specs, tiers = await asyncio.gather(
+            self._unit_specs(vmid, units), self._tier_inventory()
+        )
         rows = await asyncio.gather(*(
-            self._model_row(vmid, name, units[name], specs[name])
+            self._model_row(vmid, name, units[name], specs[name], tiers)
             for name in sorted(units)
         ))
         models = [row for row in rows if row is not None]
-        return {"status": "ok", "host_vmid": vmid, "models": models}
+        result: Dict[str, Any] = {
+            "status": "ok", "host_vmid": vmid, "models": models,
+        }
+        if tiers:
+            # Say it in the result, not in a persona prompt: the cost of
+            # picking a cold model is only knowable from values this call just
+            # read, and a model that does not know a swap can take minutes will
+            # read the delay as a hung tool and retry it.
+            cold = [m["name"] for m in models if m.get("tier") == "cold"]
+            if cold:
+                result["note"] = (
+                    f"{len(cold)} model(s) are on the cold archive tier "
+                    f"({', '.join(sorted(cold))}). set_active_model works on "
+                    "them, but promotes first: it returns immediately with "
+                    "state='promoting' and a job_id to poll with "
+                    "install_status, and the copy takes minutes. Models marked "
+                    "tier='hot' switch straight away."
+                )
+        return result
 
     async def _gpu_status(self) -> Dict[str, Any]:
         """VRAM total/used/free per card on the GPU CT, read live from sysfs.
@@ -693,6 +785,84 @@ class ProxmoxToolHandler:
         logger.info("Tool stop_guest: kind=%s vmid=%s name=%s", kind, vmid, name)
         return await self._guest_action("stop", vmid, kind, name)
 
+    async def _preflight_target(
+        self,
+        vmid: str,
+        name: str,
+        unit: str,
+        spec: Dict[str, Any],
+        tiers: Dict[str, Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """A result to return instead of swapping, or ``None`` to go ahead.
+
+        Never disable the running model to enable a unit that cannot start: if
+        the target's weights are not where its unit points, :5001 must be left
+        exactly as it is (DP-264). DP-340 adds a third answer between "fine" and
+        "refuse" — *cold*, meaning the weights exist but on the archive disk, so
+        the swap is possible after a promotion rather than impossible.
+        """
+        if tiers:
+            entry = tiers.get(self._gguf_basename(spec))
+            if entry is None:
+                return _err(
+                    f"no gguf on the node for {name!r} (unit {unit}), in "
+                    "either tier; not switching — current model left running."
+                )
+            if entry.get("tier") == "cold":
+                return await self._promote_model(name, unit, entry)
+            return None
+        if not await self._model_present(vmid, unit, spec):
+            return _err(
+                f"model file for {name!r} (unit {unit}) is not on disk; "
+                "not switching — current model left running."
+            )
+        return None
+
+    async def _promote_model(
+        self, name: str, unit: str, entry: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Start a cold→hot promotion and return a handle, never the result.
+
+        This deliberately does **not** wait for the copy. A 24 GB gguf off the
+        archive HDD is minutes, and a tool call held open that long is
+        indistinguishable from a hung one — which is a failure mode this project
+        has already paid for: DP-338 was an agent retrying a call it could not
+        tell had progressed, sixteen times. Two promotions racing for the same
+        hot-tier space is a worse outcome than a poll.
+
+        :5001 is untouched here. Whatever is serving keeps serving until the
+        promotion finishes and a *second* `set_active_model` swaps to it, so a
+        failed promotion costs time and nothing else.
+        """
+        job_id = f"{name}-{uuid.uuid4().hex[:12]}"
+        # `entry["file"]` is the node's own basename from `derpr-model-tier
+        # list`, not anything the model typed — the same rule as the unit names
+        # in `_set_active_model`, and what keeps this tool's
+        # `exfil_capable: False` claim true.
+        res = await self._run([_TIER_SCRIPT, "promote", entry["file"], job_id])
+        if res.get("status") != "ok":
+            return res
+        size = entry.get("size_bytes")
+        return {
+            "status": "ok",
+            "state": "promoting",
+            "job_id": job_id,
+            "model": name,
+            "unit": unit,
+            "file": entry["file"],
+            "size_bytes": size,
+            "note": (
+                f"{name!r} is on the cold archive tier, so it is being copied "
+                "to the SSD before it can serve. This call did NOT change what "
+                f":5001 is serving. Poll install_status(job_id='{job_id}') — "
+                "the copy takes minutes, and a poll that still says 'running' "
+                "means it is working, not stuck. When it reports state='done', "
+                f"call set_active_model({name!r}) again to actually switch. If "
+                "it reports 'hot_tier_full_all_pinned', every other model is "
+                "pinned or in use: unpin one and retry."
+            ),
+        }
+
     async def _set_active_model(self, name: str) -> Dict[str, Any]:
         logger.info("Tool set_active_model: %s", name)
         if not self._enabled():
@@ -712,14 +882,14 @@ class ProxmoxToolHandler:
             return _err(
                 f"unknown model {name!r}; CT {vmid} has: {sorted(units)}"
             )
-        specs = await self._unit_specs(vmid, units)
-        # Pre-flight: never disable the running model to enable a unit that can't
-        # start. If the target's gguf isn't on disk, refuse and leave :5001 as-is.
-        if not await self._model_present(vmid, target, specs[name]):
-            return _err(
-                f"model file for {name!r} (unit {target}) is not on disk; "
-                "not switching — current model left running."
-            )
+        specs, tiers = await asyncio.gather(
+            self._unit_specs(vmid, units), self._tier_inventory()
+        )
+        short_circuit = await self._preflight_target(
+            vmid, name, target, specs[name], tiers
+        )
+        if short_circuit is not None:
+            return short_circuit
         # Stop whatever else is competing for :5001, then enable+start the
         # target. Idempotent: re-selecting the active model just re-enables it.
         contenders, unreadable = self._port_contenders(units, specs, target)

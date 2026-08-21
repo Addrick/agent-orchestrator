@@ -6,6 +6,7 @@ Three artifacts that live on the **Proxmox node**, not in the derpr container:
 |---|---|---|
 | `derpr-pve-wrapper` | `/usr/local/bin/derpr-pve-wrapper` | The forced-command allowlist for derpr's SSH key (DP-267). |
 | `derpr-model-install` | `/usr/local/sbin/derpr-model-install` | The one verb behind `install_model` (DP-265). |
+| `derpr-model-tier` | `/usr/local/sbin/derpr-model-tier` | Hot/cold gguf tiering: `list`, `pin`, `unpin`, `promote` (DP-340). |
 | `koboldcpp-model.service.in` | `/usr/local/share/derpr/koboldcpp-model.service.in` | Unit template the installer fills in. |
 | `gguf_header.py` | `/usr/local/share/derpr/gguf_header.py` | Reads `n_layer` / `n_kv_head` / `head_dim` out of a downloaded gguf. |
 
@@ -74,6 +75,10 @@ ssh root@<node> 'chmod 755 /usr/local/bin/derpr-pve-wrapper && bash -n /usr/loca
 scp services/pve/derpr-model-install root@<node>:/usr/local/sbin/derpr-model-install
 ssh root@<node> 'chmod 755 /usr/local/sbin/derpr-model-install && bash -n /usr/local/sbin/derpr-model-install'
 ssh root@<node> 'mkdir -p /usr/local/share/derpr'
+# 2b. tiering (DP-340). Same rule: scp, then syntax-check on the node.
+scp services/pve/derpr-model-tier root@<node>:/usr/local/sbin/derpr-model-tier
+ssh root@<node> 'chmod 755 /usr/local/sbin/derpr-model-tier && bash -n /usr/local/sbin/derpr-model-tier'
+
 scp services/pve/koboldcpp-model.service.in root@<node>:/usr/local/share/derpr/
 scp services/pve/gguf_header.py root@<node>:/usr/local/share/derpr/
 ```
@@ -88,6 +93,34 @@ command="/usr/local/bin/derpr-pve-wrapper",no-pty,no-port-forwarding,no-X11-forw
 `grep -v … file > file` truncates the file that gates your own access; that is
 how the node got locked out during DP-267, recovered only via the PVE web
 console.
+
+### Tiering prerequisites (DP-340)
+
+`derpr-model-tier` assumes the archive disk is mounted and will refuse to invent
+it. Before first use:
+
+```bash
+# the archive disk, with nofail so it can never block the node's boot
+mkdir -p /srv/archive
+# /etc/fstab:
+# UUID=<uuid> /srv/archive ntfs3 rw,noatime,uid=0,gid=0,umask=022,nofail,x-systemd.device-timeout=10s 0 0
+mount /srv/archive && mkdir -p /srv/archive/models /srv/archive/.jobs /srv/archive/.tier
+```
+
+⚠️ **Move the existing ggufs to the archive before relying on eviction.** The hot
+tier only evicts a model that has a verified archive copy, so until each gguf
+exists in both places a promotion will refuse with `unarchived_victim` rather
+than delete anything. That refusal is the invariant working, not a bug.
+
+Optional, in `/etc/default/derpr-model-tier`:
+
+```sh
+HOT_CAPACITY_BYTES=128849018880   # 120 GiB — cap the hot tier below the volume
+MARGIN_BYTES=5368709120           # 5 GiB kept free beyond the incoming model
+```
+
+`HOT_CAPACITY_BYTES` matters before DP-341 shrinks the models LV: without it the
+volume is far bigger than the tier should be and eviction never fires.
 
 ### Site settings
 

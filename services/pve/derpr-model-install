@@ -28,13 +28,26 @@
 #     has fooled this project before.
 #   * The unit is written DISABLED. Putting a model on :5001 is set_active_model's
 #     job and gets its own approval.
-#   * Refuse, never truncate, on insufficient space: /srv/models is a thin LV and
-#     filling it takes :5001 and every other guest's models down with it.
+#   * Refuse, never truncate, on insufficient space. NOTE (DP-340): this check
+#     now guards the ARCHIVE disk, an ordinary partition where df is the truth.
+#     It used to guard /srv/models, a thin LV, where df reports the volume's
+#     free space and cannot see the POOL behind it running out -- it read
+#     75 GiB free over a pool with 14 GiB left, passed a 22 GB download, and
+#     put every guest on the node into a read-only filesystem (2026-08-21).
+#     The pool is now protected by not being written to at all.
 
 set -uo pipefail
 
-MODELS_DIR="${MODELS_DIR:-/srv/models}"
-JOBS_DIR="${JOBS_DIR:-$MODELS_DIR/.jobs}"
+# DP-340: downloads land in the COLD tier on the archive disk, not on the SSD.
+# The unit still points at the hot path inside the container (CT_ARCHIVE below
+# is unchanged); `derpr-model-tier promote` is what puts the bytes there.
+ARCHIVE_DIR="${ARCHIVE_DIR:-/srv/archive/models}"
+# Job records live on the archive disk too. They used to live beside the
+# download on /srv/models, which meant that when that filesystem went read-only
+# the `write_status failed` at the end of the download path could not land --
+# the failure record was on the volume the failure had just destroyed. The job
+# stayed `running` for 15 hours after the process was dead (2026-08-21).
+JOBS_DIR="${JOBS_DIR:-/srv/archive/.jobs}"
 CT_VMID="${CT_VMID:-101}"
 CT_MODELS_DIR="${CT_MODELS_DIR:-/opt/koboldcpp/models}"
 KCPP_DIR="${KCPP_DIR:-/opt/koboldcpp}"
@@ -44,8 +57,7 @@ GGUF_HEADER="${GGUF_HEADER:-/usr/local/share/derpr/gguf_header.py}"
 TOKEN_FILE="${TOKEN_FILE:-/etc/derpr-model-install.token}"
 HF_BASE="${HF_BASE:-https://huggingface.co}"
 # Headroom kept free beyond the model itself: the larger of 2 GiB and 5% of the
-# download. A thin pool that reaches 100% does not fail the write, it wedges the
-# guests using it.
+# download, on the archive disk.
 MIN_MARGIN_BYTES="${MIN_MARGIN_BYTES:-2147483648}"
 # How often the download loop republishes downloaded_bytes.
 PROGRESS_INTERVAL="${PROGRESS_INTERVAL:-5}"
@@ -106,7 +118,7 @@ parse_job_args() {
   # the regexes above already exclude "/" and ".." from reaching it — the model
   # never names a path, only a file inside a repo.
   BASENAME="${FILE##*/}"
-  DEST="$MODELS_DIR/$BASENAME"
+  DEST="$ARCHIVE_DIR/$BASENAME"
   UNIT="koboldcpp-$NAME.service"
   STARTED="${STARTED:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
   FINISHED=""
@@ -126,7 +138,7 @@ cmd_install() {
   parse_job_args "$@"
   [ -x "$0" ] || die "installer not executable"
   [ -r "$TEMPLATE" ] || die "unit template missing at $TEMPLATE"
-  [ -d "$MODELS_DIR" ] || die "models dir $MODELS_DIR does not exist"
+  [ -d "$ARCHIVE_DIR" ] || die "models dir $ARCHIVE_DIR does not exist"
 
   # Refuse to shadow an existing unit. Overwriting one would silently repoint a
   # name list_models already publishes, which is the sort of change that gets
@@ -147,12 +159,12 @@ cmd_install() {
     [ "$have" = "$SHA" ] || die "$BASENAME already exists with a different sha256"
   else
     local avail need
-    avail="$(df -B1 --output=avail "$MODELS_DIR" | tail -n1 | tr -dc '0-9')"
-    [ -n "$avail" ] || die "could not read free space on $MODELS_DIR"
+    avail="$(df -B1 --output=avail "$ARCHIVE_DIR" | tail -n1 | tr -dc '0-9')"
+    [ -n "$avail" ] || die "could not read free space on $ARCHIVE_DIR"
     need=$(( SIZE + (SIZE / 20) ))
     [ "$need" -ge $(( SIZE + MIN_MARGIN_BYTES )) ] || need=$(( SIZE + MIN_MARGIN_BYTES ))
     if [ "$avail" -lt "$need" ]; then
-      die "insufficient space on $MODELS_DIR: need $need bytes, have $avail"
+      die "insufficient space on $ARCHIVE_DIR: need $need bytes, have $avail"
     fi
   fi
 

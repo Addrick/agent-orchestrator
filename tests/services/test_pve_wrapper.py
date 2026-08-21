@@ -18,6 +18,7 @@ Skipped where bash is unavailable; CI is ubuntu, and dev boxes have git-bash.
 
 from __future__ import annotations
 
+import json
 import shlex
 import shutil
 import subprocess
@@ -39,6 +40,7 @@ _WRAPPER = Path(__file__).resolve().parents[2] / "services" / "pve" / "derpr-pve
 
 SHA = "a" * 64
 SIZE = 24_000_000_000
+TIER = "/usr/local/sbin/derpr-model-tier"
 
 
 @pytest.fixture(scope="module")
@@ -86,11 +88,37 @@ class Recorder:
         a = list(argv)
         self.calls.append(a)
         if "list-unit-files" in a:
-            return SSHResult(0, "koboldcpp-fable.service  disabled  enabled", "")
+            return SSHResult(
+                0,
+                "koboldcpp-fable.service  disabled  enabled\n"
+                "koboldcpp-archived.service  disabled  enabled",
+                "",
+            )
+        # DP-340: the tier inventory. `fable` is hot, `archived` is cold, so
+        # driving set_active_model over both exercises the straight swap AND
+        # the promotion path — and therefore emits both argv families.
+        if a[:2] == [TIER, "list"]:
+            return SSHResult(0, json.dumps({
+                "status": "ok",
+                "hot_dir": "/srv/models",
+                "archive_dir": "/srv/archive/models",
+                "hot_free_bytes": 40_000_000_000,
+                "active": "fable.gguf",
+                "models": [
+                    {"file": "fable.gguf", "tier": "hot",
+                     "size_bytes": SIZE, "pinned": False,
+                     "last_served": 1, "archived": True},
+                    {"file": "archived.gguf", "tier": "cold",
+                     "size_bytes": SIZE, "pinned": False,
+                     "last_served": 0, "archived": True},
+                ],
+            }), "")
         if "show" in a and "--property=ExecStart" in a:
+            unit = next((x for x in a if x.endswith(".service")), "")
+            stem = unit[len("koboldcpp-"):-len(".service")] if unit else "fable"
             return SSHResult(
                 0, "argv[]=/opt/koboldcpp/koboldcpp --model "
-                   "/opt/koboldcpp/models/fable.gguf --port 5001 ;", "")
+                   f"/opt/koboldcpp/models/{stem}.gguf --port 5001 ;", "")
         if a[-2:] == ["ls", "/sys/class/drm"]:
             return SSHResult(0, "card1\ncard1-DP-1\nrenderD128", "")
         if len(a) >= 3 and a[-3] == "cat":
@@ -136,6 +164,9 @@ def emitted(monkeypatch) -> List[List[str]]:
         await pve._start_guest(vmid="101", kind="ct")
         await pve._stop_guest(vmid="101", kind="ct")
         await pve._set_active_model("fable")
+        # DP-340: the cold target promotes instead of swapping, which is a
+        # different argv family and therefore a different wrapper entry.
+        await pve._set_active_model("archived")
         await hf._install_model("owner/m-GGUF", "model-Q6_K.gguf", "newmodel")
         await hf._install_status("newmodel-abc123def456")
 
@@ -164,6 +195,34 @@ def test_the_dp332_shapes_are_covered(wrapper, emitted):
     assert any("mem_info_vram_total" in c for c in joined)
 
 
+def test_the_dp340_tier_shapes_are_covered(wrapper, emitted):
+    """Named explicitly so the parity check above cannot pass vacuously.
+
+    If the cold-tier branch stopped firing, `test_every_argv...` would still be
+    green — it only checks the argvs that *were* emitted. These assert the new
+    shapes actually reach the wrapper at all.
+    """
+    joined = [shlex.join(a) for a in emitted]
+    assert any(c.endswith("derpr-model-tier list") for c in joined),         "list_models/set_active_model never asked the node for its tiers"
+    assert any("derpr-model-tier promote archived.gguf" in c for c in joined),         "a cold model did not produce a promotion argv"
+
+
+def test_a_cold_target_promotes_and_touches_nothing_else(emitted):
+    """The safety property: promoting must not disable the running model.
+
+    :5001 keeps serving until a *second* set_active_model swaps to the promoted
+    file, so a promotion that fails costs time and nothing else. A `disable`
+    emitted for the cold target's sake would break that.
+    """
+    joined = [shlex.join(a) for a in emitted]
+    promote_at = next(i for i, c in enumerate(joined) if "tier promote" in c)
+    after = joined[promote_at:]
+    assert not any("systemctl disable" in c for c in after), (
+        "set_active_model disabled a unit while promoting a cold model — "
+        f":5001 would go dark for the length of the copy: {after}"
+    )
+
+
 @pytest.mark.parametrize("cmd", [
     "id",
     "bash",
@@ -184,6 +243,19 @@ def test_the_dp332_shapes_are_covered(wrapper, emitted):
     "/usr/local/sbin/derpr-model-install install owner/m model.gguf n 8192 1 "
     "nothexdigest job1",
     "/usr/local/sbin/derpr-model-install status ../../etc/passwd",
+    # DP-340 tiering. `run-promote` is systemd's local entry point: admitting it
+    # over ssh would let a caller skip the job-record and duplicate-job gates.
+    "/usr/local/sbin/derpr-model-tier run-promote model.gguf job1",
+    # Path traversal and charset gates on the tier verbs.
+    "/usr/local/sbin/derpr-model-tier promote ../../etc/passwd job1",
+    "/usr/local/sbin/derpr-model-tier promote ../evil.gguf job1",
+    "/usr/local/sbin/derpr-model-tier promote /srv/models/m.gguf job1",
+    "/usr/local/sbin/derpr-model-tier promote model.txt job1",
+    "/usr/local/sbin/derpr-model-tier promote model.gguf",
+    "/usr/local/sbin/derpr-model-tier pin ../../root/.ssh/id_rsa",
+    "/usr/local/sbin/derpr-model-tier pin",
+    "/usr/local/sbin/derpr-model-tier list extra-arg",
+    "/usr/local/sbin/derpr-model-tier evict model.gguf",
     # A sysfs read outside the VRAM counters.
     "pct exec 101 -- cat /sys/class/drm/card1/device/mem_info_vram_total /etc/shadow",
     # A directory listing that is not the DRM one.
