@@ -54,20 +54,41 @@ RETAIN_MISSION = (
     "project patterns, architectural decisions, and long-lived constraints. "
     "IGNORE: one-shot questions, slash commands, file paths, single-session "
     "debugging steps, error messages, conversational filler. "
-    "Attribute preferences and goals to the user; attribute code suggestions "
-    "and analyses to Claude."
+    "ATTRIBUTION RULES (strict): Attribute a preference, skill, credential, "
+    "goal, or biographical claim to the user ONLY when the user asserts it "
+    "about themselves in their own words. NEVER attribute to the user any "
+    "statement that appears as quoted text, file or dataset content, a test "
+    "fixture, sample or benchmark data, or a hypothetical example. If a "
+    "statement names a third party (for example Alice, Bob, a persona, or a "
+    "dataset subject), keep that subject or discard the statement; never "
+    "rewrite it onto the user. Discard entirely any content sourced from "
+    "evaluation datasets or test fixtures. If the surrounding text states or "
+    "implies that a claim is false, fabricated, superseded, or an example, do "
+    "not extract it as a fact. "
+    "Attribute code suggestions and analyses to Claude."
 )
 
 REFLECT_MISSION = (
     "Reason over the user's Claude Code history to identify stable coding "
     "patterns, recurring project context, and durable preferences. Prefer "
-    "synthesis across sessions over single-session detail."
+    "synthesis across sessions over single-session detail. State the date of "
+    "any claim about system, infrastructure, or deployment state and flag it "
+    "as possibly stale rather than presenting it as current. If the "
+    "supporting facts conflict, say so instead of choosing silently."
 )
 
 OBSERVATIONS_MISSION = (
     "Consolidate the user's preferences, coding patterns, and project "
-    "decisions into stable beliefs. Merge duplicates across sessions. "
-    "Mark superseded preferences as historical rather than overwriting."
+    "decisions into stable beliefs. Merge duplicates aggressively: when two "
+    "or more facts state the same thing in different words, emit ONE "
+    "observation citing all of them rather than separate near-identical "
+    "observations. Never emit an observation that merely restates a single "
+    "source fact in different words. Mark superseded claims as historical "
+    "rather than overwriting, and apply this to system, infrastructure, and "
+    "deployment state as well as to preferences. When two claims about the "
+    "same system conflict, prefer the later-dated claim and state explicitly "
+    "that the earlier one is superseded, giving both dates. Never attribute a "
+    "third party or dataset subject's attributes to the user."
 )
 
 # Junk filter for user prompts. Only drops obvious noise — short conversational
