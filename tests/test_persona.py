@@ -743,6 +743,40 @@ def test_hypr_template_names_no_real_guest_and_keeps_the_operator_slots():
     assert "pve_status" in prompt
 
 
+def test_hypr_template_leaves_the_vram_arithmetic_to_the_tool_layer():
+    """DP-337. The prompt is the weakest home for a mechanical fact: it is
+    unversioned relative to the code, untestable, per-persona — and in this
+    deployment hand-maintained in `data/personas.json` on a docker volume, so
+    it does not ship with the merge that changes the tools it describes.
+
+    The budget equation now lives on `install_model.contextsize` (the one
+    argument it constrains), the GTT-spill consequence on `gpu_status`, and the
+    arithmetic itself in `install_status`'s result — where its own inputs are.
+    What stays here is the cross-tool routine and the tone, which no single
+    tool owns.
+    """
+    prompt = _hypr_entry()["prompt"]
+    assert "VRAM BUDGET." not in prompt
+    for gone in ("1010 MiB", "500 MiB", "bytes per element", "n_kv_head"):
+        assert gone not in prompt, gone
+    # The routine survives: four tools in order, and the tone that makes the
+    # choice reviewable by the human who approves it.
+    assert "INSTALLING A MODEL." in prompt
+    for tool in ("hf_search", "hf_files", "gpu_status", "install_model"):
+        assert tool in prompt
+    assert "which quant you chose" in prompt
+
+
+def test_hypr_prompt_states_the_free_vs_total_trap_exactly_once():
+    """It was in AUDIT FIRST *and* in VRAM BUDGET *and* on the `gpu_status`
+    tool — three copies of the subtlest rule in the section, which is how a
+    prompt rots into a place facts go to be forgotten. The tool description is
+    the copy that ships with the code; the prompt keeps one, in AUDIT FIRST."""
+    prompt = _hypr_entry()["prompt"]
+    assert prompt.count("Free MiB is the headroom") == 1
+    assert "AUDIT FIRST." in prompt
+
+
 def test_hypr_loads_unquarantined():
     """DP-128 loads a composition-violating persona quarantined rather than
     dropping it — so 'it loaded' is not evidence it works. Assert the empty
