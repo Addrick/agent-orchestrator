@@ -449,7 +449,12 @@ class TextEngine:
         yield {"type": "api_payload", "payload": api_payload or {}}
         if result.get("type") == "tool_calls":
             yield {"type": "tool_calls", "calls": list(result.get("calls", []))}
-            yield {"type": "done", "full_text": ""}
+            # DP-338: a one-shot result may carry the prose the model wrote
+            # beside its calls. It rides `done`, not `text_delta`, on purpose —
+            # this is the plan for a batch that has not run yet, so it belongs
+            # in the turn's history for the next iteration to read, not streamed
+            # to the user as if it were the answer.
+            yield {"type": "done", "full_text": result.get("content", "") or ""}
         else:
             text = result.get("content", "") or ""
             if text:
@@ -725,6 +730,25 @@ class TextEngine:
             # the pre-DP-206 one-shot handlers, which returned
             # {"type": "tool_calls", "calls": []} so the empty-response retry
             # logic fires rather than treating it as a text turn.
+            #
+            # DP-338: prose that arrived beside the calls is carried on the
+            # result, so this stays the exact inverse of `_events_from_one_shot`
+            # — a result round-tripped through the event shape and back must not
+            # lose the plan the model wrote for its batch.
+            #
+            # `or`, not `is not None` — the same rule tool_loop.py:801 and
+            # `_generate_tool_budget_wrapup` already follow. Every streaming
+            # provider deltas the prose out and then reports `done` with
+            # `full_text: ""` on a tool turn (anthropic.py, openai.py,
+            # google.py all do), so preferring `full_text` whenever it is
+            # merely non-None threw the deltas away and left the fix landing
+            # for agy alone.
+            prose = ("".join(text_parts).strip()
+                     or (full_text or "").strip())
+            if prose:
+                return {
+                    "type": "tool_calls", "calls": calls, "content": prose,
+                }, api_payload
             return {"type": "tool_calls", "calls": calls}, api_payload
         text = full_text if full_text is not None else "".join(text_parts)
         return {"type": "text", "content": text}, api_payload

@@ -82,8 +82,17 @@ async def build_google_history(
                 serializable_item['parts'] = [part_dict]
                 serializable_history.append(serializable_item)
         elif item.get('tool_calls'):
-            api_parts = []
-            serializable_parts = []
+            api_parts: List[Part] = []
+            serializable_parts: List[Dict[str, Any]] = []
+            # DP-338: the plan the model wrote beside its batch rides in front
+            # of the function_call parts. Without this the Gemini route stored
+            # the prose in conversation_history and then stripped it again on
+            # the way to the wire, so the next iteration read the same
+            # reason-free transcript the ticket exists to remove.
+            leading_text = (item.get('content') or '').strip()
+            if leading_text:
+                api_parts.append(Part(text=leading_text))
+                serializable_parts.append({'text': leading_text})
             for call in item['tool_calls']:
                 part_kwargs: Dict[str, Any] = {
                     'function_call': {'name': call['name'], 'args': call['arguments']}

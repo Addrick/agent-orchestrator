@@ -339,6 +339,67 @@ async def test_collect_stream_tool_calls_take_priority_over_text():
 
 
 @pytest.mark.asyncio
+async def test_collect_stream_carries_prose_beside_tool_calls():
+    """DP-338: `collect_stream` and `_events_from_one_shot` are inverses, so a
+    one-shot result round-tripped through the event shape and back must keep
+    the plan the model wrote for its batch. Before this, tool calls zeroed the
+    text on both sides and the prose died at the seam."""
+    events = [
+        {"type": "api_payload", "payload": {}},
+        {"type": "tool_calls", "calls": [
+            {"id": "c1", "name": "pve_status", "arguments": {}},
+        ]},
+        {"type": "done", "full_text": "Checking the node first."},
+    ]
+    result, _ = await TextEngine.collect_stream(_aiter(events))
+    assert result["type"] == "tool_calls"
+    assert result["content"] == "Checking the node first."
+
+
+@pytest.mark.asyncio
+async def test_collect_stream_takes_prose_from_deltas_when_done_is_empty():
+    """The shape EVERY streaming provider actually sends on a tool turn.
+
+    anthropic/openai/google all delta the prose out and then report `done`
+    with `full_text: ""`. Reading `full_text` whenever it was merely non-None
+    picked the empty string, so the DP-338 fix landed for agy (whose prose
+    rides on `done`) and for nobody else — `generate_response` still handed
+    agents and BotLogic a batch with no stated plan.
+    """
+    events = [
+        {"type": "api_payload", "payload": {}},
+        {"type": "text_delta", "text": "Checking the node "},
+        {"type": "text_delta", "text": "and the card."},
+        {"type": "tool_calls", "calls": [
+            {"id": "c1", "name": "pve_status", "arguments": {}},
+            {"id": "c2", "name": "gpu_status", "arguments": {}},
+        ]},
+        {"type": "done", "full_text": ""},
+    ]
+    result, _ = await TextEngine.collect_stream(_aiter(events))
+    assert result["type"] == "tool_calls"
+    assert result["content"] == "Checking the node and the card."
+
+
+@pytest.mark.asyncio
+async def test_collect_stream_omits_content_when_calls_carry_no_prose():
+    """A call-only response keeps the old two-key shape, so nothing
+    downstream has to special-case an empty string."""
+    events = [
+        {"type": "api_payload", "payload": {}},
+        {"type": "tool_calls", "calls": [
+            {"id": "c1", "name": "pve_status", "arguments": {}},
+        ]},
+        {"type": "done", "full_text": ""},
+    ]
+    result, _ = await TextEngine.collect_stream(_aiter(events))
+    assert result == {
+        "type": "tool_calls",
+        "calls": [{"id": "c1", "name": "pve_status", "arguments": {}}],
+    }
+
+
+@pytest.mark.asyncio
 async def test_collect_stream_handles_missing_payload():
     events = [
         {"type": "text_delta", "text": "hi"},
@@ -526,3 +587,58 @@ async def test_stream_messages_error_after_commit_propagates(
                 seen.append(ev)
     assert provider.call_count == 1
     assert [e["type"] for e in seen] == ["api_payload", "text_delta"]
+
+
+# --------------------------------------------------------------------------
+# DP-338 — `_events_from_one_shot` is the other half of the seam. Together
+# with the two `collect_stream` cases above these pin the round trip: prose
+# beside calls survives result → events → result.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_one_shot_events_put_batch_prose_on_done_not_on_deltas():
+    """It rides `done` on purpose. The prose is the plan for a batch that has
+    not run yet — it belongs in the turn's history for the next iteration to
+    read, not streamed to a user as if it were the answer."""
+    result = {
+        "type": "tool_calls",
+        "calls": [{"id": "c1", "name": "pve_status", "arguments": {}}],
+        "content": "Checking the node first.",
+    }
+    events = [
+        ev async for ev in TextEngine._events_from_one_shot(result, {"p": 1})
+    ]
+    assert [ev["type"] for ev in events] == ["api_payload", "tool_calls", "done"]
+    assert events[-1]["full_text"] == "Checking the node first."
+    assert not any(ev["type"] == "text_delta" for ev in events)
+
+
+@pytest.mark.asyncio
+async def test_one_shot_events_round_trip_back_to_the_same_result():
+    result = {
+        "type": "tool_calls",
+        "calls": [{"id": "c1", "name": "pve_status", "arguments": {}}],
+        "content": "Checking the node first.",
+    }
+    back, payload = await TextEngine.collect_stream(
+        TextEngine._events_from_one_shot(result, {"p": 1})
+    )
+    assert back == result
+    assert payload == {"p": 1}
+
+
+@pytest.mark.asyncio
+async def test_call_only_result_round_trips_unchanged_too():
+    """The inverse claim has to hold for BOTH shapes. agy used to emit
+    `"content": ""` on a call-only response while `collect_stream` omitted the
+    key, so exactly the case with no prose was the one the round trip could
+    not reproduce."""
+    result = {
+        "type": "tool_calls",
+        "calls": [{"id": "c1", "name": "pve_status", "arguments": {}}],
+    }
+    back, _ = await TextEngine.collect_stream(
+        TextEngine._events_from_one_shot(result, {})
+    )
+    assert back == result

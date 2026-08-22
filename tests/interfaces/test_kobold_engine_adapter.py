@@ -2483,6 +2483,38 @@ def test_assemble_endpoint_returns_parity_contract_shape():
     mm.close()
 
 
+def test_assemble_shows_prose_and_tool_calls_on_the_same_row():
+    """DP-338 put prose on assistant tool-call rows. The inspector rendered
+    the calls only when `content` was None, so the new prose HID the calls
+    from a view that advertises `matches_live: true` — under-reporting the
+    wire array on exactly the rows the ticket touched."""
+    from src.request_builder import AssembledRequest
+    from src.generation_params import GenerationParams
+    from src.interfaces.kobold_engine_adapter import KoboldEngineAdapter
+
+    calls = [{"id": "c1", "name": "pve_status", "arguments": {}}]
+    assembled = AssembledRequest(
+        persona_name="p", model_name="local", route="engine.local",
+        params=GenerationParams(),
+        messages=[
+            {"role": "assistant",
+             "content": "Checking the node and the card.",
+             "tool_calls": calls},
+            {"role": "assistant", "tool_calls": calls},
+        ],
+        sources=["tool_call", "tool_call"],
+    )
+
+    body = KoboldEngineAdapter._assembled_to_dict(assembled)
+
+    prose_row = body["messages"][0]["content"]
+    assert "Checking the node and the card." in prose_row
+    assert "pve_status" in prose_row
+    # A call-only row is unchanged: the calls JSON on its own.
+    assert body["messages"][1]["content"] == json.dumps(calls)
+
+
+
 # -------- DP-136 (6b): channel scoping --------
 
 def _seed_channel(mm: MemoryManager, persona_name: str, channel: str,

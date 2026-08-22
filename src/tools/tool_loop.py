@@ -786,9 +786,33 @@ class ToolLoop:
             group_id = f"iter{iter_idx}_{uuid.uuid4().hex[:8]}"
             for call_item in tool_calls_collected:
                 call_item["group_id"] = group_id
-            conversation_history.append(
-                {"role": "assistant", "tool_calls": tool_calls_collected}
+            # DP-338: the assistant's own words go into history BESIDE its
+            # calls. The prose a model writes before a batch is the plan for
+            # that batch ("checking the node, the card and the unit list before
+            # proposing a swap"); dropping it left the next iteration reading a
+            # transcript where calls appeared for no stated reason, so the model
+            # re-derived the plan from an identical history and re-emitted the
+            # same batch. Same class as the DP-335 answer loss, one iteration
+            # earlier. Providers park the prose in different places: the
+            # streaming ones delta it out and zero `full_text` on a tool turn,
+            # agy's one-shot has no deltas at all and carries it on `done`.
+            assistant_prose = (
+                "".join(accumulated_parts).strip()
+                or (full_text_from_done or "").strip()
             )
+            # Egress scrub at the source (DP-225 boundary 2). This prose is
+            # persisted to `tool_context` and replayed to the provider on the
+            # next iteration, so it is a persistence path in its own right —
+            # scrubbing only the audit dialog below would have shown the
+            # operator a redacted sentence while sealing the unredacted copy
+            # into User_Interactions.
+            assistant_prose = cast(str, get_scrubber().scrub(assistant_prose))
+            assistant_entry: Dict[str, Any] = {
+                "role": "assistant", "tool_calls": tool_calls_collected,
+            }
+            if assistant_prose:
+                assistant_entry["content"] = assistant_prose
+            conversation_history.append(assistant_entry)
             read_calls = [c for c in tool_calls_collected if not is_write_tool(c.get("name") or "")]
             write_calls = [c for c in tool_calls_collected if is_write_tool(c.get("name") or "")]
 
@@ -813,7 +837,11 @@ class ToolLoop:
                     [w.get("name") for w in write_calls],
                     [r.get("name") for r in read_calls],
                 )
-                model_reasoning = "".join(accumulated_parts).strip()
+                # Same prose the history entry got (DP-338). Reading
+                # `accumulated_parts` directly meant every agy-backed persona
+                # parked its writes with a blank "why" on the operator's
+                # dialog — agy streams no deltas, so that join was always "".
+                model_reasoning = assistant_prose
                 audit_actions = []
                 for wc in write_calls:
                     wc_name = wc.get("name", "")

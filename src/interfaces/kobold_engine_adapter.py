@@ -2071,9 +2071,14 @@ class KoboldEngineAdapter:
         messages: List[Dict[str, Any]] = []
         for m, src in zip(assembled.messages, assembled.sources):
             content = m.get("content")
-            if content is None and m.get("tool_calls"):
-                # Replayed assistant tool-call rows carry no prose content.
-                content = json.dumps(m["tool_calls"])
+            if m.get("tool_calls"):
+                # DP-338: an assistant tool-call row may now carry prose too
+                # (the plan for the batch). Showing the prose *instead of* the
+                # calls hid them on exactly the rows this ticket touched, from
+                # a view whose whole job is proving parity with the live wire
+                # array — so both are rendered, prose first.
+                calls_json = json.dumps(m["tool_calls"])
+                content = f"{content}\n{calls_json}" if content else calls_json
             messages.append({
                 "role": m.get("role"),
                 "content": content if content is not None else "",
