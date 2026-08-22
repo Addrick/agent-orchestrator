@@ -140,6 +140,7 @@ def _register_interfaces(
     notification_router: NotificationRouter,
     date_tagger: Optional[Any] = None,
     mcp_bridge: Optional[Any] = None,
+    job_completion: Optional[Any] = None,
 ) -> None:
     """Register long-running interface tasks (Discord, Gmail).
 
@@ -147,6 +148,8 @@ def _register_interfaces(
     into the engine adapter for document-ingest date anchoring.
     `mcp_bridge` is the DP-240 subagent tool bridge (or None), mounted on the
     engine adapter's app.
+    `job_completion` is the DP-343 node-job completion handler (or None), which
+    backs the engine adapter's model-job callback route.
     """
     if DISCORD_BOT:
         logger.info("Initializing Discord bot...")
@@ -186,7 +189,8 @@ def _register_interfaces(
         engine_port = KOBOLD_PORT + 1
         logger.info(f"Initializing Kobold Engine API on port {engine_port}...")
         engine_adapter = create_kobold_engine_adapter(
-            bot, date_tagger=date_tagger, mcp_bridge=mcp_bridge)
+            bot, date_tagger=date_tagger, mcp_bridge=mcp_bridge,
+            job_completion=job_completion)
         engine_adapter.port = engine_port
         # DP-238 web: mount the browser/phone push-to-talk voice capture on the
         # engine adapter's FastAPI app (GET /voice). No-op unless VOICE_WEB_ENABLED.
@@ -341,8 +345,14 @@ async def main() -> None:
     # key, no second host. Registers even when HF_TOOLS_ENABLED is false so the
     # startup-wiring contract holds. Personas opt in via
     # service_bindings: ["huggingface"].
+    # DP-343 adds a second, non-tool surface: the node pings derpr when an
+    # install or a promotion finishes, and the integration owns the bridge that
+    # turns that ping into a persona turn. It needs the ChatSystem (the turn)
+    # and the NotificationRouter (the announcement), both of which exist by now.
     from src.huggingface import HuggingFaceIntegration
-    bot.register_service(HuggingFaceIntegration())
+    hf_integration = HuggingFaceIntegration(
+        chat_system=bot, notification_router=notification_router)
+    bot.register_service(hf_integration)
 
     # 7.4 Register the MCP client subsystem (DP-268). main.py owns the manager
     # (sessions/lifecycle — voice precedent); the integration only registers
@@ -415,8 +425,16 @@ async def main() -> None:
     if DATE_TAGGER_ENABLED:
         _dt = agent_manager.get_inference_agent(DATE_TAGGER_NAME)
         date_tagger_callable = _dt.tag if _dt is not None else None
+    # DP-343: the node-job completion handler, injected as a plain callable so
+    # the interface layer never imports src.huggingface to learn what a finished
+    # download wakes.
+    job_completion_handler = (
+        hf_integration.completion_bridge.handle
+        if hf_integration.completion_bridge is not None else None
+    )
     _register_interfaces(app, bot, notification_router, date_tagger=date_tagger_callable,
-                         mcp_bridge=mcp_bridge)
+                         mcp_bridge=mcp_bridge,
+                         job_completion=job_completion_handler)
 
     # 8.1 Perform post-init startup tasks (e.g. Hindsight bank provisioning)
     await bot.startup()

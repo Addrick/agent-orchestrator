@@ -288,3 +288,143 @@ def test_forward_post_error_body_is_generic(token_unset, monkeypatch):
     assert "upstream backend unreachable" in body
     assert "internal-kobold.lan" not in body
     assert "Connection refused" not in body
+
+
+# ---------------------------------------------------------------------------
+# DP-343 — the node's job-completion ping is a THIRD principal
+# ---------------------------------------------------------------------------
+#
+# A bash script on the model host, holding MODEL_JOB_CALLBACK_TOKEN and nothing
+# else. It is exempt from the operator gate (like the MCP bridge) and does its
+# own constant-time check, so these tests exist to prove that the exemption did
+# not open a hole: the route must still refuse everyone without ITS token, and
+# the token must not be a way into the rest of the control plane.
+
+NODE_TOKEN = "n0de-callback-token"
+JOB_PATH = global_config.MODEL_JOB_CALLBACK_PATH
+
+
+@pytest.fixture
+def node_token_set(monkeypatch):
+    monkeypatch.setattr(global_config, "MODEL_JOB_CALLBACK_TOKEN", NODE_TOKEN,
+                        raising=False)
+
+
+def _make_adapter_with_job_handler(calls=None):
+    adapter, mm, persona = _make_adapter()
+    recorded = calls if calls is not None else []
+
+    async def _handle(job_id):
+        recorded.append(job_id)
+        return {"status": "ok", "woke": True, "job_id": job_id}
+
+    adapter._job_completion = _handle
+    return adapter, recorded
+
+
+def test_job_callback_route_absent_until_wired(token_set, node_token_set):
+    """No handler wired = no exemption and no route behaviour to attack.
+
+    The adapter is built without a job handler here, exactly as an instance that
+    never deployed the node half. The path must not become a standing hole in
+    the control plane just because the code that can answer it exists.
+    """
+    adapter, _, _ = _make_adapter()
+    with TestClient(adapter.app) as client:
+        r = client.post(JOB_PATH, json={"job_id": "x-1"},
+                        headers={"Authorization": f"Bearer {NODE_TOKEN}"})
+    # The operator middleware answers first: the node token is not an operator
+    # token, and without a wired handler nothing exempts the path from it.
+    assert r.status_code == 401
+
+
+def test_job_callback_rejects_without_token(token_set, node_token_set):
+    adapter, calls = _make_adapter_with_job_handler()
+    with TestClient(adapter.app) as client:
+        r = client.post(JOB_PATH, json={"job_id": "x-1"})
+    assert r.status_code == 401
+    assert calls == []
+
+
+def test_job_callback_rejects_wrong_token(token_set, node_token_set):
+    adapter, calls = _make_adapter_with_job_handler()
+    with TestClient(adapter.app) as client:
+        r = client.post(JOB_PATH, json={"job_id": "x-1"},
+                        headers=_auth("wrong"))
+    assert r.status_code == 401
+    assert calls == []
+
+
+def test_job_callback_rejects_the_operator_token(token_set, node_token_set):
+    """Two principals, two credentials — and the check runs in both directions.
+
+    An operator token that also opened this route would make every portal user
+    able to forge a completion; the point of the separate secret is that the
+    node's credential and the operator's are not interchangeable.
+    """
+    adapter, calls = _make_adapter_with_job_handler()
+    with TestClient(adapter.app) as client:
+        r = client.post(JOB_PATH, json={"job_id": "x-1"}, headers=_auth())
+    assert r.status_code == 401
+    assert calls == []
+
+
+def test_job_callback_accepts_the_node_token(token_set, node_token_set):
+    adapter, calls = _make_adapter_with_job_handler()
+    with TestClient(adapter.app) as client:
+        r = client.post(JOB_PATH, json={"job_id": "newmodel-abc123"},
+                        headers={"Authorization": f"Bearer {NODE_TOKEN}"})
+    assert r.status_code == 200
+    assert calls == ["newmodel-abc123"]
+
+
+def test_job_callback_works_without_an_operator_token_configured(
+        token_unset, node_token_set):
+    """The node must be able to ring the doorbell on an instance whose control
+    plane is locked — the two credentials are independent."""
+    adapter, calls = _make_adapter_with_job_handler()
+    with TestClient(adapter.app) as client:
+        r = client.post(JOB_PATH, json={"job_id": "j-1"},
+                        headers={"Authorization": f"Bearer {NODE_TOKEN}"})
+    assert r.status_code == 200
+    assert calls == ["j-1"]
+
+
+def test_job_callback_locked_when_its_token_is_unset(token_set, monkeypatch):
+    """Fail closed, the same way an unset DERPR_CONTROL_TOKEN locks the portal."""
+    monkeypatch.setattr(global_config, "MODEL_JOB_CALLBACK_TOKEN", "", raising=False)
+    adapter, calls = _make_adapter_with_job_handler()
+    with TestClient(adapter.app) as client:
+        r = client.post(JOB_PATH, json={"job_id": "j-1"},
+                        headers={"Authorization": "Bearer "})
+    assert r.status_code == 401
+    assert calls == []
+
+
+@pytest.mark.parametrize("body", [None, {}, {"job_id": ""}, {"job_id": 7},
+                                  {"job_id": "j" * 200}])
+def test_job_callback_rejects_a_malformed_body(token_set, node_token_set, body):
+    adapter, calls = _make_adapter_with_job_handler()
+    with TestClient(adapter.app) as client:
+        r = client.post(JOB_PATH, json=body,
+                        headers={"Authorization": f"Bearer {NODE_TOKEN}"})
+    assert r.status_code == 400
+    assert calls == []
+
+
+def test_job_callback_forwards_only_the_job_id(token_set, node_token_set):
+    """Anything else in the body is ignored by construction.
+
+    The handler's whole contract is that facts come from the SSH status read, so
+    a POST claiming `state: done` for a job that failed must reach the bridge as
+    a job id and nothing more.
+    """
+    adapter, calls = _make_adapter_with_job_handler()
+    with TestClient(adapter.app) as client:
+        r = client.post(
+            JOB_PATH,
+            json={"job_id": " j-2 ", "state": "done", "name": "evil"},
+            headers={"Authorization": f"Bearer {NODE_TOKEN}"},
+        )
+    assert r.status_code == 200
+    assert calls == ["j-2"]

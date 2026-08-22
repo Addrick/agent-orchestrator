@@ -74,6 +74,17 @@ logger = logging.getLogger(__name__)
 # must be a single lowercase [a-z0-9_-] token. Enforced on POST /personas.
 _VALID_PERSONA_NAME = re.compile(r"[a-z0-9_-]+")
 
+#: DP-343: the injected node-job completion handler — a job id in, a small
+#: outcome dict out. A plain callable for the same reason `LlmTagger` is one:
+#: this interface must not import `src.huggingface` to learn what wakes a
+#: persona, and the composition root is what knows whether anything does.
+JobCompletionHandler = Callable[[str], Awaitable[Dict[str, Any]]]
+
+#: Longest job id the completion route will forward. The node's own gate is
+#: 64 characters; this is a cheap upper bound on what a stranger can make derpr
+#: put in a log line before the handler's own regex rejects it.
+_MAX_JOB_ID = 128
+
 
 def _kobold_base_url() -> str:
     """KoboldCPP base URL without trailing /v1."""
@@ -155,8 +166,14 @@ class KoboldEngineAdapter:
 
     def __init__(self, chat_system: ChatSystem, host: Optional[str] = None, port: int = 5003,
                  date_tagger: Optional[LlmTagger] = None,
-                 mcp_bridge: Optional["McpBridge"] = None):
+                 mcp_bridge: Optional["McpBridge"] = None,
+                 job_completion: Optional[JobCompletionHandler] = None):
         self.chat_system = chat_system
+        # DP-343: handler for the pve node's job-completion ping. None = not
+        # wired (no HuggingFace integration, or no ChatSystem given to it), and
+        # then the route's auth exemption is not installed either — an unwired
+        # instance has no extra surface at all.
+        self._job_completion = job_completion
         # DP-240: MCP bridge exposing ToolManager tools to dispatched subagents.
         # None = not wired (default); the mount and its lifespan are skipped
         # entirely, so the route surface is unchanged for a normal deploy.
@@ -294,6 +311,19 @@ class KoboldEngineAdapter:
             if self._mcp_bridge is not None and (
                 request.url.path == global_config.MCP_BRIDGE_PATH
                 or request.url.path.startswith(global_config.MCP_BRIDGE_PATH + "/")
+            ):
+                return await call_next(request)
+            # DP-343: the pve node's job-completion ping is a THIRD principal —
+            # a bash script on the model host, holding MODEL_JOB_CALLBACK_TOKEN
+            # and nothing else. Same shape as the bridge exemption above: the
+            # route does its own constant-time check, and the exemption exists
+            # only when a handler is actually wired, so this is never a standing
+            # hole on an instance that has not deployed the node half. Giving
+            # the node DERPR_CONTROL_TOKEN instead would have made it an
+            # operator — able to edit personas and approve its own parks.
+            if (
+                self._job_completion is not None
+                and request.url.path == global_config.MODEL_JOB_CALLBACK_PATH
             ):
                 return await call_next(request)
             if not global_config.DERPR_CONTROL_TOKEN:
@@ -739,6 +769,52 @@ class KoboldEngineAdapter:
             # from what the engine can actually render. Empty/None on a persona
             # = fall back to the env/global default at render time.
             return {"templates": sorted(CHAT_TEMPLATES.keys())}
+
+        @self.app.post(global_config.MODEL_JOB_CALLBACK_PATH)
+        async def model_job_complete(request: Request) -> Any:
+            """The pve node reporting that an install or promotion finished.
+
+            Body: {"job_id": "<id>"} — and deliberately nothing else. derpr
+            re-reads the job over its own SSH transport before it tells a
+            persona anything, so this route cannot be used to assert an outcome;
+            the worst a stranger with the token can do is make derpr read a job
+            document that says what it already said (DP-343).
+
+            Authenticated with MODEL_JOB_CALLBACK_TOKEN rather than the operator
+            token, because the caller is a bash script on the model host and the
+            control plane is not its to hold. Exempted from the control-plane
+            middleware above only while a handler is wired.
+            """
+            if self._job_completion is None:
+                return JSONResponse(
+                    status_code=503,
+                    content={"error": "job completion callback is not wired"},
+                )
+            configured = global_config.MODEL_JOB_CALLBACK_TOKEN
+            supplied = self._extract_control_token(request)
+            if not configured or not secrets.compare_digest(
+                supplied.encode("utf-8"), configured.encode("utf-8")
+            ):
+                return JSONResponse(
+                    status_code=401,
+                    content={"error": "node token required "
+                                      "(Authorization: Bearer <MODEL_JOB_CALLBACK_TOKEN>)"},
+                )
+            try:
+                body = await request.json()
+            except Exception:  # noqa: BLE001 — a malformed body is a 400
+                body = None
+            job_id = (body or {}).get("job_id") if isinstance(body, dict) else None
+            if not isinstance(job_id, str) or not job_id.strip():
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": "job_id is required"},
+                )
+            if len(job_id) > _MAX_JOB_ID:
+                return JSONResponse(
+                    status_code=400, content={"error": "job_id too long"},
+                )
+            return await self._job_completion(job_id.strip())
 
         @self.app.post("/api/v1/persona/{name}/reset")
         async def reset_persona_history(name: str) -> Any:
@@ -2119,5 +2195,7 @@ def create_kobold_engine_adapter(
     chat_system: ChatSystem,
     date_tagger: Optional[LlmTagger] = None,
     mcp_bridge: Optional["McpBridge"] = None,
+    job_completion: Optional[JobCompletionHandler] = None,
 ) -> KoboldEngineAdapter:
-    return KoboldEngineAdapter(chat_system, date_tagger=date_tagger, mcp_bridge=mcp_bridge)
+    return KoboldEngineAdapter(chat_system, date_tagger=date_tagger,
+                               mcp_bridge=mcp_bridge, job_completion=job_completion)

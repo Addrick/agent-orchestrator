@@ -61,6 +61,11 @@ HF_BASE="${HF_BASE:-https://huggingface.co}"
 MIN_MARGIN_BYTES="${MIN_MARGIN_BYTES:-2147483648}"
 # How often the download loop republishes downloaded_bytes.
 PROGRESS_INTERVAL="${PROGRESS_INTERVAL:-5}"
+# DP-343 completion ping. Empty URL = no ping, which is the pre-DP-343 behaviour
+# and the correct state for a node whose derpr cannot be reached.
+DERPR_CALLBACK_URL="${DERPR_CALLBACK_URL:-}"
+DERPR_CALLBACK_TOKEN_FILE="${DERPR_CALLBACK_TOKEN_FILE:-/etc/derpr-callback.token}"
+DERPR_CALLBACK_TIMEOUT="${DERPR_CALLBACK_TIMEOUT:-10}"
 
 # shellcheck source=/dev/null
 [ -r /etc/default/derpr-model-install ] && . /etc/default/derpr-model-install
@@ -84,6 +89,47 @@ re_num='^[0-9]+$'
 # (an HTTP body, a curl message) is ever interpolated — the `reason` field is a
 # fixed vocabulary. That is what lets install_status declare
 # produces_untrusted: False on derpr's side.
+# ---------------------------------------------------------------------------
+# completion ping (DP-343)
+# ---------------------------------------------------------------------------
+# A job reaching a terminal state is the one event derpr cannot observe: the
+# download is detached under systemd-run precisely so it outlives the SSH call,
+# which means nothing on derpr's side is awake when it ends. Until this existed,
+# a finished install sat there until a human thought to ask again.
+#
+# The POST carries the job id and NOTHING else. derpr answers it by re-reading
+# the job through the ordinary `status` verb over its own SSH transport, so the
+# facts it acts on are the ones it already trusts and a forged ping can at worst
+# cause a re-read of a job that has not changed. Sending the status document
+# here would make this an input path into a persona's turn; sending an id makes
+# it a doorbell.
+#
+# Best effort, always. The job is finished either way, and a callback that fails
+# must never be able to turn a good install into a failed one — so every exit
+# path returns 0 and the failure is a log line.
+ping_derpr() {
+  [ -n "$DERPR_CALLBACK_URL" ] || return 0
+  local token=""
+  [ -r "$DERPR_CALLBACK_TOKEN_FILE" ] && token="$(cat "$DERPR_CALLBACK_TOKEN_FILE")"
+  if [ -z "$token" ]; then
+    log "callback skipped for job=$JOB: no token in $DERPR_CALLBACK_TOKEN_FILE"
+    return 0
+  fi
+  # $JOB matched $re_job before anything here ran, so it cannot carry a quote or
+  # a backslash into the body — the same rule that lets write_status build JSON
+  # with printf on a node that has no jq.
+  if curl -fsS --max-time "$DERPR_CALLBACK_TIMEOUT" --retry 2 --retry-delay 3 \
+      --header "Authorization: Bearer $token" \
+      --header 'Content-Type: application/json' \
+      --data "{\"job_id\":\"$JOB\"}" \
+      "$DERPR_CALLBACK_URL" >/dev/null 2>&1; then
+    log "callback sent for job=$JOB"
+  else
+    log "callback FAILED for job=$JOB (derpr not reachable at $DERPR_CALLBACK_URL)"
+  fi
+  return 0
+}
+
 write_status() {
   local state="$1" step="$2" reason="$3" downloaded="$4"
   local tmp="$JOBS_DIR/.$JOB.$$"
@@ -98,6 +144,13 @@ write_status() {
     "$STARTED" "${FINISHED:-}" "${HEADER_JSON:-}" >> "$tmp"
   # Rename into place so a poll never reads a half-written document.
   mv -f "$tmp" "$JOBS_DIR/$JOB.json"
+  # DP-343: ping AFTER the rename, never before — derpr's answer to the ping is
+  # to read this file, so a ping that overtook the rename would show the state
+  # the job just left. Terminal states are written only from `run` (the detached
+  # half), so this never delays the SSH-facing verbs.
+  case "$state" in
+    done|failed) ping_derpr ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
