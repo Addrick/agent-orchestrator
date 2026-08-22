@@ -50,6 +50,11 @@ jobid='^[a-z0-9][a-z0-9-]{0,63}$'
 sha='^[a-f0-9]{64}$'
 num='^[0-9]+$'
 installer='/usr/local/sbin/derpr-model-install'
+# DP-340 tiering. `gbase` is a bare gguf basename -- the tier verbs address
+# models by filename inside two fixed directories the script owns, so no path
+# component ever crosses this boundary.
+tierer='/usr/local/sbin/derpr-model-tier'
+gbase='^[A-Za-z0-9._-]+\.gguf$'
 
 allow() { log "ALLOW: $cmd"; exec "${a[@]}"; }
 
@@ -68,6 +73,17 @@ case "${a[0]:-}" in
        && [[ "${a[8]}" =~ $jobid ]]; then allow; fi
     if [ "${a[1]:-}" = status ] && [ "$n" -eq 3 ] \
        && [[ "${a[2]}" =~ $jobid ]]; then allow; fi
+    ;;
+
+  # DP-340: hot/cold tiering. `run-promote` is deliberately absent -- systemd
+  # invokes that locally on the node and sshd must never be able to.
+  "$tierer")
+    if [ "${a[1]:-}" = list ] && [ "$n" -eq 2 ]; then allow; fi
+    if [[ "${a[1]:-}" =~ ^(pin|unpin)$ ]] && [ "$n" -eq 3 ] \
+       && [[ "${a[2]}" =~ $gbase ]] && [[ "${a[2]}" != *".."* ]]; then allow; fi
+    if [ "${a[1]:-}" = promote ] && [ "$n" -eq 4 ] \
+       && [[ "${a[2]}" =~ $gbase ]] && [[ "${a[2]}" != *".."* ]] \
+       && [[ "${a[3]}" =~ $jobid ]]; then allow; fi
     ;;
 
   pct|qm)
