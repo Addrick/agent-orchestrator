@@ -1192,6 +1192,49 @@ detached under `systemd-run` and derpr polls. `install_model` returns as soon as
 the job starts; ask for progress with `install_status` rather than waiting.
 There is no background loop inside derpr — the node supervises its own job.
 
+#### The node tells you when it finished (DP-343)
+
+Because the job is detached, nothing inside derpr is awake when it ends — so
+until DP-343 a finished install sat on the node until someone thought to ask
+again. The node now **pings derpr** when a job reaches `done` or `failed`, and
+the persona is woken with what the ping caused derpr to read.
+
+What you see, in the channel you talk to that persona in:
+
+- **An install finished** → the persona posts what landed (repo, file, unit, and
+  the KV-budget arithmetic `install_status` computes), and reminds you that the
+  unit is disabled and nothing is serving it. If you had already told it in that
+  conversation to activate the model when it arrived, it calls
+  `set_active_model` for you — which parks for your approval like always, so the
+  swap still needs your ✅.
+- **A promotion finished** → the copy to the SSD is done and `:5001` is
+  unchanged; if you were working towards making that model active, the persona
+  calls `set_active_model` again to finish the swap.
+- **Either one failed** → you get the step and the fixed-vocabulary reason
+  (`sha256_mismatch`, `hot_tier_full_all_pinned`, …) instead of silence, and the
+  persona is told not to retry it on its own.
+
+Two things worth knowing:
+
+- **The ping carries a job id and nothing else.** Everything the persona is told
+  comes from derpr re-reading the job over its own SSH connection, so the node
+  cannot assert an outcome — a forged ping costs one status read.
+- **The wake is filed under your identifier, in your channel.** That is what
+  lets the persona see the instruction you gave it earlier, and what makes any
+  approval card it raises appear where you can answer it. The card is posted the
+  next time you speak in that channel.
+
+Off by default, and independent of `HF_TOOLS_ENABLED`. It needs, on derpr:
+`MODEL_JOB_CALLBACK_TOKEN` (the node's own credential — deliberately *not* the
+operator token), `MODEL_JOB_WAKE_PERSONA` (default `hypr`),
+`MODEL_JOB_WAKE_CHANNEL` (the Discord channel name), `MODEL_JOB_WAKE_USER` (your
+Discord user id) and `MODEL_JOB_ALERT_CHANNEL_ID` (the channel id to post into).
+On the node: `DERPR_CALLBACK_URL` and a token file, in
+`/etc/default/derpr-model-install` and `/etc/default/derpr-model-tier` — see
+`services/pve/README.md` (the URL is the container's published HTTP port, not
+the Caddy TLS front, and the bearer-over-HTTP hop is a LAN-only accepted risk). With any of them unset the jobs run exactly as they
+did before and nothing is announced.
+
 Disabled by default. Enable with `HF_TOOLS_ENABLED=true` **and** deploy the
 node-side artifacts (`services/pve/README.md` has the steps, including the
 forced-command allowlist entry). Config knobs: `HF_API_BASE`, `HF_API_TOKEN`

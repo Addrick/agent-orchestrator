@@ -40,9 +40,17 @@ SERVED_DIR="$STATE_DIR/served"
 MARGIN_BYTES="${MARGIN_BYTES:-5368709120}"   # 5 GiB
 MODEL_CT="${MODEL_CT:-101}"
 POOL="${POOL:-pve/data}"
+# DP-343 completion ping, same contract and same settings file convention as
+# derpr-model-install. Empty URL = no ping.
+DERPR_CALLBACK_URL="${DERPR_CALLBACK_URL:-}"
+DERPR_CALLBACK_TOKEN_FILE="${DERPR_CALLBACK_TOKEN_FILE:-/etc/derpr-callback.token}"
+DERPR_CALLBACK_TIMEOUT="${DERPR_CALLBACK_TIMEOUT:-10}"
 
 gguf_re='^[A-Za-z0-9._-]+\.gguf$'
 
+# `|| true` because a node without `logger` (or a test box) must not turn a
+# journal line into a failed promotion.
+log() { logger -t derpr-model-tier -- "$1" 2>/dev/null || true; }
 die() { echo "derpr-model-tier: $*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
@@ -180,6 +188,36 @@ cmd_unpin() {
 # job record -- same schema and same directory the installer uses, so
 # `derpr-model-install status <jobid>` polls a promotion with no change at all.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# completion ping (DP-343) -- same doorbell as derpr-model-install
+# ---------------------------------------------------------------------------
+# A promotion is the second half of "put this model on :5001": set_active_model
+# on a cold model starts one and returns `promoting` without touching :5001, so
+# without this ping the chain stops one step short of serving and waits for a
+# human to prod it. The POST carries the job id only; derpr re-reads the job
+# through `derpr-model-install status`, which reads this same JOBS_DIR.
+ping_derpr() {
+    [ -n "$DERPR_CALLBACK_URL" ] || return 0
+    local token=""
+    [ -r "$DERPR_CALLBACK_TOKEN_FILE" ] && token="$(cat "$DERPR_CALLBACK_TOKEN_FILE")"
+    if [ -z "$token" ]; then
+        log "callback skipped for job=$JOB: no token in $DERPR_CALLBACK_TOKEN_FILE"
+        return 0
+    fi
+    # $JOB was gated by the job-id regex in cmd_promote before systemd ever ran
+    # this, so it cannot carry a quote into the body.
+    if curl -fsS --max-time "$DERPR_CALLBACK_TIMEOUT" --retry 2 --retry-delay 3 \
+        --header "Authorization: Bearer $token" \
+        --header 'Content-Type: application/json' \
+        --data "{\"job_id\":\"$JOB\"}" \
+        "$DERPR_CALLBACK_URL" >/dev/null 2>&1; then
+        log "callback sent for job=$JOB"
+    else
+        log "callback FAILED for job=$JOB (derpr not reachable at $DERPR_CALLBACK_URL)"
+    fi
+    return 0
+}
+
 write_status() {
     local state="$1" step="$2" reason="$3" done_bytes="$4"
     local tmp="$JOBS_DIR/.$JOB.$$"
@@ -192,6 +230,11 @@ write_status() {
     printf '"started":"%s","finished":"%s","kind":"promote"}\n' \
         "$STARTED" "${FINISHED:-}" >> "$tmp"
     mv -f "$tmp" "$JOBS_DIR/$JOB.json"
+    # After the rename, for the same reason as in derpr-model-install: the ping
+    # is answered by a read of this file.
+    case "$state" in
+        done|failed) ping_derpr ;;
+    esac
 }
 
 # ---------------------------------------------------------------------------

@@ -147,6 +147,45 @@ MIN_MARGIN_BYTES=2147483648     # free space kept beyond the download
 For gated repos, put a HuggingFace read token in
 `/etc/derpr-model-install.token` (`chmod 600`). Absent, public repos still work.
 
+### Completion ping (DP-343)
+
+Both scripts POST the **job id** to derpr when a job reaches `done` or `failed`,
+so derpr can wake a persona instead of waiting to be asked. Off unless a URL is
+set. Add to **both** `/etc/default/derpr-model-install` and
+`/etc/default/derpr-model-tier`:
+
+```sh
+# On this deployment: CT100 (10.0.0.70), host port 5004, which docker-compose
+# publishes straight to the container's 5003. Deliberately NOT host 5003 —
+# that is Caddy with `tls internal`, whose self-signed cert `curl -f` refuses
+# and which would need the node to carry Caddy's root CA for no gain on a LAN
+# hop between two guests of the same node.
+DERPR_CALLBACK_URL=http://10.0.0.70:5004/api/v1/model_job/complete
+DERPR_CALLBACK_TOKEN_FILE=/etc/derpr-callback.token   # default; chmod 600
+DERPR_CALLBACK_TIMEOUT=10
+```
+
+⚠️ That is a bearer token over plain HTTP, and it is only acceptable because the
+whole deploy is LAN-only — the same accepted risk as the rest of the control
+plane (see `pre-public-exposure-checklist`). If derpr is ever exposed beyond the
+LAN, this URL is one of the things that has to move behind TLS.
+
+```bash
+# the shared secret, matching MODEL_JOB_CALLBACK_TOKEN on the derpr side
+printf '%s' '<token>' > /etc/derpr-callback.token && chmod 600 /etc/derpr-callback.token
+```
+
+⚠️ **This token is not `DERPR_CONTROL_TOKEN` and must not be set to it.** It
+opens exactly one route, which accepts a job id and nothing else. The operator
+token opens the whole control plane — persona edits, park approval — and a node
+holding it would be an operator.
+
+The POST body is `{"job_id": "..."}`; derpr answers it by re-reading the job over
+its own SSH connection, so the node is not trusted to report the outcome. The
+ping fires after the job file is renamed into place, every failure path is a log
+line (`journalctl -t derpr-model-install -t derpr-model-tier`), and an
+unreachable derpr costs the announcement and nothing else — the job stays `done`.
+
 ### derpr side
 
 ```
@@ -156,6 +195,22 @@ HF_TOOLS_ENABLED=true
 plus the existing `PVE_*` settings — `install_model` rides the same key and host
 as the proxmox tools. Give the persona
 `service_bindings: ["proxmox", "huggingface"]`.
+
+For the DP-343 ping, also:
+
+```
+MODEL_JOB_CALLBACK_TOKEN=<same value as /etc/derpr-callback.token>
+MODEL_JOB_WAKE_PERSONA=hypr
+MODEL_JOB_WAKE_CHANNEL=<discord channel NAME you talk to hypr in>
+MODEL_JOB_WAKE_USER=<your discord user id>
+MODEL_JOB_ALERT_CHANNEL_ID=<discord channel id to post the report into>
+```
+
+⚠️ `MODEL_JOB_WAKE_CHANNEL` and `MODEL_JOB_WAKE_USER` are not cosmetic. The woken
+turn is filed as if you had sent it, in that channel — which is what lets a
+`CHANNEL_ISOLATED` persona see the instruction you gave it earlier, and what
+makes any `set_active_model` it parks appear as an approval card you can answer.
+With either unset, derpr reads the job and logs it but runs no turn.
 
 ---
 

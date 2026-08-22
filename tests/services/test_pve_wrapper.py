@@ -168,7 +168,7 @@ def emitted(monkeypatch) -> List[List[str]]:
         # different argv family and therefore a different wrapper entry.
         await pve._set_active_model("archived")
         await hf._install_model("owner/m-GGUF", "model-Q6_K.gguf", "newmodel")
-        await hf._install_status("newmodel-abc123def456")
+        await hf.job_status("newmodel-abc123def456")
 
     asyncio.run(drive())
     assert recorder.calls
