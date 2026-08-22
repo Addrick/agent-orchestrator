@@ -101,6 +101,12 @@ _STATUS_FIELDS: Dict[str, type] = {
     "n_layer": int,
     "n_kv_head": int,
     "head_dim": int,
+    # DP-344. Present *instead of* the three numbers, when the node determined
+    # this model's cache is not a linear function of context (per-layer KV head
+    # counts, sliding-window attention). A node older than DP-344 never sends
+    # it, which degrades to the pre-existing "header did not publish" message —
+    # node artifacts and the container image are two independent deploys.
+    "kv_shape_note": str,
 }
 
 #: How much of any single node-supplied string is kept. A fixed-vocabulary
@@ -111,11 +117,20 @@ _MAX_STATUS_STR = 200
 _GIB = 1024 ** 3
 _MIB = 1024 ** 2
 
-#: Bytes per KV element in the units ``install_model`` writes. Deliberately a
-#: constant and not a parameter: ``koboldcpp-model.service.in`` hardcodes
-#: ``--quantkv 1``, and no tool in this module exposes a knob for it, so the
-#: model has no reachable action that could change it.
-_KV_BYTES_PER_ELEM = 1
+#: Bytes per KV element in the units ``install_model`` writes, as the exact
+#: rational that ``q8_0`` is: a block of **32** quantised elements costs **34**
+#: bytes — 32 int8 plus one f16 scale — so the cache is 1.0625 B/element, not 1.
+#: Deliberately a constant and not a parameter: ``koboldcpp-model.service.in``
+#: hardcodes ``--quantkv 1``, and no tool in this module exposes a knob for it,
+#: so the model has no reachable action that could change it.
+#:
+#: ⚠️ DP-344: this was ``1``, and the 6.25% shortfall hid because the layer
+#: count was simultaneously one too high on the model it was checked against
+#: (17/16 is exactly 1.0625, so two errors cancelled to the right answer for
+#: Qwen3.8 and to a wrong one for every other model). Kept as a ratio rather
+#: than a float so the arithmetic stays integral and exact.
+_KV_BLOCK_ELEMS = 32
+_KV_BLOCK_BYTES = 34
 
 #: koboldcpp's compute buffer and the headroom to leave beside it, in MiB.
 #: Measured on the R9700; they are the two terms of the VRAM budget that are
@@ -398,9 +413,23 @@ def _kv_budget_note(job: Dict[str, Any]) -> Optional[str]:
     absent because it has not been read yet, which is "not yet" and not
     "unreadable", and saying the wrong one of those is worse than saying
     nothing.
+
+    DP-344: ``n_layer`` is the count of layers that actually **cache** K/V, not
+    the model's block count — the node reads it off the tensor index precisely
+    because the two differ on every hybrid architecture this host serves.
     """
     if job.get("state") != "done":
         return None
+    # The node determined the formula does not describe this model at all
+    # (per-layer KV heads, sliding-window attention). Its reason is better than
+    # anything derivable here, and an estimate would be worse than none.
+    shape_note = job.get("kv_shape_note")
+    if isinstance(shape_note, str) and shape_note.strip():
+        return (
+            f"No KV-per-token figure for this model: {shape_note.strip()}. "
+            "Read gpu_status before and after the unit is first enabled and "
+            "trust that difference over any estimate."
+        )
     n_layer = job.get("n_layer")
     n_kv_head = job.get("n_kv_head")
     head_dim = job.get("head_dim")
@@ -419,11 +448,15 @@ def _kv_budget_note(job: Dict[str, Any]) -> Optional[str]:
             "after the unit is first enabled, and trust that difference over "
             "any estimate."
         )
-    per_token = 2 * n_layer * n_kv_head * head_dim * _KV_BYTES_PER_ELEM
+    elems = 2 * n_layer * n_kv_head * head_dim
+    per_token = elems * _KV_BLOCK_BYTES // _KV_BLOCK_ELEMS
     note = (
         f"KV cache for this model: {per_token} bytes per token "
         f"(2 x n_layer {n_layer} x n_kv_head {n_kv_head} x head_dim "
-        f"{head_dim} x {_KV_BYTES_PER_ELEM} byte, the unit's --quantkv 1). "
+        f"{head_dim} = {elems} elements, at q8_0's "
+        f"{_KV_BLOCK_BYTES}/{_KV_BLOCK_ELEMS} bytes per element — the unit's "
+        f"--quantkv 1). n_layer here is the number of layers that CACHE K/V, "
+        "which on a hybrid architecture is a fraction of its block count. "
         "It scales linearly with contextsize, so halving the context halves "
         "it."
     )

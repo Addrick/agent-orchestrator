@@ -612,3 +612,125 @@ async def test_model_path_accepts_the_equals_form(enabled):
     res = await h._list_models()
     assert [m["name"] for m in res["models"]] == ["fable"]
     assert (await h._set_active_model("fable"))["status"] == "ok"
+
+
+# -- DP-344: list_models carries what each unit is configured to run ----------
+#
+# The box's own evidence about what this card holds. A unit that has been
+# serving :5001 at a given context has DEMONSTRATED that context fits, which is
+# a stronger claim than anything derived from a gguf header — and the reason
+# hypr answered "32k is the maximum" for a model whose neighbour on the same
+# card had been running 163840 for a fortnight.
+
+def _exec(model: str, ctx: int | None = None, quantkv: int | None = None,
+          port: int = 5001) -> str:
+    argv = f"/opt/koboldcpp/koboldcpp --model {model} --port {port}"
+    if ctx is not None:
+        argv += f" --contextsize {ctx}"
+    if quantkv is not None:
+        argv += f" --quantkv {quantkv}"
+    return f"{{ path=/opt/koboldcpp/koboldcpp ; argv[]={argv} ; ignore_errors=no }}"
+
+
+@pytest.mark.asyncio
+async def test_list_models_reports_each_units_contextsize_and_quantkv(enabled):
+    runner = FakeRunner(
+        SSHResult(0, "active", ""),
+        exec_start={
+            "koboldcpp-fable.service": _exec("/m/fable.gguf", 163840, 1),
+            "koboldcpp-gemma.service": _exec("/m/gemma.gguf", 32768, 2),
+        },
+    )
+    h = ProxmoxToolHandler(runner)  # type: ignore[arg-type]
+    res = await h._list_models()
+    rows = {m["name"]: m for m in res["models"]}
+    assert rows["fable"]["contextsize"] == 163840
+    assert rows["fable"]["quantkv"] == 1
+    assert rows["gemma"]["contextsize"] == 32768
+    assert rows["gemma"]["quantkv"] == 2
+
+
+@pytest.mark.asyncio
+async def test_list_models_costs_no_extra_ssh_for_those_fields(enabled):
+    """They are parsed out of the ExecStart this call already reads. A second
+    round trip per unit would make the cost scale with however many units the
+    box holds, which is what DP-332 removed the bound on."""
+    runner = FakeRunner(
+        SSHResult(0, "active", ""),
+        exec_start={"koboldcpp-fable.service": _exec("/m/f.gguf", 65536, 1)},
+    )
+    h = ProxmoxToolHandler(runner)  # type: ignore[arg-type]
+    await h._list_models()
+    shows = [c for c in runner.calls if "show" in c]
+    # exactly one `systemctl show` per unit — the fields ride along with it
+    assert shows and len(shows) == len({c[6] for c in shows})
+
+
+@pytest.mark.asyncio
+async def test_a_unit_that_names_no_context_omits_the_field(enabled):
+    """Omitted rather than null: "runs 163840" and "does not say" are different
+    answers, and a null would read as the second while inviting arithmetic on
+    the first."""
+    runner = FakeRunner(
+        SSHResult(0, "active", ""),
+        exec_start={"koboldcpp-fable.service": _exec("/m/f.gguf")},
+    )
+    h = ProxmoxToolHandler(runner)  # type: ignore[arg-type]
+    res = await h._list_models()
+    row = next(m for m in res["models"] if m["name"] == "fable")
+    assert "contextsize" not in row
+    assert "quantkv" not in row
+
+
+@pytest.mark.asyncio
+async def test_the_equals_spelling_of_the_flags_is_parsed_too(enabled):
+    """systemd hands ExecStart back verbatim and a hand-written unit is exactly
+    what discovery invites (DP-332), so both spellings turn up on a real box."""
+    argv = (
+        "{ path=/opt/koboldcpp/koboldcpp ; argv[]=/opt/koboldcpp/koboldcpp "
+        "--model=/m/f.gguf --port=5001 --contextsize=131072 --quantkv=1 }"
+    )
+    runner = FakeRunner(
+        SSHResult(0, "active", ""),
+        exec_start={"koboldcpp-fable.service": argv},
+    )
+    h = ProxmoxToolHandler(runner)  # type: ignore[arg-type]
+    res = await h._list_models()
+    row = next(m for m in res["models"] if m["name"] == "fable")
+    assert row["contextsize"] == 131072
+    assert row["quantkv"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_non_numeric_context_is_dropped_not_passed_through(enabled):
+    """These fields are read as evidence about what fits the card. A string
+    where a number belongs is worse than nothing, because it invites the
+    caller to compare it against MiB."""
+    argv = (
+        "{ path=/opt/koboldcpp/koboldcpp ; argv[]=/opt/koboldcpp/koboldcpp "
+        "--model /m/f.gguf --port 5001 --contextsize huge --quantkv 1 }"
+    )
+    runner = FakeRunner(
+        SSHResult(0, "active", ""),
+        exec_start={"koboldcpp-fable.service": argv},
+    )
+    h = ProxmoxToolHandler(runner)  # type: ignore[arg-type]
+    res = await h._list_models()
+    row = next(m for m in res["models"] if m["name"] == "fable")
+    assert "contextsize" not in row
+    assert row["quantkv"] == 1
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_execstart_still_omits_rather_than_guesses(enabled):
+    """A unit whose ExecStart could not be read reports no port either, so it
+    is already excluded from the listing — but the shape must not crash on the
+    way there."""
+    runner = FakeRunner(
+        SSHResult(0, "active", ""),
+        exec_start={"koboldcpp-fable.service": None},
+    )
+    h = ProxmoxToolHandler(runner)  # type: ignore[arg-type]
+    res = await h._list_models()
+    assert res["status"] == "ok"
+    assert all("contextsize" not in m for m in res["models"] if m["name"] == "fable")
