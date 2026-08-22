@@ -1029,3 +1029,48 @@ def test_hypr_ships_with_an_empty_origin_allowlist():
     being DECLARED so that empty list survives the first mutating dev
     command."""
     assert _hypr_entry()["origin_allowlist"] == []
+
+
+def test_hypr_prompt_tells_it_to_anchor_on_an_installed_unit():
+    """DP-344. The prompt is where a CROSS-TOOL routine belongs (DP-337's rule),
+    and "check what already runs before deriving what might" spans list_models
+    and install_model, so no single tool owns it.
+
+    The failure it exists to stop: hypr computed a context budget from a header,
+    concluded 32k was the maximum, and never looked at the unit on the same card
+    that had been serving 163840 for a fortnight. The mechanical halves of that
+    answer are fixed in the tool layer; this is the habit that would have caught
+    it anyway.
+    """
+    prompt = _hypr_entry()["prompt"]
+    assert "ANCHOR BEFORE YOU DERIVE." in prompt
+    assert "list_models" in prompt
+    # The precedence has to be explicit: a running unit outranks an estimate.
+    assert "the unit is right and your" in prompt
+
+
+def test_hypr_prompt_requires_saying_which_numbers_were_read_vs_derived():
+    """Asked "are you coming up with that math on the spot or is it in your
+    prompt?", hypr answered that it read three architecture values from a tool
+    — which it had — without saying that the ~3,500 MiB of "system overhead"
+    doing the actual work in its conclusion came from nowhere at all.
+
+    Where each number came from is the question a human asks when they are
+    deciding whether to trust the conclusion, so the prompt has to require the
+    distinction be volunteered rather than merely not lied about.
+    """
+    prompt = _hypr_entry()["prompt"]
+    assert "which numbers you read from a tool" in prompt
+    assert "never present a derived number as something you measured" in prompt
+
+
+def test_hypr_template_still_leaves_the_arithmetic_itself_to_the_tools():
+    """DP-344 added a routine to the prompt, not facts. The guard from DP-337
+    stays green: no equation, no constants, no header field names — those live
+    on `install_status`, `install_model.contextsize` and `gpu_status`, where
+    they version with the code that produces them.
+    """
+    prompt = _hypr_entry()["prompt"]
+    for gone in ("1010 MiB", "500 MiB", "bytes per element", "n_kv_head",
+                 "n_layer", "block_count", "34/32", "sliding-window"):
+        assert gone not in prompt, gone

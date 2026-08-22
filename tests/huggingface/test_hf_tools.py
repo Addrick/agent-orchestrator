@@ -439,19 +439,24 @@ def _done_job(**over: Any) -> Dict[str, Any]:
 
 @pytest.mark.asyncio
 async def test_status_computes_the_kv_budget_from_the_header_numbers(enabled):
-    """2 x 48 x 8 x 128 x 1 byte = 98304 B/token; at 8192 ctx that is 768 MiB.
+    """2 x 48 x 8 x 128 = 98304 elements; at q8_0's 34/32 that is 104448
+    B/token, and at 8192 ctx 816 MiB.
 
     The point of the note is that these are *computed from this payload*, not
     quoted from a prompt written before the model existed.
+
+    DP-344: the element count used to be multiplied by 1 byte, understating
+    every model by 6.25%. q8_0 stores a block of 32 quantised values in 34
+    bytes — 32 int8 plus one f16 scale.
     """
     runner = FakeRunner(SSHResult(0, json.dumps(_done_job()), ""))
     res = await make(runner=runner)._install_status("newmodel-abc123")
     note = res["note"]
-    assert "98304 bytes per token" in note
-    assert "768 MiB" in note
+    assert "104448 bytes per token" in note
+    assert "816 MiB" in note
     # Model buffer + KV + 1010 compute + 500 margin, so the caller has one
     # number to hold against gpu_status rather than four to add up.
-    assert "25166 MiB" in note
+    assert "25214 MiB" in note
     assert "gpu_status" in note
 
 
@@ -460,7 +465,82 @@ async def test_status_kv_note_scales_linearly_with_contextsize(enabled):
     """The claim the note makes about itself has to be true of the note."""
     runner = FakeRunner(SSHResult(0, json.dumps(_done_job(contextsize=4096)), ""))
     res = await make(runner=runner)._install_status("newmodel-abc123")
-    assert "384 MiB" in res["note"]
+    assert "408 MiB" in res["note"]
+
+
+@pytest.mark.asyncio
+async def test_status_kv_note_matches_koboldcpp_on_a_real_measured_model(enabled):
+    """DP-344 regression, pinned to kcpp's own allocation rather than to the
+    formula under test.
+
+    Qwen3.8-27B on the R9700: koboldcpp logged
+    `llama_kv_cache: Vulkan0 KV buffer size = 8712.50 MiB` at n_ctx 262400,
+    which is 34816 bytes/token. The header shape the node reports for it is
+    16 cached layers (65 blocks, 17 with a K projection, one of those the
+    uncached `nextn` draft block), 4 KV heads, head_dim 256.
+
+    Two independent errors used to cancel here: 17 layers at 1 byte/element
+    gives the same 34816. Deckard-40B is the model that separates them —
+    24 layers, measured 52224 B/token, which 24 x 1 byte cannot produce.
+    """
+    for n_layer, expected in ((16, 34816), (24, 52224)):
+        payload = _done_job(n_layer=n_layer, n_kv_head=4, head_dim=256)
+        runner = FakeRunner(SSHResult(0, json.dumps(payload), ""))
+        res = await make(runner=runner)._install_status("newmodel-abc123")
+        assert f"{expected} bytes per token" in res["note"], n_layer
+
+
+@pytest.mark.asyncio
+async def test_status_reports_the_nodes_reason_when_the_formula_cannot_apply(
+    enabled,
+):
+    """DP-344. Some models have no per-token figure at all: gemma4 publishes
+    `attention.head_count_kv` per layer and windows most of them, so its cache
+    is not a linear function of context at any head count.
+
+    The node says why; this must relay that reason and emit no arithmetic.
+    Before, the array read back as absent and the head count fell through to
+    the *query* head count — a confident ~2 MB/token for a model whose windowed
+    layers stop growing at 1024 tokens.
+    """
+    payload = _done_job(
+        kv_shape_note="this model uses sliding-window attention, so its cache "
+                      "stops growing at the window",
+    )
+    runner = FakeRunner(SSHResult(0, json.dumps(payload), ""))
+    res = await make(runner=runner)._install_status("newmodel-abc123")
+    note = res["note"]
+    assert "sliding-window attention" in note
+    assert "bytes per token" not in note
+    assert "gpu_status" in note
+
+
+@pytest.mark.asyncio
+async def test_a_shape_note_wins_over_header_numbers_that_are_also_present(
+    enabled,
+):
+    """The node sends one or the other, but a node mid-upgrade could send both.
+    The refusal is the more specific signal and must not be overridden by
+    numbers that are, by the node's own determination, not applicable."""
+    payload = _done_job(kv_shape_note="per-layer attention.head_count_kv")
+    runner = FakeRunner(SSHResult(0, json.dumps(payload), ""))
+    res = await make(runner=runner)._install_status("newmodel-abc123")
+    assert "bytes per token" not in res["note"]
+
+
+@pytest.mark.asyncio
+async def test_a_node_older_than_dp344_still_gets_the_absent_shape_message(
+    enabled,
+):
+    """Node artifacts and the container image are two independent deploys, so
+    this handler will meet nodes that never send `kv_shape_note`. That must
+    degrade to the pre-existing message, not to a crash or to silence."""
+    payload = _done_job()
+    payload.pop("head_dim")
+    assert "kv_shape_note" not in payload
+    runner = FakeRunner(SSHResult(0, json.dumps(payload), ""))
+    res = await make(runner=runner)._install_status("newmodel-abc123")
+    assert "did not publish" in res["note"]
 
 
 @pytest.mark.asyncio

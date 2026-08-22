@@ -129,6 +129,22 @@ def _flag_value(tokens: List[str], flag: str) -> Optional[str]:
     return None
 
 
+def _flag_int(tokens: List[str], flag: str) -> Optional[int]:
+    """``_flag_value`` coerced to int, or None when absent or not a number.
+
+    A non-numeric value is dropped rather than passed through: these fields are
+    read as evidence about what fits the card, and a string where a number is
+    expected is worse than nothing.
+    """
+    raw = _flag_value(tokens, flag)
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
 def _validate_vmid(vmid: str) -> str:
     """Proxmox vmids are positive integers. Reject anything else early."""
     s = str(vmid).strip()
@@ -409,22 +425,35 @@ class ProxmoxToolHandler:
 
         - ``model``: the ``--model`` gguf path, or None when it names none.
         - ``port``: the ``--port`` it binds, defaulting to ``_KCPP_PORT``.
+        - ``contextsize`` / ``quantkv``: what this unit is configured to run
+          (DP-344), or None when the flag is absent.
         - ``readable``: False when the ExecStart could not be read at all.
 
         ``readable`` exists because "this unit binds 5002" and "we do not know
         what this unit binds" are opposite answers for ``set_active_model`` and
         must not collapse into one another.
+
+        ``contextsize``/``quantkv`` are already in the tokens this call parses,
+        so surfacing them costs no extra round trip — and they are the only
+        *empirical* evidence on the box about what fits this card. A unit that
+        has been serving :5001 for weeks at a given context has demonstrated
+        that context fits, which beats any arithmetic derived from a header.
         """
         res = await self._run([
             "pct", "exec", vmid, "--",
             "systemctl", "show", unit, "--property=ExecStart", "--value",
         ])
         if res.get("status") != "ok":
-            return {"model": None, "port": None, "readable": False}
+            return {
+                "model": None, "port": None, "contextsize": None,
+                "quantkv": None, "readable": False,
+            }
         toks = (res.get("stdout") or "").split()
         return {
             "model": _flag_value(toks, "--model"),
             "port": _flag_value(toks, "--port") or _KCPP_PORT,
+            "contextsize": _flag_int(toks, "--contextsize"),
+            "quantkv": _flag_int(toks, "--quantkv"),
             "readable": True,
         }
 
@@ -546,6 +575,14 @@ class ProxmoxToolHandler:
         }
         if pinned:
             row["pinned"] = True
+        # DP-344: what this unit is configured to run. Carried because it is
+        # the cheapest true answer to "what context fits this card" — a unit
+        # that has been serving :5001 is a measurement, not an estimate.
+        # Omitted rather than sent as null when the ExecStart named no such
+        # flag, so "runs 163840" and "does not say" stay distinguishable.
+        for key in ("contextsize", "quantkv"):
+            if isinstance(spec.get(key), int):
+                row[key] = spec[key]
         return row
 
     @staticmethod

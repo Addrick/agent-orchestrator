@@ -116,7 +116,13 @@ PROXMOX_TOOLS: List[Dict[str, Any]] = [
                 ":5001 endpoint, and which one is currently active. Read live off "
                 "the box, so a model installed since the last deploy appears here. "
                 "Only one runs at a time. Use before set_active_model to see the "
-                "choices."
+                "choices. Each row also carries the contextsize and quantkv its "
+                "unit is configured with, which is the box's own evidence about "
+                "what this card can hold: a unit that has been serving :5001 has "
+                "demonstrated its context fits, so a comparable model can be "
+                "sized against it directly. Read this before working out a "
+                "context size from a header, and say which installed unit you "
+                "are anchoring to."
             ),
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
@@ -142,7 +148,15 @@ PROXMOX_TOOLS: List[Dict[str, Any]] = [
                 "error: it spills to GTT and decode throughput drops by roughly "
                 "half, so a unit that \"started fine\" can be the reason the box "
                 "went slow. That is why a context size is worked out against "
-                "these numbers and discussed, not simply picked."
+                "these numbers and discussed, not simply picked. "
+                "These numbers are complete: used already includes the driver "
+                "and everything else resident on the card, so the budget is "
+                "model buffer + KV + compute buffer + margin against total, "
+                "with no separate allowance for system or driver overhead. Do "
+                "not introduce one. With nothing loaded, used on this card is "
+                "tens of MiB, not gigabytes — a large used figure means a model "
+                "is resident, and subtracting it a second time as \"overhead\" "
+                "will make contexts that fit comfortably look impossible."
             ),
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
