@@ -1,12 +1,58 @@
 ---
 name: Hindsight upstream API quirks
-description: Verified facts about vectorize-io/hindsight bank/retain/reflect API shape that diverge from what our local HindsightRESTClient assumes. Source-of-truth file paths included.
+description: Verified vectorize-io/hindsight bank/retain/reflect API shape. v0.6.1 path map (every bank route is prefixed /v1/default) plus v0.5-era field detail that still holds. The live contract is src/memory/backend/hindsight.py; this page is the reference, not the authority.
 type: reference
 ---
 
-# Hindsight upstream API — verified 2026-05-07
+# Hindsight upstream API — v0.6.1 path shape, verified 2026-09-17
 
-Source: `vectorize-io/hindsight` repo, file `hindsight-api-slim/hindsight_api/api/http.py`. Verified against current main.
+Source: `vectorize-io/hindsight`, file `hindsight-api-slim/hindsight_api/api/http.py`.
+
+> ⚠️ **This page was frozen at v0.5.0 until 2026-09-17 and described routes the client had
+> already stopped calling.** The **live contract is `src/memory/backend/hindsight.py`**, not this
+> file — when they disagree, the code wins. Everything below the path map is v0.5-era field
+> detail that is still accurate; the *routes* were the stale part.
+
+## Path map — every bank route moved in v0.6.1
+
+`HindsightRESTClient` was patched in `7d1f7a4` and now prefixes every bank route with
+`HINDSIGHT_API_PREFIX = "/v1/default"` (`src/memory/backend/hindsight.py:27`).
+
+| Op | OLD (v0.5) | CURRENT (v0.6.1+) |
+|---|---|---|
+| Create bank | `POST /banks` (bank_id in body) | `PUT /v1/default/banks/{bank_id}` (body has `name`) |
+| Delete bank | `DELETE /banks/{id}` | `DELETE /v1/default/banks/{id}` |
+| Retain | `POST /banks/{id}/retain` | `POST /v1/default/banks/{id}/memories` |
+| Recall | `POST /banks/{id}/recall` | `POST /v1/default/banks/{id}/memories/recall` |
+| Reflect | `POST /banks/{id}/reflect` | `POST /v1/default/banks/{id}/reflect` |
+| Bank config | (n/a) | `PATCH /v1/default/banks/{id}/config` |
+| Bank stats | (n/a) | `GET /v1/default/banks/{id}/stats` |
+
+**`RecallRequest`** takes `query`, `tags`, `tags_match` (`any|all|any_strict|all_strict`),
+`tag_groups`, `types`, `max_tokens`, `budget` (enum `"low"|"mid"|"high"`, **not** a float),
+`query_timestamp`, `include`, `trace`. **There is no `k`** — callers slice client-side.
+
+**`RecallResult`** items carry `text` (**not** `content`) and **no `score`** — the server returns
+pre-ranked results; synthesize position-based ranking if you need one.
+
+**Retain is still `{items: [...], async: bool}`** — a bare single item without the `items`
+wrapper returns 422.
+
+🔴 **A batch may not repeat a `document_id`.** A single `POST .../memories` fails with
+HTTP 500 — *"Batch contains duplicate document_ids ... to avoid race conditions"* — which
+conflicts with the v0.5 idiom of bundling turns that share a doc_id for `update_mode="append"`.
+`HindsightBackend._split_by_document_id` splits each drained bundle into per-doc_id sub-batches;
+coalescing still happens at the drain tick, only the on-wire POSTs split.
+
+**Reflect response** is `{text, based_on, structured_output, usage, trace}`; `trace.tool_calls`
+is a list of `{tool, input, output, duration_ms, iteration}`. `based_on` is
+`{memories, mental_models, directives}`, not per-fact-type buckets.
+
+## ⚠️ An empty bank passes every readiness check
+
+`GET /banks/{id}/stats` returns `200` with `pending_consolidation: 0` for **any** bank name,
+including one that does not exist. Read `total_documents` / `total_nodes` as well, or an
+un-ingested bank scores as a model failure rather than an empty one.
 
 ## Bank create / config — field names
 

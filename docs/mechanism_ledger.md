@@ -45,7 +45,13 @@ comparison. A new subsystem that parks, schedules, stores, notifies, retries, or
 spawns belongs in one of these families — if it doesn't fit any, that is itself
 worth a second look before writing it.
 
-Verified against `066d08d` (2026-08-23).
+Verified against `066d08d` (2026-08-23). **Re-checked 2026-09-17 at `7b87083`** — the
+tickets merged since (DP-360–365) are infra, eval-harness and error-message changes that do
+not touch mechanism families A–F, and `python scripts/arch_audit.py similar concepts`
+surfaces no near-duplicate pair that `capability_map.md` has not already classified. ⚠️ That
+is a **probe**, not a regeneration — see the caveat at the foot of this file: the ledger calls
+itself "regenerated, not maintained" and **no regeneration script exists**. `arch_audit.py`
+works at the *name* level that this file's own false-positive section calls the wrong one.
 
 ---
 

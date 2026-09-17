@@ -269,7 +269,7 @@ back with `what origin_allowlist`; clear it with `set origin_allowlist none`.
 | `ingest_bank <name>` | Bank name | Hindsight bank the `ingest_path` tool targets for this persona when the tool call omits `bank`. |
 | `<provider>.<key> <value>` | Any provider id + scalar value | Fallback dotted-path setter for provider-specific knobs that have no first-class command (e.g. `set kobold.mirostat 2`, `set kobold.rep_pen 1.15`). Stored in `params.provider_extras[<provider>][<key>]`. Value is coerced to int / float / bool when possible, otherwise kept as a string. Use `set <provider>.<key> none` (or `null`/`clear`) to remove the key. Mirror read: `what <provider>.<key>`. |
 
-Every `set <name>` above has a matching `what <name>` read. The full settable set is the `src/persona_fields.py` registry — **26 fields, 24 CLI-settable, 16 also exposed on the persona PATCH route**. `set model` is the one bespoke setter (it needs an async fuzzy-match lookup); `model` is therefore PATCH-able but generated from a hand-written CLI handler.
+Every `set <name>` above has a matching `what <name>` read. The full settable set is the `src/persona_fields.py` registry — **27 fields, 25 CLI-settable, 16 also exposed on the persona PATCH route**. `set model` is the one bespoke setter (it needs an async fuzzy-match lookup); `model` is therefore PATCH-able but generated from a hand-written CLI handler.
 
 ### Configuring by conversation — `configr` (DP-331)
 

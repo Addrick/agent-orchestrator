@@ -4,6 +4,16 @@ description: Prioritized agent-orchestrator roadmap — grounded in actual needs
 type: project
 ---
 
+> ⚠️ **Staleness warning — read before planning from this file.** Reviewed 2026-09-17; it had
+> not been substantively touched since 2026-07-03 (`d6bad35`, DP-268). In that window
+> DP-277, DP-297/319, DP-306, DP-330, DP-335/338, DP-345, DP-354 and DP-359–365 all shipped
+> and **none of them are reflected below.** Unticked here does not mean unbuilt. Check
+> `../capability_map.md` and `../mechanism_ledger.md` before concluding anything is missing.
+>
+> Spot-checked and still accurate as written: **Interface layer refactor** — `src/interfaces/`
+> really does still hold monolithic `discord_bot.py` / `gmail_bot.py` while Zammad is split
+> across `agents/zammad_bot.py` + `clients/zammad_client.py` + `clients/zammad_service.py`.
+
 ## Cleanup (quick wins)
 
 - [x] Remove `DISPATCH_ENABLED` / `ZAMMAD_BOT_ENABLED` from `global_config.py` — `agents.json` `auto_start` replaces them. **DONE** (both gone from `global_config.py`).
@@ -16,7 +26,7 @@ type: project
 - [x] **ReminderAgent** — SHIPPED. `src/agents/reminder_agent.py`, registered in `main.py` when Zammad is available. (Residual: configurable staleness/age threshold not yet landed — DP-102.)
 - [ ] **OpenViking memory management** — in-engine memory for personas/conversations, inspired by OpenViking tiered retrieval
 - [ ] **Model/provider failover** — `fallback_model` on Persona, retry on 429/5xx with alternate provider
-- [ ] **Tool permission gating expansion** — current: CONFIRM mode gates write tools via emoji reactions. Next: per-tool allow/ask/deny profiles at persona level
+- [ ] **Tool permission gating expansion** — per-tool allow/ask/deny profiles at persona level. ⚠️ **The "current" half of this line was two rewrites out of date and has been corrected:** gating is no longer emoji-reaction CONFIRM mode. Writes are audited **universally, regardless of execution mode**, through a composition of four predicates (DP-306) with `ALWAYS_CONFIRM_TOOLS` and `explicit_overrides`; see the Tool Security section of `../user_guide.md`. The allow/ask/deny *profile* shape is still unbuilt — that part of the item stands.
 
 ## Medium-term
 

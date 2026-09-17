@@ -15,4 +15,6 @@ This document contains verified hard references for the Hindsight memory system.
 
 ## Technical Reference
 - **Hindsight Research Paper**: [https://arxiv.org/abs/2512.12818](https://arxiv.org/abs/2512.12818)
-- **API Schema (Local Copy)**: [docs/architecture/external/hindsight_upstream_api.md](file:///c:/Users/adama/PycharmProjects/derpr-python/docs/architecture/external/hindsight_upstream_api.md)
+- **API Schema (local copy)**: [architecture/external/hindsight_upstream_api.md](architecture/external/hindsight_upstream_api.md)
+- **The live contract is the client, not this doc**: `src/memory/backend/hindsight.py` — it speaks
+  v0.6.1+ (`/v1/default/banks/{id}/memories`). When the two disagree, the client wins.
