@@ -311,6 +311,21 @@ body.resizing { cursor: col-resize; user-select: none; }
 .idtag.eph { color: var(--write); border-color: rgba(231,173,98,0.4); }
 .msg .text { color: var(--ink); font-size: 12.5px; line-height: 1.6; font-family: var(--sans); white-space: pre-wrap; word-wrap: break-word; }
 
+/* Markdown body (MessageBody). mdast-util-to-hast puts a literal newline text node
+   between every pair of block children, so the inherited `white-space: pre-wrap` rendered each
+   one as a blank line on top of the block's own margin -- that is what double-spaced the
+   pane. Soft single newlines inside a paragraph are preserved by remarkSoftBreaks
+   instead. `.text` keeps pre-wrap because StreamRow puts raw text straight into it. */
+.msg .text .md { white-space: normal; }
+.msg .text .md p { margin: 0 0 0.55em; }
+.msg .text .md ul, .msg .text .md ol { margin: 0 0 0.55em; padding-left: 1.4em; }
+.msg .text .md li, .msg .text .md li > p { margin: 0; }
+.msg .text .md h1, .msg .text .md h2, .msg .text .md h3, .msg .text .md h4 { margin: 0.7em 0 0.35em; line-height: 1.3; }
+.msg .text .md blockquote { margin: 0 0 0.55em; padding-left: 9px; border-left: 2px solid var(--line-2); color: var(--ink-2); }
+.msg .text .md pre { margin: 0 0 0.55em; }
+.msg .text .md > *:first-child { margin-top: 0; }
+.msg .text .md > *:last-child { margin-bottom: 0; }
+
 /* row actions */
 .rowacts { position: absolute; top: 11px; right: 14px; display: flex; gap: 4px; opacity: 0; transition: .12s; }
 .msg:hover .rowacts { opacity: 1; }
