@@ -23,6 +23,14 @@ from src.utils.history_shape import (  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
+# The one wording of "an image was attached but you can't see it". The driver
+# appends it when the model has no image support; agy also sends it when it
+# accepted an image and then could not deliver it (DP-382).
+IMAGE_UNSEEN_NOTE = (
+    "[System note: The user has attached an image that you cannot see."
+    " Please inform them of this fact in your response.]"
+)
+
 
 async def download_image(image_url: str) -> Tuple[bytes, str]:
     """Downloads image, returns (raw_bytes, mime_type).

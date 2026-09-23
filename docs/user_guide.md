@@ -363,8 +363,42 @@ secrets are redacted from the detail before it is sent.
 `agy-*` models (e.g. `set model agy-flash`) route through Google Antigravity's
 local `agy` CLI instead of an API. This runs on the user's authenticated
 **OAuth tier** (currently Gemini 3.5 Flash) rather than a metered API key, at the
-cost of a subprocess spawn per call (a few seconds of latency) and no image
-support.
+cost of a subprocess spawn per call (a few seconds of latency).
+
+**Images (DP-382).** An image attached to a message reaches `agy-*` models too,
+once `agy` on the host is allowed to read it. `agy` has no way to take an image
+as input, so derpr saves it as the only file in a fresh directory under
+`data/workspaces/_image_calls/`, runs `agy` there, and tells the model the
+file's path; the model opens it with `agy`'s own file viewer. The directory is
+deleted as soon as the call finishes, and anything left there — by a crash or a
+kill mid-call — is removed before the next image is saved. While an image is
+there, no other `agy` call from derpr runs (they wait a few seconds), because
+the rule below lets every `agy` call read that folder, not just image calls.
+
+**One-time setup per host.** Headless `agy` refuses to read any file it has not
+been told it may read, so add this rule to `agy`'s own settings file,
+`~/.gemini/antigravity-cli/settings.json`, using the absolute path of derpr's
+`data/workspaces/_image_calls` directory on that host:
+
+```json
+{ "permissions": { "allow": ["read_file(/abs/path/to/data/workspaces/_image_calls)"] } }
+```
+
+The path must be absolute (`agy` would resolve a relative one against its own
+working directory). A rule on a parent directory also works, and a `deny` rule
+covering the folder turns images off. Until a usable rule is there, derpr logs
+a warning that quotes the exact rule to add and the model is told an image was
+attached that it cannot see. The settings file is re-read on every image turn,
+so no restart is needed. Nothing else is granted: derpr still never passes
+`--dangerously-skip-permissions`, and `agy` keeps refusing commands and reads
+elsewhere.
+
+Image turns run outside the persona's persistent workspace (below) and start
+without its cached state. PNG, JPEG, WebP and GIF are supported. A failed or
+timed-out download, any other format, or a failure to save the file gets the
+same "cannot see" note. If the image call itself fails — most often `agy`
+refusing because the model tried some other tool — the reason is logged and the
+turn is answered once more without the image, with that note.
 
 Each call is executed inside a persistent workspace directory (by default, persona-specific under `data/workspaces/agy_{persona_name}` or fallback to `data/workspaces/agy_global`), preserving `agy` indexing/auth state caches. Persona names are sanitized to a filesystem-safe slug for the directory name, and concurrent calls sharing a workspace are serialized so they can't clobber each other's CLI state. You can configure this behavior in `.env` or `config/global_config.py`:
 - `AGY_PERSISTENT_WORKSPACES` (default `True`): Set to `False` to revert to stateless throwaway temporary directories.
