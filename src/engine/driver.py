@@ -97,6 +97,8 @@ class TextEngine:
         # lock serializes them so one call's CLI state can't clobber another's.
         self._agy_workspace_locks: Dict[str, asyncio.Lock] = {}
         self._cc_workspace_locks: Dict[str, asyncio.Lock] = {}
+        # DP-382: while an image is staged, no other agy call may run.
+        self._agy_image_gate = agy_provider.AgyImageGate()
         logger.info(
             f"Rate limiters initialised — "
             f"Gemini 2.5: {RATE_LIMIT_GEMINI_25_RPM} RPM / {RATE_LIMIT_GEMINI_25_RPD} RPD | "
@@ -143,9 +145,10 @@ class TextEngine:
         if 'gemini' in model_name or 'gemma' in model_name:
             return True
         # Antigravity CLI (Gemini-backed): the image is staged as a file agy
-        # reads with its own view_file tool (DP-382, providers/agy.py)
+        # reads with its own view_file tool — only once the host's agy settings
+        # allow that read (DP-382, providers/agy.py)
         if model_name.startswith('agy'):
-            return True
+            return agy_provider.agy_image_read_allowed()
         return False
 
 
@@ -240,10 +243,7 @@ class TextEngine:
 
         if history_object["current_message"].get("image_url") and not self.model_supports_images(model_name):
             logger.info(f"Model {model_name} does not support images. Modifying prompt.")
-            history_object["persona_prompt"] += (
-                "\n\n[System note: The user has attached an image that you cannot see."
-                " Please inform them of this fact in your response.]"
-            )
+            history_object["persona_prompt"] += "\n\n" + _shared.IMAGE_UNSEEN_NOTE
             history_object["current_message"]["image_url"] = None
 
         provider = self._registry.resolve(model_name)
