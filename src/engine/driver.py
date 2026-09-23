@@ -142,6 +142,10 @@ class TextEngine:
         # Google: gemini and gemma models
         if 'gemini' in model_name or 'gemma' in model_name:
             return True
+        # Antigravity CLI (Gemini-backed): the image is staged as a file agy
+        # reads with its own view_file tool (DP-382, providers/agy.py)
+        if model_name.startswith('agy'):
+            return True
         return False
 
 
@@ -487,8 +491,8 @@ class TextEngine:
         return agy_provider.resolve_agy_workspace(self, persona_name)
 
     async def _run_agy_cli(self, prompt: str, timeout: float = AGY_CALL_TIMEOUT_SECONDS,
-                           persona_name: Optional[str] = None) -> str:
-        return await agy_provider.run_agy_cli(self, prompt, timeout, persona_name)
+                           persona_name: Optional[str] = None, call_dir: Optional[str] = None) -> str:
+        return await agy_provider.run_agy_cli(self, prompt, timeout, persona_name, call_dir)
 
     @staticmethod
     def _remove_agy_cli_link_targets(workspace_dir: str) -> None:

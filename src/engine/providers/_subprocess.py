@@ -582,14 +582,20 @@ async def exec_cli(binary: str, args: List[str], workspace_dir: str, timeout: fl
         except asyncio.TimeoutError as e:
             raise LLMCommunicationError(f"{label} CLI timed out after {timeout} seconds.") from e
 
+        stderr_excerpt = stderr.decode("utf-8", errors="replace").strip()
+        excerpt = stderr_excerpt[-200:] if len(stderr_excerpt) > 200 else stderr_excerpt
         if proc.returncode != 0:
-            stderr_excerpt = stderr.decode("utf-8", errors="replace").strip()
-            excerpt = stderr_excerpt[-200:] if len(stderr_excerpt) > 200 else stderr_excerpt
             raise LLMCommunicationError(
                 f"{label} CLI failed with exit code {proc.returncode}. Stderr: {excerpt}"
             )
 
-        return stdout.decode("utf-8", errors="replace")
+        output = stdout.decode("utf-8", errors="replace")
+        # DP-382: headless agy exits 0 with an empty stdout when it auto-denies a
+        # tool call, and says why only on stderr. Returned as-is that reads as a
+        # blank model answer; raise so the reason reaches the log.
+        if not output.strip() and excerpt:
+            raise LLMCommunicationError(f"{label} CLI produced no output. Stderr: {excerpt}")
+        return output
     finally:
         if proc is not None:
             try:

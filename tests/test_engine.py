@@ -964,10 +964,11 @@ class TestAgyRenderAndConfig:
         rendered = text_engine._render_agy_prompt(history)
         assert "System" not in rendered
 
-    def test_agy_excluded_from_image_support(self, text_engine):
-        """agy is text-only in v1; excluding it means images get the existing
-        'can't see image' note + strip rather than being silently dropped."""
-        assert text_engine.model_supports_images("agy-flash") is False
+    def test_agy_supports_images(self, text_engine):
+        """DP-382: agy reads a staged image file with its own view_file tool, so
+        the driver must pass image_url through rather than strip it."""
+        assert text_engine.model_supports_images("agy-flash") is True
+        assert text_engine.model_supports_images("agy-default") is True
 
     def test_agy_limiter_constructed(self, text_engine):
         """The agy rate limiter is wired at init, ready for the route."""
@@ -1353,6 +1354,192 @@ class TestAgyHandler:
         assert handler == text_engine._stream_agy_response
         assert limiters == [text_engine._agy_limiter]
 
+    @staticmethod
+    def _agy_settings(monkeypatch, tmp_path, allow=None, raw=None):
+        """Points AGY_WORKSPACES_DIR into tmp_path and writes agy's settings.json
+        there. `allow=None` writes the exact DP-382 image rule."""
+        import src.engine.providers.agy as agy_mod
+        from config import global_config
+        monkeypatch.setattr(global_config, "AGY_WORKSPACES_DIR", tmp_path / "workspaces")
+        settings = tmp_path / "agy_settings.json"
+        if allow is None:
+            allow = [agy_mod.agy_image_read_rule()]
+        settings.write_text(raw if raw is not None else json.dumps({"permissions": {"allow": allow}}),
+                            encoding="utf-8")
+        monkeypatch.setattr(agy_mod, "AGY_SETTINGS_PATH", settings)
+
+    @pytest.mark.asyncio
+    async def test_image_staged_alone_in_call_dir_and_removed(
+            self, text_engine, base_context, monkeypatch, tmp_path):
+        """DP-382: the image is the only file in a fresh per-call dir under
+        AGY_WORKSPACES_DIR, agy runs there, the prompt names its absolute path,
+        and the dir is gone afterwards."""
+        self._agy_settings(monkeypatch, tmp_path)
+        monkeypatch.setattr(text_engine, "_download_image",
+                            AsyncMock(return_value=(b"PNGdata", "image/png")))
+        seen = {}
+
+        async def fake_cli(prompt, persona_name=None, call_dir=None):
+            seen["call_dir"] = call_dir
+            seen["files"] = os.listdir(call_dir)
+            seen["prompt"] = prompt
+            with open(os.path.join(call_dir, seen["files"][0]), "rb") as f:
+                seen["bytes"] = f.read()
+            return "a magenta square"
+
+        monkeypatch.setattr(text_engine, "_run_agy_cli", fake_cli)
+        base_context["current_message"]["image_url"] = "http://example.com/photo.png"
+
+        response, api_payload = await text_engine._generate_agy_response(
+            {"model_name": "agy-flash", "persona_name": "alice"}, base_context)
+
+        assert response == {"type": "text", "content": "a magenta square"}
+        call_dir = seen["call_dir"]
+        assert os.path.dirname(call_dir) == os.path.abspath(
+            tmp_path / "workspaces" / "_image_calls")
+        assert seen["files"] == ["image.png"]
+        assert seen["bytes"] == b"PNGdata"
+        assert os.path.join(call_dir, "image.png") in seen["prompt"]
+        assert "view_file" in seen["prompt"]
+        assert not os.path.exists(call_dir)
+        assert api_payload["image_attached"] is True
+        assert api_payload["isolation"]["workspace"] == "image-dir-per-call"
+        assert api_payload["isolation"]["skip_permissions"] is False
+
+    @pytest.mark.asyncio
+    async def test_image_call_dir_removed_when_cli_fails(
+            self, text_engine, base_context, monkeypatch, tmp_path):
+        self._agy_settings(monkeypatch, tmp_path)
+        monkeypatch.setattr(text_engine, "_download_image",
+                            AsyncMock(return_value=(b"jpg", "image/jpeg")))
+        seen = {}
+
+        async def failing_cli(prompt, persona_name=None, call_dir=None):
+            seen["call_dir"] = call_dir
+            raise LLMCommunicationError("agy CLI produced no output.")
+
+        monkeypatch.setattr(text_engine, "_run_agy_cli", failing_cli)
+        base_context["current_message"]["image_url"] = "http://example.com/photo.jpg"
+
+        with pytest.raises(LLMCommunicationError) as exc:
+            await text_engine._generate_agy_response({"model_name": "agy-flash"}, base_context)
+
+        assert not os.path.exists(seen["call_dir"])
+        assert exc.value.api_payload["image_attached"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("download", [
+        AsyncMock(side_effect=aiohttp.ClientError("Timeout")),
+        AsyncMock(return_value=(b"bmp", "image/bmp")),
+    ], ids=["download-failed", "unsupported-mime"])
+    async def test_unusable_image_degrades_to_cannot_see_note(
+            self, text_engine, base_context, monkeypatch, tmp_path, download):
+        """No file is staged and agy runs in its normal workspace, but the model
+        is still told an image was attached."""
+        self._agy_settings(monkeypatch, tmp_path)
+        monkeypatch.setattr(text_engine, "_download_image", download)
+        mock_cli = AsyncMock(return_value="no image, sorry")
+        monkeypatch.setattr(text_engine, "_run_agy_cli", mock_cli)
+        base_context["current_message"]["image_url"] = "http://example.com/x"
+
+        response, api_payload = await text_engine._generate_agy_response(
+            {"model_name": "agy-flash"}, base_context)
+
+        assert response == {"type": "text", "content": "no image, sorry"}
+        prompt = mock_cli.call_args.args[0]
+        assert "cannot see" in prompt
+        assert mock_cli.call_args.kwargs["call_dir"] is None
+        assert api_payload["image_attached"] is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("settings", [
+        {"allow": []},
+        {"raw": "{not json"},
+        {"raw": "[]"},
+        {"allow": ["read_file(PARENT)"]},
+    ], ids=["no-rule", "malformed-json", "not-an-object", "ancestor-rule-too-broad"])
+    async def test_image_skipped_without_exact_allow_rule(
+            self, text_engine, base_context, monkeypatch, tmp_path, settings):
+        """DP-382: without the exact rule agy would deny the read and return
+        nothing, so derpr never downloads or stages the image and sends the
+        "cannot see" note instead."""
+        if settings.get("allow") == ["read_file(PARENT)"]:
+            settings = {"allow": [f"read_file({tmp_path / 'workspaces'})"]}
+        self._agy_settings(monkeypatch, tmp_path, **settings)
+        download = AsyncMock(return_value=(b"png", "image/png"))
+        monkeypatch.setattr(text_engine, "_download_image", download)
+        mock_cli = AsyncMock(return_value="can't see it")
+        monkeypatch.setattr(text_engine, "_run_agy_cli", mock_cli)
+        base_context["current_message"]["image_url"] = "http://example.com/photo.png"
+
+        _, api_payload = await text_engine._generate_agy_response(
+            {"model_name": "agy-flash"}, base_context)
+
+        download.assert_not_called()
+        assert "cannot see" in mock_cli.call_args.args[0]
+        assert mock_cli.call_args.kwargs["call_dir"] is None
+        assert api_payload["image_attached"] is False
+
+    def test_allow_rule_match_normalizes_the_path(self, monkeypatch, tmp_path):
+        """An operator's hand-typed rule need not be byte-identical."""
+        import src.engine.providers.agy as agy_mod
+        self._agy_settings(monkeypatch, tmp_path, allow=[])
+        root = agy_mod.agy_image_calls_root()
+        self._agy_settings(monkeypatch, tmp_path, allow=[f"read_file({root}{os.sep}.)"])
+        assert agy_mod.agy_image_read_allowed() is True
+
+    @pytest.mark.asyncio
+    async def test_image_calls_are_serialized(self, text_engine, base_context, monkeypatch, tmp_path):
+        """DP-382: the rule covers all of _image_calls, so a second image call
+        must not stage its file while the first is still being viewed."""
+        import asyncio
+        self._agy_settings(monkeypatch, tmp_path)
+        monkeypatch.setattr(text_engine, "_download_image",
+                            AsyncMock(return_value=(b"png", "image/png")))
+        root = tmp_path / "workspaces" / "_image_calls"
+        max_seen = []
+        first_running = asyncio.Event()
+        release = asyncio.Event()
+
+        async def fake_cli(prompt, persona_name=None, call_dir=None):
+            max_seen.append(len(os.listdir(root)))
+            if not first_running.is_set():
+                first_running.set()
+                await release.wait()
+            return "ok"
+
+        monkeypatch.setattr(text_engine, "_run_agy_cli", fake_cli)
+
+        def ctx():
+            return {"persona_prompt": "p", "history": [],
+                    "current_message": {"text": "t", "image_url": "http://example.com/a.png"}}
+
+        first = asyncio.create_task(text_engine._generate_agy_response({"model_name": "agy-flash"}, ctx()))
+        await first_running.wait()
+        second = asyncio.create_task(text_engine._generate_agy_response({"model_name": "agy-flash"}, ctx()))
+        await asyncio.sleep(0.05)
+        assert len(os.listdir(root)) == 1  # second is waiting, not staged
+        release.set()
+        await asyncio.gather(first, second)
+
+        assert max_seen == [1, 1]
+        assert os.listdir(root) == []
+
+    @pytest.mark.asyncio
+    async def test_no_image_leaves_payload_and_workspace_unchanged(
+            self, text_engine, base_context, monkeypatch):
+        mock_cli = AsyncMock(return_value="hi")
+        monkeypatch.setattr(text_engine, "_run_agy_cli", mock_cli)
+        download = AsyncMock()
+        monkeypatch.setattr(text_engine, "_download_image", download)
+
+        _, api_payload = await text_engine._generate_agy_response(
+            {"model_name": "agy-flash"}, base_context)
+
+        download.assert_not_called()
+        assert "image_attached" not in api_payload
+        assert mock_cli.call_args.kwargs["call_dir"] is None
+
     @pytest.mark.asyncio
     async def test_generate_response_end_to_end_text(self, text_engine, base_context, monkeypatch):
         mock_cli = AsyncMock(return_value="end-to-end text answer")
@@ -1523,6 +1710,54 @@ class TestAgyCliInvocation:
         assert captured["kwargs"]["creationflags"] == getattr(
             subprocess, "CREATE_NEW_PROCESS_GROUP", 0
         )
+
+    @pytest.mark.asyncio
+    async def test_run_agy_cli_call_dir_overrides_workspace(self, text_engine, monkeypatch, tmp_path):
+        """DP-382: an image call runs in its caller-owned dir, not the persona
+        workspace, and run_agy_cli neither creates nor removes it."""
+        import src.engine as engine_mod
+        from config import global_config
+
+        captured_cwd = []
+
+        async def fake_exec(*args, **kwargs):
+            captured_cwd.append(kwargs.get("cwd"))
+            return self._FakeProc(stdout=b"seen it")
+
+        monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/agy")
+        monkeypatch.setattr(global_config, "AGY_PERSISTENT_WORKSPACES", True)
+        monkeypatch.setattr(global_config, "AGY_WORKSPACE_MODE", "persona")
+        monkeypatch.setattr(global_config, "AGY_WORKSPACES_DIR", tmp_path / "workspaces")
+        call_dir = tmp_path / "call"
+        call_dir.mkdir()
+
+        out = await text_engine._run_agy_cli("hi", persona_name="alice", call_dir=str(call_dir))
+
+        assert out == "seen it"
+        assert captured_cwd == [str(call_dir)]
+        assert call_dir.exists()
+        assert not (tmp_path / "workspaces" / "agy_alice").exists()
+
+    @pytest.mark.asyncio
+    async def test_run_agy_cli_empty_stdout_with_stderr_raises(self, text_engine, monkeypatch, tmp_path):
+        """DP-382: headless agy auto-denies a tool call by exiting 0 with an
+        empty stdout and the reason on stderr; that must surface as an error,
+        not a blank answer."""
+        import src.engine as engine_mod
+        from config import global_config
+
+        async def fake_exec(*args, **kwargs):
+            return self._FakeProc(
+                stdout=b"",
+                stderr=b'jetski: no output produced - a tool required the "command" permission')
+
+        monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/agy")
+        monkeypatch.setattr(global_config, "AGY_WORKSPACES_DIR", tmp_path / "workspaces")
+
+        with pytest.raises(LLMCommunicationError, match="produced no output.*permission"):
+            await text_engine._run_agy_cli("hi", timeout=5)
 
     @pytest.mark.asyncio
     async def test_run_agy_cli_persistent_workspaces_persona(self, text_engine, monkeypatch, tmp_path):

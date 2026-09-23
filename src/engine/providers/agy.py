@@ -20,9 +20,11 @@ Cross-method calls go back through the engine seams (e.g. `engine._run_agy_cli`)
 so a test's instance-level monkeypatch still intercepts.
 """
 
+import contextlib
 import json
 import logging
 import os
+import pathlib
 import re
 import shutil
 import tempfile
@@ -31,6 +33,7 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, Optional, Tupl
 
 import asyncio
 
+import aiohttp
 from aiolimiter import AsyncLimiter
 
 from config import global_config
@@ -68,6 +71,128 @@ _SYSTEM_MESSAGE_RE = re.compile(
 def strip_system_messages(text: str) -> str:
     """`text` with every `<SYSTEM_MESSAGE>…</SYSTEM_MESSAGE>` span removed."""
     return _SYSTEM_MESSAGE_RE.sub("", text)
+
+
+# DP-382: agy has no image transport — no CLI flag, and `--input-format
+# stream-json` rejects every content block but "text" (1.2.8). What it does have
+# is its own `view_file` tool, which reads images. Headless agy denies that read
+# (it cannot prompt) unless agy's settings.json carries an allow rule, and it
+# does NOT auto-allow reads in its own cwd — only under %TEMP% (measured on
+# 1.2.8). So derpr needs ONE static rule, `read_file(<AGY_WORKSPACES_DIR>/
+# _image_calls)`, and no --dangerously-skip-permissions: commands, writes and
+# every other read stay denied.
+#
+# An image turn writes the image alone into a fresh dir under _image_calls and
+# runs agy there, one image call at a time, so the only file the rule can ever
+# reach is the image being viewed. Not tempfile.mkdtemp(): %TEMP% is readable
+# by every agy call, so concurrent calls could read each other's images.
+_AGY_IMAGE_EXTENSIONS = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
+AGY_IMAGE_CALLS_DIRNAME = "_image_calls"
+# agy's own settings file (not derpr config) — where the allow rule must live.
+AGY_SETTINGS_PATH = pathlib.Path.home() / ".gemini" / "antigravity-cli" / "settings.json"
+
+
+def agy_image_calls_root() -> str:
+    return os.path.abspath(global_config.AGY_WORKSPACES_DIR / AGY_IMAGE_CALLS_DIRNAME)
+
+
+def agy_image_read_rule() -> str:
+    """The exact allow rule an operator adds to agy's settings.json."""
+    return f"read_file({agy_image_calls_root()})"
+
+
+def agy_image_read_allowed() -> bool:
+    """True when agy's settings.json allows reads of exactly the image-calls
+    dir. Read per call, so adding the rule takes effect without a restart.
+    Exact match only: an ancestor rule would work but grant more than the one
+    staged image, which is the whole point of the dir."""
+    try:
+        settings = json.loads(AGY_SETTINGS_PATH.read_text(encoding="utf-8"))
+        allow = settings.get("permissions", {}).get("allow", [])
+    except (OSError, ValueError, AttributeError):
+        return False
+    root = os.path.normcase(agy_image_calls_root())
+    for rule in allow if isinstance(allow, list) else []:
+        m = re.fullmatch(r"read_file\((.+)\)", rule) if isinstance(rule, str) else None
+        if m and os.path.normcase(os.path.abspath(m.group(1))) == root:
+            return True
+    return False
+
+
+async def load_agy_image(engine: "TextEngine", image_url: str) -> Optional[Tuple[bytes, str]]:
+    """(bytes, file extension) for an image agy will be allowed to read, else
+    None. A missing allow rule, failed download or unsupported type degrades to
+    the "cannot see" note rather than failing the turn — the same contract as
+    the API providers."""
+    if not agy_image_read_allowed():
+        logger.warning(
+            f"agy image input needs the allow rule {agy_image_read_rule()!r} under "
+            f"permissions.allow in {AGY_SETTINGS_PATH}; replying without the image."
+        )
+        return None
+    try:
+        image_bytes, mime_type = await engine._download_image(image_url)
+    except aiohttp.ClientError as e:
+        logger.error(f"Failed to download image from {image_url}: {e}")
+        return None
+    ext = _AGY_IMAGE_EXTENSIONS.get(mime_type)
+    if ext is None:
+        logger.warning(f"Unsupported image MIME type '{mime_type}' for agy. Skipping image.")
+        return None
+    return image_bytes, ext
+
+
+def new_agy_image_path(ext: str) -> str:
+    """Absolute path for a staged image, inside its own not-yet-created call dir."""
+    call_dir = global_config.AGY_WORKSPACES_DIR / AGY_IMAGE_CALLS_DIRNAME / uuid.uuid4().hex
+    return os.path.abspath(call_dir / f"image{ext}")
+
+
+def render_agy_image_notice(image_path: Optional[str]) -> str:
+    """The prompt line telling the model where its image is. The path is
+    absolute and the tool is named on purpose: given a relative path the model
+    first ran a shell command to locate the file, which headless agy denies —
+    and ONE denied tool call ends the run with no output at all."""
+    if image_path is None:
+        return (
+            "[System note: The user has attached an image that you cannot see."
+            " Please inform them of this fact in your response.]"
+        )
+    return (
+        f"[System note: The user attached an image to their latest message. It is"
+        f" saved at {image_path} — use the view_file tool on exactly that path to"
+        f" see it. That is the only file or tool you may use.]"
+    )
+
+
+@contextlib.asynccontextmanager
+async def staged_agy_image(
+    engine: "TextEngine", image_path: Optional[str], image_bytes: Optional[bytes],
+) -> AsyncIterator[Optional[str]]:
+    """Writes the image alone into its call dir and yields that dir (None when
+    there is no image). Image calls are serialized: the allow rule covers all of
+    _image_calls, so one call at a time keeps it holding only the image being
+    viewed. The dir is always removed on exit, including agy's .antigravitycli
+    link targets (same teardown as the stateless temp dir)."""
+    if image_path is None or image_bytes is None:
+        yield None
+        return
+    call_dir = os.path.dirname(image_path)
+    lock = engine._agy_workspace_locks.setdefault(agy_image_calls_root(), asyncio.Lock())
+    async with lock:
+        try:
+            os.makedirs(call_dir)
+            with open(image_path, "wb") as f:
+                f.write(image_bytes)
+            yield call_dir
+        finally:
+            remove_agy_cli_link_targets(call_dir)
+            shutil.rmtree(call_dir, ignore_errors=True)
 
 
 def render_agy_tool_protocol(tools: Optional[List[Dict[str, Any]]]) -> str:
@@ -181,7 +306,10 @@ def remove_agy_cli_link_targets(workspace_dir: str) -> None:
 
 
 async def run_agy_cli(engine: "TextEngine", prompt: str, timeout: float = AGY_CALL_TIMEOUT_SECONDS,
-                      persona_name: Optional[str] = None) -> str:
+                      persona_name: Optional[str] = None, call_dir: Optional[str] = None) -> str:
+    """`call_dir`, when given, is a caller-owned single-use cwd (a DP-382 image
+    call): it replaces the persona/stateless workspace, and the caller creates
+    and removes it."""
     binary = os.environ.get("ANTIGRAVITY_HARNESS_PATH") or shutil.which("agy")
     if not binary:
         raise LLMCommunicationError("Antigravity harness/agy binary not found.")
@@ -195,6 +323,9 @@ async def run_agy_cli(engine: "TextEngine", prompt: str, timeout: float = AGY_CA
     # untrusted content and authenticates with its own harness OAuth, not our
     # provider/portal creds.
     env = build_agy_cli_env()
+
+    if call_dir is not None:
+        return await engine._exec_agy(binary, args, call_dir, timeout, env=env)
 
     workspace_dir = engine._resolve_agy_workspace(persona_name)
     if workspace_dir is None:
@@ -234,6 +365,14 @@ async def generate_agy(
         if rendered_tools:
             prompt_parts.append(rendered_tools)
 
+    # DP-382: the notice rides the preamble, which fit_cli_prompt keeps whole —
+    # history elision must never drop the model's only pointer to its image.
+    image_url = history_object.get("current_message", {}).get("image_url")
+    image = await load_agy_image(engine, image_url) if image_url else None
+    image_path = new_agy_image_path(image[1]) if image else None
+    if image_url:
+        prompt_parts.append(render_agy_image_notice(image_path))
+
     # The whole prompt travels as ONE argv entry (`agy --print <prompt>` — the CLI
     # has no stdin/prompt-file transport), and the OS caps that: 128 KiB per
     # argument under execve, 32767 chars for the entire command line under
@@ -259,12 +398,16 @@ async def generate_agy(
         "isolation": {
             "stdin": "devnull",
             "skip_permissions": False,
-            "workspace": workspace_dir if workspace_dir else "temp-dir-per-call",
+            "workspace": ("image-dir-per-call" if image_path
+                          else workspace_dir if workspace_dir else "temp-dir-per-call"),
         }
     }
+    if image_url:
+        api_payload["image_attached"] = image is not None
 
     try:
-        raw = await engine._run_agy_cli(prompt, persona_name=persona_name)
+        async with staged_agy_image(engine, image_path, image[0] if image else None) as call_dir:
+            raw = await engine._run_agy_cli(prompt, persona_name=persona_name, call_dir=call_dir)
     except LLMCommunicationError as e:
         if e.api_payload is None:
             e.api_payload = api_payload
