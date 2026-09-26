@@ -42,3 +42,4 @@ sqlite-vec
 
 # MCP client (DP-268): consume external MCP tool servers over streamable HTTP
 mcp
+tzdata  # zoneinfo has no system tz database on Windows (DP-252 LOCAL_TZ)

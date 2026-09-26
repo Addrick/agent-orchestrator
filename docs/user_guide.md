@@ -135,7 +135,14 @@ The nav rail's **`◈ MEMORY`** dock opens a full-page **Imports** panel for man
 
 - **Bank picker:** select which Hindsight bank to work in (personas map to banks). The dropdown shows each bank's fact count.
 - **Add documents — three sources:**
-  - **Upload** `.md` / `.txt` files (multiple at once). Other file types and non-UTF-8 content are rejected per-file with a reason; PDF is deferred. Each file is keyed by its filename, so re-uploading the same name **replaces** that document rather than duplicating it.
+  - **Upload** `.md` / `.txt` files, or **KoboldCpp Lite session saves** (`.json`), multiple at once. Other file types, `.json` files that aren't a Lite save, and non-UTF-8 content are rejected per-file with a reason; PDF is deferred. Each file is keyed by its filename, so re-uploading the same name **replaces** that document rather than duplicating it.
+- **Lite session saves (DP-252).** A save downloaded from KoboldCpp's Lite UI is converted to a plain `User:` / `Assistant:` transcript before it is handed to Hindsight:
+  - **Reasoning traces are stripped.** Anything between the save's own thinking tags (`<think>` … `</think>` by default) is removed, including a trace whose opening or closing tag is missing; a turn that was only reasoning disappears.
+  - **Only the conversation is kept.** Lite's memory, author's note, world info, alternate branches, and every saved setting (which can hold API keys) are never sent.
+  - **Instruct mode only.** A save made in Lite's chat mode is rejected with a reason rather than guessed at.
+  - **Timestamps.** When Lite's *inject timestamps* option was on, user turns start with a stamp like `[9/18/2026, 01:44 AM]`. The importer recognises that exact (US-locale) shape and rewrites it as `[2026-09-18 01:44]`, so the regular date anchoring below picks it up. The stamps carry no timezone; they are read in the engine's local zone (`LOCAL_TZ`, default `America/New_York`). A save with no recognisable stamps anchors to the export time in its filename (`…_6_30_2026__7_32_26_PM.json`) instead of the upload time. Relative references in the prose ("two weeks later") are not interpreted.
+  - A whole session is **one document**, anchored to its most recent stamp.
+  - The document is tagged `source:kobold-lite`.
   - **Fetch URL** — the engine fetches the URL server-side and ingests the body text, keyed by the URL.
   - **Ingest server path** — walk a file or directory on the engine host by glob (default `**/*.md`). Unchanged files are skipped via a per-bank content hash; re-run is idempotent.
 - **Documents table:** lists the bank's documents with derived-unit counts and last-updated time; the **✕** button deletes a document and its derived memory units (with a confirm prompt).
@@ -151,7 +158,7 @@ On every ingest (upload, URL fetch, server path) the engine extracts a **single 
 
 1. **Regex pass (always runs).** Scans the body for machine-readable dates — ISO (`2026-03-12`, `2026-03-12T10:00`), `2026/03/12`, and named-month forms (`March 12, 2026`, `12 March 2026`). Locale-ambiguous bare-numeric forms (`03/12/2026`) are **deliberately ignored** — they cause more wrong anchors than they fix. Of the dates found, the engine picks the **latest one that isn't in the future**; future-dated values (e.g. a document that says "as of 2099") are dropped. This is the path for chat logs and dated notes, where the date sits in line headers.
 2. **LLM fallback (optional, only when the regex finds nothing).** A single-shot, sealed **date-tagger** reads the body purely as data and returns one ISO date or "none". It exists to catch prose-only dates ("we met last March", "the Q2 review"). Its output is validated and future-clamped exactly like the regex result — it can only *propose* a plausible past date, never inject instructions, reach a tool, or push the anchor past now. Disabled with `DATE_TAGGER_ENABLED=0`, in which case ingest is regex-only.
-3. **Fallback.** If neither finds a usable date, the document anchors to its previous default — file mtime for server-path ingest, upload/fetch time for uploads and URLs.
+3. **Fallback.** If neither finds a usable date, the document anchors to its previous default — file mtime for server-path ingest, upload/fetch time for uploads and URLs, and the export time in the filename for Lite session saves.
 
 Each ingested document is tagged `date:<YYYY-MM-DD>` and `date_source:<regex|llm|fallback>`, and the same values are stored in its metadata, so you can see in the documents table and in recall which anchor was used and how it was derived. Anchoring is **per document** (one document → one date); Hindsight stamps every memory unit it extracts from that document with that one anchor. A document whose content genuinely spans weeks (a long chat log) anchors to its most recent dated line, which keeps it correctly ranked for recency in recall.
 

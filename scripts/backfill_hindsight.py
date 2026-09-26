@@ -147,7 +147,7 @@ async def backfill(persona_filter: list[str] | None = None, wipe: bool = False):
         placeholders = ",".join("?" * len(personas)) if personas else "''"
         rows = conn.execute(f"""
             SELECT interaction_id, user_identifier, persona_name, channel, author_role,
-                   author_name, content, timestamp, reasoning_content, tool_context
+                   author_name, content, timestamp, tool_context
             FROM User_Interactions
             WHERE persona_name IN ({placeholders})
             ORDER BY timestamp ASC, interaction_id ASC
@@ -193,8 +193,10 @@ async def backfill(persona_filter: list[str] | None = None, wipe: bool = False):
             # Junk filter on user-authored turns only — assistant prose stays.
             if (row["author_role"] or "").lower() == "user" and is_junk_prompt(msg_content):
                 continue
-            if row["reasoning_content"]:
-                msg_content = f"<thought>\n{row['reasoning_content']}\n</thought>\n\n{msg_content}"
+            # Reasoning is never retained (DP-252): live turns retain only the
+            # reply, and extraction turns self-talk into false facts.
+            if not msg_content.strip():
+                continue
 
             date_header = ts.strftime("%Y-%m-%d %H:%M:%S")
             speaker = row["author_name"] or row["user_identifier"] or "Unknown"
