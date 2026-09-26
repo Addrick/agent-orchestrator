@@ -10,9 +10,11 @@ these happen; this module owns *how* and holds the cache state.
 
 import logging
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple, cast
+from zoneinfo import ZoneInfo
 
+from config import global_config
 from config.global_config import MAX_CACHED_API_REQUESTS
 from src.generation_events import ResponseType
 from src.memory.backend.base import MemoryBackend
@@ -21,6 +23,27 @@ from src.request_builder import build_scope_tags
 from src.security.scrubber import get_scrubber
 
 logger = logging.getLogger(__name__)
+
+
+def to_utc(ts: datetime) -> datetime:
+    """Aware UTC. A naive value is host-local — every naive turn timestamp
+    comes from `datetime.now()` — so it is converted, not relabelled."""
+    return ts.astimezone(timezone.utc)
+
+
+def format_retained_turn(role: str, speaker: str, content: str,
+                         timestamp: datetime) -> str:
+    """The text Hindsight extracts from for one turn (DP-402).
+
+    Turns in a channel append into one document, so each carries its speaker.
+    Only user turns carry a time, rendered in LOCAL_TZ: timestamps beside the
+    model's own words trip it up, and the user stamp already dates the
+    exchange.
+    """
+    if role == "user":
+        local = to_utc(timestamp).astimezone(ZoneInfo(global_config.LOCAL_TZ))
+        return f"[{local:%Y-%m-%d %H:%M}] {speaker}: {content}"
+    return f"{speaker}: {content}"
 
 
 class TurnPersistence:
@@ -246,6 +269,7 @@ class TurnPersistence:
         *,
         persona_name: str,
         role: str,
+        speaker: str,
         content: str,
         user_identifier: str,
         channel: str,
@@ -260,13 +284,17 @@ class TurnPersistence:
         asyncio.Queue and returns immediately; sqlite_legacy is a noop. We
         still wrap in try/except so a backend hiccup never derails the user
         turn — alpha system, retain failures are logged + dropped.
+
+        `content` is the bare turn; the speaker/time header is added here so
+        every caller retains the same shape (DP-402). The DB row and prompt
+        history keep the bare text.
         """
         try:
             await self.memory_backend.retain_turn(
                 bank_id=persona_name,
                 role=role,
-                content=content,
-                timestamp=timestamp,
+                content=format_retained_turn(role, speaker, content, timestamp),
+                timestamp=to_utc(timestamp),
                 scope_tags=build_scope_tags(
                     channel=channel, server_id=server_id, user_identifier=user_identifier,
                 ),

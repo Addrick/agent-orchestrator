@@ -12,6 +12,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 from src.memory.memory_manager import MemoryManager
 from src.memory.backend.hindsight import HindsightBackend
 from src.personas.store import load_personas_from_file, load_system_personas_from_file
+from src.turn_persistence import format_retained_turn
 from config.global_config import HINDSIGHT_URL, MEMORY_DATABASE_FILE
 
 logging.basicConfig(
@@ -198,9 +199,12 @@ async def backfill(persona_filter: list[str] | None = None, wipe: bool = False):
             if not msg_content.strip():
                 continue
 
-            date_header = ts.strftime("%Y-%m-%d %H:%M:%S")
+            # Same header as live retains (DP-402): user turns stamped in
+            # LOCAL_TZ, assistant turns speaker-only.
             speaker = row["author_name"] or row["user_identifier"] or "Unknown"
-            formatted_msg = f"[{date_header}] {speaker}: {msg_content}"
+            formatted_msg = format_retained_turn(
+                (row["author_role"] or "").lower(), speaker, msg_content, ts,
+            )
             
             current_block.append((formatted_msg, ts, row["interaction_id"], row["user_identifier"]))
             current_size += len(formatted_msg)

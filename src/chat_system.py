@@ -4,7 +4,7 @@ import asyncio
 import logging
 from contextlib import aclosing
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, AsyncIterator, Coroutine, Dict, List, Optional, Set, Tuple
 
 from src.embedding_service import EmbeddingService
@@ -415,7 +415,8 @@ class ChatSystem:
                 # and does not block the LLM call below.
                 if user_interaction_id is not None and message and message.strip():
                     await self.turn_persistence.retain_turn_safe(
-                        persona_name=persona_name, role="user", content=message,
+                        persona_name=persona_name, role="user",
+                        speaker=user_display_name or user_identifier, content=message,
                         user_identifier=user_identifier, channel=channel,
                         server_id=server_id, timestamp=user_ts,
                         interaction_id=user_interaction_id, untrusted=False,
@@ -666,9 +667,10 @@ class ChatSystem:
             if assistant_id is not None and to_retain and to_retain.strip() \
                     and response_type == ResponseType.LLM_GENERATION:
                 await self.turn_persistence.retain_turn_safe(
-                    persona_name=persona_name, role="assistant", content=to_retain,
+                    persona_name=persona_name, role="assistant",
+                    speaker=persona_name, content=to_retain,
                     user_identifier=user_identifier, channel=channel,
-                    server_id=server_id, timestamp=datetime.now(),
+                    server_id=server_id, timestamp=datetime.now(timezone.utc),
                     interaction_id=assistant_id, untrusted=ctx.turn_tainted,
                 )
 
