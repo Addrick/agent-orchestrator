@@ -30,3 +30,21 @@ def test_web_interface_is_false_when_env_var_false(monkeypatch):
     monkeypatch.setenv("WEB_INTERFACE", "false")
     importlib.reload(global_config)
     assert global_config.WEB_INTERFACE is False
+
+def test_local_tz_defaults_to_new_york_without_env_var(monkeypatch):
+    """DP-252: LOCAL_TZ absent → America/New_York, and it resolves via tzdata."""
+    import dotenv
+    from zoneinfo import ZoneInfo
+    monkeypatch.setattr(dotenv, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.delenv("LOCAL_TZ", raising=False)
+    importlib.reload(global_config)
+    assert global_config.LOCAL_TZ == "America/New_York"
+    ZoneInfo(global_config.LOCAL_TZ)  # raises if no tz database (Windows w/o tzdata)
+
+def test_local_tz_from_env_var(monkeypatch):
+    """DP-252: LOCAL_TZ present → used verbatim."""
+    monkeypatch.setenv("LOCAL_TZ", "Pacific/Guam")
+    importlib.reload(global_config)
+    assert global_config.LOCAL_TZ == "Pacific/Guam"
+    monkeypatch.delenv("LOCAL_TZ")
+    importlib.reload(global_config)

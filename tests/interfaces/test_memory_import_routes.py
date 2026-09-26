@@ -10,6 +10,9 @@ Hindsight behavior (that lives in tests/memory/test_hindsight_backend.py).
 """
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -148,6 +151,74 @@ def test_upload_rejects_non_utf8():
     backend.retain_document.assert_not_awaited()
     mm.close()
 
+
+
+# ---------- Lite session saves (DP-252) ----------
+
+_LITE_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "lite_save_instruct.json"
+_LITE_NAME = "Untitled_Instruct_6_30_2026__7_32_26_PM.json"
+
+
+def _lite(prompt: str, **settings) -> bytes:
+    return json.dumps({"prompt": prompt, "actions": [],
+                       "savedsettings": {"opmode": "4", **settings}}).encode()
+
+
+def _upload(client, name, data):
+    return client.post("/api/v1/memory/banks/alice/upload",
+                       files={"files": (name, data, "application/json")})
+
+
+def test_upload_lite_save_retains_clean_transcript():
+    adapter, mm, backend = _adapter_with_backend()
+    with TestClient(adapter.app) as client:
+        r = _upload(client, _LITE_NAME, _LITE_FIXTURE.read_bytes())
+    result = r.json()["results"][0]
+    assert result["status"] == "accepted"
+    _, kwargs = backend.retain_document.call_args
+    content = kwargs["content"]
+    assert content.startswith("User: I'm just here to test speed.")
+    assert "<think>" not in content and "SENTINEL" not in content
+    assert "source:kobold-lite" in kwargs["tags"]
+    assert kwargs["metadata"]["format"] == "kobold-lite-save"
+    assert kwargs["metadata"]["turns"] == "4"
+    assert kwargs["metadata"]["reasoning_stripped"] == "true"
+    mm.close()
+
+
+def test_upload_undated_lite_save_anchors_to_filename_export_time():
+    adapter, mm, backend = _adapter_with_backend()
+    with TestClient(adapter.app) as client:
+        r = _upload(client, _LITE_NAME, _LITE_FIXTURE.read_bytes())
+    assert r.json()["results"][0]["date_source"] == "fallback"
+    _, kwargs = backend.retain_document.call_args
+    assert kwargs["timestamp"] == datetime(2026, 6, 30, 23, 32, 26, tzinfo=timezone.utc)
+    mm.close()
+
+
+def test_upload_lite_save_anchors_to_latest_injected_stamp():
+    adapter, mm, backend = _adapter_with_backend()
+    save = _lite("{{[INPUT]}}[6/1/2026, 09:00 AM] hi{{[OUTPUT]}}yo"
+                 "{{[INPUT]}}[6/3/2026, 11:30 PM] again{{[OUTPUT]}}ok")
+    with TestClient(adapter.app) as client:
+        r = _upload(client, _LITE_NAME, save)
+    result = r.json()["results"][0]
+    assert (result["content_date"], result["date_source"]) == ("2026-06-03", "regex")
+    mm.close()
+
+
+@pytest.mark.parametrize("data,reason", [
+    (b"{not json", "invalid JSON"),
+    (b'{"some": "other json"}', "not a KoboldCpp Lite save"),
+    (_lite("User: hi", opmode="3"), "only instruct-mode Lite saves are supported"),
+])
+def test_upload_rejects_unsupported_json(data, reason):
+    adapter, mm, backend = _adapter_with_backend()
+    with TestClient(adapter.app) as client:
+        r = _upload(client, "x.json", data)
+    assert r.json()["results"][0] == {"file": "x.json", "status": "rejected", "reason": reason}
+    backend.retain_document.assert_not_awaited()
+    mm.close()
 
 # ---------- URL ingest ----------
 

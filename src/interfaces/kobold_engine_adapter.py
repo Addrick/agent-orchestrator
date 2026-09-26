@@ -30,6 +30,7 @@ from typing import (
     Dict, Optional, List, Set, Tuple,
 )
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse, RedirectResponse
@@ -46,6 +47,9 @@ from src.chat_system import (
 )
 from src.interfaces.transcript import build_transcript
 from src.memory.date_extraction import LlmTagger, resolve_ingest_anchor
+from src.memory.lite_save import (
+    NotALiteSave, export_time_from_filename, parse_lite_save,
+)
 from src.origin import Origin
 from src.security.scrubber import get_scrubber
 from src.stream_engine import CHAT_TEMPLATES
@@ -1537,9 +1541,9 @@ class KoboldEngineAdapter:
             files: List[UploadFile] = File(...),
             tags: Optional[str] = Form(None),
         ) -> Any:
-            # Phase 1: md/txt only (no server-side conversion needed → decode
-            # here + retain_document, filename-keyed idempotency). PDF/native
-            # files/retain deferred. Operator uploads are trusted.
+            # md/txt are retained as-is; a KoboldCpp Lite save (.json) is
+            # first converted to a transcript (DP-252). Filename-keyed
+            # idempotency. PDF deferred. Operator uploads are trusted.
             guard = self._import_surface_501()
             if guard is not None:
                 return guard  # SQLite backend: no-op retain would fake success
@@ -1550,9 +1554,9 @@ class KoboldEngineAdapter:
             for f in files:
                 name = f.filename or "untitled"
                 ext = os.path.splitext(name)[1].lower()
-                if ext not in (".md", ".txt"):
+                if ext not in (".md", ".txt", ".json"):
                     results.append({"file": name, "status": "rejected",
-                                    "reason": "only .md/.txt supported"})
+                                    "reason": "only .md/.txt or a Lite save .json supported"})
                     continue
                 raw = await f.read()
                 try:
@@ -1561,18 +1565,45 @@ class KoboldEngineAdapter:
                     results.append({"file": name, "status": "rejected",
                                     "reason": "not valid utf-8"})
                     continue
+                fallback_ts = now
+                file_tags: List[str] = []
+                extra_meta: Dict[str, str] = {}
+                if ext == ".json":
+                    try:
+                        transcript = parse_lite_save(
+                            json.loads(content), tz=ZoneInfo(global_config.LOCAL_TZ),
+                        )
+                    except NotALiteSave as e:
+                        results.append({"file": name, "status": "rejected", "reason": str(e)})
+                        continue
+                    except ValueError:  # JSONDecodeError
+                        results.append({"file": name, "status": "rejected",
+                                        "reason": "invalid JSON"})
+                        continue
+                    content = transcript.render()
+                    # Undated saves anchor to the export time in the filename,
+                    # an upper bound on the conversation (upload time is not).
+                    fallback_ts = export_time_from_filename(
+                        name, tz=ZoneInfo(global_config.LOCAL_TZ),
+                    ) or now
+                    file_tags = ["source:kobold-lite"]
+                    extra_meta = {
+                        "format": "kobold-lite-save",
+                        "turns": str(transcript.turn_count()),
+                        "reasoning_stripped": str(transcript.reasoning_stripped).lower(),
+                    }
                 # Anchor to the date the content is about (upload time is the
                 # fallback when the body carries no date). DP-292 phase 2.
                 ts, date_tags, date_meta = await resolve_ingest_anchor(
-                    content, fallback_ts=now, clamp_now=now, llm_tagger=tagger,
+                    content, fallback_ts=fallback_ts, clamp_now=now, llm_tagger=tagger,
                     max_chars=global_config.DATE_EXTRACTION_MAX_CHARS,
                 )
                 metadata = {"source": "upload", "filename": name,
-                            "untrusted": "false", **date_meta}
+                            "untrusted": "false", **extra_meta, **date_meta}
                 res = await self._run_backend(
                     self._memory_backend.retain_document(
                         bank_id, document_id=name, content=content,
-                        tags=list(base_tags) + date_tags, metadata=metadata,
+                        tags=list(base_tags) + file_tags + date_tags, metadata=metadata,
                         timestamp=ts,
                     )
                 )

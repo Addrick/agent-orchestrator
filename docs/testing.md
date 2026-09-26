@@ -28,7 +28,9 @@ Ordered by execution cost:
 
 Live tiers auto-skip when credentials are absent (`tests/conftest.py`). Test Zammad
 credentials live in `.env.test` (gitignored), loaded with `override=True` so a test run
-can never reach production. Fixtures and mock data: `tests/test_data/`.
+can never reach production. Committed fixture files: `tests/fixtures/`. ⚠️ `tests/test_data/`
+is **gitignored** — it is the test run's scratch `DATA_DIR` (databases, logs), so a fixture
+put there passes locally and is missing in CI.
 
 ## Mandatory test requirements
 
