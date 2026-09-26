@@ -186,7 +186,7 @@ export function MemoryPanel() {
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <input ref={fileRef} type="file" accept=".md,.txt,.json" multiple className="field" />
             <button className="btn" disabled={busy || !bank} onClick={onUpload}>
-              Upload (.md/.txt/Lite .json)
+              Upload (.md/.txt/.json kobold export)
             </button>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
