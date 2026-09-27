@@ -145,6 +145,28 @@ async def test_add_server_rejects_bad_input(tmp_path, fresh_registry, fake_trans
         await manager.add_server("ok", "ftp://srv/mcp")
 
 
+async def test_url_placeholder_resolves_from_config_and_persists_raw(
+        tmp_path, fresh_registry, fake_transport, monkeypatch):
+    # DP-403: the Hindsight address lives once, in HINDSIGHT_URL. The stored
+    # url keeps the placeholder so a moved Hindsight needs no config edit.
+    monkeypatch.setattr(mcp_client.global_config, "HINDSIGHT_URL", "http://hs:8888/")
+    fake_transport["http://hs:8888/mcp/managr/"] = FakeSession(tools=[_mcp_tool("recall")])
+    manager, _ = _make_manager(tmp_path)
+
+    result = await manager.add_server("hindsight-managr", "{HINDSIGHT_URL}/mcp/managr/")
+    assert result["tools_registered"] == ["mcp__hindsight-managr__recall"]
+    config = json.loads((tmp_path / "mcp_servers.json").read_text())
+    assert config["servers"]["hindsight-managr"]["url"] == "{HINDSIGHT_URL}/mcp/managr/"
+
+    await manager.aclose()
+
+
+def test_url_placeholder_is_allowlisted():
+    with pytest.raises(ValueError, match="Unknown MCP url placeholder"):
+        mcp_client.resolve_server_url("{GEMINI_API_KEY}/x")
+    assert mcp_client.resolve_server_url("http://srv/mcp") == "http://srv/mcp"
+
+
 async def test_add_server_duplicate_rejected(tmp_path, fresh_registry, fake_transport):
     fake_transport["http://srv/mcp"] = FakeSession()
     manager, _ = _make_manager(tmp_path)

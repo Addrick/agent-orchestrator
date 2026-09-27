@@ -1471,7 +1471,7 @@ Recommended policy for a `hindsight-<persona>` entry:
 {
   "servers": {
     "hindsight-managr": {
-      "url": "http://10.0.0.70:8888/mcp/managr/",
+      "url": "{HINDSIGHT_URL}/mcp/managr/",
       "enabled": true,
       "tool_overrides": {
         "recall":  {"is_write": false, "capabilities": {"irreversible": false}},
@@ -1481,6 +1481,11 @@ Recommended policy for a `hindsight-<persona>` entry:
   }
 }
 ```
+
+`{HINDSIGHT_URL}` is filled in from derpr's `HINDSIGHT_URL` setting when the
+server connects, so the Hindsight address is configured in one place and a
+moved Hindsight needs no edit here. It is the only placeholder accepted; any
+other server url is written out in full.
 
 Then give the persona `service_bindings: ["mcp:hindsight-managr"]` and list the
 tool names it should have in `allow`.
