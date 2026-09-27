@@ -49,12 +49,14 @@ from typing import (
     TYPE_CHECKING, Any, AsyncIterator, Callable, Coroutine, Dict, List, Optional,
     Set, Tuple,
 )
+from urllib.parse import urlsplit
 
 from mcp import ClientSession
 from mcp import types as mcp_types
 from mcp.client.session import MessageHandlerFnT
 from mcp.client.streamable_http import streamablehttp_client
 
+from config import global_config
 from config.global_config import (
     MCP_CALL_TIMEOUT,
     MCP_CONNECT_TIMEOUT,
@@ -85,6 +87,51 @@ _DESCRIPTION_MAX_CHARS = 1024
 # Floor between maintenance passes: bounds how fast an untrusted server can
 # drive re-discovery (and persona revalidation) by spamming tools/list_changed.
 _MIN_PASS_GAP = 5.0
+
+# A server url may start with ``{NAME}`` to take its base from global_config
+# instead of repeating an address that config already owns (DP-403: the
+# Hindsight MCP entries are ``{HINDSIGHT_URL}/mcp/<bank>/``). Resolved at
+# connect time and never persisted. Allowlisted, not getattr: a hand-edited
+# config file must not be able to splice an arbitrary setting (a key) into a
+# url that is logged and sent over the wire.
+_URL_BASES = ("HINDSIGHT_URL",)
+_URL_PLACEHOLDER_RE = re.compile(r"^\{([A-Z0-9_]+)\}")
+
+
+def _require_http_url(url: str, what: str) -> None:
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ValueError(f"Invalid MCP server url {what}: must be http(s) with a host.")
+
+
+def resolve_server_url(url: str) -> str:
+    """Expand a leading ``{NAME}`` placeholder from global_config and check
+    the result is an http(s) url. Every connect path goes through here.
+
+    The placeholder only supplies the base: the rest must be empty or a path,
+    so ``{HINDSIGHT_URL}@evil.example`` or ``{HINDSIGHT_URL}.evil.example``
+    cannot move the host while an approver reads "Hindsight".
+    """
+    match = _URL_PLACEHOLDER_RE.match(url)
+    if match is None:
+        _require_http_url(url, f"'{url}'")
+        return url
+    name = match.group(1)
+    if name not in _URL_BASES:
+        raise ValueError(
+            f"Unknown MCP url placeholder '{{{name}}}'; allowed: "
+            + ", ".join(f"{{{n}}}" for n in _URL_BASES)
+        )
+    rest = url[match.end():]
+    if rest and not rest.startswith("/"):
+        raise ValueError(
+            f"Invalid MCP server url '{url}': '{{{name}}}' must be followed "
+            "by a path starting with '/'."
+        )
+    base = str(getattr(global_config, name)).rstrip("/")
+    _require_http_url(base, f"base: setting {name} is '{base}'")
+    return base + rest
+
 
 # Most-restrictive defaults for a discovered tool. Operator ``tool_overrides``
 # (per tool, in the config file) may relax individual keys; server annotations
@@ -322,8 +369,7 @@ class MCPClientManager:
                 f"Invalid MCP server name '{name}': need lowercase letters/"
                 "digits/hyphens, starting alphanumeric, max 32 chars."
             )
-        if not str(url).startswith(("http://", "https://")):
-            raise ValueError(f"Invalid MCP server url '{url}': must be http(s).")
+        resolve_server_url(str(url))
 
         async with self._lock:
             config = self._load_config()
@@ -600,7 +646,7 @@ class MCPClientManager:
         connection is torn down and the error re-raised."""
         conn = _ServerConnection(
             name,
-            str(server_cfg["url"]),
+            resolve_server_url(str(server_cfg["url"])),
             on_tools_changed=lambda: self._mark_tools_changed(name),
         )
         await conn.start(MCP_CONNECT_TIMEOUT)

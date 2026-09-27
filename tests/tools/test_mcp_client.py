@@ -145,6 +145,64 @@ async def test_add_server_rejects_bad_input(tmp_path, fresh_registry, fake_trans
         await manager.add_server("ok", "ftp://srv/mcp")
 
 
+async def test_url_placeholder_resolves_from_config_and_persists_raw(
+        tmp_path, fresh_registry, fake_transport, monkeypatch):
+    # DP-403: the Hindsight address lives once, in HINDSIGHT_URL. The stored
+    # url keeps the placeholder so a moved Hindsight needs no config edit.
+    monkeypatch.setattr(mcp_client.global_config, "HINDSIGHT_URL", "http://hs:8888/")
+    fake_transport["http://hs:8888/mcp/managr/"] = FakeSession(tools=[_mcp_tool("recall")])
+    manager, _ = _make_manager(tmp_path)
+
+    result = await manager.add_server("hindsight-managr", "{HINDSIGHT_URL}/mcp/managr/")
+    assert result["tools_registered"] == ["mcp__hindsight-managr__recall"]
+    config = json.loads((tmp_path / "mcp_servers.json").read_text())
+    assert config["servers"]["hindsight-managr"]["url"] == "{HINDSIGHT_URL}/mcp/managr/"
+
+    await manager.aclose()
+
+
+def test_url_placeholder_is_allowlisted():
+    with pytest.raises(ValueError, match="Unknown MCP url placeholder"):
+        mcp_client.resolve_server_url("{GEMINI_API_KEY}/x")
+    assert mcp_client.resolve_server_url("http://srv/mcp") == "http://srv/mcp"
+
+
+@pytest.mark.parametrize("url", [
+    "{HINDSIGHT_URL}@evil.example/mcp",
+    "{HINDSIGHT_URL}.evil.example/mcp",
+    "{HINDSIGHT_URL}:9999/mcp",
+])
+def test_url_placeholder_cannot_move_the_host(monkeypatch, url):
+    # The approver sees the raw placeholder; the tail may only add a path.
+    monkeypatch.setattr(mcp_client.global_config, "HINDSIGHT_URL", "http://hs")
+    with pytest.raises(ValueError, match="path starting with '/'"):
+        mcp_client.resolve_server_url(url)
+
+
+@pytest.mark.parametrize("base", ["", "hs:8888"])
+def test_url_placeholder_names_a_bad_setting(monkeypatch, base):
+    monkeypatch.setattr(mcp_client.global_config, "HINDSIGHT_URL", base)
+    with pytest.raises(ValueError, match="HINDSIGHT_URL"):
+        mcp_client.resolve_server_url("{HINDSIGHT_URL}/mcp/managr/")
+
+
+async def test_url_placeholder_in_hand_edited_config_connects_at_startup(
+        tmp_path, fresh_registry, fake_transport, monkeypatch):
+    # The documented path: the operator writes the entry into mcp_servers.json.
+    monkeypatch.setattr(mcp_client.global_config, "HINDSIGHT_URL", "http://hs:8888")
+    (tmp_path / "mcp_servers.json").write_text(json.dumps({"servers": {
+        "hindsight-managr": {"url": "{HINDSIGHT_URL}/mcp/managr/", "enabled": True},
+    }}))
+    fake_transport["http://hs:8888/mcp/managr/"] = FakeSession(tools=[_mcp_tool("recall")])
+    manager, _ = _make_manager(tmp_path)
+    await manager.start()
+    assert "mcp__hindsight-managr__recall" in {
+        t["function"]["name"] for t in definitions.get_all_tool_definitions()
+        if t.get("type") == "function"
+    }
+    await manager.aclose()
+
+
 async def test_add_server_duplicate_rejected(tmp_path, fresh_registry, fake_transport):
     fake_transport["http://srv/mcp"] = FakeSession()
     manager, _ = _make_manager(tmp_path)

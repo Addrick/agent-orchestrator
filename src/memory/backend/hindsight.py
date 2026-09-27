@@ -23,7 +23,8 @@ logger = logging.getLogger(__name__)
 UNTRUSTED_TAG = "untrusted:true"
 TRUSTED_TAG = "untrusted:false"
 
-# Hindsight 0.6.1 hardcodes a single tenant prefix in every bank route.
+# Hindsight hardcodes a single tenant prefix in every bank route (0.6.1;
+# still true on 0.10.0).
 HINDSIGHT_API_PREFIX = "/v1/default"
 
 # Session cut heuristic: gap between retains in the same scope that starts a
@@ -99,7 +100,8 @@ class HindsightRESTClient:
         tags: Optional[List[str]] = None,
         types: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
-        # 0.6.1 RecallRequest: budget-driven (low/mid/high) + max_tokens cap.
+        # RecallRequest (0.6.1; unchanged in 0.10.0): budget-driven
+        # (low/mid/high) + max_tokens cap.
         # No `k` parameter anymore; callers slice result list to taste.
         payload: Dict[str, Any] = {"query": query, "tags": tags or []}
         if max_tokens is not None:
@@ -130,7 +132,8 @@ class HindsightRESTClient:
         enable_observations: Optional[bool] = None,
         observations_mission: Optional[str] = None,
     ) -> None:
-        # 0.6.1 CreateBankRequest. bank_id lives in the URL path; body carries
+        # CreateBankRequest (0.6.1; 0.10.0 adds more optional fields, none sent
+        # here). bank_id lives in the URL path; body carries
         # `name` (display) + mission fields. `mission`/`background` are
         # deprecated aliases for `reflect_mission` and intentionally not sent.
         payload: Dict[str, Any] = {"name": bank_id}
@@ -155,11 +158,13 @@ class HindsightRESTClient:
     async def apatch_bank_config(
         self, bank_id: str, config: Dict[str, Any]
     ) -> Dict[str, Any]:
-        # 0.6.1 PATCH /banks/{id}/config — only `retain_chunk_size`,
-        # `retain_chunk_batch_size`, `retain_extraction_mode`,
-        # `observations_mission`, `enable_observations`, and disposition_*
-        # fields are accepted. Caller is responsible for ASCII-only values
-        # (server misreads utf-8 → latin-1 on this endpoint).
+        # PATCH /banks/{id}/config. 0.6.1 accepted only a handful of fields;
+        # 0.10.0 accepts any hierarchical behavioral override (~48 keys:
+        # retain_*, recall budgets, consolidation, observations, disposition,
+        # mcp_enabled_tools, ...) in Python-field or HINDSIGHT_API_* env form.
+        # GET the same route for the live key set. Caller is responsible for
+        # ASCII-only values (0.6.1 misread utf-8 as latin-1 on this endpoint;
+        # not re-checked on 0.10.0).
         return await self._request(
             "PATCH", f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}/config",
             json={"updates": config},
