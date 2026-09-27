@@ -409,7 +409,8 @@ class _DocScopeStore:
     CREATE TABLE IF NOT EXISTS Doc_Scope (
         scope_key   TEXT PRIMARY KEY,
         document_id TEXT NOT NULL,
-        last_ts     TEXT NOT NULL
+        last_ts     TEXT NOT NULL,
+        untrusted   INTEGER NOT NULL DEFAULT 0
     );
     """
 
@@ -425,10 +426,16 @@ class _DocScopeStore:
             self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
             self._conn.executescript(self.SCHEMA)
+            cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(Doc_Scope)")}
+            if "untrusted" not in cols:  # pre-DP-409 store
+                self._conn.execute(
+                    "ALTER TABLE Doc_Scope ADD COLUMN untrusted INTEGER NOT NULL DEFAULT 0"
+                )
             self._conn.commit()
         return self._conn
 
-    def resolve(self, scope_key: str, now: datetime) -> Tuple[str, str]:
+    def resolve(self, scope_key: str, now: datetime,
+                untrusted: bool = False) -> Tuple[str, str]:
         """Return (document_id, update_mode) for a retain in this scope.
 
         Side effect: updates last_ts (and document_id on session cut) so the
@@ -455,8 +462,9 @@ class _DocScopeStore:
                     last = now
                 if (now - last).total_seconds() <= SESSION_GAP_SECONDS:
                     conn.execute(
-                        "UPDATE Doc_Scope SET last_ts=? WHERE scope_key=?",
-                        (now_iso, scope_key),
+                        "UPDATE Doc_Scope SET last_ts=?, untrusted=MAX(untrusted, ?)"
+                        " WHERE scope_key=?",
+                        (now_iso, int(untrusted), scope_key),
                     )
                     conn.commit()
                     return str(row["document_id"]), "append"
@@ -464,14 +472,54 @@ class _DocScopeStore:
             # human-readable and unique without a counter.
             document_id = f"{scope_key}:{now_iso}"
             conn.execute(
-                "INSERT INTO Doc_Scope (scope_key, document_id, last_ts) "
-                "VALUES (?, ?, ?) "
+                "INSERT INTO Doc_Scope (scope_key, document_id, last_ts, untrusted) "
+                "VALUES (?, ?, ?, ?) "
                 "ON CONFLICT(scope_key) DO UPDATE SET "
-                "document_id=excluded.document_id, last_ts=excluded.last_ts",
-                (scope_key, document_id, now_iso),
+                "document_id=excluded.document_id, last_ts=excluded.last_ts, "
+                "untrusted=excluded.untrusted",
+                (scope_key, document_id, now_iso, int(untrusted)),
             )
             conn.commit()
             return document_id, "replace"
+
+    def current(self, scope_key: str) -> Optional[Tuple[str, datetime, bool]]:
+        """(document_id, session start, untrusted) of the scope's open document.
+
+        The session start is the timestamp `resolve` baked into the id. The
+        untrusted bit is sticky for the session: once any retained turn was
+        tainted, a whole-document rebuild must not launder it (DP-409).
+        """
+        with self._lock:
+            row = self._get().execute(
+                "SELECT document_id, untrusted FROM Doc_Scope WHERE scope_key=?",
+                (scope_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        document_id = str(row["document_id"])
+        prefix = f"{scope_key}:"
+        if not document_id.startswith(prefix):
+            return None
+        try:
+            started = datetime.fromisoformat(document_id[len(prefix):])
+        except ValueError:
+            return None
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        return document_id, started, bool(row["untrusted"])
+
+    def touch(self, scope_key: str, now: datetime, untrusted: bool) -> None:
+        """Record activity on the open document without cutting a session."""
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        with self._lock:
+            conn = self._get()
+            conn.execute(
+                "UPDATE Doc_Scope SET last_ts=?, untrusted=MAX(untrusted, ?)"
+                " WHERE scope_key=?",
+                (now.isoformat(), int(untrusted), scope_key),
+            )
+            conn.commit()
 
     def close(self) -> None:
         with self._lock:
@@ -689,7 +737,9 @@ class HindsightBackend(MemoryBackend):
             update_mode = "replace"
         else:
             scope_key = self._scope_key(bank_id, scope_tags)
-            document_id, update_mode = self._doc_scope.resolve(scope_key, timestamp)
+            document_id, update_mode = self._doc_scope.resolve(
+                scope_key, timestamp, untrusted=UNTRUSTED_TAG in tags,
+            )
         item: Dict[str, Any] = {
             "content": content,
             "tags": tags,
@@ -794,6 +844,47 @@ class HindsightBackend(MemoryBackend):
         )
         q = await self._ensure_worker(bank_id)
         await q.put(item)
+
+    async def session_start(
+        self, bank_id: str, scope_tags: List[str],
+    ) -> Optional[datetime]:
+        cur = self._doc_scope.current(self._scope_key(bank_id, scope_tags))
+        return cur[1] if cur else None
+
+    async def replace_session(
+        self,
+        bank_id: str,
+        content: str,
+        *,
+        scope_tags: List[str],
+        source_persona: str,
+        untrusted: bool,
+        timestamp: datetime,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        # DP-409: rewrite the scope's open document whole. Hindsight's
+        # `replace` deletes every fact extracted from the prior text (and the
+        # observations resting only on them) and re-extracts; `append` only
+        # ever adds, so a retried turn's discarded attempt would stay recallable.
+        # Queued on the same FIFO as the appends, so it lands after them.
+        scope_key = self._scope_key(bank_id, scope_tags)
+        cur = self._doc_scope.current(scope_key)
+        if cur is None:
+            return False
+        document_id, _started, was_untrusted = cur
+        tainted = untrusted or was_untrusted
+        self._doc_scope.touch(scope_key, timestamp, tainted)
+        item = self._build_item(
+            bank_id=bank_id, content=content,
+            tags=list(scope_tags) + [
+                f"persona:{source_persona}", _untrusted_tag(tainted),
+            ],
+            scope_tags=scope_tags, timestamp=timestamp, metadata=metadata,
+            document_id=document_id,
+        )
+        q = await self._ensure_worker(bank_id)
+        await q.put(item)
+        return True
 
     async def recall(
         self,

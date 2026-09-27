@@ -1381,6 +1381,44 @@ class MemoryManager:
             cursor.execute(query, params)
             return [dict(row) for row in reversed(cursor.fetchall())]
 
+    def get_session_turns(self, persona_name: str, channel: str,
+                          since: datetime) -> List[Dict[str, Any]]:
+        """Visible, non-empty turns of one retain scope (persona + channel,
+        like `_DocScopeStore`'s key) at or after `since`, oldest first (DP-409).
+
+        Stored timestamps mix naive host-local (`datetime.now()`) and aware
+        UTC (platform timestamps), so neither SQL comparison nor a timestamp
+        ORDER BY is sound: walk back by interaction_id — insertion order, the
+        order the turns were retained in — and stop at the first older row.
+        """
+        if since.tzinfo is None:
+            since = since.astimezone()
+        rows: List[Dict[str, Any]] = []
+        with self._lock:
+            cursor = self._get_connection().cursor()
+            cursor.execute(
+                "SELECT interaction_id, author_role, author_name, user_identifier,"
+                " content, timestamp FROM User_Interactions"
+                " WHERE persona_name = ? AND channel = ?"
+                + self._SUPPRESSION_SUBQUERY + self._NON_EMPTY_CONTENT_FILTER +
+                " ORDER BY interaction_id DESC",
+                (persona_name, channel),
+            )
+            for row in cursor:
+                ts = row["timestamp"]
+                try:
+                    parsed = datetime.fromisoformat(ts) if isinstance(ts, str) else ts
+                except ValueError:
+                    continue
+                if not isinstance(parsed, datetime):
+                    continue
+                parsed = parsed.astimezone()  # naive = host-local
+                if parsed < since:
+                    break
+                rows.append({**dict(row), "timestamp": parsed})
+        rows.reverse()
+        return rows
+
     def get_server_history(self, server_id: Optional[str], persona_name: str, limit: Optional[int] = None) -> List[
         Dict[str, Any]]:
         with self._lock:

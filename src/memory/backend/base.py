@@ -449,6 +449,30 @@ class MemoryBackend(ABC):
         """
         raise NotImplementedError("retain_document not implemented on this backend")
 
+    async def session_start(
+        self, bank_id: str, scope_tags: List[str],
+    ) -> Optional[datetime]:
+        """Start of the conversation document `retain_turn` is appending to
+        for this scope, or None when there is none (DP-409). Default: None."""
+        return None
+
+    async def replace_session(
+        self,
+        bank_id: str,
+        content: str,
+        *,
+        scope_tags: List[str],
+        source_persona: str,
+        untrusted: bool,
+        timestamp: datetime,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Replace the scope's open conversation document with `content`
+        (DP-409) — the canonical transcript after a retry. Returns False when
+        the scope has no open document, so the caller falls back to
+        `retain_turn`. Default: False."""
+        return False
+
     async def delete_bank(self, bank_id: str) -> None:
         """Delete a bank (new-shape).
 

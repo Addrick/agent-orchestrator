@@ -9,6 +9,7 @@ these happen; this module owns *how* and holds the cache state.
 """
 
 import logging
+import re
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple, cast
@@ -43,7 +44,13 @@ def format_retained_turn(role: str, speaker: str, content: str,
     if role == "user":
         local = to_utc(timestamp).astimezone(ZoneInfo(global_config.LOCAL_TZ))
         return f"[{local:%Y-%m-%d %H:%M}] {speaker}: {content}"
-    return f"{speaker}: {content}"
+    # Reasoning is never retained (DP-252 contract). A model that leaves its
+    # `<think>` inline in the reply bypasses `reasoning_content`, and the
+    # extractor then files the model's self-talk as facts about the user (DP-409).
+    return f"{speaker}: {_THINK_BLOCK.sub('', content).strip()}"
+
+
+_THINK_BLOCK = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 
 
 class TurnPersistence:
@@ -263,6 +270,58 @@ class TurnPersistence:
         except Exception as e:
             logger.error(f"Assistant log_message failed: {e}", exc_info=True)
             return None
+
+    async def rebuild_session_safe(
+        self,
+        *,
+        persona_name: str,
+        channel: str,
+        user_identifier: str,
+        server_id: Optional[str],
+        retried_id: int,
+        retried_text: str,
+        untrusted: bool,
+    ) -> None:
+        """Replace the session's Hindsight document with the canonical
+        conversation after a retry (DP-409).
+
+        Appending the regenerated reply would leave the discarded attempt's
+        facts recallable. The DB row already holds the new version, so the
+        transcript is re-rendered from it — except the retried turn itself,
+        which takes `retried_text` so DP-335's footer stays out exactly as on
+        the normal retain path. No open document → plain append, as before.
+        """
+        scope_tags = build_scope_tags(
+            channel=channel, server_id=server_id, user_identifier=user_identifier,
+        )
+        try:
+            since = await self.memory_backend.session_start(persona_name, scope_tags)
+            turns = (
+                self.memory_manager.get_session_turns(persona_name, channel, since)
+                if since is not None else []
+            )
+            if turns:
+                blocks = []
+                for t in turns:
+                    role = (t["author_role"] or "").lower()
+                    content = retried_text if t["interaction_id"] == retried_id else t["content"]
+                    speaker = t["author_name"] or t["user_identifier"] or "Unknown"
+                    blocks.append(format_retained_turn(role, speaker, content, t["timestamp"]))
+                if await self.memory_backend.replace_session(
+                    persona_name, "\n\n".join(blocks),
+                    scope_tags=scope_tags, source_persona=persona_name,
+                    untrusted=untrusted, timestamp=datetime.now(timezone.utc),
+                    metadata={"interaction_id": str(retried_id)},
+                ):
+                    return
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Session rebuild failed, appending retried turn: {e}")
+        await self.retain_turn_safe(
+            persona_name=persona_name, role="assistant", speaker=persona_name,
+            content=retried_text, user_identifier=user_identifier, channel=channel,
+            server_id=server_id, timestamp=datetime.now(timezone.utc),
+            interaction_id=retried_id, untrusted=untrusted,
+        )
 
     async def retain_turn_safe(
         self,

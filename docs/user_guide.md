@@ -1795,6 +1795,13 @@ derpr: We settled on the 45% floor with a 30s spin-down delay.
 - The label is added only to what is sent to Hindsight. Chat history, the prompt and the database store the bare message.
 - The request `timestamp` Hindsight anchors facts to is always UTC, whatever timezone the engine host runs in.
 - `scripts/backfill_hindsight.py` uses the same format, so backfilled and live turns read alike.
+- **Reasoning is never retained (DP-409).** A `<think>…</think>` block that a model leaves inline in its reply is stripped before the turn is sent — extraction otherwise files the model's self-talk as facts about the user.
+
+**Retries keep only the canonical conversation (DP-409).** Hindsight remembers the conversation you *kept*, not every attempt. When you **Retry** a reply, the session's Hindsight document is rebuilt from the stored conversation — which holds only the latest version of each turn — and replaced whole. Facts extracted from the discarded attempt, and observations built only on them, are deleted; the new text is re-extracted. A normal turn still just appends, so a replace costs one re-extraction of the session only when you retry.
+
+- The session is the same one normal turns append to: one document per persona and channel, cut after 24 hours idle.
+- If the session has no document on record (e.g. the doc-scope store was wiped), a retry falls back to appending the new reply, as before.
+- *Known gap:* switching the kept version with the `<` / `>` chevrons, editing or deleting a message does not rebuild the document yet — Hindsight keeps whatever it last saw.
 
 ### Operator trust overrides
 
