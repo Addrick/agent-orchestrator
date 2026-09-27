@@ -8,6 +8,9 @@ Asserts:
 - Handler returns formatted hits (dict shape) the engine can pass to the
   LLM, with the `untrusted` bit preserved so the security framework's
   taint propagation hooks the result back into the turn.
+- DP-407: the tag_filter follows the persona's memory mode (the same
+  `recall_scope_tags` auto-recall uses), so GLOBAL recall is unscoped and
+  reaches documents that carry no channel tag (uploads).
 - When invoked with no active TurnContext (e.g. mis-wired test), the
   handler returns an empty list rather than calling the backend with a
   bogus bank_id.
@@ -20,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from src.memory.backend.base import MemoryHit
+from src.persona import MemoryMode
 from src.tools.definitions import ALL_TOOL_DEFINITIONS, get_tool_capabilities
 from src.tools.tool_manager import MemoryRecallHandler, ToolManager
 from src.tools.turn_context import TurnContext, set_turn_context, reset_turn_context
@@ -135,3 +139,36 @@ async def test_recall_memory_handler_no_turn_context_returns_empty() -> None:
 
     backend.recall.assert_not_awaited()
     assert out["result"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode,expected_tags,expected_label", [
+    (MemoryMode.CHANNEL_ISOLATED, ["channel:c1", "server:s9", "user:u1"], "channel"),
+    (MemoryMode.GLOBAL, [], "global"),
+    (MemoryMode.SERVER_WIDE, ["server:s9"], "server"),
+    (MemoryMode.PERSONAL, ["user:u1"], "personal"),
+    (MemoryMode.TICKET_ISOLATED, [], "ticket"),
+])
+async def test_recall_memory_handler_scopes_by_memory_mode(
+    mode: MemoryMode, expected_tags: list, expected_label: str,
+) -> None:
+    """DP-407: the tool must scope like auto-recall. A hardcoded
+    channel/user/server predicate hid uploaded documents (tagged only
+    `ingest`/`upload`) from a GLOBAL persona's recall_memory."""
+    backend = MagicMock()
+    backend.recall = AsyncMock(return_value=[])
+    manager = ToolManager()
+    MemoryRecallHandler(backend).register(manager)
+
+    token = set_turn_context(TurnContext(
+        persona_name="alice", user_identifier="u1",
+        channel="c1", server_id="s9", memory_mode=mode,
+    ))
+    try:
+        await manager.execute_tool("recall_memory", {"recall_memory"}, query="q")
+    finally:
+        reset_turn_context(token)
+
+    kwargs = backend.recall.await_args.kwargs
+    assert sorted(kwargs["tag_filter"]) == sorted(expected_tags)
+    assert kwargs["memory_mode"] == expected_label

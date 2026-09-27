@@ -374,27 +374,31 @@ class MemoryRecallHandler:
         manager.register("recall_memory", self._recall_memory)
 
     async def _recall_memory(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
+        from src.request_builder import recall_scope_tags
         from src.tools.turn_context import get_turn_context
         ctx = get_turn_context()
         if ctx is None:
             logger.warning("recall_memory invoked without an active turn context.")
             return []
-        tag_filter: List[str] = [
-            f"channel:{ctx.channel}",
-            f"user:{ctx.user_identifier}",
-        ]
-        if ctx.server_id:
-            tag_filter.append(f"server:{ctx.server_id}")
+        # DP-407: scope by the persona's memory mode, exactly as auto-recall
+        # does — a hardcoded channel/user/server predicate hid everything not
+        # tagged with this channel (e.g. uploaded documents) even for GLOBAL.
+        tag_filter, mode_label = recall_scope_tags(
+            ctx.memory_mode,
+            channel=ctx.channel, server_id=ctx.server_id,
+            user_identifier=ctx.user_identifier,
+        )
 
         logger.info(
             f"Executing tool: recall_memory query='{query}' limit={limit} "
-            f"persona={ctx.persona_name}"
+            f"persona={ctx.persona_name} mode={mode_label}"
         )
         hits = await self.memory_backend.recall(
             bank_id=ctx.persona_name,
             query=query,
             k=limit,
             tag_filter=tag_filter,
+            memory_mode=mode_label,
         )
         return [
             {
