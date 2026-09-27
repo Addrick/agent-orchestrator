@@ -19,10 +19,12 @@ instructions.
 pytest -m "not llm_live" -n auto                    # default test run
 flake8 src/ services/                               # lint (services/ is deployed code; CI gates it)
 mypy src/ services/ --config-file mypy.ini          # type check
+lint-imports                                        # layer contracts (setup.cfg)
 python -m src.main                                  # run
 ```
 
-Those three are the CI gates (`.github/workflows/deploy.yml`). Test tiers, markers, and
+Those four are the CI gates (`.github/workflows/deploy.yml`); `python scripts/ci_check.py`
+runs all of them, and is the pre-push hook. Test tiers, markers, and
 the **mandatory test requirements** for schema/config/contract/startup changes:
 **`docs/testing.md`** — read it before changing any of those four things.
 

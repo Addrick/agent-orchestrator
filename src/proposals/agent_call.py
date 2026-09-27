@@ -24,8 +24,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Dict, FrozenSet, List, Tuple
 
-from src.tool_policy import ToolPolicy
-from src.tools.definitions import callable_tool_names
+from src.tool_policy import ToolPolicy, callable_tool_names
 from src.tools.tool_manager import ToolManager
 
 logger = logging.getLogger(__name__)

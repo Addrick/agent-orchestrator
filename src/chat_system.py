@@ -39,7 +39,7 @@ from src.tools.tool_loop import (
     write_call_identity,
 )
 from src.turn_persistence import TurnPersistence
-from src.tools.definitions import callable_tool_names
+from src.tool_policy import callable_tool_names
 from src.tools.tool_manager import ToolManager
 from src.tools.turn_context import TurnContext, turn_scope
 from src.personas.store import save_personas_to_file

@@ -3,7 +3,7 @@
 # so personas can hold a ToolPolicy without depending on the tools layer.
 
 import logging
-from typing import List, Dict, Any, Optional, Set
+from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -226,3 +226,25 @@ class ToolPolicy:
                 filtered.append(tool)
 
         return filtered
+
+
+def callable_tool_names(tools: Optional[Iterable[Dict[str, Any]]]) -> FrozenSet[str]:
+    """Names a model can call from a list of tool definitions.
+
+    Only `type == "function"` entries count: that is what every provider
+    declares to the model (`google.build_google_tools` filters on it), so a
+    flag entry like `google_grounding` — which carries a `function.name` but
+    is never declared as a function — is not callable through a list that
+    contains it. Shared by the tool loop's offered set and the MCP bridge's
+    exposed set (DP-404), so the two cannot disagree on shape. Lives here, not
+    in src.tools.definitions, so src.proposals can use it without importing
+    upward (DP-407).
+    """
+    names = set()
+    for t in tools or ():
+        if t.get("type") != "function":
+            continue
+        name = (t.get("function") or {}).get("name")
+        if isinstance(name, str) and name:
+            names.add(name)
+    return frozenset(names)
