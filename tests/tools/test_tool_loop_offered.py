@@ -20,9 +20,8 @@ from src.generation_events import ToolCallResultEvent
 from src.memory.memory_manager import MemoryManager
 from src.persona import ExecutionMode
 from src.stream_engine import _ToolCallStreamParser
-from src.tools.definitions import (
-    callable_tool_names, get_tool_capabilities, is_write_tool,
-)
+from src.tool_policy import callable_tool_names
+from src.tools.definitions import get_tool_capabilities, is_write_tool
 from src.tools.tool_loop import ToolDeferredEvent, ToolLoop, _LoopFinishedEvent
 from src.tools.tool_manager import ToolManager
 

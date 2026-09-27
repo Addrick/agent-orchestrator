@@ -374,7 +374,7 @@ class MemoryRecallHandler:
         manager.register("recall_memory", self._recall_memory)
 
     async def _recall_memory(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
-        from src.request_builder import recall_scope_tags
+        from src.memory.scope_tags import recall_scope_tags
         from src.tools.turn_context import get_turn_context
         ctx = get_turn_context()
         if ctx is None:

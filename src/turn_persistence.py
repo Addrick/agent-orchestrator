@@ -19,7 +19,7 @@ from config.global_config import MAX_CACHED_API_REQUESTS
 from src.generation_events import ResponseType
 from src.memory.backend.base import MemoryBackend
 from src.memory.memory_manager import MemoryManager
-from src.request_builder import build_scope_tags
+from src.memory.scope_tags import build_scope_tags
 from src.security.scrubber import get_scrubber
 
 logger = logging.getLogger(__name__)
