@@ -511,6 +511,10 @@ typing-inspection==0.4.2
     #   mcp
     #   pydantic
     #   pydantic-settings
+tzdata==2026.4
+    # via
+    #   -c requirements.txt
+    #   -r requirements.in
 uritemplate==4.2.0
     # via
     #   -c requirements.txt
