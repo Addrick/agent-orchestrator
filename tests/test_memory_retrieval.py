@@ -8,7 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from memory.memory_manager import MemoryManager
-from src.request_builder import RequestBuilder, _relative_time, recall_scope_tags
+from src.memory.scope_tags import recall_scope_tags
+from src.request_builder import RequestBuilder, _relative_time
 from src.embedding_service import EmbeddingService
 from src.memory.backend.base import MemoryHit
 from src.persona import MemoryMode

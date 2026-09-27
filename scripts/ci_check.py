@@ -2,7 +2,7 @@
 """Local CI gate runner — mirrors .github/workflows/deploy.yml.
 
 Runs the same checks GitHub does (flake8 hard subset, missing-deps,
-mypy, pytest) and prints one pass/fail line per stage plus a summary.
+mypy, import-linter, pytest) and prints one pass/fail line per stage plus a summary.
 Exits non-zero if any stage fails, so PyCharm/CI surface red on failure.
 
 Usage:
@@ -53,6 +53,11 @@ def main() -> int:
                              "--select=E9,F63,F7,F82", "--show-source", "--statistics"]),
         ("missing-deps", [PY, "scripts/check_missing_deps.py"]),
         ("mypy", [PY, "-m", "mypy", "src/", "services/", "--config-file", "mypy.ini"]),
+        # deploy.yml's `lint-imports` step (setup.cfg layer contracts). Invoked
+        # through this interpreter so the worktree venv's copy runs. Missing it
+        # here let two layer violations through the pre-push gate (DP-404, DP-407).
+        ("import-linter", [PY, "-c", "import sys; from importlinter.cli import lint_imports_command; "
+                                     "sys.exit(lint_imports_command())"]),
     ]
 
     if not args.no_tests:

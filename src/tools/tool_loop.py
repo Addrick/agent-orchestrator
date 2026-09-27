@@ -32,8 +32,9 @@ from src.generation_events import (
     format_internal_error,
 )
 from src.persona import Persona
+from src.tool_policy import callable_tool_names
 from src.tools.definitions import (
-    ALWAYS_CONFIRM_TOOLS, callable_tool_names,
+    ALWAYS_CONFIRM_TOOLS,
     get_tool_capabilities, is_irreversible, get_tool_definition, is_write_tool
 )
 from src.tools.tool_manager import ToolManager, tool_error, unoffered_error
