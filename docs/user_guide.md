@@ -1431,6 +1431,65 @@ Disabled by default. Enable with `MCP_ENABLED=true`. Config knobs:
   restrictive defaults, removed tools are unregistered, and every persona is
   re-validated against the new toolset.
 
+#### Hindsight as an MCP server (DP-403)
+
+Hindsight serves its full API (reflect, bank config, mental models, directives,
+knowledge base, memory edit) as an MCP server, so a persona gets it through the
+entries above, with no Hindsight-specific tools. Configure it as **two kinds of
+entry**. Each is its own service binding, so each set of tools is granted, hidden
+in the Inspector, or removed as a unit:
+
+| Entry | URL | Reach |
+|---|---|---|
+| `hindsight-<persona>` | `http://<hindsight>:8888/mcp/<bank>/` | **That one bank.** The URL pins the session bank, and no tool has a `bank_id` argument (36 tools on Hindsight 0.10.0). |
+| `hindsight-admin` | `http://<hindsight>:8888/mcp` | **Any bank.** Every tool but `list_banks` takes an optional `bank_id`, plus `create_bank` / `get_bank_stats`. Operator personas only. |
+
+Server names allow lowercase letters, digits and `-` only (≤ 32 chars), so the
+persona's tools are named e.g. `mcp__hindsight-managr__reflect`.
+
+Recommended policy for a `hindsight-<persona>` entry:
+
+- **Read, relaxed in `tool_overrides`** (`"is_write": false,
+  "capabilities": {"irreversible": false}`; leave `produces_untrusted` on):
+  `recall`, `reflect`, `get_bank`, `list_documents`, `get_document`,
+  `list_memories`, `get_memory`, `list_mental_models`, `get_mental_model`,
+  `list_directives`, `list_tags`, `list_operations`, `get_operation`,
+  `get_knowledge_base_tree`, `get_knowledge_page`, `search_knowledge_base`.
+- **Write, left at the default (parks for approval):** `update_bank` (the live
+  way to change a bank's missions, disposition, recall budgets, etc.),
+  `create_mental_model`, `update_mental_model`, `refresh_mental_model`,
+  `create_directive`, `create_knowledge_folder`, `create_knowledge_page`,
+  `update_knowledge_node`, `update_memory`, `invalidate_memory`,
+  `cancel_operation`.
+- **Not on any allowlist:** `delete_bank` (on a pinned entry this deletes the
+  persona's own memory), `clear_memories`, `clear_mental_model`, `delete_*`, and
+  `retain` / `sync_retain`. Chat memory keeps going through `recall_memory` and
+  the automatic turn retains, which add turn scoping, document grouping, date
+  anchors and untrusted tagging that the MCP `retain`/`recall` do not.
+
+```json
+{
+  "servers": {
+    "hindsight-managr": {
+      "url": "http://10.0.0.70:8888/mcp/managr/",
+      "enabled": true,
+      "tool_overrides": {
+        "recall":  {"is_write": false, "capabilities": {"irreversible": false}},
+        "reflect": {"is_write": false, "capabilities": {"irreversible": false}}
+      }
+    }
+  }
+}
+```
+
+Then give the persona `service_bindings: ["mcp:hindsight-managr"]` and list the
+tool names it should have in `allow`.
+
+> ⚠️ **Don't enable these entries in prod until DP-404 lands.** A persona's
+> allowlist controls which tools are *offered* to the model, but execution
+> doesn't re-check it yet. A registered read tool can be called by any persona
+> that emits its name.
+
 ### MCP Bridge — derpr tools for dispatched subagents (DP-240)
 
 The mirror image of the section above: instead of derpr *consuming* someone
