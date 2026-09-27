@@ -18,6 +18,8 @@
 
 import copy
 import json
+import re
+from datetime import timedelta
 
 import pytest
 
@@ -163,10 +165,19 @@ async def test_tool_loop_context_flow_memory_and_clean_close(mocked_chat_system)
     roles = [c.kwargs["role"] for c in retain_spy.await_args_list]
     assert roles == ["user", "assistant"]
     user_retain, assistant_retain = retain_spy.await_args_list
-    assert user_retain.kwargs["content"] == "check the agents"
+    # DP-402: turns append into one Hindsight document per channel, so each is
+    # labelled with its speaker; only the user turn carries a time.
+    assert re.fullmatch(
+        r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] user-e2e: check the agents",
+        user_retain.kwargs["content"],
+    )
     assert user_retain.kwargs["bank_id"] == "test_persona"
-    assert assistant_retain.kwargs["content"] == "Both agents are healthy."
+    assert assistant_retain.kwargs["content"] == "test_persona: Both agents are healthy."
     assert assistant_retain.kwargs["untrusted"] is False
+    # The anchor Hindsight dates facts by is aware UTC on both turns — a naive
+    # value reads as UTC downstream and is hours off on a non-UTC host.
+    for call in (user_retain, assistant_retain):
+        assert call.kwargs["timestamp"].utcoffset() == timedelta(0)
 
     # --- (3) Clean closure. ---
     # Turn context was live during every model call...

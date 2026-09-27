@@ -1672,6 +1672,20 @@ Restore-test at least once before relying on backups — bank IDs and tag schema
 
 The retain path is fire-and-forget through a per-bank async queue: user turns enqueue and return immediately; one worker per bank drains in FIFO order. There is no DLQ — alpha tolerates dropped retains rather than risk back-pressure on user turns.
 
+**What each retained turn looks like (DP-402).** Turns in one channel are appended into a single Hindsight document, so each turn is labelled with who said it — otherwise the extractor reads an unattributed run of messages and has to guess the speaker:
+
+```
+[2026-09-26 14:05] Adam: can you remind me what we decided about the fan curve?
+
+derpr: We settled on the 45% floor with a 30s spin-down delay.
+```
+
+- **User turns** carry the time in `LOCAL_TZ` (default `America/New_York`) and the author's display name.
+- **Assistant turns** carry the persona name only — **no timestamp**. Timestamps next to the model's own words trip it up (the same reason Lite's "inject timestamps" is used sparingly), and the reply is minutes after its user turn, whose stamp already dates the exchange.
+- The label is added only to what is sent to Hindsight. Chat history, the prompt and the database store the bare message.
+- The request `timestamp` Hindsight anchors facts to is always UTC, whatever timezone the engine host runs in.
+- `scripts/backfill_hindsight.py` uses the same format, so backfilled and live turns read alike.
+
 ### Operator trust overrides
 
 `mark_trusted` / `mark_untrusted` flip the `untrusted` bit on a specific recall hit (per the [tool security framework](../memory/project/plans/tool_security_framework.md)). Overrides live in a parallel SQLite file (`data/hindsight_overrides.db`, `HINDSIGHT_OVERRIDE_DB`) — recall post-filters and rewrites the bit. Every flip is audit-logged with operator_id, reason, prior, and new values.
