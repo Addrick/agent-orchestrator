@@ -20,7 +20,7 @@ from src.tools.tool_loop import (
 
 # DP-404: the loop refuses a call whose name was not offered, so these
 # mechanics tests offer every tool name they script.
-_OFFERED = [{"name": n} for n in (
+_OFFERED = [{"type": "function", "function": {"name": n}} for n in (
     "create_ticket", "spinner", "update_ticket", "pve_status", "tool_a", "tool_b", "soft_fail", "search_tool", "search_tickets", "list_models", "gpu_status", "get_ticket_details", "broken_tool",
 )]
 
@@ -56,7 +56,7 @@ def _make_engine(streams: List[List[Dict[str, Any]]]):
 
 def _make_tool_manager(results: Dict[str, Any]):
     manager = MagicMock()
-    async def execute(name, **kwargs):
+    async def execute(name, _offered, **kwargs):
         return results.get(name, {"result": "ok"})
     manager.execute_tool = AsyncMock(side_effect=execute)
     manager.enrich_audit_action = AsyncMock(return_value=None)
@@ -1198,11 +1198,11 @@ async def test_exhaustion_wrap_up_is_toolless_and_nudged():
 
     await _drain(loop.run(
         persona=_make_persona(), conversation_history=history,
-        params=MagicMock(), tools=[{"name": "spinner"}],
+        params=MagicMock(), tools=[{"type": "function", "function": {"name": "spinner"}}],
     ))
 
     first_call, wrap_call = engine.stream_messages.call_args_list
-    assert first_call.kwargs["tools"] == [{"name": "spinner"}]
+    assert first_call.kwargs["tools"] == [{"type": "function", "function": {"name": "spinner"}}]
     assert wrap_call.kwargs["tools"] is None
 
     wrap_messages = wrap_call.args[1]

@@ -22,9 +22,10 @@ mean executing against a manager the operator thought they had replaced.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Tuple
 
 from src.tool_policy import ToolPolicy
+from src.tools.definitions import callable_tool_names
 from src.tools.tool_manager import ToolManager
 
 logger = logging.getLogger(__name__)
@@ -52,13 +53,8 @@ class AgentCallRunner:
         registered = self._tool_manager_lookup().get_tool_definitions()
         return self._policy_lookup().filter_tools(registered)
 
-    def exposed_tool_names(self) -> List[str]:
-        return [
-            name for name in (
-                t.get("function", {}).get("name")
-                for t in self.exposed_tool_definitions()
-            ) if name
-        ]
+    def exposed_tool_names(self) -> FrozenSet[str]:
+        return callable_tool_names(self.exposed_tool_definitions())
 
     def is_exposed(self, tool_name: str) -> bool:
         return tool_name in self.exposed_tool_names()
@@ -71,9 +67,10 @@ class AgentCallRunner:
         check still applies and is re-run here rather than trusted from the
         caller.
         """
-        if not self.is_exposed(tool_name):
+        exposed = self.exposed_tool_names()
+        if tool_name not in exposed:
             return {"error": f"tool '{tool_name}' is not exposed by the current bridge policy"}
-        return await self._tool_manager_lookup().execute_tool(tool_name, **tool_args)
+        return await self._tool_manager_lookup().execute_tool(tool_name, exposed, **tool_args)
 
     async def run(self, tool_name: str, tool_args: Dict[str, Any]) -> Tuple[bool, str]:
         """Execute one approved call. Returns (success, result message).
@@ -81,7 +78,8 @@ class AgentCallRunner:
         Refuses — loudly and without executing — any tool the live policy no
         longer exposes. This is the check that makes a stale approved row safe.
         """
-        if not self.is_exposed(tool_name):
+        exposed = self.exposed_tool_names()
+        if tool_name not in exposed:
             logger.warning(
                 "Refusing approved agent call to '%s': not exposed by the current "
                 "bridge policy (policy narrowed or tool unregistered since queueing).",
@@ -92,7 +90,7 @@ class AgentCallRunner:
                 "refused at execution time"
             )
 
-        outcome = await self._tool_manager_lookup().execute_tool(tool_name, **tool_args)
+        outcome = await self._tool_manager_lookup().execute_tool(tool_name, exposed, **tool_args)
         # execute_tool never raises — it returns {'result': ...} or {'error': ...}.
         if "error" in outcome:
             return False, str(outcome["error"])

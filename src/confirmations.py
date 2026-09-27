@@ -17,7 +17,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import AbstractSet, Any, Callable, Dict, List, Optional, Set, Tuple
 
 from config.global_config import (
     PARK_PURGE_INTERVAL, PARK_REEXECUTION_GUARD_WINDOW, PARK_ROW_RETENTION,
@@ -288,12 +288,18 @@ class ConfirmationManager:
     """
 
     def __init__(self, tool_manager_lookup: Callable[[], ToolManager],
-                 memory_manager: MemoryManager) -> None:
+                 memory_manager: MemoryManager,
+                 offered_lookup: Callable[[str], AbstractSet[str]]) -> None:
         # A lookup closure (mirrors RequestBuilder.persona_lookup) rather than
         # a bound reference: ToolLoop reads chat_system.tool_manager per call,
         # so a post-init swap must be visible here too or approved writes
         # would execute against the stale manager.
         self._tool_manager_lookup = tool_manager_lookup
+        # DP-404: persona name -> the tool names that persona is offered NOW.
+        # An approved park re-derives it at execution time rather than trusting
+        # the turn that parked it, so a binding or allowlist narrowed while the
+        # park waited (or a durable row restored after a restart) cannot run.
+        self._offered_lookup = offered_lookup
         self.memory_manager = memory_manager
         self.pending: Dict[str, ParkedWrite] = {}
         # Insertion-ordered token list per conversation — drives the portal's
@@ -920,7 +926,8 @@ class ConfirmationManager:
             tool_manager = self._tool_manager_lookup()
             try:
                 decision.result = await tool_manager.execute_tool(
-                    tool_name, **(park.write_call.get("arguments") or {}),
+                    tool_name, self._offered_lookup(park.persona_name),
+                    **(park.write_call.get("arguments") or {}),
                 )
                 # `ok` is "did the tool succeed", NOT "did the call return"
                 # and NOT "did the envelope carry an error". Two ways a write

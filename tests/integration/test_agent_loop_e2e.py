@@ -97,7 +97,7 @@ async def test_tool_loop_context_flow_memory_and_clean_close(mocked_chat_system)
         "get_agent_history": {"agent": "zammad_bot", "events": ["triaged #42"]},
     }
 
-    async def fake_execute(name, **kwargs):
+    async def fake_execute(name, _offered, **kwargs):
         return tool_results[name]
 
     chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[assignment]

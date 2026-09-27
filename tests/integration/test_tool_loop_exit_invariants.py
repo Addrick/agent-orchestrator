@@ -171,7 +171,7 @@ async def test_idless_tool_call_gets_stable_matching_tool_call_id(mocked_chat_sy
         ({"type": "text", "content": "done"}, {}),
     ], capture=capture)
 
-    async def fake_execute(name, **kwargs):
+    async def fake_execute(name, _offered, **kwargs):
         return {"status": "running"}
     chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[assignment]
 
@@ -263,7 +263,7 @@ async def test_read_group_executes_concurrently(mocked_chat_system):
 
     spans = {}
 
-    async def fake_execute(name, **kwargs):
+    async def fake_execute(name, _offered, **kwargs):
         start = time.perf_counter()
         await asyncio.sleep(0.1)
         spans[name] = (start, time.perf_counter())
@@ -308,7 +308,7 @@ async def test_budget_exhaustion_answer_is_persisted_and_retained(
         for i in range(MAX_TOOL_CALLS)
     ] + [({"type": "text", "content": "Nothing installable matched."}, {})])
 
-    async def fake_execute(name, **kwargs):
+    async def fake_execute(name, _offered, **kwargs):
         return {"status": "running"}
     chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[assignment]
 
@@ -401,7 +401,7 @@ async def test_budget_exhaustion_stays_one_terminal_event_when_wrap_up_dies(
              "arguments": {"agent_id": "z"}}]}, {})
     chat_system.text_engine.generate_response.side_effect = fake_generate_response
 
-    async def fake_execute(name, **kwargs):
+    async def fake_execute(name, _offered, **kwargs):
         return {"status": "running"}
     chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[assignment]
 

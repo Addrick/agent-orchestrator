@@ -876,7 +876,7 @@ class TestWebSearch:
         ]
         manager = ToolManager()
         WebSearchHandler().register(manager)
-        result = await manager.execute_tool("web_search", query="test query")
+        result = await manager.execute_tool("web_search", {"web_search"}, query="test query")
         assert "result" in result
         assert result["result"] == [
             {"title": "Result One", "url": "http://example.com/1", "summary": "Summary one."},
@@ -894,7 +894,7 @@ class TestWebSearch:
         mock_ddgs_instance.text.return_value = []
         manager = ToolManager()
         WebSearchHandler().register(manager)
-        await manager.execute_tool("web_search", query="test", max_results=3)
+        await manager.execute_tool("web_search", {"web_search"}, query="test", max_results=3)
         mock_ddgs_instance.text.assert_called_once_with("test", max_results=3)
 
 

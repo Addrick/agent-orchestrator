@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from typing import Any, Coroutine, Dict, List, Callable, Optional, cast
+from typing import AbstractSet, Any, Coroutine, Dict, List, Callable, Optional, cast
 
 from src.tools.definitions import get_all_tool_definitions
 
@@ -63,6 +63,16 @@ def _payload_error(payload: Any) -> Optional[str]:
     return None
 
 
+def unoffered_error(name: str) -> Dict[str, Any]:
+    """The result a refused (unoffered) call answers the model with."""
+    return {
+        "error": (
+            f"Tool '{name}' is not available to this persona; not executed. "
+            "Use only the tools you were given."
+        )
+    }
+
+
 class ToolManager:
     """
     Generic registry for tool implementations.
@@ -108,13 +118,27 @@ class ToolManager:
             or t.get('type') != 'function'
         ]
 
-    async def execute_tool(self, tool_name: str, **kwargs: Any) -> Dict[str, Any]:
+    async def execute_tool(
+        self, tool_name: str, offered: AbstractSet[str], /, **kwargs: Any,
+    ) -> Dict[str, Any]:
         """
-        Executes a registered tool by name.
+        Executes a registered tool by name, if `tool_name` is in `offered`.
+
+        DP-404: `offered` is the set of names the caller actually gave the
+        model — a turn's provider tool list (`ToolLoop`, and
+        `ConfirmationManager` re-deriving it at approval time) or the bridge's
+        exposure policy (`AgentCallRunner`). It is required and positional so
+        that no caller can reach a handler without supplying one, and so that a
+        tool argument that happens to be called `offered` still lands in
+        `kwargs`. A registered handler is not permission: the text protocol
+        lets a model name any tool in the process.
 
         Returns:
             A dictionary containing either the 'result' or an 'error' message.
         """
+        if tool_name not in offered:
+            logger.warning("Refusing unoffered tool call '%s'", tool_name)
+            return unoffered_error(tool_name)
         if tool_name not in self._handlers:
             return {"error": f"Tool '{tool_name}' not found."}
 

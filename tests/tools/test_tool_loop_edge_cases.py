@@ -29,7 +29,7 @@ from tests.tools.test_tool_loop import (
 
 # DP-404: the loop refuses a call whose name was not offered, so these
 # mechanics tests offer every tool name they script.
-_OFFERED = [{"name": n} for n in (
+_OFFERED = [{"type": "function", "function": {"name": n}} for n in (
     "update_ticket", "empty_a", "empty_b", "empty_c", "delete_user",
 )]
 

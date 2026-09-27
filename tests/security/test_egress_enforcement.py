@@ -25,7 +25,7 @@ from src.turn_persistence import TurnPersistence
 
 # DP-404: the loop refuses a call whose name was not offered, so these
 # tests offer every tool name they script.
-_OFFERED = [{"name": n} for n in ("create_ticket", "search_tool")]
+_OFFERED = [{"type": "function", "function": {"name": n}} for n in ("create_ticket", "search_tool")]
 
 
 SECRET = "supersecretvalue123"
@@ -71,7 +71,7 @@ def _make_engine(streams: List[List[Dict[str, Any]]]):
 def _make_tool_manager(results: Dict[str, Any]):
     manager = MagicMock()
 
-    async def execute(name, **kwargs):
+    async def execute(name, _offered, **kwargs):
         return results.get(name, {"result": "ok"})
     manager.execute_tool = AsyncMock(side_effect=execute)
     manager.enrich_audit_action = AsyncMock(return_value=None)
@@ -355,7 +355,9 @@ async def test_boundary4_approved_write_args_not_persisted_raw(audit_mem_manager
     from src.confirmations import ConfirmationManager, Decision, ParkedWrite
 
     tools = _make_tool_manager({})
-    manager = ConfirmationManager(lambda: tools, audit_mem_manager)
+    manager = ConfirmationManager(
+        lambda: tools, audit_mem_manager, lambda _p: frozenset({"create_ticket"}),
+    )
     park = ParkedWrite(
         token="tok1",
         write_call={"id": "w1", "name": "create_ticket",

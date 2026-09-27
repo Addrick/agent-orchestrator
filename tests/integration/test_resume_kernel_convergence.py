@@ -92,7 +92,7 @@ def _confirm_persona(chat_system):
 def _recording_tool_manager(chat_system, result=None):
     executed = []
 
-    async def fake_execute(name, **kwargs):
+    async def fake_execute(name, _offered, **kwargs):
         executed.append(name)
         return result if result is not None else {"ok": True}
     chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[assignment]
@@ -259,7 +259,7 @@ async def test_continuation_pins_scope_and_resets(mocked_chat_system):
 
     seen = {}
 
-    async def fake_execute(name, **kwargs):
+    async def fake_execute(name, _offered, **kwargs):
         seen["ctx"] = get_turn_context()
         return {"ok": True}
     chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[assignment]
@@ -433,7 +433,7 @@ async def test_concurrent_approvals_serialize(mocked_chat_system):
 
     concurrent = {"now": 0, "max": 0}
 
-    async def fake_execute(name, **kwargs):
+    async def fake_execute(name, _offered, **kwargs):
         concurrent["now"] += 1
         concurrent["max"] = max(concurrent["max"], concurrent["now"])
         await asyncio.sleep(0)  # give the other task a chance to interleave

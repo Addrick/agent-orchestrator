@@ -27,7 +27,7 @@ from src.persona import Persona, ExecutionMode
 
 
 # Reuse the shared fixture
-from tests.helpers import only_pending_token
+from tests.helpers import offer_tools, only_pending_token
 from tests.test_chat_system import chat_system_with_mocks  # noqa: F401
 
 
@@ -132,6 +132,7 @@ async def test_second_park_does_not_evict_the_first(chat_system_with_mocks):
     they are siblings, so nothing is evicted and that event no longer exists.
     """
     system, mm, text_engine_mock, persona, _ = chat_system_with_mocks
+    offer_tools(system, "test_persona", "update_ticket")
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_enabled_tools(["*"])
 
@@ -254,6 +255,7 @@ async def test_retried_turn_that_gates_a_write_updates_the_archived_row(
     the linkage across.
     """
     system, mm, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
+    offer_tools(system, "test_persona", "update_ticket")
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_enabled_tools(["*"])
     mm.handle_portal_retry.return_value = 42

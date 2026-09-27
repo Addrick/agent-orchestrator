@@ -54,7 +54,7 @@ async def test_recall_memory_handler_invokes_backend_with_turn_scope() -> None:
         channel="c1", server_id="s9",
     ))
     try:
-        out = await manager.execute_tool("recall_memory", query="deploy", limit=3)
+        out = await manager.execute_tool("recall_memory", {"recall_memory"}, query="deploy", limit=3)
     finally:
         reset_turn_context(token)
 
@@ -90,7 +90,7 @@ async def test_recall_memory_handler_omits_server_tag_when_absent() -> None:
         channel="dm:u1", server_id=None,
     ))
     try:
-        await manager.execute_tool("recall_memory", query="x")
+        await manager.execute_tool("recall_memory", {"recall_memory"}, query="x")
     finally:
         reset_turn_context(token)
 
@@ -116,7 +116,7 @@ async def test_recall_memory_handler_bank_id_follows_active_persona() -> None:
             channel="c1", server_id=None,
         ))
         try:
-            await manager.execute_tool("recall_memory", query="q")
+            await manager.execute_tool("recall_memory", {"recall_memory"}, query="q")
         finally:
             reset_turn_context(token)
 
@@ -131,7 +131,7 @@ async def test_recall_memory_handler_no_turn_context_returns_empty() -> None:
     manager = ToolManager()
     MemoryRecallHandler(backend).register(manager)
 
-    out = await manager.execute_tool("recall_memory", query="anything")
+    out = await manager.execute_tool("recall_memory", {"recall_memory"}, query="anything")
 
     backend.recall.assert_not_awaited()
     assert out["result"] == []

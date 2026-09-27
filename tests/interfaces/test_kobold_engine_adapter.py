@@ -568,7 +568,7 @@ def test_confirm_route_approves_and_streams_continuation():
 
     executed = []
 
-    async def fake_execute(name, **kwargs):
+    async def fake_execute(name, _offered, **kwargs):
         executed.append(name)
         return {"ok": True}
     chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[method-assign]

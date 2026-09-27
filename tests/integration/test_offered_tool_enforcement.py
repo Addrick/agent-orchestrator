@@ -81,3 +81,10 @@ async def test_registered_tool_outside_the_persona_allowlist_does_not_run(mocked
     _script(chat_system, _call("get_agent_status", agent_id="a"), _text("ok"))
     await _turn(chat_system)
     assert ran == []
+
+    # Positive control: widen the allowlist and the identical call runs, so
+    # the refusal above was the allowlist and nothing else.
+    persona.set_enabled_tools(["get_agent_history", "get_agent_status"])
+    _script(chat_system, _call("get_agent_status", agent_id="a"), _text("ok"))
+    await _turn(chat_system)
+    assert ran == [{"agent_id": "a"}]

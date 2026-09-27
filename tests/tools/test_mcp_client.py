@@ -127,7 +127,7 @@ async def test_add_server_registers_tools_with_restrictive_defaults(
     assert definitions.is_write_tool("mcp__home__do_thing") is True
 
     # Handler is live in the ToolManager and round-trips through the session.
-    out = await tool_manager.execute_tool("mcp__home__do_thing")
+    out = await tool_manager.execute_tool("mcp__home__do_thing", {"mcp__home__do_thing"})
     assert out == {"result": "ok"}
 
     # Config persisted.
@@ -278,7 +278,7 @@ async def test_add_server_save_failure_rolls_back_registration(
 
     assert definitions.get_tool_definition("mcp__home__do_thing") is None
     assert "home" not in manager._connections
-    out = await tool_manager.execute_tool("mcp__home__do_thing")
+    out = await tool_manager.execute_tool("mcp__home__do_thing", {"mcp__home__do_thing"})
     assert "not found" in out["error"]
 
     # The add is cleanly retryable once persistence works again.
@@ -324,7 +324,7 @@ async def test_call_tool_error_result_raises(tmp_path, fresh_registry, fake_tran
     manager, tool_manager = _make_manager(tmp_path)
     await manager.add_server("home", "http://srv/mcp")
     # Through the ToolManager the raise degrades to an {"error": ...} dict.
-    out = await tool_manager.execute_tool("mcp__home__do_thing")
+    out = await tool_manager.execute_tool("mcp__home__do_thing", {"mcp__home__do_thing"})
     assert "boom" in out["error"]
     await manager.aclose()
 
@@ -341,7 +341,7 @@ async def test_call_passes_arguments_through(tmp_path, fresh_registry, fake_tran
     fake_transport["http://srv/mcp"] = session
     manager, tool_manager = _make_manager(tmp_path)
     await manager.add_server("home", "http://srv/mcp")
-    await tool_manager.execute_tool("mcp__home__with_args", state="on", level=3)
+    await tool_manager.execute_tool("mcp__home__with_args", {"mcp__home__with_args"}, state="on", level=3)
     assert session.calls == [("with_args", {"state": "on", "level": 3})]
     await manager.aclose()
 
@@ -381,7 +381,7 @@ async def test_remove_server_unregisters_and_persists(
     result = await manager.remove_server("home")
     assert result["tools_unregistered"] == ["mcp__home__do_thing"]
     assert definitions.get_tool_definition("mcp__home__do_thing") is None
-    out = await tool_manager.execute_tool("mcp__home__do_thing")
+    out = await tool_manager.execute_tool("mcp__home__do_thing", {"mcp__home__do_thing"})
     assert "not found" in out["error"]
     config = json.loads((tmp_path / "mcp_servers.json").read_text())
     assert config["servers"] == {}
@@ -419,7 +419,7 @@ async def test_disabled_manager_short_circuits(tmp_path, fresh_registry, fake_tr
         with pytest.raises(RuntimeError, match="disabled"):
             await call
     # The management tools still surface the error through the ToolManager.
-    out = await tool_manager.execute_tool("list_mcp_servers")
+    out = await tool_manager.execute_tool("list_mcp_servers", {"list_mcp_servers"})
     assert "disabled" in out["error"]
 
 
@@ -516,13 +516,13 @@ async def test_maintenance_reconnects_dead_server(
 
     # While dead: tools stay registered but degrade to per-call errors.
     assert definitions.get_tool_definition("mcp__home__a") is not None
-    out = await tool_manager.execute_tool("mcp__home__a")
+    out = await tool_manager.execute_tool("mcp__home__a", {"mcp__home__a"})
     assert "not connected" in out["error"]
 
     await manager._maintain()
     listing = await manager.list_servers()
     assert listing[0]["connected"] is True
-    assert (await tool_manager.execute_tool("mcp__home__a")) == {"result": "ok"}
+    assert (await tool_manager.execute_tool("mcp__home__a", {"mcp__home__a"})) == {"result": "ok"}
     await manager.aclose()
 
 

@@ -20,7 +20,7 @@ from src.tools.tool_loop import (
 
 # DP-404: the loop refuses a call whose name was not offered, so these
 # tests offer every tool name they script.
-_OFFERED = [{"name": n} for n in ("create_ticket", "web_search")]
+_OFFERED = [{"type": "function", "function": {"name": n}} for n in ("create_ticket", "web_search")]
 
 
 
@@ -50,7 +50,7 @@ def _make_engine(streams: List[List[Dict[str, Any]]]):
 
 def _make_tool_manager(results: Dict[str, Any] | None = None):
     manager = MagicMock()
-    async def execute(name, **kwargs):
+    async def execute(name, _offered, **kwargs):
         if results and name in results:
             return results[name]
         return {"result": "ok"}

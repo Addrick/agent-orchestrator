@@ -11,7 +11,7 @@ No production-code changes — bugs noted in DP-199-edge-cases.md
 
 import asyncio
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -23,7 +23,7 @@ from memory.memory_manager import MemoryManager
 from src.engine import TextEngine
 
 # Reuse the shared fixture
-from tests.helpers import only_pending_token, pending_tokens
+from tests.helpers import offer_tools, only_pending_token, pending_tokens
 from tests.test_chat_system import chat_system_with_mocks  # noqa: F401
 
 
@@ -34,6 +34,7 @@ async def test_confirm_deny_then_retry_creates_new_pending(chat_system_with_mock
     """After denying a gated write, re-issuing the same request parks a NEW
     proposal with its own token (no stale state from the prior deny)."""
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
+    offer_tools(system, "test_persona", "update_ticket")
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_enabled_tools(['*'])
 
@@ -75,6 +76,7 @@ async def test_confirm_deny_continuation_parks_nothing_new(chat_system_with_mock
     """A denial's continuation returns clean text and leaves nothing pending,
     provided the model doesn't propose again."""
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
+    offer_tools(system, "test_persona", "update_ticket")
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_enabled_tools(['*'])
 
@@ -104,6 +106,7 @@ async def test_continuation_may_propose_again(chat_system_with_mocks):
     independently resolvable park — this chaining is what the old blocking
     resume could not express (the 2026-07-26 dangling-proposal bug)."""
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
+    offer_tools(system, "test_persona", "update_ticket", "create_ticket")
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_enabled_tools(['*'])
 
@@ -168,7 +171,7 @@ async def test_resolve_a_park_registered_directly(chat_system_with_mocks):
     assert response_type == ResponseType.LLM_GENERATION
     assert response == 'Done.'
     tool_manager_mock.execute_tool.assert_called_once_with(
-        'update_ticket', ticket_id=7, state='closed')
+        'update_ticket', ANY, ticket_id=7, state='closed')
 
 
 @pytest.mark.asyncio
@@ -179,6 +182,7 @@ async def test_expired_park_is_not_executed_on_approval(chat_system_with_mocks):
     seeing the affordance and clicking it.
     """
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
+    offer_tools(system, "test_persona", "update_ticket")
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_enabled_tools(['*'])
 
