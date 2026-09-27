@@ -394,6 +394,7 @@ class ChatSystem:
             user_identifier=user_identifier,
             channel=channel,
             server_id=server_id,
+            memory_mode=persona.get_memory_mode(),
         )):
             try:
                 await self.request_builder.prepare_request(

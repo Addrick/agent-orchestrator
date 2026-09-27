@@ -591,6 +591,7 @@ class RequestBuilder:
             user_identifier=user_identifier,
             channel=channel,
             server_id=server_id,
+            memory_mode=persona.get_memory_mode(),
         )):
             # DP-142: dry-run — never advance the hello override.
             await self.prepare_request(ctx, is_retry=is_retry, advance=False)

@@ -148,7 +148,7 @@ The nav rail's **`◈ MEMORY`** dock opens a full-page **Imports** panel for man
 - **Documents table:** lists the bank's documents with derived-unit counts and last-updated time; the **✕** button deletes a document and its derived memory units (with a confirm prompt).
 - **Operations monitor:** shows recent async ingest/consolidation operations for the bank with status and any error — Hindsight processes uploads asynchronously, so a freshly-added document appears here as a pending operation before its units are extracted. Use **Refresh** to re-poll.
 
-Documents ingested here are **automatically chunked and extracted by Hindsight** (server-side) using the bank's retain mission — the panel just declares the bank and hands over the content. Operator uploads are tagged trusted. When the engine runs on the SQLite memory backend (no Hindsight), the panel reports the backend has no import surface (HTTP 501) rather than silently doing nothing.
+Documents ingested here are **automatically chunked and extracted by Hindsight** (server-side) using the bank's retain mission — the panel just declares the bank and hands over the content. Operator uploads are tagged trusted. Imported documents carry no channel, user or server tag, so a persona only recalls them — automatically or via `recall_memory` — when its memory mode is **global**; channel-isolated, server-wide and personal modes filter them out. (Documents and conversation memory share this one scope setting for now.) When the engine runs on the SQLite memory backend (no Hindsight), the panel reports the backend has no import surface (HTTP 501) rather than silently doing nothing.
 
 #### Content-date anchoring (DP-292 phase 2)
 
@@ -1490,7 +1490,7 @@ Available to any persona with `enabled_tools: ["*"]` (e.g., `joy`, `it-help`). T
 
 | Tool | Type | Description |
 |------|------|-------------|
-| `recall_memory` | Read | Search the persona's long-term memory bank for facts relevant to a natural-language query. Returns up to `limit` (default 10) hits — short summaries of past conversations or observations. Scope is inherited from the active turn (persona, channel, user, server); the LLM cannot redirect recall to another persona. Marked `produces_untrusted=True` so retrieved hits taint the turn under the tool-security framework. |
+| `recall_memory` | Read | Search the persona's long-term memory bank for facts relevant to a natural-language query. Returns up to `limit` (default 10) hits — short summaries of past conversations or observations. Scope is inherited from the active turn and follows the persona's **memory mode**, exactly like automatic memory injection (channel-isolated → this channel/user/server; server-wide → this server; personal → this user; global → the whole bank); the LLM cannot redirect recall to another persona. Marked `produces_untrusted=True` so retrieved hits taint the turn under the tool-security framework. |
 | `drill_down_memory` | Read | Fetch raw episodic memories under a specific Core Profile. Use to recover specific details (dates, links, verbatim quotes) that were abstracted away during consolidation. Requires `parent_summary_id`. |
 | `update_core_memory` | Write | Modify an existing Core Profile when new information contradicts or extends it. Requires `summary_id` and the revised content. |
 

@@ -8,7 +8,8 @@ the top of `_orchestrate` and the handler reads it.
 
 Used by:
 - `recall_memory` (DP-113) — to scope `MemoryBackend.recall` to the current
-  bank + tag predicate without trusting the model to pass them.
+  bank + tag predicate without trusting the model to pass them. The predicate
+  follows the persona's `memory_mode` (DP-407), the same scope auto-recall uses.
 
 Returns None outside an active turn (e.g., import-time tool registration,
 unit tests that don't enter `_orchestrate`). Handlers must tolerate that.
@@ -20,6 +21,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Iterator, Optional
 
+from src.persona import MemoryMode
+
 
 @dataclass(frozen=True)
 class TurnContext:
@@ -27,6 +30,7 @@ class TurnContext:
     user_identifier: str
     channel: str
     server_id: Optional[str]
+    memory_mode: MemoryMode = MemoryMode.CHANNEL_ISOLATED
 
 
 _turn_context: ContextVar[Optional[TurnContext]] = ContextVar(
