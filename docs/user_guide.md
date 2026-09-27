@@ -1449,18 +1449,37 @@ persona's tools are named e.g. `mcp__hindsight-managr__reflect`.
 
 Recommended policy for a `hindsight-<persona>` entry:
 
-- **Read, relaxed in `tool_overrides`** (`"is_write": false,
-  "capabilities": {"irreversible": false}`; leave `produces_untrusted` on):
-  `recall`, `reflect`, `get_bank`, `list_documents`, `get_document`,
-  `list_memories`, `get_memory`, `list_mental_models`, `get_mental_model`,
-  `list_directives`, `list_tags`, `list_operations`, `get_operation`,
-  `get_knowledge_base_tree`, `get_knowledge_page`, `search_knowledge_base`.
+> ⚠️ **These reads are not scoped to the asker.** A pinned entry sees the whole
+> bank — every user, channel and server the persona has talked to — and ignores
+> the persona's `memory_mode`. Native `recall_memory` scopes by `memory_mode`;
+> MCP `recall`, `reflect`, `list_memories`, `get_memory`, `list_documents` and
+> `get_document` do not, and mental models / knowledge pages are synthesized from
+> the same cross-user memories. Relax the reads below only for a persona whose
+> `memory_mode` is `GLOBAL` or whose users may all see each other's history
+> (e.g. an operator-only persona). Anywhere else, leave them at the default so
+> each call parks for approval.
+
+- **Read, relaxed in `tool_overrides`** — `"is_write": false` and
+  `"capabilities": {"irreversible": false, "sensitivity": "internal"}`; leave
+  `produces_untrusted` on. `sensitivity: internal` matches `recall_memory` over
+  the same data. Without it the tool keeps the default `pii`, and a persona that
+  also has a foreign-domain network tool (e.g. `web_search`) fails composition
+  rule 3 and is quarantined as soon as the server connects. Tools: `recall`,
+  `reflect`, `get_bank`, `list_documents`, `get_document`, `list_memories`,
+  `get_memory`, `list_mental_models`, `get_mental_model`, `list_directives`,
+  `list_tags`, `list_operations`, `get_operation`, `get_knowledge_base_tree`,
+  `get_knowledge_page`, `search_knowledge_base`.
 - **Write, left at the default (parks for approval):** `update_bank` (the live
-  way to change a bank's missions, disposition, recall budgets, etc.),
+  way to change a bank's missions, recall budgets, etc. — but **not
+  disposition** when the persona sets one: derpr re-applies the persona's
+  `disposition` to the bank at every startup, so change it in the persona),
   `create_mental_model`, `update_mental_model`, `refresh_mental_model`,
   `create_directive`, `create_knowledge_folder`, `create_knowledge_page`,
   `update_knowledge_node`, `update_memory`, `invalidate_memory`,
-  `cancel_operation`.
+  `cancel_operation`. None of these carry derpr's untrusted tagging: approving
+  model-authored text here stores it as trusted, and a directive applies to
+  every later `reflect`. Deny any proposal from a turn that read web pages,
+  tickets or email.
 - **Not on any allowlist:** `delete_bank` (on a pinned entry this deletes the
   persona's own memory), `clear_memories`, `clear_mental_model`, `delete_*`, and
   `retain` / `sync_retain`. Chat memory keeps going through `recall_memory` and
@@ -1474,26 +1493,34 @@ Recommended policy for a `hindsight-<persona>` entry:
       "url": "{HINDSIGHT_URL}/mcp/managr/",
       "enabled": true,
       "tool_overrides": {
-        "recall":  {"is_write": false, "capabilities": {"irreversible": false}},
-        "reflect": {"is_write": false, "capabilities": {"irreversible": false}}
+        "recall":  {"is_write": false, "capabilities": {"irreversible": false, "sensitivity": "internal"}},
+        "reflect": {"is_write": false, "capabilities": {"irreversible": false, "sensitivity": "internal"}}
       }
     }
   }
 }
 ```
 
+The example relaxes two reads; add an entry per read you relax. `tool_overrides`
+keys are Hindsight's raw tool names (`recall`).
+
 `{HINDSIGHT_URL}` is filled in from derpr's `HINDSIGHT_URL` setting when the
 server connects, so the Hindsight address is configured in one place and a
-moved Hindsight needs no edit here. It is the only placeholder accepted; any
-other server url is written out in full.
+moved Hindsight needs no edit here. It is the only placeholder accepted, and it
+may only be followed by a path (`/…`): a url like `{HINDSIGHT_URL}@host` or
+`{HINDSIGHT_URL}.host` that would change the host is rejected, as is an empty or
+non-http(s) `HINDSIGHT_URL`. Any other server url is written out in full.
+
+The bank in the url is the persona's name (derpr's bank id). Hindsight accepts
+any bank name without error, so a typo or a renamed persona silently points the
+entry at an empty bank — check `get_bank` returns the expected bank after adding.
 
 Then give the persona `service_bindings: ["mcp:hindsight-managr"]` and list the
-tool names it should have in `allow`.
-
-> ⚠️ **Don't enable these entries in prod until DP-404 lands.** A persona's
-> allowlist controls which tools are *offered* to the model, but execution
-> doesn't re-check it yet. A registered read tool can be called by any persona
-> that emits its name.
+tools it should have in `allow` by their **namespaced** names
+(`mcp__hindsight-managr__recall`, not `recall`). MCP tools are never in `*`, so a
+raw name matches nothing and the persona is silently offered no Hindsight tools.
+Execution is limited to the offered set (DP-404), so a persona can't call a
+Hindsight tool it wasn't given.
 
 ### MCP Bridge — derpr tools for dispatched subagents (DP-240)
 

@@ -49,6 +49,7 @@ from typing import (
     TYPE_CHECKING, Any, AsyncIterator, Callable, Coroutine, Dict, List, Optional,
     Set, Tuple,
 )
+from urllib.parse import urlsplit
 
 from mcp import ClientSession
 from mcp import types as mcp_types
@@ -97,10 +98,23 @@ _URL_BASES = ("HINDSIGHT_URL",)
 _URL_PLACEHOLDER_RE = re.compile(r"^\{([A-Z0-9_]+)\}")
 
 
+def _require_http_url(url: str, what: str) -> None:
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ValueError(f"Invalid MCP server url {what}: must be http(s) with a host.")
+
+
 def resolve_server_url(url: str) -> str:
-    """Expand a leading ``{NAME}`` placeholder from global_config."""
+    """Expand a leading ``{NAME}`` placeholder from global_config and check
+    the result is an http(s) url. Every connect path goes through here.
+
+    The placeholder only supplies the base: the rest must be empty or a path,
+    so ``{HINDSIGHT_URL}@evil.example`` or ``{HINDSIGHT_URL}.evil.example``
+    cannot move the host while an approver reads "Hindsight".
+    """
     match = _URL_PLACEHOLDER_RE.match(url)
     if match is None:
+        _require_http_url(url, f"'{url}'")
         return url
     name = match.group(1)
     if name not in _URL_BASES:
@@ -108,8 +122,15 @@ def resolve_server_url(url: str) -> str:
             f"Unknown MCP url placeholder '{{{name}}}'; allowed: "
             + ", ".join(f"{{{n}}}" for n in _URL_BASES)
         )
+    rest = url[match.end():]
+    if rest and not rest.startswith("/"):
+        raise ValueError(
+            f"Invalid MCP server url '{url}': '{{{name}}}' must be followed "
+            "by a path starting with '/'."
+        )
     base = str(getattr(global_config, name)).rstrip("/")
-    return base + url[match.end():]
+    _require_http_url(base, f"base: setting {name} is '{base}'")
+    return base + rest
 
 
 # Most-restrictive defaults for a discovered tool. Operator ``tool_overrides``
@@ -348,8 +369,7 @@ class MCPClientManager:
                 f"Invalid MCP server name '{name}': need lowercase letters/"
                 "digits/hyphens, starting alphanumeric, max 32 chars."
             )
-        if not resolve_server_url(str(url)).startswith(("http://", "https://")):
-            raise ValueError(f"Invalid MCP server url '{url}': must be http(s).")
+        resolve_server_url(str(url))
 
         async with self._lock:
             config = self._load_config()
