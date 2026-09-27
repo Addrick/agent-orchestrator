@@ -33,11 +33,16 @@ def mem_manager():
     manager.close()
 
 
+def _offered(_persona_name):
+    """Every park in this module is an `update_ticket`, offered to its persona."""
+    return frozenset({"update_ticket"})
+
+
 @pytest.fixture
 def manager(mem_manager):
     tool_manager = MagicMock()
     tool_manager.execute_tool = AsyncMock(return_value={"ok": True})
-    mgr = ConfirmationManager(lambda: tool_manager, mem_manager)
+    mgr = ConfirmationManager(lambda: tool_manager, mem_manager, _offered)
     mgr._tool_manager = tool_manager  # handle for assertions
     return mgr
 
@@ -452,7 +457,7 @@ async def test_a_real_tool_manager_records_a_failed_write_as_failed(
 
     tool_manager = ToolManager()
     tool_manager.register("update_ticket", boom)
-    mgr = ConfirmationManager(lambda: tool_manager, mem_manager)
+    mgr = ConfirmationManager(lambda: tool_manager, mem_manager, _offered)
 
     parked = _park(token="a", call_id="c1")
     mgr.park(parked)
@@ -474,7 +479,7 @@ async def test_a_real_tool_manager_records_a_successful_write_as_approved(
 
     tool_manager = ToolManager()
     tool_manager.register("update_ticket", fine)
-    mgr = ConfirmationManager(lambda: tool_manager, mem_manager)
+    mgr = ConfirmationManager(lambda: tool_manager, mem_manager, _offered)
 
     parked = _park(token="a", call_id="c1")
     mgr.park(parked)
@@ -529,7 +534,7 @@ async def test_a_write_that_fails_by_returning_is_recorded_as_failed(
 
     tool_manager = ToolManager()
     tool_manager.register("update_ticket", soft_fail)
-    mgr = ConfirmationManager(lambda: tool_manager, mem_manager)
+    mgr = ConfirmationManager(lambda: tool_manager, mem_manager, _offered)
 
     parked = _park(token="a", call_id="c1")
     mgr.park(parked)
@@ -577,7 +582,7 @@ async def test_a_write_that_succeeds_stays_approved(
 
     tool_manager = ToolManager()
     tool_manager.register("update_ticket", fine)
-    mgr = ConfirmationManager(lambda: tool_manager, mem_manager)
+    mgr = ConfirmationManager(lambda: tool_manager, mem_manager, _offered)
 
     parked = _park(token="a", call_id="c1")
     mgr.park(parked)
@@ -613,7 +618,7 @@ async def test_an_uninvokable_call_is_recorded_as_failed(
 
     tool_manager = ToolManager()
     tool_manager.register("update_ticket", never)
-    mgr = ConfirmationManager(lambda: tool_manager, mem_manager)
+    mgr = ConfirmationManager(lambda: tool_manager, mem_manager, _offered)
 
     parked = _park(token="a", call_id="c1")
     parked.write_call["arguments"] = arguments
@@ -639,7 +644,7 @@ def _fresh_manager(mem_manager):
     """
     tm = MagicMock()
     tm.execute_tool = AsyncMock(return_value={"ok": True})
-    mgr = ConfirmationManager(lambda: tm, mem_manager)
+    mgr = ConfirmationManager(lambda: tm, mem_manager, _offered)
     mgr._tool_manager = tm
     return mgr
 
@@ -1408,7 +1413,7 @@ async def test_a_real_tool_manager_records_a_raised_write_as_failed(
 
     tool_manager = ToolManager()
     tool_manager.register("update_ticket", boom)
-    mgr = ConfirmationManager(lambda: tool_manager, mem_manager)
+    mgr = ConfirmationManager(lambda: tool_manager, mem_manager, _offered)
 
     parked = _park(token="a", call_id="c1")
     mgr.park(parked)

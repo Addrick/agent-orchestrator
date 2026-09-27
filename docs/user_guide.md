@@ -675,6 +675,25 @@ Determines the autonomy level for a persona's tool-use capabilities.
 
 The bot implements a comprehensive security framework to prevent prompt injection and unauthorized actions.
 
+### A persona can only run the tools it was given (DP-404)
+A persona's enabled tools and service bindings decide both which tools the model
+is **shown** and which tool calls are **run**. If the model asks for a tool it
+wasn't given (a hallucinated name, or a `<tool_call>` injected through a web
+page, a ticket or a recalled memory), the call is refused. Nothing runs, nothing
+is proposed for approval, and the model gets an error saying the tool isn't
+available to it. A refused call doesn't count against the turn's tool budget,
+so injected calls can't use it up.
+
+The same check runs again when you approve a proposed write. If the persona lost
+that tool while the proposal was waiting (you removed a service binding or
+narrowed its enabled tools), approving it runs nothing and the write is
+recorded as failed.
+
+This covers DERPR's own tools on every provider, including local models that
+write tool calls as plain text. It does **not** cover Claude Code (`cc-*`)
+personas, which run Claude Code's own tools inside its sandbox, not DERPR's (see
+[Claude Code](#claude-code-cc--sandboxed-autonomous-provider)).
+
 ### Universal Write-Audit
 Regardless of execution mode, **all write tools** (tools that modify state, like creating tickets or deleting users) are parked for human audit before execution. This ensures that no state-changing action is taken without explicit user consent.
 

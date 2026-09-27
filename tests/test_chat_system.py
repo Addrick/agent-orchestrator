@@ -1,14 +1,14 @@
 # tests/test_chat_system.py
 
 import pytest
-from unittest.mock import MagicMock, AsyncMock, patch
+from unittest.mock import ANY, MagicMock, AsyncMock, patch
 import json
 import re
 
 from config.global_config import MAX_TOOL_CALLS
 from src.confirmations import ConfirmationManager, Decision, ParkedWrite
 from tests.helpers import (
-    make_chat_system, only_pending_token,
+    make_chat_system, offer_tools, only_pending_token,
     route_stream_through_generate_response,
 )
 from src.chat_system import (
@@ -293,6 +293,7 @@ async def test_generate_response_handles_generic_exception(chat_system_with_mock
 @pytest.mark.asyncio
 async def test_generate_response_exits_after_max_tool_calls(chat_system_with_mocks):
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
+    offer_tools(system, "test_persona", "test_tool")
     persona.set_enabled_tools(['*'])
     tool_call = {'type': 'tool_calls', 'calls': [{'id': 'c1', 'name': 'test_tool', 'arguments': {}}]}
     # Make the text engine always return a tool call
@@ -316,6 +317,7 @@ async def test_generate_response_exits_after_max_tool_calls(chat_system_with_moc
 async def test_tool_use_in_autonomous_mode(chat_system_with_mocks):
     """In AUTONOMOUS mode, write tool calls still gate for audit (universal write-audit model)."""
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
+    offer_tools(system, "test_persona", "update_ticket")
     persona.set_execution_mode(ExecutionMode.AUTONOMOUS)
     persona.set_enabled_tools(['*'])
 
@@ -363,6 +365,7 @@ async def test_confirm_mode_gates_write_tools(chat_system_with_mocks):
     with the model's own text (DP-297; it used to end on PENDING_CONFIRMATION).
     """
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
+    offer_tools(system, "test_persona", "update_ticket")
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_enabled_tools(['*'])
 
@@ -389,6 +392,7 @@ async def test_confirm_mode_gates_write_tools(chat_system_with_mocks):
 async def test_confirm_mode_auto_executes_read_only_tools(chat_system_with_mocks):
     """In CONFIRM mode, read-only tools should execute immediately without confirmation."""
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
+    offer_tools(system, "test_persona", "search_tickets")
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_enabled_tools(['*'])
 
@@ -402,13 +406,14 @@ async def test_confirm_mode_auto_executes_read_only_tools(chat_system_with_mocks
 
     assert response_type == ResponseType.LLM_GENERATION
     assert response == 'Found 3 tickets.'
-    tool_manager_mock.execute_tool.assert_called_once_with('search_tickets', query='test')
+    tool_manager_mock.execute_tool.assert_called_once_with('search_tickets', ANY, query='test')
 
 
 @pytest.mark.asyncio
 async def test_confirm_mode_mixed_tools_executes_reads_and_pends_writes(chat_system_with_mocks):
     """In CONFIRM mode with mixed read+write tools, reads execute and writes pend."""
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
+    offer_tools(system, "test_persona", "search_tickets", "update_ticket")
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_enabled_tools(['*'])
 
@@ -428,13 +433,14 @@ async def test_confirm_mode_mixed_tools_executes_reads_and_pends_writes(chat_sys
     parks = system.confirmations.list_for('user', 'test_persona')
     assert [p.write_call['name'] for p in parks] == ['update_ticket']
     # Read tool was executed, write tool was not
-    tool_manager_mock.execute_tool.assert_called_once_with('search_tickets', query='test')
+    tool_manager_mock.execute_tool.assert_called_once_with('search_tickets', ANY, query='test')
 
 
 @pytest.mark.asyncio
 async def _park_one_write(system, text_engine_mock, tool_name='update_ticket',
                           call_id='call_1', arguments=None):
     """Drive a turn that gates exactly one write, and return its token."""
+    offer_tools(system, 'test_persona', tool_name)
     text_engine_mock.generate_response.side_effect = [
         ({'type': 'tool_calls',
           'calls': [{'id': call_id, 'name': tool_name,
@@ -450,6 +456,7 @@ async def _park_one_write(system, text_engine_mock, tool_name='update_ticket',
 async def test_approving_a_park_executes_and_summarizes(chat_system_with_mocks):
     """Approval executes the gated write, then runs a summary turn."""
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
+    offer_tools(system, "test_persona", "update_ticket")
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_enabled_tools(['*'])
 
@@ -467,7 +474,7 @@ async def test_approving_a_park_executes_and_summarizes(chat_system_with_mocks):
 
     assert response_type == ResponseType.LLM_GENERATION
     assert response == 'Done, ticket closed.'
-    tool_manager_mock.execute_tool.assert_called_with('update_ticket', state='closed')
+    tool_manager_mock.execute_tool.assert_called_with('update_ticket', ANY, state='closed')
     # Resolved parks leave the pending set.
     assert system.confirmations.list_for('user', 'test_persona') == []
 
@@ -563,6 +570,7 @@ async def test_continuation_can_chain_a_read(chat_system_with_mocks):
     the final text reaches the user.
     """
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
+    offer_tools(system, "test_persona", "update_ticket", "get_ticket_details")
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_enabled_tools(['*'])
 
@@ -1008,7 +1016,7 @@ async def test_apply_executes_an_approved_write(chat_system_with_mocks):
     decision = _decision(approved=True)
     await system.confirmations.apply(decision)
 
-    tool_manager_mock.execute_tool.assert_called_once_with('update_ticket', state='closed')
+    tool_manager_mock.execute_tool.assert_called_once_with('update_ticket', ANY, state='closed')
     assert decision.ok is True
     assert decision.result == {"result": {"id": 60}}
 
@@ -1057,13 +1065,16 @@ async def test_confirmations_see_post_init_tool_manager_swap(chat_system_with_mo
     like RequestBuilder.persona_lookup): a post-init rebind of
     chat_system.tool_manager must be what approved writes execute against."""
     system, _, _, _, original_tm = chat_system_with_mocks
-    swapped_tm = AsyncMock()
-    swapped_tm.execute_tool.return_value = {"ok": True}
+    swapped_tm = MagicMock()
+    swapped_tm.execute_tool = AsyncMock(return_value={"ok": True})
+    swapped_tm.get_tool_definitions.return_value = (
+        original_tm.get_tool_definitions.return_value
+    )
     system.tool_manager = swapped_tm
 
     await system.confirmations.apply(_decision(approved=True))
 
-    swapped_tm.execute_tool.assert_called_once_with("update_ticket", state="closed")
+    swapped_tm.execute_tool.assert_called_once_with("update_ticket", ANY, state="closed")
     original_tm.execute_tool.assert_not_called()
 
 
@@ -1563,6 +1574,7 @@ async def test_stream_response_interleaves_tool_events_with_tokens(chat_system_w
     """tool_revamp_v1: tool-enabled persona surfaces ToolCallStart /
     ToolCallResult between TokenEvent runs in a single linear stream."""
     system, memory_mock, text_engine, persona, tool_manager_mock = chat_system_with_mocks
+    offer_tools(system, "test_persona", "search_tickets")
     persona.set_enabled_tools(['*'])
     memory_mock.get_channel_history.return_value = []
     memory_mock.log_message.side_effect = [10, 42]

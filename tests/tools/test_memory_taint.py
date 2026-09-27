@@ -18,6 +18,11 @@ from src.tools.tool_loop import (
     ToolLoop, ToolDeferredEvent, _LoopFinishedEvent,
 )
 
+# DP-404: the loop refuses a call whose name was not offered, so these
+# tests offer every tool name they script.
+_OFFERED = [{"type": "function", "function": {"name": n}} for n in ("create_ticket", "web_search")]
+
+
 
 def _make_persona(execution_mode=ExecutionMode.AUTONOMOUS):
     p = MagicMock()
@@ -45,7 +50,7 @@ def _make_engine(streams: List[List[Dict[str, Any]]]):
 
 def _make_tool_manager(results: Dict[str, Any] | None = None):
     manager = MagicMock()
-    async def execute(name, **kwargs):
+    async def execute(name, _offered, **kwargs):
         if results and name in results:
             return results[name]
         return {"result": "ok"}
@@ -86,7 +91,7 @@ async def test_initial_taint_sources_propagates_to_park_event():
 
     events = await _drain(loop.run(
         persona=_make_persona(),
-        conversation_history=[], params=MagicMock(), tools=[],
+        conversation_history=[], params=MagicMock(), tools=_OFFERED,
         turn_tainted=True,
         initial_taint_sources=["memory_recall"],
     ))
@@ -115,7 +120,7 @@ async def test_initial_taint_sources_empty_no_taint():
 
     events = await _drain(loop.run(
         persona=_make_persona(),
-        conversation_history=[], params=MagicMock(), tools=[],
+        conversation_history=[], params=MagicMock(), tools=_OFFERED,
     ))
 
     finished = events[-1]
@@ -145,7 +150,7 @@ async def test_memory_taint_combines_with_tool_taint():
 
     events = await _drain(loop.run(
         persona=_make_persona(),
-        conversation_history=[], params=MagicMock(), tools=[],
+        conversation_history=[], params=MagicMock(), tools=_OFFERED,
         turn_tainted=True,
         initial_taint_sources=["memory_recall"],
     ))
@@ -170,7 +175,7 @@ async def test_memory_taint_text_only_no_audit_surface():
 
     events = await _drain(loop.run(
         persona=_make_persona(),
-        conversation_history=[], params=MagicMock(), tools=[],
+        conversation_history=[], params=MagicMock(), tools=_OFFERED,
         turn_tainted=True,
         initial_taint_sources=["memory_recall"],
     ))
@@ -197,7 +202,7 @@ async def test_initial_taint_sources_defaults_empty():
     # No initial_taint_sources kwarg at all
     events = await _drain(loop.run(
         persona=_make_persona(),
-        conversation_history=[], params=MagicMock(), tools=[],
+        conversation_history=[], params=MagicMock(), tools=_OFFERED,
     ))
 
     finished = events[-1]

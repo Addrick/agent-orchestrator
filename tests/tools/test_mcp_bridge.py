@@ -90,7 +90,7 @@ def test_only_policy_allowed_tools_are_exposed(wiring):
     assert set(runner.exposed_tool_names()) == {"safe_read", "dangerous_write"}
 
     policy.allow = ["safe_read"]
-    assert runner.exposed_tool_names() == ["safe_read"]
+    assert runner.exposed_tool_names() == {"safe_read"}
 
 
 def test_unregistered_tool_is_not_exposed_even_if_allowed(wiring):
@@ -98,7 +98,7 @@ def test_unregistered_tool_is_not_exposed_even_if_allowed(wiring):
     called, so listing it would advertise a capability that does not exist."""
     _, runner, _, _, policy = wiring
     policy.allow = ["safe_read", "never_registered"]
-    assert runner.exposed_tool_names() == ["safe_read"]
+    assert runner.exposed_tool_names() == {"safe_read"}
 
 
 def test_schema_round_trip_marks_gated_tools(wiring):

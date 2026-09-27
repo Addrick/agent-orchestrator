@@ -359,8 +359,8 @@ def parse_agy_tool_call(text: str) -> Optional[List[Dict[str, Any]]]:
         # costs a budget slot and returns "Tool execution failed" — and the
         # divergence scaled with the batch size.
         name = parsed.get("name")
-        if not name:
-            logger.warning("<tool_call> block missing 'name': %r", inner[:200])
+        if not name or not isinstance(name, str):
+            logger.warning("<tool_call> block missing 'name' (or not a string): %r", inner[:200])
             continue
         args = parsed.get("arguments", {})
         if isinstance(args, str):

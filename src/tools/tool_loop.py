@@ -18,7 +18,8 @@ import logging
 import uuid
 from dataclasses import dataclass
 from typing import (
-    Any, AsyncIterator, Callable, Dict, List, Optional, Tuple, Union, cast,
+    AbstractSet, Any, AsyncIterator, Callable, Dict, List, Optional, Tuple,
+    Union, cast,
 )
 
 from config.global_config import MAX_TOOL_CALLS, MAX_TOOL_ITERATIONS
@@ -32,12 +33,41 @@ from src.generation_events import (
 )
 from src.persona import Persona
 from src.tools.definitions import (
-    ALWAYS_CONFIRM_TOOLS,
+    ALWAYS_CONFIRM_TOOLS, callable_tool_names,
     get_tool_capabilities, is_irreversible, get_tool_definition, is_write_tool
 )
-from src.tools.tool_manager import ToolManager, tool_error
+from src.tools.tool_manager import ToolManager, tool_error, unoffered_error
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_call_identity(call: Dict[str, Any]) -> None:
+    """Normalize a provider's call once, at ingestion.
+
+    Providers may omit `id`, and every downstream consumer (assistant message,
+    lifecycle events, tool-result history) must agree on it or the next
+    iteration sends the model unpaired call/result blocks. Same for the name
+    (DP-404): everything downstream hashes it, and a non-string one is never a
+    tool, so it becomes "" — which no offered set contains.
+    """
+    if not call.get("id"):
+        call["id"] = f"call_{uuid.uuid4().hex[:12]}"
+    if not isinstance(call.get("name"), str):
+        logger.warning("Tool call with non-string name %r; treating as unnamed", call.get("name"))
+        call["name"] = ""
+
+
+def _admitted_calls(
+    calls: List[Dict[str, Any]], offered: AbstractSet[str], persona_name: str,
+) -> List[Dict[str, Any]]:
+    """The calls whose name was offered this turn, logging the rest (DP-404)."""
+    refused = [c["name"] for c in calls if c["name"] not in offered]
+    if refused:
+        logger.warning(
+            "Refusing %d tool call(s) not offered to persona '%s': %s",
+            len(refused), persona_name, refused,
+        )
+    return [c for c in calls if c["name"] in offered]
 
 
 @dataclass
@@ -460,13 +490,19 @@ def _call_lines(
         if msg.get("role") != "assistant":
             continue
         for call in msg.get("tool_calls") or []:
+            identity = write_call_identity(call)
+            result = results.get(call.get("id"))
+            if result == json.dumps(unoffered_error(identity[0])):
+                # DP-404: a refused call ran nothing and is not charged to the
+                # budget, so it is neither a call "made this turn" nor part of
+                # the count the header reports.
+                continue
             total += 1
             if total > _SUMMARY_MAX_CALLS:
                 continue
-            identity = write_call_identity(call)
             name = identity[0] or "unknown tool"
             rendered_args = _render_args(identity[1])
-            outcome = _summarize_outcome(results.get(call.get("id")))
+            outcome = _summarize_outcome(result)
             repeat = first_seen.get(identity)
             marker = f" (same call as #{repeat})" if repeat else ""
             first_seen.setdefault(identity, total)
@@ -715,6 +751,11 @@ class ToolLoop:
         history entry that will need correcting later.
         """
         persona_config = persona.get_config_for_engine()
+        # DP-404: the names actually sent to the provider this turn. Policy,
+        # service bindings and model compatibility were all applied by
+        # `RequestBuilder.filter_tools_for_persona` before `tools` got here,
+        # so membership is the one question that covers all three.
+        offered = callable_tool_names(tools)
         history_start = (
             history_start_override if history_start_override is not None
             else len(conversation_history)
@@ -763,14 +804,8 @@ class ToolLoop:
                             yield TokenEvent(delta=text_chunk)
                     elif etype == "tool_calls":
                         tool_calls_collected = list(ev.get("calls") or [])
-                        # Normalize identity once, at ingestion: providers may
-                        # omit `id`, and every downstream consumer (assistant
-                        # message, lifecycle events, tool-result history) must
-                        # agree on it or the next iteration sends the model
-                        # unpaired call/result blocks.
                         for c in tool_calls_collected:
-                            if not c.get("id"):
-                                c["id"] = f"call_{uuid.uuid4().hex[:12]}"
+                            _normalize_call_identity(c)
                     elif etype == "done":
                         full_text_from_done = ev.get("full_text")
             except LLMCommunicationError as e:
@@ -832,8 +867,19 @@ class ToolLoop:
             # overshoot, and the group is dispatched with `asyncio.gather`
             # anyway, so a batch that crosses the line costs one round trip, not
             # several. The next loop check sees the overshoot and ends the turn.
-            calls_used += len(tool_calls_collected)
-            for call_item in tool_calls_collected:
+            #
+            # DP-404: execution ⊆ offered. A provider returns whatever name the
+            # model produced — the local text protocol parses it out of free
+            # text, so an injected `<tool_call>` can name any tool registered in
+            # the process, including ones this persona was never given. A
+            # refused call is answered with an error in `_execute_calls`, never
+            # parked, never taints the turn and is not charged to the budget:
+            # charging it would let injected calls end the turn without
+            # running anything. `max_iterations` still bounds a model that
+            # keeps asking.
+            admitted = _admitted_calls(tool_calls_collected, offered, persona.get_name())
+            calls_used += len(admitted)
+            for call_item in admitted:
                 identity = write_call_identity(call_item)
                 call_tally[identity] = call_tally.get(identity, 0) + 1
 
@@ -867,15 +913,21 @@ class ToolLoop:
             if assistant_prose:
                 assistant_entry["content"] = assistant_prose
             conversation_history.append(assistant_entry)
-            read_calls = [c for c in tool_calls_collected if not is_write_tool(c.get("name") or "")]
-            write_calls = [c for c in tool_calls_collected if is_write_tool(c.get("name") or "")]
+            write_calls = [c for c in admitted if is_write_tool(c["name"])]
+            read_calls = [c for c in admitted if not is_write_tool(c["name"])]
 
-            async for tool_ev in self._execute_calls(read_calls, conversation_history, group_id=group_id):
+            # Refused calls ride in the executed batch so their error results
+            # keep the transcript's call order.
+            async for tool_ev in self._execute_calls(
+                [c for c in tool_calls_collected
+                 if not any(c is w for w in write_calls)],
+                conversation_history, group_id=group_id, offered=offered,
+            ):
                 yield tool_ev
 
             # Update turn_tainted from read_calls that just finished
             for rc in read_calls:
-                tool_name = rc.get("name") or "unknown"
+                tool_name = rc["name"] or "unknown"
                 caps = get_tool_capabilities(tool_name)
                 if caps.get("produces_untrusted"):
                     turn_tainted = True
@@ -1272,6 +1324,8 @@ class ToolLoop:
         calls: List[Dict[str, Any]],
         conversation_history: List[Dict[str, Any]],
         group_id: Optional[str] = None,
+        *,
+        offered: AbstractSet[str],
     ) -> AsyncIterator[LoopEvent]:
         """Execute a batch of tool calls, yielding start/result events
         and appending results to the shared conversation history. Calls in
@@ -1280,7 +1334,11 @@ class ToolLoop:
         appended/emitted in the original order so the model sees a stable
         transcript. Tool errors surface via `ToolCallResultEvent.error` and
         are also threaded into the LLM-visible result string so the model can
-        adapt rather than seeing a hard stop."""
+        adapt rather than seeing a hard stop.
+
+        `offered` is required, not defaulted (DP-404): a call outside it is
+        answered with the refusal without reaching the tool manager, and
+        `execute_tool` itself re-checks the same set for the rest."""
         # Resolve identity + emit all starts before any execution.
         resolved: List[Dict[str, Any]] = []
         for call_item in calls:
@@ -1296,8 +1354,10 @@ class ToolLoop:
             )
 
         async def _run_one(name: str, args: Dict[str, Any]) -> Any:
+            if name not in offered:
+                return unoffered_error(name)
             try:
-                return await self.tool_manager.execute_tool(name, **args)
+                return await self.tool_manager.execute_tool(name, offered, **args)
             except Exception as e:
                 logger.error(
                     f"Tool {name} raised unexpectedly: {e}", exc_info=True,

@@ -25,7 +25,7 @@ from src.chat_system import ChatSystem
 from src.engine import TextEngine
 from src.interfaces.kobold_engine_adapter import KoboldEngineAdapter as KoboldAdapter
 from src.persona import Persona, ExecutionMode
-from tests.helpers import make_chat_system
+from tests.helpers import make_chat_system, offer_tools
 from tests.provider_stream_mocks import google_stream
 
 import pytest
@@ -161,6 +161,9 @@ def _make_real_adapter(persona_name: str = "test_persona",
         personas={persona_name: persona},
     )
     chat_system.bot_logic.preprocess_message = AsyncMock(return_value=None)
+    # DP-404: calls are refused unless offered; offered once a test widens the
+    # persona's policy (the default persona allows nothing).
+    offer_tools(chat_system, persona_name, "search_tickets", "create_ticket")
 
     adapter = KoboldAdapter(chat_system=chat_system)
     return adapter, mm, persona, chat_system
@@ -565,7 +568,7 @@ def test_confirm_route_approves_and_streams_continuation():
 
     executed = []
 
-    async def fake_execute(name, **kwargs):
+    async def fake_execute(name, _offered, **kwargs):
         executed.append(name)
         return {"ok": True}
     chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[method-assign]

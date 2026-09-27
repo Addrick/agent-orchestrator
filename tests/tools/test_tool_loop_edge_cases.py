@@ -27,6 +27,13 @@ from tests.tools.test_tool_loop import (
     _make_persona, _make_engine, _make_tool_manager, _drain,
 )
 
+# DP-404: the loop refuses a call whose name was not offered, so these
+# mechanics tests offer every tool name they script.
+_OFFERED = [{"type": "function", "function": {"name": n}} for n in (
+    "update_ticket", "empty_a", "empty_b", "empty_c", "delete_user",
+)]
+
+
 
 # --- Loop-internal edge cases ---------------------------------------------
 
@@ -54,7 +61,7 @@ async def test_tool_empty_result_serialization():
 
     events = await _drain(loop.run(
         persona=_make_persona(), conversation_history=[],
-        params=MagicMock(), tools=[],
+        params=MagicMock(), tools=_OFFERED,
     ))
 
     results = [e for e in events if isinstance(e, ToolCallResultEvent)]
@@ -84,7 +91,7 @@ async def test_event_sequence_integrity_on_error():
 
     events = await _drain(loop.run(
         persona=_make_persona(), conversation_history=[],
-        params=MagicMock(), tools=[],
+        params=MagicMock(), tools=_OFFERED,
     ))
 
     # Last event is ErrorEvent
@@ -112,7 +119,7 @@ async def test_single_terminal_event_invariant():
 
     events = await _drain(loop.run(
         persona=_make_persona(), conversation_history=[],
-        params=MagicMock(), tools=[],
+        params=MagicMock(), tools=_OFFERED,
     ))
 
     terminals = [e for e in events
@@ -151,7 +158,7 @@ async def test_retry_confirm_mode_with_tools():
 
     events = await _drain(loop.run(
         persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
-        conversation_history=history, params=MagicMock(), tools=[],
+        conversation_history=history, params=MagicMock(), tools=_OFFERED,
     ))
 
     parks = [e for e in events if isinstance(e, ToolDeferredEvent)]
@@ -182,7 +189,7 @@ async def test_resume_taint_propagation():
 
     events = await _drain(loop.run(
         persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
-        conversation_history=[], params=MagicMock(), tools=[],
+        conversation_history=[], params=MagicMock(), tools=_OFFERED,
         turn_tainted=True, initial_taint_sources=["memory_recall"],
     ))
 
@@ -219,7 +226,7 @@ async def test_audit_info_flag_combinations():
 
     events = await _drain(loop.run(
         persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
-        conversation_history=[], params=MagicMock(), tools=[],
+        conversation_history=[], params=MagicMock(), tools=_OFFERED,
     ))
 
     park = next(e for e in events if isinstance(e, ToolDeferredEvent))

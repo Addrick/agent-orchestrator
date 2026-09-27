@@ -18,6 +18,13 @@ from src.tools.tool_loop import (
     render_call_summary_footer, render_max_iteration_text, write_call_identity,
 )
 
+# DP-404: the loop refuses a call whose name was not offered, so these
+# mechanics tests offer every tool name they script.
+_OFFERED = [{"type": "function", "function": {"name": n}} for n in (
+    "create_ticket", "spinner", "update_ticket", "pve_status", "tool_a", "tool_b", "soft_fail", "search_tool", "search_tickets", "list_models", "gpu_status", "get_ticket_details", "broken_tool",
+)]
+
+
 
 def _make_persona(execution_mode=ExecutionMode.AUTONOMOUS):
     p = MagicMock()
@@ -49,7 +56,7 @@ def _make_engine(streams: List[List[Dict[str, Any]]]):
 
 def _make_tool_manager(results: Dict[str, Any]):
     manager = MagicMock()
-    async def execute(name, **kwargs):
+    async def execute(name, _offered, **kwargs):
         return results.get(name, {"result": "ok"})
     manager.execute_tool = AsyncMock(side_effect=execute)
     manager.enrich_audit_action = AsyncMock(return_value=None)
@@ -88,7 +95,7 @@ async def test_single_tool_call_then_text():
 
     events = await _drain(loop.run(
         persona=_make_persona(), conversation_history=history,
-        params=MagicMock(), tools=[],
+        params=MagicMock(), tools=_OFFERED,
     ))
 
     types = [type(e).__name__ for e in events]
@@ -151,7 +158,7 @@ async def test_multiple_sequential_tool_calls():
 
     events = await _drain(loop.run(
         persona=_make_persona(), conversation_history=[],
-        params=MagicMock(), tools=[],
+        params=MagicMock(), tools=_OFFERED,
     ))
 
     starts = [e for e in events if isinstance(e, ToolCallStartEvent)]
@@ -192,7 +199,7 @@ async def test_group_id_shared_per_iter_unique_across_iters():
 
     events = await _drain(loop.run(
         persona=_make_persona(), conversation_history=[],
-        params=MagicMock(), tools=[],
+        params=MagicMock(), tools=_OFFERED,
     ))
 
     tool_evs = [e for e in events
@@ -227,7 +234,7 @@ async def test_tool_error_surfaces_in_result_event():
 
     events = await _drain(loop.run(
         persona=_make_persona(), conversation_history=[],
-        params=MagicMock(), tools=[],
+        params=MagicMock(), tools=_OFFERED,
     ))
 
     [result] = [e for e in events if isinstance(e, ToolCallResultEvent)]
@@ -267,7 +274,7 @@ async def test_a_soft_failure_also_surfaces_in_result_event():
 
     events = await _drain(loop.run(
         persona=_make_persona(), conversation_history=[],
-        params=MagicMock(), tools=[],
+        params=MagicMock(), tools=_OFFERED,
     ))
 
     [result] = [e for e in events if isinstance(e, ToolCallResultEvent)]
@@ -287,7 +294,7 @@ async def test_llm_communication_error_yields_error_event():
 
     events = await _drain(loop.run(
         persona=_make_persona(), conversation_history=[],
-        params=MagicMock(), tools=[],
+        params=MagicMock(), tools=_OFFERED,
     ))
 
     # ApiPayloadEvent with the error's payload, then ErrorEvent.
@@ -324,7 +331,7 @@ async def test_max_iterations_cap():
 
     events = await _drain(loop.run(
         persona=_make_persona(), conversation_history=[],
-        params=MagicMock(), tools=[],
+        params=MagicMock(), tools=_OFFERED,
     ))
 
     finished = events[-1]
@@ -366,7 +373,7 @@ async def test_budget_is_the_same_for_a_batching_and_a_serial_model(
 
     await _drain(loop.run(
         persona=_make_persona(), conversation_history=[],
-        params=MagicMock(), tools=[],
+        params=MagicMock(), tools=_OFFERED,
     ))
 
     assert tools.execute_tool.call_count == 10
@@ -389,7 +396,7 @@ async def test_a_batch_that_crosses_the_budget_still_runs_whole():
 
     events = await _drain(loop.run(
         persona=_make_persona(), conversation_history=[],
-        params=MagicMock(), tools=[],
+        params=MagicMock(), tools=_OFFERED,
     ))
 
     assert tools.execute_tool.call_count == 5
@@ -417,7 +424,7 @@ async def test_confirm_mode_parks_write_calls():
 
     events = await _drain(loop.run(
         persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
-        conversation_history=[], params=MagicMock(), tools=[],
+        conversation_history=[], params=MagicMock(), tools=_OFFERED,
     ))
 
     parks = [e for e in events if isinstance(e, ToolDeferredEvent)]
@@ -457,7 +464,7 @@ async def test_park_does_not_end_the_turn():
 
     events = await _drain(loop.run(
         persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
-        conversation_history=[], params=MagicMock(), tools=[],
+        conversation_history=[], params=MagicMock(), tools=_OFFERED,
     ))
 
     parks = [e for e in events if isinstance(e, ToolDeferredEvent)]
@@ -498,7 +505,7 @@ async def test_parked_write_is_answered_inline_in_history():
 
     events = await _drain(loop.run(
         persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
-        conversation_history=history, params=MagicMock(), tools=[],
+        conversation_history=history, params=MagicMock(), tools=_OFFERED,
     ))
     token = [e for e in events if isinstance(e, ToolDeferredEvent)][0].token
 
@@ -559,7 +566,7 @@ async def test_park_seals_reads_and_pending_write():
 
     events = await _drain(loop.run(
         persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
-        conversation_history=[], params=MagicMock(), tools=[],
+        conversation_history=[], params=MagicMock(), tools=_OFFERED,
     ))
 
     finished = events[-1]
@@ -607,7 +614,7 @@ async def test_error_exit_emits_sealed_tool_context():
 
     events = await _drain(loop.run(
         persona=_make_persona(), conversation_history=[],
-        params=MagicMock(), tools=[],
+        params=MagicMock(), tools=_OFFERED,
     ))
 
     assert isinstance(events[-1], ErrorEvent)
@@ -630,7 +637,7 @@ async def test_error_before_any_tool_call_seals_nothing():
 
     events = await _drain(loop.run(
         persona=_make_persona(), conversation_history=[],
-        params=MagicMock(), tools=[],
+        params=MagicMock(), tools=_OFFERED,
     ))
 
     ctx = next(e for e in events if isinstance(e, _ToolContextEvent))
@@ -653,7 +660,7 @@ async def test_max_iterations_seals_tool_context():
 
     events = await _drain(loop.run(
         persona=_make_persona(), conversation_history=[],
-        params=MagicMock(), tools=[],
+        params=MagicMock(), tools=_OFFERED,
     ))
 
     msgs = _tool_context(events[-1])
@@ -680,7 +687,7 @@ async def test_seal_respects_history_start_override():
 
     events = await _drain(loop.run(
         persona=_make_persona(), conversation_history=prior,
-        params=MagicMock(), tools=[], history_start_override=1,
+        params=MagicMock(), tools=_OFFERED, history_start_override=1,
     ))
 
     msgs = _tool_context(events[-1])
@@ -711,7 +718,7 @@ async def test_clean_exit_does_not_seal_with_the_error_reason():
 
     events = await _drain(loop.run(
         persona=_make_persona(), conversation_history=prior,
-        params=MagicMock(), tools=[], history_start_override=1,
+        params=MagicMock(), tools=_OFFERED, history_start_override=1,
     ))
 
     msgs = _tool_context(events[-1])
@@ -780,7 +787,7 @@ async def test_reproposed_write_is_answered_but_not_parked_twice():
     events = []
     async for ev in loop.run(
         persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
-        conversation_history=history, params=MagicMock(), tools=[],
+        conversation_history=history, params=MagicMock(), tools=_OFFERED,
         pending_lookup=pending_lookup,
     ):
         if isinstance(ev, ToolDeferredEvent):
@@ -830,7 +837,7 @@ async def test_distinct_writes_in_one_iteration_all_park():
     events = []
     async for ev in loop.run(
         persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
-        conversation_history=[], params=MagicMock(), tools=[],
+        conversation_history=[], params=MagicMock(), tools=_OFFERED,
         pending_lookup=pending_lookup,
     ):
         if isinstance(ev, ToolDeferredEvent):
@@ -860,7 +867,7 @@ async def test_no_pending_lookup_parks_everything():
 
     events = await _drain(loop.run(
         persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
-        conversation_history=[], params=MagicMock(), tools=[],
+        conversation_history=[], params=MagicMock(), tools=_OFFERED,
     ))
     assert len([e for e in events if isinstance(e, ToolDeferredEvent)]) == 2
 
@@ -1111,7 +1118,7 @@ async def test_exhaustion_answers_from_the_transcript():
 
     events = await _drain(loop.run(
         persona=_make_persona(), conversation_history=[],
-        params=MagicMock(), tools=[],
+        params=MagicMock(), tools=_OFFERED,
     ))
 
     finished = events[-1]
@@ -1152,7 +1159,7 @@ async def test_exhaustion_keeps_deltas_when_the_provider_reports_empty_done():
 
     events = await _drain(loop.run(
         persona=_make_persona(), conversation_history=[],
-        params=MagicMock(), tools=[],
+        params=MagicMock(), tools=_OFFERED,
     ))
 
     finished = events[-1]
@@ -1191,11 +1198,11 @@ async def test_exhaustion_wrap_up_is_toolless_and_nudged():
 
     await _drain(loop.run(
         persona=_make_persona(), conversation_history=history,
-        params=MagicMock(), tools=[{"name": "spinner"}],
+        params=MagicMock(), tools=[{"type": "function", "function": {"name": "spinner"}}],
     ))
 
     first_call, wrap_call = engine.stream_messages.call_args_list
-    assert first_call.kwargs["tools"] == [{"name": "spinner"}]
+    assert first_call.kwargs["tools"] == [{"type": "function", "function": {"name": "spinner"}}]
     assert wrap_call.kwargs["tools"] is None
 
     wrap_messages = wrap_call.args[1]
@@ -1225,7 +1232,7 @@ async def test_exhaustion_falls_back_when_the_wrap_up_generation_fails():
 
     events = await _drain(loop.run(
         persona=_make_persona(), conversation_history=[],
-        params=MagicMock(), tools=[],
+        params=MagicMock(), tools=_OFFERED,
     ))
 
     finished = events[-1]
@@ -1251,7 +1258,7 @@ async def test_exhaustion_still_seals_the_tool_context():
 
     events = await _drain(loop.run(
         persona=_make_persona(), conversation_history=[],
-        params=MagicMock(), tools=[],
+        params=MagicMock(), tools=_OFFERED,
     ))
 
     msgs = _tool_context(events[-1])
@@ -1288,7 +1295,7 @@ async def test_repeated_calls_are_counted_in_the_turn_log(caplog):
     with caplog.at_level("INFO", logger="src.tools.tool_loop"):
         await _drain(loop.run(
             persona=_make_persona(), conversation_history=[],
-            params=MagicMock(), tools=[],
+            params=MagicMock(), tools=_OFFERED,
         ))
 
     summary = next(r.getMessage() for r in caplog.records
@@ -1333,7 +1340,7 @@ async def test_batched_calls_run_in_one_iteration():
 
     await _drain(loop.run(
         persona=_make_persona(), conversation_history=history,
-        params=MagicMock(), tools=[],
+        params=MagicMock(), tools=_OFFERED,
     ))
 
     assert engine.stream_messages.call_count == 2
@@ -1366,7 +1373,7 @@ async def test_streamed_prose_lands_on_the_assistant_tool_call_entry():
 
     await _drain(loop.run(
         persona=_make_persona(), conversation_history=history,
-        params=MagicMock(), tools=[],
+        params=MagicMock(), tools=_OFFERED,
     ))
 
     assert history[0]["content"] == "Checking the node and the card."
@@ -1390,7 +1397,7 @@ async def test_one_shot_prose_on_done_lands_on_the_same_entry():
 
     await _drain(loop.run(
         persona=_make_persona(), conversation_history=history,
-        params=MagicMock(), tools=[],
+        params=MagicMock(), tools=_OFFERED,
     ))
 
     assert history[0]["content"] == "Checking the node first."
@@ -1423,7 +1430,7 @@ async def test_prose_is_scrubbed_before_it_enters_history():
 
         await _drain(loop.run(
             persona=_make_persona(), conversation_history=history,
-            params=MagicMock(), tools=[],
+            params=MagicMock(), tools=_OFFERED,
         ))
     finally:
         reset_scrubber()
@@ -1450,7 +1457,7 @@ async def test_call_only_iteration_writes_no_content_key():
 
     await _drain(loop.run(
         persona=_make_persona(), conversation_history=history,
-        params=MagicMock(), tools=[],
+        params=MagicMock(), tools=_OFFERED,
     ))
 
     assert "content" not in history[0]
@@ -1475,7 +1482,7 @@ async def test_one_shot_prose_reaches_the_park_audit_reasoning():
 
     events = await _drain(loop.run(
         persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
-        conversation_history=[], params=MagicMock(), tools=[],
+        conversation_history=[], params=MagicMock(), tools=_OFFERED,
     ))
 
     park = [e for e in events if isinstance(e, ToolDeferredEvent)][0]

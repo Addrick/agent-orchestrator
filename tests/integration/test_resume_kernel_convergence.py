@@ -31,6 +31,7 @@ from src.persona import ExecutionMode
 from src.tools.turn_context import get_turn_context
 from src.deferral_kinds import DEFERRAL_KIND_NODE_JOB, declare_deferral
 from config.global_config import PENDING_ACTION_TTL
+from tests.helpers import offer_tools
 
 pytestmark = pytest.mark.integration
 
@@ -81,13 +82,17 @@ def _confirm_persona(chat_system):
     persona = chat_system.personas["test_persona"]
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_enabled_tools(["*"])
+    offer_tools(
+        chat_system, "test_persona",
+        "create_ticket", "update_ticket", "merge_tickets", "get_agent_status",
+    )
     return persona
 
 
 def _recording_tool_manager(chat_system, result=None):
     executed = []
 
-    async def fake_execute(name, **kwargs):
+    async def fake_execute(name, _offered, **kwargs):
         executed.append(name)
         return result if result is not None else {"ok": True}
     chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[assignment]
@@ -254,7 +259,7 @@ async def test_continuation_pins_scope_and_resets(mocked_chat_system):
 
     seen = {}
 
-    async def fake_execute(name, **kwargs):
+    async def fake_execute(name, _offered, **kwargs):
         seen["ctx"] = get_turn_context()
         return {"ok": True}
     chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[assignment]
@@ -428,7 +433,7 @@ async def test_concurrent_approvals_serialize(mocked_chat_system):
 
     concurrent = {"now": 0, "max": 0}
 
-    async def fake_execute(name, **kwargs):
+    async def fake_execute(name, _offered, **kwargs):
         concurrent["now"] += 1
         concurrent["max"] = max(concurrent["max"], concurrent["now"])
         await asyncio.sleep(0)  # give the other task a chance to interleave

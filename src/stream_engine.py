@@ -776,8 +776,10 @@ class _ToolCallStreamParser:
             logger.warning("Discarding malformed <tool_call> block: %r", raw_json[:200])
             return
         name = parsed.get("name")
-        if not name:
-            logger.warning("<tool_call> missing 'name' field: %r", raw_json[:200])
+        if not name or not isinstance(name, str):
+            # A non-string name is never a tool, and letting it through
+            # crashed the loop's set-membership checks (DP-404).
+            logger.warning("<tool_call> missing 'name' field (or not a string): %r", raw_json[:200])
             return
         args = parsed.get("arguments", {})
         if isinstance(args, str):

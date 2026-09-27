@@ -5,7 +5,10 @@ import logging
 from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, AsyncGenerator, AsyncIterator, Coroutine, Dict, List, Optional, Set, Tuple
+from typing import (
+    Any, AsyncGenerator, AsyncIterator, Coroutine, Dict, FrozenSet, List, Optional,
+    Set, Tuple,
+)
 
 from src.embedding_service import EmbeddingService
 from src.clients.service_integration import ServiceIntegration
@@ -36,6 +39,7 @@ from src.tools.tool_loop import (
     write_call_identity,
 )
 from src.turn_persistence import TurnPersistence
+from src.tools.definitions import callable_tool_names
 from src.tools.tool_manager import ToolManager
 from src.tools.turn_context import TurnContext, turn_scope
 from src.personas.store import save_personas_to_file
@@ -172,7 +176,7 @@ class ChatSystem:
         # Lookup closure over self (like request_builder's persona_lookup) so
         # post-init rebinds of `self.tool_manager` stay visible to resumes.
         self.confirmations: ConfirmationManager = ConfirmationManager(
-            lambda: self.tool_manager, memory_manager,
+            lambda: self.tool_manager, memory_manager, self._offered_tool_names,
         )
         # persona_lookup is a closure over self (not a dict reference) so
         # tests/admin paths that rebind `self.personas` stay visible.
@@ -185,6 +189,15 @@ class ChatSystem:
         )
         self._services: Dict[str, ServiceIntegration] = {}
         self._embedding_service: Optional[EmbeddingService] = embedding_service
+
+    def _offered_tool_names(self, persona_name: str) -> FrozenSet[str]:
+        """What `persona_name` is offered right now (DP-404) — the same
+        filter a turn uses, so an approval re-check and a live turn cannot
+        disagree. An unknown persona is offered nothing."""
+        persona = self.personas.get(persona_name)
+        if persona is None:
+            return frozenset()
+        return callable_tool_names(self.request_builder.filter_tools_for_persona(persona))
 
     def visible_personas(self) -> Dict[str, Persona]:
         """Personas safe to expose in user-facing listings (dropdowns, status text).

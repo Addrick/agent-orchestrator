@@ -23,7 +23,7 @@ async def test_tool_search_tickets_finds_golden_set(tool_manager):
     """Verifies that search_tickets correctly finds the pre-indexed Golden tickets."""
     # Search for the Warp Core history
     query = 'title:"[GOLD] Warp Core" AND state.name:closed'
-    response = await tool_manager.execute_tool("search_tickets", query=query)
+    response = await tool_manager.execute_tool("search_tickets", {"search_tickets"}, query=query)
     
     assert 'result' in response
     results = response['result']
@@ -37,24 +37,24 @@ async def test_tool_search_tickets_finds_golden_set(tool_manager):
 async def test_tool_search_tickets_with_filtering(tool_manager):
     """Verifies that search_tickets handles broad queries and state filtering."""
     # Broad search for Printer
-    response = await tool_manager.execute_tool("search_tickets", query='title:"Printer"')
+    response = await tool_manager.execute_tool("search_tickets", {"search_tickets"}, query='title:"Printer"')
     assert 'result' in response
     assert len(response['result']) >= 1
     
     # Check that we can filter for closed tickets specifically
     query = 'title:"Printer" AND state.name:closed'
-    response = await tool_manager.execute_tool("search_tickets", query=query)
+    response = await tool_manager.execute_tool("search_tickets", {"search_tickets"}, query=query)
     assert all(t['state'] == 'closed' for t in response['result'])
 
 @pytest.mark.asyncio
 async def test_tool_get_ticket_details_structure(tool_manager, zammad_client):
     """Verifies that get_ticket_details returns the comprehensive info required by the bot."""
     # Find one of our golden tickets
-    resp = await tool_manager.execute_tool("search_tickets", query='title:"[GOLD] Warp Core"')
+    resp = await tool_manager.execute_tool("search_tickets", {"search_tickets"}, query='title:"[GOLD] Warp Core"')
     # Note: the tool get_ticket_details uses ticket_number (Zammad's user-facing ID)
     ticket_number = resp['result'][0]['number']
     
-    response = await tool_manager.execute_tool("get_ticket_details", ticket_number=ticket_number)
+    response = await tool_manager.execute_tool("get_ticket_details", {"get_ticket_details"}, ticket_number=ticket_number)
     assert 'result' in response
     details = response['result']
     
@@ -75,8 +75,7 @@ async def test_tool_create_and_update_lifecycle(tool_manager, zammad_client):
     ticket_id = None
     try:
         # 1. Create
-        response = await tool_manager.execute_tool(
-            "create_ticket",
+        response = await tool_manager.execute_tool("create_ticket", {"create_ticket"},
             title="[TOOL TEST] Lifecycle",
             body="Initial Body",
             customer_id=TEST_CUSTOMER_ID
@@ -85,8 +84,7 @@ async def test_tool_create_and_update_lifecycle(tool_manager, zammad_client):
         ticket_id = response['result']['id']
         
         # 2. Add Note
-        response = await tool_manager.execute_tool(
-            "add_note_to_ticket",
+        response = await tool_manager.execute_tool("add_note_to_ticket", {"add_note_to_ticket"},
             ticket_id=ticket_id,
             body="Follow-up Note",
         )
@@ -107,7 +105,7 @@ async def test_tool_create_and_update_lifecycle(tool_manager, zammad_client):
 async def test_tool_get_user_info(tool_manager):
     """Verifies that search_user can retrieve and format user/customer info."""
     # We search by email of the test user (which we know exists)
-    response = await tool_manager.execute_tool("search_user", query="pytest-integration-user@zammad.local")
+    response = await tool_manager.execute_tool("search_user", {"search_user"}, query="pytest-integration-user@zammad.local")
     
     assert 'result' in response
     users = response['result']
