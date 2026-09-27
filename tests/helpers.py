@@ -29,6 +29,49 @@ OPERATOR_ORIGIN = Origin(transport="test", operator=True)
 ANON_ORIGIN = Origin(transport="test", operator=False)
 
 
+def offer_tools(chat_system: ChatSystem, persona_name: str, *names: str) -> None:
+    """Make `names` genuinely offered to `persona_name` on its next turn.
+
+    DP-404: the tool loop refuses any call whose name was not in the list
+    sent to the provider, so a test that scripts a call must offer the tool
+    through the real path: a registered handler (`get_tool_definitions`
+    lists only registered tools) and the tool's service binding on the
+    persona. A placeholder handler is registered only where none exists;
+    tests that replace `tool_manager.execute_tool` still see their fake run.
+    A mocked tool manager (not a real `ToolManager`) gets the static
+    definitions appended to its `get_tool_definitions` return value instead;
+    there, a name with no static definition (a test-only tool) gets a minimal
+    unbound read definition.
+    """
+    from src.tools.definitions import get_tool_definition
+    from src.tools.tool_manager import ToolManager
+
+    async def _placeholder(**_kwargs: Any) -> Dict[str, Any]:
+        return {"ok": True}
+
+    tool_manager = chat_system.tool_manager
+    persona = chat_system.personas[persona_name]
+    bindings = list(persona.get_service_bindings())
+    for name in names:
+        definition = get_tool_definition(name)
+        if isinstance(tool_manager, ToolManager):
+            if definition is None:
+                raise ValueError(f"offer_tools: no static definition for '{name}'")
+            if name not in tool_manager._handlers:
+                tool_manager.register(name, _placeholder)
+        else:
+            if definition is None:
+                definition = {"type": "function", "function": {"name": name}}
+            listed = list(tool_manager.get_tool_definitions.return_value or [])
+            if definition not in listed:
+                listed.append(definition)
+            tool_manager.get_tool_definitions.return_value = listed
+        binding = (get_tool_definition(name) or {}).get("service_binding")
+        if binding and binding not in bindings:
+            bindings.append(binding)
+    persona.set_service_bindings(bindings)
+
+
 def make_chat_system(
     memory_manager: Optional[Any] = None,
     text_engine: Optional[Any] = None,

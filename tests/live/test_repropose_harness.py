@@ -19,7 +19,7 @@ import pytest
 from src.engine import TextEngine
 from src.memory.memory_manager import MemoryManager
 from src.persona import ExecutionMode, MemoryMode, Persona
-from tests.helpers import make_chat_system
+from tests.helpers import make_chat_system, offer_tools
 from tests.live.test_repropose_live import _Probe, PERSONA
 
 
@@ -51,6 +51,9 @@ def probe_harness():
         executed.append({"name": "create_ticket", "arguments": kwargs})
         return {"ticket_id": 1}
     cs.tool_manager.register("create_ticket", stub)
+    # DP-404: create_ticket is zammad-bound; without the binding it is never
+    # offered, and a call to it is refused.
+    offer_tools(cs, PERSONA, "create_ticket")
     yield _Probe(cs, mm, executed), cs
     mm.close()
     if os.path.exists(db_path):

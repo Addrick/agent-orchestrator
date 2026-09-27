@@ -18,7 +18,8 @@ import logging
 import uuid
 from dataclasses import dataclass
 from typing import (
-    Any, AsyncIterator, Callable, Dict, List, Optional, Tuple, Union, cast,
+    AbstractSet, Any, AsyncIterator, Callable, Dict, FrozenSet, List, Optional,
+    Set, Tuple, Union, cast,
 )
 
 from config.global_config import MAX_TOOL_CALLS, MAX_TOOL_ITERATIONS
@@ -38,6 +39,33 @@ from src.tools.definitions import (
 from src.tools.tool_manager import ToolManager, tool_error
 
 logger = logging.getLogger(__name__)
+
+
+def offered_tool_names(tools: Optional[List[Dict[str, Any]]]) -> FrozenSet[str]:
+    """Names of the tools actually sent to the provider this turn.
+
+    DP-404: the set a returned call is checked against before it runs. The
+    persona's policy, service bindings and model-compatibility filter have all
+    been applied by the time `tools` reaches the loop
+    (`RequestBuilder.filter_tools_for_persona`), so membership here is the one
+    question that covers all three. Accepts both the OpenAI
+    `{"function": {"name": ...}}` shape and a bare `{"name": ...}`.
+    """
+    names: Set[str] = set()
+    for t in tools or []:
+        name = (t.get("function") or t).get("name")
+        if name:
+            names.add(name)
+    return frozenset(names)
+
+
+def _unoffered_error(name: str) -> Dict[str, Any]:
+    return {
+        "error": (
+            f"Tool '{name}' is not available to this persona; not executed. "
+            "Use only the tools you were given."
+        )
+    }
 
 
 @dataclass
@@ -715,6 +743,7 @@ class ToolLoop:
         history entry that will need correcting later.
         """
         persona_config = persona.get_config_for_engine()
+        offered = offered_tool_names(tools)
         history_start = (
             history_start_override if history_start_override is not None
             else len(conversation_history)
@@ -867,15 +896,45 @@ class ToolLoop:
             if assistant_prose:
                 assistant_entry["content"] = assistant_prose
             conversation_history.append(assistant_entry)
-            read_calls = [c for c in tool_calls_collected if not is_write_tool(c.get("name") or "")]
-            write_calls = [c for c in tool_calls_collected if is_write_tool(c.get("name") or "")]
+            # DP-404: execution ⊆ offered. A provider returns whatever name the
+            # model produced — the local text protocol parses it out of free
+            # text, so an injected `<tool_call>` can name any tool registered in
+            # the process, including ones this persona was never given. Without
+            # this check an unoffered read ran unconfirmed and an unoffered
+            # write reached the approval prompt. Unoffered calls are answered
+            # with an error in `_execute_calls` and never parked.
+            unoffered = [
+                c.get("name") or "" for c in tool_calls_collected
+                if (c.get("name") or "") not in offered
+            ]
+            if unoffered:
+                logger.warning(
+                    "Refusing %d tool call(s) not offered to persona '%s': %s",
+                    len(unoffered), persona.get_name(), unoffered,
+                )
+            read_calls = [
+                c for c in tool_calls_collected
+                if (c.get("name") or "") not in offered
+                or not is_write_tool(c.get("name") or "")
+            ]
+            write_calls = [
+                c for c in tool_calls_collected
+                if (c.get("name") or "") in offered
+                and is_write_tool(c.get("name") or "")
+            ]
 
-            async for tool_ev in self._execute_calls(read_calls, conversation_history, group_id=group_id):
+            async for tool_ev in self._execute_calls(
+                read_calls, conversation_history, group_id=group_id,
+                offered=offered,
+            ):
                 yield tool_ev
 
-            # Update turn_tainted from read_calls that just finished
+            # Update turn_tainted from read_calls that just finished (a refused
+            # call ran nothing and read no external bytes)
             for rc in read_calls:
                 tool_name = rc.get("name") or "unknown"
+                if tool_name not in offered:
+                    continue
                 caps = get_tool_capabilities(tool_name)
                 if caps.get("produces_untrusted"):
                     turn_tainted = True
@@ -1272,6 +1331,8 @@ class ToolLoop:
         calls: List[Dict[str, Any]],
         conversation_history: List[Dict[str, Any]],
         group_id: Optional[str] = None,
+        *,
+        offered: AbstractSet[str],
     ) -> AsyncIterator[LoopEvent]:
         """Execute a batch of tool calls, yielding start/result events
         and appending results to the shared conversation history. Calls in
@@ -1280,7 +1341,12 @@ class ToolLoop:
         appended/emitted in the original order so the model sees a stable
         transcript. Tool errors surface via `ToolCallResultEvent.error` and
         are also threaded into the LLM-visible result string so the model can
-        adapt rather than seeing a hard stop."""
+        adapt rather than seeing a hard stop.
+
+        `offered` is required, not defaulted: this is the only place a read
+        call executes, so it is where DP-404's execution ⊆ offered check lives,
+        and a caller that forgot to pass it must fail loudly rather than run
+        everything."""
         # Resolve identity + emit all starts before any execution.
         resolved: List[Dict[str, Any]] = []
         for call_item in calls:
@@ -1296,6 +1362,8 @@ class ToolLoop:
             )
 
         async def _run_one(name: str, args: Dict[str, Any]) -> Any:
+            if name not in offered:
+                return _unoffered_error(name)
             try:
                 return await self.tool_manager.execute_tool(name, **args)
             except Exception as e:

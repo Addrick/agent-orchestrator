@@ -31,6 +31,7 @@ from src.persona import ExecutionMode
 from src.tools.turn_context import get_turn_context
 from src.deferral_kinds import DEFERRAL_KIND_NODE_JOB, declare_deferral
 from config.global_config import PENDING_ACTION_TTL
+from tests.helpers import offer_tools
 
 pytestmark = pytest.mark.integration
 
@@ -81,6 +82,10 @@ def _confirm_persona(chat_system):
     persona = chat_system.personas["test_persona"]
     persona.set_execution_mode(ExecutionMode.CONFIRM)
     persona.set_enabled_tools(["*"])
+    offer_tools(
+        chat_system, "test_persona",
+        "create_ticket", "update_ticket", "merge_tickets", "get_agent_status",
+    )
     return persona
 
 

@@ -23,6 +23,7 @@ from datetime import timedelta
 
 import pytest
 
+from tests.helpers import offer_tools
 from src.chat_system import (
     DoneEvent, ErrorEvent, TokenEvent,
     ToolCallResultEvent, ToolCallStartEvent, ResponseType,
@@ -69,6 +70,7 @@ async def test_tool_loop_context_flow_memory_and_clean_close(mocked_chat_system)
     persona = chat_system.personas["test_persona"]
     persona.set_inject_timestamp(False)
     persona.set_enabled_tools(["*"])
+    offer_tools(chat_system, "test_persona", "get_agent_status", "get_agent_history")
 
     user_id, channel = "user-e2e", "chan-e2e"
 
@@ -221,6 +223,7 @@ async def test_tool_loop_closes_cleanly_on_llm_error(mocked_chat_system):
     chat_system, memory_manager = mocked_chat_system
     persona = chat_system.personas["test_persona"]
     persona.set_enabled_tools(["*"])
+    offer_tools(chat_system, "test_persona", "get_agent_status", "get_agent_history")
 
     chat_system.text_engine.generate_response.side_effect = LLMCommunicationError("upstream 500")
 

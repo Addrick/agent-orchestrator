@@ -25,6 +25,7 @@ import time
 import pytest
 from unittest.mock import AsyncMock
 
+from tests.helpers import offer_tools
 from src.chat_system import (
     DoneEvent, ErrorEvent, ToolCallResultEvent, ResponseType,
 )
@@ -66,6 +67,7 @@ async def test_ctx_reset_when_postloop_persistence_raises(mocked_chat_system):
     the loop. reset_turn_context must still run."""
     chat_system, _ = mocked_chat_system
     chat_system.personas["test_persona"].set_enabled_tools(["*"])
+    offer_tools(chat_system, "test_persona", "create_ticket", "get_agent_status", "get_agent_history")
     _script_engine(chat_system, [({"type": "text", "content": "hello"}, {})])
 
     def boom(*a, **k):
@@ -86,6 +88,7 @@ async def test_ctx_reset_on_early_consumer_break(mocked_chat_system):
     client) must not leave the ContextVar set."""
     chat_system, _ = mocked_chat_system
     chat_system.personas["test_persona"].set_enabled_tools(["*"])
+    offer_tools(chat_system, "test_persona", "create_ticket", "get_agent_status", "get_agent_history")
     _script_engine(chat_system, [({"type": "text", "content": "answer"}, {})])
 
     assert get_turn_context() is None
@@ -103,6 +106,7 @@ async def test_ctx_reset_when_audit_logging_raises(mocked_chat_system):
     If it raises, reset_turn_context must still run."""
     chat_system, _ = mocked_chat_system
     chat_system.personas["test_persona"].set_enabled_tools(["*"])
+    offer_tools(chat_system, "test_persona", "create_ticket", "get_agent_status", "get_agent_history")
     chat_system.tool_manager.enrich_audit_action = AsyncMock(return_value=None)  # type: ignore[assignment]
     _script_engine(chat_system, [
         ({"type": "tool_calls", "calls": [
@@ -128,6 +132,7 @@ async def test_ctx_reset_when_user_turn_logging_raises(mocked_chat_system):
     ContextVar (already set) must still be reset."""
     chat_system, _ = mocked_chat_system
     chat_system.personas["test_persona"].set_enabled_tools(["*"])
+    offer_tools(chat_system, "test_persona", "create_ticket", "get_agent_status", "get_agent_history")
     _script_engine(chat_system, [({"type": "text", "content": "hi"}, {})])
 
     def boom(*a, **k):
@@ -155,6 +160,7 @@ async def test_idless_tool_call_gets_stable_matching_tool_call_id(mocked_chat_sy
     model unpaired call/result blocks."""
     chat_system, _ = mocked_chat_system
     chat_system.personas["test_persona"].set_enabled_tools(["*"])
+    offer_tools(chat_system, "test_persona", "create_ticket", "get_agent_status", "get_agent_history")
 
     capture = {"turn_ctx_seen": [], "histories": []}
     _script_engine(chat_system, [
@@ -198,6 +204,7 @@ async def test_continuation_sets_and_resets_turn_context(mocked_chat_system):
     pinned, and the ContextVar must be reset afterward."""
     chat_system, _ = mocked_chat_system
     chat_system.personas["test_persona"].set_enabled_tools(["*"])
+    offer_tools(chat_system, "test_persona", "create_ticket", "get_agent_status", "get_agent_history")
     chat_system.tool_manager.enrich_audit_action = AsyncMock(return_value=None)  # type: ignore[assignment]
     chat_system.tool_manager.execute_tool = AsyncMock(return_value={"ok": True})  # type: ignore[assignment]
 
@@ -245,6 +252,7 @@ async def test_read_group_executes_concurrently(mocked_chat_system):
     should run concurrently — their executions must overlap in time."""
     chat_system, _ = mocked_chat_system
     chat_system.personas["test_persona"].set_enabled_tools(["*"])
+    offer_tools(chat_system, "test_persona", "create_ticket", "get_agent_status", "get_agent_history")
     _script_engine(chat_system, [
         ({"type": "tool_calls", "calls": [
             {"id": "r1", "name": "get_agent_status", "arguments": {"agent_id": "a"}},
@@ -290,6 +298,7 @@ async def test_budget_exhaustion_answer_is_persisted_and_retained(
 
     chat_system, memory_manager = mocked_chat_system
     chat_system.personas["test_persona"].set_enabled_tools(["*"])
+    offer_tools(chat_system, "test_persona", "create_ticket", "get_agent_status", "get_agent_history")
     # One call per response, forever — the live `hypr` shape — then the
     # wrap-up completion the loop asks for once the budget is gone.
     _script_engine(chat_system, [
@@ -379,6 +388,7 @@ async def test_budget_exhaustion_stays_one_terminal_event_when_wrap_up_dies(
 
     chat_system, _ = mocked_chat_system
     chat_system.personas["test_persona"].set_enabled_tools(["*"])
+    offer_tools(chat_system, "test_persona", "create_ticket", "get_agent_status", "get_agent_history")
 
     calls = {"n": 0}
 

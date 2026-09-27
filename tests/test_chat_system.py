@@ -8,7 +8,7 @@ import re
 from config.global_config import MAX_TOOL_CALLS
 from src.confirmations import ConfirmationManager, Decision, ParkedWrite
 from tests.helpers import (
-    make_chat_system, only_pending_token,
+    make_chat_system, offer_tools, only_pending_token,
     route_stream_through_generate_response,
 )
 from src.chat_system import (
@@ -57,6 +57,14 @@ def chat_system_with_mocks():
     )
     # Mock bot_logic by default to isolate ChatSystem logic
     system.bot_logic.preprocess_message = AsyncMock(return_value=None)
+    # DP-404: calls are refused unless offered. Offered only once a test also
+    # widens the persona's policy (the default persona allows nothing).
+    offer_tools(
+        system, "test_persona",
+        "search_tickets", "update_ticket", "create_ticket", "get_agent_status",
+        "web_search", "inspect_agents", "install_model", "get_ticket_details",
+        "test_tool",
+    )
 
     yield (system, mock_memory_manager, text_engine,
            mock_persona, mock_tool_manager)

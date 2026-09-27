@@ -23,6 +23,11 @@ from src.security.scrubber import get_scrubber, reset_scrubber
 from src.tools.tool_loop import ToolLoop, ToolDeferredEvent, _LoopFinishedEvent
 from src.turn_persistence import TurnPersistence
 
+# DP-404: the loop refuses a call whose name was not offered, so these
+# tests offer every tool name they script.
+_OFFERED = [{"name": n} for n in ("create_ticket", "search_tool")]
+
+
 SECRET = "supersecretvalue123"
 REDACTED = "[REDACTED:TEST_KEY]"
 
@@ -107,7 +112,7 @@ async def test_boundary1_tool_result_scrubbed_in_history_and_event():
 
     events = await _drain(loop.run(
         persona=_make_persona(), conversation_history=history,
-        params=MagicMock(), tools=[],
+        params=MagicMock(), tools=_OFFERED,
     ))
 
     result_events = [e for e in events if isinstance(e, ToolCallResultEvent)]
@@ -150,7 +155,7 @@ async def test_boundary1_tool_error_scrubbed_in_event():
 
     events = await _drain(loop.run(
         persona=_make_persona(), conversation_history=[],
-        params=MagicMock(), tools=[],
+        params=MagicMock(), tools=_OFFERED,
     ))
 
     result_events = [e for e in events if isinstance(e, ToolCallResultEvent)]
@@ -185,7 +190,7 @@ async def test_boundary2_model_reasoning_scrubbed_in_audit():
 
     events = await _drain(loop.run(
         persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
-        conversation_history=[], params=MagicMock(), tools=[],
+        conversation_history=[], params=MagicMock(), tools=_OFFERED,
     ))
 
     park = next(e for e in events if isinstance(e, ToolDeferredEvent))
@@ -216,7 +221,7 @@ async def test_boundary2_write_args_scrubbed_in_audit_and_confirmation():
 
     events = await _drain(loop.run(
         persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
-        conversation_history=[], params=MagicMock(), tools=[],
+        conversation_history=[], params=MagicMock(), tools=_OFFERED,
     ))
 
     park = next(e for e in events if isinstance(e, ToolDeferredEvent))
