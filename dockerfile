@@ -78,12 +78,16 @@ COPY . .
 # Copy the compiled static UI assets from Stage 1
 COPY --from=ui-builder /app/ui/dist ./src/interfaces/web_assets/derpr_ui/dist
 
-# Create a directory for persistent data (SQLite db)
-RUN mkdir -p /app/data
+# Mount point for persistent data (SQLite dbs, personas, agent workspaces).
+# Outside /app on purpose (DP-410): an agent CLI walks up from its workspace to
+# find a repo root and instruction files, so a data dir nested under /app puts
+# derpr's own code above every workspace. Compose mounts the volume here and
+# sets DATA_DIR=/data; the two must change together.
+RUN mkdir -p /data
 
-# Ensure the new user owns the data directory so it can write to it
-# (Even though we mount a volume over it, this is good practice in case the container is run standalone)
-RUN chown -R botuser:botuser /app
+# Ensure the new user owns the app and data directories so it can write to them
+# (a fresh named volume takes its ownership from the mount point)
+RUN chown -R botuser:botuser /app /data
 
 # Switch to the non-root user
 USER botuser

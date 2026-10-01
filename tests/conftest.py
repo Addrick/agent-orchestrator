@@ -45,15 +45,19 @@ def _force_sqlite_backend_in_tests(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _isolate_agy_agent_definition(monkeypatch, tmp_path):
-    """Keep DP-408's agent file out of the real home dir.
+    """Keep DP-408's agent file and DP-410's image rule out of the real home dir.
 
     Every `run_agy_cli` writes `~/.gemini/config/agents/derpr-engine.md` if it
-    is missing — a test that reaches it unpatched would install the file on the
-    dev box (or fail on a read-only home in CI). Point it at the test's tmp dir.
+    is missing, and an agy image turn adds a read rule to
+    `~/.gemini/antigravity-cli/settings.json` — a test that reaches either
+    unpatched would edit the dev box's own agy config (or fail on a read-only
+    home in CI). Point both at the test's tmp dir.
     """
     import src.engine.providers.agy as agy_mod
     monkeypatch.setattr(agy_mod, "AGY_AGENT_PATH",
                         tmp_path / "agy_config" / "agents" / "derpr-engine.md")
+    monkeypatch.setattr(agy_mod, "AGY_SETTINGS_PATH",
+                        tmp_path / "agy_config" / "antigravity-cli" / "settings.json")
 
 
 @pytest.fixture(autouse=True)

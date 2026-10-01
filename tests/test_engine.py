@@ -987,22 +987,77 @@ class TestAgyRenderAndConfig:
         assert text_engine.model_supports_images("agy-default") is True
 
     @pytest.mark.parametrize("settings", [
-        {"allow": []},
         {"raw": "{not json"},
         {"raw": "[]"},
-        {"allow": ["read_file(workspaces/_image_calls)"]},
+        {"raw": '{"permissions": []}'},
+        {"raw": '{"permissions": {"allow": "read_file(/x)"}}'},
         {"allow": None, "deny": ["read_file(WORKSPACES)"]},
-    ], ids=["no-rule", "malformed-json", "not-an-object", "relative-rule", "denied"])
-    def test_agy_image_gate_closed_without_a_usable_rule(
+    ], ids=["malformed-json", "not-an-object", "permissions-not-an-object", "allow-not-a-list", "denied"])
+    def test_agy_image_gate_closed_when_the_rule_cannot_be_added(
             self, text_engine, monkeypatch, tmp_path, settings):
-        """DP-382: without a rule agy will honour, the driver's gate says no, so
-        the turn gets the driver's "cannot see" note and agy is never asked to
-        read a file it would refuse. A relative rule is rejected because agy
-        resolves it against its own cwd, and deny beats allow in agy."""
+        """DP-382/DP-410: when derpr can't put a rule agy will honour in place,
+        the driver's gate says no, so the turn gets the driver's "cannot see"
+        note and agy is never asked to read a file it would refuse. derpr does
+        not rewrite a settings file it can't parse, and deny beats allow in
+        agy — so neither file is touched."""
+        import src.engine.providers.agy as agy_mod
         if settings.get("deny"):
             settings = {"deny": [f"read_file({tmp_path / 'workspaces'})"]}
         _write_agy_settings(monkeypatch, tmp_path, **settings)
+        before = agy_mod.AGY_SETTINGS_PATH.read_bytes()
         assert text_engine.model_supports_images("agy-flash") is False
+        assert agy_mod.AGY_SETTINGS_PATH.read_bytes() == before
+
+    @pytest.mark.parametrize("allow", [
+        [],
+        ["read_file(workspaces/_image_calls)"],
+        ["read_file(/app/data/workspaces/_image_calls)", "command(git)"],
+    ], ids=["no-rule", "relative-rule", "rule-for-an-old-data-dir"])
+    def test_agy_image_rule_is_added_when_nothing_grants_the_dir(
+            self, text_engine, monkeypatch, tmp_path, allow):
+        """DP-410: derpr owns the path, so it writes the rule instead of asking
+        an operator to copy it — the rule for /app/data stopped matching the
+        day the volume moved to /data. A relative rule doesn't count (agy
+        resolves it against its own cwd). Everything already in the file
+        survives, and a second turn adds nothing."""
+        import src.engine.providers.agy as agy_mod
+        _write_agy_settings(monkeypatch, tmp_path, raw=json.dumps(
+            {"model": "Gemini 3.5 Flash (High)", "permissions": {"allow": allow, "ask": ["command(rm)"]}}))
+
+        assert text_engine.model_supports_images("agy-flash") is True
+        assert text_engine.model_supports_images("agy-flash") is True
+
+        settings = json.loads(agy_mod.AGY_SETTINGS_PATH.read_text(encoding="utf-8"))
+        assert settings["model"] == "Gemini 3.5 Flash (High)"
+        assert settings["permissions"]["ask"] == ["command(rm)"]
+        assert settings["permissions"]["allow"] == [*allow, agy_mod.agy_image_read_rule()]
+
+    def test_agy_image_rule_creates_a_missing_settings_file(self, monkeypatch, tmp_path):
+        """DP-410: a host where agy never wrote settings.json (old key absent)
+        gets a file holding just the rule."""
+        import src.engine.providers.agy as agy_mod
+        from config import global_config
+        monkeypatch.setattr(global_config, "AGY_WORKSPACES_DIR", tmp_path / "workspaces")
+        settings = tmp_path / "antigravity-cli" / "settings.json"
+        monkeypatch.setattr(agy_mod, "AGY_SETTINGS_PATH", settings)
+
+        assert agy_mod.ensure_agy_image_rule() is True
+        assert json.loads(settings.read_text(encoding="utf-8")) == {
+            "permissions": {"allow": [agy_mod.agy_image_read_rule()]}}
+
+    def test_agy_image_gate_closed_when_settings_cannot_be_written(self, monkeypatch, tmp_path, caplog):
+        """DP-410: a failed write leaves the gate closed and names the rule, so
+        the operator can still add it by hand."""
+        import src.engine.providers.agy as agy_mod
+        _write_agy_settings(monkeypatch, tmp_path, allow=[])
+
+        def _refuse(*args, **kwargs):
+            raise PermissionError("read-only home")
+        monkeypatch.setattr(agy_mod, "write_json_atomic", _refuse)
+
+        with caplog.at_level("WARNING"):
+            assert agy_mod.ensure_agy_image_rule() is False
+        assert repr(agy_mod.agy_image_read_rule()) in caplog.text
 
     @pytest.mark.parametrize("variant", ["normalized", "ancestor", "bom"])
     def test_agy_image_gate_accepts_equivalent_rules(self, monkeypatch, tmp_path, variant):
@@ -1021,7 +1076,9 @@ class TestAgyRenderAndConfig:
         else:
             _write_agy_settings(monkeypatch, tmp_path, raw=BOM + json.dumps(
                 {"permissions": {"allow": [agy_mod.agy_image_read_rule()]}}))
-        assert agy_mod.agy_image_read_allowed() is True
+        before = agy_mod.AGY_SETTINGS_PATH.read_bytes()
+        assert agy_mod.ensure_agy_image_rule() is True
+        assert agy_mod.AGY_SETTINGS_PATH.read_bytes() == before
 
     def test_agy_limiter_constructed(self, text_engine):
         """The agy rate limiter is wired at init, ready for the route."""

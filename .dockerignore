@@ -1,9 +1,11 @@
 # DP-408: /app must not be a git repo. agy (and any other agent CLI) walks up
-# from its cwd to the repository root — persona workspaces live under
+# from its cwd to the repository root — persona workspaces lived under
 # /app/data/workspaces, so a shipped /app/.git made every agy call load derpr's
-# own dev instructions and treat the derpr codebase as its workspace. Nothing
-# at runtime reads /app/.git; self_edit and the notes workspace use their own
-# clones under data/. CLAUDE.md stays: notes_workspace.seed_claude_md copies it
+# own dev instructions and treat the derpr codebase as its workspace. DP-410
+# moved the data volume to /data; this stays because an image run without
+# DATA_DIR still falls back to /app/data. Nothing at runtime reads /app/.git;
+# self_edit and the notes workspace use their own clones under the data dir.
+# CLAUDE.md stays: notes_workspace.seed_claude_md copies it
 # into cc-* persona workspaces (DP-314).
 .git
 .agents/
