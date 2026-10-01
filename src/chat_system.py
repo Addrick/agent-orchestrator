@@ -679,6 +679,18 @@ class ChatSystem:
             # recallable "memory" of tool names and arguments if embedded.
             to_retain = retain_text if retain_text is not None else final_text
             if assistant_id is not None and to_retain and to_retain.strip() \
+                    and response_type == ResponseType.LLM_GENERATION \
+                    and assistant_id == retry_assistant_id:
+                # DP-409: a retry replaced this row in place, so Hindsight gets
+                # the rebuilt canonical session, not the new attempt appended
+                # beside the discarded one.
+                await self.turn_persistence.rebuild_session_safe(
+                    persona_name=persona_name, channel=channel,
+                    user_identifier=user_identifier, server_id=server_id,
+                    retried_id=assistant_id, retried_text=to_retain,
+                    untrusted=ctx.turn_tainted,
+                )
+            elif assistant_id is not None and to_retain and to_retain.strip() \
                     and response_type == ResponseType.LLM_GENERATION:
                 await self.turn_persistence.retain_turn_safe(
                     persona_name=persona_name, role="assistant",

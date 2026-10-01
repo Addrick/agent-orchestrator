@@ -1533,6 +1533,32 @@ async def test_stream_response_is_retry_archives_via_handle_portal_retry(
 
 
 @pytest.mark.asyncio
+async def test_retry_rebuilds_hindsight_session_instead_of_appending(
+    chat_system_with_mocks,
+):
+    """DP-409: the regenerated reply replaces the session document; appending
+    it would leave the discarded attempt's facts recallable."""
+    system, memory_mock, _, _, _ = chat_system_with_mocks
+    memory_mock.get_channel_history.return_value = []
+    memory_mock.handle_portal_retry.return_value = 99
+    memory_mock.update_interaction_content.return_value = True
+    system.turn_persistence.rebuild_session_safe = AsyncMock()
+    system.turn_persistence.retain_turn_safe = AsyncMock()
+
+    await _drain_events(
+        system.stream_response(
+            "test_persona", "portal", "web_ui", "ignored", is_retry=True,
+        )
+    )
+
+    system.turn_persistence.retain_turn_safe.assert_not_called()
+    kwargs = system.turn_persistence.rebuild_session_safe.call_args.kwargs
+    assert kwargs["retried_id"] == 99
+    assert kwargs["retried_text"] == "LLM Reply"
+    assert kwargs["channel"] == "web_ui"
+
+
+@pytest.mark.asyncio
 async def test_stream_response_is_retry_pops_trailing_assistant(chat_system_with_mocks):
     """On retry, history from DB ends with the about-to-be-overwritten
     assistant row. Kernel must pop it from `messages_for_llm` so the model
