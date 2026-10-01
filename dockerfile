@@ -22,7 +22,8 @@ ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 
 # Install system dependencies:
-# - git: app_manager.py git ops
+# - git: self_edit/notes clones under data/ (DP-314) — never /app itself, which
+#   ships without .git (.dockerignore, DP-408)
 # - curl: installs agy + claude
 # - bubblewrap + socat: Claude Code's Linux OS sandbox (DP-222) — bwrap enforces
 #   filesystem isolation, socat relays sandboxed network through the proxy.
