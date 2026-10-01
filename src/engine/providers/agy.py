@@ -38,6 +38,7 @@ from aiolimiter import AsyncLimiter
 
 from config import global_config
 from src.llm_errors import LLMCommunicationError
+from src.utils.atomic_json import write_json_atomic
 from src.utils.claude_cli_env import build_agy_cli_env
 from src.text_tool_protocol import (
     TOOL_CALL_OPEN,
@@ -81,7 +82,10 @@ def strip_system_messages(text: str) -> str:
 # does NOT auto-allow reads in its own cwd — only under %TEMP% (measured on
 # 1.2.8). So derpr needs ONE static rule, `read_file(<AGY_WORKSPACES_DIR>/
 # _image_calls)`, and no --dangerously-skip-permissions: commands, writes and
-# every other read stay denied.
+# every other read stay denied. derpr adds that rule itself
+# (`ensure_agy_image_rule`, DP-410): the path is derpr's own, so an operator
+# asked to copy it into agy's settings is only being handed something derpr
+# already knows — and has to be asked again whenever the data dir moves.
 #
 # The rule is host-wide — every agy call can use it, not just image calls — so
 # the dir must hold nothing when no image call is running. An image call wipes
@@ -106,7 +110,7 @@ def agy_image_calls_root() -> str:
 
 
 def agy_image_read_rule() -> str:
-    """The exact allow rule an operator adds to agy's settings.json."""
+    """The exact allow rule derpr adds to agy's settings.json."""
     return f"read_file({agy_image_calls_root()})"
 
 
@@ -126,33 +130,56 @@ def _rules_covering(rules: Any, root: str) -> List[str]:
     return covering
 
 
-def agy_image_read_allowed() -> bool:
-    """True when agy's settings.json lets agy read the image-calls dir: an
-    absolute `read_file` allow rule on it or an ancestor (an ancestor already
-    grants the dir to every agy run, so refusing it would narrow nothing) and
-    no deny rule over it (agy applies deny before allow). Read per call, so
-    adding the rule takes effect without a restart. Logs why when False."""
+def ensure_agy_image_rule() -> bool:
+    """True when agy's settings.json lets agy read the image-calls dir, adding
+    derpr's allow rule when nothing grants it yet.
+
+    Already granted means an absolute `read_file` allow rule on the dir or an
+    ancestor (an ancestor already grants the dir to every agy run, so adding
+    ours would narrow nothing). Checked per image turn like `ensure_agy_agent`,
+    so a moved data dir or a fresh host is repaired without a restart. The
+    rule is appended and every other setting kept; a rule for a previous
+    location is left alone (another derpr on this host may own it).
+
+    Never written: a file that is not a JSON object with list-valued rules
+    (agy's, not ours, to repair), or one whose deny rules cover the dir (agy
+    applies deny before allow, and a deny there is an operator's decision).
+    Logs why when False."""
+    rule = agy_image_read_rule()
     try:
         # utf-8-sig: PowerShell 5.1's `-Encoding utf8` writes a BOM.
         settings = json.loads(AGY_SETTINGS_PATH.read_text(encoding="utf-8-sig"))
-        permissions = settings.get("permissions", {})
-        allow, deny = permissions.get("allow", []), permissions.get("deny", [])
     except FileNotFoundError:
-        allow, deny = [], []
-    except (OSError, ValueError, AttributeError) as e:
+        settings = {}
+    except (OSError, ValueError) as e:
         logger.warning(f"agy image input: cannot read {AGY_SETTINGS_PATH} ({e}); replying without the image.")
+        return False
+    permissions = settings.setdefault("permissions", {}) if isinstance(settings, dict) else None
+    allow = permissions.setdefault("allow", []) if isinstance(permissions, dict) else None
+    deny = permissions.get("deny", []) if isinstance(permissions, dict) else None
+    if not isinstance(allow, list) or not isinstance(deny, list):
+        logger.warning(
+            f"agy image input: {AGY_SETTINGS_PATH} has no usable permissions block to add "
+            f"{rule!r} to; replying without the image."
+        )
         return False
     root = os.path.normcase(os.path.normpath(agy_image_calls_root()))
     denied = _rules_covering(deny, root)
     if denied:
         logger.warning(f"agy image input: {AGY_SETTINGS_PATH} denies {denied}; replying without the image.")
         return False
-    if not _rules_covering(allow, root):
+    if _rules_covering(allow, root):
+        return True
+    allow.append(rule)
+    try:
+        write_json_atomic(AGY_SETTINGS_PATH, settings, indent=2)
+    except OSError as e:
         logger.warning(
-            f"agy image input needs the allow rule {agy_image_read_rule()!r} under "
-            f"permissions.allow in {AGY_SETTINGS_PATH}; replying without the image."
+            f"agy image input: cannot add the allow rule {rule!r} under permissions.allow "
+            f"in {AGY_SETTINGS_PATH} ({e}); replying without the image."
         )
         return False
+    logger.info(f"agy image input: added the allow rule {rule!r} to {AGY_SETTINGS_PATH}.")
     return True
 
 

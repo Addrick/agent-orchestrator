@@ -15,7 +15,12 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 
 # Core directories
-DATA_DIR = PROJECT_ROOT / "data"
+# DATA_DIR holds every persistent store and every agent workspace. The default
+# sits inside the project tree, which is fine on a dev box; the container sets
+# DATA_DIR=/data (DP-410) so no workspace has the app's code as an ancestor —
+# agy walks up from its cwd looking for a repo root and instruction files, and
+# under /app/data that walk reached derpr's own (DP-408).
+DATA_DIR = Path(os.environ["DATA_DIR"]).resolve() if os.environ.get("DATA_DIR") else PROJECT_ROOT / "data"
 LOGS_DIR = PROJECT_ROOT / "logs"
 CREDENTIALS_DIR = PROJECT_ROOT / "credentials"
 TEST_DIR = PROJECT_ROOT / "tests"
@@ -38,7 +43,7 @@ if IS_TESTING:
 # Ensure essential local directories exist
 if not IS_TESTING:
     for directory in [DATA_DIR, LOGS_DIR, CREDENTIALS_DIR]:
-        directory.mkdir(exist_ok=True)
+        directory.mkdir(parents=True, exist_ok=True)
 
 # =============================================================================
 # FILE PATHS

@@ -355,7 +355,7 @@ unexpectedly — and a ✅/❌ click on a gated action that fails to resolve —
 the exception class, a one-line detail, and a short reference id:
 
 > Internal error [PermissionError] (ref 4f2ab910): [Errno 13] Permission denied:
-> '/app/data/personas.json' — you may want to rephrase and try again.
+> '/data/personas.json' — you may want to rephrase and try again.
 
 The class and detail are usually enough to tell a transient provider hiccup from a
 real fault without leaving Discord. The **ref** is the bridge to the full traceback:
@@ -382,23 +382,25 @@ kill mid-call — is removed before the next image is saved. While an image is
 there, no other `agy` call from derpr runs (they wait a few seconds), because
 the rule below lets every `agy` call read that folder, not just image calls.
 
-**One-time setup per host.** Headless `agy` refuses to read any file it has not
-been told it may read, so add this rule to `agy`'s own settings file,
-`~/.gemini/antigravity-cli/settings.json`, using the absolute path of derpr's
-`data/workspaces/_image_calls` directory on that host:
+**No setup per host (DP-410).** Headless `agy` refuses to read any file it has
+not been told it may read, so derpr adds one rule to `agy`'s own settings file,
+`~/.gemini/antigravity-cli/settings.json`, naming the absolute path of its
+`workspaces/_image_calls` directory on that host:
 
 ```json
 { "permissions": { "allow": ["read_file(/abs/path/to/data/workspaces/_image_calls)"] } }
 ```
 
-The path must be absolute (`agy` would resolve a relative one against its own
-working directory). A rule on a parent directory also works, and a `deny` rule
-covering the folder turns images off. Until a usable rule is there, derpr logs
-a warning that quotes the exact rule to add and the model is told an image was
-attached that it cannot see. The settings file is re-read on every image turn,
-so no restart is needed. Nothing else is granted: derpr still never passes
-`--dangerously-skip-permissions`, and `agy` keeps refusing commands and reads
-elsewhere.
+The settings file is checked on every image turn. If no rule covers the folder
+(a rule on a parent directory counts), derpr appends its own and leaves every
+other setting as it was — so moving the data directory needs no manual step,
+and neither does a new host. A rule left behind for an old location is not
+removed. derpr does not touch the file when it is not valid JSON, and never
+overrides a `deny` rule covering the folder: in both cases, or when the file
+cannot be written, it logs a warning that quotes the rule and the model is told
+an image was attached that it cannot see. Nothing else is granted: derpr still
+never passes `--dangerously-skip-permissions`, and `agy` keeps refusing
+commands and reads elsewhere.
 
 Image turns run outside the persona's persistent workspace (below) and start
 without its cached state. PNG, JPEG, WebP and GIF are supported. A failed or

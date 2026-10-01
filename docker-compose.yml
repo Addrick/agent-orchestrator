@@ -20,8 +20,11 @@ services:
     ports:
       - "5004:5003"
     environment:
-      # Override the DB path to point to the persistent volume
-      - MEMORY_DATABASE_FILE=/app/data/user_memory.db
+      # All persistent state and agent workspaces live on the volume mounted at
+      # /data below — outside /app, so no workspace has the app's code as an
+      # ancestor (DP-410). Every store path defaults under DATA_DIR; this and
+      # the mount must change together.
+      - DATA_DIR=/data
       # If you are running on Linux/AWS, you might need to set the Repo path for your git-pull logic
       # Though usually, in Docker, we prefer rebuilding the image over git-pulling inside.
       - REPO_PATH=/app
@@ -45,7 +48,7 @@ services:
       - CC_NOTES_REPO_URL=https://github.com/Addrick/derpr-private-notes.git
     volumes:
       # Persist the SQLite database and other data
-      - ./data:/app/data
+      - ./data:/data
       # Persist Gmail credentials (token.json) so you don't have to re-auth
       - ./credentials:/app/credentials
       # Optional: Mount logs if you write to files

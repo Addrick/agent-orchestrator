@@ -146,9 +146,10 @@ class TextEngine:
             return True
         # Antigravity CLI (Gemini-backed): the image is staged as a file agy
         # reads with its own view_file tool — only once the host's agy settings
-        # allow that read (DP-382, providers/agy.py)
+        # allow that read, which derpr sets up itself where it can (DP-382,
+        # DP-410, providers/agy.py)
         if model_name.startswith('agy'):
-            return agy_provider.agy_image_read_allowed()
+            return agy_provider.ensure_agy_image_rule()
         return False
 
 
