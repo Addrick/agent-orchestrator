@@ -1739,8 +1739,62 @@ class TestAgyCliInvocation:
         assert "-p" in captured["args"] and "--print-timeout" in captured["args"]
         # OS-level sandbox on by default (defense-in-depth)
         assert "--sandbox" in captured["args"]
+        # DP-408: runs as derpr's tool-less agent, not agy's coding agent
+        args = list(captured["args"])
+        assert args[args.index("--agent") + 1] == "derpr-engine"
         # agy is isolated in its own POSIX session for cleanup
         assert captured["kwargs"].get("start_new_session") is True
+
+    def test_agy_agent_definition_allows_no_commands(self):
+        """DP-408: the agent exists to take the shell away. A denied command
+        makes headless agy exit 0 with empty stdout, so the definition must
+        list only `view_file` (DP-382 image reads) and switch commands off."""
+        from src.engine.providers import agy as agy_mod
+
+        front = agy_mod.AGY_AGENT_DEFINITION.split("---")[1]
+        assert "tools:\n  - view_file\nmainAgent" in front
+        assert "commandExecutionPolicy: off" in front
+        assert f"name: {agy_mod.AGY_AGENT_NAME}" in front
+
+    def test_ensure_agy_agent_writes_and_repairs(self):
+        from src.engine.providers import agy as agy_mod
+
+        path = agy_mod.AGY_AGENT_PATH  # tmp, via the conftest fixture
+        assert not path.exists()
+        agy_mod.ensure_agy_agent()
+        assert path.read_text(encoding="utf-8") == agy_mod.AGY_AGENT_DEFINITION
+
+        path.write_text("---\nname: derpr-engine\ntools: [run_command]\n---\n", encoding="utf-8")
+        agy_mod.ensure_agy_agent()
+        assert path.read_text(encoding="utf-8") == agy_mod.AGY_AGENT_DEFINITION
+
+    @pytest.mark.asyncio
+    async def test_unwritable_agent_definition_is_logged(self, text_engine, monkeypatch, tmp_path, caplog):
+        """agy silently runs its default agent when `--agent` names one it
+        cannot find (1.2.11), so the call still goes out — but the write
+        failure must reach the log, since nothing else would show it."""
+        import src.engine as engine_mod
+        from config import global_config
+        from src.engine.providers import agy as agy_mod
+
+        monkeypatch.setattr(global_config, "AGY_WORKSPACES_DIR", tmp_path / "workspaces")
+        blocker = tmp_path / "not_a_dir"
+        blocker.write_text("x")
+        monkeypatch.setattr(agy_mod, "AGY_AGENT_PATH", blocker / "agents" / "derpr-engine.md")
+
+        captured = {}
+
+        async def fake_exec(*args, **kwargs):
+            captured["args"] = args
+            return self._FakeProc(stdout=b"ok")
+
+        monkeypatch.setattr(engine_mod.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(engine_mod.shutil, "which", lambda name: "/usr/bin/agy")
+
+        with caplog.at_level("WARNING"):
+            await text_engine._run_agy_cli("hi", timeout=5)
+        assert "--agent" in captured["args"]
+        assert "cannot write agent definition" in caplog.text
 
     @pytest.mark.asyncio
     async def test_sandbox_flag_omitted_when_disabled(self, text_engine, monkeypatch, tmp_path):

@@ -1,0 +1,14 @@
+# DP-408: /app must not be a git repo. agy (and any other agent CLI) walks up
+# from its cwd to the repository root — persona workspaces live under
+# /app/data/workspaces, so a shipped /app/.git made every agy call load derpr's
+# own dev instructions and treat the derpr codebase as its workspace. Nothing
+# at runtime reads /app/.git; self_edit and the notes workspace use their own
+# clones under data/. CLAUDE.md stays: notes_workspace.seed_claude_md copies it
+# into cc-* persona workspaces (DP-314).
+.git
+.agents/
+
+# Never in a CI checkout (gitignored), but a local `docker build` would copy
+# them: the private notes repo and other tasks' worktrees.
+memory/
+worktrees/

@@ -156,6 +156,57 @@ def agy_image_read_allowed() -> bool:
     return True
 
 
+# DP-408: every derpr agy call runs as this custom agent. agy's default agent
+# is a coding agent: given a workspace inside a git repo it searches it, and
+# from 2026-09-25 (agy self-update) it reached for `git grep` on plain
+# prompts — headless agy denies the command and exits 0 with empty stdout,
+# which killed managr's briefs on every run. derpr never wants agy's tools
+# (it drives its own via the `<tool_call>` protocol), so the agent lists only
+# `view_file` (DP-382 image reads) and turns command execution off: the model
+# cannot attempt a command at all, instead of being denied mid-turn.
+# Global scope (`~/.gemini/config/agents/`): one file serves every cwd agy runs
+# in — persona workspaces, tempdirs and per-call image dirs alike.
+AGY_AGENT_NAME = "derpr-engine"
+AGY_AGENT_PATH = pathlib.Path.home() / ".gemini" / "config" / "agents" / f"{AGY_AGENT_NAME}.md"
+AGY_AGENT_DEFINITION = f"""---
+name: {AGY_AGENT_NAME}
+description: Plain text completion for the derpr engine. Answers the prompt directly; no shell, no file edits.
+tools:
+  - view_file
+mainAgent: true
+subagent: false
+model: inherit
+commandExecutionPolicy: off
+---
+
+Answer the prompt you are given directly, as plain text. You are a text model serving another
+program: there is no codebase to inspect and no command to run. The only file you may open is
+one the prompt names by absolute path.
+"""
+
+
+def ensure_agy_agent() -> None:
+    """Write derpr's agy agent definition if it is missing or differs.
+
+    Checked on every call (one small read) so a deleted or hand-edited file is
+    repaired without a restart. agy given `--agent` for an agent it cannot find
+    silently runs its default agent (measured, 1.2.11) — nothing in the output
+    says so — so a write failure is logged here or it is invisible."""
+    try:
+        if AGY_AGENT_PATH.read_text(encoding="utf-8") == AGY_AGENT_DEFINITION:
+            return
+    except (OSError, ValueError):
+        pass
+    try:
+        AGY_AGENT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        AGY_AGENT_PATH.write_text(AGY_AGENT_DEFINITION, encoding="utf-8")
+    except OSError as e:
+        logger.warning(
+            f"agy: cannot write agent definition {AGY_AGENT_PATH} ({e}); "
+            f"agy will silently run its default (tool-using) agent."
+        )
+
+
 async def load_agy_image(engine: "TextEngine", image_url: str) -> Optional[Tuple[bytes, str]]:
     """(bytes, file extension) for an image agy can view, else None. A failed
     download or unsupported type degrades to the "cannot see" note rather than
@@ -417,7 +468,8 @@ async def run_agy_cli(engine: "TextEngine", prompt: str, timeout: float = AGY_CA
         raise LLMCommunicationError("Antigravity harness/agy binary not found.")
 
     timeout_sec_str = f"{int(timeout) + 30}s"
-    args = ["--print-timeout", timeout_sec_str, "-p", prompt]
+    ensure_agy_agent()
+    args = ["--agent", AGY_AGENT_NAME, "--print-timeout", timeout_sec_str, "-p", prompt]
     if global_config.AGY_SANDBOX:
         args = ["--sandbox", *args]
 
