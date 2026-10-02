@@ -7,10 +7,13 @@ bare `poll_interval` is ignored.
 """
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
+from zoneinfo import ZoneInfo
 
 import pytest
 
+from config import global_config
 from src.agents.agent_manager import AgentManager
 from src.agents.base import Agent
 
@@ -62,6 +65,28 @@ async def test_legacy_poll_interval_is_ignored():
     finally:
         await mgr.stop_agent("noop")
         await asyncio.gather(mgr._running["noop"].task, return_exceptions=True)
+
+
+# --- daily_at is wall-clock in LOCAL_TZ, not the host clock (DP-412) ---
+
+def test_local_now_follows_local_tz_not_host_clock(monkeypatch):
+    monkeypatch.setattr(global_config, "LOCAL_TZ", "Asia/Tokyo")
+    assert Agent._local_now().utcoffset() == timedelta(hours=9)
+
+
+def test_next_daily_run_is_wall_clock_in_local_zone():
+    """`daily_at: "17:00"` is 5 PM Eastern on a UTC host, across DST."""
+    ny = ZoneInfo("America/New_York")
+    utc = timezone.utc
+    # 16:30 EDT -> today's 17:00 EDT (21:00 UTC)
+    before = datetime(2026, 10, 1, 20, 30, tzinfo=utc).astimezone(ny)
+    assert Agent._next_daily_run("17:00", before) == datetime(2026, 10, 1, 21, 0, tzinfo=utc)
+    # 17:30 EDT -> already past, so tomorrow's
+    after = datetime(2026, 10, 1, 21, 30, tzinfo=utc).astimezone(ny)
+    assert Agent._next_daily_run("17:00", after) == datetime(2026, 10, 2, 21, 0, tzinfo=utc)
+    # EST: the same wall-clock time is 22:00 UTC
+    winter = datetime(2026, 12, 1, 12, 0, tzinfo=ny)
+    assert Agent._next_daily_run("17:00", winter) == datetime(2026, 12, 1, 22, 0, tzinfo=utc)
 
 
 @pytest.mark.asyncio

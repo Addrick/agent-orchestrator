@@ -34,7 +34,7 @@
             "description": "Polls Zammad for new tickets and runs the multi-stage AI triage pipeline."
         },
         "reminder": {
-            "schedule": {"daily_at": "17:00"},
+            "schedule": {"daily_at": "13:00"},
             "auto_start": true,
             "send_startup_dm": false,
             "notification_targets": [
@@ -44,12 +44,15 @@
         },
         "managr": {
             "persona": "managr_planner",
-            "schedule": {"daily_at": "07:30"},
+            "schedule": {"daily_at": "17:00"},
             "action_history_limit": 5,
             "proposals_enabled": true,
             "auto_start": true,
             "notification_targets": [
                 {"channel": "discord_dm", "recipient": "adrich"}
+            ],
+            "startup_notification_targets": [
+                {"channel": "discord_channel", "recipient": "debug"}
             ],
             "description": "Daily board-level Manager's Report: snapshots the whole ticket board, gathers analyst briefs, posts a plan digest, and queues whitelist-validated action proposals for human review (DP-280 Phase 0 + DP-282 Phase 1). No direct write path."
         },
@@ -73,6 +76,10 @@
         "client-tix": {
             "discord_channel_id": "1498777752197796003",
             "email": null
+        },
+        "debug": {
+            "discord_channel_id": "1222358674127982622",
+            "email": null
         }
     },
 
@@ -82,7 +89,7 @@
             "class": "Python class name — must extend Agent",
             "module": "Import path for the agent module (e.g. src.agents.dispatch_agent)",
             "persona": "Name of system persona in system_personas.json",
-            "schedule": "Schedule config object, e.g. {\"interval\": 300} for seconds between deploy cycles"
+            "schedule": "Schedule config object: {\"interval\": 300} for seconds between deploy cycles, or {\"daily_at\": \"HH:MM\"} for once a day at that wall-clock time in LOCAL_TZ (not the container's clock)"
         },
         "optional": {
             "action_history_limit": "Recent actions injected into LLM context (default: 0 = disabled)",

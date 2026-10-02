@@ -6,7 +6,9 @@ import logging
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple, cast
+from zoneinfo import ZoneInfo
 
+from config import global_config
 from src.chat_system import ChatSystem
 from src.persona import Persona
 from src.personas.store import load_system_personas_from_file
@@ -108,25 +110,36 @@ class Agent(ABC):
         """Execute one cycle of the agent's work. Subclasses implement this."""
         ...
 
+    @staticmethod
+    def _local_now() -> datetime:
+        """Now in LOCAL_TZ. The host clock is not a safe proxy for "local" —
+        prod runs in a UTC container, which fired `daily_at` 4-5h early (DP-412)."""
+        return datetime.now(ZoneInfo(global_config.LOCAL_TZ))
+
+    @staticmethod
+    def _next_daily_run(daily_at: str, now: datetime) -> datetime:
+        """Next occurrence of "HH:MM" strictly after `now`, in `now`'s zone."""
+        target_hour, target_minute = map(int, daily_at.split(':'))
+        target = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        return target
+
     async def _wait_for_next_run(self) -> None:
         """Sleep until the next scheduled run, respecting shutdown.
 
         Supports:
         - {"interval": <seconds>} — fixed interval between runs
-        - {"daily_at": "HH:MM"}   — run once a day at specific local time
+        - {"daily_at": "HH:MM"}   — run once a day at that wall-clock time in LOCAL_TZ
         """
         if "daily_at" in self.schedule:
             try:
                 target_time_str = self.schedule["daily_at"]
-                target_hour, target_minute = map(int, target_time_str.split(':'))
-                
+
                 while not self._shutdown_event.is_set():
-                    now = datetime.now() # Schedule relative to local time
-                    target = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
-                    
-                    if target <= now:
-                        target += timedelta(days=1)
-                    
+                    now = self._local_now()
+                    target = self._next_daily_run(target_time_str, now)
+
                     wait_seconds = (target - now).total_seconds()
                     # Sleep in chunks to handle system clock changes and DST gracefully
                     sleep_time = min(wait_seconds, 3600.0)
@@ -135,7 +148,7 @@ class Agent(ABC):
                         await asyncio.wait_for(self._shutdown_event.wait(), timeout=sleep_time)
                         return
                     except asyncio.TimeoutError:
-                        if datetime.now() >= target:
+                        if self._local_now() >= target:
                             break
             except Exception as e:
                 logger.error(f"Failed to parse daily_at schedule '{self.schedule.get('daily_at')}': {e}")

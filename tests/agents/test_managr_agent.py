@@ -215,6 +215,54 @@ async def test_no_notification_targets_config_key():
     assert outcome == "notification_failed"
 
 
+@pytest.mark.asyncio
+async def test_startup_cycle_reports_to_startup_targets():
+    """DP-412: the boot cycle goes to startup_notification_targets, every
+    later cycle to notification_targets. (Key absent -> the boot cycle uses
+    notification_targets: test_deploy_happy_path_sends_plan_digest.)"""
+    agent, chat_system, zammad, router = _make_agent(agent_config={
+        "notification_targets": [{"channel": "discord_dm", "recipient": "adrich"}],
+        "startup_notification_targets": [
+            {"channel": "discord_channel", "recipient": "debug"}],
+        "_recipients": {"adrich": {"discord_user_id": "321"},
+                        "debug": {"discord_channel_id": "999"}},
+    })
+    chat_system.text_engine.generate_response = AsyncMock(side_effect=[
+        _text("stale brief"), _text("patterns brief"), _text("BOOT PLAN"),
+        _text("stale brief"), _text("patterns brief"), _text("DAILY PLAN"),
+    ])
+    agent.text_engine = chat_system.text_engine
+
+    await agent.deploy()
+    router.send.assert_awaited_once()
+    kwargs = router.send.await_args.kwargs
+    assert (kwargs["channel"], kwargs["recipient"]) == ("discord_channel", "999")
+    assert kwargs["body"] == "BOOT PLAN"
+
+    agent.deploy_count = 1  # what Agent.start() does after the first deploy
+    await agent.deploy()
+    assert router.send.await_count == 2
+    kwargs = router.send.await_args.kwargs
+    assert (kwargs["channel"], kwargs["recipient"]) == ("discord_dm", "321")
+    assert kwargs["body"] == "DAILY PLAN"
+
+
+def test_agents_json_routes_startup_report_to_debug_channel():
+    """The shipped config: boot report -> debug channel, daily -> operator DM."""
+    config = json.loads((CONFIG_DIR / "agents.json").read_text())
+    agent, *_ = _make_agent(agent_config={
+        **config["agents"]["managr"], "_recipients": config["recipients"]})
+
+    def resolved():
+        return [(t["channel"], agent._resolve_recipient(t["channel"], t["recipient"]))
+                for t in agent._digest_targets()]
+
+    assert resolved() == [("discord_channel", "1222358674127982622")]
+    agent.deploy_count = 1
+    assert resolved() == [
+        ("discord_dm", config["recipients"]["adrich"]["discord_user_id"])]
+
+
 def test_format_ticket_line_is_defensive():
     agent, *_ = _make_agent()
     now = datetime(2026, 7, 4, 12, 0, tzinfo=timezone.utc)

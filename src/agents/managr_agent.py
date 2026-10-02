@@ -858,7 +858,7 @@ class ManagrAgent(Agent):
 
     async def _send_digest(self, action_id: int, plan: str) -> int:
         """Send the report to every configured notification target."""
-        targets = self.agent_config.get("notification_targets", [])
+        targets = self._digest_targets()
         if not targets:
             logger.warning("Managr has no notification_targets configured; report not sent.")
             return 0
@@ -888,6 +888,19 @@ class ManagrAgent(Agent):
             if sent:
                 sent_count += 1
         return sent_count
+
+    def _digest_targets(self) -> List[Dict[str, Any]]:
+        """Targets for this cycle's digest (DP-412).
+
+        The startup cycle (first deploy after boot) reports to
+        startup_notification_targets when configured, so a restart does not
+        send the operator an extra report; every later cycle — and a startup
+        cycle with that key absent/empty — uses notification_targets."""
+        if self.deploy_count == 0:
+            startup_targets = self.agent_config.get("startup_notification_targets")
+            if startup_targets:
+                return list(startup_targets)
+        return list(self.agent_config.get("notification_targets", []))
 
     def _resolve_recipient(self, channel: str, recipient_key: str) -> str:
         """Resolve a recipient key from agents.json recipients, or pass through."""
