@@ -1607,7 +1607,7 @@ Available to any persona with `enabled_tools: ["*"]` (e.g., `joy`, `it-help`). T
 
 Agents are autonomous background workers that run on a schedule without user interaction. They are configured in `config/agents.json`.
 
-A schedule is either `{"interval": <seconds>}` or `{"daily_at": "HH:MM"}`. `daily_at` is a wall-clock time in `LOCAL_TZ` (default `America/New_York`), not the host's clock — prod runs in a UTC container, so `"17:00"` means 5 PM Eastern year-round.
+A schedule is either `{"interval": <seconds>}` or `{"daily_at": "HH:MM"}`. `daily_at` is a wall-clock time in `LOCAL_TZ` (default `America/New_York`), not the host's clock, so `"17:00"` means 5 PM Eastern year-round.
 
 ### Current Agents
 
@@ -1828,6 +1828,7 @@ derpr: We settled on the 45% floor with a 30s spin-down delay.
 |---------|-------|----------|
 | Default model | `gemini-3.1-flash-lite` | `DEFAULT_MODEL_NAME` |
 | Default agent model | `agy-flash` | `DEFAULT_AGENT_MODEL` |
+| Time zone | US Eastern (`America/New_York`) | `LOCAL_TZ` — every time shown to a person or a model is in this zone: the `[Current Time]` line in the system prompt, timestamps in agent and consolidator prompts, retained-turn stamps, report dates, `daily_at` schedules. Stored timestamps are UTC and are converted on display. The container clock is set to the same zone (`TZ` in the `dockerfile`), so log timestamps agree; change the two together (DP-413) |
 | Default context limit | 15 messages | `DEFAULT_HISTORY_MESSAGES` |
 | Context hard cap | 30 messages | `GLOBAL_HISTORY_MESSAGES` |
 | Max tool calls per request | 15 | `MAX_TOOL_CALLS` — tool calls **executed**, not LLM round trips. DP-297 raised it 5 → 10 (a parked write costs a step instead of ending the turn); DP-335 moved the counter off iterations, so the number now means the same thing whichever model answers, and sized it for the longest routine any persona runs |

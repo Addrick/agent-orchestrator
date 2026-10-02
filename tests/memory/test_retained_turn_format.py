@@ -6,7 +6,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from config import global_config
-from src.turn_persistence import format_retained_turn, to_utc
+from src.turn_persistence import format_retained_turn
+from src.utils.timeutil import to_utc
 
 
 @pytest.fixture(autouse=True)
@@ -31,12 +32,12 @@ def test_assistant_turn_has_speaker_and_no_timestamp():
     assert out == "derpr: hello"
 
 
-def test_naive_timestamp_is_host_local_not_utc():
-    # Every naive turn timestamp is `datetime.now()` — host-local wall time.
-    naive = datetime(2026, 9, 26, 14, 5)
-    utc = to_utc(naive)
-    assert utc.utcoffset() == timedelta(0)
-    assert utc == naive.astimezone()  # same instant as the local reading
+def test_naive_timestamp_is_utc_not_host_local():
+    # DP-413: a naive timestamp is a stored one, and storage is UTC — it is
+    # relabelled, never converted from whatever zone the host clock is in.
+    naive = datetime(2026, 9, 26, 18, 5)
+    assert to_utc(naive) == datetime(2026, 9, 26, 18, 5, tzinfo=timezone.utc)
+    assert format_retained_turn("user", "Adam", "hi", naive) == "[2026-09-26 14:05] Adam: hi"
 
 
 def test_aware_timestamp_keeps_its_instant():

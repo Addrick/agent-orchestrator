@@ -413,11 +413,7 @@ class ManagrAgent(Agent):
                 logger.warning(f"Could not fetch actions for peer agent '{peer}': {e}")
                 continue
             for a in actions or []:
-                ts = a.get("timestamp", "?")
-                if hasattr(ts, "strftime"):
-                    ts = ts.strftime("%Y-%m-%d %H:%M")
-                else:
-                    ts = str(ts)[:16]
+                ts = self._display_ts(a.get("timestamp", "?"))
                 lines.append(
                     f"- [{ts}] {peer}: {a.get('action_type', '?')} "
                     f"{a.get('trigger_context') or ''} -> {a.get('outcome', '?')}"
@@ -863,7 +859,7 @@ class ManagrAgent(Agent):
             logger.warning("Managr has no notification_targets configured; report not sent.")
             return 0
 
-        subject = f"Manager's Report — {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
+        subject = f"Manager's Report — {self._local_now().strftime('%Y-%m-%d')}"
         sent_count = 0
         for target in targets:
             channel = target.get("channel", "discord_dm")

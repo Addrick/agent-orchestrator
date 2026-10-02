@@ -13,23 +13,16 @@ import re
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple, cast
-from zoneinfo import ZoneInfo
 
-from config import global_config
 from config.global_config import MAX_CACHED_API_REQUESTS
 from src.generation_events import ResponseType
 from src.memory.backend.base import MemoryBackend
 from src.memory.memory_manager import MemoryManager
 from src.memory.scope_tags import build_scope_tags
 from src.security.scrubber import get_scrubber
+from src.utils.timeutil import to_local, to_utc
 
 logger = logging.getLogger(__name__)
-
-
-def to_utc(ts: datetime) -> datetime:
-    """Aware UTC. A naive value is host-local — every naive turn timestamp
-    comes from `datetime.now()` — so it is converted, not relabelled."""
-    return ts.astimezone(timezone.utc)
 
 
 def format_retained_turn(role: str, speaker: str, content: str,
@@ -42,7 +35,7 @@ def format_retained_turn(role: str, speaker: str, content: str,
     exchange.
     """
     if role == "user":
-        local = to_utc(timestamp).astimezone(ZoneInfo(global_config.LOCAL_TZ))
+        local = to_local(timestamp)
         return f"[{local:%Y-%m-%d %H:%M}] {speaker}: {content}"
     # Reasoning is never retained (DP-252 contract). A model that leaves its
     # `<think>` inline in the reply bypasses `reasoning_content`, and the
@@ -262,7 +255,7 @@ class TurnPersistence:
                 user_identifier=user_identifier, persona_name=persona_name,
                 channel=channel, author_role='assistant',
                 author_name=persona_name, content=final_text,
-                timestamp=datetime.now(), server_id=server_id,
+                timestamp=datetime.now(timezone.utc), server_id=server_id,
                 tool_context=tool_context_json,
                 reply_to_id=user_interaction_id,
             )

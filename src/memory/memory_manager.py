@@ -16,6 +16,7 @@ from config.global_config import EMBEDDING_MODEL, EMBEDDING_DIMENSION, SEMANTIC_
 from src.deferral_kinds import DEFERRAL_KIND_APPROVAL
 from src.memory.backend.base import MemoryHit, Experience, MentalModel, ReflectResult
 from src.security.scrubber import get_scrubber
+from src.utils.timeutil import to_utc
 import sqlite_vec
 
 logger = logging.getLogger(__name__)
@@ -824,7 +825,7 @@ class MemoryManager:
             old_content = row['content']
             old_reasoning = row['reasoning_content']
             old_summary_id = row['parent_summary_id']
-            now = datetime.now()
+            now = datetime.now(timezone.utc)
 
             try:
                 # 2. Archive old version
@@ -908,7 +909,7 @@ class MemoryManager:
             interaction_id = row['interaction_id']
             old_content = row['content']
             old_reasoning = row['reasoning_content']
-            now = datetime.now()
+            now = datetime.now(timezone.utc)
             try:
                 # Content-hash dedupe (mirrors swap_interaction_version): if an
                 # archive row with the same (interaction_id, old_content) already
@@ -1172,7 +1173,7 @@ class MemoryManager:
             target_content = archives[k]['old_content']
             target_reasoning = archives[k]['old_reasoning_content']
             current_canonical = canonical_row['content']
-            now = datetime.now()
+            now = datetime.now(timezone.utc)
 
             try:
                 # 1. Archive current canonical (with content-hash dedupe).
@@ -1271,7 +1272,7 @@ class MemoryManager:
             try:
                 cursor.execute(
                     "INSERT INTO Suppressed_Interactions (interaction_id, suppressed_at) VALUES (?, ?)",
-                    (interaction_id, datetime.now()),
+                    (interaction_id, datetime.now(timezone.utc)),
                 )
                 conn.commit()
                 return True
@@ -1289,7 +1290,7 @@ class MemoryManager:
             if not rows:
                 return False
 
-            now = datetime.now()
+            now = datetime.now(timezone.utc)
             suppressed_count = 0
             for row in rows:
                 interaction_id = row['interaction_id']
@@ -1386,13 +1387,12 @@ class MemoryManager:
         """Visible, non-empty turns of one retain scope (persona + channel,
         like `_DocScopeStore`'s key) at or after `since`, oldest first (DP-409).
 
-        Stored timestamps mix naive host-local (`datetime.now()`) and aware
-        UTC (platform timestamps), so neither SQL comparison nor a timestamp
-        ORDER BY is sound: walk back by interaction_id — insertion order, the
-        order the turns were retained in — and stop at the first older row.
+        Stored timestamps mix naive and aware forms of UTC (rows written
+        before DP-413 used a bare `datetime.now()`), so walk back by
+        interaction_id — insertion order, the order the turns were retained
+        in — and stop at the first older row.
         """
-        if since.tzinfo is None:
-            since = since.astimezone()
+        since = to_utc(since)
         rows: List[Dict[str, Any]] = []
         with self._lock:
             cursor = self._get_connection().cursor()
@@ -1412,7 +1412,7 @@ class MemoryManager:
                     continue
                 if not isinstance(parsed, datetime):
                     continue
-                parsed = parsed.astimezone()  # naive = host-local
+                parsed = to_utc(parsed)
                 if parsed < since:
                     break
                 rows.append({**dict(row), "timestamp": parsed})
@@ -2432,7 +2432,7 @@ class MemoryManager:
         scrubbing field-by-field keeps unregistered-shape detection alive on a
         large metadata blob that would exceed the limit once flattened.
         """
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         scrubber = get_scrubber()
         safe_metadata = (
             cast(Dict[str, Any], scrubber.scrub(metadata)) if metadata else None

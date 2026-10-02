@@ -6,13 +6,12 @@ import logging
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple, cast
-from zoneinfo import ZoneInfo
 
-from config import global_config
 from src.chat_system import ChatSystem
 from src.persona import Persona
 from src.personas.store import load_system_personas_from_file
 from src.memory.memory_manager import MemoryManager
+from src.utils.timeutil import local_now, to_local
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +113,16 @@ class Agent(ABC):
     def _local_now() -> datetime:
         """Now in LOCAL_TZ. The host clock is not a safe proxy for "local" —
         prod runs in a UTC container, which fired `daily_at` 4-5h early (DP-412)."""
-        return datetime.now(ZoneInfo(global_config.LOCAL_TZ))
+        return local_now()
+
+    @staticmethod
+    def _display_ts(ts: Any) -> str:
+        """A stored action timestamp as LOCAL_TZ "YYYY-MM-DD HH:MM" for a
+        prompt; anything unparseable is passed through clipped."""
+        try:
+            return to_local(ts).strftime("%Y-%m-%d %H:%M")
+        except (AttributeError, TypeError, ValueError):
+            return str(ts)[:16]
 
     @staticmethod
     def _next_daily_run(daily_at: str, now: datetime) -> datetime:
@@ -447,11 +455,7 @@ class Agent(ABC):
 
         lines = [f"--- RECENT ACTIONS ({self.agent_name}) ---"]
         for i, action in enumerate(actions, 1):
-            ts = action.get("timestamp", "?")
-            if hasattr(ts, "strftime"):
-                ts = ts.strftime("%Y-%m-%d %H:%M")
-            else:
-                ts = str(ts)[:16]
+            ts = self._display_ts(action.get("timestamp", "?"))
 
             action_type = action.get("action_type", "?").upper()
             trigger = action.get("trigger_context", "")

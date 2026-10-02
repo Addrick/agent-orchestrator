@@ -140,9 +140,9 @@ async def test_replace_session_without_open_document_declines(backend):
 def test_session_turns_span_mixed_timestamp_formats(mm):
     start = datetime(2026, 9, 27, 3, 45, tzinfo=timezone.utc)
     _log(mm, "user", "before the session", start - timedelta(hours=30))
-    # Naive = host-local wall time, as `datetime.now()` writes it.
-    u = _log(mm, "user", "first", start.astimezone().replace(tzinfo=None))
-    a = _log(mm, "assistant", "reply", (start + timedelta(seconds=9)).astimezone().replace(tzinfo=None))
+    # Naive UTC, as rows written before DP-413 are stored.
+    u = _log(mm, "user", "first", start.replace(tzinfo=None))
+    a = _log(mm, "assistant", "reply", (start + timedelta(seconds=9)).replace(tzinfo=None))
     # Aware UTC, as a platform timestamp is stored.
     u2 = _log(mm, "user", "second", start + timedelta(minutes=5))
     gone = _log(mm, "assistant", "deleted", start + timedelta(minutes=6))
