@@ -53,6 +53,30 @@ is a **probe**, not a regeneration — see the caveat at the foot of this file: 
 itself "regenerated, not maintained" and **no regeneration script exists**. `arch_audit.py`
 works at the *name* level that this file's own false-positive section calls the wrong one.
 
+**Re-checked 2026-10-01 at `d1c514a`** (DP-252, 379, 382, 402–404, 406–410 merged since). Still a
+probe, not a regeneration. What it found, none of it yet folded into the tables below:
+
+- **Family A gate column** — a parked write is now also gated on the offered set:
+  `ToolManager.execute_tool(name, offered, …)` refuses a tool the persona was not given, and
+  `ConfirmationManager.apply` re-derives that set at approval time (DP-404).
+- **Finding C1 was overstated** — `expire_stale_proposals` is also called from
+  `proposals/service.py` (three call sites), not only `ManagrAgent`. The point that stands:
+  there is still no *boot* pass.
+- **No family covers writes into Hindsight**, and there are now four: the live `retain_turn`,
+  the retry `replace_session` (DP-409), `retain_document` from upload / URL / `ingest_path` /
+  Lite import (DP-252), and `scripts/backfill_hindsight.py`. `capability_map.md` has the
+  rows; nobody has laid them out by mechanism.
+- **A same-shape pair with no row** — "check and repair an external CLI's on-disk config before
+  each spawn": `agy.ensure_agy_agent` (DP-408) and `agy.ensure_agy_image_rule` (DP-410), which
+  DP-410's own commit message calls the same shape, plus `notes_workspace.seed_claude_md`.
+- **`arch_audit.py similar` pairs with no verdict in the map:** `stream_agy` / `stream_cc`
+  (0.87), `TextEngine._stream_local_response` / `LocalProvider.stream` (0.60),
+  `SqliteSemanticBackend.get_action_steps` / `MemoryToolHandler._drill_down_memory` (0.59), and
+  `RequestBuilder.fetch_raw_history` / `scope_tags.recall_scope_tags` (0.57, new with DP-407).
+- **Line references below have drifted**; trust the symbol, not the number
+  (`_update_core_memory` is at `tool_manager.py:438`, `MAX_INFLIGHT_SSH` has no leading
+  underscore and lives in `proxmox/ssh.py`).
+
 ---
 
 ## A · Work that outlives the turn that started it
@@ -219,8 +243,9 @@ why it never caught DP-343.
    `_arm_idle` / `_idle_fallback` (`self_edit/integration.py:325`).
 4. **C1** — proposal expiry has no boot pass where the structurally identical
    park expiry does. `confirmations.rebuild_from_store` runs at boot
-   (`bootstrap/__init__.py:129`); `expire_stale_proposals` is driven only from
-   `ManagrAgent` (`agents/managr_agent.py:624`).
+   (`bootstrap/__init__.py:129`); `expire_stale_proposals` is driven from
+   `ManagrAgent` (`agents/managr_agent.py:624`) and `proposals/service.py` — on a managr run
+   or a proposals API call, never at boot.
 
 **Closed:** **D1** — one node door as of DP-348 (see §D).
 

@@ -1,7 +1,7 @@
 # DP-118 — `ingest_path` tool design
 
 **Date:** 2026-05-18
-**Status:** Approved (brainstorm); implementation in progress.
+**Status:** Shipped — `src/tools/ingest_path.py`; `ingest_path` is in `ALL_TOOL_DEFINITIONS`. Kept as the design record.
 
 ## Goal
 

@@ -6,11 +6,11 @@ An async, provider-agnostic LLM orchestration engine for chatbot automation: IT 
 
 ## What it does
 
-- **Chat orchestration.** One `ChatSystem` brokers requests across providers (OpenAI, Anthropic, Google Gemini/Gemma, OpenAI-compatible local). Streaming-first: token deltas, tool calls, and tool results all flow through a single event stream.
+- **Chat orchestration.** One `ChatSystem` brokers requests across six providers (OpenAI, Anthropic, Google Gemini/Gemma, local kobold.cpp, and the `agy` and Claude Code CLIs). Streaming-first: token deltas, tool calls, and tool results all flow through a single event stream.
 - **Multi-interface.** Discord bot (primary), Gmail (PoC), Zammad agents, and a FastAPI web portal (React, at `/derpr`) with persona CRUD, DB-as-source history, version chevrons for regenerations, and engine-side prompt/budget management on the OAI route.
 - **Persona system.** Stateful LLM configs with `ExecutionMode` (AUTONOMOUS / CONFIRM) and `MemoryMode` (CHANNEL_ISOLATED, SERVER_WIDE, PERSONAL, GLOBAL, TICKET_ISOLATED). Runtime-mutable through `set` commands; persisted to `data/personas.json`.
-- **Tool loop.** JSON-schema tools dispatched via `ToolManager`, capped at 5 iterations per request, with read/write classification, service-binding gating, and CONFIRM-mode approval flows on Discord.
-- **Autonomous agents.** Background workers on interval schedules: `ZammadBot` (multi-stage triage via system personas), `DispatchAgent` (priority + notification routing), `SqliteConsolidator` (segment + summarize + embed), `MemoryConsolidator` (cluster L1 summaries into L2 core profiles).
+- **Tool loop.** JSON-schema tools dispatched via `ToolManager`, budgeted at 15 executed tool calls per request (plus a 25-round-trip runaway guard), with read/write classification, service-binding gating, and every write parked for human approval regardless of execution mode.
+- **Autonomous agents.** Background workers on interval schedules: `ZammadBot` (multi-stage triage via system personas), `DispatchAgent` (priority + notification routing), `ReminderAgent` (open-ticket nudges), `ManagrAgent` (triage manager that emits human-approved proposals), `SqliteConsolidator` (segment + summarize + embed, SQLite backend only). Also: the `fixr` self-edit supervisor, Proxmox and HuggingFace model-management tools, an MCP client and bridge, and an optional voice pipeline — see `docs/architecture/overview.md`.
 - **Tiered memory.** Sliding-window history from SQLite plus semantic recall via either `SqliteSemanticBackend` (default, sqlite-vec) or `HindsightBackend` (alpha, REST to a Dockerised hindsight + pgvector). Engine-side recall is routed through the `MemoryBackend` ABC; transcript layer (logging, suppression, edit/version history, audit) stays on `MemoryManager`.
 
 ## Architecture
@@ -38,7 +38,7 @@ flowchart TB
 
 Async pipeline: any interface produces a request, `ChatSystem` runs a streaming tool loop over the configured persona's model, and resolved turns persist into a tiered memory store while background agents triage tickets and consolidate long-term memory out-of-band.
 
-Full component diagram (every class, every edge) → [`docs/architecture.mmd`](docs/architecture.mmd) · component reference → [`memory/codebase/architecture.md`](memory/codebase/architecture.md).
+Full component diagram (every class, every edge) → [`docs/architecture.mmd`](docs/architecture.mmd) · component reference → [`docs/architecture/architecture.md`](docs/architecture/architecture.md).
 
 ## Tech stack
 
@@ -46,19 +46,19 @@ Full component diagram (every class, every edge) → [`docs/architecture.mmd`](d
 |------------|---------------------------------------------------------------------------------------|
 | Runtime    | Python 3.14, `asyncio` throughout                                                     |
 | Storage    | SQLite (`sqlite-vec` for KNN); optional Postgres + pgvector via Hindsight container   |
-| LLM APIs   | OpenAI, Anthropic, Google Gemini/Gemma, OpenAI-compatible local (kobold.cpp, Ollama)  |
+| LLM APIs   | OpenAI, Anthropic, Google Gemini/Gemma, local kobold.cpp, `agy` CLI, Claude Code CLI  |
 | Embeddings | `gemini-embedding-001` (3072-d, L2-normalised)                                        |
 | Web        | FastAPI + uvicorn (portal/adapter), discord.py, google-api-python-client              |
 | Packaging  | Docker + Docker Compose; `pip-compile` (requirements.in → requirements.txt)           |
-| Testing    | pytest, pytest-asyncio, `unittest.mock`; 4-tier markers (unit/integration/zammad_live/llm_live) |
+| Testing    | pytest, pytest-asyncio, `unittest.mock`; tiered markers — see `docs/testing.md` |
 
 ## Repository layout
 
 ```
 src/
   chat_system.py         DI hub + orchestration kernel
-  engine.py              Provider-agnostic TextEngine — one streaming driver
-                         per provider; one-shot = collect(stream) (DP-206)
+  engine/                Provider-agnostic TextEngine (driver.py), ProviderRegistry,
+                         and one streaming driver per provider in providers/
   stream_engine.py       Kobold-native local transport (engine-owned)
   llm_errors.py          LLMCommunicationError leaf
   message_handler.py     BotLogic — dev commands (set/what/dump_*/help/…)
@@ -80,8 +80,8 @@ src/
 config/                  global_config.py, default_personas.json,
                          system_personas.json, agents.json
 docs/                    user_guide.md (user-facing spec), architecture/
-memory/                  Tiered memory notes (L0 MEMORY.md → L1 _overview → L2)
-tests/                   4-tier pytest suite
+memory/                  (gitignored) private notes repo, absent from a public clone
+tests/                   tiered pytest suite (docs/testing.md)
 ```
 
 ## Quickstart
@@ -118,7 +118,7 @@ Once the bot is online, message a persona on Discord (e.g. `gemini hello`) or op
 docker compose up -d --build      # main app
 ```
 
-The optional Hindsight semantic-memory stack is **deployed out-of-repo** on `aux-desktop` / `derpr-host` (`10.0.0.70`) at `C:\Server\Hindsight\` — this repo no longer ships a Hindsight compose template. It runs the API server with no internet egress; an nginx LB sidecar (`kobold-lb.conf`) routes LLM traffic to LAN kobold.cpp instances. See `docs/user_guide.md` (Hindsight section) for deployment, bank bootstrap, backup/restore, and failure modes.
+The optional Hindsight semantic-memory stack is **deployed out-of-repo** on the production host — this repo no longer ships a Hindsight compose template. It runs the API server with no internet egress; an nginx LB sidecar (`kobold-lb.conf`) routes LLM traffic to LAN kobold.cpp instances. See `docs/user_guide.md` (Hindsight section) for deployment, bank bootstrap, backup/restore, and failure modes.
 
 ## Environment
 
@@ -130,10 +130,11 @@ All variables are read directly via `os.environ` — set them in `.env` or your 
 | `OPENAI_API_KEY` | OpenAI provider |
 | `ANTHROPIC_API_KEY` | Anthropic provider |
 | `GOOGLE_GENERATIVEAI_API_KEY` | Gemini/Gemma + embeddings |
-| `LOCAL_LLM_URL` | Override for OpenAI-compatible local endpoint (default `http://omen:5001/v1`) |
+| `LOCAL_LLM_URL` | Override for the local kobold.cpp endpoint (default in `config/global_config.py`) |
 | `ZAMMAD_URL`, `ZAMMAD_API_KEY` | Enables ZammadClient + Zammad agents |
 | `GMAIL_CREDENTIALS_FILE`, `GMAIL_TOKEN_FILE`, `GMAIL_PROJECT_ID`, `GMAIL_PUBSUB_TOPIC`, `GMAIL_PUBSUB_SUBSCRIPTION_ID` | Gmail PoC interface |
-| `MEMORY_DATABASE_FILE` | SQLite path (default `data/user_memory.db`) |
+| `DATA_DIR` | Where all mutable state lives (default `./data`; the container sets `/data`, outside the app tree) |
+| `MEMORY_DATABASE_FILE` | SQLite path (default `<DATA_DIR>/user_memory.db`) |
 | `KOBOLD_DEFAULT_PERSONA` | Persona served when the portal opens with no selection |
 | `DISCORD_DEBUG_CHANNEL` | Channel id excluded from response handling |
 | `SEMANTIC_BACKEND`, `HINDSIGHT_URL` | Switch semantic recall to Hindsight (alpha) |
@@ -143,28 +144,32 @@ All variables are read directly via `os.environ` — set them in `.env` or your 
 
 ```bash
 pytest                                                                    # everything; live tiers auto-skip without creds
-pytest -m "not zammad_live and not llm_live and not discord_live"          # CI default
+pytest -n auto -m "not integration"                                       # what CI and the pre-push hook run
 pytest -m "not integration and not zammad_live and not llm_live and not discord_live"  # unit only
 pytest -m zammad_live                                                     # against a live Zammad
 pytest -m llm_live                                                        # against real LLM APIs
 pytest --cov=src
 ```
 
-Test Zammad credentials live in `.env.test` (gitignored, loaded with `override=True` so production is never hit). Migration tests use the `legacy_mem_manager` fixture pattern — see `CLAUDE.md` for the mandatory-test rules around schema, config, and startup-wiring changes.
+Test Zammad credentials live in `.env.test` (gitignored, loaded with `override=True` so production is never hit). Migration tests use the `legacy_mem_manager` fixture pattern — see [`docs/testing.md`](docs/testing.md) for the mandatory-test rules around schema, config, and startup-wiring changes.
 
 Static checks:
 
 ```bash
-flake8 src/
-mypy src/ --config-file mypy.ini
+flake8 src/ services/
+mypy src/ services/ --config-file mypy.ini
+lint-imports                      # layer contracts (setup.cfg)
+python scripts/ci_check.py        # all of CI's gates in one go
 ```
 
 ## Documentation
 
 - [`docs/user_guide.md`](docs/user_guide.md) — user-facing behaviour: interfaces, commands, personas, modes, tools, agents, long-term memory, Hindsight bring-up. Doubles as the spec for new features (write here before implementing).
 - [`docs/architecture/`](docs/architecture) — split design notes (overview, architecture, external, research, roadmap). Decision records (ADRs) live in the private notes repo, not here.
-- [`memory/codebase/architecture.md`](memory/codebase/architecture.md) — exhaustive component reference: data flow, schemas, tables, indexes, startup sequence.
-- [`CLAUDE.md`](CLAUDE.md) — contributor rules: parallel-agent / worktree workflow, mandatory tests, memory-update protocol.
+- [`docs/architecture/architecture.md`](docs/architecture/architecture.md) — exhaustive component reference: data flow, schemas, tables, indexes, startup sequence.
+- [`docs/capability_map.md`](docs/capability_map.md) and [`docs/mechanism_ledger.md`](docs/mechanism_ledger.md) — capability → implementation, and the same question keyed on mechanism. Read before adding anything that "already exists somewhere".
+- [`docs/testing.md`](docs/testing.md) — test tiers, markers, mandatory test requirements.
+- [`CLAUDE.md`](CLAUDE.md) — repo-specific parameters for coding agents (commands, ticket prefix, docs contract).
 
 ## License
 

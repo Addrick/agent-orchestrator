@@ -382,6 +382,15 @@ kill mid-call — is removed before the next image is saved. While an image is
 there, no other `agy` call from derpr runs (they wait a few seconds), because
 the rule below lets every `agy` call read that folder, not just image calls.
 
+**derpr runs `agy` as its own agent (DP-408).** Every `agy` call is launched with
+`--agent derpr-engine`, an agent definition derpr writes to
+`~/.gemini/config/agents/derpr-engine.md`: one tool (`view_file`), command execution off.
+Without it a headless `agy` may try to run a shell command, have it auto-denied, and
+return nothing. The file is checked on every call and rewritten if it is missing or
+differs — a hand edit does not survive, so change the definition in
+`src/engine/providers/agy.py`, not on disk. If the file cannot be written derpr logs a
+warning, because `agy` silently falls back to its default tool-using agent.
+
 **No setup per host (DP-410).** Headless `agy` refuses to read any file it has
 not been told it may read, so derpr adds one rule to `agy`'s own settings file,
 `~/.gemini/antigravity-cli/settings.json`, naming the absolute path of its
@@ -1713,12 +1722,12 @@ The semantic memory tier can be backed by [vectorize-io/hindsight](https://githu
 
 ### Deployment
 
-**Production (since 2026-05-19):** Hindsight runs on `aux-desktop` / `derpr-host` (`10.0.0.70`), bound to `0.0.0.0:8888`; the derpr default `HINDSIGHT_URL` points there. The stack is **maintained out-of-repo** on that host at `C:\Server\Hindsight\` (`docker-compose.hindsight.yml` + `kobold-lb.conf` + engine patches) — this repo no longer ships a Hindsight compose template. For offline/local development, recreate a compose from the host copy (bind `127.0.0.1:8888` and point the kobold-proxy upstream at a reachable kobold).
+**Production (since 2026-05-19):** Hindsight runs on `aux-desktop` / `derpr-host` (`10.0.0.70`), bound to `0.0.0.0:8888`; the derpr default `HINDSIGHT_URL` points there. The stack is **maintained out-of-repo** on that host — a Linux container since the 2026-06-23 Proxmox cutover — under `/opt/configs/hindsight/` (compose file + `kobold-lb.conf` + engine patches; the `C:\Server\Hindsight\` path older notes quote is the retired Windows install) — this repo no longer ships a Hindsight compose template. For offline/local development, recreate a compose from the host copy (bind `127.0.0.1:8888` and point the kobold-proxy upstream at a reachable kobold).
 
 The stack runs two containers:
 
 - `hindsight-memory` — the API server (`ghcr.io/vectorize-io/hindsight`), bound to `0.0.0.0:8888` on `10.0.0.70`.
-- `hindsight-kobold-proxy` — nginx LB sidecar that load-balances `:5001` across LAN koboldcpp instances (`kobold-lb.conf`). The hindsight container itself has **no** internet egress (paranoid mode, see `memory/project/decisions/2026-05-05-hindsight-paranoid-mode.md`).
+- `hindsight-kobold-proxy` — nginx LB sidecar that load-balances `:5001` across LAN koboldcpp instances (`kobold-lb.conf`). The hindsight container itself has **no** internet egress (paranoid mode; the decision record is `project/decisions/security/2026-05-05-hindsight-paranoid-mode.md` in the private notes repo).
 
 ### Required host services
 
@@ -1807,7 +1816,7 @@ derpr: We settled on the 45% floor with a 30s spin-down delay.
 
 ### Operator trust overrides
 
-`mark_trusted` / `mark_untrusted` flip the `untrusted` bit on a specific recall hit (per the [tool security framework](../memory/project/plans/tool_security_framework.md)). Overrides live in a parallel SQLite file (`data/hindsight_overrides.db`, `HINDSIGHT_OVERRIDE_DB`) — recall post-filters and rewrites the bit. Every flip is audit-logged with operator_id, reason, prior, and new values.
+`mark_trusted` / `mark_untrusted` flip the `untrusted` bit on a specific recall hit (per the tool security framework — `project/plans/tool_security_framework.md` in the private notes repo). Overrides live in a parallel SQLite file (`data/hindsight_overrides.db`, `HINDSIGHT_OVERRIDE_DB`) — recall post-filters and rewrites the bit. Every flip is audit-logged with operator_id, reason, prior, and new values.
 
 ## System Defaults
 
@@ -1818,7 +1827,7 @@ derpr: We settled on the 45% floor with a 30s spin-down delay.
 | Default context limit | 15 messages | `DEFAULT_HISTORY_MESSAGES` |
 | Context hard cap | 30 messages | `GLOBAL_HISTORY_MESSAGES` |
 | Max tool calls per request | 15 | `MAX_TOOL_CALLS` — tool calls **executed**, not LLM round trips. DP-297 raised it 5 → 10 (a parked write costs a step instead of ending the turn); DP-335 moved the counter off iterations, so the number now means the same thing whichever model answers, and sized it for the longest routine any persona runs |
-| Max LLM round trips per request | 25 | `MAX_TOOL_ITERATIONS` — runaway guard only. A turn normally ends by spending `MAX_TOOL_CALLS`; this catches a loop that talks to the provider without calling anything |
+| Max LLM round trips per request | 25 | `MAX_TOOL_ITERATIONS` — runaway guard only. A turn normally ends by spending `MAX_TOOL_CALLS`; this catches a loop that talks to the provider without spending the call budget — since DP-404, a model that keeps naming tools it was not offered (refused calls are not charged) |
 | Max response tokens | 4096 | `DEFAULT_TOKEN_LIMIT` |
 | Default total context budget | 131072 tokens | `DEFAULT_MAX_CONTEXT_TOKENS` |
 | Proposal approval window | 24 hours | `PENDING_ACTION_TTL` — DP-297 renamed and raised this from `PENDING_CONFIRMATION_TIMEOUT` (300s), since a park became a queue worked through later rather than a blocking modal. DP-319 made the store durable, so this is now the real deadline rather than min(this, uptime) |

@@ -18,7 +18,7 @@ Async, provider-agnostic LLM orchestration engine for chatbot automation (IT sup
 
 **fixr self-improvement supervisor (DP-227):** `src/self_edit/` — event-driven dispatcher above the engine. `dispatch_fix` (WRITE→parked) spawns a detached `claude` coding-agent subprocess per bug in an isolated git worktree; a bridge tails its stream-json log and wakes the `fixr` persona on question/done/error. `FixrIntegration` (ServiceIntegration, `service_bindings:["fixr"]`) registered at startup. Never merges/pushes — a human merges the PR.
 
-**Security (DP-225):** `src/security/` — `CredentialVault` inventories machine secrets (OpenAI/Anthropic/Google/Zammad keys); `SecretScrubber` redacts them from any string bound for the LLM context / audit / inspector. Wired at startup via `bootstrap.register_credentials()` (vault→scrubber), enforced at egress in tool_loop, turn_persistence, engine, zammad_client.
+**Security (DP-225):** `src/security/` — `CredentialVault` inventories machine secrets (OpenAI/Anthropic/Google/Zammad keys); `SecretScrubber` redacts them from any string bound for the LLM context / audit / inspector. Wired at startup via `bootstrap.register_credentials()` (vault→scrubber), enforced at egress in `tool_loop`, `turn_persistence`, `confirmations`, the engine adapter, `memory_manager` (audit rows) and `security/log_scrub` — the list of record is the scrubber row in `../capability_map.md`.
 
 **Notification system:** NotificationRouter → Notifier ABC (DiscordNotifier, DiscordChannelNotifier, ZammadNotifier, LogNotifier; voice registers a `web` channel via WebAlarmNotifier). Decoupled from agents — channel/recipient config-driven.
 
@@ -38,7 +38,7 @@ Async, provider-agnostic LLM orchestration engine for chatbot automation (IT sup
 
 **Config:** global_config.py (limits, rate limits), default_personas.json + system_personas.json (git-tracked), data/personas.json (local override), agents.json.
 
-**Testing:** 4-tier (unit, integration, zammad-live, llm-live). No pre-commit test hook — tests run manually. Migration tests via legacy_mem_manager fixture.
+**Testing:** tiered (unit, integration, plus live tiers — see `../testing.md`). `.githooks/pre-push` runs `scripts/ci_check.py`, which is CI's gate; neither runs the `integration` tier. Migration tests via legacy_mem_manager fixture.
 
 **Docs:** `docs/user_guide.md` — user-facing behavior spec (commands, personas, tools, interfaces). Also serves as spec-before-implement target for new features.
 

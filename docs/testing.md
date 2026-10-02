@@ -15,7 +15,7 @@ pytest tests/test_engine.py          # single file
 pytest --cov=src                     # with coverage
 ```
 
-## The four tiers
+## The tiers
 
 Ordered by execution cost:
 
@@ -25,6 +25,10 @@ Ordered by execution cost:
 3. **Zammad live** (`@pytest.mark.zammad_live`) — needs a live Zammad
    (`ZAMMAD_URL` + `ZAMMAD_API_KEY`).
 4. **LLM live** (`@pytest.mark.llm_live`) — real provider API calls, needs API keys.
+
+`pytest.ini` also declares `discord_live` (sends real Discord DMs), `hindsight_live`
+(needs a live Hindsight API at `HINDSIGHT_LIVE_URL`) and `slow` (declared, currently
+unused).
 
 Live tiers auto-skip when credentials are absent (`tests/conftest.py`). Test Zammad
 credentials live in `.env.test` (gitignored), loaded with `override=True` so a test run
@@ -84,9 +88,19 @@ If a component must be registered at startup to work at all, test that the regis
 
 ## Gates
 
-`pytest`, `flake8 src/ services/`, and `mypy src/ services/ --config-file mypy.ini` —
-the same three `.github/workflows/deploy.yml` runs. Nothing is `QA_READY` until all
-three pass **inside the ticket's own worktree**, using that worktree's `.venv`.
+CI (`.github/workflows/deploy.yml`) runs five steps, and `python scripts/ci_check.py` —
+also the pre-push hook — runs the same five: the flake8 **hard subset**
+(`--select=E9,F63,F7,F82`; the full flake8 pass is `--exit-zero`, advisory only),
+`scripts/check_missing_deps.py`, `mypy src/ services/ --config-file mypy.ini`,
+`lint-imports`, and `pytest -n auto -m "not integration"`. Nothing is `QA_READY` until
+all of them pass **inside the ticket's own worktree**, using that worktree's `.venv`.
+
+> ⚠️ **The integration tier is not in the gate.** CI and the pre-push hook both select
+> `-m "not integration"`, so anything marked `integration` — including
+> `tests/integration/test_startup_wiring.py`, `test_node_transport_gate.py` and
+> `test_tool_loop_exit_invariants.py`, which other docs cite as guards — runs only when
+> someone runs `pytest` by hand. The default command above (`-m "not llm_live"`) does
+> include it; run that before calling a change done.
 
 > ⚠️ Run `pytest` from **inside** the worktree. `pythonpath = src .` resolves relative to
 > the run directory, so `pytest worktrees/DP-XXX/...` from the main tree imports `src`

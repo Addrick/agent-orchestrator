@@ -22,7 +22,7 @@ type: project
 ## Near-term
 
 - [ ] **Uptime Kuma heartbeat** — add async background task that pushes a heartbeat to Uptime Kuma on an interval; only send when Discord gateway is healthy so Kuma reflects actual bot availability
-- [x] **ToolLoop extraction** — SHIPPED. `ToolLoop` lives in `src/tools/tool_loop.py` (event-yielding `run()`; `_orchestrate` is a thin forwarder). Superseded by `tool_revamp_v1.md`. See `project/plans/toolloop_extraction.md`
+- [x] **ToolLoop extraction** — SHIPPED. `ToolLoop` lives in `src/tools/tool_loop.py` (event-yielding `run()`; `_orchestrate` is a thin forwarder). Superseded by `tool_revamp_v1.md`. See `project-history/plans/toolloop_extraction.md` (private notes repo)
 - [x] **ReminderAgent** — SHIPPED. `src/agents/reminder_agent.py`, registered in `main.py` when Zammad is available. (Residual: configurable staleness/age threshold not yet landed — DP-102.)
 - [ ] **OpenViking memory management** — in-engine memory for personas/conversations, inspired by OpenViking tiered retrieval
 - [ ] **Model/provider failover** — `fallback_model` on Persona, retry on 429/5xx with alternate provider

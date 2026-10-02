@@ -26,6 +26,6 @@ Encoded in `config/global_config.py` as `RATE_LIMIT_GEMINI_25_RPM`, etc. Split l
 
 A single `batchEmbedContents` request whose total input exceeds the 30k tokens/minute budget is rejected at the gate. The API returns a 429 whose `details` payload contains only a `Help` link — no `RetryInfo`, no `QuotaFailure.violations` — and the rejected request does **not** show up in the AI Studio usage pane (it was never admitted to the quota counter).
 
-This was the root cause of the long-standing memory-agent stall: the agent was sending one large batch per cycle and the entire batch was being rejected, not throttled. The fix shipped in commit `ac78ecd` (2026-04-06) was token-aware chunking in `MemoryAgent._chunk_messages` that caps each outbound batch at ~25k estimated tokens (chars/4).
+This was the root cause of the long-standing memory-agent stall: the agent was sending one large batch per cycle and the entire batch was being rejected, not throttled. The fix shipped in commit `ac78ecd` (2026-04-06) was token-aware chunking in `MemoryAgent._chunk_messages` (now `SqliteConsolidator._chunk_messages`, `src/agents/sqlite_consolidator.py`) that caps each outbound batch at ~25k estimated tokens (chars/4).
 
 When diagnosing a 429 with this signature, look at the *total token size of the rejected call*, not RPM history. Adam has confirmed he has not hit burst-pattern / edge-protection 429s on this project.

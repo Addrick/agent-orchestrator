@@ -10,7 +10,8 @@ Components:
 - `ChatSystem._orchestrate` (`src/chat_system.py`) — drives the loop, owns the
   turn lifecycle (context var, persistence, taint, terminal event).
 
-Coverage: `tests/integration/test_tool_loop_exit_invariants.py`.
+Coverage: `tests/integration/test_tool_loop_exit_invariants.py` (marked `integration`, so it
+runs on a plain `pytest` but **not** in CI or the pre-push gate, which use `-m "not integration"`).
 
 ## The five invariants
 
@@ -99,11 +100,14 @@ The 15 is sized against hypr's model-provisioning floor — `pve_status` +
 `gpu_status` + `list_models` + `hf_search` + `hf_files` + `install_model` = six
 calls with zero missteps — plus room for two dead ends.
 
-⚠️ **`MAX_TOOL_ITERATIONS` is unreachable at these defaults, by design.** Every
-iteration that continues past the tool-call check charges at least one call, so
-`iterations_used <= calls_used` always holds and the call budget always trips
-first while `MAX_TOOL_ITERATIONS > MAX_TOOL_CALLS`. It is a backstop against a
-future loop shape that can iterate without spending, not a live limit. The
+⚠️ **`MAX_TOOL_ITERATIONS` is a live limit since DP-404.** A call naming a tool the
+persona was not offered is refused with an error result and **not charged** to the call
+budget (charging it would let injected calls end a turn without running anything), so
+an iteration whose calls are all refused spends nothing and `iterations_used <=
+calls_used` no longer holds. `MAX_TOOL_ITERATIONS` is what bounds a model that keeps
+naming un-offered tools. For a turn made only of admitted calls the old reasoning still
+applies: every continuing iteration charges at least one call, so the call budget trips
+first while `MAX_TOOL_ITERATIONS > MAX_TOOL_CALLS`. The
 ordering invariant is pinned by a test, because the day `MAX_TOOL_CALLS` rises
 past 25 the guard silently starts truncating ordinary turns. (An earlier comment
 justified the guard with "a model that emits an empty tool-call list forever
