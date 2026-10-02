@@ -26,7 +26,10 @@ python -m src.main                                  # run
 Those four, plus `scripts/check_missing_deps.py`, are the CI gates
 (`.github/workflows/deploy.yml`); `python scripts/ci_check.py` runs all of them, and is the
 pre-push hook. ⚠️ CI and the hook run pytest with `-m "not integration"` and only flake8's
-hard-error subset — the default run above is the stricter one. Test tiers, markers, and
+hard-error subset — the default run above is the stricter one. A push to `master` that
+touches only `docs/`, `readme.md` or `.agents/` skips the pipeline entirely (no rebuild, no
+prod restart); **a `CLAUDE.md` edit still deploys**, because the image seeds it into `cc-*`
+persona workspaces. Test tiers, markers, and
 the **mandatory test requirements** for schema/config/contract/startup changes:
 **`docs/testing.md`** — read it before changing any of those four things.
 
