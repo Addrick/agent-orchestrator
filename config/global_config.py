@@ -321,9 +321,10 @@ DATE_EXTRACTION_MAX_CHARS = 20000  # body head scanned for dates / sent to tagge
 DATE_FORMAT_REPORTS_FILE: Path = Path(
     os.environ.get("DATE_FORMAT_REPORTS_FILE", str(DATA_DIR / "date_format_reports.json"))
 )
-# IANA zone for wall-clock times that carry no zone of their own (e.g. Lite's
-# injected timestamps, DP-252). The engine host's zone is not a safe proxy —
-# prod runs in a UTC container.
+# IANA zone for every time shown to a person or a model, and for wall-clock
+# times that carry no zone of their own (Lite's injected timestamps, DP-252;
+# `daily_at`, DP-412). Read through src/utils/timeutil.py, never from the host
+# clock. The dockerfile's TZ must name the same zone (DP-413).
 LOCAL_TZ: str = os.environ.get("LOCAL_TZ", "America/New_York")
 
 ZAMMAD_BOT_EMAIL = "autotriage@bot.local"

@@ -11,6 +11,7 @@ from src.memory.memory_manager import (
 )
 from src.embedding_service import EmbeddingService
 from src.persona import Persona
+from src.utils.timeutil import to_local
 
 if TYPE_CHECKING:
     # Annotation-only: the TextEngine instance is injected by main.py, so the
@@ -204,14 +205,7 @@ class MemoryConsolidator:
         lines = []
         for idx, row in enumerate(cluster):
             try:
-                # Handle ISO bytes
-                if isinstance(row['created_at'], bytes):
-                    dt = datetime.fromisoformat(row['created_at'].decode('utf-8'))
-                elif isinstance(row['created_at'], str):
-                    dt = datetime.fromisoformat(row['created_at'])
-                else:
-                    dt = row['created_at']
-                ts_str = dt.strftime('%Y-%m-%d %H:%M')
+                ts_str = to_local(row['created_at']).strftime('%Y-%m-%d %H:%M')
             except Exception:
                 ts_str = "Unknown Date"
             lines.append(f"[{ts_str}] Memory Segment: {row['content']}")

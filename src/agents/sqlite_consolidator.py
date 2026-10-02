@@ -20,6 +20,7 @@ from config.global_config import (
     GEMINI_EMBEDDING_001_TPM,
 )
 from src.utils.message_utils import strip_vertex_links
+from src.utils.timeutil import to_local
 
 logger = logging.getLogger(__name__)
 
@@ -579,9 +580,7 @@ class SqliteConsolidator(Agent):
             id_tag = f"[ID: {msg_id}]" if msg_id else ""
             
             if ts:
-                if isinstance(ts, str):
-                    ts = datetime.fromisoformat(ts)
-                ts_str = ts.strftime('%Y-%m-%d %H:%M')
+                ts_str = to_local(ts).strftime('%Y-%m-%d %H:%M')
                 lines.append(f"{id_tag} [{ts_str}] [{role}] {name}: {content}")
             else:
                 lines.append(f"{id_tag} [{role}] {name}: {content}")

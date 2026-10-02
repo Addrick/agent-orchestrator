@@ -13,7 +13,7 @@ import json
 import logging
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from config.global_config import (
@@ -32,6 +32,7 @@ from src.tools.tool_manager import ToolManager
 from src.tools.turn_context import TurnContext, turn_scope
 from src.utils.message_utils import strip_vertex_links
 from src.utils.model_utils import get_model_prefix
+from src.utils.timeutil import to_utc
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +46,7 @@ MAX_CONVERSATION_TAINTS = 10000
 
 def _relative_time(dt: datetime) -> str:
     """Format a datetime as a relative time string (e.g., '2 days ago')."""
-    now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
-    delta = now - dt
+    delta = datetime.now(timezone.utc) - to_utc(dt)
     seconds = int(delta.total_seconds())
     if seconds < 0:
         return "just now"

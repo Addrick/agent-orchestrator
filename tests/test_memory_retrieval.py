@@ -2,7 +2,7 @@
 
 import math
 import struct
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -423,15 +423,21 @@ async def test_retrieve_memory_block_channel_persona_keeps_channel(
 # --- _relative_time Tests ---
 
 def test_relative_time_days():
-    assert "2 days ago" == _relative_time(datetime.now() - timedelta(days=2))
+    assert "2 days ago" == _relative_time(datetime.now(timezone.utc) - timedelta(days=2))
 
 
 def test_relative_time_weeks():
-    assert "1 week ago" == _relative_time(datetime.now() - timedelta(weeks=1))
+    assert "1 week ago" == _relative_time(datetime.now(timezone.utc) - timedelta(weeks=1))
 
 
 def test_relative_time_hours():
-    assert "3 hours ago" == _relative_time(datetime.now() - timedelta(hours=3))
+    assert "3 hours ago" == _relative_time(datetime.now(timezone.utc) - timedelta(hours=3))
+
+
+def test_relative_time_naive_is_stored_utc():
+    """DP-413: a naive hit timestamp is UTC, whatever zone the host clock is in."""
+    naive_utc = (datetime.now(timezone.utc) - timedelta(hours=3)).replace(tzinfo=None)
+    assert "3 hours ago" == _relative_time(naive_utc)
 
 
 # --- Memory Block Formatting ---

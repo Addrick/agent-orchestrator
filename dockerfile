@@ -17,6 +17,10 @@ FROM python:3.14-slim
 # PYTHONUNBUFFERED: Ensures logs are flushed immediately (essential for Docker logs)
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+# The container clock is US Eastern, not Docker's default UTC, so log
+# timestamps and any bare datetime.now() agree with the app's LOCAL_TZ
+# default (DP-413). Change the two together.
+ENV TZ=America/New_York
 
 # Set the working directory in the container
 WORKDIR /app

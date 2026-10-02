@@ -414,7 +414,7 @@ class ChatSystem:
                 #    (so the freshly-inserted row doesn't show up twice) but before
                 #    the LLM call so the user row is always pinned even if the model
                 #    errors mid-flight.
-                user_ts = timestamp or datetime.now()
+                user_ts = timestamp or datetime.now(timezone.utc)
                 user_interaction_id, retry_assistant_id = self.turn_persistence.log_user_turn(
                     is_retry=is_retry, persona_name=persona_name,
                     user_identifier=user_identifier, channel=channel,
