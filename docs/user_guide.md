@@ -1598,6 +1598,8 @@ Available to any persona with `enabled_tools: ["*"]` (e.g., `joy`, `it-help`). T
 
 Agents are autonomous background workers that run on a schedule without user interaction. They are configured in `config/agents.json`.
 
+A schedule is either `{"interval": <seconds>}` or `{"daily_at": "HH:MM"}`. `daily_at` is a wall-clock time in `LOCAL_TZ` (default `America/New_York`), not the host's clock — prod runs in a UTC container, so `"17:00"` means 5 PM Eastern year-round.
+
 ### Current Agents
 
 **SqliteConsolidator (memory)** (`auto_start: true`) — Runs every 15 minutes (only when `SEMANTIC_BACKEND=sqlite`). Segments recent conversations by topic, extracts observations via LLM, and stores embedded summaries for long-term recall. See [Long-term Memory](#long-term-memory) below for the full pipeline description. Config in `agents.json` under `"sqlite_consolidator"`.
@@ -1624,12 +1626,14 @@ Managr is a top-level planning agent for the whole ticket board. Where triage an
 
 **Managr is not a chattable persona.** "Managr" is the scheduled agent; the `managr_planner` / `managr_*_analyst` entries in `system_personas.json` are internal, tool-less system personas the agent invokes once per cycle — they hold no conversation state, and talking to them would not affect the next cycle. All operator interaction (reviewing proposals, adding/retiring standing orders) happens through a *conversational* persona that has `service_bindings: ["proposals"]` with the proposal tools enabled — intended to be joy, but any persona granted the binding works, including a dedicated user persona named e.g. `managr` if you prefer a "speak to the manager" front desk. Feedback loops back to the agent through data: standing orders and proposal-denial reasons are injected into its next planning cycle.
 
-**Cycle** (`auto_start: true` — one cycle at startup, then daily at `daily_at`, like ReminderAgent):
+**Cycle** (`auto_start: true` — one cycle at startup, then daily at `daily_at`, 17:00 `LOCAL_TZ`):
 
 1. **Observe** — snapshot the board: open tickets with age/state/priority/tags, staleness, recent triage/dispatch/reminder activity, and the outcomes of managr's previous proposals (approved / denied / expired). Quarantined tickets (see below) are flagged in code and their titles withheld. *Article content lands with DP-288 Phase 2.*
 2. **Orient** — fan out read-only analysis briefs to specialized system personas (e.g. a stale-ticket investigator, a per-client summarizer, a cross-ticket pattern detector). Each returns a short structured brief.
 3. **Decide** — a single planning call over the briefs produces the plan: an assessment of board health, priorities for the day, and a list of proposed actions.
 4. **Report & propose** — the plan is posted as a readable digest (Discord channel and/or Zammad internal note). Each proposed action is written to a durable **proposal queue** for human review; nothing executes on its own.
+
+**Where the report goes (DP-412).** The daily cycle sends the digest to `notification_targets` — the operator's Discord DM. The startup cycle (the one that runs when the container boots) sends it to `startup_notification_targets` instead — the Discord debug channel — so a restart or deploy does not DM the operator an extra report. With `startup_notification_targets` absent or empty, the startup cycle falls back to `notification_targets`. Only the destination differs: the startup cycle is still a full cycle and queues/dispositions proposals exactly as the daily one does.
 
 **Proposals.** A proposal is a schema-validated action drawn from a fixed whitelist. The Phase 1 whitelist is internal-only and low-blast: `add_note` (always an internal article, never customer-visible), `set_priority`, and `remind` (park as pending-reminder until a date); richer actions (`draft_reply`, `merge_tickets`, `escalate_to_human`) come with later phases. Free-text intent never becomes a proposal — the planner emits candidates through a structured `submit_proposals` schema, and each one is validated in code against the whitelist before a row is written (invalid actions are dropped and logged, never stored). Each proposal records the proposing agent, the action and its arguments, the rationale, and taint provenance (which ticket content motivated it), and expires unreviewed after 7 days (`MANAGR_PROPOSAL_TTL_DAYS`). At most 10 proposals are queued per cycle (`MANAGR_MAX_PROPOSALS_PER_CYCLE`). Proposal emission is gated by `proposals_enabled` in managr's `agents.json` entry (absent = off, Phase 0 behavior).
 

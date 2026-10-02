@@ -378,7 +378,8 @@ Abstract base for autonomous background workers. Not user-interactive — poll e
 - `_build_llm_context()`: Minimal context (user prompt + optional action history injection)
 - `_get_action_history_message()`: Injects recent actions into LLM context if `action_history_limit > 0`
 - Auto-loads system personas from file on init (agents invoke system personas for read-only analysis)
-- Config: `schedule` (dict, e.g. `{"interval": 30}`), `action_history_limit` (int), `agent_name` (str)
+- Config: `schedule` (dict: `{"interval": 30}` or `{"daily_at": "HH:MM"}`), `action_history_limit` (int), `agent_name` (str)
+- `daily_at` is wall-clock in `LOCAL_TZ` (`_local_now()` / `_next_daily_run()`), never the host clock — prod is a UTC container (DP-412)
 
 Trajectory-logging contract (DP-116a) — root + children written to `Agent_Actions`:
 - `_log_task_root(action_type, trigger_context, action_payload, contexts, outcome="pending")`: opens a root row, JSON-serialises + ASCII-safe-truncates `action_payload`, attaches `Agent_Action_Contexts` rows; returns the root `action_id`.
@@ -426,7 +427,7 @@ Tags ticket as triaged. No tools used — all LLM calls are read-only.
 Content is classified first (DP-288) via `self.classifier` — a `ContentClassifier` single-shot inference agent injected by AgentManager convention-DI (DP-294), not constructed ad-hoc; flagged content is quarantined before it reaches any triage persona prompt.
 
 **`managr_agent.py` -- ManagrAgent** (`agent_name="managr"`, DP-280/282/290)
-Autonomous Zammad ticket-triage manager. Per cycle: builds a board snapshot, fans it out to read-only analyst personas for briefs, then a planner persona (`MANAGR_PLANNER_NAME`) produces the Manager's Report. When `proposals_enabled`, a second planner call (`tools=[submit_proposals]`) emits proposed writes into the `src/proposals/` queue instead of writing directly (see that section) — human approves via the portal. DP-290 also gives it reflective dispositions: it can reaffirm/revise/withdraw its own still-pending proposals from a prior cycle. Respects the DP-288 quarantine in code: tickets carrying a `QUARANTINE_TAGS` tag are excluded from the detail tier (title withheld, flagged as reported/suspected phishing) so their content never reaches a planner prompt — managr does not run the classifier itself; `ZammadBot` applies the tags upstream.
+Autonomous Zammad ticket-triage manager. Per cycle: builds a board snapshot, fans it out to read-only analyst personas for briefs, then a planner persona (`MANAGR_PLANNER_NAME`) produces the Manager's Report. When `proposals_enabled`, a second planner call (`tools=[submit_proposals]`) emits proposed writes into the `src/proposals/` queue instead of writing directly (see that section) — human approves via the portal. DP-290 also gives it reflective dispositions: it can reaffirm/revise/withdraw its own still-pending proposals from a prior cycle. Respects the DP-288 quarantine in code: tickets carrying a `QUARANTINE_TAGS` tag are excluded from the detail tier (title withheld, flagged as reported/suspected phishing) so their content never reaches a planner prompt — managr does not run the classifier itself; `ZammadBot` applies the tags upstream. Digest routing (`_digest_targets`, DP-412): the boot cycle (`deploy_count == 0`, the same first-deploy sentinel as ReminderAgent's `send_startup_dm`) goes to `startup_notification_targets` when configured, every other cycle to `notification_targets`.
 
 **`sqlite_consolidator.py` -- SqliteConsolidator** (formerly `MemoryAgent`; `agent_name="memory"`)
 Batch agent that segments conversations by topic, extracts observations via LLM, and stores embedded summaries. **Registered only when `SEMANTIC_BACKEND=="sqlite"`** — the Hindsight backend drives consolidation upstream, and registering this agent under it would crash `deploy()` on the first cycle (legacy SQL ops raise `NotImplementedError`). Two-phase pipeline per channel:
@@ -669,7 +670,7 @@ Human-approval gating primitive for autonomous-agent writes — a **separate imp
 
 ### Agent Config
 - `config/agents.json` -- agent definitions, schedule, auto_start, notification_defaults, recipient mappings
-- Structure: `{agents: {name: {persona, schedule, action_history_limit, auto_start, notification_defaults}}, recipients: {name: {discord_user_id, email}}}`
+- Structure: `{agents: {name: {persona, schedule, action_history_limit, auto_start, notification_defaults, notification_targets, startup_notification_targets}}, recipients: {name: {discord_user_id, discord_channel_id, email}}}`
 
 ## Testing Structure
 
