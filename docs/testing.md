@@ -95,6 +95,11 @@ also the pre-push hook — runs the same five: the flake8 **hard subset**
 `lint-imports`, and `pytest -n auto -m "not integration"`. Nothing is `QA_READY` until
 all of them pass **inside the ticket's own worktree**, using that worktree's `.venv`.
 
+A push to `master` whose diff is confined to `docs/`, `readme.md` and `.agents/` does not
+run the workflow at all (`paths-ignore`, DP-414) — no tests, no image build, no prod
+restart. Pull requests always run it. `CLAUDE.md` is not in that list: it ships in the
+image and is copied into `cc-*` persona workspaces, so changing it is a deploy.
+
 > ⚠️ **The integration tier is not in the gate.** CI and the pre-push hook both select
 > `-m "not integration"`, so anything marked `integration` — including
 > `tests/integration/test_startup_wiring.py`, `test_node_transport_gate.py` and

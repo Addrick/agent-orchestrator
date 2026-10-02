@@ -6,6 +6,18 @@ on:
   push:
     branches:
       - master
+    # A push that touches ONLY these paths skips the whole pipeline: nothing in
+    # the running container reads them, so rebuilding the image and restarting
+    # prod for a docs commit is pure outage (DP-414). `.agents/` is not even in
+    # the image (.dockerignore).
+    #
+    # CLAUDE.md is deliberately NOT here. It ships in the image and
+    # notes_workspace.seed_claude_md copies it into cc-* persona workspaces
+    # (DP-314), so an edit to it is a runtime change and must deploy.
+    paths-ignore:
+      - 'docs/**'
+      - 'readme.md'
+      - '.agents/**'
   pull_request:
     branches:
       - master
