@@ -108,7 +108,7 @@ console.
 Each derpr start hashes the `services/pve/` files baked into its image and asks the
 node for `sha256sum` of the five deployed paths above (the wrapper admits that one
 exact argv and nothing else). Any stale, missing or unverifiable file is posted to
-`DISCORD_DEBUG_CHANNEL`. So after a merge that touches this directory, either deploy
+the debug channel (agents.json `recipients.debug`, or `DISCORD_DEBUG_CHANNEL`). So after a merge that touches this directory, either deploy
 before the container restarts or expect that message, and after deploying, a
 container restart with no message is the confirmation. The path list lives in
 `src/proxmox/artifacts.py` `NODE_ARTIFACTS` and in the wrapper; change both or neither.

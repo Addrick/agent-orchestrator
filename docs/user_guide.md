@@ -1164,11 +1164,14 @@ anyone noticing.
 
 So each time derpr starts, it hashes the copies it shipped with and asks the node
 for the sha256 of its own. If any differ, are missing, or can't be checked, one
-message goes to the **Discord debug channel** (`DISCORD_DEBUG_CHANNEL`) naming
+message goes to the **Discord debug channel** naming
 each file, and the fix: redeploy `services/pve/` per its README. When everything
 matches, nothing is posted.
 
-- It only runs when `PVE_TOOLS_ENABLED` is on and a debug channel is configured.
+- It only runs when `PVE_TOOLS_ENABLED` is on and a debug channel is known: the
+  `debug` entry under `recipients` in `config/agents.json` (the same one managr's
+  boot report posts to), or `DISCORD_DEBUG_CHANNEL` if set, which takes priority.
+  With PVE tools on and neither set, derpr logs a warning that the check is off.
 - "Can't be checked" includes the node refusing the hash request. That happens
   when the node's wrapper is older than DP-418, so it reads as stale too.
 - It reports and nothing more. It never redeploys and never blocks startup.
