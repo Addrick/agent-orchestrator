@@ -274,7 +274,10 @@ recurrent/hybrid model, and `koboldcpp.py` drops `--smartcache` whenever
 `--smartcachegrid` is set — grid on a dense model would leave it with neither.
 
 Every other flag in `koboldcpp-model.service.in` is a box constant, including
-`--multiuser 1`. **The unit file is the whole configuration** — nothing rewrites
+`--multiuser 1` and **`--jinja --jinja_tools`** (DP-417): derpr's local provider
+speaks `/v1/chat/completions` and relies on the model's own chat template, and
+KoboldCPP turns jinja off for any request that carries tools unless
+`--jinja_tools` is set too. **The unit file is the whole configuration** — nothing rewrites
 its argv at exec. (CT101 used to run a policy wrapper over the koboldcpp binary
 that did, because the template hardcoded one `--quantkv` / `--smartcache` for
 every model; it is removed as part of DP-364's rollout.)
