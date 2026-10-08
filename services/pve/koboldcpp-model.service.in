@@ -6,6 +6,13 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=@@KCPP_DIR@@
+# DP-421: one R9700, one engine. CT101 and CT102 share the card and every engine binds :5001,
+# so refuse to start while another engine (this CT's or the other CT's) holds it. VRAM+GTT,
+# not VRAM alone: an idle engine's weights are runtime-PM-evicted to GTT and vram_used reads ~0.
+# Polls 10 s so a restart outlasts its predecessor's release, and no longer: set_active_model's
+# `enable --now` waits on this inside PVE_SSH_TIMEOUT (20 s). A non-zero exit here is a skipped
+# condition, not a failure, so Restart=on-failure does not loop on it.
+ExecCondition=/bin/sh -c 'i=0; while :; do u=0; for f in /sys/class/drm/card[0-9]/device/mem_info_vram_used /sys/class/drm/card[0-9]/device/mem_info_gtt_used; do [ -r "$$f" ] && u=$$((u + $$(cat "$$f"))); done; [ "$$u" -lt 2147483648 ] && exit 0; i=$$((i + 1)); [ "$$i" -ge 10 ] && break; sleep 1; done; echo "r9700 busy: $$((u / 1048576)) MiB VRAM+GTT already held; not starting a second engine" >&2; exit 1'
 ExecStart=@@KCPP_DIR@@/koboldcpp --model @@MODEL_PATH@@ --port @@PORT@@ --host 0.0.0.0 --usevulkan 0 --gpulayers 999 --contextsize @@CONTEXTSIZE@@ --quantkv @@QUANTKV@@ --blasbatchsize 1024 --flashattention --threads 7 --multiuser 1 --jinja --jinja_tools@@CACHE_FLAGS@@
 Restart=on-failure
 RestartSec=10

@@ -906,6 +906,31 @@ class ProxmoxToolHandler:
             ),
         }, DEFERRAL_KIND_NODE_JOB, job_id)
 
+    async def _unit_skipped_start(
+        self, vmid: str, target: str
+    ) -> Optional[Dict[str, Any]]:
+        """An error result if ``target`` was enabled but did not start, else None."""
+        # DP-421: every kcpp unit carries an ExecCondition that skips the start
+        # while another engine holds the R9700 — this CT's or the other
+        # inference CT's, since both share the card. A skipped condition is not
+        # a failure, so `enable --now` exits 0 with nothing started. `start`
+        # waits out ExecCondition, so `is-active` here is already definitive:
+        # a fresh Type=simple unit is `active` the instant koboldcpp forks.
+        state_res = await self._run([
+            "pct", "exec", vmid, "--", "systemctl", "is-active", target,
+        ])
+        if state_res.get("status") != "ok":
+            state = (state_res.get("stdout") or "").strip() or _detail(state_res)
+            return _err(
+                f"{target} is enabled but did not start (state: {state}). The "
+                "usual cause is the single-engine guard: another inference "
+                "engine already holds the R9700 — the other inference CT's, or "
+                "a non-koboldcpp engine on this one (Strata). Stop it and run "
+                "set_active_model again; :5001 is still served by whatever "
+                "holds the GPU now."
+            )
+        return None
+
     async def _set_active_model(self, name: str) -> Dict[str, Any]:
         logger.info("Tool set_active_model: %s", name)
         if not self._enabled():
@@ -964,6 +989,9 @@ class ProxmoxToolHandler:
         ])
         if res.get("status") != "ok":
             return res
+        skipped = await self._unit_skipped_start(vmid, target)
+        if skipped is not None:
+            return skipped
         # What just happened is "the unit was started", NOT "the model is
         # serving", and the difference is minutes (DP-353). `systemctl enable
         # --now` on a Type=simple unit returns the instant koboldcpp is forked
