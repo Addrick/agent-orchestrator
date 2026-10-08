@@ -48,7 +48,7 @@ def main() -> int:
         persona_name=PERSONA,
         model_name="local",
         prompt="you only respond with 'success'",
-        context_length=10,
+        history_messages=10,
     )
 
     text_engine = TextEngine()
