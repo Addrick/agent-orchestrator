@@ -257,7 +257,7 @@ def _install_env(tmp_path: Path, bindir: Path, payload: bytes) -> dict:
     (bindir / "python3").chmod(0o755)
     env = _env(tmp_path, bindir)
     env.update({
-        "ARCHIVE_DIR": "archive/models",
+        "MODELS_DIR": "archive/models",
         "JOBS_DIR": "archive/.jobs",
         "TEMPLATE": "unit.in",
         "GGUF_HEADER": reader.as_posix(),

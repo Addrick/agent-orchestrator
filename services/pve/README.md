@@ -136,9 +136,11 @@ volume is far bigger than the tier should be and eviction never fires.
 `derpr-model-install` reads `/etc/default/derpr-model-install` if present:
 
 ```sh
-ARCHIVE_DIR=/srv/archive/models  # where downloads land (DP-340: the archive HDD,
-                                 # never the SSD thin pool)
-JOBS_DIR=/srv/archive/.jobs      # job records, on the same disk as the download
+MODELS_DIR=/srv/models           # where downloads land (DP-416: the dedicated
+                                 # models NVMe; never a thin LV, df must be true)
+JOBS_DIR=/srv/archive/.jobs      # job records, on a different disk from the
+                                 # download so a full models disk can still
+                                 # record the failure
 CT_VMID=101                      # GPU container
 CT_MODELS_DIR=/opt/koboldcpp/models
 KCPP_DIR=/opt/koboldcpp
@@ -161,7 +163,7 @@ and pruned when its `modelinstall-<job>` unit is gone, which also deletes the
 `.part` a crashed job left behind. Two jobs installing the same name are
 refused; `LOCK_WAIT` bounds how long a precheck waits before giving up.
 
-Downloads land as `<ARCHIVE_DIR>/<name>.gguf` — named for the **unit name**, not
+Downloads land as `<MODELS_DIR>/<name>.gguf` — named for the **unit name**, not
 for the repo's file name, because two unrelated repos publishing
 `model-Q4_K_M.gguf` is ordinary and the second would otherwise be uninstallable.
 
