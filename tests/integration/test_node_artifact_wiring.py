@@ -29,7 +29,6 @@ def _register(monkeypatch, *, pve: bool, channel: int) -> dict:
     monkeypatch.setattr(main, "GMAIL_BOT", False)
     monkeypatch.setattr(main, "WEB_INTERFACE", False)
     monkeypatch.setattr(main, "PVE_TOOLS_ENABLED", pve)
-    monkeypatch.setattr(main, "DISCORD_DEBUG_CHANNEL", channel)
     monkeypatch.setenv("DISCORD_API_KEY", "x")
 
     async def _start(_token):
@@ -38,7 +37,7 @@ def _register(monkeypatch, *, pve: bool, channel: int) -> dict:
                         lambda _bot: SimpleNamespace(start=_start))
     app = _App()
     bot = SimpleNamespace(get_service=lambda _name: None)
-    main._register_interfaces(app, bot, main.NotificationRouter())
+    main._register_interfaces(app, bot, main.NotificationRouter(), debug_channel=channel)
     for coro in app.tasks.values():  # never awaited here; close to avoid warnings
         if inspect.iscoroutine(coro):
             coro.close()
@@ -52,3 +51,28 @@ def test_startup_schedules_the_check(monkeypatch):
 @pytest.mark.parametrize("pve,channel", [(False, 123), (True, 0)])
 def test_no_check_without_transport_or_channel(monkeypatch, pve, channel):
     assert "node_artifact_check" not in _register(monkeypatch, pve=pve, channel=channel)
+
+
+@pytest.mark.parametrize("env,recipients,want", [
+    (0, {"debug": {"discord_channel_id": "1498"}}, 1498),   # prod: agents.json only
+    (77, {"debug": {"discord_channel_id": "1498"}}, 77),    # env overrides
+    (0, {"debug": {"discord_channel_id": None}}, 0),
+    (0, {}, 0),
+])
+def test_debug_channel_comes_from_the_recipients_prod_configures(monkeypatch, env, recipients, want):
+    """DP-420: DP-418 keyed on DISCORD_DEBUG_CHANNEL alone, which prod does not
+    set, and shipped inert. Prod's debug channel is agents.json recipients.debug,
+    the same entry managr's boot report resolves."""
+    monkeypatch.setattr(main, "DISCORD_DEBUG_CHANNEL", env)
+    assert main._debug_channel_id({"recipients": recipients}) == want
+
+
+def test_the_shipped_agents_json_resolves_a_debug_channel(monkeypatch):
+    """The real config file, not a fixture: if `debug` disappears from it the
+    check silently stops again."""
+    import json
+    from pathlib import Path
+    monkeypatch.setattr(main, "DISCORD_DEBUG_CHANNEL", 0)
+    cfg = json.loads((Path(main.__file__).resolve().parents[1] / "config" / "agents.json")
+                     .read_text(encoding="utf-8"))
+    assert main._debug_channel_id(cfg) > 0

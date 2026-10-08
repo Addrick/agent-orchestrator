@@ -136,18 +136,35 @@ def _init_zammad_client() -> Optional[ZammadClient]:
         return None
 
 
+def _debug_channel_id(agent_config: Dict[str, Any]) -> int:
+    """The Discord debug channel: ``DISCORD_DEBUG_CHANNEL`` when set, else the
+    ``recipients.debug`` entry in agents.json -- the one prod configures, and
+    the one managr's boot report (DP-412) already posts to. 0 when neither."""
+    if DISCORD_DEBUG_CHANNEL:
+        return DISCORD_DEBUG_CHANNEL
+    info = (agent_config.get("recipients") or {}).get("debug") or {}
+    channel = str(info.get("discord_channel_id") or "")
+    return int(channel) if channel.isdigit() else 0
+
+
 def _schedule_node_artifact_check(app: AppManager,
-                                  notification_router: NotificationRouter) -> None:
+                                  notification_router: NotificationRouter,
+                                  debug_channel: int) -> None:
     """DP-418: once per start, compare the node's services/pve/ copies against
     the image's and post any drift to the debug channel."""
-    if not (PVE_TOOLS_ENABLED and DISCORD_DEBUG_CHANNEL):
+    if not (PVE_TOOLS_ENABLED and debug_channel):
+        # DP-420: this returned silently when the channel was unresolved and
+        # shipped inert. Say so, since it is the one thing that cannot report.
+        if PVE_TOOLS_ENABLED:
+            logger.warning("node artifact drift check disabled: no debug channel "
+                           "(set DISCORD_DEBUG_CHANNEL or agents.json recipients.debug)")
         return
     from src.proxmox.artifacts import report_node_artifact_drift
     from src.proxmox.ssh import SSHRunner
 
     async def _send_debug(subject: str, body: str) -> bool:
         return await notification_router.send(
-            "discord_channel", str(DISCORD_DEBUG_CHANNEL), subject, body)
+            "discord_channel", str(debug_channel), subject, body)
 
     app.register_task("node_artifact_check",
                       report_node_artifact_drift(SSHRunner(), _send_debug))
@@ -160,6 +177,7 @@ def _register_interfaces(
     date_tagger: Optional[Any] = None,
     mcp_bridge: Optional[Any] = None,
     job_completion: Optional[Any] = None,
+    debug_channel: int = 0,
 ) -> None:
     """Register long-running interface tasks (Discord, Gmail).
 
@@ -195,7 +213,7 @@ def _register_interfaces(
             notification_router.register("discord_dm", DiscordNotifier(discord_bot))
             notification_router.register("discord_channel", DiscordChannelNotifier(discord_bot))
             app.register_task("discord", discord_bot.start(discord_token))
-            _schedule_node_artifact_check(app, notification_router)
+            _schedule_node_artifact_check(app, notification_router, debug_channel)
 
     if GMAIL_BOT:
         logger.info("Initializing Gmail bot...")
@@ -454,7 +472,8 @@ async def main() -> None:
     )
     _register_interfaces(app, bot, notification_router, date_tagger=date_tagger_callable,
                          mcp_bridge=mcp_bridge,
-                         job_completion=job_completion_handler)
+                         job_completion=job_completion_handler,
+                         debug_channel=_debug_channel_id(agent_manager.config))
 
     # 8.1 Perform post-init startup tasks (e.g. Hindsight bank provisioning)
     await bot.startup()
