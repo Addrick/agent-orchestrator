@@ -7,7 +7,7 @@
 #
 #   * `_shared.extract_system_prompt`      -> anthropic, google, agy, cc
 #   * `openai.build_openai_params`         -> gpt-*
-#   * `StreamEngine._build_messages`       -> local (koboldcpp)
+#   * `local.build_local_params`           -> local (DP-417: reuses build_openai_params)
 #
 # The latter two used to inline their own split that DISCARDED
 # `persona_prompt` whenever the history opened with a system turn. That
@@ -24,7 +24,8 @@ import pytest
 
 from src.engine.providers._shared import extract_system_prompt
 from src.engine.providers.openai import build_openai_params
-from src.stream_engine import StreamEngine
+from src.engine.providers.local import build_local_params
+from src.generation_params import GenerationParams
 
 PERSONA = "You are the persona. Follow these standing instructions."
 INJECTED = "[Recent actions]\n- did a thing"
@@ -45,7 +46,7 @@ def _openai_system(history_object):
 
 
 def _local_system(history_object):
-    messages = StreamEngine._build_messages(history_object)
+    messages = build_local_params({}, history_object, GenerationParams())["messages"]
     return messages[0]["content"], messages[1:]
 
 

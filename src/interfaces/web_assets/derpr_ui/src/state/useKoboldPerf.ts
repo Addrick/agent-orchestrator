@@ -110,8 +110,9 @@ export function useKoboldPerf(): PerfSnapshot {
 
 /* ---- formatting (pure, exported for reuse/testing) ------------------- */
 
-/** KCPP stop_reason codes. 0/1/2 verified against a live KCPP 1.115; 3 is the
- *  abort path (what `/api/extra/abort` produces); -1 means "no gen yet". */
+/** KCPP stop_reason codes. 0/1/2 verified against a live KCPP 1.115; 3 is an
+ *  aborted generation (from KCPP source); -1 means "no gen yet". The adapter
+ *  maps a Strata backend's finish reasons onto the same codes (DP-417). */
 export function stopReasonLabel(code: number): string {
   switch (code) {
     case 0:

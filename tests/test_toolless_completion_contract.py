@@ -9,9 +9,9 @@ for, returned `type=tool_calls`, and the prose went in the bin.
 The trap is that the wrap-up prompt is a transcript of the turn's OWN tool
 calls plus a persona prompt naming tools by hand, so a `<tool_call>` in the
 reply is the LIKELY output, not a corner case. And the failure is
-provider-shaped: the kobold path strips the span and keeps the prose in
-`visible_text`, so the dev box degrades gracefully while the deployed
-one-shot provider loses the answer outright.
+provider-shaped: the (since retired) kobold path stripped the span and kept
+the prose, so the dev box degraded gracefully while the deployed one-shot
+provider lost the answer outright.
 
 Each case here mocks at the **transport** — the CLI subprocess, the HTTP
 stream — and asserts on what the caller receives, so no adapter is skipped.
@@ -26,7 +26,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.engine import TextEngine
-from src.stream_engine import StreamEngine
 
 
 # The shape of the reply that broke it: real prose, then a tool-call span the
@@ -79,32 +78,32 @@ async def _drive_cc(monkeypatch) -> List[Dict[str, Any]]:
 
 
 async def _drive_local(monkeypatch) -> List[Dict[str, Any]]:
-    # Import the kobold SSE fakes from the stream-engine suite rather than
-    # re-deriving them: a second hand-written transport fake is a second
-    # implementation of the contract, and it drifts toward whatever the test
-    # that owns it needs.
-    from tests.test_stream_engine import _FakeClient, _FakeResp, _sse_token
-
-    # Keep the separators: kobold streams whitespace inside its tokens, and a
+    # Mock the chat-completions stream the local server sends. Keep the
+    # separators: the server streams whitespace inside its deltas, and a
     # tokenizer that drops it makes the prose assertion pass or fail on the
     # test's own splitting rather than on the provider.
-    chunks = [_sse_token(tok) for tok in RAW_WITH_TOOL_SPAN.splitlines(True)]
-    chunks.append(_sse_token("", finish_reason="stop"))
-    engine = StreamEngine()
-    engine._http_client = _FakeClient(_FakeResp(chunks=chunks))
-    return await _drain(engine.stream_local(
+    from unittest.mock import MagicMock
+    from tests.provider_stream_mocks import AsyncIterList, openai_chunk
+
+    chunks = [openai_chunk(content=tok) for tok in RAW_WITH_TOOL_SPAN.splitlines(True)]
+    chunks.append(openai_chunk(finish_reason="stop"))
+    engine = TextEngine()
+    engine.local_client = MagicMock()
+    engine.local_client.chat.completions.create = AsyncMock(return_value=AsyncIterList(chunks))
+    return await _drain(engine._stream_local_response(
         {"model_name": "local", "max_output_tokens": 128,
          "temperature": 0.7, "top_p": 0.9, "top_k": 40,
          "chat_template": "chatml"},
         {"persona_prompt": "you are hypr",
-         "message_history": [{"role": "user", "content": "which quant?"}]},
+         "message_history": [{"role": "user", "content": "which quant?"}],
+         "current_message": {"text": ""}},
         None, None,
     ))
 
 
-# `local` is the graceful-degradation control: it also parses the span, but
-# keeps the prose in `visible_text`. Including it is the point — it is why the
-# dev box could not see this bug, and it pins that the mitigation still holds.
+# `local` is the control: since DP-417 it gets structured tool calls from the
+# server and never parses text, so a span in a toolless reply is just prose.
+# It pins that the local path cannot regress into the agy/cc bug.
 DRIVERS = {"agy": _drive_agy, "cc": _drive_cc, "local": _drive_local}
 
 

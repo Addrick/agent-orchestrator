@@ -425,12 +425,10 @@ def parse_agy_tool_call(text: str) -> Optional[List[Dict[str, Any]]]:
             # exists to fix: `strip_tool_call_blocks` removes the malformed
             # block from the prose too, so a call the model made vanishes from
             # `calls`, from `content` and from the transcript with nothing
-            # anywhere to say it existed. The streaming twin has always logged
-            # both of these (stream_engine._commit_call).
+            # anywhere to say it existed.
             logger.warning("Discarding malformed <tool_call> block: %r", inner[:200])
             continue
-        # Same field policy as `_ToolCallStreamParser._commit_call`, which is
-        # the point of sharing the extraction: `name` is required, `arguments`
+        # Field policy: `name` is required, `arguments`
         # defaults to {}, and a stringified args object (a common small-model
         # slip) is decoded rather than passed through. Handing a str to
         # `execute_tool(name, **args)` raises TypeError inside the loop, which

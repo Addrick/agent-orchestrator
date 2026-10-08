@@ -107,10 +107,11 @@ export function getModelList(): Promise<string[]> {
   )
 }
 
-// The instruct templates the local renderer understands (the engine's
-// StreamEngine.CHAT_TEMPLATES keys), for the persona inspector's chat_template
-// dropdown. Fetched rather than hardcoded so the UI never drifts from what the
-// engine can actually render (DP-140). Mock mirrors the engine's current set.
+// The instruct presets a persona may name (the engine's
+// CHAT_TEMPLATE_THINKING keys; since DP-417 only their thinking switch is
+// used), for the persona inspector's chat_template dropdown. Fetched rather
+// than hardcoded so the UI never drifts from the engine (DP-140). Mock mirrors
+// the engine's current set.
 export function getChatTemplates(): Promise<string[]> {
   return liveOr(
     async () => (await getJSON<{ templates: string[] }>(`/api/v1/chat_templates`)).templates,
@@ -345,15 +346,6 @@ export function getAssembled(
       ),
     () => MOCK_ASSEMBLED,
   )
-}
-
-// ---- abort -----------------------------------------------------------
-export async function abort(): Promise<void> {
-  try {
-    await fetch(`${BASE}/api/v1/abort`, { method: 'POST' })
-  } catch {
-    /* best-effort */
-  }
 }
 
 // ---- capabilities ------------------------------------------------------

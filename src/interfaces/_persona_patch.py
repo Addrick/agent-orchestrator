@@ -27,12 +27,11 @@ _KOBOLD_SAMPLER_EXTRAS: List[Tuple[str, Callable[[Any], Any]]] = [
 # Persona keys accepted by the engine adapter's PATCH route. Core persona
 # fields come from the registry (src/persona_fields.py) so the PATCH surface
 # can never drift from the dev-command surface; the rest are route-specific:
-# the history_messages/context_length pair, instruct_tags, and the kobold
-# sampler extras above.
+# the history_messages/context_length pair and the kobold sampler extras
+# above. (`instruct_tags` went with the kobold-native transport, DP-417.)
 _KNOWN_PATCH_KEYS_ENGINE = registry_patch_keys() | {
     "history_messages",
     "context_length",
-    "instruct_tags",
 } | {key for key, _ in _KOBOLD_SAMPLER_EXTRAS}
 
 
@@ -65,7 +64,7 @@ def apply_persona_patch_body(
     The single chokepoint shared by the PATCH /persona/{name} route (existing
     persona edit) and the POST /personas route (create) so the two surfaces can
     never drift. Runs the registry-managed keys, the history_messages/
-    context_length pair, instruct_tags, and the kobold sampler extras. Mutates
+    context_length pair, and the kobold sampler extras. Mutates
     `persona`; appends any rejected (coerced-away / refused) field keys to
     `rejected`. Unknown keys are ignored here — the caller reports them.
     """
@@ -74,12 +73,6 @@ def apply_persona_patch_body(
         persona.set_history_messages(data["history_messages"])
     elif "context_length" in data:
         persona.set_history_messages(data["context_length"])
-    if "instruct_tags" in data:
-        tags = data["instruct_tags"]
-        if isinstance(tags, dict) and any(tags.values()):
-            persona.set_provider_extra("kobold", "instruct_tags", tags)
-        else:
-            persona.clear_provider_extra("kobold", "instruct_tags")
     _apply_kobold_sampler_extras(persona, data, rejected)
 
 

@@ -233,9 +233,9 @@ def _set_chat_template(args: List[str], persona: Persona) -> Tuple[Optional[str]
     if value_str in ('none', 'null', 'clear'):
         persona.set_chat_template(None)
         return f"Chat template for {persona.get_name()} cleared (reverting to global default).", True
-    from src.stream_engine import CHAT_TEMPLATES
-    if value_str not in CHAT_TEMPLATES:
-        available = ", ".join(sorted(CHAT_TEMPLATES))
+    from src.generation_params import CHAT_TEMPLATE_THINKING
+    if value_str not in CHAT_TEMPLATE_THINKING:
+        available = ", ".join(sorted(CHAT_TEMPLATE_THINKING))
         return f"Error: unknown chat template '{value_str}'. Available: {available}.", False
     persona.set_chat_template(value_str)
     return f"Chat template for {persona.get_name()} set to '{value_str}'.", True
@@ -824,7 +824,7 @@ def apply_patch_fields(persona: Persona, data: Dict[str, Any], rejected: List[st
 
     Rejections (values the Persona setter coerced away or refused) are
     appended to `rejected`. Route-specific keys (the history_messages/
-    context_length pair, instruct_tags, kobold sampler extras) are handled
+    context_length pair, kobold sampler extras) are handled
     by the caller.
     """
     for f in patchable_fields():

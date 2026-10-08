@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=@@KCPP_DIR@@
-ExecStart=@@KCPP_DIR@@/koboldcpp --model @@MODEL_PATH@@ --port @@PORT@@ --host 0.0.0.0 --usevulkan 0 --gpulayers 999 --contextsize @@CONTEXTSIZE@@ --quantkv @@QUANTKV@@ --blasbatchsize 1024 --flashattention --threads 7 --multiuser 1@@CACHE_FLAGS@@
+ExecStart=@@KCPP_DIR@@/koboldcpp --model @@MODEL_PATH@@ --port @@PORT@@ --host 0.0.0.0 --usevulkan 0 --gpulayers 999 --contextsize @@CONTEXTSIZE@@ --quantkv @@QUANTKV@@ --blasbatchsize 1024 --flashattention --threads 7 --multiuser 1 --jinja --jinja_tools@@CACHE_FLAGS@@
 Restart=on-failure
 RestartSec=10
 TimeoutStartSec=600

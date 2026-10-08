@@ -633,9 +633,9 @@ def test_chat_completions_stream_abort_flushes_partial():
 
 def test_chat_templates_endpoint_lists_engine_presets():
     # Single source of truth for the inspector dropdown: the endpoint must
-    # return exactly the engine's CHAT_TEMPLATES keys, sorted, incl. the new
-    # thinking variants. Drift here is what the endpoint exists to prevent.
-    from src.stream_engine import CHAT_TEMPLATES
+    # return exactly the engine's preset names, sorted, incl. the thinking
+    # variants. Drift here is what the endpoint exists to prevent.
+    from src.generation_params import CHAT_TEMPLATE_THINKING as CHAT_TEMPLATES
     adapter, mm, _ = _make_adapter_with_seeded_db()
     with TestClient(adapter.app) as client:
         r = client.get("/api/v1/chat_templates")
@@ -2309,6 +2309,70 @@ def test_perf_request_carries_a_deadline(monkeypatch):
     with TestClient(adapter.app) as client:
         client.get("/api/extra/perf")
     assert seen.get("timeout"), "perf poll inherited the client's unbounded timeout"
+    mm.close()
+
+
+# A trimmed live Strata /metrics body (2026-10-08).
+_STRATA_METRICS = {
+    "live": {"state": "idle", "queued": 0, "elapsed_s": None},
+    "requests": [{"time": 1000.0, "finish": "stop", "prompt_tokens": 340, "prompt_read": 5,
+                  "output_tokens": 90, "prompt_ms": 35.9, "decode_ms": 1253.6,
+                  "decode_tok_s": 71.8}],
+    "totals": {"since": 400.0, "requests": 79},
+    "time": 1030.0,
+}
+
+
+def _strata_get(metrics):
+    async def _fake_get(url, **kw):
+        resp = MagicMock()
+        resp.content = b"{}"
+        if url.endswith("/api/extra/perf"):
+            resp.status_code = 404
+            resp.json = lambda: {"detail": "not found"}
+        else:
+            assert url.endswith("/metrics"), url
+            resp.status_code = 200
+            resp.json = lambda: metrics
+        return resp
+    return _fake_get
+
+
+def test_perf_projects_strata_metrics_onto_the_kcpp_contract(monkeypatch):
+    """DP-417: Strata has no /api/extra/perf, so a live Strata backend would
+    read as `backend unreachable`. Its /metrics carries the same facts."""
+    adapter, mm = _perf_adapter()
+    monkeypatch.setattr(adapter._http, "get", _strata_get(_STRATA_METRICS))
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/extra/perf")
+    assert r.status_code == 200
+    p = r.json()
+    assert p["idle"] == 1 and p["queue"] == 0
+    assert p["last_input_count"] == 5 and p["last_token_count"] == 90
+    assert p["last_eval_speed"] == 71.8 and p["stop_reason"] == 1
+    assert p["total_gens"] == 79 and p["uptime"] == 630.0
+    assert p["idletime"] == 30.0  # age of the last completed run
+    mm.close()
+
+
+def test_perf_strata_busy_reports_elapsed_and_no_last_run(monkeypatch):
+    adapter, mm = _perf_adapter()
+    busy = {"live": {"state": "decode", "queued": 2, "elapsed_s": 4.5},
+            "requests": [], "totals": {"since": 0, "requests": 0}, "time": 10.0}
+    monkeypatch.setattr(adapter._http, "get", _strata_get(busy))
+    with TestClient(adapter.app) as client:
+        p = client.get("/api/extra/perf").json()
+    assert p["idle"] == 0 and p["queue"] == 2 and p["idletime"] == 4.5
+    assert p["stop_reason"] == -1 and p["total_gens"] == 0
+    mm.close()
+
+
+def test_perf_503_when_neither_perf_nor_metrics_answers(monkeypatch):
+    adapter, mm = _perf_adapter()
+    monkeypatch.setattr(adapter._http, "get", _strata_get({"not": "metrics"}))
+    with TestClient(adapter.app) as client:
+        r = client.get("/api/extra/perf")
+    assert r.status_code == 503 and r.json() == {"error": "backend_unreachable"}
     mm.close()
 
 

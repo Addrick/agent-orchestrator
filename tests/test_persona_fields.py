@@ -69,9 +69,9 @@ def test_what_set_round_trip(persona):
 
 
 def test_set_chat_template_validates_slug(persona):
-    """`set chat_template` accepts a known CHAT_TEMPLATES slug, rejects an
-    unknown one (with the available list), and clears on 'none'."""
-    from src.stream_engine import CHAT_TEMPLATES
+    """`set chat_template` accepts a known preset slug, rejects an unknown one
+    (with the available list), and clears on 'none'."""
+    from src.generation_params import CHAT_TEMPLATE_THINKING as CHAT_TEMPLATES
     set_ct = cli_set_handlers()['chat_template']
 
     known = sorted(CHAT_TEMPLATES)[0]

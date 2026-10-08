@@ -507,6 +507,17 @@ def test_the_template_hardcodes_no_per_model_flag():
     assert "--multiuser 4" not in text
 
 
+def test_the_unit_uses_the_models_own_chat_template_for_tool_calls_too(tmp_path):
+    """DP-417: derpr talks to the local server over /v1/chat/completions and
+    relies on the model's jinja template. `--jinja` alone is not enough:
+    KoboldCPP turns jinja off for any request that carries tools unless
+    `--jinja_tools` is also set, and nearly every derpr request offers tools."""
+    res = _render(tmp_path)
+    assert res.returncode == 0, res.stderr
+    line = _exec_start(tmp_path)
+    assert " --jinja " in f"{line} " and " --jinja_tools" in line
+
+
 @pytest.mark.parametrize("kv,quantkv", [
     ("q8", "--quantkv 1"), ("f16", "--quantkv 0"), ("q4", "--quantkv 2"),
 ])

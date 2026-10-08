@@ -59,7 +59,6 @@ src/
   chat_system.py         DI hub + orchestration kernel
   engine/                Provider-agnostic TextEngine (driver.py), ProviderRegistry,
                          and one streaming driver per provider in providers/
-  stream_engine.py       Kobold-native local transport (engine-owned)
   llm_errors.py          LLMCommunicationError leaf
   message_handler.py     BotLogic — dev commands (set/what/dump_*/help/…)
   persona.py             Persona dataclass + modes

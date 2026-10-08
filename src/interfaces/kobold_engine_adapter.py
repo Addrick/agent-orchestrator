@@ -52,7 +52,8 @@ from src.memory.lite_save import (
 )
 from src.origin import Origin
 from src.security.scrubber import get_scrubber
-from src.stream_engine import CHAT_TEMPLATES
+from src.engine.providers.local import local_base_url
+from src.generation_params import CHAT_TEMPLATE_THINKING
 from src.personas.store import save_personas_to_file
 from src.interfaces._persona_patch import (
     _KNOWN_PATCH_KEYS_ENGINE as _KNOWN_PATCH_KEYS,
@@ -88,19 +89,55 @@ JobCompletionHandler = Callable[[str], Awaitable[Dict[str, Any]]]
 _MAX_JOB_ID = 128
 
 
-def _kobold_base_url() -> str:
-    """KoboldCPP base URL without trailing /v1."""
-    raw = os.environ.get("LOCAL_LLM_URL", global_config.LOCAL_LLM_URL).rstrip("/")
-    if raw.endswith("/v1"):
-        raw = raw[:-3]
-    return raw
-
-
 # Deadline for the statusline's own upstream calls. These are polled once a
 # second and are pure telemetry, so a backend that accepts the connection and
 # then never answers (hung GPU host) must fail fast rather than occupy the poll
 # forever — see useKoboldPerf for what an unbounded wait does to the loop.
 _PERF_TIMEOUT_S = 5.0
+
+
+#: Strata `finish` → KCPP `stop_reason` (0 out of tokens, 1 EOS, 2 stop
+#: sequence, 3 aborted). A stop sequence and EOS both report "stop" on Strata.
+_STRATA_FINISH_TO_STOP_REASON = {"length": 0, "stop": 1, "tool_calls": 1}
+
+
+def _perf_from_strata_metrics(body: Any) -> Optional[Dict[str, Any]]:
+    """Project a Strata ``GET /metrics`` body onto KCPP's ``/api/extra/perf``
+    fields, the contract the statusline reads (DP-417). Strata has no perf
+    route; its `live` block is the current run and `requests[0]` the last
+    completed one. None if the body is not a Strata metrics sample."""
+    if not isinstance(body, dict) or not isinstance(body.get("live"), dict):
+        return None
+    live = body["live"]
+    totals = body.get("totals") or {}
+    reqs = body.get("requests") or []
+    last = reqs[0] if reqs and isinstance(reqs[0], dict) else {}
+    now = float(body.get("time") or time.time())
+    busy = live.get("state") not in (None, "idle")
+    read = int(last.get("prompt_read") or 0)
+    out = int(last.get("output_tokens") or 0)
+    prompt_s = float(last.get("prompt_ms") or 0) / 1000
+    decode_s = float(last.get("decode_ms") or 0) / 1000
+    return {
+        "last_process": prompt_s * 1000 / read if read else 0,
+        "last_eval": decode_s * 1000 / out if out else 0,
+        "last_token_count": out,
+        "last_input_count": read,
+        "last_process_time": prompt_s,
+        "last_eval_time": decode_s,
+        "last_process_speed": read / prompt_s if prompt_s else 0,
+        "last_eval_speed": float(last.get("decode_tok_s") or 0),
+        "last_seed": -1,
+        "total_gens": int(totals.get("requests") or 0),
+        "stop_reason": (_STRATA_FINISH_TO_STOP_REASON.get(str(last.get("finish")), 3)
+                        if last else -1),
+        "queue": int(live.get("queued") or 0),
+        "idle": 0 if busy else 1,
+        "uptime": max(0.0, now - float(totals.get("since") or now)),
+        # Busy: seconds into this run. Idle: age of the last completed run.
+        "idletime": (float(live.get("elapsed_s") or 0) if busy
+                     else max(0.0, now - float(last.get("time") or now))),
+    }
 
 
 def _kobold_progress_url() -> str:
@@ -154,7 +191,6 @@ class KoboldEngineAdapter:
     # else non-GET requires the operator token — new mutating routes are born
     # gated, not born open.
     DATA_PLANE_POST_PATHS = frozenset({
-        "/api/extra/abort",
         "/chat/completions",
         "/v1/chat/completions",
         # Voice STT uploads (DP-238) mount on this same app via
@@ -510,7 +546,6 @@ class KoboldEngineAdapter:
             "long_term_memory": p.get_long_term_memory(),
             "inject_timestamp": p.get_inject_timestamp(),
             "chat_template": p.get_chat_template(),
-            "instruct_tags": p.get_provider_extra("kobold", "instruct_tags"),
             "kobold_extras": get_kobold_extras_for_get(p),
             "enabled_tools": p.get_enabled_tools(),
             # READ-path display compat: overrides are re-attached to the served
@@ -750,12 +785,11 @@ class KoboldEngineAdapter:
 
         @self.app.get("/api/v1/chat_templates")
         async def list_chat_templates() -> Dict[str, Any]:
-            # The instruct templates the local renderer understands
-            # (StreamEngine.CHAT_TEMPLATES keys). Single source of truth for the
-            # persona inspector's chat_template dropdown so the UI never drifts
-            # from what the engine can actually render. Empty/None on a persona
-            # = fall back to the env/global default at render time.
-            return {"templates": sorted(CHAT_TEMPLATES.keys())}
+            # The instruct presets a persona may name (DP-417: only their
+            # thinking switch is used — generation_params.CHAT_TEMPLATE_THINKING).
+            # Single source of truth for the persona inspector's chat_template
+            # dropdown. Empty/None on a persona = the server's default.
+            return {"templates": sorted(CHAT_TEMPLATE_THINKING.keys())}
 
         @self.app.post(global_config.MODEL_JOB_CALLBACK_PATH)
         async def model_job_complete(request: Request) -> Any:
@@ -1187,7 +1221,8 @@ class KoboldEngineAdapter:
 
         @self.app.get("/api/extra/perf")
         async def get_perf() -> Any:
-            """Backend processing counters, forwarded from KCPP.
+            """Backend processing counters, forwarded from KCPP — or, on a
+            Strata backend (no such route), projected from its /metrics.
 
             Deliberately NOT `_forward_get`: its failure mode is a 200 carrying
             the fallback body, and the only honest fallback here is `{}`. An
@@ -1202,8 +1237,19 @@ class KoboldEngineAdapter:
             """
             try:
                 r = await self._http.get(
-                    f"{_kobold_base_url()}/api/extra/perf", timeout=_PERF_TIMEOUT_S
+                    f"{local_base_url()}/api/extra/perf", timeout=_PERF_TIMEOUT_S
                 )
+                if r.status_code == 404:
+                    # Not KoboldCPP. A Strata backend reports the same facts
+                    # on /metrics (DP-417).
+                    r = await self._http.get(
+                        f"{local_base_url()}/metrics", timeout=_PERF_TIMEOUT_S
+                    )
+                    projected = _perf_from_strata_metrics(r.json() if r.content else None)
+                    if r.status_code == 200 and projected is not None:
+                        return JSONResponse(status_code=200, content=projected)
+                    logger.warning(f"metrics upstream answered {r.status_code} with an unusable body")
+                    return JSONResponse(status_code=503, content={"error": "backend_unreachable"})
                 body = r.json() if r.content else None
                 # `idle` is the field the portal keys on; a body without it is
                 # not a perf sample no matter what status carried it.
@@ -1262,16 +1308,6 @@ class KoboldEngineAdapter:
                 logger.debug(f"prefill progress fetch failed: {e}")
                 return JSONResponse(content={"available": False, "reason": "unreachable"})
             return JSONResponse(content=projected)
-
-        @self.app.post("/api/extra/abort")
-        async def abort_generation() -> Any:
-            url = f"{_kobold_base_url()}/api/extra/abort"
-            try:
-                r = await self._http.post(url, json={})
-                return JSONResponse(r.json() if r.content else {"result": "aborted"})
-            except Exception as e:
-                logger.warning(f"Abort forward failed: {e}")
-                return {"result": "abort_failed", "error": str(e)}
 
         @self.app.post("/chat/completions")
         @self.app.post("/v1/chat/completions")

@@ -84,7 +84,6 @@ export interface Persona {
   // kobold-only
   top_p: number | null
   top_k: number | null
-  instruct_tags: Record<string, string> | null
   kobold_extras: KoboldExtras
   // security
   security_blocked: boolean

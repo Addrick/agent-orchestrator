@@ -546,76 +546,67 @@ class TestGoogle:
 
 
 class TestLocalModel:
-    """DP-206b: `local` one-shot rides the engine-owned kobold-native
-    StreamEngine — generate_response = collect over `stream_local`, the same
-    transport and `<tool_call>` protocol as the streaming portal path. The
-    OpenAI-compat local transport is gone."""
+    """DP-417: `local` one-shot is collect over the same chat-completions
+    stream as the portal path (`providers.local.stream_local`)."""
 
     @staticmethod
-    def _fake_local_engine(events):
+    def _fake_stream_local(events):
         async def _gen(*a, **k):
             for ev in events:
                 yield ev
-        fake = MagicMock()
-        fake.stream_local = MagicMock(side_effect=_gen)
-        return fake
+        return MagicMock(side_effect=_gen)
 
     @pytest.mark.asyncio
     async def test_success_text_response(self, local_config, base_context):
-        fake = self._fake_local_engine([
-            {"type": "api_payload", "payload": {"prompt": "<13 chars>", "genkey": "KCPP1234"}},
+        fake = self._fake_stream_local([
+            {"type": "api_payload", "payload": {"model": "local"}},
             {"type": "text_delta", "text": "Local success"},
             {"type": "done", "full_text": "Local success"},
         ])
-        engine = TextEngine(stream_engine=fake)
-        response, payload = await engine.generate_response(
-            local_config, base_context, None, {"temperature": 0.5},
-        )
+        engine = TextEngine()
+        with patch("src.engine.driver.stream_local", fake):
+            response, payload = await engine.generate_response(
+                local_config, base_context, None, {"temperature": 0.5},
+            )
         assert response == {"type": "text", "content": "Local success"}
-        assert payload == {"prompt": "<13 chars>", "genkey": "KCPP1234"}
-        fake.stream_local.assert_called_once()
-        # The driver forwards (config, history_object, tools, local_inference_config).
-        args = fake.stream_local.call_args[0]
-        assert args[1] is base_context
-        assert args[3] == {"temperature": 0.5}
+        assert payload == {"model": "local"}
+        fake.assert_called_once()
+        # (engine, config, history_object, params, tools): local_inference_config
+        # overrides arrive folded into the GenerationParams.
+        args = fake.call_args[0]
+        assert args[2] is base_context
+        assert args[3].temperature == 0.5
 
     @pytest.mark.asyncio
     async def test_success_tool_call_response(self, local_config, base_context):
-        """A `<tool_call>` block parsed out of the kobold token stream surfaces
-        as a standard tool_calls result from the one-shot path."""
+        """Structured tool_calls from the server surface as a standard
+        tool_calls result from the one-shot path."""
         calls = [{"id": "call_run_code_0", "name": "run_code",
                   "arguments": {"code": "print('hello from local')"}}]
-        fake = self._fake_local_engine([
-            {"type": "api_payload", "payload": {"prompt": "<10 chars>"}},
+        fake = self._fake_stream_local([
+            {"type": "api_payload", "payload": {}},
             {"type": "tool_calls", "calls": calls},
             {"type": "done", "full_text": ""},
         ])
-        engine = TextEngine(stream_engine=fake)
-        response, _ = await engine.generate_response(local_config, base_context, tools=[
-            {"type": "function", "function": {"name": "run_code"}}])
+        engine = TextEngine()
+        with patch("src.engine.driver.stream_local", fake):
+            response, _ = await engine.generate_response(local_config, base_context, tools=[
+                {"type": "function", "function": {"name": "run_code"}}])
 
         assert response['type'] == 'tool_calls'
         assert response['calls'] == calls
 
     @pytest.mark.asyncio
     async def test_transport_error_raises_llm_error(self, local_config, base_context):
-        fake = MagicMock()
-        fake.stream_local = MagicMock(side_effect=LLMCommunicationError(
-            "Kobold native stream transport error: connection refused"
+        fake = MagicMock(side_effect=LLMCommunicationError(
+            "Local model API returned an error: connection refused"
         ))
-        engine = TextEngine(stream_engine=fake)
-        with patch('src.engine.asyncio.sleep', new_callable=AsyncMock):
-            with pytest.raises(LLMCommunicationError, match="Kobold native stream"):
+        engine = TextEngine()
+        with patch("src.engine.driver.stream_local", fake),                 patch('src.engine.asyncio.sleep', new_callable=AsyncMock):
+            with pytest.raises(LLMCommunicationError, match="Local model API"):
                 await engine.generate_response(local_config, base_context)
         # Transport errors are retried like any provider before surfacing.
-        assert fake.stream_local.call_count == EMPTY_RESPONSE_RETRIES + 1
-
-    def test_default_engine_owns_a_real_stream_engine(self):
-        """Facade collapse: TextEngine() constructs its kobold-native local
-        provider itself — no separate wiring at the composition root."""
-        from src.stream_engine import StreamEngine
-        engine = TextEngine()
-        assert isinstance(engine.stream_engine, StreamEngine)
+        assert fake.call_count == EMPTY_RESPONSE_RETRIES + 1
 
 
 class TestProviderRouting:

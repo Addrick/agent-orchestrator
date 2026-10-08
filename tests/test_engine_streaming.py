@@ -190,17 +190,18 @@ async def test_stream_messages_overlays_params_onto_persona_config(
 
 
 # --------------------------------------------------------------------------
-# Local model dispatch — stream_messages delegates to the engine-owned
-# kobold-native StreamEngine (params, incl. provider_extras, pass through).
+# Local model dispatch — stream_messages routes straight to the local
+# chat-completions stream (params, incl. provider_extras, pass through), with
+# no retry policy (DP-417).
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_stream_messages_local_delegates_to_stream_engine(
+async def test_stream_messages_local_delegates_to_stream_local(
     local_config, messages, drain
 ):
     fake_events = [
-        {"type": "api_payload", "payload": {"prompt": "<10 chars>"}},
+        {"type": "api_payload", "payload": {"model": "local"}},
         {"type": "text_delta", "text": "streamed"},
         {"type": "done", "full_text": "streamed"},
     ]
@@ -209,42 +210,14 @@ async def test_stream_messages_local_delegates_to_stream_engine(
         for e in fake_events:
             yield e
 
-    fake_stream_engine = MagicMock()
-    fake_stream_engine.stream_messages = MagicMock(side_effect=_gen)
-    engine = TextEngine(stream_engine=fake_stream_engine)
-
-    events = await drain(engine.stream_messages(
-        local_config, messages, GenerationParams(temperature=0.7),
-    ))
-    assert events == fake_events
-    fake_stream_engine.stream_messages.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_stream_messages_local_always_streams_kobold_native(
-    local_config, messages, drain
-):
-    """Facade collapse (DP-206b): there is no 'unwired' state — a default
-    TextEngine owns a StreamEngine, so local always streams kobold-native."""
-    fake_events = [
-        {"type": "api_payload", "payload": {"prompt": "<10 chars>"}},
-        {"type": "text_delta", "text": "native"},
-        {"type": "done", "full_text": "native"},
-    ]
-
-    async def _gen(*a, **kw):
-        for e in fake_events:
-            yield e
-
+    fake = MagicMock(side_effect=_gen)
     engine = TextEngine()
-    engine.stream_engine = MagicMock()
-    engine.stream_engine.stream_messages = MagicMock(side_effect=_gen)
-
-    events = await drain(engine.stream_messages(
-        local_config, messages, GenerationParams(),
-    ))
+    params = GenerationParams(temperature=0.7)
+    with patch("src.engine.driver.stream_local", fake):
+        events = await drain(engine.stream_messages(local_config, messages, params))
     assert events == fake_events
-    engine.stream_engine.stream_messages.assert_called_once()
+    fake.assert_called_once()
+    assert fake.call_args[0][3] is params
 
 
 # --------------------------------------------------------------------------

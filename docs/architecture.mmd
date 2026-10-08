@@ -30,7 +30,7 @@ flowchart TB
         LOOP["<b>ToolLoop Engine</b><br/><i>tool_loop.py · max 5 iterations</i>"]
         subgraph DRIVER_SERVICES["Execution Drivers &amp; Extensions"]
             direction LR
-            ENG["<b>TextEngine</b><br/><i>stream_engine.py</i>"]
+            ENG["<b>TextEngine</b><br/><i>engine/driver.py · providers/</i>"]
             TM["<b>ToolManager Registry</b><br/><i>tool_manager.py</i>"]
             MCP["<b>MCP Bridge &amp; Client</b><br/><i>mcp_bridge / mcp_client</i>"]
             PROP["<b>Proposal Engine</b><br/><i>service &amp; executor</i>"]

@@ -19,7 +19,6 @@ from src.engine.providers.agy import parse_agy_tool_call
 from src.generation_events import ToolCallResultEvent
 from src.memory.memory_manager import MemoryManager
 from src.persona import ExecutionMode
-from src.stream_engine import _ToolCallStreamParser
 from src.tool_policy import callable_tool_names
 from src.tools.definitions import get_tool_capabilities, is_write_tool
 from src.tools.tool_loop import ToolDeferredEvent, ToolLoop, _LoopFinishedEvent
@@ -202,15 +201,8 @@ _INJECTED = (
 )
 
 
-def _stream_parse(text: str) -> List[Dict[str, Any]]:
-    parser = _ToolCallStreamParser()
-    parser.feed(text)
-    return parser.finalize()
-
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize("parse", [_stream_parse, parse_agy_tool_call],
-                         ids=["kobold-stream", "agy"])
+@pytest.mark.parametrize("parse", [parse_agy_tool_call], ids=["agy"])
 async def test_injected_text_calls_run_only_what_was_offered(parse):
     calls = parse(_INJECTED)
     # The non-string name is dropped at the parser, not passed to the loop.

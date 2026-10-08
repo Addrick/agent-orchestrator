@@ -527,66 +527,17 @@ class TestProviderExtras:
         assert params.get_provider_extras("kobold") == {"rep_pen": 1.1}
 
     def test_kobold_extras_unrecognized_dropped(self):
-        """StreamEngine._params_from_legacy_dicts only pulls a known set of
-        kobold knobs; anything else is dropped silently."""
-        from src.stream_engine import StreamEngine
+        """params_from_legacy_dicts only pulls a known set of kobold knobs;
+        anything else is dropped silently."""
+        from src.engine.providers.local import params_from_legacy_dicts
 
         persona = {"model_name": "local"}
         lic = {
             "rep_pen": 1.1,
             "unrecognized_field": "garbage",
             "some_other_thing": 42,
+            "instruct_tags": {"instruct_starttag": "REQUEST_USER:"},
         }
-        params = StreamEngine._params_from_legacy_dicts(persona, lic)
+        params = params_from_legacy_dicts(persona, lic)
         kobold = params.get_provider_extras("kobold")
-        assert kobold.get("rep_pen") == 1.1
-        assert "unrecognized_field" not in kobold
-        assert "some_other_thing" not in kobold
-
-    def test_legacy_dicts_instruct_tags_override(self):
-        """If local_inference_config carries instruct_tags with any value,
-        it overrides the persona's stored instruct_tags."""
-        from src.stream_engine import StreamEngine
-
-        persona = {
-            "model_name": "local",
-            "provider_extras": {
-                "kobold": {
-                    "instruct_tags": {"instruct_starttag": "PERSONA_USER:"}
-                }
-            },
-        }
-        lic = {"instruct_tags": {"instruct_starttag": "REQUEST_USER:"}}
-        params = StreamEngine._params_from_legacy_dicts(persona, lic)
-        kobold = params.get_provider_extras("kobold")
-        assert kobold["instruct_tags"]["instruct_starttag"] == "REQUEST_USER:"
-
-    @pytest.mark.asyncio
-    async def test_chat_template_resolution_precedence(self, monkeypatch):
-        """persona_config['chat_template'] > env var > auto-detect > default."""
-        from unittest.mock import MagicMock
-        from src.stream_engine import StreamEngine
-        from src.utils import model_utils
-
-        model_utils._KOBOLD_MODEL_CACHE.clear()
-        engine = StreamEngine()
-
-        # Fake async client whose /api/v1/model returns no model → auto-detect
-        # yields None, so the final assertion lands on the chatml default.
-        class _NoModelClient:
-            async def get(self, url, timeout=None, **kw):
-                r = MagicMock()
-                r.status_code = 200
-                r.json.return_value = {"result": None}
-                return r
-
-        engine._http_client = _NoModelClient()
-
-        monkeypatch.setenv("KOBOLD_CHAT_TEMPLATE", "llama3")
-        # Persona setting wins.
-        assert await engine._resolve_template_name({"chat_template": "gemma"}) == "gemma"
-        # No persona value → env var.
-        assert await engine._resolve_template_name({"chat_template": None}) == "llama3"
-        # No persona, no env, no detectable model → chatml default.
-        monkeypatch.delenv("KOBOLD_CHAT_TEMPLATE", raising=False)
-        assert await engine._resolve_template_name({}) == "chatml"
+        assert kobold == {"rep_pen": 1.1}

@@ -3,8 +3,8 @@
 import logging
 import os
 import asyncio
-from typing import Dict, Any, Optional, Tuple, List, Callable, AsyncIterator
-from contextlib import asynccontextmanager, AsyncExitStack
+from typing import Dict, Any, Optional, Tuple, List, Callable, AsyncGenerator, AsyncIterator
+from contextlib import aclosing, asynccontextmanager, AsyncExitStack
 
 from dotenv import load_dotenv
 
@@ -24,7 +24,6 @@ from google import genai
 from google.genai.types import Tool
 from src.generation_params import GenerationParams
 from src.llm_errors import LLMCommunicationError
-from src.stream_engine import StreamEngine
 # DP-244: Provider ABC family + ordered registry. Every provider is fully
 # extracted into `providers/<name>.py` (agy/cc share `providers/_subprocess.py`);
 # the driver keeps thin `_stream_<provider>_response` / helper seams that the
@@ -32,6 +31,7 @@ from src.stream_engine import StreamEngine
 from src.engine.registry import build_registry
 from src.engine.providers import _shared
 from src.engine.providers.openai import stream_openai
+from src.engine.providers.local import params_from_legacy_dicts, stream_local
 from src.engine.providers.anthropic import stream_anthropic
 from src.engine.providers import google
 from src.engine.providers import agy as agy_provider
@@ -62,15 +62,13 @@ class TextEngine:
         "gemma-4-31b-it": "gemma-4-26b-a4b-it",
     }
 
-    def __init__(self, stream_engine: Optional[Any] = None) -> None:
+    def __init__(self) -> None:
         # --- Lazy-loaded clients ---
-        # OpenAIProvider (providers.openai) lazily fills this cache slot.
+        # OpenAIProvider (providers.openai) lazily fills this cache slot, and
+        # LocalProvider (providers.local) the local server's (DP-417).
         self.openai_client: Optional[Any] = None
+        self.local_client: Optional[Any] = None
         self.anthropic_client: Optional[anthropic.AsyncAnthropic] = None
-        # Kobold-native local provider (DP-206b: engine-owned — the engine is
-        # the single entry; StreamEngine is its `local` transport component).
-        # The parameter exists for tests to inject fakes.
-        self.stream_engine: Any = stream_engine if stream_engine is not None else StreamEngine()
 
         # --- Google Client (matching original implementation) ---
         self.google_client: Optional[genai.client.AsyncClient] = None
@@ -118,8 +116,10 @@ class TextEngine:
         self._initialize_env()
 
     async def aclose(self) -> None:
-        """Release transport resources (the kobold-native HTTP client)."""
-        await self.stream_engine.aclose()
+        """Release transport resources (the local server's HTTP client)."""
+        if self.local_client is not None:
+            await self.local_client.close()
+            self.local_client = None
 
     def _initialize_env(self) -> None:
         """Load API keys from .env file."""
@@ -432,18 +432,16 @@ class TextEngine:
         self, config: Dict[str, Any], history_object: Dict[str, Any],
         tools: Optional[List[Dict[str, Any]]] = None,
         local_inference_config: Optional[Dict[str, Any]] = None,
-    ) -> AsyncIterator[Dict[str, Any]]:
-        """Canonical local driver (DP-206b): the kobold-native token stream.
-        StreamEngine renders the chat template, folds the tool list into the
-        system prompt as the `<tool_call>` protocol, and parses tool-call
-        blocks out of the token stream — so the local one-shot path
-        (collect over this) uses the exact same transport and tool protocol
-        as the streaming portal path. This replaced the OpenAI-compat
-        `/v1/chat/completions` one-shot transport."""
-        async for ev in self.stream_engine.stream_local(
-            config, history_object, tools, local_inference_config
-        ):
-            yield ev
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Engine seam for the local provider (DP-417): one streaming
+        chat-completions request to the local server, the same transport for
+        the streaming portal path and the one-shot (collect over this) path.
+        `local_inference_config` overrides the persona's sampler defaults."""
+        params = params_from_legacy_dicts(config, local_inference_config)
+        # aclosing: a caller closing this stream cancels the generation.
+        async with aclosing(stream_local(self, config, history_object, params, tools)) as events:
+            async for ev in events:
+                yield ev
 
     @staticmethod
     async def _events_from_one_shot(
@@ -602,9 +600,8 @@ class TextEngine:
     # driver `_stream_response` wraps it (routing, rate limiting, retries,
     # 429 fallback), `stream_messages` dispatches through the driver for
     # true token deltas, and `generate_response` is collect_stream over the
-    # driver. Local (`model_name == "local"`) is the engine-owned
-    # kobold-native StreamEngine for streaming AND one-shot (collect) —
-    # the OpenAI-compat local transport is gone.
+    # driver. Local (`model_name == "local"`) streams chat-completions from
+    # the local server for streaming AND one-shot (collect) (DP-417).
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -663,10 +660,10 @@ class TextEngine:
           - optional `{"type": "tool_calls", "calls": [...]}`
           - terminal `{"type": "done", "full_text": ...}`
 
-        For `model_name == "local"` this routes straight to the kobold-native
-        SSE stream (GenerationParams — including kobold provider_extras —
-        pass through unchanged, and no retry policy applies, matching the
-        pre-cutover portal path). All other models dispatch through the
+        For `model_name == "local"` this routes straight to the local server
+        (GenerationParams — including kobold provider_extras — pass through
+        unchanged, and no retry policy applies, matching the pre-cutover
+        portal path). All other models dispatch through the
         `_stream_response` policy driver: true token deltas from the
         canonical per-provider streams, with the same rate limiting / retry /
         fallback policy as `generate_response` (DP-206b cutover)."""
@@ -674,10 +671,14 @@ class TextEngine:
         model_name: str = merged_config.get("model_name", "")
 
         if model_name == "local":
-            async for ev in self.stream_engine.stream_messages(
-                merged_config, messages, params, tools
-            ):
-                yield ev
+            # No image: the local provider has no image support (the policy
+            # driver adds the "image unseen" note on the other path).
+            local_history = self._messages_to_history_object(messages)
+            # aclosing: a caller closing this stream (the portal's stop
+            # button drops the SSE) must close the upstream HTTP stream.
+            async with aclosing(stream_local(self, merged_config, local_history, params, tools)) as events:
+                async for ev in events:
+                    yield ev
             return
 
         history_object = self._messages_to_history_object(messages, image_url)

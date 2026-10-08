@@ -1,8 +1,7 @@
 """Unit tests for the shared `<tool_call>` text-protocol primitives.
 
-These cover the module directly (not just via the two call sites) so the
-genuinely-shared extraction/decode/rendering core is pinned independently of
-engine.py and stream_engine.py.
+These cover the module directly (not just via its agy call site) so the
+extraction/decode/rendering core is pinned independently of the provider.
 """
 
 from src.text_tool_protocol import (
