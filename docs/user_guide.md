@@ -1199,8 +1199,15 @@ visible in `list_models` as a `tier` field.
 
 | tier | where | size | what it means |
 |---|---|---|---|
-| **hot** | `/srv/models`, on the SSD | ~120 GiB, ~4-5 models | koboldcpp can serve it right now |
+| **hot** | `/srv/models`, on a dedicated 2 TB NVMe | ~1.8 TiB | koboldcpp can serve it right now |
 | **cold** | `/srv/archive/models`, on the archive HDD | ~840 GiB | installed and kept, but must be promoted before it can serve |
+
+> **Since 2026-10-07 the split is mostly vestigial.** The hot tier used to be a
+> ~120 GiB thin LV carved from the same pool as the guests' disks, which is
+> what made a separate cold tier worth having. It is now its own 2 TB disk, so
+> it is larger than the cold tier and eviction effectively never fires. The
+> mechanism below still runs unchanged: installs still land cold and still need
+> a promotion before they can serve.
 
 **The cold copy is the authoritative one.** Every gguf that has ever been
 installed stays there; the hot tier is a cache of the handful currently worth
@@ -1284,7 +1291,10 @@ move, the node refuses:
   wedged every guest on the node into a read-only filesystem. Downloads now
   target the archive disk, which is an ordinary partition where `df` is the
   truth, and the pool is protected by not being written to at all rather than by
-  a check. Promotion to the hot tier keeps a pool-aware check as a second line.
+  a check. Promotion to the hot tier keeps a pool-aware check as a second line
+  — though since `/srv/models` moved to its own disk (2026-10-07) the pool it
+  reads no longer backs that volume, so the check only caps hot-tier free space
+  at whatever the guests' pool has left.
 
 And after downloading, a sha256 mismatch deletes the partial file and fails the
 job. Size matching is not proof.
