@@ -14,6 +14,12 @@ class AsyncIterList:
 
     def __init__(self, items: Iterable[Any]) -> None:
         self._items = list(items)
+        self.closed = False
+
+    async def close(self) -> None:
+        """The SDK stream's close(): drops the HTTP response, which is how a
+        caller cancels a generation (DP-417)."""
+        self.closed = True
 
     def __aiter__(self) -> "AsyncIterList":
         self._it = iter(self._items)
@@ -32,10 +38,14 @@ class AsyncIterList:
 
 def openai_chunk(content: Optional[str] = None,
                  tool_call_deltas: Optional[List[Any]] = None,
-                 finish_reason: Optional[str] = None) -> MagicMock:
+                 finish_reason: Optional[str] = None,
+                 reasoning: Optional[str] = None) -> MagicMock:
     delta = MagicMock()
     delta.content = content
     delta.tool_calls = tool_call_deltas
+    # A local server's thinking arrives as a non-standard delta field, which
+    # the SDK keeps in pydantic's `model_extra`.
+    delta.model_extra = {"reasoning_content": reasoning} if reasoning else {}
     choice = MagicMock(delta=delta, finish_reason=finish_reason)
     return MagicMock(choices=[choice])
 

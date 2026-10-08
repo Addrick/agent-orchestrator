@@ -530,10 +530,11 @@ class Persona:
         return self._thinking_level
 
     def get_chat_template(self) -> Optional[str]:
-        """Returns the instruct template name used when rendering prompts for local inference.
+        """Returns the persona's instruct-preset name for local inference.
 
-        Maps to StreamEngine.CHAT_TEMPLATES keys: 'chatml', 'gemma', 'llama3', 'alpaca'.
-        None means fall back to KOBOLD_CHAT_TEMPLATE env/config or 'chatml'.
+        Since DP-417 only its thinking switch is used — see
+        ``generation_params.CHAT_TEMPLATE_THINKING``. None falls back to the
+        ``KOBOLD_CHAT_TEMPLATE`` env var, then to the server's default.
         """
         return self._chat_template
 
@@ -798,12 +799,13 @@ class Persona:
         logger.info(f"Persona '{self._name}' thinking_level set to {value}.")
 
     def set_chat_template(self, value: Optional[str]) -> None:
-        """Sets the instruct template name for local inference prompt rendering.
+        """Sets the instruct-preset name for local inference (its thinking
+        switch; see ``generation_params.CHAT_TEMPLATE_THINKING``).
 
-        Valid names are the keys of ``stream_engine.CHAT_TEMPLATES`` (None to
-        clear). This setter is lenient — unknown values are accepted and fall
-        back to chatml at render time, so config-load stays robust; the
-        ``set chat_template`` CLI handler validates and rejects unknowns.
+        Valid names are that table's keys (None to clear). This setter is
+        lenient — an unknown value is accepted and means the server default,
+        so config-load stays robust; the ``set chat_template`` CLI handler
+        validates and rejects unknowns.
         """
         self._chat_template = value if value else None
         logger.info(f"Persona '{self._name}' chat_template set to {value!r}.")

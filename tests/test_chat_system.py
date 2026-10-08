@@ -740,18 +740,18 @@ async def test_grounding_filtered_for_incompatible_models(chat_system_with_mocks
     tool_manager_mock.get_tool_definitions.return_value = [grounding_tool]
 
     if model_name == "local":
-        # DP-206b: local bypasses generate_response entirely — it streams via
-        # the engine-owned kobold StreamEngine. Capture tools at that seam.
+        # local bypasses generate_response entirely — stream_messages routes
+        # straight to the local chat-completions stream (DP-417). Capture
+        # tools at that seam.
         captured = {}
 
-        async def _fake_local(config, messages, params, tools=None):
+        async def _fake_local(engine, config, history_object, params, tools=None):
             captured["tools"] = tools
             yield {"type": "api_payload", "payload": {}}
             yield {"type": "done", "full_text": "ok"}
 
-        text_engine_mock.stream_engine = MagicMock()
-        text_engine_mock.stream_engine.stream_messages = MagicMock(side_effect=_fake_local)
-        await system.generate_response("test_persona", "user", "channel", "test")
+        with patch("src.engine.driver.stream_local", MagicMock(side_effect=_fake_local)):
+            await system.generate_response("test_persona", "user", "channel", "test")
         assert len(captured["tools"] or []) == 0
         return
 

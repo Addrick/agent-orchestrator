@@ -11,10 +11,9 @@ from typing import Any, Dict, List, Tuple
 
 import aiohttp
 
-# DP-317: moved down to the `utils` leaf so `src.stream_engine` — which sits
-# below `src.engine` in the layer order — can share it without an upward
-# import. Re-exported here because every provider already imports it from
-# `_shared`, and this is its provider-facing home.
+# DP-317: lives in the `utils` leaf (it was shared with the since-retired
+# `src.stream_engine`). Re-exported here because every provider already
+# imports it from `_shared`, and this is its provider-facing home.
 # The redundant-looking alias is the explicit-re-export form mypy requires
 # under `no_implicit_reexport`.
 from src.utils.history_shape import (  # noqa: F401

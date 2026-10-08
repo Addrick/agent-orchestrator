@@ -171,7 +171,6 @@ def test_data_plane_post_paths_not_gated():
     """Allowlist is exactly the generation/abort/voice-STT surface — the drift
     guard: anything else non-GET is gated by construction."""
     assert KoboldAdapter.DATA_PLANE_POST_PATHS == frozenset({
-        "/api/extra/abort",
         "/chat/completions",
         "/v1/chat/completions",
         "/voice/transcribe",
@@ -188,18 +187,6 @@ def test_voice_stt_uploads_not_gated(token_set):
     with TestClient(adapter.app) as client:
         assert client.post("/voice/transcribe", content=b"\x00\x00").status_code == 404
         assert client.post("/voice/utterance", content=b"\x00\x00").status_code == 404
-
-
-def test_abort_open_without_token(token_set):
-    adapter, _, _ = _make_adapter()
-    # abort proxies upstream — stub the client so we test the gate decision,
-    # not a real kobold round-trip.
-    adapter._http.post = AsyncMock(return_value=SimpleNamespace(
-        status_code=200, content=b"{}", json=lambda: {}
-    ))
-    with TestClient(adapter.app) as client:
-        r = client.post("/api/extra/abort")
-    assert r.status_code != 401
 
 
 # ---------------------------------------------------------------------------

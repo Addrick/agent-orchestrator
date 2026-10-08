@@ -3,25 +3,19 @@
 
 Models without a native tool-calling API are driven over a plain-text
 convention: tool definitions are rendered into the prompt, and the model
-signals a call by emitting `<tool_call>{json}</tool_call>`. Two call sites use
-this convention with legitimately different *shapes*:
+signals a call by emitting `<tool_call>{json}</tool_call>`. The agy CLI path
+(`providers/agy.py`) is the one caller since DP-417: it parses a COMPLETE text
+response in one shot. (The local kobold path used to parse it incrementally
+from the token stream; it now gets structured `tool_calls` from the server.)
 
-  - `engine.py` (agy CLI path) parses a COMPLETE text response in one shot.
-  - `stream_engine.py` (local kobold path) parses INCREMENTALLY as tokens
-    arrive, holding lookahead so a partially-arrived tag never leaks.
-
-This module owns only the genuinely-common core so the two paths cannot
-drift on the wire format:
+This module owns the wire-format core:
 
   - the literal open/close tags (`TOOL_CALL_OPEN` / `TOOL_CALL_CLOSE`),
   - extracting the complete `<tool_call>…</tool_call>` blocks from text,
   - JSON-decoding a block's inner payload into a dict.
 
-The differing parser *machinery* (the streaming buffer/lookahead vs. the
-single-shot regex sweep) and each caller's id-minting / field-validation
-policy intentionally stay at their respective call sites — forcing them into
-one parser would distort the streaming path without removing real
-duplication.
+The parser machinery and the caller's id-minting / field-validation policy
+stay at the call site.
 """
 
 import json
@@ -100,8 +94,7 @@ def strip_tool_call_blocks(text: str) -> str:
     A TRUNCATED trailing block — the model hit its output cap mid-`<tool_call>`
     — is dropped too. That fragment is not prose: this result is persisted to
     `tool_context` and replayed verbatim into the next request, so leaving it
-    in self-poisons the model's own future context with a half-written marker,
-    the hazard `stream_engine._strip_harmony` names for the streaming path.
+    in self-poisons the model's own future context with a half-written marker.
     """
     if not text:
         return ""

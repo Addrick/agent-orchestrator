@@ -119,6 +119,28 @@ class GenerationParams:
         # Kobold-specific extras
         kobold_extras = self.provider_extras.setdefault("kobold", {})
         for k in ("rep_pen", "rep_pen_range", "rep_pen_slope",
-                  "min_p", "typical", "tfs", "max_context_length", "instruct_tags"):
+                  "min_p", "typical", "tfs", "max_context_length"):
             if config.get(k) is not None:
                 kobold_extras[k] = config[k]
+
+
+# DP-417: the persona `chat_template` presets once named derpr's hand-written
+# prompt formats for the kobold-native local transport. The local server now
+# applies the model's own jinja template, so the only part of a preset that
+# still means anything is whether it switched thinking on or off — and that
+# was always carried by the preset's gen-time prefix (an empty `<think></think>`
+# or thought channel to suppress it, an open one to force it). The names stay
+# valid so stored personas and the editor dropdown keep working.
+#   True  → thinking on   False → thinking off   None → server default
+CHAT_TEMPLATE_THINKING: Dict[str, Optional[bool]] = {
+    "alpaca": None,
+    "chatml": None,
+    "chatml-nothink": False,
+    "gemma": None,
+    "gemma4-e-nothink": False,
+    "gemma4-nothink": False,
+    "gemma4-think": True,
+    "llama2": None,
+    "llama3": None,
+    "llama4": None,
+}

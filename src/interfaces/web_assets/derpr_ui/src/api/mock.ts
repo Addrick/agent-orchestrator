@@ -31,11 +31,6 @@ export const MOCK_PERSONA: Persona = {
   chat_template: 'chatml',
   top_p: 0.92,
   top_k: 40,
-  instruct_tags: {
-    system: '<|im_start|>system',
-    user: '<|im_start|>user',
-    assistant: '<|im_start|>assistant',
-  },
   kobold_extras: {
     rep_pen: 1.07,
     rep_pen_range: 320,

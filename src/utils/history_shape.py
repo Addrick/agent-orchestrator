@@ -1,12 +1,10 @@
 # src/utils/history_shape.py
 """Provider-agnostic reshaping of the legacy ``history_object`` (DP-317).
 
-Lives in ``utils`` — the leaf layer — because both ``src.engine.providers``
-and ``src.stream_engine`` need it, and `stream_engine` sits *below* `engine`
-in the layer order (setup.cfg). Putting it in `engine.providers._shared`, where
-it started, meant `stream_engine` could not reach it without an upward import:
-a layer violation, and a genuine import cycle, since `src.engine`'s package
-``__init__`` imports `driver`, which imports `src.stream_engine`.
+Lives in ``utils`` — the leaf layer — because it was shared with
+``src.stream_engine``, which sat *below* `engine` in the layer order and so
+could not import `engine.providers._shared` (retired in DP-417; the providers
+re-export it from `_shared`).
 
 Pure dict manipulation, no imports beyond typing — keeps `utils` a
 dependency-free leaf.

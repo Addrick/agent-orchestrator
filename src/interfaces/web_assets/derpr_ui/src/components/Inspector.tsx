@@ -108,12 +108,11 @@ const MEMORY_MODES = [
   'TICKET_ISOLATED',
 ]
 
-// The instruct templates the engine's LOCAL renderer understands are fetched
-// from GET /api/v1/chat_templates (the keys of StreamEngine.CHAT_TEMPLATES) via
-// store.chatTemplates — never hardcoded, so the dropdown can't drift from what
-// the engine can render (DP-140). The field is only read on the local-inference
-// path (cloud providers ignore it); empty selection = leave unset → engine uses
-// KOBOLD_CHAT_TEMPLATE / chatml. Any unknown value falls back to chatml.
+// The instruct presets a persona may name are fetched from
+// GET /api/v1/chat_templates via store.chatTemplates — never hardcoded, so the
+// dropdown can't drift from the engine (DP-140). Since DP-417 only a preset's
+// thinking switch is used, and only on the local-inference path; empty
+// selection = leave unset → KOBOLD_CHAT_TEMPLATE, else the server's default.
 
 // PATCH-able base params that are plain strings on the wire.
 const STR_BASE: (keyof Persona)[] = ['model_name', 'chat_template']
@@ -407,15 +406,14 @@ function PersonaPane({ store }: { store: PortalStore }) {
             <input type="number" step="0.01" value={buf.typical} onChange={(e) => set('typical', e.target.value)} />
           </Cell>
         </Pair>
-        {/* mirostat / sampler_order / instruct_tags are not in the adapter's
-            PATCH coercion set — shown read-only until a dedicated editor lands. */}
+        {/* mirostat / sampler_order are not in the adapter's PATCH coercion
+            set — shown read-only until a dedicated editor lands. */}
         <div className="field">
-          <span className="lbl">mirostat · tau · eta · sampler_order · instruct_tags (read-only)</span>
+          <span className="lbl">mirostat · tau · eta · sampler_order (read-only)</span>
           <div className="ctrl">
             <span>
               {asStr(p.kobold_extras?.mirostat) || '—'} · {asStr(p.kobold_extras?.mirostat_tau) || '—'} ·{' '}
-              {asStr(p.kobold_extras?.mirostat_eta) || '—'} · [{(p.kobold_extras?.sampler_order || []).join(', ')}] ·{' '}
-              {p.instruct_tags && Object.keys(p.instruct_tags).length ? 'custom' : '—'}
+              {asStr(p.kobold_extras?.mirostat_eta) || '—'} · [{(p.kobold_extras?.sampler_order || []).join(', ')}]
             </span>
           </div>
         </div>

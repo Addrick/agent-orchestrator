@@ -353,3 +353,71 @@ async def test_google_wire_payload_matches_golden(text_engine, monkeypatch):
     }
     assert payload["contents"][2]["parts"][0]["thought_signature"] == "...present..."
     assert result == {"type": "text", "content": "parity ok"}
+
+
+# ---------------------------------------------------------------------------
+# Local (DP-417) — chat-completions to the local server. A new golden, not a
+# carried-over one: the kobold-native wire (a rendered prompt string) is gone.
+# The history carries a tool round trip to pin the stored→wire translation.
+# ---------------------------------------------------------------------------
+
+LOCAL_CONFIG = {
+    "model_name": "local",
+    "temperature": 0.7,
+    "top_p": 0.9,
+    "top_k": 40,
+    "max_output_tokens": 256,
+    "max_context_tokens": 16384,
+    "chat_template": "chatml-nothink",
+}
+LOCAL_INFERENCE_CONFIG = {"rep_pen": 1.07, "rep_pen_range": 320, "min_p": 0.05,
+                          "stop_sequence": ["\nUser:"]}
+LOCAL_HISTORY = [
+    {"role": "user", "content": "weather in Oslo?"},
+    {"role": "assistant", "tool_calls": [
+        {"id": "call_get_weather_0", "name": "get_weather", "arguments": {"location": "Oslo"}}]},
+    {"role": "tool", "tool_call_id": "call_get_weather_0", "name": "get_weather",
+     "content": '{"temp_c": 4}'},
+    {"role": "user", "content": "current question"},
+]
+
+LOCAL_GOLDEN_WIRE = {
+    "model": "local",
+    "max_tokens": 256,
+    "temperature": 0.7,
+    "top_p": 0.9,
+    "messages": [
+        {"content": "You are the parity bot.", "role": "system"},
+        {"content": "weather in Oslo?", "role": "user"},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "call_get_weather_0", "type": "function",
+             "function": {"name": "get_weather", "arguments": '{"location": "Oslo"}'}}]},
+        {"role": "tool", "tool_call_id": "call_get_weather_0", "content": '{"temp_c": 4}'},
+        {"content": "current question", "role": "user"},
+    ],
+    "tool_choice": "auto",
+    "tools": OPENAI_GOLDEN_WIRE["tools"],
+    "stop": ["\nUser:"],
+    "extra_body": {
+        "rep_pen": 1.07, "rep_pen_range": 320, "min_p": 0.05, "top_k": 40,
+        "max_context_length": 16384,
+        "chat_template_kwargs": {"enable_thinking": False},
+    },
+}
+
+
+@pytest.mark.asyncio
+async def test_local_wire_payload_matches_golden(text_engine):
+    client = MagicMock()
+    client.chat.completions.create = AsyncMock(return_value=openai_text_stream("parity ok"))
+    text_engine.local_client = client
+    result, payload = await text_engine.generate_response(
+        dict(LOCAL_CONFIG), _ctx(LOCAL_HISTORY), copy.deepcopy(PARITY_TOOLS),
+        dict(LOCAL_INFERENCE_CONFIG),
+    )
+    captured = dict(client.chat.completions.create.call_args.kwargs)
+    assert captured.pop("stream") is True
+    assert captured == LOCAL_GOLDEN_WIRE
+    assert payload == {**{k: v for k, v in LOCAL_GOLDEN_WIRE.items() if k != "tools"},
+                       "tools": ["get_weather", "create_note"]}
+    assert result == {"type": "text", "content": "parity ok"}

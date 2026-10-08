@@ -118,9 +118,9 @@ export function usePortalStore() {
   // The LLM model catalog (same source as the `what models` dev command);
   // drives the inspector's model_name dropdown. Persona-independent, loaded once.
   const [modelList, setModelList] = useState<string[]>([])
-  // Instruct templates the local renderer understands (engine CHAT_TEMPLATES
-  // keys); drives the inspector's chat_template dropdown. Fetched, not
-  // hardcoded, so it never drifts from the engine (DP-140). Loaded once.
+  // Instruct presets a persona may name (engine CHAT_TEMPLATE_THINKING keys);
+  // drives the inspector's chat_template dropdown. Fetched, not hardcoded, so
+  // it never drifts from the engine (DP-140). Loaded once.
   const [chatTemplates, setChatTemplates] = useState<string[]>([])
   const [persona, setPersona] = useState<Persona | null>(null)
   const [tools, setTools] = useState<ToolDef[]>([])
@@ -715,7 +715,9 @@ export function usePortalStore() {
   )
 
   const abortTurn = useCallback(async () => {
-    await api.abort()
+    // Dropping the SSE is the cancel: the engine closes the upstream stream
+    // and the local server stops generating on disconnect (DP-417). (This
+    // used to POST /api/v1/abort first — a route that never existed.)
     abortRef.current?.abort()
     abortRef.current = null
     streamingRef.current = false

@@ -1,10 +1,9 @@
 # src/llm_errors.py
 """Provider-communication error type (DP-206b).
 
-A leaf module so both the engine (`src.engine`) and its kobold-native local
-provider (`src.stream_engine`) can share the exception without an import
-cycle — the engine owns and constructs the StreamEngine, so the old
-stream_engine → engine import direction had to invert. Importers may keep
+A leaf module so the engine (`src.engine`) and anything below it can share
+the exception without an import cycle (it was split out for the kobold-native
+`src.stream_engine`, retired in DP-417). Importers may keep
 using the historical `from src.engine import LLMCommunicationError` re-export.
 """
 

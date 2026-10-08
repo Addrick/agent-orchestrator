@@ -89,7 +89,7 @@ CONTRACTS: List[Tuple[str, Tuple[str, ...]]] = [
     # commands, tools, transports, agents, or the engines.
     ("src.memory", (
         "src.chat_system", "src.message_handler", "src.tools",
-        "src.interfaces", "src.agents", "src.stream_engine", "src.engine",
+        "src.interfaces", "src.agents", "src.engine",
     )),
     # tools/* may see persona + the backend ABC (the Protocol boundary),
     # never transports/orchestrator/concrete storage. The ABC allowance is
@@ -111,7 +111,7 @@ CONTRACTS: List[Tuple[str, Tuple[str, ...]]] = [
     # utils/* is stdlib+config only.
     ("src.utils", (
         "src.chat_system", "src.message_handler", "src.engine",
-        "src.stream_engine", "src.memory", "src.interfaces", "src.agents",
+        "src.memory", "src.interfaces", "src.agents",
         "src.tools", "src.persona", "src.clients",
     )),
     # Persona persistence (DP-203: ex-utils/save_utils). May see the persona
@@ -120,13 +120,13 @@ CONTRACTS: List[Tuple[str, Tuple[str, ...]]] = [
     # Never orchestration, engines, transports, agents, or storage.
     ("src.personas", (
         "src.chat_system", "src.message_handler", "src.engine",
-        "src.stream_engine", "src.memory", "src.interfaces", "src.agents",
+        "src.memory", "src.interfaces", "src.agents",
         "src.clients",
     )),
     # persona is a domain leaf.
     ("src.persona", (
         "src.chat_system", "src.message_handler", "src.engine",
-        "src.stream_engine", "src.memory", "src.interfaces", "src.agents",
+        "src.memory", "src.interfaces", "src.agents",
         "src.clients", "src.tools",
     )),
     # clients/* are cross-cutting leaves.
@@ -138,28 +138,27 @@ CONTRACTS: List[Tuple[str, Tuple[str, ...]]] = [
     # import the orchestrator, engines, transports, or agents at runtime —
     # collaborators are injected by the composition site (ChatSystem.__init__).
     ("src.message_handler", (
-        "src.chat_system", "src.engine", "src.stream_engine",
+        "src.chat_system", "src.engine",
         "src.interfaces", "src.agents", "src.turn_persistence",
         "src.memory",
     )),
     # Request assembly sits below the orchestrator: personas, tools, storage.
     ("src.request_builder", (
         "src.chat_system", "src.message_handler", "src.interfaces",
-        "src.agents", "src.engine", "src.stream_engine",
+        "src.agents", "src.engine",
     )),
     # Turn persistence sits below the orchestrator: storage + shared leaves.
     ("src.turn_persistence", (
         "src.chat_system", "src.message_handler", "src.interfaces",
-        "src.agents", "src.engine", "src.stream_engine", "src.tools",
+        "src.agents", "src.engine", "src.tools",
     )),
     # Confirmation parking sits below the orchestrator: tools + storage only.
     ("src.confirmations", (
         "src.chat_system", "src.message_handler", "src.interfaces",
-        "src.agents", "src.engine", "src.stream_engine",
+        "src.agents", "src.engine",
     )),
     # Engine layer never reaches up into orchestration/storage/transports.
     ("src.engine", ("src.chat_system", "src.message_handler", "src.memory", "src.interfaces", "src.agents")),
-    ("src.stream_engine", ("src.chat_system", "src.message_handler", "src.memory", "src.interfaces", "src.agents")),
     ("src.llm_errors", ("src.",)),
     ("src.text_tool_protocol", ("src.",)),
     ("src.tool_policy", ("src.",)),
