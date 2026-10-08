@@ -1168,7 +1168,7 @@ message goes to the **Discord debug channel** naming
 each file, and the fix: redeploy `services/pve/` per its README. When everything
 matches, nothing is posted.
 
-- It only runs when `PVE_TOOLS_ENABLED` is on and a debug channel is known: the
+- It only runs when the Discord interface is running, `PVE_TOOLS_ENABLED` is on and a debug channel is known: the
   `debug` entry under `recipients` in `config/agents.json` (the same one managr's
   boot report posts to), or `DISCORD_DEBUG_CHANNEL` if set, which takes priority.
   With PVE tools on and neither set, derpr logs a warning that the check is off.
@@ -1237,11 +1237,11 @@ visible in `list_models` as a `tier` field.
 > installed before that; activating one of them still promotes it as below. A
 > model installed hot has no archive copy, so eviction will never remove it.
 
-**The cold copy is the authoritative one.** Every gguf that has ever been
-installed stays there; the hot tier is a cache of the handful currently worth
-keeping on fast storage. That is what makes eviction safe — dropping a model
-from the hot tier deletes a copy, never the model, and the worst case is the
-minutes it takes to copy it back.
+**For models installed before DP-416, the cold copy is the authoritative one** —
+the hot tier is a cache of the handful currently worth keeping on fast storage.
+That is what makes eviction safe: dropping such a model from the hot tier
+deletes a copy, never the model, and the worst case is the minutes it takes to
+copy it back. A model installed since has no cold copy and is never evicted.
 
 **Installing does not activate.** `install_model` writes the unit disabled;
 nothing on `:5001` changes until `set_active_model` is called. (Before DP-416 it
