@@ -30,6 +30,7 @@ import pytest
 from config import global_config
 from src.huggingface.client import HFFile
 from src.huggingface.handler import HuggingFaceToolHandler
+from src.proxmox.artifacts import NODE_ARTIFACTS, check_node_artifacts
 from src.proxmox.handler import ProxmoxToolHandler
 from src.proxmox.ssh import SSHResult
 
@@ -171,6 +172,8 @@ def emitted(monkeypatch) -> List[List[str]]:
             "owner/m-GGUF", "model-Q6_K.gguf", "newmodel", kv_precision="q8"
         )
         await hf.job_status("newmodel-abc123def456")
+        # DP-418: the startup drift check is a node caller too.
+        await check_node_artifacts(recorder)  # type: ignore[arg-type]
 
     asyncio.run(drive())
     assert recorder.calls
@@ -302,3 +305,23 @@ def test_the_schema_offers_exactly_the_precisions_the_wrapper_admits(wrapper):
             "model.gguf", "n", "8192", "1", SHA, "job1", kv,
         ]
         assert _verdict(wrapper, argv) == "ALLOW", kv
+
+
+_HASH_ARGV = ["sha256sum", *(node_path for _, node_path in NODE_ARTIFACTS)]
+
+
+def test_the_dp418_hash_shape_is_covered(emitted):
+    assert _HASH_ARGV in emitted
+
+
+@pytest.mark.parametrize("argv", [
+    _HASH_ARGV[:-1],                                  # one path short
+    [*_HASH_ARGV, "/etc/shadow"],                     # one path extra
+    ["sha256sum", "/etc/shadow"],                     # any other file
+    ["sha256sum", *reversed(_HASH_ARGV[1:])],         # same paths, other order
+    ["sha256sum", "-c", *_HASH_ARGV[1:]],             # a flag
+])
+def test_the_hash_verb_admits_only_its_one_argv(wrapper, argv):
+    """DP-418: hashing is a read of the node, so it is pinned to one exact
+    argv. Anything else would let the key read arbitrary files' digests."""
+    assert _verdict(wrapper, argv) == "DENY"

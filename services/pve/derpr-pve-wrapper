@@ -62,6 +62,12 @@ allow() { log "ALLOW: $cmd"; exec "${a[@]}"; }
 
 case "${a[0]:-}" in
   uptime) [ "$n" -eq 1 ] && allow ;;
+
+  # DP-418: derpr's startup drift check hashes the deployed artifacts. One
+  # exact argv -- these five paths, this order (src/proxmox/artifacts.py
+  # NODE_ARTIFACTS) -- so it can read nothing else on the node.
+  sha256sum)
+    [ "$cmd" = "sha256sum /usr/local/bin/derpr-pve-wrapper /usr/local/sbin/derpr-model-install /usr/local/sbin/derpr-model-tier /usr/local/share/derpr/koboldcpp-model.service.in /usr/local/share/derpr/gguf_header.py" ] && allow ;;
   reboot) [ "$n" -eq 1 ] && allow ;;
 
   # DP-265: the ONE node-side verb for HuggingFace model provisioning. `run` is
