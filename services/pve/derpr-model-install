@@ -36,22 +36,23 @@
 #     used to carry exactly that -- a policy wrapper over the koboldcpp binary,
 #     because the template hardcoded one --quantkv / --smartcache for every
 #     model -- and it also rewrote every non-derpr launch on the box.
-#   * Refuse, never truncate, on insufficient space. NOTE (DP-340): this check
-#     now guards the ARCHIVE disk, an ordinary partition where df is the truth.
-#     It used to guard /srv/models, a thin LV, where df reports the volume's
-#     free space and cannot see the POOL behind it running out -- it read
-#     75 GiB free over a pool with 14 GiB left, passed a 22 GB download, and
-#     put every guest on the node into a read-only filesystem (2026-08-21).
-#     The pool is now protected by not being written to at all.
+#   * Refuse, never truncate, on insufficient space. `df` is the truth only
+#     because /srv/models is a plain partition on its own disk (DP-416). When
+#     it was a thin LV, df reported the volume's free space and could not see
+#     the POOL behind it running out -- it read 75 GiB free over a pool with
+#     14 GiB left, passed a 22 GB download, and put every guest on the node
+#     into a read-only filesystem (2026-08-21). Never point MODELS_DIR at a
+#     thin LV again.
 
 set -uo pipefail
 
-# DP-340: downloads land in the COLD tier on the archive disk, not on the SSD.
-# The unit still points at the hot path inside the container (CT_ARCHIVE below
-# is unchanged); `derpr-model-tier promote` is what puts the bytes there.
-ARCHIVE_DIR="${ARCHIVE_DIR:-/srv/archive/models}"
-# Job records live on the archive disk too. They used to live beside the
-# download on /srv/models, which meant that when that filesystem went read-only
+# DP-416: downloads land straight in the directory koboldcpp serves from, so an
+# install is servable as soon as it finishes. DP-340 had them land on the
+# archive HDD and need a `derpr-model-tier promote` first; that existed only
+# because /srv/models was a 120 GiB thin LV, and it is now a dedicated 2 TB disk.
+MODELS_DIR="${MODELS_DIR:-/srv/models}"
+# Job records live on the archive disk, NOT beside the download. They used to live on
+# /srv/models, which meant that when that filesystem went read-only
 # the `write_status failed` at the end of the download path could not land --
 # the failure record was on the volume the failure had just destroyed. The job
 # stayed `running` for 15 hours after the process was dead (2026-08-21).
@@ -169,7 +170,7 @@ prune_reservations() {
     systemctl is-active --quiet "modelinstall-$job" 2>/dev/null && continue
     part="$(sed -n 2p "$f")"
     case "$part" in
-      "$ARCHIVE_DIR"/*.part) rm -f "$part" ;;
+      "$MODELS_DIR"/*.part) rm -f "$part" ;;
     esac
     rm -f "$f"
     log "pruned stale reservation job=$job"
@@ -299,7 +300,7 @@ parse_job_args() {
   # the wrapper's allowlist requires - it pins the model path to
   # <dir>/<file>.gguf with no subdirectory.
   BASENAME="$NAME.gguf"
-  DEST="$ARCHIVE_DIR/$BASENAME"
+  DEST="$MODELS_DIR/$BASENAME"
   UNIT="koboldcpp-$NAME.service"
   STARTED="${STARTED:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
   FINISHED=""
@@ -313,7 +314,7 @@ cmd_install() {
   parse_job_args "$@"
   [ -x "$0" ] || die "installer not executable"
   [ -r "$TEMPLATE" ] || die "unit template missing at $TEMPLATE"
-  [ -d "$ARCHIVE_DIR" ] || die "models dir $ARCHIVE_DIR does not exist"
+  [ -d "$MODELS_DIR" ] || die "models dir $MODELS_DIR does not exist"
 
   # Everything from here to systemd-run is one critical section. The whole
   # defect is that the precheck and the commit were separable: two jobs both
@@ -358,8 +359,8 @@ cmd_install() {
     [ "$have" = "$SHA" ] || die "$BASENAME already exists with a different sha256"
   else
     local avail need promised
-    avail="$(df -B1 --output=avail "$ARCHIVE_DIR" | tail -n1 | tr -dc '0-9')"
-    [ -n "$avail" ] || die "could not read free space on $ARCHIVE_DIR"
+    avail="$(df -B1 --output=avail "$MODELS_DIR" | tail -n1 | tr -dc '0-9')"
+    [ -n "$avail" ] || die "could not read free space on $MODELS_DIR"
     need=$(( SIZE + (SIZE / 20) ))
     [ "$need" -ge $(( SIZE + MIN_MARGIN_BYTES )) ] || need=$(( SIZE + MIN_MARGIN_BYTES ))
     # Space already promised by running jobs is space this one cannot have,
@@ -369,7 +370,7 @@ cmd_install() {
     promised="$(reserved_bytes)"
     need=$(( need + promised ))
     if [ "$avail" -lt "$need" ]; then
-      die "insufficient space on $ARCHIVE_DIR: need $need bytes (including $promised reserved by running jobs), have $avail"
+      die "insufficient space on $MODELS_DIR: need $need bytes (including $promised reserved by running jobs), have $avail"
     fi
   fi
 

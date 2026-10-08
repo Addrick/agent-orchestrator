@@ -127,7 +127,7 @@ def _env(tmp_path: Path, bindir: Path) -> dict:
     env = dict(os.environ)
     env.update({
         "PATH": f"{bindir.as_posix()}{os.pathsep}{env.get('PATH', '')}",
-        "ARCHIVE_DIR": "archive/models",
+        "MODELS_DIR": "archive/models",
         "JOBS_DIR": "archive/.jobs",
         "TEMPLATE": "unit.in",
         "GGUF_HEADER": reader.as_posix(),

@@ -1160,7 +1160,7 @@ the same node — there is no second credential and no second host.
 |------|------|-------------|
 | `hf_search` | Read | Search HuggingFace for repos that publish gguf, most-downloaded first: repo id, downloads, likes, gated flag, tags. A hit means the *repo* is tagged as containing gguf, not that any particular file exists — follow up with `hf_files`. Results are third-party text, so this tool is flagged as producing untrusted content and taints the turn. |
 | `hf_files` | Read | One repo's gguf files with the exact **byte size** and **sha256** the Hub publishes for each. This is what you size a quant against (compare with `gpu_status`) and where the exact filename comes from. A file whose `sha256` is `null` — a non-LFS file, with no published digest — cannot be installed at all. |
-| `install_model` | **Write (parked)** | Download one gguf onto the model host and write a koboldcpp systemd unit for it. **The unit lands disabled and is not started**, and the bytes land in the **cold** tier on the archive disk, not on the SSD (see [Where a model lives](#where-a-model-lives--hot-and-cold-storage-dp-340)) — so an install can never consume the space the running guests need. Takes `repo`, `file`, `name`, a required `kv_precision`, and an optional `contextsize`. Returns a `job_id` immediately; the download continues on the node. **`kv_precision` (DP-364)** is `q8` (the usual choice), `f16` (full precision, about twice the cache) or `q4` (half again, at a cost in output quality). There is no default: the persona proposes one and says why, the approval card shows it, and the node writes it into the unit as `--quantkv`. **The cache mode is not a choice** — the node reads it off the downloaded file. A **hybrid** model (one with recurrent/SSM layers, e.g. Qwen3.6/3.8) gets the checkpoint grid (`--smartcachegrid`), because its recurrent state can't be rewound and only a checkpoint lets an edit deep in a conversation skip reprocessing. A **dense** model gets conversation swap slots (`--smartcache`), because its cache already survives edits. Everything else in the unit is a box-wide constant (`--multiuser 1`, threads, batch size), and nothing rewrites the unit's flags afterwards. If the node can't read the file's architecture it writes no unit and fails the job with `cache_mode_unknown` — the verified file is kept, so a retry does not download it twice. |
+| `install_model` | **Write (parked)** | Download one gguf onto the model host and write a koboldcpp systemd unit for it. **The unit lands disabled and is not started**, and the bytes land straight in `/srv/models`, the dedicated models disk koboldcpp serves from (DP-416), so the model is servable — `set_active_model` swaps to it with no promotion — as soon as the job reports `done`. That disk is separate from the guests' storage, so an install can never consume the space the running guests need. Takes `repo`, `file`, `name`, a required `kv_precision`, and an optional `contextsize`. Returns a `job_id` immediately; the download continues on the node. **`kv_precision` (DP-364)** is `q8` (the usual choice), `f16` (full precision, about twice the cache) or `q4` (half again, at a cost in output quality). There is no default: the persona proposes one and says why, the approval card shows it, and the node writes it into the unit as `--quantkv`. **The cache mode is not a choice** — the node reads it off the downloaded file. A **hybrid** model (one with recurrent/SSM layers, e.g. Qwen3.6/3.8) gets the checkpoint grid (`--smartcachegrid`), because its recurrent state can't be rewound and only a checkpoint lets an edit deep in a conversation skip reprocessing. A **dense** model gets conversation swap slots (`--smartcache`), because its cache already survives edits. Everything else in the unit is a box-wide constant (`--multiuser 1`, threads, batch size), and nothing rewrites the unit's flags afterwards. If the node can't read the file's architecture it writes no unit and fails the job with `cache_mode_unknown` — the verified file is kept, so a retry does not download it twice. |
 | `install_status` | Read | Poll one node job — an install, or a promotion started by `set_active_model`: `state` (running / done / failed), current step, bytes downloaded, and on failure a short fixed-vocabulary reason. Also reports what the node read out of the downloaded gguf: `n_layer` / `n_kv_head` / `head_dim`, and `ssm_layers` — the count of blocks holding a recurrent state instead of a KV cache, so a non-zero value means the model is a hybrid and gets the checkpoint grid — plus the `kv_precision` and `cache_mode` the unit was written with. On a finished job it adds a `note` telling you to **measure** the VRAM cost rather than calculate it: read `gpu_status` before the unit is first enabled and again after, and trust the difference. **It no longer computes a KV budget (DP-360)** — a total assembled from header terms has matched a real measurement on this box only by two errors cancelling (DP-344), so the measurement is the answer. The note is for installs only: a finished **promotion** copies weights to the SSD without creating a unit or choosing a contextsize, so it gets no sizing advice. Where the node determines the cache is not linear in context at all (windowed attention, per-layer KV heads) it says which, and that reason is relayed. |
 
 #### What the approval card shows
@@ -1202,12 +1202,13 @@ visible in `list_models` as a `tier` field.
 | **hot** | `/srv/models`, on a dedicated 2 TB NVMe | ~1.8 TiB | koboldcpp can serve it right now |
 | **cold** | `/srv/archive/models`, on the archive HDD | ~840 GiB | installed and kept, but must be promoted before it can serve |
 
-> **Since 2026-10-07 the split is mostly vestigial.** The hot tier used to be a
+> **Since 2026-10-07 the split is vestigial.** The hot tier used to be a
 > ~120 GiB thin LV carved from the same pool as the guests' disks, which is
 > what made a separate cold tier worth having. It is now its own 2 TB disk, so
-> it is larger than the cold tier and eviction effectively never fires. The
-> mechanism below still runs unchanged: installs still land cold and still need
-> a promotion before they can serve.
+> it is larger than the cold tier and eviction effectively never fires, and
+> **new installs land hot** (DP-416). The cold tier now holds only models
+> installed before that; activating one of them still promotes it as below. A
+> model installed hot has no archive copy, so eviction will never remove it.
 
 **The cold copy is the authoritative one.** Every gguf that has ever been
 installed stays there; the hot tier is a cache of the handful currently worth
@@ -1215,12 +1216,10 @@ keeping on fast storage. That is what makes eviction safe — dropping a model
 from the hot tier deletes a copy, never the model, and the worst case is the
 minutes it takes to copy it back.
 
-**Installing does not promote.** `install_model` writes the bytes to the cold
-tier and the unit disabled, exactly as before; nothing is put on the SSD and
-nothing on `:5001` changes. This is deliberate and it is the main protection
-against the failure that motivated the split: a download that never touches the
-SSD cannot exhaust the pool the running guests allocate from, whatever its size
-and whatever a space check does or does not catch.
+**Installing does not activate.** `install_model` writes the unit disabled;
+nothing on `:5001` changes until `set_active_model` is called. (Before DP-416 it
+also wrote the bytes to the cold tier, to keep downloads off the guests' thin
+pool; the models disk is no longer part of that pool.)
 
 **Promotion happens when you activate.** Calling `set_active_model` on a cold
 model promotes it first: it makes room in the hot tier, copies the gguf across
@@ -1280,21 +1279,19 @@ move, the node refuses:
   overwriting one silently repoints a name `list_models` already publishes;
 - a destination file that already exists with a **different** sha256 (an
   identical one is reused, so a retry costs nothing);
-- insufficient free space on the **archive** disk — the larger of 2 GiB or 5% of
+- insufficient free space on the **models** disk — the larger of 2 GiB or 5% of
   the download is kept free.
 
-  ⚠️ This check was long documented as protecting the models volume from being
-  filled, and it did not. It reads `df`, and until DP-340 it read `df` against
-  `/srv/models` — a **thin LV**, where `df` reports the volume's free space and
-  is structurally blind to the *pool* behind it running out. On 2026-08-21 it
-  saw 75 GiB free over a pool with 14 GiB left, passed a 22 GB download, and
-  wedged every guest on the node into a read-only filesystem. Downloads now
-  target the archive disk, which is an ordinary partition where `df` is the
-  truth, and the pool is protected by not being written to at all rather than by
-  a check. Promotion to the hot tier keeps a pool-aware check as a second line
-  — though since `/srv/models` moved to its own disk (2026-10-07) the pool it
-  reads no longer backs that volume, so the check only caps hot-tier free space
-  at whatever the guests' pool has left.
+  ⚠️ This check reads `df`, which is only the truth on an ordinary partition.
+  Until DP-340 it read `df` against `/srv/models` when that was a **thin LV**,
+  where `df` reports the volume's free space and is structurally blind to the
+  *pool* behind it running out. On 2026-08-21 it saw 75 GiB free over a pool
+  with 14 GiB left, passed a 22 GB download, and wedged every guest on the node
+  into a read-only filesystem. DP-340 moved downloads to the archive disk;
+  DP-416 moved them back once `/srv/models` became its own disk (2026-10-07),
+  where `df` is the truth again. Promotion of a cold model keeps a pool-aware
+  check, but the pool it reads no longer backs `/srv/models`, so that check
+  only caps hot-tier free space at whatever the guests' pool has left.
 
 And after downloading, a sha256 mismatch deletes the partial file and fails the
 job. Size matching is not proof.
