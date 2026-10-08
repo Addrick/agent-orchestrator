@@ -52,6 +52,8 @@ from config.global_config import (
     DATE_TAGGER_ENABLED,
     DATE_TAGGER_NAME,
     CONTENT_CLASSIFIER_NAME,
+    DISCORD_DEBUG_CHANNEL,
+    PVE_TOOLS_ENABLED,
 )
 from dotenv import load_dotenv
 from src.utils.model_utils import get_model_list
@@ -134,6 +136,23 @@ def _init_zammad_client() -> Optional[ZammadClient]:
         return None
 
 
+def _schedule_node_artifact_check(app: AppManager,
+                                  notification_router: NotificationRouter) -> None:
+    """DP-418: once per start, compare the node's services/pve/ copies against
+    the image's and post any drift to the debug channel."""
+    if not (PVE_TOOLS_ENABLED and DISCORD_DEBUG_CHANNEL):
+        return
+    from src.proxmox.artifacts import report_node_artifact_drift
+    from src.proxmox.ssh import SSHRunner
+
+    async def _send_debug(subject: str, body: str) -> bool:
+        return await notification_router.send(
+            "discord_channel", str(DISCORD_DEBUG_CHANNEL), subject, body)
+
+    app.register_task("node_artifact_check",
+                      report_node_artifact_drift(SSHRunner(), _send_debug))
+
+
 def _register_interfaces(
     app: AppManager,
     bot: ChatSystem,
@@ -176,6 +195,7 @@ def _register_interfaces(
             notification_router.register("discord_dm", DiscordNotifier(discord_bot))
             notification_router.register("discord_channel", DiscordChannelNotifier(discord_bot))
             app.register_task("discord", discord_bot.start(discord_token))
+            _schedule_node_artifact_check(app, notification_router)
 
     if GMAIL_BOT:
         logger.info("Initializing Gmail bot...")

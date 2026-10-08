@@ -1153,6 +1153,26 @@ happened to call it. The name a model passes comes from `list_models` in the sam
 turn, so nothing has to be updated — but if *you* have a name memorised from
 before, check `list_models` rather than assuming.
 
+#### Stale node scripts are reported at startup (DP-418)
+
+Half of every Proxmox and HuggingFace tool runs on the node itself: the scripts in
+`services/pve/` (the SSH wrapper, the model installer, the tier script, the unit
+template and the gguf header reader). Those are copied to the node **by hand**, so
+CI cannot tell when the node is running older copies than the container. From
+2026-08-21 to 2026-10-08 it was, and `install_model` failed on every call without
+anyone noticing.
+
+So each time derpr starts, it hashes the copies it shipped with and asks the node
+for the sha256 of its own. If any differ, are missing, or can't be checked, one
+message goes to the **Discord debug channel** (`DISCORD_DEBUG_CHANNEL`) naming
+each file, and the fix: redeploy `services/pve/` per its README. When everything
+matches, nothing is posted.
+
+- It only runs when `PVE_TOOLS_ENABLED` is on and a debug channel is configured.
+- "Can't be checked" includes the node refusing the hash request. That happens
+  when the node's wrapper is older than DP-418, so it reads as stale too.
+- It reports and nothing more. It never redeploys and never blocks startup.
+
 ### HuggingFace Model Tools (requires `service_bindings: ["huggingface"]`)
 
 Find a gguf on HuggingFace and provision it onto the model host, so it *becomes*
