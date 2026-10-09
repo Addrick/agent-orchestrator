@@ -1536,6 +1536,22 @@ Recommended policy for a `hindsight-<persona>` entry:
   the automatic turn retains, which add turn scoping, document grouping, date
   anchors and untrusted tagging that the MCP `retain`/`recall` do not.
 
+**Every offered tool costs prompt on every turn.** The schemas ride along with each
+request whether or not the model calls them. Measured on Hindsight 0.10 (DP-426):
+the 16 reads cost ≈2.9k tokens, and the full read + write set above costs ≈12.7k.
+Four authoring tools account for ≈8.3k of that, at roughly 2k each:
+`create_mental_model`, `update_mental_model`, `create_knowledge_page` and
+`update_knowledge_node`. The prod default is reads plus the seven light writes
+(≈4.4k). Add a heavy tool to a persona's allowlist when it actually needs one. They
+are all registered already, so this is an allowlist edit, not a config change.
+
+**Check composition before enabling an entry.** At the defaults every Hindsight
+tool is a network *write* in its own domain. A persona that already reads
+untrusted data from another domain therefore trips composition rule 2 and is
+quarantined when the server connects; that was hypr with `hf_search`. Relaxing
+that entry's reads clears it. A persona that reads PII (joy, via Zammad) trips
+rule 3 with any Hindsight entry, relaxed or not.
+
 ```json
 {
   "servers": {
