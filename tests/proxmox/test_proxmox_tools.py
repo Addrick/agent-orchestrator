@@ -56,6 +56,7 @@ class FakeRunner:
         exec_start: dict[str, str | None] | None = None,
         disable_failures: set[str] | None = None,
         tiers: dict | str | None = None,
+        skipped: set[str] | None = None,
     ) -> None:
         self.calls: List[List[str]] = []
         self._result = result or SSHResult(0, "ok-stdout", "")
@@ -76,6 +77,9 @@ class FakeRunner:
         # deployed container will meet, so the call falls through to the
         # default result and the handler degrades to probing the hot path.
         self._tiers = tiers
+        # units the DP-421 ExecCondition skips: `enable --now` exits 0, but
+        # `is-active` then reports them inactive.
+        self._skipped = skipped or set()
 
     async def run(self, argv: Sequence[str]) -> SSHResult:
         a = list(argv)
@@ -115,6 +119,10 @@ class FakeRunner:
             if override is not _DEFAULT_EXEC_START:
                 return SSHResult(0, str(override), "")
             return SSHResult(0, f"argv[]=/opt/kcpp --model /models/{unit}.gguf ;", "")
+        # `systemctl is-active <unit>` → inactive for the nominated units: what
+        # a unit skipped by the DP-421 single-engine ExecCondition reports.
+        if "is-active" in a and a[-1] in self._skipped:
+            return SSHResult(3, "inactive", "")
         # `systemctl disable --now <unit>` → fails for the nominated units.
         if "disable" in a and a[-1] in self._disable_failures:
             return SSHResult(
@@ -525,6 +533,25 @@ async def test_set_active_model_aborts_when_a_disable_fails(enabled):
     # The target was never enabled: :5001 is left with whatever holds it, and
     # the caller is told rather than being handed a false "active_model".
     assert not any("enable" in c for c in runner.calls)
+
+
+@pytest.mark.asyncio
+async def test_set_active_model_reports_a_start_the_gpu_guard_skipped(enabled):
+    """DP-421: the unit's ExecCondition skips the start while another engine
+    holds the R9700. A skipped condition is not a failure, so `enable --now`
+    exits 0 with nothing started — returning `state: loading` there would be
+    the DP-329 shape again, a swap reported for a model that never loads."""
+    runner = FakeRunner(skipped={"koboldcpp-fable.service"})
+    h = ProxmoxToolHandler(runner)  # type: ignore[arg-type]
+    res = await h._set_active_model("fable")
+    assert res["status"] == "error"
+    assert "did not start" in res["message"]
+    assert "inactive" in res["message"]
+    assert "active_model" not in res
+    assert [
+        "pct", "exec", "101", "--", "systemctl", "is-active",
+        "koboldcpp-fable.service",
+    ] in runner.calls
 
 
 @pytest.mark.asyncio

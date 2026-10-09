@@ -655,6 +655,11 @@ redeploy. Write the unit however you like — `--model <path>` and
 `--model=<path>` are both read — and give it a `--port` if it is not meant to
 serve `:5001`, which keeps it out of the swap set entirely.
 
+Only one inference engine runs on the GPU at a time. If the other inference container
+is already serving (CT101 and CT102 share the card), a model will not start: the
+swap comes back as an error saying another engine holds the GPU, and `:5001` stays
+with the engine that holds it. Stop that container or engine first, then swap again.
+
 - **Provision (DP-265)** — "find me a smaller gemma quant" → `hf_search` /
   `hf_files`, then `install_model` downloads it onto the model host and writes a
   **disabled** unit for it. See [HuggingFace Model Tools](#huggingface-model-tools-requires-service_bindings-huggingface).
