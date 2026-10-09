@@ -281,6 +281,19 @@ def _read_untrusted(tags: List[str]) -> bool:
 _STOP = object()
 
 
+class _Tracked:
+    """A queued retain item whose caller awaits delivery (DP-423).
+
+    The worker resolves `future` True once the POST carrying `item`
+    succeeded, False when that batch was dropped.
+    """
+    __slots__ = ("item", "future")
+
+    def __init__(self, item: Dict[str, Any], future: "asyncio.Future[bool]") -> None:
+        self.item = item
+        self.future = future
+
+
 class _TrustOverrideStore:
     """Parallel SQLite store for per-unit trust flips (DP-110 option c).
 
@@ -582,13 +595,13 @@ class HindsightBackend(MemoryBackend):
     @staticmethod
     def _drain_batch(
         q: "asyncio.Queue[Any]", first: Any
-    ) -> Tuple[List[Dict[str, Any]], int, bool]:
+    ) -> Tuple[List[Any], int, bool]:
         """Pull `first` plus any items currently queued into one batch.
 
         Returns (batch, done_count, stop_seen). STOP mid-batch flushes the
         batch first, then the caller honors stop after the POST.
         """
-        batch: List[Dict[str, Any]] = [first]
+        batch: List[Any] = [first]
         done_count = 1
         stop_seen = False
         while True:
@@ -623,6 +636,23 @@ class HindsightBackend(MemoryBackend):
                 buckets.append({doc_id: item})
         return [list(b.values()) for b in buckets]
 
+    async def _post_batch(
+        self,
+        client: HindsightRESTClient,
+        bank_id: str,
+        items: List[Dict[str, Any]],
+        futures: Dict[int, "asyncio.Future[bool]"],
+    ) -> None:
+        """POST one drained batch, confirming each tracked item as soon as
+        the POST carrying it lands — a later POST of the same batch failing
+        must not un-confirm it, or the flush re-sends and appends it twice."""
+        for sub in self._split_by_document_id(items):
+            await client.aretain(bank_id=bank_id, items=sub)
+            for it in sub:
+                fut = futures.get(id(it))
+                if fut is not None and not fut.done():
+                    fut.set_result(True)
+
     async def _worker_loop(self, bank_id: str, q: "asyncio.Queue[Any]") -> None:
         """Drain-on-tick FIFO worker.
 
@@ -639,9 +669,11 @@ class HindsightBackend(MemoryBackend):
                 q.task_done()
                 return
             batch, done_count, stop_seen = self._drain_batch(q, first)
+            # DP-423: a tracked item's caller learns whether its POST landed.
+            futures = {id(e.item): e.future for e in batch if isinstance(e, _Tracked)}
+            items = [e.item if isinstance(e, _Tracked) else e for e in batch]
             try:
-                for sub in self._split_by_document_id(batch):
-                    await client.aretain(bank_id=bank_id, items=sub)
+                await self._post_batch(client, bank_id, items, futures)
             except httpx.ConnectError as e:
                 # Kobold offline / proxy down — expected operational state, log+drop.
                 logger.info("Hindsight retain batch dropped (kobold offline): %s", e)
@@ -650,6 +682,9 @@ class HindsightBackend(MemoryBackend):
             except Exception:  # noqa: BLE001 — worker must never die
                 logger.exception("Hindsight retain worker: unexpected error, dropping batch")
             finally:
+                for fut in futures.values():
+                    if not fut.done():
+                        fut.set_result(False)
                 for _ in range(done_count):
                     q.task_done()
             if stop_seen:
@@ -767,19 +802,61 @@ class HindsightBackend(MemoryBackend):
         # An explicit document_id makes the retain idempotent on that key
         # (_build_item switches to update_mode='replace'), which is how a
         # re-ingest supersedes a document instead of racing a delete.
+        item = self._turn_item(
+            bank_id, role, content, timestamp=timestamp, scope_tags=scope_tags,
+            source_persona=source_persona, untrusted=untrusted,
+            metadata=metadata, document_id=document_id,
+        )
+        q = await self._ensure_worker(bank_id)
+        await q.put(item)
+        return ""
+
+    async def retain_turn_confirmed(
+        self,
+        bank_id: str,
+        role: str,
+        content: str,
+        *,
+        timestamp: datetime,
+        scope_tags: List[str],
+        source_persona: str,
+        untrusted: bool = False,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        # Same FIFO as retain_turn, so ordering and drain-tick coalescing
+        # are unchanged; only the caller waits for the worker's POST.
+        item = self._turn_item(
+            bank_id, role, content, timestamp=timestamp, scope_tags=scope_tags,
+            source_persona=source_persona, untrusted=untrusted, metadata=metadata,
+        )
+        future: "asyncio.Future[bool]" = asyncio.get_running_loop().create_future()
+        q = await self._ensure_worker(bank_id)
+        await q.put(_Tracked(item, future))
+        return await future
+
+    def _turn_item(
+        self,
+        bank_id: str,
+        role: str,
+        content: str,
+        *,
+        timestamp: datetime,
+        scope_tags: List[str],
+        source_persona: str,
+        untrusted: bool,
+        metadata: Optional[Dict[str, Any]],
+        document_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         tags = list(scope_tags) + [
             f"persona:{source_persona}",
             f"role:{role}",
             _untrusted_tag(untrusted),
         ]
-        item = self._build_item(
+        return self._build_item(
             bank_id=bank_id, content=content, tags=tags,
             scope_tags=scope_tags, timestamp=timestamp, metadata=metadata,
             document_id=document_id,
         )
-        q = await self._ensure_worker(bank_id)
-        await q.put(item)
-        return ""
 
     async def retain_experience(
         self,

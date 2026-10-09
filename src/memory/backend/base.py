@@ -294,6 +294,32 @@ class MemoryBackend(ABC):
         """
         raise NotImplementedError("retain_turn lands in Sprint 2 (HindsightBackend)")
 
+    async def retain_turn_confirmed(
+        self,
+        bank_id: str,
+        role: str,
+        content: str,
+        *,
+        timestamp: datetime,
+        scope_tags: List[str],
+        source_persona: str,
+        untrusted: bool = False,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """`retain_turn`, resolving only once the backend has accepted the
+        turn: True when it landed, False when it was dropped (DP-423).
+
+        The deferred-retain queue deletes a turn on True and keeps it for a
+        later retry on False. Default: a backend whose `retain_turn` returns
+        has accepted it (sqlite_legacy's noop, synchronous stores).
+        """
+        await self.retain_turn(
+            bank_id=bank_id, role=role, content=content, timestamp=timestamp,
+            scope_tags=scope_tags, source_persona=source_persona,
+            untrusted=untrusted, metadata=metadata,
+        )
+        return True
+
     async def mark_trusted(
         self,
         bank_id: str,

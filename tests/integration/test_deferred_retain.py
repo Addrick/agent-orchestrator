@@ -1,9 +1,11 @@
 # tests/integration/test_deferred_retain.py
 #
-# DP-423: a turn reaches the semantic backend only once it has left the
-# sliding history window — pushed out by newer turns, or aged out after
-# SESSION_GAP_SECONDS — never while the model still reads it verbatim, or
-# recall hands the same conversation back twice.
+# DP-423: a turn reaches the semantic backend once newer turns push it out
+# of the sliding history window — not while the model still reads it
+# verbatim, or recall hands the same conversation back twice — or once its
+# conversation has sat idle for SESSION_GAP_SECONDS, so a short chat that
+# simply stops is still remembered. The window keeps priority: it is never
+# trimmed to make room for memory.
 # Driven through the real kernel and a real MemoryManager; only the LLM and
 # the backend's `retain_turn` are mocked.
 
@@ -24,6 +26,7 @@ async def _turn(chat_system, message, *, user="u1", channel="chan"):
     )
     async for _ in chat_system.stream_response("test_persona", user, channel, message):
         pass
+    await chat_system.turn_persistence.drain_flushes()
 
 
 def _retained(spy):
@@ -79,24 +82,27 @@ async def test_edit_and_delete_inside_window_are_honoured(setup):
 
 
 @pytest.mark.asyncio
-async def test_aged_out_turns_are_flushed_by_traffic_elsewhere(setup):
+async def test_idle_conversation_is_flushed_by_the_sweep(setup):
     chat_system, _, _, spy = setup
 
     await _turn(chat_system, "abandoned", channel="quiet")
     assert spy.await_count == 0
 
-    # No more turns in `quiet`; a sweep after the gap retains them anyway.
+    # Nothing will ever push these out of a window of 2; after a day idle
+    # the sweep (run on any turn, anywhere) retains them anyway.
     later = datetime.now(timezone.utc) + timedelta(seconds=SESSION_GAP_SECONDS + 60)
-    sent = await chat_system.turn_persistence.flush_aged_out(now=later)
+    sent = await chat_system.turn_persistence.flush_idle_sessions(now=later)
     assert sent == 2
     assert _retained(spy) == ["abandoned", "re: abandoned"]
     assert {c.kwargs["scope_tags"][0] for c in spy.await_args_list} == {"channel:quiet"}
+    assert await chat_system.turn_persistence.flush_idle_sessions(now=later) == 0
 
 
 @pytest.mark.asyncio
-async def test_aged_out_turns_leave_the_window_and_are_retained(setup):
-    """Window and memory never overlap: a turn older than the gap is dropped
-    from the window on the same turn the sweep retains it."""
+async def test_window_keeps_priority_after_a_break(setup):
+    """Coming back a day later is not a blank chat: the window still holds
+    yesterday, and since the conversation resumed before any sweep cut it,
+    those turns are not retained while they are still in the window."""
     chat_system, memory_manager, _, spy = setup
 
     await _turn(chat_system, "yesterday")
@@ -106,13 +112,42 @@ async def test_aged_out_turns_leave_the_window_and_are_retained(setup):
 
     await _turn(chat_system, "today")
     history = chat_system.text_engine.generate_response.call_args.args[1]["message_history"]
-    contents = [m.get("content") for m in history]
-    assert not any("yesterday" in str(c) for c in contents)
-    # Sent with their original timestamps so the doc-scope store files them
-    # in the old document.
+    assert any("yesterday" in str(m.get("content")) for m in history)
+    assert spy.await_count == 0
+
+    await _turn(chat_system, "later today")
+    # Now pushed out by newer turns: retained, with their original stamps.
     assert _retained(spy) == ["yesterday", "re: yesterday"]
     assert all(c.kwargs["timestamp"] < old + timedelta(seconds=1)
                for c in spy.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_refused_retain_stays_queued_and_is_retried(setup):
+    """A turn leaves the queue only once the backend accepted it — a down
+    Hindsight must not cost the memory of a turn already out of the window."""
+    chat_system, memory_manager, _, spy = setup
+    backend = chat_system.memory_backend
+    accept = {"ok": False}
+
+    async def confirmed(**kwargs):
+        if accept["ok"]:
+            await spy(**kwargs)
+        return accept["ok"]
+
+    backend.retain_turn_confirmed = confirmed  # type: ignore[assignment]
+
+    await _turn(chat_system, "one")
+    await _turn(chat_system, "two")
+    await _turn(chat_system, "three")  # evicts one's pair — refused
+    rows = memory_manager.get_channel_history("chan", "test_persona", None, 10)
+    assert memory_manager.is_retain_pending(rows[0]["interaction_id"])
+    assert spy.await_count == 0
+
+    accept["ok"] = True
+    await _turn(chat_system, "four")  # retries one's pair, evicts two's
+    assert _retained(spy) == ["one", "re: one", "two", "re: two"]
+    assert not memory_manager.is_retain_pending(rows[0]["interaction_id"])
 
 
 @pytest.mark.asyncio

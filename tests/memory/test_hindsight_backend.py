@@ -955,3 +955,57 @@ def test_hindsight_api_error_is_memory_backend_error():
     assert isinstance(e4, MemoryBackendError)
     assert e4.transient is False
     assert str(e4) == "Hindsight API Error 422: bad metadata"
+
+
+# --- DP-423: delivery-confirmed retain ---
+
+def _turn_kwargs(content: str, channel: str = "c1") -> Dict[str, Any]:
+    return dict(
+        bank_id="alice", role="user", content=content,
+        timestamp=datetime.now(timezone.utc),
+        scope_tags=[f"channel:{channel}"], source_persona="alice",
+    )
+
+
+@pytest.mark.asyncio
+async def test_retain_turn_confirmed_resolves_on_post_outcome(backend: HindsightBackend) -> None:
+    """True once the POST carrying the turn succeeded, False when its batch
+    was dropped — the deferred-retain queue keys its dequeue on this."""
+    async def flaky(bank_id: str, items, async_=True) -> Dict[str, Any]:
+        if any(it["content"] == "boom" for it in items):
+            raise httpx.ConnectError("kobold offline")
+        return {"id": "ok"}
+
+    client = backend._get_client()
+    with patch.object(client, "aretain", side_effect=flaky):
+        assert await backend.retain_turn_confirmed(**_turn_kwargs("fine")) is True
+        assert await backend.retain_turn_confirmed(**_turn_kwargs("boom")) is False
+        # The worker survived the drop and keeps confirming.
+        assert await backend.retain_turn_confirmed(**_turn_kwargs("fine again")) is True
+        await backend.aclose()
+
+
+@pytest.mark.asyncio
+async def test_retain_turn_confirmed_per_item_across_split_posts(backend: HindsightBackend) -> None:
+    """One drained batch can become several POSTs (one item per document per
+    POST). A turn whose POST landed is confirmed even if a later POST of the
+    same batch fails — else it would be re-sent and appended twice."""
+    posts: List[List[str]] = []
+
+    async def second_post_fails(bank_id: str, items, async_=True) -> Dict[str, Any]:
+        posts.append([it["content"] for it in items])
+        if len(posts) == 2:
+            raise httpx.ConnectError("kobold offline")
+        return {"id": "ok"}
+
+    client = backend._get_client()
+    with patch.object(client, "aretain", side_effect=second_post_fails):
+        # Same document twice → split into two POSTs within one drain tick.
+        results = await asyncio.gather(
+            backend.retain_turn_confirmed(**_turn_kwargs("first")),
+            backend.retain_turn_confirmed(**_turn_kwargs("second")),
+        )
+        await backend.aclose()
+
+    assert posts == [["first"], ["second"]]
+    assert results == [True, False]

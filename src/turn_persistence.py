@@ -9,11 +9,12 @@ caches that back `dump_history`. The orchestration kernel decides *when*
 these happen; this module owns *how* and holds the cache state.
 """
 
+import asyncio
 import logging
 import re
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple, cast
+from typing import Any, Dict, List, Optional, Set, Tuple, cast
 
 from config.global_config import MAX_CACHED_API_REQUESTS
 from src.generation_events import ResponseType
@@ -60,6 +61,10 @@ class TurnPersistence:
         # first iteration of each turn). last_api_requests keeps only the final
         # payload for back-compat; this preserves the whole loop for dump_history.
         self.last_api_iterations: Dict[str, Dict[str, List[Dict[str, Any]]]] = defaultdict(dict)
+        # DP-423 deferred-retain flushes: serialized, and run as tasks so a
+        # slow backend never holds up a turn.
+        self._flush_lock = asyncio.Lock()
+        self._flush_tasks: Set["asyncio.Task[None]"] = set()
 
     def store_api_request(self, user_identifier: str, persona_name: str,
                           payload: Dict[str, Any],
@@ -332,7 +337,7 @@ class TurnPersistence:
 
         While a turn is in the window the model reads it verbatim, so
         retaining it too would make recall hand it back a second time. The
-        queue is durable; `flush_evicted` and `flush_aged_out` drain it.
+        queue is durable; `schedule_flush` drains it.
         `retain_text` (DP-335) replaces the row's content at flush time only
         while the row still holds `source_content`.
         """
@@ -351,53 +356,127 @@ class TurnPersistence:
             logger.warning(f"is_retain_pending failed (interaction {interaction_id}): {e}")
             return False
 
+    def schedule_flush(
+        self,
+        *,
+        persona_name: Optional[str] = None,
+        memory_mode: Optional[MemoryMode] = None,
+        channel: str = "",
+        user_identifier: str = "",
+        server_id: Optional[str] = None,
+        oldest_window_id: Optional[int] = None,
+        current_id: Optional[int] = None,
+    ) -> None:
+        """Run the DP-423 flushes in the background: the idle sweep, then
+        (given a persona) the eviction flush for this request's window.
+
+        Background because delivery is confirmed: a down Hindsight would
+        otherwise stall the user's turn for the HTTP timeout. Flushes are
+        serialized by `_flush_lock`, so turns still reach the backend in
+        queue order.
+        """
+        async def run() -> None:
+            await self.flush_idle_sessions()
+            if persona_name is not None and memory_mode is not None:
+                await self.flush_evicted(
+                    persona_name=persona_name, memory_mode=memory_mode,
+                    channel=channel, user_identifier=user_identifier,
+                    server_id=server_id, oldest_window_id=oldest_window_id,
+                    current_id=current_id,
+                )
+
+        task = asyncio.get_running_loop().create_task(run(), name="dp423-retain-flush")
+        self._flush_tasks.add(task)
+        task.add_done_callback(self._flush_tasks.discard)
+
+    async def drain_flushes(self) -> None:
+        """Await every scheduled flush (tests, shutdown)."""
+        while self._flush_tasks:
+            await asyncio.gather(*list(self._flush_tasks), return_exceptions=True)
+
     async def flush_retains(self, **filters: Any) -> int:
         """Retain queued turns matching `filters` (see
-        `MemoryManager.take_pending_retains`), oldest first; returns how many.
+        `MemoryManager.pending_retains`), oldest first; returns how many
+        the backend accepted.
 
-        Each turn keeps its own timestamp, so the doc-scope store cuts
-        documents at the same idle gaps it would have cut them live.
+        A turn leaves the queue only once the backend confirmed it, so one
+        dropped while Hindsight (or its kobold) is down is retried by a
+        later flush. Each turn keeps its own timestamp, so the doc-scope
+        store cuts documents at the same idle gaps it would have cut them
+        live.
         """
+        async with self._flush_lock:
+            try:
+                rows = self.memory_manager.pending_retains(**filters)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Pending retain flush failed ({filters}): {e}")
+                return 0
+            done = [r["interaction_id"] for r in rows if r["skip"]]
+            sendable = [r for r in rows if not r["skip"]]
+            # gather starts every delivery before awaiting any, so they all
+            # land on the backend's FIFO in order and share a drain tick.
+            results = await asyncio.gather(*(self._deliver(r) for r in sendable))
+            done += [r["interaction_id"] for r, ok in zip(sendable, results) if ok]
+            if done:
+                try:
+                    self.memory_manager.delete_pending_retains(done)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"Pending retain dequeue failed: {e}")
+            if not all(results):
+                logger.info(
+                    f"Retain flush: {results.count(False)} of {len(results)} turns "
+                    "not accepted; they stay queued for the next flush"
+                )
+            return sum(results)
+
+    async def _deliver(self, r: Dict[str, Any]) -> bool:
+        persona_name = r["persona_name"]
+        role = (r["author_role"] or "").lower()
+        speaker = (
+            persona_name if role == "assistant"
+            else r["author_name"] or r["user_identifier"] or "Unknown"
+        )
         try:
-            rows = self.memory_manager.take_pending_retains(**filters)
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"Pending retain flush failed ({filters}): {e}")
-            return 0
-        sent = 0
-        for r in rows:
-            if r["skip"]:
-                continue
-            persona_name = r["persona_name"]
-            role = (r["author_role"] or "").lower()
-            speaker = (
-                persona_name if role == "assistant"
-                else r["author_name"] or r["user_identifier"] or "Unknown"
-            )
-            await self.retain_turn_safe(
-                persona_name=persona_name, role=role, speaker=speaker,
-                content=r["text"], user_identifier=r["user_identifier"],
-                channel=r["channel"], server_id=r["server_id"],
-                timestamp=r["timestamp"], interaction_id=r["interaction_id"],
+            return await self.memory_backend.retain_turn_confirmed(
+                bank_id=persona_name,
+                role=role,
+                content=format_retained_turn(role, speaker, r["text"], r["timestamp"]),
+                timestamp=to_utc(r["timestamp"]),
+                scope_tags=build_scope_tags(
+                    channel=r["channel"], server_id=r["server_id"],
+                    user_identifier=r["user_identifier"],
+                ),
+                source_persona=persona_name,
                 untrusted=r["untrusted"],
+                metadata={"interaction_id": str(r["interaction_id"])},
             )
-            sent += 1
-        return sent
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"retain_turn_confirmed failed ({role} turn): {e}")
+            return False
 
-    async def flush_aged_out(self, now: Optional[datetime] = None) -> int:
-        """Retain every queued turn older than SESSION_GAP_SECONDS, in any
-        scope — the age at which the history window drops it
-        (`RequestBuilder.build_conversation_history`), and the gap that
-        opens a new Hindsight document. Without this a conversation that
-        simply stops never leaves the window and is never remembered.
+    async def flush_idle_sessions(self, now: Optional[datetime] = None) -> int:
+        """Retain every queued turn of a conversation that stopped: any
+        (persona, channel) with no turn in SESSION_GAP_SECONDS — the gap
+        that opens a new Hindsight document.
 
-        Lazy sweep, run on every turn and once at startup (the DP-319 pairing:
-        the sweep reads the durable queue, the boot pass covers a process
-        that comes up and sees no traffic).
+        Without it a conversation shorter than the window would never be
+        pushed out, and never remembered. Its turns may still be in the
+        window if the conversation is picked up again; that brief overlap
+        is accepted so the window keeps priority (DP-423). Lazy sweep on
+        every turn plus a boot pass in `main` (the DP-319 pairing).
         """
         now = now or datetime.now(timezone.utc)
-        return await self.flush_retains(
-            older_than=now - timedelta(seconds=SESSION_GAP_SECONDS),
-        )
+        try:
+            scopes = self.memory_manager.idle_retain_scopes(
+                now - timedelta(seconds=SESSION_GAP_SECONDS)
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Idle retain sweep failed: {e}")
+            return 0
+        sent = 0
+        for persona_name, channel in scopes:
+            sent += await self.flush_retains(persona_name=persona_name, channel=channel)
+        return sent
 
     async def flush_evicted(
         self,
@@ -417,8 +496,8 @@ class TurnPersistence:
         the memory mode's scope, mirroring `RequestBuilder.fetch_raw_history`
         — a narrower flush strands turns another channel evicted, a wider
         one retains turns still in someone else's window. An empty window
-        (`ticket` mode, a window of 0, everything aged out) evicts
-        everything before the current turn.
+        (`ticket` mode, a window of 0) evicts everything before the current
+        turn.
         """
         before_id = oldest_window_id if oldest_window_id is not None else current_id
         if before_id is None:

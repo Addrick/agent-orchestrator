@@ -409,11 +409,6 @@ class ChatSystem:
                 yield ErrorEvent(message=err_msg)
                 return
 
-            # DP-423: retain every queued turn that has aged out of the window
-            # (older than SESSION_GAP_SECONDS), in any scope — the only way a
-            # conversation that simply stops is ever remembered.
-            await self.turn_persistence.flush_aged_out()
-
             if continuation is None:
                 # 2. Log user turn (or archive for retry). Done after history is built
                 #    (so the freshly-inserted row doesn't show up twice) but before
@@ -431,10 +426,11 @@ class ChatSystem:
                 # DP-113 / DP-423: retain through the backend boundary, but only
                 # turns that have left the window this request was built from —
                 # the model reads the rest verbatim, and retaining them too makes
-                # recall hand them back twice. This turn joins the queue. Neither
-                # call blocks the LLM call below (Hindsight enqueues
-                # fire-and-forget; sqlite_legacy's retain is a noop).
-                await self.turn_persistence.flush_evicted(
+                # recall hand them back twice — plus conversations idle for a
+                # day, which nothing else would ever push out. This turn joins
+                # the queue. The flush runs as a background task and never
+                # blocks the LLM call below.
+                self.turn_persistence.schedule_flush(
                     persona_name=persona_name,
                     memory_mode=persona.get_memory_mode(),
                     channel=channel, user_identifier=user_identifier,
@@ -697,8 +693,8 @@ class ChatSystem:
                 # DP-409: a retry replaced an already-retained row in place, so
                 # Hindsight gets the rebuilt canonical session, not the new
                 # attempt appended beside the discarded one. Since DP-423 that
-                # needs the reply to have left the window first (aged out); a
-                # retried reply still in the window just re-queues below.
+                # needs the reply to have been flushed first (its conversation
+                # sat idle for a day); one still queued just re-queues below.
                 await self.turn_persistence.rebuild_session_safe(
                     persona_name=persona_name, channel=channel,
                     user_identifier=user_identifier, server_id=server_id,

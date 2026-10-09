@@ -1355,7 +1355,7 @@ class MemoryManager:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
-            query = ("SELECT interaction_id, author_role, author_name, content, tool_context, reasoning_content, timestamp FROM User_Interactions"
+            query = ("SELECT interaction_id, author_role, author_name, content, tool_context, reasoning_content FROM User_Interactions"
                      " WHERE user_identifier = ? AND persona_name = ?"
                      + self._SUPPRESSION_SUBQUERY + self._CONTRIBUTES_TO_HISTORY)
             params: List[Any] = [user_identifier, persona_name]
@@ -1370,7 +1370,7 @@ class MemoryManager:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
-            query = ("SELECT interaction_id, author_role, author_name, content, tool_context, reasoning_content, timestamp FROM User_Interactions"
+            query = ("SELECT interaction_id, author_role, author_name, content, tool_context, reasoning_content FROM User_Interactions"
                      " WHERE zammad_ticket_id = ?"
                      + self._SUPPRESSION_SUBQUERY + self._CONTRIBUTES_TO_HISTORY)
             params: List[Any] = [ticket_id]
@@ -1386,7 +1386,7 @@ class MemoryManager:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
-            query = ("SELECT interaction_id, author_role, author_name, content, tool_context, reasoning_content, timestamp FROM User_Interactions"
+            query = ("SELECT interaction_id, author_role, author_name, content, tool_context, reasoning_content FROM User_Interactions"
                      " WHERE channel = ? AND persona_name = ?")
             params: List[Any] = [channel, persona_name]
             if server_id:
@@ -1506,30 +1506,29 @@ class MemoryManager:
             params.append(server_id)
         return where, params
 
-    def take_pending_retains(self, persona_name: Optional[str] = None, *,
-                             before_id: Optional[int] = None,
-                             older_than: Optional[datetime] = None,
-                             channel: Optional[str] = None,
-                             user_identifier: Optional[str] = None,
-                             server_id: Any = ANY_SERVER) -> List[Dict[str, Any]]:
-        """Dequeue waiting turns that have left the history window, oldest first.
+    def pending_retains(self, persona_name: Optional[str] = None, *,
+                        before_id: Optional[int] = None,
+                        channel: Optional[str] = None,
+                        user_identifier: Optional[str] = None,
+                        server_id: Any = ANY_SERVER) -> List[Dict[str, Any]]:
+        """Waiting turns that have left the history window, oldest first.
 
-        A turn leaves the window by count — `before_id` takes turns older
-        than the window's oldest turn — or by age — `older_than` takes turns
-        stamped before it (the window drops turns older than
-        SESSION_GAP_SECONDS). `persona_name`, `channel`, `user_identifier`
-        and `server_id` narrow the take to the rows one memory mode's window
-        covers, matched on the interaction's own columns the way the history
-        getters match them (`server_id=None` is IS NULL); a None filter
-        matches everything.
+        `before_id` limits to turns older than the window's oldest turn; None
+        means all. `persona_name`, `channel`, `user_identifier` and
+        `server_id` narrow it to the rows one memory mode's window covers,
+        matched on the interaction's own columns the way the history getters
+        match them (`server_id=None` is IS NULL); a None filter matches all.
 
-        Each returned row carries its persona and channel, the text to
-        retain (`retain_text` when the row still holds the content it was
-        derived from, else the row's current content) and `skip`, set for
-        turns deleted or emptied since they were queued. Taken rows leave
-        the queue in the same transaction — a retain that then fails is
-        dropped, as live retains always were.
+        Read-only: a turn stays queued until `delete_pending_retains` is
+        called for it, i.e. until the backend confirmed the retain. Each row
+        carries its persona and channel, the text to retain (`retain_text`
+        when the row still holds the content it was derived from, else the
+        row's current content) and `skip`, set for turns deleted or emptied
+        since they were queued.
         """
+        where, params = self._pending_retain_filters(
+            persona_name, before_id, channel, user_identifier, server_id,
+        )
         query = (
             "SELECT p.interaction_id, p.persona_name, p.untrusted, p.retain_text,"
             " p.source_content, u.channel, u.author_role, u.author_name,"
@@ -1538,26 +1537,10 @@ class MemoryManager:
             "        WHERE s.interaction_id = p.interaction_id) AS suppressed"
             " FROM Pending_Retain p"
             " JOIN User_Interactions u ON u.interaction_id = p.interaction_id"
-            " WHERE 1 = 1"
+            " WHERE 1 = 1" + where + " ORDER BY p.interaction_id"
         )
-        where, params = self._pending_retain_filters(
-            persona_name, before_id, channel, user_identifier, server_id,
-        )
-        query += where + " ORDER BY p.interaction_id"
-        cutoff = to_utc(older_than) if older_than is not None else None
-        with self.transaction() as conn:
-            rows = []
-            for r in conn.execute(query, params).fetchall():
-                ts = self.parse_stored_ts(r["timestamp"])
-                # Stored timestamps mix naive and aware forms, so the age test
-                # is done here, not in SQL. An unreadable stamp counts as old.
-                if cutoff is not None and ts is not None and ts >= cutoff:
-                    continue
-                rows.append({**dict(r), "timestamp": ts})
-            conn.executemany(
-                "DELETE FROM Pending_Retain WHERE interaction_id = ?",
-                [(r["interaction_id"],) for r in rows],
-            )
+        with self._lock:
+            rows = [dict(r) for r in self._get_connection().execute(query, params).fetchall()]
         result: List[Dict[str, Any]] = []
         for r in rows:
             content = r["content"] or ""
@@ -1565,6 +1548,7 @@ class MemoryManager:
                 text = r["retain_text"]
             else:
                 text = content
+            ts = self.parse_stored_ts(r["timestamp"])
             result.append({
                 "interaction_id": r["interaction_id"],
                 "persona_name": r["persona_name"],
@@ -1574,12 +1558,40 @@ class MemoryManager:
                 "user_identifier": r["user_identifier"],
                 "server_id": r["server_id"],
                 "text": text,
-                "timestamp": r["timestamp"],
+                "timestamp": ts,
                 "untrusted": bool(r["untrusted"]),
-                "skip": (bool(r["suppressed"]) or not text.strip()
-                         or r["timestamp"] is None),
+                "skip": bool(r["suppressed"]) or not text.strip() or ts is None,
             })
         return result
+
+    def delete_pending_retains(self, interaction_ids: Sequence[int]) -> None:
+        with self.transaction() as conn:
+            conn.executemany(
+                "DELETE FROM Pending_Retain WHERE interaction_id = ?",
+                [(i,) for i in interaction_ids],
+            )
+
+    def idle_retain_scopes(self, idle_before: datetime) -> List[Tuple[str, str]]:
+        """(persona, channel) scopes with waiting turns and no turn at all
+        since `idle_before` — conversations that stopped (DP-423 sweep)."""
+        idle_before = to_utc(idle_before)
+        idle: List[Tuple[str, str]] = []
+        with self._lock:
+            conn = self._get_connection()
+            scopes = conn.execute(
+                "SELECT DISTINCT persona_name, channel FROM Pending_Retain"
+            ).fetchall()
+            for s in scopes:
+                last = conn.execute(
+                    "SELECT timestamp FROM User_Interactions"
+                    " WHERE persona_name = ? AND channel = ?"
+                    " ORDER BY interaction_id DESC LIMIT 1",
+                    (s["persona_name"], s["channel"]),
+                ).fetchone()
+                last_ts = self.parse_stored_ts(last["timestamp"]) if last else None
+                if last_ts is None or last_ts < idle_before:
+                    idle.append((s["persona_name"], s["channel"]))
+        return idle
 
     def get_server_history(self, server_id: Optional[str], persona_name: str, limit: Optional[int] = None) -> List[
         Dict[str, Any]]:
@@ -1587,12 +1599,12 @@ class MemoryManager:
             conn = self._get_connection()
             cursor = conn.cursor()
             if server_id is not None:
-                query = ("SELECT interaction_id, author_role, author_name, content, tool_context, reasoning_content, timestamp FROM User_Interactions"
+                query = ("SELECT interaction_id, author_role, author_name, content, tool_context, reasoning_content FROM User_Interactions"
                          " WHERE server_id = ? AND persona_name = ?"
                          + self._SUPPRESSION_SUBQUERY + self._CONTRIBUTES_TO_HISTORY)
                 params: List[Any] = [server_id, persona_name]
             else:
-                query = ("SELECT interaction_id, author_role, author_name, content, tool_context, reasoning_content, timestamp FROM User_Interactions"
+                query = ("SELECT interaction_id, author_role, author_name, content, tool_context, reasoning_content FROM User_Interactions"
                          " WHERE server_id IS NULL AND persona_name = ?"
                          + self._SUPPRESSION_SUBQUERY + self._CONTRIBUTES_TO_HISTORY)
                 params = [persona_name]
@@ -1607,7 +1619,7 @@ class MemoryManager:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
-            query = ("SELECT interaction_id, author_role, author_name, content, tool_context, reasoning_content, timestamp FROM User_Interactions"
+            query = ("SELECT interaction_id, author_role, author_name, content, tool_context, reasoning_content FROM User_Interactions"
                      " WHERE persona_name = ?"
                      + self._SUPPRESSION_SUBQUERY + self._CONTRIBUTES_TO_HISTORY)
             params: List[Any] = [persona_name]
