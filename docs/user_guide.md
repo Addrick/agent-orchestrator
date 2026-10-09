@@ -273,7 +273,7 @@ back with `what origin_allowlist`; clear it with `set origin_allowlist none`.
 | `service_bindings <list\|none>` | Comma-separated service names | e.g., `set service_bindings zammad,agents` |
 | `max_context_tokens <integer>` | Integer >= 100 | Total context budget — prompt + reserved response (same semantic as KoboldCPP's `max_context_length`). Effective prompt prune budget = this minus `tokens`. Oldest non-system messages drop until prompt fits; system messages and the latest user message are always preserved. Default 131072. |
 | `chat_template <name>` | An instruct-preset name | **Only the thinking switch is used now (DP-417).** The local model server applies the model's own chat template (a KoboldCPP server must run with `--jinja --jinja_tools` — see [Local model server](#local-model-server-requirements)), so a preset no longer changes the prompt format. Its one remaining effect: the `*-nothink` presets (`chatml-nothink`, `gemma4-nothink`, `gemma4-e-nothink`) turn thinking off, `gemma4-think` turns it on, and every other preset (`chatml`, `alpaca`, `llama3`, …) leaves the server's default (Qwen thinks by default). `thinking_level` overrides it. Unknown names are still rejected and existing values stay valid. `GET /api/v1/chat_templates` lists the names, and the persona editor renders them as a dropdown. Only affects `model local`. |
-| `thinking_level <value>` | `none`, `minimal`, `low`, `medium`, `high` | Extended-thinking level passed through to the provider. Gemma takes it as its thinking level. **On `model local` (DP-417)** it becomes `reasoning_effort`, and `none` turns thinking off; it takes precedence over `chat_template`. Which levels a local server distinguishes is up to the server (KoboldCPP: `none`–`medium`; Strata: `none`, `low`–`high`). Clears when set to a non-value. |
+| `thinking_level <value>` | `none`, `minimal`, `low`, `medium`, `high` | Extended-thinking level passed through to the provider. Gemma takes it as its thinking level. **On `model local` (DP-417)** it becomes `reasoning_effort`, and `none` turns thinking off; it takes precedence over `chat_template`. Which levels a local server distinguishes is up to the server (KoboldCPP: `none`–`medium`; Strata: `none`, `low`–`high`). **On `agy-*` (DP-425)** it becomes `agy --effort`: `low`–`high` (plus `agy`'s `xhigh`, `max`) pass through, `none`/`minimal` run as `low`, and unset means `AGY_DEFAULT_EFFORT` (`low`) — see [Antigravity](#antigravity-agy--oauth-tier-provider). Clears when set to a non-value. |
 | `long_term_memory <on\|off>` | on/off | Per-persona long-term-memory switch. Off disables both retrieval *and* retain for this persona — it stops contributing to and drawing from the memory store. |
 | `include_ambient_memory <on\|off>` | on/off | Whether ambient-channel memories (messages logged under persona `ambient`) are eligible for this persona's retrieval. Default on. |
 | `inject_timestamp <on\|off>` | on/off | Prepend a timestamp to each turn. Defaults on for user personas, off for system personas. |
@@ -373,8 +373,21 @@ secrets are redacted from the detail before it is sent.
 
 `agy-*` models (e.g. `set model agy-flash`) route through Google Antigravity's
 local `agy` CLI instead of an API. This runs on the user's authenticated
-**OAuth tier** (currently Gemini 3.5 Flash) rather than a metered API key, at the
-cost of a subprocess spawn per call (a few seconds of latency).
+**OAuth tier** rather than a metered API key, at the cost of a subprocess spawn
+per call (a few seconds of latency). The model family is whatever `agy`'s own
+settings select (`"model"` in `~/.gemini/antigravity-cli/settings.json` — Gemini
+Flash on the production host); derpr does not choose it.
+
+**Thinking effort (DP-425).** derpr does choose how hard the model thinks: every
+call passes `agy --effort <level>`, which overrides the effort baked into the
+settings file's model (a `"… (High)"` model runs at Low when derpr asks for Low)
+for that call only — the settings file is not changed. The level is the persona's
+`thinking_level` when set, otherwise `AGY_DEFAULT_EFFORT` (default `low`). `agy`
+accepts `low`, `medium`, `high`, `xhigh` and `max`; `none` and `minimal` run as
+`low`, the lowest `agy` has. Any other value is ignored with a warning and the
+default is used, because `agy` refuses to start on a level it does not know. High
+effort can deliberate past the 120-second call timeout on an ambiguous request —
+which then fails every retry the same way — so raise it per persona, not globally.
 
 **Images (DP-382).** An image attached to a message reaches `agy-*` models too,
 once `agy` on the host is allowed to read it. `agy` has no way to take an image
@@ -389,6 +402,8 @@ the rule below lets every `agy` call read that folder, not just image calls.
 **derpr runs `agy` as its own agent (DP-408).** Every `agy` call is launched with
 `--agent derpr-engine`, an agent definition derpr writes to
 `~/.gemini/config/agents/derpr-engine.md`: one tool (`view_file`), command execution off.
+Its instructions say the limit is on `agy`'s own tools only, so a persona's tools
+(requested as `<tool_call>` blocks) stay usable (DP-425).
 Without it a headless `agy` may try to run a shell command, have it auto-denied, and
 return nothing. The file is checked on every call and rewritten if it is missing or
 differs — a hand edit does not survive, so change the definition in
@@ -425,6 +440,7 @@ turn is answered once more without the image, with that note.
 Each call is executed inside a persistent workspace directory (by default, persona-specific under `data/workspaces/agy_{persona_name}` or fallback to `data/workspaces/agy_global`), preserving `agy` indexing/auth state caches. Persona names are sanitized to a filesystem-safe slug for the directory name, and concurrent calls sharing a workspace are serialized so they can't clobber each other's CLI state. You can configure this behavior in `.env` or `config/global_config.py`:
 - `AGY_PERSISTENT_WORKSPACES` (default `True`): Set to `False` to revert to stateless throwaway temporary directories.
 - `AGY_WORKSPACE_MODE` (default `"persona"`): Set to `"global"` to share a single derpr-wide workspace.
+- `AGY_DEFAULT_EFFORT` (default `low`): The `agy --effort` level for a persona with no `thinking_level` (see *Thinking effort* above). An invalid value falls back to `low` with a warning.
 - `AGY_SANDBOX` (default `True`): Run `agy` under its built-in OS-level sandbox (`--sandbox`; nsjail on Linux, sandbox-exec on macOS — see the platform note below for Windows). Set to `False` if the sandbox is unavailable in your environment (e.g. a container without the needed privileges).
 
 > **Prompt size.** The `agy` and `cc-*` CLIs take the whole prompt as a single

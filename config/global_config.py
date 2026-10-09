@@ -440,6 +440,11 @@ AGY_PERSISTENT_WORKSPACES = os.environ.get("AGY_PERSISTENT_WORKSPACES", "True").
 AGY_WORKSPACE_MODE = os.environ.get("AGY_WORKSPACE_MODE", "persona") # 'persona' or 'global'
 AGY_WORKSPACES_DIR = DATA_DIR / "workspaces"
 
+# DP-425: `agy --effort` for a persona with no thinking_level. Passed on every
+# call so agy's settings.json model ("… (High)") never decides it; high effort
+# deliberated past the 120 s call timeout on a plain hypr request, 3/3 retries.
+AGY_DEFAULT_EFFORT = os.environ.get("AGY_DEFAULT_EFFORT", "low")
+
 # Run agy under its built-in OS-level sandbox (--sandbox: nsjail on Linux,
 # sandbox-exec on macOS). Defense-in-depth while the prompt still forbids
 # agy's own tools; required before that restriction is ever lifted.

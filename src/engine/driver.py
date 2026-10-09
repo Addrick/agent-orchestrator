@@ -490,8 +490,9 @@ class TextEngine:
         return agy_provider.resolve_agy_workspace(self, persona_name)
 
     async def _run_agy_cli(self, prompt: str, timeout: float = AGY_CALL_TIMEOUT_SECONDS,
-                           persona_name: Optional[str] = None, call_dir: Optional[str] = None) -> str:
-        return await agy_provider.run_agy_cli(self, prompt, timeout, persona_name, call_dir)
+                           persona_name: Optional[str] = None, call_dir: Optional[str] = None,
+                           effort: Optional[str] = None) -> str:
+        return await agy_provider.run_agy_cli(self, prompt, timeout, persona_name, call_dir, effort)
 
     @staticmethod
     def _remove_agy_cli_link_targets(workspace_dir: str) -> None:
