@@ -6,7 +6,7 @@ An async, provider-agnostic LLM orchestration engine for chatbot automation: IT 
 
 ## What it does
 
-- **Chat orchestration.** One `ChatSystem` brokers requests across six providers (OpenAI, Anthropic, Google Gemini/Gemma, local kobold.cpp, and the `agy` and Claude Code CLIs). Streaming-first: token deltas, tool calls, and tool results all flow through a single event stream.
+- **Chat orchestration.** One `ChatSystem` brokers requests across six providers (OpenAI, Anthropic, Google Gemini/Gemma, a local KoboldCPP or Strata server over OpenAI chat-completions, and the `agy` and Claude Code CLIs). Streaming-first: token deltas, tool calls, and tool results all flow through a single event stream.
 - **Multi-interface.** Discord bot (primary), Gmail (PoC), Zammad agents, and a FastAPI web portal (React, at `/derpr`) with persona CRUD, DB-as-source history, version chevrons for regenerations, and engine-side prompt/budget management on the OAI route.
 - **Persona system.** Stateful LLM configs with `ExecutionMode` (AUTONOMOUS / CONFIRM) and `MemoryMode` (CHANNEL_ISOLATED, SERVER_WIDE, PERSONAL, GLOBAL, TICKET_ISOLATED). Runtime-mutable through `set` commands; persisted to `data/personas.json`.
 - **Tool loop.** JSON-schema tools dispatched via `ToolManager`, budgeted at 15 executed tool calls per request (plus a 25-round-trip runaway guard), with read/write classification, service-binding gating, and every write parked for human approval regardless of execution mode.
@@ -46,10 +46,10 @@ Full component diagram (every class, every edge) → [`docs/architecture.mmd`](d
 |------------|---------------------------------------------------------------------------------------|
 | Runtime    | Python 3.14, `asyncio` throughout                                                     |
 | Storage    | SQLite (`sqlite-vec` for KNN); optional Postgres + pgvector via Hindsight container   |
-| LLM APIs   | OpenAI, Anthropic, Google Gemini/Gemma, local kobold.cpp, `agy` CLI, Claude Code CLI  |
+| LLM APIs   | OpenAI, Anthropic, Google Gemini/Gemma, local KoboldCPP / Strata (chat-completions), `agy` CLI, Claude Code CLI |
 | Embeddings | `gemini-embedding-001` (3072-d, L2-normalised)                                        |
 | Web        | FastAPI + uvicorn (portal/adapter), discord.py, google-api-python-client              |
-| Packaging  | Docker + Docker Compose; `pip-compile` (requirements.in → requirements.txt)           |
+| Packaging  | Docker + Docker Compose; `uv pip compile` (requirements.in → requirements.txt)           |
 | Testing    | pytest, pytest-asyncio, `unittest.mock`; tiered markers — see `docs/testing.md` |
 
 ## Repository layout
@@ -67,13 +67,18 @@ src/
   memory/                MemoryManager, backend ABC, SQLite + Hindsight impls,
                          consolidation, context budget, router
   agents/                Agent ABC, AgentManager, ZammadBot, DispatchAgent,
+                         ReminderAgent, ManagrAgent, ContentClassifier, DateTagger,
                          SqliteConsolidator, AgentServiceIntegration
   interfaces/            discord_bot, gmail_bot, kobold_engine_adapter (FastAPI
                          portal), transcript
   clients/               ZammadClient + ZammadIntegration, NotificationRouter,
                          Notifier impls, ServiceIntegration ABC
   personas/              store.py — persona/model file persistence
-  utils/                 google_utils, message_utils, model_utils
+  utils/                 timeutil, atomic_json, git_support, cc_sandbox,
+                         claude_cli_env, notes_workspace, history_shape,
+                         google_utils, message_utils, model_utils
+  bootstrap/  database/  proposals/  security/  self_edit/  voice/
+  proxmox/  huggingface/  — subsystems; see docs/architecture/architecture.md
   app_manager.py         Top-level lifecycle
   main.py                Startup wiring
 config/                  global_config.py, default_personas.json,
@@ -98,7 +103,7 @@ git clone <repo-url> agent-orchestrator
 cd agent-orchestrator
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1     # PowerShell — bash: source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt   # runtime + test/lint tools (requirements.txt is runtime only)
 ```
 
 Create a `.env` in the repo root (no `.env.example` is checked in yet) and fill in only the keys you need — every provider key is optional; missing services are skipped at startup.
@@ -129,13 +134,13 @@ All variables are read directly via `os.environ` — set them in `.env` or your 
 | `OPENAI_API_KEY` | OpenAI provider |
 | `ANTHROPIC_API_KEY` | Anthropic provider |
 | `GOOGLE_GENERATIVEAI_API_KEY` | Gemini/Gemma + embeddings |
-| `LOCAL_LLM_URL` | Override for the local kobold.cpp endpoint (default in `config/global_config.py`) |
+| `LOCAL_LLM_URL` | Override for the local KoboldCPP / Strata endpoint (default in `config/global_config.py`) |
 | `ZAMMAD_URL`, `ZAMMAD_API_KEY` | Enables ZammadClient + Zammad agents |
 | `GMAIL_CREDENTIALS_FILE`, `GMAIL_TOKEN_FILE`, `GMAIL_PROJECT_ID`, `GMAIL_PUBSUB_TOPIC`, `GMAIL_PUBSUB_SUBSCRIPTION_ID` | Gmail PoC interface |
 | `DATA_DIR` | Where all mutable state lives (default `./data`; the container sets `/data`, outside the app tree) |
 | `MEMORY_DATABASE_FILE` | SQLite path (default `<DATA_DIR>/user_memory.db`) |
 | `KOBOLD_DEFAULT_PERSONA` | Persona served when the portal opens with no selection |
-| `DISCORD_DEBUG_CHANNEL` | Channel id excluded from response handling |
+| `DISCORD_DEBUG_CHANNEL` | Channel id excluded from response handling; when set, also overrides agents.json `recipients.debug` as the destination of the node-artifact drift report |
 | `SEMANTIC_BACKEND`, `HINDSIGHT_URL` | Switch semantic recall to Hindsight (alpha) |
 | `RATE_LIMIT_*` | Per-family RPM/RPD/TPR overrides — see `config/global_config.py` |
 
@@ -155,7 +160,7 @@ Test Zammad credentials live in `.env.test` (gitignored, loaded with `override=T
 Static checks:
 
 ```bash
-flake8 src/ services/
+flake8 src/ services/              # advisory: CI gates only the hard-error subset (E9,F63,F7,F82)
 mypy src/ services/ --config-file mypy.ini
 lint-imports                      # layer contracts (setup.cfg)
 python scripts/ci_check.py        # all of CI's gates in one go

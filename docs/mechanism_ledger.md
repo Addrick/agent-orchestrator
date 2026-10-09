@@ -77,6 +77,22 @@ probe, not a regeneration. What it found, none of it yet folded into the tables 
   (`_update_core_memory` is at `tool_manager.py:438`, `MAX_INFLIGHT_SSH` has no leading
   underscore and lives in `proxmox/ssh.py`).
 
+**Re-checked 2026-10-08 at `fcf317e`** (DP-412–418, 420 merged since). Still a probe. Found:
+
+- **No family covers one-shot reports to the operator at startup**, and there are now three,
+  each finding its destination differently: managr's boot cycle (`startup_notification_targets`
+  → `ManagrAgent._resolve_recipient`, DP-412), the node-artifact drift check
+  (`main._debug_channel_id`: `DISCORD_DEBUG_CHANNEL`, else agents.json `recipients.debug`,
+  DP-418/420) and `fixr_orphan_notify` (the fixr channel from config). "The debug channel" is
+  now resolved by two separate pieces of code — and `discord_bot.on_message` excludes only the
+  env-var one, which prod does not set. Recipient resolution is five copies
+  (`capability_map.md` *Resolve who to notify*).
+- **`TextEngine._stream_local_response` / `LocalProvider.stream` is gone** — DP-417 deleted the
+  first; the pair no longer appears in `arch_audit.py similar concepts`. `stream_agy` /
+  `stream_cc` (0.87) still stands without a verdict.
+- Family D's **LLM provider** row: the local provider is now an `AsyncOpenAI` client through
+  `openai.stream_chat_completions` (DP-417), gated by nothing (its key is a placeholder).
+
 ---
 
 ## A · Work that outlives the turn that started it
@@ -157,7 +173,7 @@ recorded anywhere as deliberate. Same `unreviewed` row in the capability map.
 |---|---|---|---|---|
 | pve tool (`proxmox/handler.py:234`) | `SSHRunner.run` | `Semaphore(_MAX_INFLIGHT_SSH=4)` | `{"status": "error", ...}` | `PVE_TOOLS_ENABLED`, checked **inside `_run`** |
 | ⚠️ HF tool (`huggingface/handler.py:219`) | `SSHRunner.run` — same class | **none** | same dict shape | `HF_TOOLS_ENABLED`, checked **per tool at each call site**, not in `_run` |
-| LLM provider | `aiohttp` / `httpx` per provider | per-provider | provider exceptions | API key |
+| LLM provider | provider SDK / `httpx` per provider; local = `AsyncOpenAI` via `openai.stream_chat_completions` (DP-417) | per-provider | provider exceptions | API key (local: none) |
 | Hindsight | `httpx.AsyncClient` | — | `HindsightAPIError` | health probe |
 | kcpp adapter | `httpx.AsyncClient` | — | `httpx.RequestError` | — |
 | MCP server | `ClientSession` | — | reconnect loop | `MCP_ENABLED` |
