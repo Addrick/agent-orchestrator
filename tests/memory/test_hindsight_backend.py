@@ -597,7 +597,8 @@ async def test_get_document_route(backend: HindsightBackend) -> None:
     with patch.object(client, "_request", AsyncMock(return_value={"id": "d1"})) as m:
         doc = await backend.get_document("alice", "d1")
     assert m.call_args.args == ("GET", "/v1/default/banks/alice/documents/d1")
-    assert doc == {"id": "d1"}
+    # DocumentResponse passes through, plus the DP-424 trust bit (no tags → fail-closed).
+    assert doc == {"id": "d1", "untrusted": True}
 
 
 @pytest.mark.asyncio
@@ -1025,3 +1026,85 @@ def test_doc_scope_out_of_order_turn_does_not_rewind_session(tmp_path) -> None:
     # Within the gap of `late`, beyond it from t0: still the same session.
     assert store.resolve("alice:c1", late + timedelta(seconds=120)) == (doc, "append")
     store.close()
+
+
+# ---------- DP-424: drill-down reads ----------
+
+
+@pytest.mark.asyncio
+async def test_recall_carries_provenance_handles(backend: HindsightBackend) -> None:
+    """DP-424: a hit keeps the document_id/chunk_id get_document drills into;
+    an observation (no source document) leaves them None, not ""."""
+    fake_results = [
+        {"id": "f1", "text": "fact", "tags": [TRUSTED_TAG],
+         "document_id": "alice:c1:2026-09-01", "chunk_id": "alice_c1_3"},
+        {"id": "o1", "text": "observation", "tags": [TRUSTED_TAG],
+         "document_id": None, "chunk_id": None},
+    ]
+
+    async def fake_arecall(bank_id: str, query: str, **kw):
+        return fake_results
+
+    client = backend._get_client()
+    with patch.object(client, "arecall", side_effect=fake_arecall):
+        hits = await backend.recall("alice", "q")
+
+    assert (hits[0].document_id, hits[0].chunk_id) == ("alice:c1:2026-09-01", "alice_c1_3")
+    assert (hits[1].document_id, hits[1].chunk_id) == (None, None)
+    await backend.aclose()
+
+
+@pytest.mark.asyncio
+async def test_get_memory_resolves_trust_like_recall(backend: HindsightBackend) -> None:
+    """DP-424: get_memory's `untrusted` is the storage tag overridden by the
+    operator store — the same resolution recall applies, so drilling into a
+    hit cannot launder (or lose) its trust bit."""
+    unit = {"id": "u1", "text": "x", "tags": [UNTRUSTED_TAG]}
+
+    async def fake_aget_memory(bank_id: str, memory_id: str):
+        return dict(unit)
+
+    client = backend._get_client()
+    with patch.object(client, "aget_memory", side_effect=fake_aget_memory):
+        assert (await backend.get_memory("alice", "u1"))["untrusted"] is True
+        await backend.mark_trusted("alice", "u1", operator_id="adam", reason="vetted")
+        assert (await backend.get_memory("alice", "u1"))["untrusted"] is False
+    await backend.aclose()
+
+
+@pytest.mark.asyncio
+async def test_model_supplied_ids_cannot_leave_the_bank(backend: HindsightBackend) -> None:
+    """DP-424: get_memory / get_document ids come from the model, and httpx
+    normalizes `..` — a raw id would route `alice`'s read into `bob`'s bank."""
+    client = backend._get_client()
+    with patch.object(client.client, "request", AsyncMock(
+        return_value=httpx.Response(200, json={"id": "x", "tags": []}),
+    )) as m:
+        await backend.get_memory("alice", "../../bob/memories/x")
+        await backend.get_document("alice", "../../bob/documents/d")
+        await backend.list_document_chunks("alice", "../../bob/documents/d")
+    for call in m.call_args_list:
+        raw = httpx.URL(call.args[1]).raw_path
+        assert raw.startswith(b"/v1/default/banks/alice/"), raw
+        assert b"/bob/" not in raw
+    for bare in ("..", ".", ""):
+        with pytest.raises(HindsightAPIError) as exc:
+            await backend.get_memory("alice", bare)
+        assert exc.value.status_code == 400 and not exc.value.transient
+    await backend.aclose()
+
+
+@pytest.mark.asyncio
+async def test_get_document_reports_trust_bit(backend: HindsightBackend) -> None:
+    client = backend._get_client()
+    with patch.object(
+        client, "aget_document",
+        AsyncMock(return_value={"id": "d1", "original_text": "t", "tags": [TRUSTED_TAG]}),
+    ):
+        assert (await backend.get_document("alice", "d1"))["untrusted"] is False
+    with patch.object(
+        client, "aget_document",
+        AsyncMock(return_value={"id": "d2", "original_text": "t", "tags": []}),
+    ):
+        assert (await backend.get_document("alice", "d2"))["untrusted"] is True  # fail-closed
+    await backend.aclose()

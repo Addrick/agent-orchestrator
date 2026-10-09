@@ -47,6 +47,84 @@ MEMORY_TOOLS: List[Dict[str, Any]] = [
         "type": "function",
         "is_write": False,
         "capabilities": {
+            # DP-424: same trust shape as recall_memory — the unit and its
+            # source facts were extracted from ingested (untrusted) content.
+            "produces_untrusted": True,
+            "irreversible": False,
+            "locality": "local",
+            "sensitivity": "internal",
+        },
+        "function": {
+            "name": "get_memory",
+            "description": (
+                "Fetch one long-term memory by the `id` of a recall_memory hit, to "
+                "see where it came from. Returns its `document_id` and `chunk_id` "
+                "(pass them to get_document for the original text) and, for a "
+                "consolidated observation, the `source_memories` it was built from. "
+                "Only memories recall_memory could return in this conversation are "
+                "visible; anything else reads as not found."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "memory_id": {
+                        "type": "string",
+                        "description": "The `id` of a recall_memory hit or a source memory.",
+                    },
+                },
+                "required": ["memory_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "is_write": False,
+        "capabilities": {
+            "produces_untrusted": True,
+            "irreversible": False,
+            "locality": "local",
+            "sensitivity": "internal",
+        },
+        "function": {
+            "name": "get_document",
+            "description": (
+                "Read the original text a memory was extracted from, usually the "
+                "whole past conversation. Use when a recalled fact lacks the detail "
+                "you need (exact wording, a link, surrounding discussion). Pass "
+                "`chunk_id` to get only the passage that produced the fact. "
+                "Either way the text is returned a page at a time — follow "
+                "`next_offset` to read on."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "document_id": {
+                        "type": "string",
+                        "description": "The `document_id` from a recall_memory hit or get_memory.",
+                    },
+                    "chunk_id": {
+                        "type": "string",
+                        "description": "Optional `chunk_id` — return only that passage.",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Character offset to start reading from (default 0).",
+                        "default": 0,
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Maximum characters to return (default 6000, max 20000).",
+                        "default": 6000,
+                    },
+                },
+                "required": ["document_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "is_write": False,
+        "capabilities": {
             "produces_untrusted": True,
             "irreversible": False,
             "locality": "local",

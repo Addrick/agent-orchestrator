@@ -20,7 +20,8 @@ from src.memory.memory_manager import MemoryManager
 from src.persona import Persona
 from src.tools.ingest_path import IngestPathHandler
 from src.tools.tool_manager import (
-    MemoryRecallHandler, MemoryToolHandler, ToolManager, WebSearchHandler,
+    MemoryRecallHandler, MemorySourceHandler, MemoryToolHandler, ToolManager,
+    WebSearchHandler,
 )
 from src.utils.model_utils import get_model_list
 from src.personas.store import (
@@ -78,6 +79,7 @@ def build_tool_manager(
     WebSearchHandler().register(tool_manager)
     MemoryToolHandler(memory_manager).register(tool_manager)
     MemoryRecallHandler(memory_manager.backend).register(tool_manager)
+    MemorySourceHandler(memory_manager.backend).register(tool_manager)
     IngestPathHandler(
         memory_manager.backend,
         cache_dir=global_config.INGEST_CACHE_DIR,
