@@ -209,6 +209,34 @@ class HindsightRESTClient:
             "GET", f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}/documents/{document_id}"
         )
 
+    async def alist_document_chunks(
+        self,
+        bank_id: str,
+        document_id: str,
+        *,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        # GET .../documents/{id}/chunks -> ListChunksResponse
+        # {items: [{chunk_id, document_id, bank_id, chunk_index, chunk_text,
+        # created_at, attachments}], total, limit, offset}. limit is 1..1000.
+        params: Dict[str, Any] = {}
+        if limit is not None:
+            params["limit"] = limit
+        if offset is not None:
+            params["offset"] = offset
+        return await self._request(
+            "GET", f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}/documents/{document_id}/chunks",
+            params=params or None,
+        )
+
+    async def aget_memory(self, bank_id: str, memory_id: str) -> Dict[str, Any]:
+        # GET .../memories/{id} -> {id, text, type, tags, document_id, chunk_id,
+        # mentioned_at, occurred_*, state, source_memory_ids, source_memories, ...}
+        return await self._request(
+            "GET", f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}/memories/{memory_id}"
+        )
+
     async def adelete_document(self, bank_id: str, document_id: str) -> Dict[str, Any]:
         # DELETE .../documents/{id} -> DeleteDocumentResponse
         # {success, message, document_id, memory_units_deleted}
@@ -1027,6 +1055,8 @@ class HindsightBackend(MemoryBackend):
                     metadata=r.get("metadata", {}) or {},
                     tags=tags,
                     timestamp=ts,
+                    document_id=r.get("document_id") or None,
+                    chunk_id=r.get("chunk_id") or None,
                 )
             )
         # Apply operator overrides on top of the storage-side bit (DP-110 option c).
@@ -1108,7 +1138,32 @@ class HindsightBackend(MemoryBackend):
 
     async def get_document(self, bank_id: str, document_id: str) -> Dict[str, Any]:
         client = self._get_client()
-        return await client.aget_document(bank_id, document_id)
+        doc = await client.aget_document(bank_id, document_id)
+        # DP-424: the trust bit, resolved from tags as recall resolves it.
+        doc["untrusted"] = _read_untrusted(doc.get("tags") or [])
+        return doc
+
+    async def list_document_chunks(
+        self,
+        bank_id: str,
+        document_id: str,
+        *,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        client = self._get_client()
+        return await client.alist_document_chunks(
+            bank_id, document_id, limit=limit, offset=offset,
+        )
+
+    async def get_memory(self, bank_id: str, memory_id: str) -> Dict[str, Any]:
+        client = self._get_client()
+        unit = await client.aget_memory(bank_id, memory_id)
+        # Same trust resolution as recall: storage tag, then operator override.
+        untrusted = _read_untrusted(unit.get("tags") or [])
+        override = self._overrides.get_overrides(bank_id, [memory_id]).get(memory_id)
+        unit["untrusted"] = untrusted if override is None else override
+        return unit
 
     async def delete_document(self, bank_id: str, document_id: str) -> Dict[str, Any]:
         client = self._get_client()

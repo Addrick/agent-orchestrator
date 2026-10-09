@@ -60,6 +60,11 @@ class MemoryHit:
     metadata: Dict[str, Any] = field(default_factory=dict)
     tags: List[str] = field(default_factory=list)
     timestamp: Optional[datetime] = None
+    # DP-424: provenance handles for drill-down (`get_memory` / `get_document`).
+    # Hindsight sets them on extracted facts; consolidated observations and the
+    # SQLite backend leave them None.
+    document_id: Optional[str] = None
+    chunk_id: Optional[str] = None
 
 
 @dataclass
@@ -544,8 +549,33 @@ class MemoryBackend(ABC):
         raise NotImplementedError("list_documents not implemented on this backend")
 
     async def get_document(self, bank_id: str, document_id: str) -> Dict[str, Any]:
-        """Fetch a single document (upstream DocumentResponse shape)."""
+        """Fetch a single document (upstream DocumentResponse shape, plus an
+        `untrusted` bool resolved from its tags — DP-424)."""
         raise NotImplementedError("get_document not implemented on this backend")
+
+    async def list_document_chunks(
+        self,
+        bank_id: str,
+        document_id: str,
+        *,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """List a document's retain chunks (paginated).
+
+        Returns the upstream ListChunksResponse shape: {items: [{chunk_id,
+        document_id, bank_id, chunk_index, chunk_text, ...}], total, limit, offset}.
+        """
+        raise NotImplementedError("list_document_chunks not implemented on this backend")
+
+    async def get_memory(self, bank_id: str, memory_id: str) -> Dict[str, Any]:
+        """Fetch one memory unit by id (DP-424 drill-down).
+
+        Returns the upstream memory shape ({id, text, type, tags, document_id,
+        chunk_id, source_memory_ids, ...}) plus an `untrusted` bool resolved the
+        same way `recall` resolves it (storage tag, then operator override).
+        """
+        raise NotImplementedError("get_memory not implemented on this backend")
 
     async def delete_document(self, bank_id: str, document_id: str) -> Dict[str, Any]:
         """Delete a document and its derived memory units.

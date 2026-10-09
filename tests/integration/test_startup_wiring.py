@@ -18,6 +18,7 @@ from memory.memory_manager import MemoryManager
 from src.engine import TextEngine
 from src.persona import Persona, MemoryMode
 from src.tools.definitions import ALL_TOOL_DEFINITIONS
+from src.tools.tool_manager import MemorySourceHandler
 from config.global_config import TEST_MEMORY_DATABASE_FILE
 from tests.helpers import make_chat_system
 
@@ -112,7 +113,11 @@ def test_all_tool_definitions_have_registered_handlers(wired_system):
         for t in wired_system.tool_manager.get_tool_definitions()
         if t.get("type") == "function"
     }
-    missing = all_defined - registered
+    # DP-424: the drill-down pair registers only on the Hindsight backend; this
+    # fixture is SQLite, where they must be absent rather than half-wired.
+    hindsight_only = set(MemorySourceHandler.TOOL_NAMES)
+    assert not registered & hindsight_only
+    missing = all_defined - registered - hindsight_only
     assert not missing, f"Tool definitions without registered handlers: {missing}"
 
 
@@ -228,7 +233,7 @@ def test_persona_with_all_bindings_sees_all_tools(wired_system):
         name for name, prefixes in MODEL_INCOMPATIBLE_TOOLS.items()
         if model_prefix in prefixes
     }
-    expected = all_defined - incompatible
+    expected = all_defined - incompatible - set(MemorySourceHandler.TOOL_NAMES)  # Hindsight-only
 
     missing = expected - filtered_names
     assert not missing, f"Tools missing from persona's filtered set: {missing}"

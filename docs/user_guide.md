@@ -1631,9 +1631,20 @@ Available to any persona with `enabled_tools: ["*"]` (e.g., `joy`, `it-help`). T
 
 | Tool | Type | Description |
 |------|------|-------------|
-| `recall_memory` | Read | Search the persona's long-term memory bank for facts relevant to a natural-language query. Returns up to `limit` (default 10) hits — short summaries of past conversations or observations. Scope is inherited from the active turn and follows the persona's **memory mode**, exactly like automatic memory injection (channel-isolated → this channel/user/server; server-wide → this server; personal → this user; global → the whole bank); the LLM cannot redirect recall to another persona. Marked `produces_untrusted=True` so retrieved hits taint the turn under the tool-security framework. |
-| `drill_down_memory` | Read | Fetch raw episodic memories under a specific Core Profile. Use to recover specific details (dates, links, verbatim quotes) that were abstracted away during consolidation. Requires `parent_summary_id`. |
+| `recall_memory` | Read | Search the persona's long-term memory bank for facts relevant to a natural-language query. Returns up to `limit` (default 10) hits — short summaries of past conversations or observations. On the Hindsight backend each hit also carries the `document_id` / `chunk_id` it was extracted from, the handles `get_memory` and `get_document` drill into. Scope is inherited from the active turn and follows the persona's **memory mode**, exactly like automatic memory injection (channel-isolated → this channel/user/server; server-wide → this server; personal → this user; global → the whole bank); the LLM cannot redirect recall to another persona. Marked `produces_untrusted=True` so retrieved hits taint the turn under the tool-security framework. |
+| `get_memory` | Read | *Hindsight backend only.* Fetch one memory by the `id` a `recall_memory` hit returned. Answers "where did this come from": it returns the fact's `document_id` and `chunk_id`, and for a consolidated observation the facts it was built from (`source_memories`), each with its own `document_id`. |
+| `get_document` | Read | *Hindsight backend only.* Read the original text a memory was extracted from — usually the whole conversation it came out of. Pass `chunk_id` (from a recall hit or `get_memory`) to get just the passage that produced the fact; without it the text comes back a page at a time (`offset` / `max_chars`, default 6000 characters, with `next_offset` to continue). Use when a recalled fact is missing the detail you need — the exact wording, a link, the surrounding discussion. |
+| `drill_down_memory` | Read | *SQLite backend only.* Fetch raw episodic memories under a specific Core Profile. Use to recover specific details (dates, links, verbatim quotes) that were abstracted away during consolidation. Requires `parent_summary_id`. |
 | `update_core_memory` | Write | Modify an existing Core Profile when new information contradicts or extends it. Requires `summary_id` and the revised content. |
+
+**Drill-down obeys the same scope as recall.** `get_memory` and `get_document` read only
+the persona's own bank, and only what `recall_memory` could have returned in this turn:
+an id from another channel, user or server (per the persona's memory mode) is answered
+"not found", exactly as if it did not exist. Source facts outside the scope are dropped
+from `source_memories`. Both tools are `produces_untrusted`, like recall. This is what
+separates them from the operator-facing `mcp__hindsight-<persona>__get_memory` /
+`__get_document` (Hindsight's own MCP tools), which see the whole bank regardless of
+memory mode and are for `GLOBAL`/operator personas only.
 
 **Internal tools** (used by agents/system personas, not by user personas):
 

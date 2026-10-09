@@ -408,9 +408,190 @@ class MemoryRecallHandler:
                 "untrusted": h.untrusted,
                 "tags": h.tags,
                 "timestamp": h.timestamp.isoformat() if h.timestamp else None,
+                "document_id": h.document_id,
+                "chunk_id": h.chunk_id,
             }
             for h in hits
         ]
+
+
+def _in_recall_scope(tags: List[str], scope_tags: List[str]) -> bool:
+    """Whether `recall(tag_filter=scope_tags)` could have returned an item with `tags`.
+
+    Mirrors Hindsight's default `tags_match="any"`, which `recall_memory` relies
+    on: no filter matches everything; otherwise an item matches when it shares
+    any filter tag, or carries no tags at all.
+    """
+    return not scope_tags or not tags or any(t in tags for t in scope_tags)
+
+
+class MemorySourceHandler:
+    """DP-424: `get_memory` / `get_document` — drill from a recall hit to its source.
+
+    The scoped counterpart of Hindsight's own MCP `get_memory` / `get_document`
+    (DP-403), which see the whole bank. Bank and tag scope come from the active
+    turn exactly as in `MemoryRecallHandler`, and an id outside that scope reads
+    as not found — the same answer a nonexistent id gets, so the tools cannot be
+    used to probe what other channels or users have stored.
+    """
+
+    TOOL_NAMES = ("get_memory", "get_document")
+    _MAX_DOC_CHARS = 20000
+    _MAX_SOURCES = 20
+    _CHUNK_PAGE = 1000
+    _MAX_CHUNK_PAGES = 10
+
+    def __init__(self, memory_backend: Any) -> None:
+        self.memory_backend = memory_backend
+
+    def register(self, manager: ToolManager) -> None:
+        from src.memory.backend.base import MemoryBackend
+        # Hindsight-only: a backend that inherits the ABC stubs has no units
+        # or documents to drill into (SQLite has `drill_down_memory` instead).
+        cls = type(self.memory_backend)
+        if getattr(cls, "get_memory", None) is MemoryBackend.get_memory:
+            return
+        get_memory, get_document = self.TOOL_NAMES
+        manager.register(get_memory, self._get_memory)
+        manager.register(get_document, self._get_document)
+
+    def _scope(self, tool: str) -> Optional[tuple[str, List[str]]]:
+        from src.memory.scope_tags import recall_scope_tags
+        from src.tools.turn_context import get_turn_context
+        ctx = get_turn_context()
+        if ctx is None:
+            logger.warning("%s invoked without an active turn context.", tool)
+            return None
+        scope_tags, _ = recall_scope_tags(
+            ctx.memory_mode,
+            channel=ctx.channel, server_id=ctx.server_id,
+            user_identifier=ctx.user_identifier,
+        )
+        return ctx.persona_name, scope_tags
+
+    @staticmethod
+    async def _fetch(
+        fn: Callable[..., Coroutine[Any, Any, Any]], *args: Any, **kwargs: Any,
+    ) -> Any:
+        """Call a backend read; None when the item does not exist.
+
+        A non-transient backend error (404, a malformed id) is "not found";
+        a transient one (5xx, network) still raises so the caller sees an outage.
+        """
+        from src.memory.backend.base import MemoryBackendError
+        try:
+            return await fn(*args, **kwargs)
+        except MemoryBackendError as e:
+            if e.transient:
+                raise
+            return None
+
+    @staticmethod
+    def _unit_view(unit: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": unit.get("id"),
+            "text": unit.get("text"),
+            "type": unit.get("type"),
+            "state": unit.get("state"),
+            "untrusted": unit.get("untrusted", True),
+            "tags": unit.get("tags") or [],
+            "mentioned_at": unit.get("mentioned_at"),
+            "occurred_start": unit.get("occurred_start"),
+            "document_id": unit.get("document_id"),
+            "chunk_id": unit.get("chunk_id"),
+        }
+
+    async def _get_memory(self, memory_id: str) -> Dict[str, Any]:
+        scope = self._scope("get_memory")
+        if scope is None:
+            return {"error": "get_memory needs an active conversation."}
+        bank_id, scope_tags = scope
+        logger.info(f"Executing tool: get_memory id='{memory_id}' persona={bank_id}")
+        not_found = {"error": f"Memory '{memory_id}' not found."}
+
+        unit = await self._fetch(self.memory_backend.get_memory, bank_id, memory_id)
+        if not unit or not _in_recall_scope(unit.get("tags") or [], scope_tags):
+            return not_found
+
+        source_ids = [str(s) for s in (unit.get("source_memory_ids") or [])][:self._MAX_SOURCES]
+        sources = await asyncio.gather(*(
+            self._fetch(self.memory_backend.get_memory, bank_id, sid) for sid in source_ids
+        ))
+        view = self._unit_view(unit)
+        view["source_memories"] = [
+            self._unit_view(s) for s in sources
+            if s and _in_recall_scope(s.get("tags") or [], scope_tags)
+        ]
+        return view
+
+    async def _get_document(
+        self,
+        document_id: str,
+        chunk_id: Optional[str] = None,
+        offset: int = 0,
+        max_chars: int = 6000,
+    ) -> Dict[str, Any]:
+        scope = self._scope("get_document")
+        if scope is None:
+            return {"error": "get_document needs an active conversation."}
+        bank_id, scope_tags = scope
+        logger.info(
+            f"Executing tool: get_document id='{document_id}' chunk={chunk_id} "
+            f"offset={offset} persona={bank_id}"
+        )
+        not_found = {"error": f"Document '{document_id}' not found."}
+
+        doc = await self._fetch(self.memory_backend.get_document, bank_id, document_id)
+        if not doc or not _in_recall_scope(doc.get("tags") or [], scope_tags):
+            return not_found
+        max_chars = max(1, min(int(max_chars), self._MAX_DOC_CHARS))
+        base = {
+            "document_id": document_id,
+            "untrusted": doc.get("untrusted", True),
+            "created_at": doc.get("created_at"),
+        }
+
+        if chunk_id:
+            chunk = await self._find_chunk(bank_id, document_id, chunk_id)
+            if chunk is None:
+                return {"error": f"Chunk '{chunk_id}' not found in document '{document_id}'."}
+            text = chunk.get("chunk_text") or ""
+            return {
+                **base,
+                "chunk_id": chunk_id,
+                "chunk_index": chunk.get("chunk_index"),
+                "text": text[:max_chars],
+                "truncated": len(text) > max_chars,
+            }
+
+        full = doc.get("original_text") or ""
+        start = max(0, int(offset))
+        end = start + max_chars
+        return {
+            **base,
+            "text": full[start:end],
+            "offset": start,
+            "total_chars": len(full),
+            "next_offset": end if end < len(full) else None,
+        }
+
+    async def _find_chunk(
+        self, bank_id: str, document_id: str, chunk_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        offset = 0
+        for _ in range(self._MAX_CHUNK_PAGES):
+            page = await self._fetch(
+                self.memory_backend.list_document_chunks, bank_id, document_id,
+                limit=self._CHUNK_PAGE, offset=offset,
+            ) or {}
+            items = page.get("items") or []
+            for item in items:
+                if item.get("chunk_id") == chunk_id:
+                    return cast(Dict[str, Any], item)
+            offset += len(items)
+            if not items or offset >= int(page.get("total") or 0):
+                return None
+        return None
 
 
 class MemoryToolHandler:
