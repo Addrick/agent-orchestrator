@@ -9,9 +9,9 @@
 #      message history that has accumulated the prior iterations' tool calls
 #      and tool results (so the agent "gets proper context at each step").
 #   2. Memory recording — the user turn and the final assistant turn are both
-#      persisted (log_message rows) and pushed through the backend boundary
-#      (`retain_turn`), and the assistant row carries the tool-call transcript
-#      as tool_context.
+#      persisted (log_message rows) and, once they leave the window, pushed
+#      through the backend boundary (`retain_turn`, deferred since DP-423),
+#      and the assistant row carries the tool-call transcript as tool_context.
 #   3. Clean closure — the per-turn ContextVar is set during the turn and
 #      reset to None afterward, and the stream terminates with exactly one
 #      DoneEvent (carrying the real interaction ids) and nothing after it.
@@ -19,11 +19,12 @@
 import copy
 import json
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from tests.helpers import offer_tools
+from src.memory.backend.base import SESSION_GAP_SECONDS
 from src.chat_system import (
     DoneEvent, ErrorEvent, TokenEvent,
     ToolCallResultEvent, ToolCallStartEvent, ResponseType,
@@ -161,6 +162,14 @@ async def test_tool_loop_context_flow_memory_and_clean_close(mocked_chat_system)
     ctx_tool_ids = [m.get("tool_call_id") for m in tool_ctx if m.get("role") == "tool"]
     assert ctx_tool_ids == ["call_1", "call_2"]
 
+    # DP-423: both turns are still in the window, so nothing is retained yet —
+    # they wait in the queue until evicted or their session goes idle.
+    await chat_system.turn_persistence.drain_flushes()
+    assert retain_spy.await_count == 0
+    sent = await chat_system.turn_persistence.flush_idle_sessions(
+        now=datetime.now(timezone.utc) + timedelta(seconds=SESSION_GAP_SECONDS + 60),
+    )
+    assert sent == 2
     # Backend boundary received both turns with the right roles + content,
     # and the assistant turn is marked untrusted=False (no tainting tool ran).
     assert retain_spy.await_count == 2

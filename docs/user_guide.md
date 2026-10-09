@@ -1836,6 +1836,16 @@ Restore-test at least once before relying on backups — bank IDs and tag schema
 
 The retain path is fire-and-forget through a per-bank async queue: user turns enqueue and return immediately; one worker per bank drains in FIFO order. There is no DLQ — alpha tolerates dropped retains rather than risk back-pressure on user turns.
 
+**A turn reaches Hindsight once it has left the history window (DP-423).** While a message is inside the persona's sliding-window history the model reads it verbatim, so retaining it as well would make recall hand the same conversation back a second time. Each turn therefore waits in the database and is appended to the session's Hindsight document when one of two things happens:
+
+- **Newer turns push it out of the window.** The window holds the last `context` messages of the persona's memory-mode scope, and that window always keeps priority: it is never trimmed to make room for memory. On each turn, every waiting message in that scope older than the window's oldest message is sent, oldest first. The scope follows the memory mode exactly: the channel (`channel`), every channel of the persona (`global`, so a turn in one channel can push out another channel's messages), the server (`server`), or the speaking user's messages (`personal`). A persona whose window is empty (`ticket` mode, or a window of 0) sends each turn on the next one.
+- **Its conversation stops for 24 hours.** A channel with no new message for 24 hours (the same gap that starts a new Hindsight document) has all its waiting messages sent, even though nothing pushed them out of the window. Otherwise a short conversation that simply stops would never be remembered. This is checked on every turn the engine handles, in any channel, and once at startup. Retrying a reply counts as activity, so retrying in a conversation that has been quiet for a day does not send the reply you are replacing.
+- *Known overlap:* if you pick that conversation up again after it was sent, its last messages are still in the window and also recallable until newer turns push them out. That is the price of the window keeping priority. Hindsight cannot hide them from recall: an appended session's facts all carry the session's latest timestamp, so recall cannot be cut off at the window's edge.
+- **Nothing is lost when Hindsight is down.** A message leaves the waiting list only once Hindsight has accepted it. If Hindsight or its model server is offline, the message stays waiting and is retried on later turns. Sending happens in the background, so a slow or unreachable Hindsight never delays a reply.
+- **Edits and deletes inside the window are honoured.** What is sent is the message as it stands at eviction: an edited message is sent with its new text, a deleted one is not sent at all, and a retried reply is sent only in its final version — Hindsight never sees the discarded attempts. If the final version is one that would never be remembered on a first try (the reply errored or was stopped part-way, or it is only the tool-call list), nothing from that turn is sent.
+- Each turn keeps its original time, speaker label and untrusted flag; deferring it changes when it is sent, not what is sent.
+- Waiting messages are stored durably, so a restart loses nothing. Messages from before this change were already retained and are not sent again.
+
 **What each retained turn looks like (DP-402).** Turns in one channel are appended into a single Hindsight document, so each turn is labelled with who said it — otherwise the extractor reads an unattributed run of messages and has to guess the speaker:
 
 ```
@@ -1851,11 +1861,11 @@ derpr: We settled on the 45% floor with a 30s spin-down delay.
 - `scripts/backfill_hindsight.py` uses the same format, so backfilled and live turns read alike.
 - **Reasoning is never retained (DP-409).** A `<think>…</think>` block that a model leaves inline in its reply is stripped before the turn is sent — extraction otherwise files the model's self-talk as facts about the user.
 
-**Retries keep only the canonical conversation (DP-409).** Hindsight remembers the conversation you *kept*, not every attempt. When you **Retry** a reply, the session's Hindsight document is rebuilt from the stored conversation — which holds only the latest version of each turn — and replaced whole. Facts extracted from the discarded attempt, and observations built only on them, are deleted; the new text is re-extracted. A normal turn still just appends, so a replace costs one re-extraction of the session only when you retry.
+**Retries keep only the canonical conversation (DP-409).** Hindsight remembers the conversation you *kept*, not every attempt. Since DP-423 a retried reply is normally still waiting in the window, so retrying it simply replaces what will be sent. Only when the retried reply had already been sent (its conversation sat idle for 24 hours first) is the session's Hindsight document rebuilt from the stored conversation — which holds only the latest version of each turn — and replaced whole. Facts extracted from the discarded attempt, and observations built only on them, are deleted; the new text is re-extracted.
 
 - The session is the same one normal turns append to: one document per persona and channel, cut after 24 hours idle.
 - If the session has no document on record (e.g. the doc-scope store was wiped), a retry falls back to appending the new reply, as before.
-- *Known gap:* switching the kept version with the `<` / `>` chevrons, editing or deleting a message does not rebuild the document yet — Hindsight keeps whatever it last saw.
+- *Known gap:* switching the kept version with the `<` / `>` chevrons, editing or deleting a message **after it has left the window** does not rebuild the document — Hindsight keeps whatever it was sent.
 
 ### Operator trust overrides
 

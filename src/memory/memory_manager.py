@@ -448,6 +448,30 @@ class MemoryManager:
                 retired_at TIMESTAMP,
                 retire_note TEXT
             );
+
+            -- DP-423: turns waiting to be retained into the semantic backend.
+            -- A turn is retained once it leaves the sliding history window
+            -- (or its session goes idle), never while the model still sees it
+            -- verbatim. The row's text is read from User_Interactions at flush
+            -- time, so edits and deletes inside the window are honoured;
+            -- `retain_text` overrides it only while the row still holds
+            -- `source_content` (DP-335's footer is persisted but not retained).
+            -- persona_name/channel duplicate the interaction's own columns so
+            -- the per-scope flush is one indexed range scan. `generation`
+            -- counts re-queues, so a flush that read a row before a retry
+            -- re-queued it cannot dequeue the new attempt.
+            CREATE TABLE IF NOT EXISTS Pending_Retain (
+                interaction_id INTEGER PRIMARY KEY,
+                persona_name TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                untrusted INTEGER NOT NULL DEFAULT 0,
+                retain_text TEXT,
+                source_content TEXT,
+                generation INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (interaction_id) REFERENCES User_Interactions(interaction_id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_pending_retain_scope
+                ON Pending_Retain (persona_name, channel, interaction_id);
             """
             conn.executescript(schema_sql)
             conn.commit()
@@ -1405,19 +1429,185 @@ class MemoryManager:
                 (persona_name, channel),
             )
             for row in cursor:
-                ts = row["timestamp"]
-                try:
-                    parsed = datetime.fromisoformat(ts) if isinstance(ts, str) else ts
-                except ValueError:
+                parsed = self.parse_stored_ts(row["timestamp"])
+                if parsed is None:
                     continue
-                if not isinstance(parsed, datetime):
-                    continue
-                parsed = to_utc(parsed)
                 if parsed < since:
                     break
                 rows.append({**dict(row), "timestamp": parsed})
         rows.reverse()
         return rows
+
+    @staticmethod
+    def parse_stored_ts(ts: Any) -> Optional[datetime]:
+        """A stored `timestamp` as aware UTC, or None when unreadable.
+
+        Rows written before DP-413 hold a naive `datetime.now()`; `to_utc`
+        reads naive values as UTC.
+        """
+        try:
+            parsed = datetime.fromisoformat(ts) if isinstance(ts, str) else ts
+        except ValueError:
+            return None
+        if not isinstance(parsed, datetime):
+            return None
+        return to_utc(parsed)
+
+    # ---------- Deferred retain queue (DP-423) ----------
+
+    def queue_retain(self, interaction_id: int, persona_name: str, channel: str,
+                     *, untrusted: bool, retain_text: Optional[str] = None,
+                     source_content: Optional[str] = None) -> None:
+        """Mark a turn for retain once it leaves the history window.
+
+        Upsert: a retried or resumed turn re-queues the same row, and the
+        newest attempt's taint and retain text replace the discarded one's.
+        Each re-queue bumps `generation`, so a flush already holding the old
+        attempt leaves the new one queued (`delete_pending_retains`).
+        """
+        with self._lock:
+            conn = self._get_connection()
+            conn.execute(
+                "INSERT INTO Pending_Retain"
+                " (interaction_id, persona_name, channel, untrusted, retain_text, source_content)"
+                " VALUES (?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(interaction_id) DO UPDATE SET"
+                " untrusted=excluded.untrusted, retain_text=excluded.retain_text,"
+                " source_content=excluded.source_content, generation=generation + 1",
+                (interaction_id, persona_name, channel, int(untrusted),
+                 retain_text, source_content),
+            )
+            conn.commit()
+
+    def is_retain_pending(self, interaction_id: int) -> bool:
+        with self._lock:
+            row = self._get_connection().execute(
+                "SELECT 1 FROM Pending_Retain WHERE interaction_id = ?",
+                (interaction_id,),
+            ).fetchone()
+        return row is not None
+
+    # Sentinel for "any server" — None is a real value (web UI rows store
+    # server_id NULL, which the history getters match with IS NULL).
+    ANY_SERVER: Any = object()
+
+    @classmethod
+    def _pending_retain_filters(cls, persona_name: Optional[str],
+                                before_id: Optional[int], channel: Optional[str],
+                                user_identifier: Optional[str],
+                                server_id: Any) -> Tuple[str, List[Any]]:
+        clauses = [
+            (" AND p.persona_name = ?", persona_name),
+            (" AND p.interaction_id < ?", before_id),
+            (" AND p.channel = ?", channel),
+            (" AND u.user_identifier = ?", user_identifier),
+        ]
+        where = "".join(c for c, v in clauses if v is not None)
+        params: List[Any] = [v for _, v in clauses if v is not None]
+        if server_id is None:
+            where += " AND u.server_id IS NULL"
+        elif server_id is not cls.ANY_SERVER:
+            where += " AND u.server_id = ?"
+            params.append(server_id)
+        return where, params
+
+    def pending_retains(self, persona_name: Optional[str] = None, *,
+                        before_id: Optional[int] = None,
+                        channel: Optional[str] = None,
+                        user_identifier: Optional[str] = None,
+                        server_id: Any = ANY_SERVER) -> List[Dict[str, Any]]:
+        """Waiting turns that have left the history window, oldest first.
+
+        `before_id` limits to turns older than the window's oldest turn; None
+        means all. `persona_name`, `channel`, `user_identifier` and
+        `server_id` narrow it to the rows one memory mode's window covers,
+        matched on the interaction's own columns the way the history getters
+        match them (`server_id=None` is IS NULL); a None filter matches all.
+
+        Read-only: a turn stays queued until `delete_pending_retains` is
+        called for it, i.e. until the backend confirmed the retain. Each row
+        carries its persona and channel, the text to retain (`retain_text`
+        when the row still holds the content it was derived from, else the
+        row's current content), its queue `generation`, and `skip`, set for
+        turns deleted or emptied since they were queued.
+        """
+        where, params = self._pending_retain_filters(
+            persona_name, before_id, channel, user_identifier, server_id,
+        )
+        query = (
+            "SELECT p.interaction_id, p.persona_name, p.untrusted, p.retain_text,"
+            " p.source_content, p.generation, u.channel, u.author_role, u.author_name,"
+            " u.user_identifier, u.server_id, u.content, u.timestamp,"
+            " EXISTS(SELECT 1 FROM Suppressed_Interactions s"
+            "        WHERE s.interaction_id = p.interaction_id) AS suppressed"
+            " FROM Pending_Retain p"
+            " JOIN User_Interactions u ON u.interaction_id = p.interaction_id"
+            " WHERE 1 = 1" + where + " ORDER BY p.interaction_id"
+        )
+        with self._lock:
+            rows = [dict(r) for r in self._get_connection().execute(query, params).fetchall()]
+        result: List[Dict[str, Any]] = []
+        for r in rows:
+            content = r["content"] or ""
+            if r["retain_text"] is not None and content == r["source_content"]:
+                text = r["retain_text"]
+            else:
+                text = content
+            ts = self.parse_stored_ts(r["timestamp"])
+            result.append({
+                "interaction_id": r["interaction_id"],
+                "persona_name": r["persona_name"],
+                "channel": r["channel"],
+                "author_role": r["author_role"],
+                "author_name": r["author_name"],
+                "user_identifier": r["user_identifier"],
+                "server_id": r["server_id"],
+                "text": text,
+                "timestamp": ts,
+                "untrusted": bool(r["untrusted"]),
+                "generation": r["generation"],
+                "skip": bool(r["suppressed"]) or not text.strip() or ts is None,
+            })
+        return result
+
+    def delete_pending_retains(self, rows: Sequence[Dict[str, Any]]) -> None:
+        """Dequeue rows read by `pending_retains`, except any re-queued since:
+        a retry that landed mid-flush bumped `generation` and stays queued."""
+        with self.transaction() as conn:
+            conn.executemany(
+                "DELETE FROM Pending_Retain WHERE interaction_id = ? AND generation = ?",
+                [(r["interaction_id"], r["generation"]) for r in rows],
+            )
+
+    def discard_pending_retain(self, interaction_id: int) -> None:
+        """Drop a queued turn unretained, whatever its generation."""
+        with self.transaction() as conn:
+            conn.execute(
+                "DELETE FROM Pending_Retain WHERE interaction_id = ?",
+                (interaction_id,),
+            )
+
+    def idle_retain_scopes(self, idle_before: datetime) -> List[Tuple[str, str]]:
+        """(persona, channel) scopes with waiting turns and no turn at all
+        since `idle_before` — conversations that stopped (DP-423 sweep)."""
+        idle_before = to_utc(idle_before)
+        idle: List[Tuple[str, str]] = []
+        with self._lock:
+            conn = self._get_connection()
+            scopes = conn.execute(
+                "SELECT DISTINCT persona_name, channel FROM Pending_Retain"
+            ).fetchall()
+            for s in scopes:
+                last = conn.execute(
+                    "SELECT timestamp FROM User_Interactions"
+                    " WHERE persona_name = ? AND channel = ?"
+                    " ORDER BY interaction_id DESC LIMIT 1",
+                    (s["persona_name"], s["channel"]),
+                ).fetchone()
+                last_ts = self.parse_stored_ts(last["timestamp"]) if last else None
+                if last_ts is None or last_ts < idle_before:
+                    idle.append((s["persona_name"], s["channel"]))
+        return idle
 
     def get_server_history(self, server_id: Optional[str], persona_name: str, limit: Optional[int] = None) -> List[
         Dict[str, Any]]:

@@ -423,17 +423,25 @@ class ChatSystem:
                     timestamp=user_ts,
                 )
 
-                # DP-113: retain user turn through the backend boundary. Sqlite_legacy
-                # is a noop (batch SqliteConsolidator still drives consolidation); Hindsight
-                # enqueues fire-and-forget. Either way, retain_turn returns quickly
-                # and does not block the LLM call below.
+                # DP-113 / DP-423: retain through the backend boundary, but only
+                # turns that have left the window this request was built from —
+                # the model reads the rest verbatim, and retaining them too makes
+                # recall hand them back twice — plus conversations idle for a
+                # day, which nothing else would ever push out. This turn joins
+                # the queue. The flush runs as a background task and never
+                # blocks the LLM call below.
+                self.turn_persistence.schedule_flush(
+                    persona_name=persona_name,
+                    memory_mode=persona.get_memory_mode(),
+                    channel=channel, user_identifier=user_identifier,
+                    server_id=server_id,
+                    oldest_window_id=ctx.oldest_interaction_id,
+                    current_id=user_interaction_id,
+                )
                 if user_interaction_id is not None and message and message.strip():
-                    await self.turn_persistence.retain_turn_safe(
-                        persona_name=persona_name, role="user",
-                        speaker=user_display_name or user_identifier, content=message,
-                        user_identifier=user_identifier, channel=channel,
-                        server_id=server_id, timestamp=user_ts,
-                        interaction_id=user_interaction_id, untrusted=False,
+                    self.turn_persistence.queue_retain_safe(
+                        interaction_id=user_interaction_id,
+                        persona_name=persona_name, channel=channel, untrusted=False,
                     )
             else:
                 # 2'. Continuation: the operator's decisions were already
@@ -624,6 +632,11 @@ class ChatSystem:
                             # created earlier in THIS turn, which only became
                             # findable by token on the line above.
                             self._register_duplicates(dups_this_turn, errored_id)
+                            # DP-423: a retry whose partial text overwrote a
+                            # queued reply is not retained, like any errored turn.
+                            self.turn_persistence.discard_overwritten_retry(
+                                errored_id, retry_assistant_id, "".join(accumulated_parts),
+                            )
                         yield ev
                         return
                     elif isinstance(ev, _LoopFinishedEvent):
@@ -641,7 +654,7 @@ class ChatSystem:
                 # then re-raise so the surrounding StreamingResponse aborts.
                 partial = "".join(accumulated_parts)
                 if partial.strip():
-                    self.turn_persistence.commit_or_update_assistant(
+                    cancelled_id = self.turn_persistence.commit_or_update_assistant(
                         persona_name=persona_name, user_identifier=user_identifier,
                         channel=channel, server_id=server_id,
                         final_text=partial,
@@ -649,6 +662,10 @@ class ChatSystem:
                         user_interaction_id=user_interaction_id,
                         retry_assistant_id=retry_assistant_id,
                         tool_context_json=None,
+                    )
+                    # DP-423: as on the error path above.
+                    self.turn_persistence.discard_overwritten_retry(
+                        cancelled_id, retry_assistant_id, partial,
                     )
                 raise
 
@@ -678,26 +695,40 @@ class ChatSystem:
             # footer, which is ground truth for the reader but would become a
             # recallable "memory" of tool names and arguments if embedded.
             to_retain = retain_text if retain_text is not None else final_text
-            if assistant_id is not None and to_retain and to_retain.strip() \
-                    and response_type == ResponseType.LLM_GENERATION \
-                    and assistant_id == retry_assistant_id:
-                # DP-409: a retry replaced this row in place, so Hindsight gets
-                # the rebuilt canonical session, not the new attempt appended
-                # beside the discarded one.
+            retainable = bool(to_retain and to_retain.strip()) \
+                and response_type == ResponseType.LLM_GENERATION
+            if assistant_id is not None and retainable \
+                    and assistant_id == retry_assistant_id \
+                    and not self.turn_persistence.is_retain_pending(assistant_id):
+                # DP-409: a retry replaced an already-retained row in place, so
+                # Hindsight gets the rebuilt canonical session, not the new
+                # attempt appended beside the discarded one. Since DP-423 that
+                # needs the reply to have been flushed first (its conversation
+                # sat idle for a day); one still queued just re-queues below.
                 await self.turn_persistence.rebuild_session_safe(
                     persona_name=persona_name, channel=channel,
                     user_identifier=user_identifier, server_id=server_id,
                     retried_id=assistant_id, retried_text=to_retain,
                     untrusted=ctx.turn_tainted,
                 )
-            elif assistant_id is not None and to_retain and to_retain.strip() \
-                    and response_type == ResponseType.LLM_GENERATION:
-                await self.turn_persistence.retain_turn_safe(
-                    persona_name=persona_name, role="assistant",
-                    speaker=persona_name, content=to_retain,
-                    user_identifier=user_identifier, channel=channel,
-                    server_id=server_id, timestamp=datetime.now(timezone.utc),
-                    interaction_id=assistant_id, untrusted=ctx.turn_tainted,
+            elif assistant_id is not None and retainable:
+                # DP-423: queued, not retained — see the user-turn note above.
+                self.turn_persistence.queue_retain_safe(
+                    interaction_id=assistant_id,
+                    persona_name=persona_name, channel=channel,
+                    untrusted=ctx.turn_tainted,
+                    retain_text=to_retain if retain_text is not None else None,
+                    source_content=final_text if retain_text is not None else None,
+                )
+            else:
+                # DP-423: a retry that overwrote the row with an attempt that
+                # is never retained (footer only, not an LLM reply) must not
+                # leave the discarded attempt queued. A retried park keeps its
+                # row's text (commit_or_update_assistant), so nothing was
+                # written over it.
+                self.turn_persistence.discard_overwritten_retry(
+                    assistant_id, retry_assistant_id,
+                    "" if response_type == ResponseType.PENDING_CONFIRMATION else final_text,
                 )
 
             yield DoneEvent(

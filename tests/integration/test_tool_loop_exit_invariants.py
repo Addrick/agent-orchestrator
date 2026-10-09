@@ -21,11 +21,13 @@
 import asyncio
 import copy
 import time
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from unittest.mock import AsyncMock
 
 from tests.helpers import offer_tools
+from src.memory.backend.base import SESSION_GAP_SECONDS
 from src.chat_system import (
     DoneEvent, ErrorEvent, ToolCallResultEvent, ResponseType,
 )
@@ -312,13 +314,15 @@ async def test_budget_exhaustion_answer_is_persisted_and_retained(
         return {"status": "running"}
     chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[assignment]
 
+    # Spy at the backend boundary: since DP-423 the retain is deferred and
+    # delivered by the flush, which calls the backend directly.
     retained = []
-    original_retain = chat_system.turn_persistence.retain_turn_safe
+    original_retain = chat_system.memory_backend.retain_turn
 
     async def spy_retain(**kwargs):
         retained.append(kwargs)
         return await original_retain(**kwargs)
-    chat_system.turn_persistence.retain_turn_safe = spy_retain  # type: ignore[assignment]
+    chat_system.memory_backend.retain_turn = spy_retain  # type: ignore[assignment]
 
     events = await _drain(chat_system.stream_response(
         "test_persona", "u_budget", "c_budget", "install the official model",
@@ -352,6 +356,14 @@ async def test_budget_exhaustion_answer_is_persisted_and_retained(
     # ...and RETAINED. This is the half that was structurally impossible
     # before: `_orchestrate` gates retention on response_type, so a real answer
     # shipped as DEV_COMMAND would never reach the memory bank.
+    #
+    # DP-423 defers the retain until the turn leaves the window, so the prose
+    # / footer split now has to survive the queue: cut the session to flush.
+    await chat_system.turn_persistence.drain_flushes()
+    assert not [k for k in retained if k.get("role") == "assistant"]
+    await chat_system.turn_persistence.flush_idle_sessions(
+        now=datetime.now(timezone.utc) + timedelta(seconds=SESSION_GAP_SECONDS + 60),
+    )
     assistant_retained = [k for k in retained if k.get("role") == "assistant"]
     assert assistant_retained
 
@@ -366,7 +378,8 @@ async def test_budget_exhaustion_answer_is_persisted_and_retained(
     #
     # `content` is read, not just counted. A captured payload nobody
     # interrogates is a fixture, not a test.
-    embedded = assistant_retained[0]["content"]
+    # The backend sees DP-402's speaker label; the body follows it.
+    embedded = assistant_retained[0]["content"].removeprefix("test_persona: ")
     assert embedded.startswith("Nothing installable matched.")
     assert "`get_agent_status`" not in embedded, (
         "the machine-generated call list was embedded into the memory bank"
