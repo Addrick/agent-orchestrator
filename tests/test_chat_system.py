@@ -1537,11 +1537,13 @@ async def test_retry_rebuilds_hindsight_session_instead_of_appending(
     chat_system_with_mocks,
 ):
     """DP-409: the regenerated reply replaces the session document; appending
-    it would leave the discarded attempt's facts recallable."""
+    it would leave the discarded attempt's facts recallable. Since DP-423 only
+    a reply that was already retained (not still queued) gets here."""
     system, memory_mock, _, _, _ = chat_system_with_mocks
     memory_mock.get_channel_history.return_value = []
     memory_mock.handle_portal_retry.return_value = 99
     memory_mock.update_interaction_content.return_value = True
+    memory_mock.is_retain_pending.return_value = False
     system.turn_persistence.rebuild_session_safe = AsyncMock()
     system.turn_persistence.retain_turn_safe = AsyncMock()
 
@@ -1552,10 +1554,40 @@ async def test_retry_rebuilds_hindsight_session_instead_of_appending(
     )
 
     system.turn_persistence.retain_turn_safe.assert_not_called()
+    memory_mock.queue_retain.assert_not_called()
     kwargs = system.turn_persistence.rebuild_session_safe.call_args.kwargs
     assert kwargs["retried_id"] == 99
     assert kwargs["retried_text"] == "LLM Reply"
     assert kwargs["channel"] == "web_ui"
+
+
+@pytest.mark.asyncio
+async def test_retry_of_queued_reply_requeues_instead_of_rebuilding(
+    chat_system_with_mocks,
+):
+    """DP-423: a retried reply still in the window was never sent to
+    Hindsight, so the new attempt just replaces the queued one — no rebuild,
+    no retain."""
+    system, memory_mock, _, _, _ = chat_system_with_mocks
+    memory_mock.get_channel_history.return_value = []
+    memory_mock.handle_portal_retry.return_value = 99
+    memory_mock.update_interaction_content.return_value = True
+    memory_mock.is_retain_pending.return_value = True
+    system.turn_persistence.rebuild_session_safe = AsyncMock()
+    system.turn_persistence.retain_turn_safe = AsyncMock()
+
+    await _drain_events(
+        system.stream_response(
+            "test_persona", "portal", "web_ui", "ignored", is_retry=True,
+        )
+    )
+
+    system.turn_persistence.rebuild_session_safe.assert_not_called()
+    system.turn_persistence.retain_turn_safe.assert_not_called()
+    memory_mock.queue_retain.assert_called_once()
+    args, kwargs = memory_mock.queue_retain.call_args
+    assert args == (99, "test_persona", "web_ui")
+    assert kwargs["untrusted"] is False
 
 
 @pytest.mark.asyncio

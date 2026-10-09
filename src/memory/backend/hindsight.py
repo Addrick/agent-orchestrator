@@ -12,7 +12,7 @@ import httpx
 from config import global_config
 from .base import (
     MemoryBackend, MemoryBackendError, MemoryHit, Experience, ReflectResult,
-    MentalModel,
+    MentalModel, SESSION_GAP_SECONDS,
 )
 
 if TYPE_CHECKING:
@@ -26,10 +26,6 @@ TRUSTED_TAG = "untrusted:false"
 # Hindsight hardcodes a single tenant prefix in every bank route (0.6.1;
 # still true on 0.10.0).
 HINDSIGHT_API_PREFIX = "/v1/default"
-
-# Session cut heuristic: gap between retains in the same scope that starts a
-# new document. >24h idle → new conversation document. Plan §1.4.
-SESSION_GAP_SECONDS = 24 * 3600
 
 
 class HindsightAPIError(MemoryBackendError):

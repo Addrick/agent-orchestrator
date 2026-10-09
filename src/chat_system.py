@@ -29,7 +29,7 @@ from src.generation_events import (
 )
 from src.message_handler import BotLogic
 from src.origin import ANONYMOUS, Origin
-from src.persona import Persona
+from src.persona import MemoryMode, Persona
 from src.deferral_kinds import DEFERRAL_KIND_APPROVAL
 from src.request_builder import AssembledRequest, RequestBuilder, RequestContext
 from src.security.scrubber import get_scrubber
@@ -409,6 +409,11 @@ class ChatSystem:
                 yield ErrorEvent(message=err_msg)
                 return
 
+            # DP-423: cut idle sessions before this turn is logged — logging it
+            # would make this scope look active, and its previous session's
+            # queued turns must reach Hindsight before the new session starts.
+            await self.turn_persistence.flush_idle_sessions()
+
             if continuation is None:
                 # 2. Log user turn (or archive for retry). Done after history is built
                 #    (so the freshly-inserted row doesn't show up twice) but before
@@ -423,17 +428,25 @@ class ChatSystem:
                     timestamp=user_ts,
                 )
 
-                # DP-113: retain user turn through the backend boundary. Sqlite_legacy
-                # is a noop (batch SqliteConsolidator still drives consolidation); Hindsight
-                # enqueues fire-and-forget. Either way, retain_turn returns quickly
-                # and does not block the LLM call below.
+                # DP-113 / DP-423: retain through the backend boundary, but only
+                # turns that have left the window this request was built from —
+                # the model reads the rest verbatim, and retaining them too makes
+                # recall hand them back twice. This turn joins the queue. Neither
+                # call blocks the LLM call below (Hindsight enqueues
+                # fire-and-forget; sqlite_legacy's retain is a noop).
+                await self.turn_persistence.flush_evicted(
+                    persona_name=persona_name, channel=channel,
+                    oldest_window_id=ctx.oldest_interaction_id,
+                    current_id=user_interaction_id,
+                    user_identifier=(
+                        user_identifier
+                        if persona.get_memory_mode() == MemoryMode.PERSONAL else None
+                    ),
+                )
                 if user_interaction_id is not None and message and message.strip():
-                    await self.turn_persistence.retain_turn_safe(
-                        persona_name=persona_name, role="user",
-                        speaker=user_display_name or user_identifier, content=message,
-                        user_identifier=user_identifier, channel=channel,
-                        server_id=server_id, timestamp=user_ts,
-                        interaction_id=user_interaction_id, untrusted=False,
+                    self.turn_persistence.queue_retain_safe(
+                        interaction_id=user_interaction_id,
+                        persona_name=persona_name, channel=channel, untrusted=False,
                     )
             else:
                 # 2'. Continuation: the operator's decisions were already
@@ -680,10 +693,13 @@ class ChatSystem:
             to_retain = retain_text if retain_text is not None else final_text
             if assistant_id is not None and to_retain and to_retain.strip() \
                     and response_type == ResponseType.LLM_GENERATION \
-                    and assistant_id == retry_assistant_id:
-                # DP-409: a retry replaced this row in place, so Hindsight gets
-                # the rebuilt canonical session, not the new attempt appended
-                # beside the discarded one.
+                    and assistant_id == retry_assistant_id \
+                    and not self.turn_persistence.is_retain_pending(assistant_id):
+                # DP-409: a retry replaced an already-retained row in place, so
+                # Hindsight gets the rebuilt canonical session, not the new
+                # attempt appended beside the discarded one. Since DP-423 that
+                # only happens once an idle session was cut; a retried reply
+                # still in the window just re-queues below.
                 await self.turn_persistence.rebuild_session_safe(
                     persona_name=persona_name, channel=channel,
                     user_identifier=user_identifier, server_id=server_id,
@@ -692,12 +708,13 @@ class ChatSystem:
                 )
             elif assistant_id is not None and to_retain and to_retain.strip() \
                     and response_type == ResponseType.LLM_GENERATION:
-                await self.turn_persistence.retain_turn_safe(
-                    persona_name=persona_name, role="assistant",
-                    speaker=persona_name, content=to_retain,
-                    user_identifier=user_identifier, channel=channel,
-                    server_id=server_id, timestamp=datetime.now(timezone.utc),
-                    interaction_id=assistant_id, untrusted=ctx.turn_tainted,
+                # DP-423: queued, not retained — see the user-turn note above.
+                self.turn_persistence.queue_retain_safe(
+                    interaction_id=assistant_id,
+                    persona_name=persona_name, channel=channel,
+                    untrusted=ctx.turn_tainted,
+                    retain_text=to_retain if retain_text is not None else None,
+                    source_content=final_text if retain_text is not None else None,
                 )
 
             yield DoneEvent(

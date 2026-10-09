@@ -3,7 +3,8 @@
 
 The write-side tail of a turn, extracted from ChatSystem: logging the user
 row (or archiving the prior assistant on retry), committing/updating the
-assistant row, fire-and-forget LTM retain, and the per-user API-request
+assistant row, LTM retain (deferred until a turn leaves the history window,
+DP-423), and the per-user API-request
 caches that back `dump_history`. The orchestration kernel decides *when*
 these happen; this module owns *how* and holds the cache state.
 """
@@ -11,12 +12,12 @@ these happen; this module owns *how* and holds the cache state.
 import logging
 import re
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple, cast
 
 from config.global_config import MAX_CACHED_API_REQUESTS
 from src.generation_events import ResponseType
-from src.memory.backend.base import MemoryBackend
+from src.memory.backend.base import SESSION_GAP_SECONDS, MemoryBackend
 from src.memory.memory_manager import MemoryManager
 from src.memory.scope_tags import build_scope_tags
 from src.security.scrubber import get_scrubber
@@ -314,6 +315,125 @@ class TurnPersistence:
             content=retried_text, user_identifier=user_identifier, channel=channel,
             server_id=server_id, timestamp=datetime.now(timezone.utc),
             interaction_id=retried_id, untrusted=untrusted,
+        )
+
+    def queue_retain_safe(
+        self,
+        *,
+        interaction_id: int,
+        persona_name: str,
+        channel: str,
+        untrusted: bool,
+        retain_text: Optional[str] = None,
+        source_content: Optional[str] = None,
+    ) -> None:
+        """Queue a turn for retain once it leaves the history window (DP-423).
+
+        While a turn is in the window the model reads it verbatim, so
+        retaining it too would make recall hand it back a second time. The
+        queue is durable; `flush_evicted` and `flush_idle_sessions` drain it.
+        `retain_text` (DP-335) replaces the row's content at flush time only
+        while the row still holds `source_content`.
+        """
+        try:
+            self.memory_manager.queue_retain(
+                interaction_id, persona_name, channel, untrusted=untrusted,
+                retain_text=retain_text, source_content=source_content,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"queue_retain dropped (interaction {interaction_id}): {e}")
+
+    def is_retain_pending(self, interaction_id: int) -> bool:
+        try:
+            return self.memory_manager.is_retain_pending(interaction_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"is_retain_pending failed (interaction {interaction_id}): {e}")
+            return False
+
+    async def flush_retains(
+        self,
+        persona_name: str,
+        channel: str,
+        *,
+        before_id: Optional[int] = None,
+        user_identifier: Optional[str] = None,
+    ) -> int:
+        """Retain a scope's queued turns, oldest first; returns how many.
+
+        Each turn keeps its own timestamp, so the doc-scope store cuts
+        documents at the same idle gaps it would have cut them live.
+        """
+        try:
+            rows = self.memory_manager.take_pending_retains(
+                persona_name, channel,
+                before_id=before_id, user_identifier=user_identifier,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Pending retain flush failed ({persona_name}/{channel}): {e}")
+            return 0
+        sent = 0
+        for r in rows:
+            if r["skip"]:
+                continue
+            role = (r["author_role"] or "").lower()
+            speaker = (
+                persona_name if role == "assistant"
+                else r["author_name"] or r["user_identifier"] or "Unknown"
+            )
+            await self.retain_turn_safe(
+                persona_name=persona_name, role=role, speaker=speaker,
+                content=r["text"], user_identifier=r["user_identifier"],
+                channel=channel, server_id=r["server_id"],
+                timestamp=r["timestamp"], interaction_id=r["interaction_id"],
+                untrusted=r["untrusted"],
+            )
+            sent += 1
+        return sent
+
+    async def flush_idle_sessions(self, now: Optional[datetime] = None) -> int:
+        """Cut every idle session: retain all queued turns of any scope with
+        no turn in SESSION_GAP_SECONDS — the gap that opens a new Hindsight
+        document — so a conversation that stops is still remembered.
+
+        Lazy sweep, run on every turn and once at startup (the DP-319 pairing:
+        the sweep reads the durable queue, the boot pass covers a process
+        that comes up and sees no traffic).
+        """
+        now = now or datetime.now(timezone.utc)
+        try:
+            scopes = self.memory_manager.idle_retain_scopes(
+                now - timedelta(seconds=SESSION_GAP_SECONDS)
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Idle retain sweep failed: {e}")
+            return 0
+        sent = 0
+        for persona_name, channel in scopes:
+            sent += await self.flush_retains(persona_name, channel)
+        return sent
+
+    async def flush_evicted(
+        self,
+        *,
+        persona_name: str,
+        channel: str,
+        oldest_window_id: Optional[int],
+        current_id: Optional[int],
+        user_identifier: Optional[str] = None,
+    ) -> int:
+        """Retain the scope's queued turns that have left the history window.
+
+        Interaction ids are insertion-ordered, so everything older than the
+        window's oldest turn is out of it, in every memory mode. An empty
+        window (`ticket` mode, a window of 0) evicts everything before the
+        current turn. `user_identifier` restricts the flush to one user's
+        turns, for `personal` mode where only those are in the window.
+        """
+        before_id = oldest_window_id if oldest_window_id is not None else current_id
+        if before_id is None:
+            return 0
+        return await self.flush_retains(
+            persona_name, channel, before_id=before_id, user_identifier=user_identifier,
         )
 
     async def retain_turn_safe(

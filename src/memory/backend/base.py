@@ -24,6 +24,13 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 
+# Session cut heuristic: gap between retains in the same scope that starts a
+# new document. >24h idle → new conversation document. Plan §1.4. Also the
+# idle gap after which TurnPersistence flushes a scope's deferred retains
+# (DP-423), so a conversation that stops is cut at the same point.
+SESSION_GAP_SECONDS = 24 * 3600
+
+
 # ----------------------------- Errors ----------------------------- #
 
 

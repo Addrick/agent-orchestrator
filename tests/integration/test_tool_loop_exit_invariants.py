@@ -21,11 +21,13 @@
 import asyncio
 import copy
 import time
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from unittest.mock import AsyncMock
 
 from tests.helpers import offer_tools
+from src.memory.backend.base import SESSION_GAP_SECONDS
 from src.chat_system import (
     DoneEvent, ErrorEvent, ToolCallResultEvent, ResponseType,
 )
@@ -352,6 +354,13 @@ async def test_budget_exhaustion_answer_is_persisted_and_retained(
     # ...and RETAINED. This is the half that was structurally impossible
     # before: `_orchestrate` gates retention on response_type, so a real answer
     # shipped as DEV_COMMAND would never reach the memory bank.
+    #
+    # DP-423 defers the retain until the turn leaves the window, so the prose
+    # / footer split now has to survive the queue: cut the session to flush.
+    assert not [k for k in retained if k.get("role") == "assistant"]
+    await chat_system.turn_persistence.flush_idle_sessions(
+        now=datetime.now(timezone.utc) + timedelta(seconds=SESSION_GAP_SECONDS + 60),
+    )
     assistant_retained = [k for k in retained if k.get("role") == "assistant"]
     assert assistant_retained
 
