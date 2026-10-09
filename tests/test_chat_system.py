@@ -1591,6 +1591,46 @@ async def test_retry_of_queued_reply_requeues_instead_of_rebuilding(
 
 
 @pytest.mark.asyncio
+async def test_retry_overwritten_by_unretained_attempt_discards_queued_reply(
+    chat_system_with_mocks, monkeypatch,
+):
+    """DP-423: a retry whose new attempt is never retained (here the
+    exhaustion fallback's bare tool list, DEV_COMMAND) still overwrites the
+    row. The queued previous attempt must go, or the flush retains the new
+    text under the discarded attempt's trust bit."""
+    from src.tools.tool_loop import _LoopFinishedEvent
+
+    system, memory_mock, _, _, _ = chat_system_with_mocks
+    memory_mock.get_channel_history.return_value = []
+    memory_mock.handle_portal_retry.return_value = 99
+    memory_mock.update_interaction_content.return_value = True
+    memory_mock.is_retain_pending.return_value = True
+
+    class _ExhaustedLoop:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def run(self, **kwargs):
+            yield _LoopFinishedEvent(
+                final_text="`get_agent_status` {} — ok",
+                response_type=ResponseType.DEV_COMMAND,
+                tool_context_json="[]",
+            )
+
+    monkeypatch.setattr("src.chat_system.ToolLoop", _ExhaustedLoop)
+
+    await _drain_events(
+        system.stream_response(
+            "test_persona", "portal", "web_ui", "ignored", is_retry=True,
+        )
+    )
+
+    memory_mock.update_interaction_content.assert_called_once()
+    memory_mock.queue_retain.assert_not_called()
+    memory_mock.discard_pending_retain.assert_called_once_with(99)
+
+
+@pytest.mark.asyncio
 async def test_stream_response_is_retry_pops_trailing_assistant(chat_system_with_mocks):
     """On retry, history from DB ends with the about-to-be-overwritten
     assistant row. Kernel must pop it from `messages_for_llm` so the model

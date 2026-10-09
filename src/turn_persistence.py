@@ -49,6 +49,27 @@ def format_retained_turn(role: str, speaker: str, content: str,
 _THINK_BLOCK = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 
 
+def _retain_kwargs(*, persona_name: str, role: str, speaker: str, content: str,
+                   user_identifier: str, channel: str, server_id: Optional[str],
+                   timestamp: datetime, interaction_id: int,
+                   untrusted: bool) -> Dict[str, Any]:
+    """The `MemoryBackend.retain_turn*` arguments for one chat turn: the
+    DP-402 header, UTC time, scope tags and interaction id, shared by the
+    eager (`retain_turn_safe`) and deferred (DP-423 flush) paths."""
+    return {
+        "bank_id": persona_name,
+        "role": role,
+        "content": format_retained_turn(role, speaker, content, timestamp),
+        "timestamp": to_utc(timestamp),
+        "scope_tags": build_scope_tags(
+            channel=channel, server_id=server_id, user_identifier=user_identifier,
+        ),
+        "source_persona": persona_name,
+        "untrusted": untrusted,
+        "metadata": {"interaction_id": str(interaction_id)},
+    }
+
+
 class TurnPersistence:
     """Owns turn write-paths (user/assistant rows, retain) + request caches."""
 
@@ -349,6 +370,22 @@ class TurnPersistence:
         except Exception as e:  # noqa: BLE001
             logger.warning(f"queue_retain dropped (interaction {interaction_id}): {e}")
 
+    def discard_overwritten_retry(self, row_id: Optional[int],
+                                  retry_assistant_id: Optional[int],
+                                  written_text: str) -> None:
+        """Unqueue a retried reply whose row this attempt overwrote with text
+        that is never retained (errored, cancelled, footer-only, not an LLM
+        reply). A fresh turn like that is never queued; left queued, the flush
+        would retain the new text under the discarded attempt's trust bit.
+        No-op unless `row_id` is the retried row and `written_text` (what
+        `commit_or_update_assistant` wrote over it) is non-empty."""
+        if row_id is None or row_id != retry_assistant_id or not written_text.strip():
+            return
+        try:
+            self.memory_manager.discard_pending_retain(row_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"discard_pending_retain failed (interaction {row_id}): {e}")
+
     def is_retain_pending(self, interaction_id: int) -> bool:
         try:
             return self.memory_manager.is_retain_pending(interaction_id)
@@ -373,10 +410,14 @@ class TurnPersistence:
         Background because delivery is confirmed: a down Hindsight would
         otherwise stall the user's turn for the HTTP timeout. Flushes are
         serialized by `_flush_lock`, so turns still reach the backend in
-        queue order.
+        queue order. The request's own (persona, channel) is never idle-cut:
+        a retry logs no new row, so it would otherwise flush the very reply
+        it is regenerating.
         """
+        active = (persona_name, channel) if persona_name is not None else None
+
         async def run() -> None:
-            await self.flush_idle_sessions()
+            await self.flush_idle_sessions(active=active)
             if persona_name is not None and memory_mode is not None:
                 await self.flush_evicted(
                     persona_name=persona_name, memory_mode=memory_mode,
@@ -390,7 +431,8 @@ class TurnPersistence:
         task.add_done_callback(self._flush_tasks.discard)
 
     async def drain_flushes(self) -> None:
-        """Await every scheduled flush (tests, shutdown)."""
+        """Await every scheduled flush (tests). Shutdown does not drain:
+        the queue is durable, so an interrupted flush is redone on boot."""
         while self._flush_tasks:
             await asyncio.gather(*list(self._flush_tasks), return_exceptions=True)
 
@@ -411,12 +453,12 @@ class TurnPersistence:
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"Pending retain flush failed ({filters}): {e}")
                 return 0
-            done = [r["interaction_id"] for r in rows if r["skip"]]
+            done = [r for r in rows if r["skip"]]
             sendable = [r for r in rows if not r["skip"]]
             # gather starts every delivery before awaiting any, so they all
             # land on the backend's FIFO in order and share a drain tick.
             results = await asyncio.gather(*(self._deliver(r) for r in sendable))
-            done += [r["interaction_id"] for r, ok in zip(sendable, results) if ok]
+            done += [r for r, ok in zip(sendable, results) if ok]
             if done:
                 try:
                     self.memory_manager.delete_pending_retains(done)
@@ -437,24 +479,19 @@ class TurnPersistence:
             else r["author_name"] or r["user_identifier"] or "Unknown"
         )
         try:
-            return await self.memory_backend.retain_turn_confirmed(
-                bank_id=persona_name,
-                role=role,
-                content=format_retained_turn(role, speaker, r["text"], r["timestamp"]),
-                timestamp=to_utc(r["timestamp"]),
-                scope_tags=build_scope_tags(
-                    channel=r["channel"], server_id=r["server_id"],
-                    user_identifier=r["user_identifier"],
-                ),
-                source_persona=persona_name,
+            return await self.memory_backend.retain_turn_confirmed(**_retain_kwargs(
+                persona_name=persona_name, role=role, speaker=speaker,
+                content=r["text"], user_identifier=r["user_identifier"],
+                channel=r["channel"], server_id=r["server_id"],
+                timestamp=r["timestamp"], interaction_id=r["interaction_id"],
                 untrusted=r["untrusted"],
-                metadata={"interaction_id": str(r["interaction_id"])},
-            )
+            ))
         except Exception as e:  # noqa: BLE001
             logger.warning(f"retain_turn_confirmed failed ({role} turn): {e}")
             return False
 
-    async def flush_idle_sessions(self, now: Optional[datetime] = None) -> int:
+    async def flush_idle_sessions(self, now: Optional[datetime] = None, *,
+                                  active: Optional[Tuple[str, str]] = None) -> int:
         """Retain every queued turn of a conversation that stopped: any
         (persona, channel) with no turn in SESSION_GAP_SECONDS — the gap
         that opens a new Hindsight document.
@@ -464,6 +501,8 @@ class TurnPersistence:
         window if the conversation is picked up again; that brief overlap
         is accepted so the window keeps priority (DP-423). Lazy sweep on
         every turn plus a boot pass in `main` (the DP-319 pairing).
+        `active` is the (persona, channel) the calling request is in, which
+        is skipped whatever its last row's age.
         """
         now = now or datetime.now(timezone.utc)
         try:
@@ -475,6 +514,8 @@ class TurnPersistence:
             return 0
         sent = 0
         for persona_name, channel in scopes:
+            if (persona_name, channel) == active:
+                continue
             sent += await self.flush_retains(persona_name=persona_name, channel=channel)
         return sent
 
@@ -492,7 +533,7 @@ class TurnPersistence:
         """Retain the queued turns this request's history window pushed out.
 
         Interaction ids are insertion-ordered, so every turn the window
-        covers that is older than its oldest turn is out of it. "Covers" is
+        covers with an id below the window's smallest is out of it. "Covers" is
         the memory mode's scope, mirroring `RequestBuilder.fetch_raw_history`
         — a narrower flush strands turns another channel evicted, a wider
         one retains turns still in someone else's window. An empty window
@@ -543,17 +584,11 @@ class TurnPersistence:
         history keep the bare text.
         """
         try:
-            await self.memory_backend.retain_turn(
-                bank_id=persona_name,
-                role=role,
-                content=format_retained_turn(role, speaker, content, timestamp),
-                timestamp=to_utc(timestamp),
-                scope_tags=build_scope_tags(
-                    channel=channel, server_id=server_id, user_identifier=user_identifier,
-                ),
-                source_persona=persona_name,
-                untrusted=untrusted,
-                metadata={"interaction_id": str(interaction_id)},
-            )
+            await self.memory_backend.retain_turn(**_retain_kwargs(
+                persona_name=persona_name, role=role, speaker=speaker,
+                content=content, user_identifier=user_identifier,
+                channel=channel, server_id=server_id, timestamp=timestamp,
+                interaction_id=interaction_id, untrusted=untrusted,
+            ))
         except Exception as e:  # noqa: BLE001
             logger.warning(f"retain_turn dropped ({role} turn): {e}")

@@ -3429,7 +3429,7 @@ def test_pending_retains_bounds_and_explicit_dequeue(mem_manager):
     assert [t["interaction_id"] for t in taken] == ids[:2]
     # Reading is not dequeuing: a turn leaves only once its retain is confirmed.
     assert mem_manager.is_retain_pending(ids[0])
-    mem_manager.delete_pending_retains(ids[:2])
+    mem_manager.delete_pending_retains(taken)
     assert not mem_manager.is_retain_pending(ids[0])
     assert mem_manager.is_retain_pending(other)
     assert [t["interaction_id"] for t in mem_manager.pending_retains("p", channel="c1")] == ids[2:]
@@ -3487,6 +3487,22 @@ def test_queue_retain_upsert_replaces_retried_attempt(mem_manager):
     mem_manager.queue_retain(row, "p", "c1", untrusted=False)
     taken = mem_manager.pending_retains("p", channel="c1")
     assert len(taken) == 1 and taken[0]["untrusted"] is False
+
+
+def test_requeue_during_flush_survives_the_dequeue(mem_manager):
+    """A flush read the old attempt; a retry re-queued the row before the
+    flush confirmed. The confirmed dequeue must leave the new attempt."""
+    row = _log(mem_manager, "attempt 1", role="assistant")
+    mem_manager.queue_retain(row, "p", "c1", untrusted=False)
+    read_by_flush = mem_manager.pending_retains("p", channel="c1")
+    mem_manager.queue_retain(row, "p", "c1", untrusted=True)  # the retry
+
+    mem_manager.delete_pending_retains(read_by_flush)
+    assert mem_manager.is_retain_pending(row)
+    assert mem_manager.pending_retains("p", channel="c1")[0]["untrusted"] is True
+
+    mem_manager.discard_pending_retain(row)
+    assert not mem_manager.is_retain_pending(row)
 
 
 def test_idle_retain_scopes(mem_manager):

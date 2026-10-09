@@ -632,6 +632,11 @@ class ChatSystem:
                             # created earlier in THIS turn, which only became
                             # findable by token on the line above.
                             self._register_duplicates(dups_this_turn, errored_id)
+                            # DP-423: a retry whose partial text overwrote a
+                            # queued reply is not retained, like any errored turn.
+                            self.turn_persistence.discard_overwritten_retry(
+                                errored_id, retry_assistant_id, "".join(accumulated_parts),
+                            )
                         yield ev
                         return
                     elif isinstance(ev, _LoopFinishedEvent):
@@ -649,7 +654,7 @@ class ChatSystem:
                 # then re-raise so the surrounding StreamingResponse aborts.
                 partial = "".join(accumulated_parts)
                 if partial.strip():
-                    self.turn_persistence.commit_or_update_assistant(
+                    cancelled_id = self.turn_persistence.commit_or_update_assistant(
                         persona_name=persona_name, user_identifier=user_identifier,
                         channel=channel, server_id=server_id,
                         final_text=partial,
@@ -657,6 +662,10 @@ class ChatSystem:
                         user_interaction_id=user_interaction_id,
                         retry_assistant_id=retry_assistant_id,
                         tool_context_json=None,
+                    )
+                    # DP-423: as on the error path above.
+                    self.turn_persistence.discard_overwritten_retry(
+                        cancelled_id, retry_assistant_id, partial,
                     )
                 raise
 
@@ -686,8 +695,9 @@ class ChatSystem:
             # footer, which is ground truth for the reader but would become a
             # recallable "memory" of tool names and arguments if embedded.
             to_retain = retain_text if retain_text is not None else final_text
-            if assistant_id is not None and to_retain and to_retain.strip() \
-                    and response_type == ResponseType.LLM_GENERATION \
+            retainable = bool(to_retain and to_retain.strip()) \
+                and response_type == ResponseType.LLM_GENERATION
+            if assistant_id is not None and retainable \
                     and assistant_id == retry_assistant_id \
                     and not self.turn_persistence.is_retain_pending(assistant_id):
                 # DP-409: a retry replaced an already-retained row in place, so
@@ -701,8 +711,7 @@ class ChatSystem:
                     retried_id=assistant_id, retried_text=to_retain,
                     untrusted=ctx.turn_tainted,
                 )
-            elif assistant_id is not None and to_retain and to_retain.strip() \
-                    and response_type == ResponseType.LLM_GENERATION:
+            elif assistant_id is not None and retainable:
                 # DP-423: queued, not retained — see the user-turn note above.
                 self.turn_persistence.queue_retain_safe(
                     interaction_id=assistant_id,
@@ -710,6 +719,16 @@ class ChatSystem:
                     untrusted=ctx.turn_tainted,
                     retain_text=to_retain if retain_text is not None else None,
                     source_content=final_text if retain_text is not None else None,
+                )
+            else:
+                # DP-423: a retry that overwrote the row with an attempt that
+                # is never retained (footer only, not an LLM reply) must not
+                # leave the discarded attempt queued. A retried park keeps its
+                # row's text (commit_or_update_assistant), so nothing was
+                # written over it.
+                self.turn_persistence.discard_overwritten_retry(
+                    assistant_id, retry_assistant_id,
+                    "" if response_type == ResponseType.PENDING_CONFIRMATION else final_text,
                 )
 
             yield DoneEvent(

@@ -297,8 +297,8 @@ class RequestBuilder:
         """Retrieves and formats conversation history based on the persona's memory mode.
 
         Returns (formatted_history, oldest_interaction_id).
-        oldest_interaction_id is the interaction_id of the oldest message in the
-        sliding window, used for the memory recency filter.
+        oldest_interaction_id is the smallest interaction_id in the sliding
+        window, used for the memory recency filter and the DP-423 eviction cut.
 
         DP-142: ``advance`` gates the hello-override side effect. Live turns pass
         True; read-only / dry-run callers pass False.
@@ -314,9 +314,13 @@ class RequestBuilder:
             user_identifier, channel, server_id, effective_limit
         )
 
-        oldest_interaction_id = None
-        if raw_history:
-            oldest_interaction_id = raw_history[0].get('interaction_id')
+        # The smallest id, not raw_history[0]'s: the window is ordered by
+        # timestamp, ids by insertion, and they disagree when a platform
+        # timestamp (Discord `created_at`) lands out of insertion order. Every
+        # window row is at or above the minimum, which is what the recall
+        # cutoff and the DP-423 eviction flush both need.
+        ids = [r['interaction_id'] for r in raw_history if r.get('interaction_id') is not None]
+        oldest_interaction_id = min(ids) if ids else None
 
         formatted = self.format_raw_history_for_llm(raw_history, memory_mode_used, persona_name, server_id)
         return formatted, oldest_interaction_id

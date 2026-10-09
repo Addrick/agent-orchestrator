@@ -339,9 +339,11 @@ async def main() -> None:
     )
 
     # DP-423 boot pass: retain the queued turns of conversations that went
-    # idle while the process was down, and retry ones a down Hindsight
-    # refused. Every turn re-runs this sweep; this covers a process that
-    # comes up and sees no traffic. Backgrounded: startup never waits on it.
+    # idle while the process was down (including any a down Hindsight
+    # refused). Evicted turns of still-active conversations are retried by
+    # that conversation's next turn. Every turn re-runs this sweep; this
+    # covers a process that comes up and sees no traffic. Backgrounded:
+    # startup never waits on it.
     bot.turn_persistence.schedule_flush()
 
     # 5. Register service integrations

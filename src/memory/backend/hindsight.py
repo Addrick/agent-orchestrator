@@ -470,10 +470,13 @@ class _DocScopeStore:
                 except ValueError:
                     last = now
                 if (now - last).total_seconds() <= SESSION_GAP_SECONDS:
+                    # Never move last_ts back: DP-423 flushes can deliver a
+                    # turn older than one already sent (personal mode evicts
+                    # per user), and a regressed last_ts cuts a false session.
                     conn.execute(
                         "UPDATE Doc_Scope SET last_ts=?, untrusted=MAX(untrusted, ?)"
                         " WHERE scope_key=?",
-                        (now_iso, int(untrusted), scope_key),
+                        (max(now, last).isoformat(), int(untrusted), scope_key),
                     )
                     conn.commit()
                     return str(row["document_id"]), "append"

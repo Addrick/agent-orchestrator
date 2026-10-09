@@ -1009,3 +1009,19 @@ async def test_retain_turn_confirmed_per_item_across_split_posts(backend: Hindsi
 
     assert posts == [["first"], ["second"]]
     assert results == [True, False]
+
+
+def test_doc_scope_out_of_order_turn_does_not_rewind_session(tmp_path) -> None:
+    """DP-423 can deliver a turn older than one already sent (personal mode
+    evicts per user). It appends, and must not move last_ts back — a rewound
+    last_ts cuts a false session on the next in-order turn."""
+    from src.memory.backend.hindsight import _DocScopeStore
+
+    store = _DocScopeStore(str(tmp_path / "doc_scope.db"))
+    t0 = datetime.now(timezone.utc)
+    late = t0 + timedelta(seconds=SESSION_GAP_SECONDS - 60)
+    doc, _ = store.resolve("alice:c1", late)
+    assert store.resolve("alice:c1", t0) == (doc, "append")  # older, delivered after
+    # Within the gap of `late`, beyond it from t0: still the same session.
+    assert store.resolve("alice:c1", late + timedelta(seconds=120)) == (doc, "append")
+    store.close()

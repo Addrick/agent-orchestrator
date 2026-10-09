@@ -457,7 +457,9 @@ class MemoryManager:
             -- `retain_text` overrides it only while the row still holds
             -- `source_content` (DP-335's footer is persisted but not retained).
             -- persona_name/channel duplicate the interaction's own columns so
-            -- the per-scope flush is one indexed range scan.
+            -- the per-scope flush is one indexed range scan. `generation`
+            -- counts re-queues, so a flush that read a row before a retry
+            -- re-queued it cannot dequeue the new attempt.
             CREATE TABLE IF NOT EXISTS Pending_Retain (
                 interaction_id INTEGER PRIMARY KEY,
                 persona_name TEXT NOT NULL,
@@ -465,6 +467,7 @@ class MemoryManager:
                 untrusted INTEGER NOT NULL DEFAULT 0,
                 retain_text TEXT,
                 source_content TEXT,
+                generation INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY (interaction_id) REFERENCES User_Interactions(interaction_id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_pending_retain_scope
@@ -1459,6 +1462,8 @@ class MemoryManager:
 
         Upsert: a retried or resumed turn re-queues the same row, and the
         newest attempt's taint and retain text replace the discarded one's.
+        Each re-queue bumps `generation`, so a flush already holding the old
+        attempt leaves the new one queued (`delete_pending_retains`).
         """
         with self._lock:
             conn = self._get_connection()
@@ -1468,7 +1473,7 @@ class MemoryManager:
                 " VALUES (?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(interaction_id) DO UPDATE SET"
                 " untrusted=excluded.untrusted, retain_text=excluded.retain_text,"
-                " source_content=excluded.source_content",
+                " source_content=excluded.source_content, generation=generation + 1",
                 (interaction_id, persona_name, channel, int(untrusted),
                  retain_text, source_content),
             )
@@ -1523,15 +1528,15 @@ class MemoryManager:
         called for it, i.e. until the backend confirmed the retain. Each row
         carries its persona and channel, the text to retain (`retain_text`
         when the row still holds the content it was derived from, else the
-        row's current content) and `skip`, set for turns deleted or emptied
-        since they were queued.
+        row's current content), its queue `generation`, and `skip`, set for
+        turns deleted or emptied since they were queued.
         """
         where, params = self._pending_retain_filters(
             persona_name, before_id, channel, user_identifier, server_id,
         )
         query = (
             "SELECT p.interaction_id, p.persona_name, p.untrusted, p.retain_text,"
-            " p.source_content, u.channel, u.author_role, u.author_name,"
+            " p.source_content, p.generation, u.channel, u.author_role, u.author_name,"
             " u.user_identifier, u.server_id, u.content, u.timestamp,"
             " EXISTS(SELECT 1 FROM Suppressed_Interactions s"
             "        WHERE s.interaction_id = p.interaction_id) AS suppressed"
@@ -1560,15 +1565,26 @@ class MemoryManager:
                 "text": text,
                 "timestamp": ts,
                 "untrusted": bool(r["untrusted"]),
+                "generation": r["generation"],
                 "skip": bool(r["suppressed"]) or not text.strip() or ts is None,
             })
         return result
 
-    def delete_pending_retains(self, interaction_ids: Sequence[int]) -> None:
+    def delete_pending_retains(self, rows: Sequence[Dict[str, Any]]) -> None:
+        """Dequeue rows read by `pending_retains`, except any re-queued since:
+        a retry that landed mid-flush bumped `generation` and stays queued."""
         with self.transaction() as conn:
             conn.executemany(
+                "DELETE FROM Pending_Retain WHERE interaction_id = ? AND generation = ?",
+                [(r["interaction_id"], r["generation"]) for r in rows],
+            )
+
+    def discard_pending_retain(self, interaction_id: int) -> None:
+        """Drop a queued turn unretained, whatever its generation."""
+        with self.transaction() as conn:
+            conn.execute(
                 "DELETE FROM Pending_Retain WHERE interaction_id = ?",
-                [(i,) for i in interaction_ids],
+                (interaction_id,),
             )
 
     def idle_retain_scopes(self, idle_before: datetime) -> List[Tuple[str, str]]:

@@ -99,6 +99,20 @@ async def test_idle_conversation_is_flushed_by_the_sweep(setup):
 
 
 @pytest.mark.asyncio
+async def test_idle_sweep_skips_the_requests_own_scope(setup):
+    """A retry logs no row, so its conversation still looks idle; the sweep
+    it triggers must not flush the reply it is regenerating."""
+    chat_system, _, _, spy = setup
+
+    await _turn(chat_system, "abandoned", channel="quiet")
+    later = datetime.now(timezone.utc) + timedelta(seconds=SESSION_GAP_SECONDS + 60)
+    tp = chat_system.turn_persistence
+    assert await tp.flush_idle_sessions(now=later, active=("test_persona", "quiet")) == 0
+    assert spy.await_count == 0
+    assert await tp.flush_idle_sessions(now=later, active=("test_persona", "other")) == 2
+
+
+@pytest.mark.asyncio
 async def test_window_keeps_priority_after_a_break(setup):
     """Coming back a day later is not a blank chat: the window still holds
     yesterday, and since the conversation resumed before any sweep cut it,
