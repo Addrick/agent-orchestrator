@@ -1223,6 +1223,34 @@ class TestAgyHandler:
         assert isinstance(api_payload, dict)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("thinking_level, expected", [
+        (None, "low"), ("high", "high"), ("minimal", "low"), ("none", "low"), ("bogus", "low"),
+    ])
+    async def test_handler_passes_persona_thinking_level_as_effort(
+            self, text_engine, base_context, monkeypatch, thinking_level, expected):
+        """DP-425: effort comes from the persona, else AGY_DEFAULT_EFFORT —
+        never from agy's settings.json model. agy exits 1 on an unknown level,
+        so one is never passed through."""
+        mock_cli = AsyncMock(return_value="a plain answer")
+        monkeypatch.setattr(text_engine, "_run_agy_cli", mock_cli)
+
+        config = {"model_name": "agy-flash", "thinking_level": thinking_level}
+        _, api_payload = await text_engine._generate_agy_response(config, base_context)
+
+        assert mock_cli.await_args.kwargs["effort"] == expected
+        assert api_payload["effort"] == expected
+
+    def test_invalid_default_effort_falls_back_to_low(self, monkeypatch):
+        from config import global_config
+        from src.engine.providers import agy as agy_mod
+
+        monkeypatch.setattr(global_config, "AGY_DEFAULT_EFFORT", "turbo")
+        assert agy_mod.resolve_agy_effort(None) == "low"
+        monkeypatch.setattr(global_config, "AGY_DEFAULT_EFFORT", "Medium")
+        assert agy_mod.resolve_agy_effort(None) == "medium"
+        assert agy_mod.resolve_agy_effort("max") == "max"
+
+    @pytest.mark.asyncio
     async def test_handler_tool_path(self, text_engine, base_context, monkeypatch):
         tool_output = '<tool_call>{"name": "get_weather", "arguments": {"location": "Tokyo"}}</tool_call>'
         mock_cli = AsyncMock(return_value=tool_output)
@@ -1466,7 +1494,7 @@ class TestAgyHandler:
                             AsyncMock(return_value=(b"PNGdata", "image/png")))
         seen = {}
 
-        async def fake_cli(prompt, persona_name=None, call_dir=None):
+        async def fake_cli(prompt, persona_name=None, call_dir=None, effort=None):
             seen["call_dir"] = call_dir
             seen["files"] = os.listdir(call_dir)
             seen["prompt"] = prompt
@@ -1505,7 +1533,7 @@ class TestAgyHandler:
                             AsyncMock(return_value=(b"jpg", "image/jpeg")))
         calls = []
 
-        async def cli(prompt, persona_name=None, call_dir=None):
+        async def cli(prompt, persona_name=None, call_dir=None, effort=None):
             calls.append((prompt, call_dir))
             if call_dir is not None:
                 raise LLMCommunicationError("agy CLI produced no output.")
@@ -1552,7 +1580,7 @@ class TestAgyHandler:
                             AsyncMock(return_value=(b"png", "image/png")))
         seen = {}
 
-        async def cli(prompt, persona_name=None, call_dir=None):
+        async def cli(prompt, persona_name=None, call_dir=None, effort=None):
             seen["entries"] = os.listdir(os.path.dirname(call_dir))
             return "ok"
 
@@ -1681,7 +1709,7 @@ class TestAgyHandler:
         first_running = asyncio.Event()
         release = asyncio.Event()
 
-        async def fake_cli(prompt, persona_name=None, call_dir=None):
+        async def fake_cli(prompt, persona_name=None, call_dir=None, effort=None):
             max_seen.append(len(os.listdir(root)))
             if not first_running.is_set():
                 first_running.set()
@@ -1790,6 +1818,8 @@ class TestAgyCliInvocation:
         # DP-408: runs as derpr's tool-less agent, not agy's coding agent
         args = list(captured["args"])
         assert args[args.index("--agent") + 1] == "derpr-engine"
+        # DP-425: effort is always explicit, so agy's settings.json can't pick it
+        assert args[args.index("--effort") + 1] == "low"
         # agy is isolated in its own POSIX session for cleanup
         assert captured["kwargs"].get("start_new_session") is True
 
@@ -1803,6 +1833,10 @@ class TestAgyCliInvocation:
         assert "tools:\n  - view_file\nmainAgent" in front
         assert "commandExecutionPolicy: off" in front
         assert f"name: {agy_mod.AGY_AGENT_NAME}" in front
+        # DP-425: the body scopes "no tools" to agy's own, and names derpr's
+        # protocol as allowed — a bare "no command to run" read as a ban on both.
+        body = agy_mod.AGY_AGENT_DEFINITION.split("---", 2)[2]
+        assert "<tool_call>" in body and "this CLI's tools only" in body
 
     def test_ensure_agy_agent_writes_and_repairs(self):
         from src.engine.providers import agy as agy_mod

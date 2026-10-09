@@ -60,6 +60,33 @@ logger = logging.getLogger(__name__)
 
 AGY_CALL_TIMEOUT_SECONDS = 120.0
 
+# DP-425: `agy --effort` overrides the effort of the model agy's settings.json
+# selects, for that call only (measured on 1.3.2: a "Gemini 3.5 Flash (High)"
+# setting resolves to gemini-3.8-flash-low under `--effort low`, and the file is
+# untouched). agy exits 1 on any other value, so derpr maps or drops a level
+# rather than pass it through: `none`/`minimal` (valid persona thinking_levels
+# elsewhere) have no agy equivalent and run at agy's lowest.
+AGY_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+_AGY_EFFORT_ALIASES = {"none": "low", "minimal": "low"}
+
+
+def resolve_agy_effort(thinking_level: Optional[str]) -> str:
+    """The `--effort` for a call: the persona's thinking_level, else
+    AGY_DEFAULT_EFFORT, else "low". An unknown value is logged and skipped."""
+    for source, value in (
+        ("thinking_level", thinking_level),
+        ("AGY_DEFAULT_EFFORT", global_config.AGY_DEFAULT_EFFORT),
+    ):
+        if not value:
+            continue
+        level = str(value).strip().lower()
+        level = _AGY_EFFORT_ALIASES.get(level, level)
+        if level in AGY_EFFORT_LEVELS:
+            return level
+        logger.warning(f"agy: {source} {value!r} is not an agy effort {AGY_EFFORT_LEVELS}; ignoring it.")
+    return "low"
+
+
 # agy wraps its own out-of-band notices in `<SYSTEM_MESSAGE>` spans. The calls
 # and the prose are both derived from the scrubbed text, so the pattern lives
 # in one place — two hand-copied literals could drift into disagreeing about
@@ -191,6 +218,9 @@ def ensure_agy_image_rule() -> bool:
 # (it drives its own via the `<tool_call>` protocol), so the agent lists only
 # `view_file` (DP-382 image reads) and turns command execution off: the model
 # cannot attempt a command at all, instead of being denied mid-turn.
+# DP-425: the body has to say WHOSE tools are off. "No command to run" alone
+# read to the model as "the system prompt forbids tool use", which it then
+# weighed against the persona's `<tool_call>` tools until the call timed out.
 # Global scope (`~/.gemini/config/agents/`): one file serves every cwd agy runs
 # in — persona workspaces, tempdirs and per-call image dirs alike.
 AGY_AGENT_NAME = "derpr-engine"
@@ -206,9 +236,11 @@ model: inherit
 commandExecutionPolicy: off
 ---
 
-Answer the prompt you are given directly, as plain text. You are a text model serving another
-program: there is no codebase to inspect and no command to run. The only file you may open is
-one the prompt names by absolute path.
+You are a text model serving another program. Your own built-in tools are off: there is no
+codebase for you to inspect and no command for you to run, and the only file you may open is
+one the prompt names by absolute path. That limit is on this CLI's tools only. When the prompt
+lists tools to request in {TOOL_CALL_OPEN} blocks, those belong to the program you serve and
+you may request them exactly as the prompt describes. Otherwise, answer directly as plain text.
 """
 
 
@@ -484,17 +516,21 @@ def remove_agy_cli_link_targets(workspace_dir: str) -> None:
 
 
 async def run_agy_cli(engine: "TextEngine", prompt: str, timeout: float = AGY_CALL_TIMEOUT_SECONDS,
-                      persona_name: Optional[str] = None, call_dir: Optional[str] = None) -> str:
+                      persona_name: Optional[str] = None, call_dir: Optional[str] = None,
+                      effort: Optional[str] = None) -> str:
     """`call_dir`, when given, is a caller-owned single-use cwd (a DP-382 image
     call): it replaces the persona/stateless workspace, and the caller creates
-    and removes it."""
+    and removes it. `effort` is a resolved agy level; None means the default."""
     binary = os.environ.get("ANTIGRAVITY_HARNESS_PATH") or shutil.which("agy")
     if not binary:
         raise LLMCommunicationError("Antigravity harness/agy binary not found.")
 
     timeout_sec_str = f"{int(timeout) + 30}s"
     ensure_agy_agent()
-    args = ["--agent", AGY_AGENT_NAME, "--print-timeout", timeout_sec_str, "-p", prompt]
+    args = [
+        "--agent", AGY_AGENT_NAME, "--effort", effort or resolve_agy_effort(None),
+        "--print-timeout", timeout_sec_str, "-p", prompt,
+    ]
     if global_config.AGY_SANDBOX:
         args = ["--sandbox", *args]
 
@@ -575,6 +611,7 @@ def build_agy_prompt(
         workspace = workspace_dir or "temp-dir-per-call"
     api_payload: Dict[str, Any] = {
         "model": config.get("model_name"),
+        "effort": resolve_agy_effort(config.get("thinking_level")),
         "prompt_chars": len(prompt),
         "history_messages_elided": elided,
         "tools": tool_names,
@@ -607,6 +644,7 @@ async def _run_agy_with_image(
         try:
             raw = await engine._run_agy_cli(
                 prompt, persona_name=config.get("persona_name"), call_dir=os.path.dirname(image_path),
+                effort=api_payload["effort"],
             )
         except LLMCommunicationError as e:
             # Most often agy denying the read: the driver's gate cannot judge
@@ -635,7 +673,9 @@ async def generate_agy(
             IMAGE_UNSEEN_NOTE if has_image else None, False,
         )
         try:
-            raw = await engine._run_agy_cli(prompt, persona_name=config.get("persona_name"))
+            raw = await engine._run_agy_cli(
+                prompt, persona_name=config.get("persona_name"), effort=api_payload["effort"],
+            )
         except LLMCommunicationError as e:
             if e.api_payload is None:
                 e.api_payload = api_payload
