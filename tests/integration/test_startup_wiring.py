@@ -121,6 +121,28 @@ def test_all_tool_definitions_have_registered_handlers(wired_system):
     assert not missing, f"Tool definitions without registered handlers: {missing}"
 
 
+def test_hindsight_backend_wires_the_drill_down_tools(tmp_path):
+    """DP-424: on Hindsight the startup path registers get_memory / get_document
+    (and not the SQLite-only drill_down_memory) — the SQLite fixture above can
+    only prove their absence."""
+    from src.bootstrap import build_tool_manager
+    from src.memory.backend.hindsight import HindsightBackend
+
+    backend = HindsightBackend(
+        url="http://unused.invalid",
+        override_db_path=str(tmp_path / "overrides.db"),
+        doc_scope_db_path=str(tmp_path / "doc_scope.db"),
+    )
+    memory_manager = MemoryManager(db_path=":memory:", backend=backend)
+    registered = {
+        t["function"]["name"]
+        for t in build_tool_manager(memory_manager, {}).get_tool_definitions()
+        if t.get("type") == "function"
+    }
+    assert set(MemorySourceHandler.TOOL_NAMES) <= registered
+    assert "drill_down_memory" not in registered
+
+
 def test_all_service_bindings_have_registered_services(wired_system):
     """Every service_binding referenced in tool definitions has a matching registered service."""
     bindings_in_defs = {

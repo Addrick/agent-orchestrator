@@ -1073,6 +1073,28 @@ async def test_get_memory_resolves_trust_like_recall(backend: HindsightBackend) 
 
 
 @pytest.mark.asyncio
+async def test_model_supplied_ids_cannot_leave_the_bank(backend: HindsightBackend) -> None:
+    """DP-424: get_memory / get_document ids come from the model, and httpx
+    normalizes `..` — a raw id would route `alice`'s read into `bob`'s bank."""
+    client = backend._get_client()
+    with patch.object(client.client, "request", AsyncMock(
+        return_value=httpx.Response(200, json={"id": "x", "tags": []}),
+    )) as m:
+        await backend.get_memory("alice", "../../bob/memories/x")
+        await backend.get_document("alice", "../../bob/documents/d")
+        await backend.list_document_chunks("alice", "../../bob/documents/d")
+    for call in m.call_args_list:
+        raw = httpx.URL(call.args[1]).raw_path
+        assert raw.startswith(b"/v1/default/banks/alice/"), raw
+        assert b"/bob/" not in raw
+    for bare in ("..", ".", ""):
+        with pytest.raises(HindsightAPIError) as exc:
+            await backend.get_memory("alice", bare)
+        assert exc.value.status_code == 400 and not exc.value.transient
+    await backend.aclose()
+
+
+@pytest.mark.asyncio
 async def test_get_document_reports_trust_bit(backend: HindsightBackend) -> None:
     client = backend._get_client()
     with patch.object(

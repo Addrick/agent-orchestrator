@@ -91,8 +91,8 @@ MEMORY_TOOLS: List[Dict[str, Any]] = [
                 "Read the original text a memory was extracted from, usually the "
                 "whole past conversation. Use when a recalled fact lacks the detail "
                 "you need (exact wording, a link, surrounding discussion). Pass "
-                "`chunk_id` to get only the passage that produced the fact; "
-                "otherwise the text is returned a page at a time — follow "
+                "`chunk_id` to get only the passage that produced the fact. "
+                "Either way the text is returned a page at a time — follow "
                 "`next_offset` to read on."
             ),
             "parameters": {

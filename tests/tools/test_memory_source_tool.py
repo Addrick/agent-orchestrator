@@ -173,6 +173,26 @@ async def test_transient_failure_is_an_error_not_not_found() -> None:
 
 
 @pytest.mark.asyncio
+async def test_auth_failure_is_an_error_not_not_found() -> None:
+    """Only a missing/malformed id is "not found"; a 403 is an outage the model
+    must not read as an empty bank."""
+    err = MemoryBackendError("Hindsight API Error 403: forbidden")
+    err.status_code = 403  # type: ignore[attr-defined]
+    backend = _Backend({}, {})
+    backend.get_memory = AsyncMock(side_effect=err)  # type: ignore[method-assign]
+    out = await _call(backend, "get_memory", memory_id="x")
+    assert "error" in out and "not found" not in out["error"]
+
+
+@pytest.mark.asyncio
+async def test_get_document_null_paging_args_mean_defaults() -> None:
+    backend = _Backend(_units(), _docs())
+    out = (await _call(backend, "get_document", document_id="doc-mine",
+                       offset=None, max_chars=None))["result"]
+    assert (out["text"], out["offset"], out["next_offset"]) == ("abcdefghij", 0, None)
+
+
+@pytest.mark.asyncio
 async def test_get_document_pages_the_original_text() -> None:
     backend = _Backend(_units(), _docs())
     first = (await _call(backend, "get_document", document_id="doc-mine", max_chars=4))["result"]

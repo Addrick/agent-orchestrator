@@ -8,6 +8,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, NoReturn, Optional, Tuple, TYPE_CHECKING, cast
+from urllib.parse import quote
 import httpx
 from config import global_config
 from .base import (
@@ -41,6 +42,21 @@ class HindsightAPIError(MemoryBackendError):
             f"Hindsight API Error {status_code}: {message}",
             transient=500 <= status_code < 600,
         )
+
+
+def _path_segment(value: str) -> str:
+    """Encode a caller-supplied id as exactly one URL path segment.
+
+    DP-424: `get_memory` / `get_document` take ids from the model. httpx
+    normalizes dot segments, so a raw `../../<other-bank>/memories/<id>`
+    would leave the persona's bank. `/`, `?` and `#` are percent-encoded;
+    a bare `.` / `..` / empty id cannot be encoded away and is rejected as
+    the 400 a malformed id gets anyway.
+    """
+    seg = quote(str(value), safe="")
+    if seg in ("", ".", ".."):
+        raise HindsightAPIError(400, f"invalid id {value!r}")
+    return seg
 
 
 class HindsightRESTClient:
@@ -206,7 +222,8 @@ class HindsightRESTClient:
     async def aget_document(self, bank_id: str, document_id: str) -> Dict[str, Any]:
         # GET .../documents/{id} -> DocumentResponse
         return await self._request(
-            "GET", f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}/documents/{document_id}"
+            "GET",
+            f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}/documents/{_path_segment(document_id)}",
         )
 
     async def alist_document_chunks(
@@ -226,7 +243,8 @@ class HindsightRESTClient:
         if offset is not None:
             params["offset"] = offset
         return await self._request(
-            "GET", f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}/documents/{document_id}/chunks",
+            "GET",
+            f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}/documents/{_path_segment(document_id)}/chunks",
             params=params or None,
         )
 
@@ -234,7 +252,7 @@ class HindsightRESTClient:
         # GET .../memories/{id} -> {id, text, type, tags, document_id, chunk_id,
         # mentioned_at, occurred_*, state, source_memory_ids, source_memories, ...}
         return await self._request(
-            "GET", f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}/memories/{memory_id}"
+            "GET", f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}/memories/{_path_segment(memory_id)}"
         )
 
     async def adelete_document(self, bank_id: str, document_id: str) -> Dict[str, Any]:
@@ -1160,8 +1178,11 @@ class HindsightBackend(MemoryBackend):
         client = self._get_client()
         unit = await client.aget_memory(bank_id, memory_id)
         # Same trust resolution as recall: storage tag, then operator override.
+        # Keyed on the unit's own id, as recall keys it — not the caller's
+        # spelling of it (a differently-cased UUID still resolves upstream).
+        unit_id = str(unit.get("id") or memory_id)
         untrusted = _read_untrusted(unit.get("tags") or [])
-        override = self._overrides.get_overrides(bank_id, [memory_id]).get(memory_id)
+        override = self._overrides.get_overrides(bank_id, [unit_id]).get(unit_id)
         unit["untrusted"] = untrusted if override is None else override
         return unit
 

@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from typing import AbstractSet, Any, Coroutine, Dict, List, Callable, Optional, cast
+from typing import AbstractSet, Any, Coroutine, Dict, List, Callable, Optional, Tuple, cast
 
 from src.tools.definitions import get_all_tool_definitions
 
@@ -357,6 +357,30 @@ class WebSearchHandler:
         return [{"title": r["title"], "url": r["href"], "summary": r["body"]} for r in raw]
 
 
+def _turn_recall_scope(tool: str) -> Optional[Tuple[str, List[str], str]]:
+    """`(bank_id, tag_filter, mode_label)` for the active turn, or None outside one.
+
+    The single derivation of what a turn's memory tools may see: `recall_memory`
+    and the DP-424 drill-down pair both call it, so drill-down cannot drift from
+    what recall could have returned. DP-407: scoped by the persona's memory
+    mode, exactly as auto-recall is — a hardcoded channel/user/server predicate
+    hid everything not tagged with this channel (e.g. uploaded documents) even
+    for GLOBAL.
+    """
+    from src.memory.scope_tags import recall_scope_tags
+    from src.tools.turn_context import get_turn_context
+    ctx = get_turn_context()
+    if ctx is None:
+        logger.warning("%s invoked without an active turn context.", tool)
+        return None
+    tag_filter, mode_label = recall_scope_tags(
+        ctx.memory_mode,
+        channel=ctx.channel, server_id=ctx.server_id,
+        user_identifier=ctx.user_identifier,
+    )
+    return ctx.persona_name, tag_filter, mode_label
+
+
 class MemoryRecallHandler:
     """Wraps `MemoryBackend.recall` as the model-callable `recall_memory` tool.
 
@@ -374,27 +398,17 @@ class MemoryRecallHandler:
         manager.register("recall_memory", self._recall_memory)
 
     async def _recall_memory(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
-        from src.memory.scope_tags import recall_scope_tags
-        from src.tools.turn_context import get_turn_context
-        ctx = get_turn_context()
-        if ctx is None:
-            logger.warning("recall_memory invoked without an active turn context.")
+        scope = _turn_recall_scope("recall_memory")
+        if scope is None:
             return []
-        # DP-407: scope by the persona's memory mode, exactly as auto-recall
-        # does — a hardcoded channel/user/server predicate hid everything not
-        # tagged with this channel (e.g. uploaded documents) even for GLOBAL.
-        tag_filter, mode_label = recall_scope_tags(
-            ctx.memory_mode,
-            channel=ctx.channel, server_id=ctx.server_id,
-            user_identifier=ctx.user_identifier,
-        )
+        bank_id, tag_filter, mode_label = scope
 
         logger.info(
             f"Executing tool: recall_memory query='{query}' limit={limit} "
-            f"persona={ctx.persona_name} mode={mode_label}"
+            f"persona={bank_id} mode={mode_label}"
         )
         hits = await self.memory_backend.recall(
-            bank_id=ctx.persona_name,
+            bank_id=bank_id,
             query=query,
             k=limit,
             tag_filter=tag_filter,
@@ -455,34 +469,35 @@ class MemorySourceHandler:
         manager.register(get_memory, self._get_memory)
         manager.register(get_document, self._get_document)
 
-    def _scope(self, tool: str) -> Optional[tuple[str, List[str]]]:
-        from src.memory.scope_tags import recall_scope_tags
-        from src.tools.turn_context import get_turn_context
-        ctx = get_turn_context()
-        if ctx is None:
-            logger.warning("%s invoked without an active turn context.", tool)
-            return None
-        scope_tags, _ = recall_scope_tags(
-            ctx.memory_mode,
-            channel=ctx.channel, server_id=ctx.server_id,
-            user_identifier=ctx.user_identifier,
-        )
-        return ctx.persona_name, scope_tags
-
     @staticmethod
+    def _scope(tool: str) -> Optional[Tuple[str, List[str]]]:
+        scope = _turn_recall_scope(tool)
+        if scope is None:
+            return None
+        bank_id, scope_tags, _mode = scope
+        return bank_id, scope_tags
+
+    # HTTP statuses that mean "no such item" (missing, or a malformed id).
+    # Anything else non-2xx — 401/403 auth, 408/429 throttling — is an outage
+    # the caller must see, not an empty bank.
+    _NOT_FOUND_STATUSES = frozenset({400, 404, 422})
+
+    @classmethod
     async def _fetch(
-        fn: Callable[..., Coroutine[Any, Any, Any]], *args: Any, **kwargs: Any,
+        cls, fn: Callable[..., Coroutine[Any, Any, Any]], *args: Any, **kwargs: Any,
     ) -> Any:
         """Call a backend read; None when the item does not exist.
 
-        A non-transient backend error (404, a malformed id) is "not found";
-        a transient one (5xx, network) still raises so the caller sees an outage.
+        A missing item or malformed id (404 / 400 / 422) is "not found"; any
+        other failure (5xx, auth, throttling, network) still raises so the
+        caller sees an outage.
         """
         from src.memory.backend.base import MemoryBackendError
         try:
             return await fn(*args, **kwargs)
         except MemoryBackendError as e:
-            if e.transient:
+            status = getattr(e, "status_code", None)
+            if e.transient or (status is not None and status not in cls._NOT_FOUND_STATUSES):
                 raise
             return None
 
@@ -528,24 +543,28 @@ class MemorySourceHandler:
         self,
         document_id: str,
         chunk_id: Optional[str] = None,
-        offset: int = 0,
-        max_chars: int = 6000,
+        offset: Optional[int] = 0,
+        max_chars: Optional[int] = 6000,
     ) -> Dict[str, Any]:
         scope = self._scope("get_document")
         if scope is None:
             return {"error": "get_document needs an active conversation."}
         bank_id, scope_tags = scope
+        # Models send an explicit null for an optional argument; that means
+        # "the default", not a TypeError.
+        start = max(0, int(offset if offset is not None else 0))
+        page = max(1, min(int(max_chars if max_chars is not None else 6000),
+                          self._MAX_DOC_CHARS))
         logger.info(
             f"Executing tool: get_document id='{document_id}' chunk={chunk_id} "
-            f"offset={offset} persona={bank_id}"
+            f"offset={start} persona={bank_id}"
         )
         not_found = {"error": f"Document '{document_id}' not found."}
 
         doc = await self._fetch(self.memory_backend.get_document, bank_id, document_id)
         if not doc or not _in_recall_scope(doc.get("tags") or [], scope_tags):
             return not_found
-        max_chars = max(1, min(int(max_chars), self._MAX_DOC_CHARS))
-        base = {
+        result: Dict[str, Any] = {
             "document_id": document_id,
             "untrusted": doc.get("untrusted", True),
             "created_at": doc.get("created_at"),
@@ -556,24 +575,20 @@ class MemorySourceHandler:
             if chunk is None:
                 return {"error": f"Chunk '{chunk_id}' not found in document '{document_id}'."}
             text = chunk.get("chunk_text") or ""
-            return {
-                **base,
-                "chunk_id": chunk_id,
-                "chunk_index": chunk.get("chunk_index"),
-                "text": text[:max_chars],
-                "truncated": len(text) > max_chars,
-            }
+            result.update(chunk_id=chunk_id, chunk_index=chunk.get("chunk_index"))
+        else:
+            text = doc.get("original_text") or ""
 
-        full = doc.get("original_text") or ""
-        start = max(0, int(offset))
-        end = start + max_chars
-        return {
-            **base,
-            "text": full[start:end],
-            "offset": start,
-            "total_chars": len(full),
-            "next_offset": end if end < len(full) else None,
-        }
+        # One paging contract for both: an oversized chunk continues via
+        # `next_offset` exactly as the full text does.
+        end = start + page
+        result.update(
+            text=text[start:end],
+            offset=start,
+            total_chars=len(text),
+            next_offset=end if end < len(text) else None,
+        )
+        return result
 
     async def _find_chunk(
         self, bank_id: str, document_id: str, chunk_id: str,
