@@ -3410,11 +3410,11 @@ def test_migration_creates_pending_retain(legacy_mem_manager):
     assert "idx_pending_retain_scope" in names
     # Existing data preserved, and NOT queued: it was retained live before.
     assert conn.execute("SELECT content FROM User_Interactions").fetchone()[0] == "old"
-    assert legacy_mem_manager.take_pending_retains("p", "c1") == []
+    assert legacy_mem_manager.take_pending_retains("p", channel="c1") == []
 
     new_id = _log(legacy_mem_manager, "new")
     legacy_mem_manager.queue_retain(new_id, "p", "c1", untrusted=False)
-    taken = legacy_mem_manager.take_pending_retains("p", "c1")
+    taken = legacy_mem_manager.take_pending_retains("p", channel="c1")
     assert [t["text"] for t in taken] == ["new"]
 
 
@@ -3425,13 +3425,13 @@ def test_take_pending_retains_bounds_and_dequeues(mem_manager):
     other = _log(mem_manager, "elsewhere", channel="c2")
     mem_manager.queue_retain(other, "p", "c2", untrusted=False)
 
-    taken = mem_manager.take_pending_retains("p", "c1", before_id=ids[2])
+    taken = mem_manager.take_pending_retains("p", channel="c1", before_id=ids[2])
     assert [t["interaction_id"] for t in taken] == ids[:2]
     # Taken rows leave the queue; the rest and the other scope stay.
     assert not mem_manager.is_retain_pending(ids[0])
     assert mem_manager.is_retain_pending(ids[2])
     assert mem_manager.is_retain_pending(other)
-    assert [t["interaction_id"] for t in mem_manager.take_pending_retains("p", "c1")] == ids[2:]
+    assert [t["interaction_id"] for t in mem_manager.take_pending_retains("p", channel="c1")] == ids[2:]
 
 
 def test_take_pending_retains_filters_by_user(mem_manager):
@@ -3439,7 +3439,7 @@ def test_take_pending_retains_filters_by_user(mem_manager):
     b = _log(mem_manager, "from b", user="b")
     for i in (a, b):
         mem_manager.queue_retain(i, "p", "c1", untrusted=False)
-    taken = mem_manager.take_pending_retains("p", "c1", user_identifier="a")
+    taken = mem_manager.take_pending_retains("p", channel="c1", user_identifier="a")
     assert [t["interaction_id"] for t in taken] == [a]
     assert mem_manager.is_retain_pending(b)
 
@@ -3456,7 +3456,7 @@ def test_take_pending_retains_reads_the_row_at_flush_time(mem_manager):
     mem_manager.update_interaction_content(edited, "final draft")
     mem_manager.suppress_interaction(deleted)
 
-    by_id = {t["interaction_id"]: t for t in mem_manager.take_pending_retains("p", "c1")}
+    by_id = {t["interaction_id"]: t for t in mem_manager.take_pending_retains("p", channel="c1")}
     assert by_id[edited]["text"] == "final draft" and not by_id[edited]["skip"]
     assert by_id[deleted]["skip"]
     assert by_id[tainted]["untrusted"] is True
@@ -3475,7 +3475,7 @@ def test_retain_text_applies_only_while_source_content_unchanged(mem_manager):
                                  retain_text="Answer.", source_content=full)
     mem_manager.update_interaction_content(edited, "Rewritten answer.")
 
-    by_id = {t["interaction_id"]: t for t in mem_manager.take_pending_retains("p", "c1")}
+    by_id = {t["interaction_id"]: t for t in mem_manager.take_pending_retains("p", channel="c1")}
     assert by_id[kept]["text"] == "Answer."
     assert by_id[edited]["text"] == "Rewritten answer."
 
@@ -3484,18 +3484,36 @@ def test_queue_retain_upsert_replaces_retried_attempt(mem_manager):
     row = _log(mem_manager, "attempt", role="assistant")
     mem_manager.queue_retain(row, "p", "c1", untrusted=True)
     mem_manager.queue_retain(row, "p", "c1", untrusted=False)
-    taken = mem_manager.take_pending_retains("p", "c1")
+    taken = mem_manager.take_pending_retains("p", channel="c1")
     assert len(taken) == 1 and taken[0]["untrusted"] is False
 
 
-def test_idle_retain_scopes(mem_manager):
+def test_take_pending_retains_by_age_spans_scopes(mem_manager):
+    """`older_than` is the 24h sweep: every scope, by the turn's own stamp."""
     from datetime import timedelta
     now = datetime.now(timezone.utc)
-    old = _log(mem_manager, "stale", channel="idle", ts=now - timedelta(days=2))
-    fresh = _log(mem_manager, "live", channel="busy", ts=now - timedelta(days=2))
-    _log(mem_manager, "recent turn, not queued", channel="busy", ts=now)
-    mem_manager.queue_retain(old, "p", "idle", untrusted=False)
-    mem_manager.queue_retain(fresh, "p", "busy", untrusted=False)
+    old_a = _log(mem_manager, "stale a", channel="a", ts=now - timedelta(days=2))
+    old_b = _log(mem_manager, "stale b", channel="b", persona="q",
+                 ts=(now - timedelta(days=2)).replace(tzinfo=None))  # pre-DP-413 naive
+    fresh = _log(mem_manager, "live", channel="a", ts=now)
+    for i, persona, ch in ((old_a, "p", "a"), (old_b, "q", "b"), (fresh, "p", "a")):
+        mem_manager.queue_retain(i, persona, ch, untrusted=False)
 
-    # `busy` has a newer (unqueued) turn, so its session is still open.
-    assert mem_manager.idle_retain_scopes(now - timedelta(days=1)) == [("p", "idle")]
+    taken = mem_manager.take_pending_retains(older_than=now - timedelta(days=1))
+    assert [(t["interaction_id"], t["persona_name"], t["channel"]) for t in taken] == [
+        (old_a, "p", "a"), (old_b, "q", "b"),
+    ]
+    assert mem_manager.is_retain_pending(fresh)
+
+
+def test_take_pending_retains_server_filter_matches_null(mem_manager):
+    web = _log(mem_manager, "web ui")
+    disc = mem_manager.log_message(
+        user_identifier="u1", persona_name="p", channel="c1", author_role="user",
+        author_name="u1", content="discord", timestamp=datetime.now(timezone.utc),
+        server_id="guild",
+    )
+    for i in (web, disc):
+        mem_manager.queue_retain(i, "p", "c1", untrusted=False)
+    assert [t["interaction_id"] for t in mem_manager.take_pending_retains("p", server_id=None)] == [web]
+    assert [t["interaction_id"] for t in mem_manager.take_pending_retains("p", server_id="guild")] == [disc]

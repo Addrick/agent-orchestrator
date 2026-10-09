@@ -165,7 +165,7 @@ async def test_tool_loop_context_flow_memory_and_clean_close(mocked_chat_system)
     # DP-423: both turns are still in the window, so nothing is retained yet —
     # they wait in the queue until evicted or their session goes idle.
     assert retain_spy.await_count == 0
-    sent = await chat_system.turn_persistence.flush_idle_sessions(
+    sent = await chat_system.turn_persistence.flush_aged_out(
         now=datetime.now(timezone.utc) + timedelta(seconds=SESSION_GAP_SECONDS + 60),
     )
     assert sent == 2

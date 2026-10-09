@@ -338,10 +338,10 @@ async def main() -> None:
         embedding_service=embedding_service,
     )
 
-    # DP-423 boot pass: retain the queued turns of sessions that went idle
-    # while the process was down. Every turn re-runs this sweep; this covers
-    # a process that comes up and sees no traffic.
-    await bot.turn_persistence.flush_idle_sessions()
+    # DP-423 boot pass: retain queued turns that aged out of the history
+    # window while the process was down. Every turn re-runs this sweep; this
+    # covers a process that comes up and sees no traffic.
+    await bot.turn_persistence.flush_aged_out()
 
     # 5. Register service integrations
     if zammad_client is not None:

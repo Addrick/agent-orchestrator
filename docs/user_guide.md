@@ -97,7 +97,7 @@ A React UI served at `GET /derpr` on the same adapter, driving the OpenAI-style 
 
 **Send feedback (DP-214):** your message appears in the transcript immediately on send, tagged `sending…`, and the assistant row shows an animated typing indicator until the model produces its first token or tool call. When the turn completes, both transient rows are replaced by the authoritative transcript rows. On a failed turn the dismissed error re-syncs the transcript, so the user turn (persisted before generation) stays visible. Note: personas on non-local models currently deliver their response in one piece — true token streaming for cloud providers is tracked as DP-215–217.
 
-Personas with `history_messages: 0` always render an empty transcript — the portal mirrors exactly what the engine would feed the model, and a zero-window persona feeds it nothing.
+Personas with `history_messages: 0` always render an empty transcript — the portal mirrors exactly what the engine would feed the model, and a zero-window persona feeds it nothing. One exception: the model's window also drops messages older than 24 hours (DP-423), but the transcript keeps showing them.
 
 **Follow scroll + drafting (DP-218):** the transcript auto-follows new content (sent messages, stream frames, completed turns) while you're at the bottom; scrolling up to read history releases the follow, and returning to the bottom re-arms it. The composer stays editable during a response so you can draft your next message mid-stream — Enter won't send until the turn finishes (the SEND button is replaced by ■ stop while streaming).
 
@@ -240,7 +240,7 @@ back with `what origin_allowlist`; clear it with `set origin_allowlist none`.
 | `model` | Current model name |
 | `models [vendor]` | Available models, optionally filtered by vendor (OpenAI, Google, Anthropic, Antigravity, Local) |
 | `personas` | All loaded persona names |
-| `context` | Conversation history limit (message count) |
+| `context` | Conversation history limit (message count). Messages older than 24 hours are dropped from the window regardless, and reach the model through long-term memory instead (DP-423) |
 | `tokens` | Max response token limit |
 | `temp` | Temperature parameter |
 | `top_p` | Top-p (nucleus sampling) parameter |
@@ -1836,10 +1836,11 @@ Restore-test at least once before relying on backups — bank IDs and tag schema
 
 The retain path is fire-and-forget through a per-bank async queue: user turns enqueue and return immediately; one worker per bank drains in FIFO order. There is no DLQ — alpha tolerates dropped retains rather than risk back-pressure on user turns.
 
-**A turn reaches Hindsight only once it has left the history window (DP-423).** While a message is still inside the persona's sliding-window history the model already sees it verbatim, so retaining it as well would make recall hand the same conversation back a second time. Each turn therefore waits in the database and is appended to the session's Hindsight document when it is evicted:
+**History and long-term memory never overlap (DP-423).** While a message is inside the persona's sliding-window history the model reads it verbatim, so retaining it as well would make recall hand the same conversation back a second time. Each turn therefore waits in the database and is appended to the session's Hindsight document only once it has left the window. A message leaves the window in one of two ways:
 
-- **Evicted by newer turns.** On each turn, every waiting message of that persona and channel that is older than the oldest message in the window is sent, oldest first. Under `personal` memory mode only the speaking user's messages count, because only theirs are in their window. A persona whose window is empty (`ticket` mode, or a history window of 0) sends each turn on the next one.
-- **Session cut.** A channel that has been idle for 24 hours — the same gap that starts a new Hindsight document — has all of its waiting messages sent, even though they never left the window. Otherwise a conversation that simply stops would never be remembered. This is checked on every turn the engine handles (any channel) and once at startup, so it does not need traffic in the idle channel itself.
+- **Pushed out by newer turns.** The window holds the last `context` messages of the persona's memory-mode scope. On each turn, every waiting message in that scope older than the window's oldest message is sent, oldest first. The scope follows the memory mode exactly: the channel (`channel`), every channel of the persona (`global`, so a turn in one channel can push out another channel's messages), the server (`server`), or the speaking user's messages (`personal`). A persona whose window is empty (`ticket` mode, or a window of 0) sends each turn on the next one.
+- **Aged out after 24 hours.** The window also drops any message older than 24 hours, the same gap that starts a new Hindsight document. Any waiting message that old is sent, in every channel. This is checked on every turn the engine handles and once at startup, so a conversation that simply stops is still remembered without new traffic in its channel. A conversation picked up after a day's break therefore starts with an empty window, and the model gets the earlier exchange through recall instead.
+- *Only the model's window is time-limited.* The portal transcript still shows full history, so it can show messages older than 24 hours that the model no longer receives verbatim.
 - **Edits and deletes inside the window are honoured.** What is sent is the message as it stands at eviction: an edited message is sent with its new text, a deleted one is not sent at all, and a retried reply is sent only in its final version — Hindsight never sees the discarded attempts.
 - Each turn keeps its original time, speaker label and untrusted flag; deferring it changes when it is sent, not what is sent.
 - Waiting messages are stored durably, so a restart loses nothing. Messages from before this change were already retained and are not sent again.
@@ -1859,7 +1860,7 @@ derpr: We settled on the 45% floor with a 30s spin-down delay.
 - `scripts/backfill_hindsight.py` uses the same format, so backfilled and live turns read alike.
 - **Reasoning is never retained (DP-409).** A `<think>…</think>` block that a model leaves inline in its reply is stripped before the turn is sent — extraction otherwise files the model's self-talk as facts about the user.
 
-**Retries keep only the canonical conversation (DP-409).** Hindsight remembers the conversation you *kept*, not every attempt. Since DP-423 a retried reply is normally still waiting in the window, so retrying it simply replaces what will be sent. Only when the retried reply had already been sent (an idle session was cut first) is the session's Hindsight document rebuilt from the stored conversation — which holds only the latest version of each turn — and replaced whole. Facts extracted from the discarded attempt, and observations built only on them, are deleted; the new text is re-extracted.
+**Retries keep only the canonical conversation (DP-409).** Hindsight remembers the conversation you *kept*, not every attempt. Since DP-423 a retried reply is normally still waiting in the window, so retrying it simply replaces what will be sent. Only when the retried reply had already been sent (it aged out first) is the session's Hindsight document rebuilt from the stored conversation — which holds only the latest version of each turn — and replaced whole. Facts extracted from the discarded attempt, and observations built only on them, are deleted; the new text is re-extracted.
 
 - The session is the same one normal turns append to: one document per persona and channel, cut after 24 hours idle.
 - If the session has no document on record (e.g. the doc-scope store was wiped), a retry falls back to appending the new reply, as before.

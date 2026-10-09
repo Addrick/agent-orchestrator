@@ -1,8 +1,9 @@
 # tests/integration/test_deferred_retain.py
 #
 # DP-423: a turn reaches the semantic backend only once it has left the
-# sliding history window (or its session went idle) — never while the model
-# still reads it verbatim, or recall hands the same conversation back twice.
+# sliding history window — pushed out by newer turns, or aged out after
+# SESSION_GAP_SECONDS — never while the model still reads it verbatim, or
+# recall hands the same conversation back twice.
 # Driven through the real kernel and a real MemoryManager; only the LLM and
 # the backend's `retain_turn` are mocked.
 
@@ -78,36 +79,54 @@ async def test_edit_and_delete_inside_window_are_honoured(setup):
 
 
 @pytest.mark.asyncio
-async def test_idle_session_is_flushed_by_traffic_elsewhere(setup):
+async def test_aged_out_turns_are_flushed_by_traffic_elsewhere(setup):
     chat_system, _, _, spy = setup
 
     await _turn(chat_system, "abandoned", channel="quiet")
     assert spy.await_count == 0
 
-    # No more turns in `quiet`; a turn anywhere after the idle gap cuts it.
+    # No more turns in `quiet`; a sweep after the gap retains them anyway.
     later = datetime.now(timezone.utc) + timedelta(seconds=SESSION_GAP_SECONDS + 60)
-    sent = await chat_system.turn_persistence.flush_idle_sessions(now=later)
+    sent = await chat_system.turn_persistence.flush_aged_out(now=later)
     assert sent == 2
     assert _retained(spy) == ["abandoned", "re: abandoned"]
     assert {c.kwargs["scope_tags"][0] for c in spy.await_args_list} == {"channel:quiet"}
 
 
 @pytest.mark.asyncio
-async def test_session_cut_flushes_previous_session_before_new_turn(setup):
+async def test_aged_out_turns_leave_the_window_and_are_retained(setup):
+    """Window and memory never overlap: a turn older than the gap is dropped
+    from the window on the same turn the sweep retains it."""
     chat_system, memory_manager, _, spy = setup
 
     await _turn(chat_system, "yesterday")
-    # Age the session past the gap.
     old = datetime.now(timezone.utc) - timedelta(seconds=SESSION_GAP_SECONDS + 60)
     with memory_manager.transaction() as conn:
         conn.execute("UPDATE User_Interactions SET timestamp = ?", (old,))
 
     await _turn(chat_system, "today")
-    # Still inside a window of 2, but the session was cut: sent with their
-    # original timestamps so the doc-scope store files them in the old document.
+    history = chat_system.text_engine.generate_response.call_args.args[1]["message_history"]
+    contents = [m.get("content") for m in history]
+    assert not any("yesterday" in str(c) for c in contents)
+    # Sent with their original timestamps so the doc-scope store files them
+    # in the old document.
     assert _retained(spy) == ["yesterday", "re: yesterday"]
     assert all(c.kwargs["timestamp"] < old + timedelta(seconds=1)
                for c in spy.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_global_mode_flushes_turns_another_channel_evicted(setup):
+    """A global window spans channels, so a turn in one channel pushes out
+    another channel's turns — and must retain them, or they'd be stranded."""
+    chat_system, _, persona, spy = setup
+    persona.set_memory_mode(MemoryMode.GLOBAL)
+
+    await _turn(chat_system, "over here", channel="a")
+    await _turn(chat_system, "b1", channel="b")
+    await _turn(chat_system, "b2", channel="b")
+    assert _retained(spy) == ["over here", "re: over here"]
+    assert {c.kwargs["scope_tags"][0] for c in spy.await_args_list} == {"channel:a"}
 
 
 @pytest.mark.asyncio

@@ -358,7 +358,7 @@ async def test_budget_exhaustion_answer_is_persisted_and_retained(
     # DP-423 defers the retain until the turn leaves the window, so the prose
     # / footer split now has to survive the queue: cut the session to flush.
     assert not [k for k in retained if k.get("role") == "assistant"]
-    await chat_system.turn_persistence.flush_idle_sessions(
+    await chat_system.turn_persistence.flush_aged_out(
         now=datetime.now(timezone.utc) + timedelta(seconds=SESSION_GAP_SECONDS + 60),
     )
     assistant_retained = [k for k in retained if k.get("role") == "assistant"]

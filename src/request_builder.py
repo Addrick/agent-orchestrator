@@ -13,7 +13,7 @@ import json
 import logging
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from config.global_config import (
@@ -21,7 +21,7 @@ from config.global_config import (
 )
 from src.embedding_service import EmbeddingService
 from src.generation_params import GenerationParams
-from src.memory.backend.base import MemoryBackend, MemoryHit
+from src.memory.backend.base import SESSION_GAP_SECONDS, MemoryBackend, MemoryHit
 from src.memory.context_budget import drop_orphaned_tool_head, truncate_messages_to_budget
 from src.memory.memory_manager import MemoryManager
 from src.memory.scope_tags import recall_scope_tags
@@ -313,6 +313,7 @@ class RequestBuilder:
             persona.get_memory_mode(), persona_name,
             user_identifier, channel, server_id, effective_limit
         )
+        raw_history = self._drop_aged_out(raw_history)
 
         oldest_interaction_id = None
         if raw_history:
@@ -320,6 +321,26 @@ class RequestBuilder:
 
         formatted = self.format_raw_history_for_llm(raw_history, memory_mode_used, persona_name, server_id)
         return formatted, oldest_interaction_id
+
+    @staticmethod
+    def _drop_aged_out(raw_history: List[Dict[str, Any]],
+                       now: Optional[datetime] = None) -> List[Dict[str, Any]]:
+        """Drop the window's turns older than SESSION_GAP_SECONDS (DP-423).
+
+        A turn is retained into long-term memory once it leaves the window,
+        and `TurnPersistence.flush_aged_out` retains every turn this old —
+        so the window must not hold one too, or recall and history overlap.
+        Cuts at the first young-enough turn (rows are oldest first) so the
+        window stays a contiguous tail and `oldest_interaction_id` keeps
+        meaning "everything before this is out". An unreadable stamp is kept:
+        such a row is never retained either.
+        """
+        cutoff = (now or datetime.now(timezone.utc)) - timedelta(seconds=SESSION_GAP_SECONDS)
+        for i, row in enumerate(raw_history):
+            ts = MemoryManager.parse_stored_ts(row.get('timestamp'))
+            if ts is None or ts >= cutoff:
+                return raw_history[i:]
+        return []
 
     async def retrieve_memory_block(
             self,

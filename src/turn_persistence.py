@@ -20,6 +20,7 @@ from src.generation_events import ResponseType
 from src.memory.backend.base import SESSION_GAP_SECONDS, MemoryBackend
 from src.memory.memory_manager import MemoryManager
 from src.memory.scope_tags import build_scope_tags
+from src.persona import MemoryMode
 from src.security.scrubber import get_scrubber
 from src.utils.timeutil import to_local, to_utc
 
@@ -331,7 +332,7 @@ class TurnPersistence:
 
         While a turn is in the window the model reads it verbatim, so
         retaining it too would make recall hand it back a second time. The
-        queue is durable; `flush_evicted` and `flush_idle_sessions` drain it.
+        queue is durable; `flush_evicted` and `flush_aged_out` drain it.
         `retain_text` (DP-335) replaces the row's content at flush time only
         while the row still holds `source_content`.
         """
@@ -350,31 +351,23 @@ class TurnPersistence:
             logger.warning(f"is_retain_pending failed (interaction {interaction_id}): {e}")
             return False
 
-    async def flush_retains(
-        self,
-        persona_name: str,
-        channel: str,
-        *,
-        before_id: Optional[int] = None,
-        user_identifier: Optional[str] = None,
-    ) -> int:
-        """Retain a scope's queued turns, oldest first; returns how many.
+    async def flush_retains(self, **filters: Any) -> int:
+        """Retain queued turns matching `filters` (see
+        `MemoryManager.take_pending_retains`), oldest first; returns how many.
 
         Each turn keeps its own timestamp, so the doc-scope store cuts
         documents at the same idle gaps it would have cut them live.
         """
         try:
-            rows = self.memory_manager.take_pending_retains(
-                persona_name, channel,
-                before_id=before_id, user_identifier=user_identifier,
-            )
+            rows = self.memory_manager.take_pending_retains(**filters)
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"Pending retain flush failed ({persona_name}/{channel}): {e}")
+            logger.warning(f"Pending retain flush failed ({filters}): {e}")
             return 0
         sent = 0
         for r in rows:
             if r["skip"]:
                 continue
+            persona_name = r["persona_name"]
             role = (r["author_role"] or "").lower()
             speaker = (
                 persona_name if role == "assistant"
@@ -383,57 +376,66 @@ class TurnPersistence:
             await self.retain_turn_safe(
                 persona_name=persona_name, role=role, speaker=speaker,
                 content=r["text"], user_identifier=r["user_identifier"],
-                channel=channel, server_id=r["server_id"],
+                channel=r["channel"], server_id=r["server_id"],
                 timestamp=r["timestamp"], interaction_id=r["interaction_id"],
                 untrusted=r["untrusted"],
             )
             sent += 1
         return sent
 
-    async def flush_idle_sessions(self, now: Optional[datetime] = None) -> int:
-        """Cut every idle session: retain all queued turns of any scope with
-        no turn in SESSION_GAP_SECONDS — the gap that opens a new Hindsight
-        document — so a conversation that stops is still remembered.
+    async def flush_aged_out(self, now: Optional[datetime] = None) -> int:
+        """Retain every queued turn older than SESSION_GAP_SECONDS, in any
+        scope — the age at which the history window drops it
+        (`RequestBuilder.build_conversation_history`), and the gap that
+        opens a new Hindsight document. Without this a conversation that
+        simply stops never leaves the window and is never remembered.
 
         Lazy sweep, run on every turn and once at startup (the DP-319 pairing:
         the sweep reads the durable queue, the boot pass covers a process
         that comes up and sees no traffic).
         """
         now = now or datetime.now(timezone.utc)
-        try:
-            scopes = self.memory_manager.idle_retain_scopes(
-                now - timedelta(seconds=SESSION_GAP_SECONDS)
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"Idle retain sweep failed: {e}")
-            return 0
-        sent = 0
-        for persona_name, channel in scopes:
-            sent += await self.flush_retains(persona_name, channel)
-        return sent
+        return await self.flush_retains(
+            older_than=now - timedelta(seconds=SESSION_GAP_SECONDS),
+        )
 
     async def flush_evicted(
         self,
         *,
         persona_name: str,
+        memory_mode: MemoryMode,
         channel: str,
+        user_identifier: str,
+        server_id: Optional[str],
         oldest_window_id: Optional[int],
         current_id: Optional[int],
-        user_identifier: Optional[str] = None,
     ) -> int:
-        """Retain the scope's queued turns that have left the history window.
+        """Retain the queued turns this request's history window pushed out.
 
-        Interaction ids are insertion-ordered, so everything older than the
-        window's oldest turn is out of it, in every memory mode. An empty
-        window (`ticket` mode, a window of 0) evicts everything before the
-        current turn. `user_identifier` restricts the flush to one user's
-        turns, for `personal` mode where only those are in the window.
+        Interaction ids are insertion-ordered, so every turn the window
+        covers that is older than its oldest turn is out of it. "Covers" is
+        the memory mode's scope, mirroring `RequestBuilder.fetch_raw_history`
+        — a narrower flush strands turns another channel evicted, a wider
+        one retains turns still in someone else's window. An empty window
+        (`ticket` mode, a window of 0, everything aged out) evicts
+        everything before the current turn.
         """
         before_id = oldest_window_id if oldest_window_id is not None else current_id
         if before_id is None:
             return 0
+        if memory_mode == MemoryMode.GLOBAL:
+            scope: Dict[str, Any] = {}
+        elif memory_mode == MemoryMode.PERSONAL:
+            scope = {"user_identifier": user_identifier}
+        elif memory_mode == MemoryMode.SERVER_WIDE:
+            scope = {"server_id": server_id}
+        elif memory_mode == MemoryMode.TICKET_ISOLATED:
+            scope = {"channel": channel}
+        else:
+            # get_channel_history matches a falsy server_id as IS NULL.
+            scope = {"channel": channel, "server_id": server_id or None}
         return await self.flush_retains(
-            persona_name, channel, before_id=before_id, user_identifier=user_identifier,
+            persona_name=persona_name, before_id=before_id, **scope,
         )
 
     async def retain_turn_safe(

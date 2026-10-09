@@ -29,7 +29,7 @@ from src.generation_events import (
 )
 from src.message_handler import BotLogic
 from src.origin import ANONYMOUS, Origin
-from src.persona import MemoryMode, Persona
+from src.persona import Persona
 from src.deferral_kinds import DEFERRAL_KIND_APPROVAL
 from src.request_builder import AssembledRequest, RequestBuilder, RequestContext
 from src.security.scrubber import get_scrubber
@@ -409,10 +409,10 @@ class ChatSystem:
                 yield ErrorEvent(message=err_msg)
                 return
 
-            # DP-423: cut idle sessions before this turn is logged — logging it
-            # would make this scope look active, and its previous session's
-            # queued turns must reach Hindsight before the new session starts.
-            await self.turn_persistence.flush_idle_sessions()
+            # DP-423: retain every queued turn that has aged out of the window
+            # (older than SESSION_GAP_SECONDS), in any scope — the only way a
+            # conversation that simply stops is ever remembered.
+            await self.turn_persistence.flush_aged_out()
 
             if continuation is None:
                 # 2. Log user turn (or archive for retry). Done after history is built
@@ -435,13 +435,12 @@ class ChatSystem:
                 # call blocks the LLM call below (Hindsight enqueues
                 # fire-and-forget; sqlite_legacy's retain is a noop).
                 await self.turn_persistence.flush_evicted(
-                    persona_name=persona_name, channel=channel,
+                    persona_name=persona_name,
+                    memory_mode=persona.get_memory_mode(),
+                    channel=channel, user_identifier=user_identifier,
+                    server_id=server_id,
                     oldest_window_id=ctx.oldest_interaction_id,
                     current_id=user_interaction_id,
-                    user_identifier=(
-                        user_identifier
-                        if persona.get_memory_mode() == MemoryMode.PERSONAL else None
-                    ),
                 )
                 if user_interaction_id is not None and message and message.strip():
                     self.turn_persistence.queue_retain_safe(
@@ -698,8 +697,8 @@ class ChatSystem:
                 # DP-409: a retry replaced an already-retained row in place, so
                 # Hindsight gets the rebuilt canonical session, not the new
                 # attempt appended beside the discarded one. Since DP-423 that
-                # only happens once an idle session was cut; a retried reply
-                # still in the window just re-queues below.
+                # needs the reply to have left the window first (aged out); a
+                # retried reply still in the window just re-queues below.
                 await self.turn_persistence.rebuild_session_safe(
                     persona_name=persona_name, channel=channel,
                     user_identifier=user_identifier, server_id=server_id,
