@@ -38,7 +38,6 @@ from src.tools.definitions import (
     get_tool_capabilities, is_irreversible, get_tool_definition, is_write_tool
 )
 from src.tools.tool_manager import ToolManager, tool_error, unoffered_error
-from src.utils.timeutil import local_now
 
 logger = logging.getLogger(__name__)
 
@@ -677,17 +676,11 @@ def build_wire_messages(
     (`ChatSystem.assemble_request`) call this, so the wire messages the inspector
     shows cannot drift from what a live submit actually sends.
     """
-    system_prompt = persona.get_prompt()
-    inject = True
-    if hasattr(persona, "get_inject_timestamp"):
-        inject = persona.get_inject_timestamp()
-
-    if inject:
-        # Wednesday, June 10, 2026, 01:01 AM EDT
-        now_str = local_now().strftime("%A, %B %d, %Y, %I:%M %p %Z")
-        system_prompt = f"[Current Time: {now_str}]\n\n{system_prompt}"
-
-    return [{"role": "system", "content": system_prompt}] + list(conversation_history)
+    # No time in the system prompt (DP-431): a minute-resolution clock at
+    # token 0 changed the prefix every minute and defeated a local server's
+    # prompt cache. The current time rides on the newest user turn instead
+    # (`RequestBuilder`, `prompt_stamp`).
+    return [{"role": "system", "content": persona.get_prompt()}] + list(conversation_history)
 
 
 def runaway_guard_for(max_tool_calls: int) -> int:

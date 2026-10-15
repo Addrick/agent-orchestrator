@@ -6,9 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from config import global_config
-from src.persona import Persona
-from src.tools.tool_loop import build_wire_messages
-from src.utils.timeutil import local_now, to_local, to_utc
+from src.utils.timeutil import local_now, prompt_stamp, to_local, to_utc
 
 
 @pytest.fixture(autouse=True)
@@ -40,9 +38,9 @@ def test_to_local_renders_every_stored_shape_as_eastern(stored):
     assert to_local(stored).strftime("%Y-%m-%d %H:%M %Z") == "2026-10-01 21:45 EDT"
 
 
-def test_prompt_current_time_is_local_tz_not_host_clock(monkeypatch):
+def test_prompt_stamp_is_local_tz_not_host_clock(monkeypatch):
+    # 01:45 UTC Fri Oct 2 is Thu Oct 1 in Eastern, Fri 10:45 in Tokyo.
+    stored = datetime(2026, 10, 2, 1, 45)
+    assert prompt_stamp(stored) == "[Thu 2026-10-01 21:45]"
     monkeypatch.setattr(global_config, "LOCAL_TZ", "Asia/Tokyo")
-    persona = Persona(persona_name="t", model_name="mock", prompt="p", inject_timestamp=True)
-    system = build_wire_messages(persona, [])[0]["content"]
-    assert system.startswith("[Current Time: ")
-    assert " JST]" in system
+    assert prompt_stamp(stored) == "[Fri 2026-10-02 10:45]"

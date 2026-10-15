@@ -33,3 +33,12 @@ def to_local(ts: Union[datetime, str, bytes]) -> datetime:
     if isinstance(ts, str):
         ts = datetime.fromisoformat(ts)
     return to_utc(ts).astimezone(ZoneInfo(global_config.LOCAL_TZ))
+
+
+def prompt_stamp(ts: Union[datetime, str, bytes]) -> str:
+    """The `[Wed 2026-10-15 14:05]` prefix a user turn carries in the prompt
+    (DP-431). Rendered from the turn's stored time, never "now", so a turn's
+    stamp is byte-identical on every request and the prompt prefix stays
+    cacheable. The weekday is there because models cannot reliably derive it.
+    """
+    return f"[{to_local(ts):%a %Y-%m-%d %H:%M}]"

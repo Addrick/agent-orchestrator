@@ -11,6 +11,7 @@ and the S5 parity inspector share this single code path by construction.
 
 import json
 import logging
+import re
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -32,7 +33,7 @@ from src.tools.tool_manager import ToolManager
 from src.tools.turn_context import TurnContext, turn_scope
 from src.utils.message_utils import strip_vertex_links
 from src.utils.model_utils import get_model_prefix
-from src.utils.timeutil import to_utc
+from src.utils.timeutil import prompt_stamp, to_utc
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,21 @@ logger = logging.getLogger(__name__)
 # the least-recently-touched entry once over capacity (taint is a soft cache —
 # a re-derived False on a cold key is safe, and recall re-taints if needed).
 MAX_CONVERSATION_TAINTS = 10000
+
+
+_PROMPT_STAMP = re.compile(r"^\[[A-Z][a-z]{2} \d{4}-\d{2}-\d{2} \d{2}:\d{2}\] ")
+
+
+def _stamped(content: str, ts: Any) -> str:
+    """`content` behind its turn's `prompt_stamp` (DP-431). A row with no
+    readable stored time passes through bare rather than being stamped "now",
+    which would change on every request and break the cached prefix."""
+    if ts is None:
+        return content
+    try:
+        return f"{prompt_stamp(ts)} {content}"
+    except (TypeError, ValueError):
+        return content
 
 
 def _relative_time(dt: datetime) -> str:
@@ -83,6 +99,9 @@ class RequestContext:
     image_url: Optional[str] = None
     history_limit: Optional[int] = None
     user_display_name: Optional[str] = None
+    # When the new user turn was sent; stored with the row and used for its
+    # prompt stamp so the two agree (DP-431). None = now.
+    timestamp: Optional[datetime] = None
     # Populated during prepare_request
     conversation_history: List[Dict[str, Any]] = field(default_factory=list)
     tools_for_llm: List[Dict[str, Any]] = field(default_factory=list)
@@ -167,8 +186,15 @@ class RequestBuilder:
             self.conversation_taints.popitem(last=False)
 
     def format_raw_history_for_llm(self, raw_history: List[Dict[str, Any]], memory_mode: str,
-                                   persona_name: str, server_id: Optional[str]) -> List[Dict[str, Any]]:
-        """Formats database history records into a list of messages for the LLM."""
+                                   persona_name: str, server_id: Optional[str],
+                                   stamp: bool = False) -> List[Dict[str, Any]]:
+        """Formats database history records into a list of messages for the LLM.
+
+        ``stamp`` (the persona's ``inject_timestamp``) prefixes every user-role
+        message with its stored time (DP-431). The persona's own assistant
+        turns are never stamped: a stamp beside the model's own words gets
+        imitated in its replies.
+        """
         final_history: List[Dict[str, Any]] = []
         is_group_chat = memory_mode in ("server", "global", "ticket") or (
                     memory_mode == "channel" and server_id is not None)
@@ -183,9 +209,11 @@ class RequestBuilder:
             if author_role == 'user':
                 if is_group_chat and author_name:
                     formatted_content = f"{author_name}: {content_clean}"
-                    final_history.append({'role': 'user', 'content': formatted_content})
                 else:
-                    final_history.append({'role': 'user', 'content': content_clean})
+                    formatted_content = content_clean
+                if stamp:
+                    formatted_content = _stamped(formatted_content, msg.get('timestamp'))
+                final_history.append({'role': 'user', 'content': formatted_content})
             elif author_role == 'assistant':
                 if author_name == persona_name:
                     tool_context_json = msg.get('tool_context')
@@ -217,6 +245,8 @@ class RequestBuilder:
                 else:
                     # In a group chat, messages from other personas are treated as user messages
                     formatted_content = f"{author_name}: {content_clean}"
+                    if stamp:
+                        formatted_content = _stamped(formatted_content, msg.get('timestamp'))
                     final_history.append({'role': 'user', 'content': formatted_content})
         return final_history
 
@@ -322,7 +352,10 @@ class RequestBuilder:
         ids = [r['interaction_id'] for r in raw_history if r.get('interaction_id') is not None]
         oldest_interaction_id = min(ids) if ids else None
 
-        formatted = self.format_raw_history_for_llm(raw_history, memory_mode_used, persona_name, server_id)
+        formatted = self.format_raw_history_for_llm(
+            raw_history, memory_mode_used, persona_name, server_id,
+            stamp=persona.get_inject_timestamp(),
+        )
         return formatted, oldest_interaction_id
 
     async def retrieve_memory_block(
@@ -355,7 +388,9 @@ class RequestBuilder:
                 if msg.get('role') == 'user':
                     content = msg.get('content', '')
                     if isinstance(content, str) and content.strip():
-                        query_text = strip_vertex_links(content)
+                        # Drop the DP-431 stamp: recall reads dates in a
+                        # query as a time filter.
+                        query_text = strip_vertex_links(_PROMPT_STAMP.sub('', content, count=1))
                         break
         if not query_text:
             logger.warning(f"### RequestBuilder: Skipping retrieval for {persona.get_name()} (no text content to embed)")
@@ -707,7 +742,12 @@ class RequestBuilder:
             # land a phantom `{'role':'user','content':''}` turn in the prompt,
             # which would otherwise make the model generate off a blank turn.
             # Noise reduction: Strip vertexai grounding redirect URLs from user message for LLM context.
-            ctx.conversation_history.append({"role": "user", "content": strip_vertex_links(ctx.message)})
+            content = strip_vertex_links(ctx.message)
+            if ctx.persona.get_inject_timestamp():
+                # The stamp the row will carry as history next turn, so the
+                # prompt prefix is unchanged when it gets there (DP-431).
+                content = _stamped(content, ctx.timestamp or datetime.now(timezone.utc))
+            ctx.conversation_history.append({"role": "user", "content": content})
 
         # Respect per-request context overrides from the portal for history truncation.
         ctx_limit = (ctx.local_inference_config or {}).get("max_context_length") or ctx.persona.get_max_context_tokens()

@@ -38,7 +38,8 @@ def mocked_chat_system():
     test_personas = {
         "test_persona": Persona(
             persona_name="test_persona", model_name="mock_model", prompt="You are a test persona.",
-            enabled_tools=['*'], memory_mode=MemoryMode.CHANNEL_ISOLATED, history_messages=10
+            enabled_tools=['*'], memory_mode=MemoryMode.CHANNEL_ISOLATED, history_messages=10,
+            inject_timestamp=False,  # DP-431 stamps: tests/integration/test_prompt_timestamps_db.py
         ),
         "capped_persona": Persona(
             persona_name='capped_persona', model_name='mock', prompt='talk', history_messages=100

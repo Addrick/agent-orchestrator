@@ -47,7 +47,9 @@ def chat_system_with_mocks():
     mock_tool_manager = AsyncMock()
     mock_tool_manager.get_tool_definitions = MagicMock(return_value=[])
 
-    mock_persona = Persona('test_persona', 'mock_model', 'prompt')
+    # Bare turn text: these tests assert message content, not DP-431's
+    # stamps (covered in tests/test_prompt_timestamps.py).
+    mock_persona = Persona('test_persona', 'mock_model', 'prompt', inject_timestamp=False)
 
     system = make_chat_system(
         memory_manager=mock_memory_manager,

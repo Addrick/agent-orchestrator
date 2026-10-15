@@ -380,6 +380,9 @@ class ChatSystem:
             history_limit=history_limit, user_display_name=user_display_name,
             local_inference_config=local_inference_config,
             client_messages=client_messages,
+            # Fixed before assembly: the prompt stamp and the stored row must
+            # carry the same time (DP-431).
+            timestamp=timestamp or datetime.now(timezone.utc),
         )
 
         # DP-113: pin the active turn's scope so engine-side tools (e.g.
@@ -414,7 +417,7 @@ class ChatSystem:
                 #    (so the freshly-inserted row doesn't show up twice) but before
                 #    the LLM call so the user row is always pinned even if the model
                 #    errors mid-flight.
-                user_ts = timestamp or datetime.now(timezone.utc)
+                user_ts = ctx.timestamp or datetime.now(timezone.utc)
                 user_interaction_id, retry_assistant_id = self.turn_persistence.log_user_turn(
                     is_retry=is_retry, persona_name=persona_name,
                     user_identifier=user_identifier, channel=channel,

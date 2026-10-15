@@ -32,8 +32,8 @@ def mem_test_system():
         text_engine=mock_text_engine,
     )
     chat_system.personas = {
-        'test_persona': Persona('test_persona', 'mock_model', 'prompt', history_messages=10),
-        'persona_2': Persona('persona_2', 'mock_model', 'prompt', history_messages=10)
+        'test_persona': Persona('test_persona', 'mock_model', 'prompt', history_messages=10, inject_timestamp=False),
+        'persona_2': Persona('persona_2', 'mock_model', 'prompt', history_messages=10, inject_timestamp=False)
     }
     yield chat_system, memory_manager, mock_text_engine
 
