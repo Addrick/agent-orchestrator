@@ -1394,6 +1394,27 @@ def test_persona_extended_unknown_persona_returns_404():
     mm.close()
 
 
+def test_persona_max_tool_calls_get_and_patch():
+    """DP-428: null on GET when unset; PATCH sets it, null clears it, and an
+    out-of-range value is reported as rejected rather than silently kept."""
+    adapter, mm, persona = _make_adapter_with_seeded_db()
+    with TestClient(adapter.app) as client:
+        assert client.get("/api/v1/persona/test_persona").json()["max_tool_calls"] is None
+
+        r = client.patch("/api/v1/persona/test_persona", json={"max_tool_calls": 40})
+        assert r.status_code == 200
+        assert persona.get_max_tool_calls() == 40
+        assert client.get("/api/v1/persona/test_persona").json()["max_tool_calls"] == 40
+
+        r = client.patch("/api/v1/persona/test_persona", json={"max_tool_calls": 0})
+        assert r.json()["rejected_fields"] == ["max_tool_calls"]
+
+        r = client.patch("/api/v1/persona/test_persona", json={"max_tool_calls": None})
+        assert r.json()["rejected_fields"] == []
+        assert persona.get_max_tool_calls() is None
+    mm.close()
+
+
 def test_patch_persona_updates_max_context_tokens():
     adapter, mm, persona = _make_adapter_with_seeded_db()
     with TestClient(adapter.app) as client:

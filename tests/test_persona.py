@@ -282,6 +282,35 @@ def test_set_max_context_tokens_invalid_resets(base_persona_args, monkeypatch):
     assert p.get_max_context_tokens() == 131072
 
 
+
+# --- DP-428: max_tool_calls ---
+
+def test_max_tool_calls_unset_follows_global_default(base_persona_args, monkeypatch):
+    p = Persona(**base_persona_args)
+    assert p.get_max_tool_calls() is None
+    monkeypatch.setattr(global_config, 'MAX_TOOL_CALLS', 7)
+    assert p.get_effective_max_tool_calls() == 7
+
+
+def test_max_tool_calls_explicit(base_persona_args):
+    p = Persona(**base_persona_args, max_tool_calls=40)
+    assert p.get_max_tool_calls() == 40
+    assert p.get_effective_max_tool_calls() == 40
+
+
+@pytest.mark.parametrize("bad", ["lots", 0, -3, 101, True, 2.5j])
+def test_max_tool_calls_invalid_clears_to_default(base_persona_args, bad):
+    p = Persona(**base_persona_args, max_tool_calls=40)
+    assert p.set_max_tool_calls(bad) is None
+    assert p.get_max_tool_calls() is None
+
+
+def test_max_tool_calls_none_clears(base_persona_args):
+    p = Persona(**base_persona_args, max_tool_calls=40)
+    assert p.set_max_tool_calls(None) is None
+    assert p.get_effective_max_tool_calls() == global_config.MAX_TOOL_CALLS
+
+
 # --- provider_extras helpers (Phase E) ---
 
 def test_provider_extra_set_and_get(persona):

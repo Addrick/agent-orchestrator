@@ -65,6 +65,7 @@ class Persona:
             thinking_level: Optional[str] = None,
             long_term_memory: bool = True,
             max_context_tokens: Optional[int] = None,
+            max_tool_calls: Optional[int] = None,
             params: Any = None,
             chat_template: Optional[str] = None,
             tool_policy: Optional[Union[Dict[str, Any], ToolPolicy]] = None,
@@ -166,6 +167,8 @@ class Persona:
             self._max_context_tokens: int = int(max_context_tokens) if max_context_tokens is not None else global_config.DEFAULT_MAX_CONTEXT_TOKENS
         except (ValueError, TypeError):
             self._max_context_tokens = global_config.DEFAULT_MAX_CONTEXT_TOKENS
+
+        self._max_tool_calls: Optional[int] = self._coerce_max_tool_calls(max_tool_calls)
 
         if isinstance(tool_policy, ToolPolicy):
             self._tool_policy = tool_policy
@@ -561,6 +564,18 @@ class Persona:
         KoboldCPP's `max_context_length` — see context_budget.py."""
         return self._max_context_tokens
 
+    def get_max_tool_calls(self) -> Optional[int]:
+        """Per-persona override of `MAX_TOOL_CALLS` (DP-428), or None for the
+        global default. Raw, so persistence keeps "unset" distinct from a
+        value that happens to equal today's default."""
+        return self._max_tool_calls
+
+    def get_effective_max_tool_calls(self) -> int:
+        """The tool-call budget this persona's turns actually run with."""
+        if self._max_tool_calls is not None:
+            return self._max_tool_calls
+        return global_config.MAX_TOOL_CALLS
+
     def get_provider_extra(self, provider: str, key: str) -> Any:
         """Read a single provider-specific knob from `provider_extras[provider][key]`."""
         return self._params.provider_extras.get(provider, {}).get(key)
@@ -927,6 +942,30 @@ class Persona:
             logger.info(
                 f"Invalid max_context_tokens '{new_value}'. Using default: {self._max_context_tokens}.")
         return self._max_context_tokens
+
+    @staticmethod
+    def _coerce_max_tool_calls(value: Any) -> Optional[int]:
+        """An integer in [1, MAX_TOOL_CALLS_OVERRIDE_CAP], else None (the
+        global default)."""
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            parsed = int(value)
+        except (ValueError, TypeError):
+            return None
+        return parsed if 1 <= parsed <= global_config.MAX_TOOL_CALLS_OVERRIDE_CAP else None
+
+    def set_max_tool_calls(self, new_value: Any) -> Optional[int]:
+        """Sets the per-persona tool-call budget. None, or anything that does
+        not parse as an integer in [1, MAX_TOOL_CALLS_OVERRIDE_CAP], clears
+        it back to the global default."""
+        self._max_tool_calls = self._coerce_max_tool_calls(new_value)
+        if self._max_tool_calls is None and new_value is not None:
+            logger.warning(
+                f"Invalid max_tool_calls '{new_value}' for '{self._name}'. Using global default.")
+        else:
+            logger.info(f"Persona '{self._name}' max_tool_calls set to {self._max_tool_calls}.")
+        return self._max_tool_calls
 
     def set_memory_mode(self, new_mode: Any) -> None:
         """Sets the memory retrieval strategy from a string or a MemoryMode member."""

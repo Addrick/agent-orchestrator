@@ -293,6 +293,40 @@ async def test_read_group_executes_concurrently(mocked_chat_system):
 # --------------------------------------------------------------------------
 
 @pytest.mark.asyncio
+async def test_persona_max_tool_calls_bounds_the_turn(mocked_chat_system):
+    """DP-428: the persona's own `max_tool_calls` is the budget the loop runs
+    with — the turn stops after that many calls, not after MAX_TOOL_CALLS."""
+    chat_system, _ = mocked_chat_system
+    persona = chat_system.personas["test_persona"]
+    persona.set_enabled_tools(["*"])
+    persona.set_max_tool_calls(3)
+    offer_tools(chat_system, "test_persona", "get_agent_status")
+    _script_engine(chat_system, [
+        ({"type": "tool_calls", "calls": [
+            {"id": f"c{i}", "name": "get_agent_status",
+             "arguments": {"agent_id": "z"}}]}, {})
+        for i in range(10)
+    ])
+
+    executed = []
+
+    async def fake_execute(name, _offered, **kwargs):
+        executed.append(name)
+        return {"status": "running"}
+    chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[assignment]
+
+    events = await _drain(chat_system.stream_response(
+        "test_persona", "u_cap", "c_cap", "check the agent",
+    ))
+
+    done = [e for e in events if isinstance(e, DoneEvent)][-1]
+    assert len(executed) == 3
+    # The script never stops calling, so the wrap-up falls back to the
+    # rendered cap text — which names the persona's budget, not the global.
+    assert "3 of 3 tool steps" in done.text
+
+
+@pytest.mark.asyncio
 async def test_budget_exhaustion_answer_is_persisted_and_retained(
         mocked_chat_system):
     """I3 + I5 for the exhausted-budget exit."""

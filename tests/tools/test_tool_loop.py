@@ -1097,6 +1097,20 @@ def test_runaway_guard_stays_above_the_call_budget():
     assert global_config.MAX_TOOL_ITERATIONS > global_config.MAX_TOOL_CALLS
 
 
+@pytest.mark.parametrize("budget", [1, 15, 40, 100])
+def test_runaway_guard_tracks_a_per_persona_budget(budget):
+    """DP-428: a persona's own budget gets a guard derived from it, so raising
+    the budget past `MAX_TOOL_ITERATIONS` cannot let the guard truncate a turn
+    the budget still allows. At the defaults the derivation is the constant."""
+    from config import global_config
+    from src.tools.tool_loop import runaway_guard_for
+
+    assert runaway_guard_for(global_config.MAX_TOOL_CALLS) == global_config.MAX_TOOL_ITERATIONS
+    loop = ToolLoop(MagicMock(), MagicMock(), max_tool_calls=budget)
+    assert loop.max_tool_calls == budget
+    assert loop.max_iterations == runaway_guard_for(budget) > budget
+
+
 # --- DP-335 S2: the exhaustion answer ---------------------------------------
 
 

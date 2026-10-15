@@ -26,7 +26,9 @@ import json
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type
 
-from config.global_config import DEFAULT_PERSONA
+from config.global_config import (
+    DEFAULT_PERSONA, MAX_TOOL_CALLS, MAX_TOOL_CALLS_OVERRIDE_CAP,
+)
 from src.origin import split_allowlist_entries
 from src.persona import ExecutionMode, MemoryMode, Persona
 from src.tool_policy import KNOWN_OVERRIDES
@@ -753,6 +755,28 @@ PERSONA_FIELDS: List[PersonaField] = [
         set_cli=_set_max_context_tokens,
         patch_key='max_context_tokens',
         patch_apply=_plain_patch(lambda p, v: p.set_max_context_tokens(v)),
+    ),
+    PersonaField(
+        name='max_tool_calls',
+        describe=lambda p: (
+            f"Max tool calls for '{p.get_name()}' is {p.get_effective_max_tool_calls()}"
+            + (" (persona override)." if p.get_max_tool_calls() is not None
+               else f" (global default, MAX_TOOL_CALLS={MAX_TOOL_CALLS}).")
+        ),
+        set_cli=_optional_number_setter(
+            caster=int,
+            apply=lambda p, v: p.set_max_tool_calls(v),
+            ok_msg="Max tool calls for {name} set to {value}.",
+            fallback_msg=(
+                "Max tool calls for {name} cleared ('{raw}' is not a number); "
+                f"the global default ({MAX_TOOL_CALLS}) will be used."
+            ),
+            lo=1,
+            hi=MAX_TOOL_CALLS_OVERRIDE_CAP,
+            range_msg=f"Error: max_tool_calls must be between 1 and {MAX_TOOL_CALLS_OVERRIDE_CAP}.",
+        ),
+        patch_key='max_tool_calls',
+        patch_apply=_optional_number_patch(lambda p, v: p.set_max_tool_calls(v)),
     ),
     PersonaField(
         name='chat_template',

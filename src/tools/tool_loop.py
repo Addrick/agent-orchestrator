@@ -690,6 +690,18 @@ def build_wire_messages(
     return [{"role": "system", "content": system_prompt}] + list(conversation_history)
 
 
+def runaway_guard_for(max_tool_calls: int) -> int:
+    """The round-trip guard for a given call budget: the same distance above
+    it as `MAX_TOOL_ITERATIONS` sits above `MAX_TOOL_CALLS` (DP-428).
+
+    Derived rather than fixed because the guard must stay above the budget
+    (see `config.global_config`): a persona that raises its own
+    `max_tool_calls` past a fixed 25 would have ordinary turns truncated by
+    the guard instead of ending on the budget it asked for.
+    """
+    return max_tool_calls + (MAX_TOOL_ITERATIONS - MAX_TOOL_CALLS)
+
+
 class ToolLoop:
     """Drives the stream_messages → tool_calls → execute → repeat cycle."""
 
@@ -697,7 +709,7 @@ class ToolLoop:
         self,
         text_engine: TextEngine,
         tool_manager: ToolManager,
-        max_iterations: int = MAX_TOOL_ITERATIONS,
+        max_iterations: Optional[int] = None,
         max_tool_calls: int = MAX_TOOL_CALLS,
     ) -> None:
         """`max_tool_calls` is the turn's budget; `max_iterations` is the
@@ -705,10 +717,14 @@ class ToolLoop:
         what an iteration buys depends entirely on how many calls the model
         packs into one message, so a single limit means a different amount of
         work per provider. See `config.global_config` for the sizing.
+        `max_iterations` defaults to `runaway_guard_for(max_tool_calls)`.
         """
         self.text_engine = text_engine
         self.tool_manager = tool_manager
-        self.max_iterations = max_iterations
+        self.max_iterations = (
+            max_iterations if max_iterations is not None
+            else runaway_guard_for(max_tool_calls)
+        )
         self.max_tool_calls = max_tool_calls
 
     async def run(

@@ -75,6 +75,8 @@ export interface Persona {
   memory_mode: string
   long_term_memory: boolean
   max_context_tokens: number
+  // per-persona tool-call budget; null = global MAX_TOOL_CALLS (DP-428)
+  max_tool_calls: number | null
   chat_template: string | null
   tool_policy: ToolPolicy | null
   enabled_tools: string[]
