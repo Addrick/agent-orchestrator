@@ -543,6 +543,8 @@ class KoboldEngineAdapter:
             "thinking_level": p.get_thinking_level(),
             "memory_mode": p.get_memory_mode().name,
             "max_context_tokens": p.get_max_context_tokens(),
+            # None = the global MAX_TOOL_CALLS (DP-428).
+            "max_tool_calls": p.get_max_tool_calls(),
             "long_term_memory": p.get_long_term_memory(),
             "inject_timestamp": p.get_inject_timestamp(),
             "chat_template": p.get_chat_template(),

@@ -536,8 +536,12 @@ class ChatSystem:
                 )
 
             # Construct per-call so tests that swap `chat_system.text_engine`
-            # post-init still see the new engine; ToolLoop is stateless.
-            tool_loop = ToolLoop(self.text_engine, self.tool_manager)
+            # post-init still see the new engine; ToolLoop is stateless. The
+            # call budget is per persona (DP-428); the guard derives from it.
+            tool_loop = ToolLoop(
+                self.text_engine, self.tool_manager,
+                max_tool_calls=ctx.persona.get_effective_max_tool_calls(),
+            )
             try:
                 async for ev in tool_loop.run(
                     persona=ctx.persona,

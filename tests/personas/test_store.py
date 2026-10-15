@@ -151,6 +151,24 @@ def test_max_context_tokens_missing_uses_default(tmp_path: Path):
     assert loaded["legacy"].get_max_context_tokens() == global_config.DEFAULT_MAX_CONTEXT_TOKENS
 
 
+
+def test_max_tool_calls_round_trip_and_unset_stays_unset(temp_save_file: Path):
+    """DP-428: an override survives save/load; an unset persona writes no key,
+    so it keeps following MAX_TOOL_CALLS instead of freezing today's value."""
+    set_p = Persona(persona_name="busy", model_name="m", prompt="p", max_tool_calls=40)
+    unset_p = Persona(persona_name="plain", model_name="m", prompt="p")
+    save_utils.save_personas_to_file(
+        {"busy": set_p, "plain": unset_p}, set(), file_path_override=str(temp_save_file))
+
+    on_disk = {p["name"]: p for p in json.loads(temp_save_file.read_text())["personas"]}
+    assert on_disk["busy"]["max_tool_calls"] == 40
+    assert "max_tool_calls" not in on_disk["plain"]
+
+    loaded = save_utils.load_personas_from_file(file_path_override=str(temp_save_file))
+    assert loaded["busy"].get_max_tool_calls() == 40
+    assert loaded["plain"].get_max_tool_calls() is None
+
+
 # --- Phase A: GenerationParams nested shape on disk ---
 
 

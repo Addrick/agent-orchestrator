@@ -109,7 +109,10 @@ naming un-offered tools. For a turn made only of admitted calls the old reasonin
 applies: every continuing iteration charges at least one call, so the call budget trips
 first while `MAX_TOOL_ITERATIONS > MAX_TOOL_CALLS`. The
 ordering invariant is pinned by a test, because the day `MAX_TOOL_CALLS` rises
-past 25 the guard silently starts truncating ordinary turns. (An earlier comment
+past 25 the guard silently starts truncating ordinary turns. **Per persona
+(DP-428)** the same holds by construction: a persona's `max_tool_calls` replaces
+the budget, and `ToolLoop` derives its guard as `runaway_guard_for(budget)` —
+the budget plus the default 10-step headroom — rather than reusing the fixed 25. (An earlier comment
 justified the guard with "a model that emits an empty tool-call list forever
 reaches this one" — that is wrong: an empty tool-call list is the loop's
 *natural-exit* branch and ends the turn immediately.)

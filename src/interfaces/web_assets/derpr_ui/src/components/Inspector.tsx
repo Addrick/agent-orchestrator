@@ -124,6 +124,7 @@ const NUM_BASE: (keyof Persona)[] = [
   'max_tokens',
   'history_messages',
   'max_context_tokens',
+  'max_tool_calls',
 ]
 // PATCH-able kobold sampler extras (top-level keys on the PATCH body; the
 // adapter routes them into provider_extras["kobold"]). Empty string clears.
@@ -327,6 +328,17 @@ function PersonaPane({ store }: { store: PortalStore }) {
             value={buf.thinking_level}
             placeholder="none"
             onChange={(e) => set('thinking_level', e.target.value)}
+          />
+        </Cell>
+      </Pair>
+
+      <Pair>
+        <Cell label="max_tool_calls">
+          <input
+            type="number"
+            value={buf.max_tool_calls}
+            placeholder="default"
+            onChange={(e) => set('max_tool_calls', e.target.value)}
           />
         </Cell>
       </Pair>
