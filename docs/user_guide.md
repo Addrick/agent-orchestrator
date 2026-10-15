@@ -810,14 +810,14 @@ would create the ticket twice.
 
 **Gated actions stay in the model's memory (DP-296).** A persona remembers the tool calls it made and the writes it proposed, even when the turn did not finish cleanly — a proposal you approved, denied, or simply never answered, a turn that died on a provider error, or one that hit the tool-iteration cap. Previously only turns that ended with the model writing text carried their tool calls forward, so gated actions were invisible on the next turn: ask "did you see the error you got?" after a parked proposal and the persona had no record of ever calling anything, and would re-propose or invent an answer. Unfinished calls are recorded as *not executed* with a reason (`awaiting_approval`, `denied`, `error`), so a persona can tell "I did this" from "I asked to do this and it didn't happen" and stops re-proposing denied actions. This holds for regenerated turns too: retrying a reply that then proposes a write records the proposal against the regenerated message, without disturbing the text that message already shows or the version history behind it.
 
-**When a persona runs out of tool steps, it answers anyway — and shows you what it spent them on (DP-335).** A turn has a fixed budget of tool steps: **15 tool calls**, counted as calls actually made rather than as replies from the model, so the allowance is the same whichever model is answering. If the persona uses all of them without reaching an answer, it no longer replies with just "I seem to be stuck in a loop":
+**When a persona runs out of tool steps, it answers anyway — and shows you what it spent them on (DP-335).** A turn has a budget of tool steps: **15 tool calls** by default (a persona can be given its own with `set max_tool_calls`, DP-428), counted as calls actually made rather than as replies from the model, so the allowance is the same whichever model is answering. If the persona uses all of them without reaching an answer, it no longer replies with just "I seem to be stuck in a loop":
 
 - It writes a **real answer first**, from everything it already found — what it learned, what is still unresolved and why, and the one next step it would take. Hitting the cap usually does not mean anything broke; the common case is a persona that spent its budget searching and re-reading and simply never got to the action you asked for, and by then it generally knows enough to say something useful.
 - Under that it lists **every tool call it made**, in order, with the arguments it used and how each one turned out (succeeded, failed with the error, or still waiting for your approval), and marks any call it made twice with the same arguments. The prose can be vague about what it ran; this list is read straight from the record and cannot be, so you can check one against the other.
 
 That answer is a normal reply — it is remembered like any other, so you can follow up on it in the next message. (The prose is what gets remembered; the call list under it is shown to you but not filed away as something the persona said.) If the model is unreachable at that moment, you still get the list on its own.
 
-The 15 is a stopping condition, not a hard ceiling: if the persona asks for several tools in one message, that whole group runs even when it crosses the line, and the turn ends immediately after. Half of a group the persona proposed as one plan is worse than a call or two of overshoot, and the group runs concurrently anyway. So a turn can report having spent, say, 17 of its 15 steps — that is the overshoot, not a miscount. Size rate limits and costs against a small margin above 15 rather than exactly 15.
+The budget (15 unless the persona sets its own) is a stopping condition, not a hard ceiling: if the persona asks for several tools in one message, that whole group runs even when it crosses the line, and the turn ends immediately after. Half of a group the persona proposed as one plan is worse than a call or two of overshoot, and the group runs concurrently anyway. So a turn can report having spent, say, 17 of its 15 steps — that is the overshoot, not a miscount. Size rate limits and costs against a small margin above 15 rather than exactly 15.
 
 **A persona can ask for several tools at once, and gets all of them back (DP-338).** Reads that do not depend on each other — "how is the node, how is the card, what units exist" — belong in one message, and they run at the same time, so three answers cost one round trip instead of three. On the `agy-*` models this used to be a silent trap: the persona asked for three, DERPR ran the first and threw the other two away without executing them, recording a result, or logging anything. The persona saw one of its three questions answered, asked again, got the same one answer, and kept going until the turn's tool budget ran out — in the worst observed case, fifteen identical status checks over six and a half minutes with nothing to show for it. If you saw a persona spinning on one repeated call in the spent-steps list described above, that was this.
 
@@ -1824,7 +1824,7 @@ The stack runs two containers:
 - **kobold.cpp** with an OpenAI-compatible `/v1` endpoint and a model loaded. The production proxy on `10.0.0.70` routes to the LAN kobold instances configured in `kobold-lb.conf` (live: `10.0.0.69:5001`; `10.0.0.67:5001` is the laptop, intermittent).
 - Docker Desktop / Docker Engine.
 
-If kobold is offline, retain operations are silently dropped (see failure modes below) and recall returns the existing corpus.
+If kobold is offline, chat turns wait in `Pending_Retain` and are retried until Hindsight accepts them (DP-423, below); other retains are dropped (see failure modes below). Recall returns the existing corpus.
 
 ### Enable in the bot
 
@@ -1877,11 +1877,11 @@ Restore-test at least once before relying on backups — bank IDs and tag schema
 
 | Symptom | Cause | Effect |
 |---------|-------|--------|
-| Retain calls drop, log `Hindsight retain dropped (kobold offline)` | kobold not running on host | New turns aren't consolidated; existing recall still works |
-| Container restart | `docker compose restart hindsight` or crash | Recall + retain both unavailable until container is up; queued retains in-flight at shutdown are lost |
+| Non-chat retains drop, log `Hindsight retain batch dropped (kobold offline)` | kobold not running on host | Chat turns are unaffected — they stay queued in `Pending_Retain` and are retried (DP-423). Other retains are lost; existing recall still works |
+| Container restart | `docker compose restart hindsight` or crash | Recall + retain both unavailable until container is up; chat turns stay queued durably and are sent later, other in-flight retains are lost |
 | 409 on `ensure_bank` | Bank already exists | Treated as success — safe to call on every startup |
 
-The retain path is fire-and-forget through a per-bank async queue: user turns enqueue and return immediately; one worker per bank drains in FIFO order. There is no DLQ — alpha tolerates dropped retains rather than risk back-pressure on user turns.
+Non-chat retains (`retain_turn` / `retain_experience`) are fire-and-forget through a per-bank async queue that drains in FIFO order, with no DLQ — a dropped one is lost. Chat turns no longer take that path; they are queued durably and confirmed, as described next.
 
 **A turn reaches Hindsight once it has left the history window (DP-423).** While a message is inside the persona's sliding-window history the model reads it verbatim, so retaining it as well would make recall hand the same conversation back a second time. Each turn therefore waits in the database and is appended to the session's Hindsight document when one of two things happens:
 

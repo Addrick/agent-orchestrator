@@ -93,6 +93,21 @@ probe, not a regeneration. What it found, none of it yet folded into the tables 
 - Family D's **LLM provider** row: the local provider is now an `AsyncOpenAI` client through
   `openai.stream_chat_completions` (DP-417), gated by nothing (its key is a placeholder).
 
+**Re-checked 2026-10-15 at `f85ed94`** (DP-419, 421, 423–425, 428–430 merged since). Still a probe. Found:
+
+- **DP-423 adds a durable outbound queue with confirmed delivery** — trigger: window eviction or
+  24 h idle, checked lazily on every turn **plus a boot pass** (`main.py`,
+  `turn_persistence.schedule_flush`); store: `Pending_Retain`; idempotency: upsert on
+  `interaction_id` with a `generation` counter so a stale flush cannot dequeue a re-queued
+  attempt; resumer: `TurnPersistence.flush_retains` → `retain_turn_confirmed`; a refused row
+  stays and is retried on a later flush. No row in families A–F has this shape yet.
+- **Finding C1 is now false as worded** — `flush_idle_sessions` also pairs a lazy sweep with a
+  boot pass, so the park sweep is no longer the only one. The proposals asymmetry still stands.
+- **The Hindsight-writers note above is stale** for the live path: chat turns are now the
+  deferred, confirmed flush, not a direct `retain_turn`.
+- DP-424, 425 and 428 add nothing that defers, retries or resumes; DP-421's unit guard is
+  host-side, outside this ledger's `src/` scope.
+
 ---
 
 ## A · Work that outlives the turn that started it
