@@ -576,7 +576,9 @@ function ToolsPane({
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState<{ kind: 'ok' | 'warn' | 'err'; text: string } | null>(null)
   const [advOpen, setAdvOpen] = useState(false)
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  // Groups start collapsed (DP-430): the full catalog is too long to scan, so
+  // track the opened ones — a group added later also arrives collapsed.
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [draft, setDraft] = useState<PolicyDraft>(() => deriveDraft(persona, tools))
 
   // The draft is seeded once at mount, but the catalog can change underneath it
@@ -660,7 +662,7 @@ function ToolsPane({
       return { ...d, overrides: next }
     })
   const toggleGroup = (key: string) =>
-    setCollapsed((c) => {
+    setExpanded((c) => {
       const next = new Set(c)
       if (next.has(key)) next.delete(key)
       else next.add(key)
@@ -827,7 +829,7 @@ function ToolsPane({
 
       {groups.map(([key, groupTools]) => {
         const bindingOff = key !== BUILTIN_GROUP && !draft.bindings.has(key)
-        const isCollapsed = collapsed.has(key)
+        const isCollapsed = !expanded.has(key)
         const nAllow = groupTools.filter((t) => draft.states[t.name] === 'allow').length
         const nAsk = groupTools.filter((t) => draft.states[t.name] === 'ask').length
         const label = key === BUILTIN_GROUP ? 'built-in · local' : key
