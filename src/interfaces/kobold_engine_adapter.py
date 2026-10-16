@@ -42,7 +42,7 @@ import asyncio
 from config import global_config
 from src.chat_system import (
     ChatSystem, DoneEvent, ErrorEvent, GenerationEvent,
-    PendingConfirmationEvent, ResponseType, TokenEvent, ToolCallResultEvent,
+    PendingConfirmationEvent, ReasoningEvent, ResponseType, TokenEvent, ToolCallResultEvent,
     ToolCallStartEvent,
 )
 from src.interfaces.transcript import build_transcript
@@ -1071,11 +1071,6 @@ class KoboldEngineAdapter:
                     content={"error": f"interaction {interaction_id} not found"},
                 )
 
-            for v in versions:
-                reasoning = v.get("reasoning_content")
-                if reasoning:
-                    v["content"] = f"<think>\n{reasoning}\n</think>\n{v['content']}"
-
             return {"interaction_id": interaction_id, "versions": versions}
 
         @self.app.post("/api/v1/interaction/{interaction_id}/select_version/{k}")
@@ -1108,14 +1103,6 @@ class KoboldEngineAdapter:
                 self._memory_manager.list_interaction_versions,
                 interaction_id,
             )
-            for v in versions:
-                reasoning = v.get("reasoning_content")
-                if reasoning:
-                    v["content"] = f"<think>\n{reasoning}\n</think>\n{v['content']}"
-
-            if result.get("reasoning_content"):
-                result["current_content"] = f"<think>\n{result['reasoning_content']}\n</think>\n{result['current_content']}"
-
             return {**result, "versions": versions}
 
         @self.app.patch("/api/v1/interaction/{interaction_id}")
@@ -1447,6 +1434,7 @@ class KoboldEngineAdapter:
 
             if not is_stream:
                 full_text = ""
+                reasoning: Optional[str] = None
                 assistant_id: Optional[int] = None
                 async for ev in self._stream_response(
                     persona_name=persona_name,
@@ -1461,17 +1449,22 @@ class KoboldEngineAdapter:
                 ):
                     if isinstance(ev, DoneEvent):
                         full_text = ev.text
+                        reasoning = ev.reasoning
                         assistant_id = ev.assistant_id
                     elif isinstance(ev, ErrorEvent):
                         return JSONResponse(
                             status_code=502,
                             content={"error": {"message": ev.message}},
                         )
+                message: Dict[str, Any] = {"role": "assistant", "content": full_text}
+                if reasoning:
+                    # Same field as the stream's deltas (DP-434).
+                    message["reasoning_content"] = reasoning
                 return JSONResponse(content={
                     "object": "chat.completion",
                     "choices": [{
                         "index": 0,
-                        "message": {"role": "assistant", "content": full_text},
+                        "message": message,
                         "finish_reason": "stop",
                     }],
                     "derpr_assistant_id": assistant_id,
@@ -1785,12 +1778,20 @@ class KoboldEngineAdapter:
         both speak the same wire protocol; the label feeds the optional SSE dump.
         """
         frames: List[Tuple[str, bytes]] = []
-        if isinstance(ev, TokenEvent):
+
+        def delta_frame(field: str, text: str) -> bytes:
             chunk = json.dumps({
                 "object": "chat.completion.chunk",
-                "choices": [{"index": 0, "delta": {"content": ev.delta}}],
+                "choices": [{"index": 0, "delta": {field: text}}],
             })
-            frames.append(("TokenEvent", f"data: {chunk}\n\n".encode("utf-8")))
+            return f"data: {chunk}\n\n".encode("utf-8")
+
+        if isinstance(ev, TokenEvent):
+            frames.append(("TokenEvent", delta_frame("content", ev.delta)))
+        elif isinstance(ev, ReasoningEvent):
+            # The field OpenAI-compatible reasoning servers use (DP-434), so
+            # the portal never has to parse thinking back out of `content`.
+            frames.append(("ReasoningEvent", delta_frame("reasoning_content", ev.delta)))
         elif isinstance(ev, ToolCallStartEvent):
             payload_obj: Dict[str, Any] = {
                 "tool_name": ev.tool_name,
@@ -1858,11 +1859,7 @@ class KoboldEngineAdapter:
             # never streamed. Transcode it as a content delta here or the portal
             # shows a blank reply even though the command ran + persisted.
             if ev.response_type == ResponseType.DEV_COMMAND and ev.text:
-                cmd_chunk = json.dumps({
-                    "object": "chat.completion.chunk",
-                    "choices": [{"index": 0, "delta": {"content": ev.text}}],
-                })
-                frames.append(("DevCommandText", f"data: {cmd_chunk}\n\n".encode("utf-8")))
+                frames.append(("DevCommandText", delta_frame("content", ev.text)))
             # DP-130 history contract (C3): emit the `event: derpr` id-frame on
             # EVERY terminal turn — including parked writes (assistant_id=None),
             # tool-only, and aborts. Carrying user_id, assistant_id (null when

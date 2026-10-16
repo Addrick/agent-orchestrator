@@ -21,11 +21,13 @@ from src.generation_events import (
     ErrorEvent as ErrorEvent,
     GenerationEvent as GenerationEvent,
     PendingConfirmationEvent as PendingConfirmationEvent,
+    ReasoningEvent as ReasoningEvent,
     ResponseType as ResponseType,
     TokenEvent as TokenEvent,
     ToolCallResultEvent as ToolCallResultEvent,
     ToolCallStartEvent as ToolCallStartEvent,
     format_internal_error as format_internal_error,
+    join_reasoning,
 )
 from src.message_handler import BotLogic
 from src.origin import ANONYMOUS, Origin
@@ -477,6 +479,10 @@ class ChatSystem:
             # Only the DP-335 exhaustion exit sets it — see `_LoopFinishedEvent`.
             retain_text: Optional[str] = None
             accumulated_parts: List[str] = []
+            # DP-434: the turn's thinking, across every iteration, exactly as
+            # the user watched it stream. Stored as `reasoning_content`, apart
+            # from the reply, so it is shown on reload but never replayed.
+            accumulated_reasoning: List[str] = []
             # Writes this turn gated for approval. Registered in the store only
             # after the assistant row commits, since each needs that row's id to
             # patch later — see the park-registration block below.
@@ -568,6 +574,9 @@ class ChatSystem:
                     elif isinstance(ev, TokenEvent):
                         accumulated_parts.append(ev.delta)
                         yield ev
+                    elif isinstance(ev, ReasoningEvent):
+                        accumulated_reasoning.append(ev.delta)
+                        yield ev
                     elif isinstance(ev, (ToolCallStartEvent, ToolCallResultEvent)):
                         yield ev
                     elif isinstance(ev, _ToolContextEvent):
@@ -628,6 +637,7 @@ class ChatSystem:
                                 user_interaction_id=user_interaction_id,
                                 retry_assistant_id=retry_assistant_id,
                                 tool_context_json=tool_context_json,
+                                reasoning_content=join_reasoning(accumulated_reasoning),
                             )
                             # Writes gated before the loop died are still real
                             # proposals — register them against the row that
@@ -660,7 +670,8 @@ class ChatSystem:
                 # accumulated so the row reflects what the user actually saw,
                 # then re-raise so the surrounding StreamingResponse aborts.
                 partial = "".join(accumulated_parts)
-                if partial.strip():
+                partial_reasoning = join_reasoning(accumulated_reasoning)
+                if partial.strip() or partial_reasoning:
                     cancelled_id = self.turn_persistence.commit_or_update_assistant(
                         persona_name=persona_name, user_identifier=user_identifier,
                         channel=channel, server_id=server_id,
@@ -669,6 +680,7 @@ class ChatSystem:
                         user_interaction_id=user_interaction_id,
                         retry_assistant_id=retry_assistant_id,
                         tool_context_json=None,
+                        reasoning_content=partial_reasoning,
                     )
                     # DP-423: as on the error path above.
                     self.turn_persistence.discard_overwritten_retry(
@@ -688,6 +700,7 @@ class ChatSystem:
                 user_interaction_id=user_interaction_id,
                 retry_assistant_id=retry_assistant_id,
                 tool_context_json=tool_context_json,
+                reasoning_content=join_reasoning(accumulated_reasoning),
             )
             self._register_parks(parks_this_turn, assistant_id)
             self._register_duplicates(dups_this_turn, assistant_id)
@@ -743,6 +756,7 @@ class ChatSystem:
                 response_type=response_type,
                 assistant_id=assistant_id,
                 user_interaction_id=user_interaction_id,
+                reasoning=join_reasoning(accumulated_reasoning),
                 # No ephemeral chunk: since DP-297 the turn's own text is
                 # persisted normally and each proposal carries its own token on
                 # its PendingConfirmationEvent instead.
@@ -911,7 +925,10 @@ class ChatSystem:
                 if isinstance(ev, TokenEvent):
                     continue
                 if isinstance(ev, DoneEvent):
-                    final_text = ev.text
+                    # A reply that was only thinking (out of tokens mid-think)
+                    # sends the thinking rather than nothing: these surfaces
+                    # have no reasoning fold, and an empty reply is silence.
+                    final_text = ev.text or ev.reasoning or ""
                     response_type = ev.response_type
                     assistant_id = ev.assistant_id
                     user_interaction_id = ev.user_interaction_id

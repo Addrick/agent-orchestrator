@@ -8,7 +8,7 @@ import pytest
 
 from src.engine import LLMCommunicationError
 from src.generation_events import (
-    ErrorEvent, ResponseType, TokenEvent,
+    ErrorEvent, ReasoningEvent, ResponseType, TokenEvent,
     ToolCallResultEvent, ToolCallStartEvent,
 )
 from src.persona import ExecutionMode
@@ -1554,3 +1554,100 @@ def test_a_non_approval_deferral_is_summarized_without_asking_for_a_click():
         {"status": "awaiting_human_approval"})) == "waiting for your approval"
     assert _summarize_outcome(_json.dumps(
         {"status": "awaiting:node_job"})) == "waiting on node_job"
+
+
+# ---- reasoning stays apart from content (DP-434) --------------------------
+
+@pytest.mark.asyncio
+async def test_reasoning_is_its_own_event_and_stays_within_the_turn():
+    """Reasoning is shown live, never mixed into content, and carried on the
+    in-turn tool-call step so the next iteration still sees the model's own
+    thinking — but sealed out of tool_context, which replays to later turns."""
+    engine = _make_engine([
+        [
+            {"type": "reasoning_delta", "text": "need the "},
+            {"type": "reasoning_delta", "text": "ticket"},
+            {"type": "text_delta", "text": "Checking."},
+            {"type": "tool_calls", "calls": [
+                {"id": "r1", "name": "search_tool", "arguments": {"q": "x"}},
+            ]},
+            {"type": "done", "full_text": ""},
+        ],
+        [
+            {"type": "reasoning_delta", "text": "found it"},
+            {"type": "text_delta", "text": "Done."},
+            {"type": "done", "full_text": "Done."},
+        ],
+    ])
+    loop = ToolLoop(engine, _make_tool_manager({}))
+    history: List[Dict[str, Any]] = []
+
+    events = await _drain(loop.run(
+        persona=_make_persona(), conversation_history=history,
+        params=MagicMock(), tools=_OFFERED,
+    ))
+
+    reasoning = [e.delta for e in events if isinstance(e, ReasoningEvent)]
+    tokens = [e.delta for e in events if isinstance(e, TokenEvent)]
+    # A later iteration's thinking starts a new paragraph of the one block.
+    assert reasoning == ["need the ", "ticket", "\n\nfound it"]
+    assert tokens == ["Checking.", "Done."]
+    assert history[0]["content"] == "Checking."
+    assert history[0]["reasoning_content"] == "need the ticket"
+    # The second iteration's request carried the first step's thinking.
+    second_request = engine.stream_messages.call_args_list[1].args[1]
+    assert second_request[1]["reasoning_content"] == "need the ticket"
+    finished = events[-1]
+    assert isinstance(finished, _LoopFinishedEvent)
+    assert finished.final_text == "Done."
+    assert "need the" not in (finished.tool_context_json or "")
+
+
+@pytest.mark.asyncio
+async def test_reasoning_only_tool_turn_still_explains_the_park():
+    """A thinking model that goes straight to the call writes its rationale
+    only as reasoning; the operator's dialog must not lose it."""
+    engine = _make_engine([
+        [
+            {"type": "reasoning_delta", "text": "The outage needs a ticket."},
+            {"type": "tool_calls", "calls": [
+                {"id": "w1", "name": "create_ticket", "arguments": {"title": "x"}},
+            ]},
+            {"type": "done", "full_text": ""},
+        ],
+        [{"type": "done", "full_text": "Queued that for you."}],
+    ])
+    loop = ToolLoop(engine, _make_tool_manager({}))
+    history: List[Dict[str, Any]] = []
+
+    events = await _drain(loop.run(
+        persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
+        conversation_history=history, params=MagicMock(), tools=_OFFERED,
+    ))
+
+    park = [e for e in events if isinstance(e, ToolDeferredEvent)][0]
+    assert park.audit_info["model_reasoning"] == "The outage needs a ticket."
+    assert "content" not in history[0]
+
+
+@pytest.mark.asyncio
+async def test_exhaustion_wrap_up_reasoning_belongs_to_the_turn():
+    """DP-434: the wrap-up's thinking is the turn's reasoning like any
+    iteration's, not silently dropped — and never part of the answer."""
+    engine = _make_engine([
+        _spin(0),
+        [{"type": "reasoning_delta", "text": "summarise what the tool said"},
+         {"type": "text_delta", "text": "It spun."},
+         {"type": "done", "full_text": "It spun."}],
+    ])
+    loop = ToolLoop(engine, _make_tool_manager({"spinner": {"result": "spin"}}),
+                    max_iterations=50, max_tool_calls=1)
+
+    events = await _drain(loop.run(
+        persona=_make_persona(), conversation_history=[],
+        params=MagicMock(), tools=_OFFERED,
+    ))
+
+    reasoning = [e.delta for e in events if isinstance(e, ReasoningEvent)]
+    assert reasoning == ["summarise what the tool said"]
+    assert events[-1].retain_text == "It spun."

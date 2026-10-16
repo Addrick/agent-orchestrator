@@ -5,7 +5,8 @@
 
    We use fetch + ReadableStream (not EventSource, which is GET-only) and
    parse the SSE grammar in order:
-     data: {chat.completion.chunk}        → token delta
+     data: {chat.completion.chunk}        → token delta (delta.content) or
+                                            reasoning delta (delta.reasoning_content)
      event: derpr-tool-start              → live tool card
      event: derpr-tool-result             → tool result
      event: derpr-confirm                 → parked write (S6; surfaced as event)
@@ -22,6 +23,7 @@ import type {
 
 export interface StreamHandlers {
   onToken: (delta: string) => void
+  onReasoning: (delta: string) => void
   onToolStart: (f: ToolStartFrame) => void
   onToolResult: (f: ToolResultFrame) => void
   onIdFrame: (f: DerprIdFrame) => void
@@ -89,16 +91,21 @@ function dispatchBlock(block: string, h: StreamHandlers, sawError: { v: boolean 
       h.onIdFrame(obj as unknown as DerprIdFrame)
       return
     default: {
-      // unlabelled `data:` — either a token delta or an error frame
+      // unlabelled `data:` — a token or reasoning delta, or an error frame
       if (obj.error) {
         sawError.v = true
         const e = obj.error as { message?: string }
         h.onError(e.message || 'engine error')
         return
       }
-      const choices = obj.choices as { delta?: { content?: string } }[] | undefined
-      const delta = choices?.[0]?.delta?.content
-      if (typeof delta === 'string' && delta.length) h.onToken(delta)
+      const choices = obj.choices as
+        | { delta?: { content?: string; reasoning_content?: string } }[]
+        | undefined
+      const d = choices?.[0]?.delta
+      // DP-434: reasoning arrives in its own field, never inside content.
+      if (typeof d?.reasoning_content === 'string' && d.reasoning_content.length)
+        h.onReasoning(d.reasoning_content)
+      if (typeof d?.content === 'string' && d.content.length) h.onToken(d.content)
     }
   }
 }

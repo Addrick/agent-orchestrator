@@ -133,6 +133,8 @@ If the backend stops answering, the line turns amber and reads `backend unreacha
 
 `model local` talks to the server at `LOCAL_LLM_URL` over the OpenAI chat-completions API (DP-417), and that server applies the model's own chat template and parses its tool calls. Strata does this out of the box. **A KoboldCPP server must be started with both `--jinja` and `--jinja_tools`** (`"jinja": true, "jinja_tools": true` in a `.kcpps` file): with `--jinja` alone KoboldCPP falls back to its own built-in format for every request that carries tools — nearly all of derpr's — and without either flag it uses that format for everything. Units written by `install_model` include both flags. Stopping a reply (the portal's stop button) closes the connection, and both servers abort the generation on disconnect.
 
+**Thinking models (DP-434).** A model's thinking is kept apart from its reply. The portal shows it in the collapsible reasoning fold, live and after reload; Discord and other chat surfaces get the reply alone (or the thinking, if the model ran out of room before answering). Older messages that stored their thinking inside the reply are converted once at startup and look the same. During one reply the model still sees its own thinking from earlier tool-call steps, but once the reply is done its thinking is never sent back to it on later turns, and is never retained to long-term memory.
+
 ### Memory imports panel (DP-292)
 
 The nav rail's **`◈ MEMORY`** dock opens a full-page **Imports** panel for managing the documents in a Hindsight memory bank. It is an **operator tool**, not a chat surface: reads (bank list, document list, operation status) are open, but every mutation (upload, ingest, delete) requires the operator control token set in the top bar — without it the panel is read-only and mutating actions show a "control token required" notice.
@@ -1906,7 +1908,7 @@ derpr: We settled on the 45% floor with a 30s spin-down delay.
 - The label is added only to what is sent to Hindsight. Chat history, the prompt and the database store the bare message.
 - The request `timestamp` Hindsight anchors facts to is always UTC, whatever timezone the engine host runs in.
 - `scripts/backfill_hindsight.py` uses the same format, so backfilled and live turns read alike.
-- **Reasoning is never retained (DP-409).** A `<think>…</think>` block that a model leaves inline in its reply is stripped before the turn is sent — extraction otherwise files the model's self-talk as facts about the user.
+- **Reasoning is never retained (DP-409, DP-434).** A thinking model's reasoning is stored apart from its reply, so only the reply is sent — extraction otherwise files the model's self-talk as facts about the user.
 
 **Retries keep only the canonical conversation (DP-409).** Hindsight remembers the conversation you *kept*, not every attempt. Since DP-423 a retried reply is normally still waiting in the window, so retrying it simply replaces what will be sent. Only when the retried reply had already been sent (its conversation sat idle for 24 hours first) is the session's Hindsight document rebuilt from the stored conversation — which holds only the latest version of each turn — and replaced whole. Facts extracted from the discarded attempt, and observations built only on them, are deleted; the new text is re-extracted.
 

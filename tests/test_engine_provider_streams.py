@@ -387,3 +387,15 @@ class TestGoogleStream:
         stream_ids = [c["id"] for c in stream_calls]
         assert [c["id"] for c in result["calls"]] == stream_ids
         assert len(set(stream_ids)) == len(stream_ids)
+
+
+def test_wire_message_carries_in_turn_reasoning():
+    """DP-434: an in-flight tool-call step's thinking reaches the server in
+    the field reasoning chat templates read; absent, no key is added."""
+    from src.engine.providers.openai import to_openai_wire_message
+    call = {"id": "c1", "name": "f", "arguments": {}}
+    with_r = to_openai_wire_message(
+        {"role": "assistant", "tool_calls": [call], "reasoning_content": "plan"})
+    without = to_openai_wire_message({"role": "assistant", "tool_calls": [call]})
+    assert with_r["reasoning_content"] == "plan"
+    assert "reasoning_content" not in without

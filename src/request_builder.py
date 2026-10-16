@@ -215,8 +215,9 @@ class RequestBuilder:
                             )
                     if content_clean:
                         final_history.append({'role': 'assistant', 'content': content_clean})
-                else:
-                    # In a group chat, messages from other personas are treated as user messages
+                elif content_clean:
+                    # In a group chat, messages from other personas are treated as user messages.
+                    # A reply that was only reasoning has nothing to show (DP-434).
                     formatted_content = f"{author_name}: {content_clean}"
                     if stamp:
                         formatted_content = _stamped(formatted_content, msg.get('timestamp'))

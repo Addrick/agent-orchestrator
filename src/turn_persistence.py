@@ -11,7 +11,6 @@ these happen; this module owns *how* and holds the cache state.
 
 import asyncio
 import logging
-import re
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple, cast
@@ -40,13 +39,9 @@ def format_retained_turn(role: str, speaker: str, content: str,
     if role == "user":
         local = to_local(timestamp)
         return f"[{local:%Y-%m-%d %H:%M}] {speaker}: {content}"
-    # Reasoning is never retained (DP-252 contract). A model that leaves its
-    # `<think>` inline in the reply bypasses `reasoning_content`, and the
-    # extractor then files the model's self-talk as facts about the user (DP-409).
-    return f"{speaker}: {_THINK_BLOCK.sub('', content).strip()}"
-
-
-_THINK_BLOCK = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+    # Reasoning is never retained (DP-252 contract): it lives in
+    # `reasoning_content`, never in `content` (DP-434).
+    return f"{speaker}: {content.strip()}"
 
 
 def _retain_kwargs(*, persona_name: str, role: str, speaker: str, content: str,
@@ -192,13 +187,19 @@ class TurnPersistence:
             user_interaction_id: Optional[int],
             retry_assistant_id: Optional[int],
             tool_context_json: Optional[str],
+            reasoning_content: Optional[str] = None,
     ) -> Optional[int]:
         """Persist the assistant turn (UPDATE on retry, INSERT otherwise).
 
         Returns the canonical assistant interaction_id, or None when the
-        text is empty or the response_type isn't a normal LLM generation.
+        turn produced nothing (no text, reasoning or tool context) or the
+        response_type isn't a normal LLM generation.
+
+        `reasoning_content` is the turn's thinking, stored in its own column
+        so history replay never sends it back to the model (DP-434).
         """
-        if (not final_text or not final_text.strip()) and not tool_context_json:
+        has_output = bool((final_text and final_text.strip()) or reasoning_content)
+        if not has_output and not tool_context_json:
             return None
 
         if retry_assistant_id is not None:
@@ -222,7 +223,7 @@ class TurnPersistence:
                     except Exception as e:
                         logger.error(f"Retry park set_tool_context failed: {e}")
                 return None
-            if not final_text or not final_text.strip():
+            if not has_output:
                 # The turn died before producing prose (the error path commits
                 # whatever accumulated, which is "" whenever the model emitted
                 # tool calls and nothing else). Overwriting here would blank the
@@ -243,12 +244,12 @@ class TurnPersistence:
                 # Forward tool_context so the regenerated row's stored tool calls
                 # stay paired with its new content — a retried turn may use a
                 # different (or no) set of tools than the failed attempt.
-                # Explicit reasoning_content=None clears the stale `<think>` of
-                # the prior attempt: it no longer matches the regenerated text
-                # (DP-141 sentinel contract — omitting would now *preserve* it).
+                # Always pass reasoning_content, even None: the prior attempt's
+                # reasoning no longer matches the regenerated text (DP-141
+                # sentinel contract — omitting would *preserve* it).
                 self.memory_manager.update_interaction_content(
                     retry_assistant_id, final_text,
-                    reasoning_content=None, tool_context=tool_context_json,
+                    reasoning_content=reasoning_content, tool_context=tool_context_json,
                 )
                 return retry_assistant_id
             except Exception as e:
@@ -286,6 +287,7 @@ class TurnPersistence:
                 timestamp=datetime.now(timezone.utc), server_id=server_id,
                 tool_context=tool_context_json,
                 reply_to_id=user_interaction_id,
+                reasoning_content=reasoning_content,
             )
             return assistant_id
         except Exception as e:

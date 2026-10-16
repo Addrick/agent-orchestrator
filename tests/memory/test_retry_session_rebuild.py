@@ -50,11 +50,10 @@ def _log(mm: MemoryManager, role: str, content: str, ts: datetime,
 
 # ---------- format_retained_turn ----------
 
-def test_inline_think_is_stripped_from_assistant_turn():
+def test_assistant_turn_is_retained_as_its_content():
+    """Reasoning lives in its own column (DP-434), so content is retained as is."""
     ts = datetime(2026, 9, 26, 18, 5, tzinfo=timezone.utc)
-    out = format_retained_turn(
-        "assistant", "explr", "<think>\nthe user is a researcher\n</think>\nHello.", ts,
-    )
+    out = format_retained_turn("assistant", "explr", "Hello.\n", ts)
     assert out == "explr: Hello."
 
 

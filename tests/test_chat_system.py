@@ -1778,3 +1778,51 @@ async def test_a_non_approval_deferral_is_never_offered_to_the_operator(
     ))
 
     assert system.confirmations.list_for('user', 'test_persona') == []
+
+
+@pytest.mark.asyncio
+async def test_reasoning_streams_and_persists_apart_from_content(chat_system_with_mocks):
+    """DP-434: thinking is surfaced as ReasoningEvent and stored in
+    `reasoning_content` — `content` (which replays into later prompts) holds
+    only the reply."""
+    system, memory_mock, _, _, _ = chat_system_with_mocks
+    memory_mock.get_channel_history.return_value = []
+    memory_mock.log_message.side_effect = [10, 42]
+
+    async def scripted(*_args, **_kwargs):
+        yield {"type": "reasoning_delta", "text": "user wants a greeting"}
+        yield {"type": "text_delta", "text": "Hello!"}
+        yield {"type": "done", "full_text": "Hello!"}
+    system.text_engine.stream_messages = scripted
+
+    events = await _drain_events(
+        system.stream_response("test_persona", "user", "channel", "hi")
+    )
+    assert [type(e).__name__ for e in events] == ["ReasoningEvent", "TokenEvent", "DoneEvent"]
+    assert events[-1].text == "Hello!"
+    bot_call = memory_mock.log_message.call_args_list[1]
+    assert bot_call.kwargs["content"] == "Hello!"
+    assert bot_call.kwargs["reasoning_content"] == "user wants a greeting"
+
+
+@pytest.mark.asyncio
+async def test_thinking_only_reply_is_stored_and_not_silent(chat_system_with_mocks):
+    """DP-434: a reply that was only thinking (out of tokens mid-think) is
+    stored as reasoning, and the non-streaming surfaces (Discord, Gmail) get
+    the thinking rather than an empty reply they would silently drop."""
+    system, memory_mock, _, _, _ = chat_system_with_mocks
+    memory_mock.get_channel_history.return_value = []
+    memory_mock.log_message.side_effect = [10, 42]
+
+    async def scripted(*_args, **_kwargs):
+        yield {"type": "reasoning_delta", "text": "still working it out"}
+        yield {"type": "done", "full_text": ""}
+    system.text_engine.stream_messages = scripted
+
+    text, response_type, assistant_id, _ = await system.generate_response(
+        "test_persona", "user", "channel", "hi")
+    assert text == "still working it out"
+    assert assistant_id == 42
+    bot_call = memory_mock.log_message.call_args_list[1]
+    assert bot_call.kwargs["content"] == ""
+    assert bot_call.kwargs["reasoning_content"] == "still working it out"

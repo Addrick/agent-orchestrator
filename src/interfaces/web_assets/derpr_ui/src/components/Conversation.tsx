@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import type { PortalStore } from '../state/store'
-import { splitThink, policyLabel } from '../state/util'
+import { policyLabel } from '../state/util'
 import { MessageRow } from './MessageRow'
 import { StreamRow } from './StreamRow'
 import { BudgetBar } from './BudgetBar'
@@ -56,13 +56,13 @@ export function Conversation({ store }: { store: PortalStore }) {
     if (el && followRef.current) el.scrollTop = el.scrollHeight
   }, [chunks, stream, devRow, loading, viewMode, alarms])
 
-  // Feeds only the BudgetBar; the filter + splitThink + join over the whole
+  // Feeds only the BudgetBar; the filter + join over the whole
   // transcript is too heavy to redo on every per-frame stream re-render.
   const historyText = useMemo(
     () =>
       chunks
         .filter((c) => !c.ephemeral)
-        .map((c) => (c.role === 'assistant' ? splitThink(c.content).body : c.content))
+        .map((c) => c.content)
         .join('\n'),
     [chunks],
   )

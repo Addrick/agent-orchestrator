@@ -166,7 +166,7 @@ export const MOCK_TRANSCRIPT: Chunk[] = [
     interaction_id: 1042,
     role: 'assistant',
     content:
-      '<think>\nPolicy DP-204 requires L2 approval for cert resets. The tool is is_write+high sensitivity, persona tool_policy is CONFIRM, so this must park for approval before running.\n</think>\nHeads up — reissuing a VPN cert is gated by policy DP-204 (L2 approval). I\'ve staged the reset; approve below and I\'ll run it.',
+      'Heads up — reissuing a VPN cert is gated by policy DP-204 (L2 approval). I\'ve staged the reset; approve below and I\'ll run it.',
     ephemeral: false,
     reasoning:
       'Policy DP-204 requires L2 approval for cert resets. The tool is is_write+high sensitivity, persona tool_policy is CONFIRM, so this must park for approval before running.',

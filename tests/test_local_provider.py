@@ -185,26 +185,30 @@ async def test_stream_emits_payload_deltas_done():
 
 
 @pytest.mark.asyncio
-async def test_reasoning_is_folded_into_one_think_block():
-    """Downstream (portal render, DP-409 retain strip) already handles inline
-    <think>, which is what the kobold-native stream produced."""
+async def test_reasoning_streams_apart_from_the_answer():
+    """DP-434: reasoning never enters the answer text, so it can never reach
+    `User_Interactions.content` and replay into later prompts."""
     engine = _engine_with_stream(AsyncIterList([
         openai_chunk(reasoning="Let me "), openai_chunk(reasoning="add."),
         openai_chunk(content="\n\n391"), openai_chunk(finish_reason="stop")]))
     events = await _drain(engine._stream_local_response({}, _history()))
-    assert events[-1]["full_text"] == "<think>\nLet me add.\n</think>\n391"
+    reasoning = "".join(e["text"] for e in events if e["type"] == "reasoning_delta")
+    text = "".join(e["text"] for e in events if e["type"] == "text_delta")
+    assert reasoning == "Let me add."
+    assert text == "391"
+    assert events[-1] == {"type": "done", "full_text": "391"}
 
 
 @pytest.mark.asyncio
-async def test_reasoning_before_tool_calls_is_closed_and_ids_are_filled():
+async def test_reasoning_before_tool_calls_stays_out_of_text_and_ids_are_filled():
     engine = _engine_with_stream(AsyncIterList([
         openai_chunk(reasoning="need weather"),
         openai_chunk(tool_call_deltas=[openai_tool_call_delta(
             index=0, id=None, name="get_weather", arguments='{"city": "Oslo"}')]),
         openai_chunk(finish_reason="tool_calls")]))
     events = await _drain(engine._stream_local_response({}, _history(), tools=[TOOL]))
-    text = "".join(e["text"] for e in events if e["type"] == "text_delta")
-    assert text == "<think>\nneed weather\n</think>\n"
+    assert [e["type"] for e in events if e["type"].endswith("_delta")] == ["reasoning_delta"]
+    assert events[-1] == {"type": "done", "full_text": ""}
     (calls,) = [e["calls"] for e in events if e["type"] == "tool_calls"]
     assert calls == [{"id": "call_get_weather_0", "name": "get_weather", "arguments": {"city": "Oslo"}}]
 
