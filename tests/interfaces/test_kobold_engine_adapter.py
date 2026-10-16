@@ -2478,6 +2478,109 @@ def test_perf_503_when_neither_perf_nor_metrics_answers(monkeypatch):
     mm.close()
 
 
+def test_perf_projects_strata_unloaded_as_idle(monkeypatch):
+    """DP-435: Strata with --lazy / --idle-unload reports state='unloaded'
+    when no request is running. This must project as idle=1, not busy."""
+    adapter, mm = _perf_adapter()
+    unloaded = {
+        "live": {"state": "unloaded", "queued": 0, "phase": None, "elapsed_s": None},
+        "requests": [{"time": 1000.0, "finish": "stop", "prompt_tokens": 185,
+                      "prompt_read": 185, "output_tokens": 500, "prompt_ms": 1500.0,
+                      "decode_ms": 10000.0, "decode_tok_s": 50.0}],
+        "totals": {"since": 400.0, "requests": 5},
+        "time": 1050.0,
+    }
+    monkeypatch.setattr(adapter._http, "get", _strata_get(unloaded))
+    with TestClient(adapter.app) as client:
+        p = client.get("/api/extra/perf").json()
+    assert p["idle"] == 1
+    assert p["queue"] == 0
+    assert p["last_input_count"] == 185
+    assert p["last_token_count"] == 500
+    assert p["last_eval_speed"] == 50.0
+    assert p["total_gens"] == 5
+    assert p["idletime"] == 50.0
+    mm.close()
+
+
+def test_prefill_projects_strata_reading_thinking_and_unloaded(monkeypatch):
+    """DP-435: Strata live state='reading' is prefill, 'thinking' is generate,
+    and 'unloaded' is idle."""
+    adapter, mm = _prefill_adapter(monkeypatch, progress_url="")
+
+    # reading phase
+    reading = {
+        "live": {"state": "reading", "phase": None, "prompt_read": 100,
+                 "prompt_total": 400, "generated": 0, "max_tokens": 1000},
+        "totals": {"requests": 1},
+    }
+    monkeypatch.setattr(adapter._http, "get", _strata_get(reading))
+    with TestClient(adapter.app) as client:
+        body = client.get("/api/extra/prefill").json()
+    assert body["available"] is True
+    assert body["phase"] == "prefill"
+    assert body["processed"] == 100
+    assert body["total"] == 400
+
+    # generating with phase='thinking'
+    thinking = {
+        "live": {"state": "generating", "phase": "thinking", "prompt_read": 400,
+                 "prompt_total": 400, "generated": 50, "max_tokens": 1000, "tok_s": 42.0},
+        "totals": {"requests": 1},
+    }
+    monkeypatch.setattr(adapter._http, "get", _strata_get(thinking))
+    with TestClient(adapter.app) as client:
+        body = client.get("/api/extra/prefill").json()
+    assert body["available"] is True
+    assert body["phase"] == "generate"
+    assert body["generated"] == 50
+    assert body["tok_s"] == 42.0
+
+    # unloaded
+    unloaded = {
+        "live": {"state": "unloaded", "phase": None, "prompt_read": None,
+                 "prompt_total": None, "generated": None, "max_tokens": None},
+        "totals": {"requests": 1},
+    }
+    monkeypatch.setattr(adapter._http, "get", _strata_get(unloaded))
+    with TestClient(adapter.app) as client:
+        body = client.get("/api/extra/prefill").json()
+    assert body["available"] is True
+    assert body["phase"] == "idle"
+
+    mm.close()
+
+
+def test_prefill_falls_back_to_strata_when_sidecar_unreachable(monkeypatch):
+    """DP-435: When KOBOLD_PROGRESS_URL points to a dead/unreachable sidecar,
+    prefill should fall back to Strata's /metrics if Strata is answering."""
+    adapter, mm = _prefill_adapter(monkeypatch, progress_url="http://dead-sidecar:5011")
+    strata_live = {
+        "live": {"state": "reading", "phase": None, "prompt_read": 50,
+                 "prompt_total": 200, "generated": 0, "max_tokens": 500},
+        "totals": {"requests": 2},
+    }
+
+    async def _mock_get(url, **kw):
+        if "dead-sidecar" in url:
+            raise RuntimeError("sidecar down")
+        if url.endswith("/metrics"):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.content = b"{}"
+            resp.json = lambda: strata_live
+            return resp
+        raise RuntimeError(f"unexpected {url}")
+
+    monkeypatch.setattr(adapter._http, "get", _mock_get)
+    with TestClient(adapter.app) as client:
+        body = client.get("/api/extra/prefill").json()
+    assert body["available"] is True
+    assert body["phase"] == "prefill"
+    assert body["processed"] == 50
+    mm.close()
+
+
 # --- DP-297 review #11: the /confirm relay must close its generator ---------
 
 def test_confirm_relay_closes_the_generator_on_disconnect():

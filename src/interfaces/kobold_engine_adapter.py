@@ -113,8 +113,8 @@ def _perf_from_strata_metrics(body: Any) -> Optional[Dict[str, Any]]:
     reqs = body.get("requests") or []
     last = reqs[0] if reqs and isinstance(reqs[0], dict) else {}
     now = float(body.get("time") or time.time())
-    busy = live.get("state") not in (None, "idle")
-    read = int(last.get("prompt_read") or 0)
+    busy = live.get("state") in ("reading", "generating", "decode", "prefill")
+    read = int(last.get("prompt_read") or last.get("prompt_tokens") or 0)
     out = int(last.get("output_tokens") or 0)
     prompt_s = float(last.get("prompt_ms") or 0) / 1000
     decode_s = float(last.get("decode_ms") or 0) / 1000
@@ -139,7 +139,7 @@ def _perf_from_strata_metrics(body: Any) -> Optional[Dict[str, Any]]:
         "uptime": max(0.0, now - float(totals.get("since") or now)),
         # Busy: seconds into this run. Idle: age of the last completed run.
         "idletime": (float(live.get("elapsed_s") or 0) if busy
-                     else max(0.0, now - float(last.get("time") or now))),
+                     else max(0.0, now - float(last.get("time") or totals.get("since") or now))),
     }
 
 
@@ -153,14 +153,14 @@ def _prefill_from_strata_metrics(body: Any) -> Optional[Dict[str, Any]]:
         return None
     live = body["live"]
     totals = body.get("totals") or {}
-    busy = live.get("state") not in (None, "idle")
+    busy = live.get("state") in ("reading", "generating", "decode", "prefill")
 
     phase_str = str(live.get("phase") or live.get("state") or "").lower()
-    if not busy or phase_str in ("idle", ""):
+    if not busy or phase_str in ("idle", "unloaded", ""):
         phase = "idle"
-    elif phase_str in ("prefill", "ingest", "prompt"):
+    elif phase_str in ("prefill", "ingest", "prompt", "reading"):
         phase = "prefill"
-    elif phase_str in ("generate", "decode"):
+    elif phase_str in ("generate", "decode", "generating", "thinking"):
         phase = "generate"
     elif (live.get("generated") or 0) > 0:
         phase = "generate"
@@ -1349,9 +1349,8 @@ class KoboldEngineAdapter:
                     # so log it and return a generic reason
                     # (decisions/2026-05-27-kobold-stack-trace-exposure).
                     logger.debug(f"prefill progress sidecar fetch failed: {e}")
-                    return JSONResponse(content={"available": False, "reason": "unreachable"})
 
-            # Strata fallback: no sidecar configured, check /metrics
+            # Strata fallback: no sidecar configured or sidecar unreachable, check /metrics
             try:
                 r = await self._http.get(f"{local_base_url()}/metrics", timeout=2.0)
                 if r.status_code == 200:
@@ -1361,6 +1360,8 @@ class KoboldEngineAdapter:
             except Exception as e:
                 logger.debug(f"prefill Strata metrics fetch failed: {e}")
 
+            if base:
+                return JSONResponse(content={"available": False, "reason": "unreachable"})
             return JSONResponse(content={"available": False, "reason": "not_configured"})
 
         @self.app.post("/chat/completions")
