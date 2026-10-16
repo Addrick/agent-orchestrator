@@ -13,6 +13,7 @@ import pytest
 from src.engine import TextEngine, LLMCommunicationError
 from src.engine.providers.local import (
     build_local_params,
+    get_local_client,
     local_base_url,
     params_from_legacy_dicts,
     thinking_controls,
@@ -282,3 +283,40 @@ async def test_aclose_releases_the_client_and_is_idempotent():
     await engine.aclose()
     client.close.assert_awaited_once()
     assert engine.local_client is None
+
+
+# --- URL normalization and dynamic client refresh (DP-435) --------------------
+
+@pytest.mark.parametrize("raw,expected", [
+    ("http://10.0.0.70:5001/v1", "http://10.0.0.70:5001"),
+    ("http://http://127.0.0.1:18080/v1", "http://127.0.0.1:18080"),
+    ("https://http://127.0.0.1:18080/v1", "https://127.0.0.1:18080"),
+    ("127.0.0.1:18080/v1", "http://127.0.0.1:18080"),
+    ("127.0.0.1:18080", "http://127.0.0.1:18080"),
+    ("http://127.0.0.1:18080/v1/", "http://127.0.0.1:18080"),
+    ("http://127.0.0.1:18080/", "http://127.0.0.1:18080"),
+    ("  http://127.0.0.1:18080/v1  ", "http://127.0.0.1:18080"),
+    ("https://strata.lan:18080/v1", "https://strata.lan:18080"),
+])
+def test_local_base_url_normalization(monkeypatch, raw, expected):
+    monkeypatch.setenv("LOCAL_LLM_URL", raw)
+    assert local_base_url() == expected
+
+
+@pytest.mark.asyncio
+async def test_get_local_client_refreshes_on_url_change(monkeypatch):
+    monkeypatch.setenv("LOCAL_LLM_URL", "http://127.0.0.1:5001/v1")
+    engine = TextEngine()
+    c1 = await get_local_client(engine)
+    assert str(c1.base_url).rstrip("/") == "http://127.0.0.1:5001/v1"
+
+    # Same URL returns cached client
+    c2 = await get_local_client(engine)
+    assert c2 is c1
+
+    # URL changes -> client refreshed
+    monkeypatch.setenv("LOCAL_LLM_URL", "http://127.0.0.1:18080/v1")
+    c3 = await get_local_client(engine)
+    assert c3 is not c1
+    assert str(c3.base_url).rstrip("/") == "http://127.0.0.1:18080/v1"
+    await engine.aclose()
