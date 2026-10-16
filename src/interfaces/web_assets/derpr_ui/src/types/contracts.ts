@@ -313,6 +313,7 @@ export interface KoboldPrefill {
   generated?: number
   generate_total?: number
   run?: number
+  tok_s?: number | null
 }
 
 export interface KoboldPerf {

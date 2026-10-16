@@ -2129,10 +2129,79 @@ def _prefill_adapter(monkeypatch, progress_url=""):
 
 def test_prefill_reports_unavailable_when_sidecar_not_configured(monkeypatch):
     adapter, mm = _prefill_adapter(monkeypatch, progress_url="")
+
+    async def _fake_get(url, **kw):
+        resp = MagicMock()
+        resp.status_code = 404
+        resp.content = b"{}"
+        resp.json = lambda: {"detail": "not found"}
+        return resp
+
+    monkeypatch.setattr(adapter._http, "get", _fake_get)
     with TestClient(adapter.app) as client:
         r = client.get("/api/extra/prefill")
     assert r.status_code == 200, "an absent sidecar is a normal deployment, not an error"
     assert r.json() == {"available": False, "reason": "not_configured"}
+    mm.close()
+
+
+def test_prefill_projects_strata_prefill_phase(monkeypatch):
+    """DP-433: Strata tracks live prompt-ingestion counters in /metrics 'live'."""
+    adapter, mm = _prefill_adapter(monkeypatch, progress_url="")
+    strata_live = {
+        "live": {
+            "state": "prefill", "phase": "prefill", "prompt_read": 12000,
+            "prompt_total": 47268, "generated": 0, "max_tokens": 4096, "tok_s": 0.0,
+        },
+        "totals": {"requests": 79},
+    }
+
+    async def _fake_get(url, **kw):
+        assert url.endswith("/metrics"), url
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.content = b"{}"
+        resp.json = lambda: strata_live
+        return resp
+
+    monkeypatch.setattr(adapter._http, "get", _fake_get)
+    with TestClient(adapter.app) as client:
+        body = client.get("/api/extra/prefill").json()
+    assert body == {
+        "available": True, "phase": "prefill", "processed": 12000,
+        "total": 47268, "generated": 0, "generate_total": 4096, "run": 79,
+        "tok_s": 0.0,
+    }
+    mm.close()
+
+
+def test_prefill_projects_strata_decode_phase(monkeypatch):
+    """DP-433: Strata tracks live token-generation progress and tok_s."""
+    adapter, mm = _prefill_adapter(monkeypatch, progress_url="")
+    strata_live = {
+        "live": {
+            "state": "decode", "phase": "decode", "prompt_read": 47268,
+            "prompt_total": 47268, "generated": 512, "max_tokens": 4096, "tok_s": 65.4,
+        },
+        "totals": {"requests": 79},
+    }
+
+    async def _fake_get(url, **kw):
+        assert url.endswith("/metrics"), url
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.content = b"{}"
+        resp.json = lambda: strata_live
+        return resp
+
+    monkeypatch.setattr(adapter._http, "get", _fake_get)
+    with TestClient(adapter.app) as client:
+        body = client.get("/api/extra/prefill").json()
+    assert body == {
+        "available": True, "phase": "generate", "processed": 47268,
+        "total": 47268, "generated": 512, "generate_total": 4096, "run": 79,
+        "tok_s": 65.4,
+    }
     mm.close()
 
 
@@ -2385,6 +2454,18 @@ def test_perf_strata_busy_reports_elapsed_and_no_last_run(monkeypatch):
         p = client.get("/api/extra/perf").json()
     assert p["idle"] == 0 and p["queue"] == 2 and p["idletime"] == 4.5
     assert p["stop_reason"] == -1 and p["total_gens"] == 0
+    mm.close()
+
+
+def test_perf_surfaces_live_tok_s_when_strata_busy(monkeypatch):
+    """DP-433: When busy, perf.last_eval_speed reflects Strata's live tok_s."""
+    adapter, mm = _perf_adapter()
+    busy = {"live": {"state": "decode", "queued": 1, "elapsed_s": 3.0, "tok_s": 62.3},
+            "requests": [], "totals": {"since": 0, "requests": 0}, "time": 10.0}
+    monkeypatch.setattr(adapter._http, "get", _strata_get(busy))
+    with TestClient(adapter.app) as client:
+        p = client.get("/api/extra/perf").json()
+    assert p["idle"] == 0 and p["last_eval_speed"] == 62.3
     mm.close()
 
 
