@@ -71,7 +71,7 @@ export function StatusLine() {
   const ingestDone = live?.processed ?? 0
   const ingestTotal = live?.total ?? 0
   const ingestPct = ingestTotal ? Math.min(100, Math.round((ingestDone / ingestTotal) * 100)) : 0
-  const decoding = !!live && live.phase === 'generate' && (live.generate_total ?? 0) > 0
+  const decoding = !!live && live.phase === 'generate' && ((live.generate_total ?? 0) > 0 || (live.generated ?? 0) > 0)
 
   return (
     <div className="statusline" role="status">
@@ -92,7 +92,7 @@ export function StatusLine() {
            a rendering artifact. */
         <span
           className="sl-chip sl-busy"
-          title="live prompt ingestion (kcpp-progress sidecar); steps by blasbatchsize"
+          title="live prompt ingestion (kcpp-progress sidecar or Strata /metrics); steps by blasbatchsize"
         >
           ingest{' '}
           <b>
@@ -108,19 +108,25 @@ export function StatusLine() {
           className="sl-chip"
           title={
             busy
-              ? 'Counters freeze during a generation — perf reports the previous run until this one completes.'
+              ? (live?.total ?? 0) > 0
+                ? 'Prompt tokens ingested for the active generation.'
+                : 'Counters freeze during a generation — perf reports the previous run until this one completes.'
               : 'Prompt tokens ingested by the last completed generation (KCPP last_input_count).'
           }
         >
           ingest{' '}
-          {hasGen ? (
+          {busy && (live?.total ?? 0) > 0 ? (
+            <b>
+              {fmtTok(live?.processed || live?.total || 0)}/{fmtTok(live?.total || 0)} tok
+            </b>
+          ) : hasGen ? (
             <b>
               {fmtTok(perf.last_input_count)}/{fmtTok(perf.last_input_count)} tok
             </b>
           ) : (
             <b>—</b>
           )}
-          {hasGen && perf.last_process_time > 0 && (
+          {hasGen && perf.last_process_time > 0 && !busy && (
             <span className="sl-sub">
               {' '}
               · {fmtDur(perf.last_process_time)} · {perf.last_process_speed.toFixed(0)} t/s
@@ -130,11 +136,20 @@ export function StatusLine() {
       )}
 
       {decoding ? (
-        <span className="sl-chip sl-busy" title="live decode progress (kcpp-progress sidecar)">
+        <span className="sl-chip sl-busy" title="live decode progress">
           gen{' '}
           <b>
-            {fmtTok(live?.generated ?? 0)}/{fmtTok(live?.generate_total ?? 0)} tok
+            {(live?.generate_total ?? 0) > 0
+              ? `${fmtTok(live?.generated ?? 0)}/${fmtTok(live?.generate_total ?? 0)}`
+              : fmtTok(live?.generated ?? 0)}{' '}
+            tok
           </b>
+          {((live?.tok_s != null && live.tok_s > 0) || perf.last_eval_speed > 0) && (
+            <span className="sl-sub">
+              {' '}
+              · {(live?.tok_s && live.tok_s > 0 ? live.tok_s : perf.last_eval_speed).toFixed(1)} t/s
+            </span>
+          )}
         </span>
       ) : (
         <span className="sl-chip" title="Last generation: decode tokens, and prefill + decode wall time.">

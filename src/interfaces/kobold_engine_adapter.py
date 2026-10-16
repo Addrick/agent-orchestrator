@@ -118,6 +118,9 @@ def _perf_from_strata_metrics(body: Any) -> Optional[Dict[str, Any]]:
     out = int(last.get("output_tokens") or 0)
     prompt_s = float(last.get("prompt_ms") or 0) / 1000
     decode_s = float(last.get("decode_ms") or 0) / 1000
+    eval_speed = (float(live.get("tok_s") or 0)
+                  if (busy and live.get("tok_s") is not None)
+                  else float(last.get("decode_tok_s") or 0))
     return {
         "last_process": prompt_s * 1000 / read if read else 0,
         "last_eval": decode_s * 1000 / out if out else 0,
@@ -126,7 +129,7 @@ def _perf_from_strata_metrics(body: Any) -> Optional[Dict[str, Any]]:
         "last_process_time": prompt_s,
         "last_eval_time": decode_s,
         "last_process_speed": read / prompt_s if prompt_s else 0,
-        "last_eval_speed": float(last.get("decode_tok_s") or 0),
+        "last_eval_speed": eval_speed,
         "last_seed": -1,
         "total_gens": int(totals.get("requests") or 0),
         "stop_reason": (_STRATA_FINISH_TO_STOP_REASON.get(str(last.get("finish")), 3)
@@ -137,6 +140,51 @@ def _perf_from_strata_metrics(body: Any) -> Optional[Dict[str, Any]]:
         # Busy: seconds into this run. Idle: age of the last completed run.
         "idletime": (float(live.get("elapsed_s") or 0) if busy
                      else max(0.0, now - float(last.get("time") or now))),
+    }
+
+
+def _prefill_from_strata_metrics(body: Any) -> Optional[Dict[str, Any]]:
+    """Project a Strata ``GET /metrics`` body onto the ``/api/extra/prefill``
+    contract (DP-433). Strata tracks live prompt-read and token-generation
+    counters directly in its ``live`` object, so no stdout sidecar is needed.
+    None if ``body`` is not a Strata metrics sample.
+    """
+    if not isinstance(body, dict) or not isinstance(body.get("live"), dict):
+        return None
+    live = body["live"]
+    totals = body.get("totals") or {}
+    busy = live.get("state") not in (None, "idle")
+
+    phase_str = str(live.get("phase") or live.get("state") or "").lower()
+    if not busy or phase_str in ("idle", ""):
+        phase = "idle"
+    elif phase_str in ("prefill", "ingest", "prompt"):
+        phase = "prefill"
+    elif phase_str in ("generate", "decode"):
+        phase = "generate"
+    elif (live.get("generated") or 0) > 0:
+        phase = "generate"
+    elif (live.get("prompt_read") or 0) < (live.get("prompt_total") or 0):
+        phase = "prefill"
+    else:
+        phase = "generate"
+
+    prompt_read = int(live.get("prompt_read") or live.get("prompt_tokens") or 0)
+    prompt_total = int(live.get("prompt_total") or live.get("prompt_tokens") or 0)
+    generated = int(live.get("generated") or 0)
+    gen_total = int(live.get("max_tokens") or 0)
+    run = int(totals.get("requests") or 0)
+    tok_s = float(live.get("tok_s")) if live.get("tok_s") is not None else None
+
+    return {
+        "available": True,
+        "phase": phase,
+        "processed": prompt_read,
+        "total": prompt_total,
+        "generated": generated,
+        "generate_total": gen_total,
+        "run": run,
+        "tok_s": tok_s,
     }
 
 
@@ -1266,50 +1314,67 @@ class KoboldEngineAdapter:
 
         @self.app.get("/api/extra/prefill")
         async def get_prefill() -> Any:
-            """Live prompt-ingestion progress, from the kcpp-progress sidecar.
+            """Live prompt-ingestion progress, from the kcpp-progress sidecar —
+            or projected from Strata's /metrics ``live`` block (DP-433).
 
             NOT a KoboldCPP route — KCPP has no API for this. Its `last_*` perf
             fields are frozen for the duration of a run, so the only source of
             per-batch prefill progress is KCPP's stdout, which a sidecar next to
             the model host tails and serves (`services/kcpp-progress`).
 
-            Optional by design: with `KOBOLD_PROGRESS_URL` unset, or the sidecar
-            down, this reports `available: false` and the portal falls back to
-            last-completed counters rather than showing a broken bar.
+            Strata exposes prompt ingestion and decode progress natively in its
+            ``GET /metrics`` ``live`` block, so when no sidecar is configured
+            (or when running against Strata), this route queries Strata's
+            ``/metrics`` and projects it onto the same contract.
+
+            Optional by design: with `KOBOLD_PROGRESS_URL` unset and no Strata
+            metrics answering, this reports `available: false` and the portal
+            falls back to last-completed counters rather than showing a broken bar.
             """
             base = _kobold_progress_url()
-            if not base:
-                return JSONResponse(content={"available": False, "reason": "not_configured"})
+            if base:
+                try:
+                    r = await self._http.get(f"{base}/progress", timeout=2.0)
+                    if r.status_code != 200:
+                        return JSONResponse(content={"available": False, "reason": "upstream_error"})
+                    body = r.json() if r.content else {}
+                    # Re-project rather than passing the sidecar's body through, so
+                    # a future sidecar field cannot silently reach the browser.
+                    # Inside the `try` on purpose: this is where a sidecar that
+                    # answers 200 with a JSON *array*, or a counter as a
+                    # non-numeric string, blows up — and the contract this route
+                    # promises is that it always degrades to `available: false`,
+                    # never that it 500s.
+                    if not isinstance(body, dict):
+                        raise TypeError(f"sidecar body is {type(body).__name__}, not an object")
+                    projected = {
+                        "available": True,
+                        "phase": str(body.get("phase", "idle")),
+                        "processed": int(body.get("processed") or 0),
+                        "total": int(body.get("total") or 0),
+                        "generated": int(body.get("generated") or 0),
+                        "generate_total": int(body.get("generate_total") or 0),
+                        "run": int(body.get("run") or 0),
+                    }
+                    return JSONResponse(content=projected)
+                except Exception as e:
+                    # Data-plane route: the exception text can carry the upstream URL,
+                    # so log it and return a generic reason
+                    # (decisions/2026-05-27-kobold-stack-trace-exposure).
+                    logger.debug(f"prefill progress sidecar fetch failed: {e}")
+                    return JSONResponse(content={"available": False, "reason": "unreachable"})
+
+            # Strata fallback: no sidecar configured, check /metrics
             try:
-                r = await self._http.get(f"{base}/progress", timeout=2.0)
-                if r.status_code != 200:
-                    return JSONResponse(content={"available": False, "reason": "upstream_error"})
-                body = r.json() if r.content else {}
-                # Re-project rather than passing the sidecar's body through, so
-                # a future sidecar field cannot silently reach the browser.
-                # Inside the `try` on purpose: this is where a sidecar that
-                # answers 200 with a JSON *array*, or a counter as a
-                # non-numeric string, blows up — and the contract this route
-                # promises is that it always degrades to `available: false`,
-                # never that it 500s.
-                if not isinstance(body, dict):
-                    raise TypeError(f"sidecar body is {type(body).__name__}, not an object")
-                projected = {
-                    "available": True,
-                    "phase": str(body.get("phase", "idle")),
-                    "processed": int(body.get("processed") or 0),
-                    "total": int(body.get("total") or 0),
-                    "generated": int(body.get("generated") or 0),
-                    "generate_total": int(body.get("generate_total") or 0),
-                    "run": int(body.get("run") or 0),
-                }
+                r = await self._http.get(f"{local_base_url()}/metrics", timeout=2.0)
+                if r.status_code == 200:
+                    strata_projected = _prefill_from_strata_metrics(r.json() if r.content else None)
+                    if strata_projected is not None:
+                        return JSONResponse(content=strata_projected)
             except Exception as e:
-                # Data-plane route: the exception text can carry the upstream URL,
-                # so log it and return a generic reason
-                # (decisions/2026-05-27-kobold-stack-trace-exposure).
-                logger.debug(f"prefill progress fetch failed: {e}")
-                return JSONResponse(content={"available": False, "reason": "unreachable"})
-            return JSONResponse(content=projected)
+                logger.debug(f"prefill Strata metrics fetch failed: {e}")
+
+            return JSONResponse(content={"available": False, "reason": "not_configured"})
 
         @self.app.post("/chat/completions")
         @self.app.post("/v1/chat/completions")
