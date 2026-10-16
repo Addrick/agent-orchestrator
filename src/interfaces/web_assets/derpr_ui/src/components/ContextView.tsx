@@ -1,5 +1,5 @@
 import type { Chunk, Persona } from '../types/contracts'
-import { splitThink, estimateTokens, fmtTok, argString } from '../state/util'
+import { chunkParts, estimateTokens, fmtTok, argString } from '../state/util'
 
 interface Props {
   persona: Persona
@@ -21,8 +21,7 @@ export function ContextView({ persona, chunks, ltmBlock, ltmOn }: Props) {
   chunks
     .filter((c) => !c.ephemeral)
     .forEach((c) => {
-      const body =
-        c.role === 'assistant' ? splitThink(c.content).body : c.content
+      const { body } = chunkParts(c)
       const tools = (c.tool_context || [])
         .map(
           (t) =>

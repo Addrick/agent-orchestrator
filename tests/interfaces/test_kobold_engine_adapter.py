@@ -2572,3 +2572,15 @@ def test_dev_command_unaffected_for_an_unrestricted_persona():
     assert r.status_code == 200
     assert "you are test" in r.json()["response"]
     mm.close()
+
+
+def test_reasoning_event_is_a_reasoning_content_delta():
+    """DP-434: the portal reads thinking from `delta.reasoning_content`, never
+    out of `content`."""
+    from src.generation_events import ReasoningEvent
+    from src.interfaces.kobold_engine_adapter import KoboldEngineAdapter
+
+    ((label, frame),) = KoboldEngineAdapter._event_to_sse(ReasoningEvent(delta="hmm"))
+    assert label == "ReasoningEvent"
+    payload = json.loads(frame.decode("utf-8").removeprefix("data: ").strip())
+    assert payload["choices"][0]["delta"] == {"reasoning_content": "hmm"}

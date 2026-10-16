@@ -78,7 +78,14 @@ def to_openai_wire_message(msg: Dict[str, Any]) -> Dict[str, Any]:
                     "arguments": args if isinstance(args, str) else json.dumps(args),
                 },
             })
-        return {"role": "assistant", "content": msg.get("content") or None, "tool_calls": calls}
+        wire: Dict[str, Any] = {
+            "role": "assistant", "content": msg.get("content") or None, "tool_calls": calls,
+        }
+        # An earlier tool-call step of the turn in flight carries its thinking
+        # (DP-434); the field reasoning chat templates read it from.
+        if msg.get("reasoning_content"):
+            wire["reasoning_content"] = msg["reasoning_content"]
+        return wire
     if role == "tool":
         content = msg.get("content")
         return {
@@ -152,10 +159,6 @@ async def stream_openai(
             yield ev
 
 
-_THINK_OPEN = "<think>\n"
-_THINK_CLOSE = "\n</think>\n"
-
-
 async def stream_chat_completions(
     client: AsyncOpenAI, api_params: Dict[str, Any], provider_label: str,
 ) -> AsyncGenerator[Dict[str, Any], None]:
@@ -163,10 +166,11 @@ async def stream_chat_completions(
     shape. Shared by every server that speaks this API: OpenAI itself and,
     since DP-417, the local model server (KoboldCPP or Strata).
 
-    - `reasoning_content` deltas (a local server's thinking) are folded into
-      the text as one `<think>…</think>` block. That is the shape the
-      kobold-native transport produced and everything downstream already
-      handles: the portal renders it, retain strips it (DP-409).
+    - `reasoning_content` deltas (a local server's thinking) stay separate
+      from the answer (DP-434): they are emitted as `reasoning_delta` events
+      and never folded into the text or `done.full_text`.
+      Folding them in as `<think>…</think>` put the reasoning into
+      `User_Interactions.content`, which replays into every later prompt.
     - Closing this generator early closes the HTTP stream, which is how a
       generation is cancelled: both local servers stop on disconnect. Every
       generator that delegates to this one must wrap it in `aclosing` —
@@ -176,7 +180,7 @@ async def stream_chat_completions(
     yield {"type": "api_payload", "payload": openai_dump_params(api_params)}
 
     text_parts: List[str] = []
-    in_think = False
+    reasoning_parts: List[str] = []
     # index → {"id", "name", "arguments"} accumulated across delta chunks
     raw_calls: Dict[int, Dict[str, Any]] = {}
     stream: Any = None
@@ -190,17 +194,14 @@ async def stream_chat_completions(
             extra = getattr(delta, "model_extra", None)
             reasoning = extra.get("reasoning_content") if isinstance(extra, dict) else None
             if isinstance(reasoning, str) and reasoning:
-                piece = reasoning if in_think else _THINK_OPEN + reasoning
-                in_think = True
-                text_parts.append(piece)
-                yield {"type": "text_delta", "text": piece}
+                reasoning_parts.append(reasoning)
+                yield {"type": "reasoning_delta", "text": reasoning}
             content = getattr(delta, "content", None)
+            if isinstance(content, str) and reasoning_parts and not text_parts:
+                # KoboldCPP opens the answer with the blank line that
+                # followed `</think>` in the raw stream; drop it.
+                content = content.lstrip()
             if isinstance(content, str) and content:
-                if in_think:
-                    # KoboldCPP opens the answer with the blank line that
-                    # followed `</think>` in the raw stream; drop it.
-                    content = _THINK_CLOSE + content.lstrip()
-                    in_think = False
                 text_parts.append(content)
                 yield {"type": "text_delta", "text": content}
             for tc in (getattr(delta, "tool_calls", None) or []):
@@ -226,12 +227,6 @@ async def stream_chat_completions(
     finally:
         if stream is not None:
             await stream.close()
-
-    if in_think:
-        # Thinking that ran straight into tool calls (or the end) never saw a
-        # content delta to close it.
-        text_parts.append(_THINK_CLOSE)
-        yield {"type": "text_delta", "text": _THINK_CLOSE}
 
     if raw_calls:
         # Reuse the one parser: wrap accumulated fragments in the same

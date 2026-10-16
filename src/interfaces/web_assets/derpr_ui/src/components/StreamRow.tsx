@@ -1,6 +1,5 @@
 import type { StreamState } from '../state/store'
 import type { ToolDef } from '../types/contracts'
-import { splitThink } from '../state/util'
 import { ReasoningFold } from './ReasoningFold'
 import { ToolCard } from './ToolCard'
 import { deriveTreatment } from '../state/util'
@@ -48,11 +47,11 @@ export function StreamRow({ stream: s, tools, onDismiss, onRegen }: Props) {
     )
   }
 
-  const { reasoning, body } = splitThink(s.text)
+  const { reasoning, text: body } = s
   // No frame of any kind yet — the provider hasn't produced bytes. True for
   // the whole wait on non-streaming providers (everything except local), so
   // show an explicit typing indicator rather than a bare cursor.
-  const waiting = s.active && !s.text && s.tools.length === 0
+  const waiting = s.active && !s.text && !s.reasoning && s.tools.length === 0
 
   return (
     <div className={'msg' + (treatment === 'aborted' ? ' aborted' : '')}>

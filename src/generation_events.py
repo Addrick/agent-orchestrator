@@ -74,6 +74,14 @@ class TokenEvent:
 
 
 @dataclass
+class ReasoningEvent:
+    """Incremental reasoning (thinking) delta, kept apart from the answer's
+    TokenEvents end to end (DP-434): it is shown and stored as
+    `reasoning_content`, never replayed to the model as its own words."""
+    delta: str
+
+
+@dataclass
 class DoneEvent:
     """Terminal event for stream_response — final committed text + ids.
 
@@ -143,7 +151,7 @@ class ToolCallResultEvent:
 
 
 GenerationEvent = Union[
-    TokenEvent, DoneEvent, ErrorEvent,
+    TokenEvent, ReasoningEvent, DoneEvent, ErrorEvent,
     ToolCallStartEvent, ToolCallResultEvent,
     PendingConfirmationEvent,
 ]

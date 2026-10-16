@@ -282,7 +282,10 @@ class TextEngine:
                             elif etype == "done":
                                 attempt_done_text = ev.get("full_text")
                             continue
-                        if etype == "text_delta":
+                        if etype in ("text_delta", "reasoning_delta"):
+                            # Reasoning commits the attempt like text does: it
+                            # is user-visible output, and holding it until the
+                            # answer starts would freeze the live thinking.
                             pending.append(ev)
                             pending_text.append(ev.get("text", "") or "")
                             if "".join(pending_text).strip():
@@ -657,7 +660,9 @@ class TextEngine:
     ) -> AsyncIterator[Dict[str, Any]]:
         """Provider-agnostic streaming entry. Yields:
           - `{"type": "api_payload", "payload": ...}` first
-          - one or more `{"type": "text_delta", "text": ...}` chunks
+          - one or more `{"type": "text_delta", "text": ...}` chunks, and
+            `{"type": "reasoning_delta", "text": ...}` from a thinking model
+            (DP-434 — never part of the answer text)
           - optional `{"type": "tool_calls", "calls": [...]}`
           - terminal `{"type": "done", "full_text": ...}`
 

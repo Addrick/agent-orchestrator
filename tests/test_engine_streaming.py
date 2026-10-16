@@ -523,6 +523,34 @@ async def test_stream_messages_error_after_commit_propagates(
     assert [e["type"] for e in seen] == ["api_payload", "text_delta"]
 
 
+@pytest.mark.asyncio
+async def test_stream_messages_releases_reasoning_before_the_answer(
+    text_engine, openai_config, messages
+):
+    """DP-434: reasoning commits the attempt like text does, so thinking
+    reaches the consumer as it arrives instead of being held until the first
+    answer token."""
+    upstream_progress: List[str] = []
+
+    async def provider_stream(*_a, **_k):
+        yield {"type": "api_payload", "payload": {"p": 1}}
+        yield {"type": "reasoning_delta", "text": "thinking"}
+        upstream_progress.append("answer")
+        yield {"type": "text_delta", "text": "answer"}
+        yield {"type": "done", "full_text": "answer"}
+
+    seen: List[str] = []
+    with patch.object(text_engine, "_stream_openai_response",
+                      MagicMock(side_effect=provider_stream)):
+        async for ev in text_engine.stream_messages(
+            openai_config, messages, GenerationParams(),
+        ):
+            if ev["type"] == "reasoning_delta":
+                assert upstream_progress == []
+            seen.append(ev["type"])
+    assert seen == ["api_payload", "reasoning_delta", "text_delta", "done"]
+
+
 # --------------------------------------------------------------------------
 # DP-338 — `_events_from_one_shot` is the other half of the seam. Together
 # with the two `collect_stream` cases above these pin the round trip: prose

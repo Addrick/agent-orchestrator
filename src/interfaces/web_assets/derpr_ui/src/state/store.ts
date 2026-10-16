@@ -160,6 +160,7 @@ export function usePortalStore() {
   // whole app tree (usePortalStore lives in App) per token — visible stutter on
   // long transcripts. Buffer deltas and flush at most once per animation frame.
   const tokenBufRef = useRef('')
+  const reasoningBufRef = useRef('')
   const tokenRafRef = useRef<number | null>(null)
   const flushTokens = useCallback(() => {
     if (tokenRafRef.current != null) {
@@ -167,9 +168,15 @@ export function usePortalStore() {
       tokenRafRef.current = null
     }
     const delta = tokenBufRef.current
-    if (!delta) return
+    const rDelta = reasoningBufRef.current
+    if (!delta && !rDelta) return
     tokenBufRef.current = ''
-    setStream((s) => ({ ...s, text: s.text + delta }))
+    reasoningBufRef.current = ''
+    setStream((s) => ({
+      ...s,
+      text: s.text + delta,
+      reasoning: rDelta ? (s.reasoning ?? '') + rDelta : s.reasoning,
+    }))
   }, [])
   // Drop any pending deltas from a previous stream (new stream start / dismiss).
   const resetTokenBuf = useCallback(() => {
@@ -178,6 +185,7 @@ export function usePortalStore() {
       tokenRafRef.current = null
     }
     tokenBufRef.current = ''
+    reasoningBufRef.current = ''
   }, [])
 
   // ---- loaders -------------------------------------------------------
@@ -535,6 +543,14 @@ export function usePortalStore() {
     (personaName: string, channel: string) => ({
       onToken: (delta: string) => {
         tokenBufRef.current += delta
+        if (tokenRafRef.current == null)
+          tokenRafRef.current = requestAnimationFrame(() => {
+            tokenRafRef.current = null
+            flushTokens()
+          })
+      },
+      onReasoning: (delta: string) => {
+        reasoningBufRef.current += delta
         if (tokenRafRef.current == null)
           tokenRafRef.current = requestAnimationFrame(() => {
             tokenRafRef.current = null

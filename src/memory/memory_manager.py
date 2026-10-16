@@ -1049,7 +1049,7 @@ class MemoryManager:
         contract: omitted = leave the column untouched, explicit ``None`` =
         clear it (write NULL), an explicit value = set it. A manual edit
         (DP-141) sends only the new body and must NOT erase the row's stored
-        `<think>` reasoning, so it omits the arg. A regenerated (retry) turn
+        `reasoning_content`, so it omits the arg. A regenerated (retry) turn
         passes the column explicitly — fresh reasoning, or ``None`` to clear the
         stale reasoning that no longer matches the new content. Likewise a retry
         rewrites `tool_context` to stay paired with its (possibly different) set

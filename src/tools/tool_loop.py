@@ -27,7 +27,7 @@ from src.deferral_kinds import DEFERRAL_KIND_APPROVAL
 from src.engine import LLMCommunicationError, TextEngine
 from src.security.scrubber import get_scrubber
 from src.generation_events import (
-    ErrorEvent, ResponseType, TokenEvent,
+    ErrorEvent, ReasoningEvent, ResponseType, TokenEvent,
     ToolCallResultEvent, ToolCallStartEvent,
     format_internal_error,
 )
@@ -152,7 +152,7 @@ class _LoopFinishedEvent:
 
 
 LoopEvent = Union[
-    TokenEvent, ErrorEvent,
+    TokenEvent, ReasoningEvent, ErrorEvent,
     ToolCallStartEvent, ToolCallResultEvent,
     _ApiPayloadEvent, _LoopFinishedEvent, _ToolContextEvent, ToolDeferredEvent,
     _WriteDuplicateEvent,
@@ -328,7 +328,14 @@ def seal_tool_context(
     answered = {
         m.get("tool_call_id") for m in tool_msgs if m.get("role") == "tool"
     }
-    sealed: List[Dict[str, Any]] = list(tool_msgs)
+    # Reasoning rides an in-turn assistant entry so the next iteration's
+    # template can show the model its own thinking (DP-434); it is dropped
+    # here because tool_context replays into every later turn.
+    sealed: List[Dict[str, Any]] = [
+        {k: v for k, v in m.items() if k != "reasoning_content"}
+        if m.get("role") == "assistant" else m
+        for m in tool_msgs
+    ]
     for msg in tool_msgs:
         if msg.get("role") != "assistant":
             continue
@@ -779,6 +786,7 @@ class ToolLoop:
         # the provider forever without spending anything.
         calls_used = 0
         iterations_used = 0
+        turn_reasoned = False
         call_tally: Dict[Tuple[str, str], int] = {}
 
         while (calls_used < self.max_tool_calls
@@ -789,6 +797,7 @@ class ToolLoop:
             full_text_from_done: Optional[str] = None
             tool_calls_collected: Optional[List[Dict[str, Any]]] = None
             accumulated_parts: List[str] = []
+            accumulated_reasoning: List[str] = []
 
             messages_for_llm: List[Dict[str, Any]] = build_wire_messages(
                 persona, conversation_history,
@@ -812,6 +821,19 @@ class ToolLoop:
                         if text_chunk:
                             accumulated_parts.append(text_chunk)
                             yield TokenEvent(delta=text_chunk)
+                    elif etype == "reasoning_delta":
+                        # DP-434: never joins `accumulated_parts` — that text
+                        # becomes history `content` and replays to the model.
+                        reasoning_chunk = ev.get("text") or ""
+                        if reasoning_chunk:
+                            if not accumulated_reasoning and turn_reasoned:
+                                # A later iteration's thinking continues the
+                                # turn's one reasoning block; keep it a new
+                                # paragraph rather than run-on.
+                                reasoning_chunk = "\n\n" + reasoning_chunk
+                            turn_reasoned = True
+                            accumulated_reasoning.append(reasoning_chunk)
+                            yield ReasoningEvent(delta=reasoning_chunk)
                     elif etype == "tool_calls":
                         tool_calls_collected = list(ev.get("calls") or [])
                         for c in tool_calls_collected:
@@ -922,6 +944,16 @@ class ToolLoop:
             }
             if assistant_prose:
                 assistant_entry["content"] = assistant_prose
+            # DP-434: this iteration's thinking stays visible to the model for
+            # the rest of the turn — reasoning templates (Qwen's among them)
+            # render it for tool-call steps after the last user message, and
+            # losing it makes multi-step tool use re-derive its plan.
+            # `seal_tool_context` strips it before anything is persisted.
+            iteration_reasoning = cast(
+                str, get_scrubber().scrub("".join(accumulated_reasoning).strip()),
+            )
+            if iteration_reasoning:
+                assistant_entry["reasoning_content"] = iteration_reasoning
             conversation_history.append(assistant_entry)
             write_calls = [c for c in admitted if is_write_tool(c["name"])]
             read_calls = [c for c in admitted if not is_write_tool(c["name"])]
@@ -957,7 +989,9 @@ class ToolLoop:
                 # `accumulated_parts` directly meant every agy-backed persona
                 # parked its writes with a blank "why" on the operator's
                 # dialog — agy streams no deltas, so that join was always "".
-                model_reasoning = assistant_prose
+                # A thinking model that went straight to the call wrote its
+                # rationale only as reasoning (DP-434); show that instead.
+                model_reasoning = assistant_prose or iteration_reasoning
                 audit_actions = []
                 for wc in write_calls:
                     wc_name = wc.get("name", "")

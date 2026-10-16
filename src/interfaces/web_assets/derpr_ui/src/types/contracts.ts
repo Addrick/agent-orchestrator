@@ -18,7 +18,7 @@ export interface ToolContext {
 export interface Chunk {
   interaction_id: number | null // null only when ephemeral
   role: 'user' | 'assistant'
-  content: string // reasoning folded in as <think>…</think>
+  content: string // the reply alone; reasoning is its own field (DP-434)
   ephemeral: boolean
   reasoning: string | null
   tool_context: ToolContext[] | null

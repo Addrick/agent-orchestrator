@@ -42,7 +42,7 @@ import asyncio
 from config import global_config
 from src.chat_system import (
     ChatSystem, DoneEvent, ErrorEvent, GenerationEvent,
-    PendingConfirmationEvent, ResponseType, TokenEvent, ToolCallResultEvent,
+    PendingConfirmationEvent, ReasoningEvent, ResponseType, TokenEvent, ToolCallResultEvent,
     ToolCallStartEvent,
 )
 from src.interfaces.transcript import build_transcript
@@ -1071,11 +1071,6 @@ class KoboldEngineAdapter:
                     content={"error": f"interaction {interaction_id} not found"},
                 )
 
-            for v in versions:
-                reasoning = v.get("reasoning_content")
-                if reasoning:
-                    v["content"] = f"<think>\n{reasoning}\n</think>\n{v['content']}"
-
             return {"interaction_id": interaction_id, "versions": versions}
 
         @self.app.post("/api/v1/interaction/{interaction_id}/select_version/{k}")
@@ -1108,14 +1103,6 @@ class KoboldEngineAdapter:
                 self._memory_manager.list_interaction_versions,
                 interaction_id,
             )
-            for v in versions:
-                reasoning = v.get("reasoning_content")
-                if reasoning:
-                    v["content"] = f"<think>\n{reasoning}\n</think>\n{v['content']}"
-
-            if result.get("reasoning_content"):
-                result["current_content"] = f"<think>\n{result['reasoning_content']}\n</think>\n{result['current_content']}"
-
             return {**result, "versions": versions}
 
         @self.app.patch("/api/v1/interaction/{interaction_id}")
@@ -1791,6 +1778,14 @@ class KoboldEngineAdapter:
                 "choices": [{"index": 0, "delta": {"content": ev.delta}}],
             })
             frames.append(("TokenEvent", f"data: {chunk}\n\n".encode("utf-8")))
+        elif isinstance(ev, ReasoningEvent):
+            # The field OpenAI-compatible reasoning servers use (DP-434), so
+            # the portal never has to parse thinking back out of `content`.
+            chunk = json.dumps({
+                "object": "chat.completion.chunk",
+                "choices": [{"index": 0, "delta": {"reasoning_content": ev.delta}}],
+            })
+            frames.append(("ReasoningEvent", f"data: {chunk}\n\n".encode("utf-8")))
         elif isinstance(ev, ToolCallStartEvent):
             payload_obj: Dict[str, Any] = {
                 "tool_name": ev.tool_name,

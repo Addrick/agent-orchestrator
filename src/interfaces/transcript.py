@@ -27,14 +27,6 @@ def _is_renderable(role: Optional[str], content: str, reasoning: str) -> bool:
     return bool(content or reasoning)
 
 
-def _merge_reasoning(role: Optional[str], content: str, reasoning: str) -> str:
-    """Fold an assistant row's reasoning into its rendered content as a
-    <think> block (kobold/Lite convention; matches list_interaction_versions)."""
-    if reasoning and role == "assistant":
-        return f"<think>\n{reasoning}\n</think>\n{content}"
-    return content
-
-
 def _parse_tool_context(raw: Any) -> Optional[Any]:
     """tool_context is stored as a JSON string (or None). Return the parsed
     structure for the transcript, or None when absent/unparseable.
@@ -118,7 +110,7 @@ def build_transcript(
         {
           "interaction_id": <int|null>,   # server-authored identity
           "role": "user|assistant",
-          "content": "...",               # reasoning folded into <think> block
+          "content": "...",               # the reply alone; reasoning is separate
           "ephemeral": <bool>,            # true => not yet persisted
           "reasoning": "<str|null>",
           "tool_context": [...]|null,
@@ -155,7 +147,7 @@ def build_transcript(
         chunks.append({
             "interaction_id": iid,
             "role": role,
-            "content": _merge_reasoning(role, content, reasoning),
+            "content": content,
             "ephemeral": False,
             "reasoning": reasoning or None,
             "tool_context": _parse_tool_context(msg.get("tool_context")),

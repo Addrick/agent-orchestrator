@@ -44,13 +44,13 @@ def test_transcript_includes_role_content_and_versions_flag():
     assert chunks[1]["role"] == "assistant"
     assert chunks[1]["has_versions"] is True  # id 101 has versions
 
-def test_transcript_folds_reasoning_into_think_block():
+def test_transcript_keeps_reasoning_apart_from_content():
     rows = [
         {"author_role": "assistant", "content": "answer",
          "reasoning_content": "thinking", "interaction_id": 5},
     ]
     chunks = build_transcript(rows)["chunks"]
-    assert chunks[0]["content"] == "<think>\nthinking\n</think>\nanswer"
+    assert chunks[0]["content"] == "answer"
     assert chunks[0]["reasoning"] == "thinking"
 
 def test_transcript_parses_tool_context_json():

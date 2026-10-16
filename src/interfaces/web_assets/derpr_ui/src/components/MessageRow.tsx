@@ -1,6 +1,6 @@
 import { memo, useState } from 'react'
 import type { Chunk, ToolDef } from '../types/contracts'
-import { splitThink } from '../state/util'
+import { chunkParts } from '../state/util'
 import { MessageBody } from './MessageBody'
 import { ReasoningFold } from './ReasoningFold'
 import { ToolCard } from './ToolCard'
@@ -34,12 +34,7 @@ export const MessageRow = memo(function MessageRow({
   isLastUser,
   isLastAssistant,
 }: Props) {
-  // <think> folding is an assistant-output convention — never reinterpret a
-  // user's literal text as reasoning.
-  const { reasoning, body } =
-    c.role === 'assistant'
-      ? splitThink(c.content)
-      : { reasoning: null, body: c.content }
+  const { reasoning, body } = chunkParts(c)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(body)
 

@@ -1,17 +1,16 @@
 /* shared helpers — kept dumb and pure */
+import type { Chunk } from '../types/contracts'
 
-/** Split a folded <think>…</think> block out of content → { reasoning, body }.
- *  Persisted rows carry the exact '<think>\nR\n</think>\nC' framing the adapter
- *  reconstructs, but STREAMING deltas come straight from the model (think
- *  templates leak the tags into content), so tolerate loose whitespace and an
- *  open-but-unclosed block — otherwise raw reasoning renders as body text
- *  until </think> arrives and then visually "jumps" into the fold. */
-export function splitThink(content: string): { reasoning: string | null; body: string } {
-  const m = content.match(/^<think>\s*([\s\S]*?)\s*<\/think>\s*([\s\S]*)$/)
+/** A chunk's reasoning and reply. Since DP-434 reasoning arrives in its own
+ *  field; rows persisted before that carry it folded into content as a
+ *  leading '<think>\nR\n</think>\nC' block with `reasoning` null, so split
+ *  those here. Temporary: remove once no legacy rows remain. */
+export function chunkParts(c: Chunk): { reasoning: string | null; body: string } {
+  if (c.role !== 'assistant') return { reasoning: null, body: c.content }
+  if (c.reasoning) return { reasoning: c.reasoning, body: c.content }
+  const m = c.content.match(/^<think>\s*([\s\S]*?)\s*<\/think>\s*([\s\S]*)$/)
   if (m) return { reasoning: m[1], body: m[2] }
-  const open = content.match(/^<think>\s*([\s\S]*)$/)
-  if (open) return { reasoning: open[1], body: '' }
-  return { reasoning: null, body: content }
+  return { reasoning: null, body: c.content }
 }
 
 export function fmtTok(n: number): string {

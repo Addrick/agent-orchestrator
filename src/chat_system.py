@@ -21,6 +21,7 @@ from src.generation_events import (
     ErrorEvent as ErrorEvent,
     GenerationEvent as GenerationEvent,
     PendingConfirmationEvent as PendingConfirmationEvent,
+    ReasoningEvent as ReasoningEvent,
     ResponseType as ResponseType,
     TokenEvent as TokenEvent,
     ToolCallResultEvent as ToolCallResultEvent,
@@ -62,6 +63,11 @@ class _ContinuationState:
     siblings, so replaying one forks the conversation.
     """
     batch: List[Decision]
+
+
+def _joined_reasoning(parts: List[str]) -> Optional[str]:
+    """A turn's streamed reasoning deltas as its `reasoning_content` column."""
+    return "".join(parts).strip() or None
 
 
 def _render_resolution_nudge(batch: List[Decision]) -> str:
@@ -477,6 +483,10 @@ class ChatSystem:
             # Only the DP-335 exhaustion exit sets it — see `_LoopFinishedEvent`.
             retain_text: Optional[str] = None
             accumulated_parts: List[str] = []
+            # DP-434: the turn's thinking, across every iteration, exactly as
+            # the user watched it stream. Stored as `reasoning_content`, apart
+            # from the reply, so it is shown on reload but never replayed.
+            accumulated_reasoning: List[str] = []
             # Writes this turn gated for approval. Registered in the store only
             # after the assistant row commits, since each needs that row's id to
             # patch later — see the park-registration block below.
@@ -568,6 +578,9 @@ class ChatSystem:
                     elif isinstance(ev, TokenEvent):
                         accumulated_parts.append(ev.delta)
                         yield ev
+                    elif isinstance(ev, ReasoningEvent):
+                        accumulated_reasoning.append(ev.delta)
+                        yield ev
                     elif isinstance(ev, (ToolCallStartEvent, ToolCallResultEvent)):
                         yield ev
                     elif isinstance(ev, _ToolContextEvent):
@@ -628,6 +641,7 @@ class ChatSystem:
                                 user_interaction_id=user_interaction_id,
                                 retry_assistant_id=retry_assistant_id,
                                 tool_context_json=tool_context_json,
+                                reasoning_content=_joined_reasoning(accumulated_reasoning),
                             )
                             # Writes gated before the loop died are still real
                             # proposals — register them against the row that
@@ -660,7 +674,8 @@ class ChatSystem:
                 # accumulated so the row reflects what the user actually saw,
                 # then re-raise so the surrounding StreamingResponse aborts.
                 partial = "".join(accumulated_parts)
-                if partial.strip():
+                partial_reasoning = _joined_reasoning(accumulated_reasoning)
+                if partial.strip() or partial_reasoning:
                     cancelled_id = self.turn_persistence.commit_or_update_assistant(
                         persona_name=persona_name, user_identifier=user_identifier,
                         channel=channel, server_id=server_id,
@@ -669,6 +684,7 @@ class ChatSystem:
                         user_interaction_id=user_interaction_id,
                         retry_assistant_id=retry_assistant_id,
                         tool_context_json=None,
+                        reasoning_content=partial_reasoning,
                     )
                     # DP-423: as on the error path above.
                     self.turn_persistence.discard_overwritten_retry(
@@ -688,6 +704,7 @@ class ChatSystem:
                 user_interaction_id=user_interaction_id,
                 retry_assistant_id=retry_assistant_id,
                 tool_context_json=tool_context_json,
+                reasoning_content=_joined_reasoning(accumulated_reasoning),
             )
             self._register_parks(parks_this_turn, assistant_id)
             self._register_duplicates(dups_this_turn, assistant_id)
