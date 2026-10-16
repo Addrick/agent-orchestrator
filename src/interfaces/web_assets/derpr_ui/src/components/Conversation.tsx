@@ -308,7 +308,7 @@ function RenderedSlot({
       {showLtm && (
         <div className="ltmrow">
           <div className="lh">
-            <span className="lbl">◈ LTM recalled · injected as author's-note</span>
+            <span className="lbl">◈ LTM recalled · prepended to your message</span>
             <span className="lbl" style={{ marginLeft: 'auto' }}>
               /session/{persona.name}/ltm_block
             </span>

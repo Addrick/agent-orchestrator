@@ -33,7 +33,7 @@ from src.tools.tool_manager import ToolManager
 from src.tools.turn_context import TurnContext, turn_scope
 from src.utils.message_utils import strip_vertex_links
 from src.utils.model_utils import get_model_prefix
-from src.utils.timeutil import prompt_stamp, to_utc
+from src.utils.timeutil import prompt_stamp, prompt_time
 
 logger = logging.getLogger(__name__)
 
@@ -58,33 +58,6 @@ def _stamped(content: str, ts: Any) -> str:
         return f"{prompt_stamp(ts)} {content}"
     except (TypeError, ValueError):
         return content
-
-
-def _relative_time(dt: datetime) -> str:
-    """Format a datetime as a relative time string (e.g., '2 days ago')."""
-    delta = datetime.now(timezone.utc) - to_utc(dt)
-    seconds = int(delta.total_seconds())
-    if seconds < 0:
-        return "just now"
-    if seconds < 60:
-        return "just now"
-    minutes = seconds // 60
-    if minutes < 60:
-        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
-    hours = minutes // 60
-    if hours < 24:
-        return f"{hours} hour{'s' if hours != 1 else ''} ago"
-    days = hours // 24
-    if days < 7:
-        return f"{days} day{'s' if days != 1 else ''} ago"
-    weeks = days // 7
-    if weeks < 5:
-        return f"{weeks} week{'s' if weeks != 1 else ''} ago"
-    months = days // 30
-    if months < 12:
-        return f"{months} month{'s' if months != 1 else ''} ago"
-    years = days // 365
-    return f"{years} year{'s' if years != 1 else ''} ago"
 
 
 @dataclass
@@ -436,6 +409,30 @@ class RequestBuilder:
             logger.warning(f"### RequestBuilder: Injected memory block for {persona.get_name()} ({len(hits)} hits, untrusted={has_untrusted})")
         return memory_block, has_untrusted
 
+    @staticmethod
+    def _attach_memory_block(history: List[Dict[str, Any]], block: str) -> None:
+        """Prepend the LTM block to the newest user turn (DP-431).
+
+        Not at the head of the window: it is re-recalled every turn, so there
+        it changed the prompt right after the system prompt and a local
+        server's prefix cache reprocessed the whole history each time. Beside
+        the newest turn only the last exchange reprocesses, and the facts sit
+        next to the message they were recalled for. Folded *into* that turn
+        rather than added as its own message, so roles still alternate (chat
+        templates such as Gemma's reject two user messages in a row) and the
+        token pruner, which always keeps the newest user turn, keeps it too.
+        """
+        for msg in reversed(history):
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content")
+            if isinstance(content, str):
+                msg["content"] = f"{block}\n\n{content}"
+            elif isinstance(content, list):
+                msg["content"] = [{"type": "text", "text": block}] + content
+            return
+        logger.debug("LTM block dropped: no user turn to attach it to.")
+
     async def get_session_memory_block(
             self,
             persona_name: str,
@@ -493,10 +490,10 @@ class RequestBuilder:
         """Tag each assembled wire message with its provenance for the inspector.
 
         Structural derivation (the flat wire dicts carry no provenance): index 0
-        is the persona system prompt; a leading `<memory>` user row is the LTM
-        block; replayed tool turns are tagged tool_call/tool_result; on a
-        non-retry turn the final non-LTM user row is the composer's new message;
-        everything else is sliding-window history.
+        is the persona system prompt; replayed tool turns are tagged
+        tool_call/tool_result; on a non-retry turn the final user row is the
+        composer's new message; everything else is sliding-window history. The
+        user row the LTM block rides on (DP-431) gets a `+ltm` suffix.
         """
         sources: List[str] = []
         for i, m in enumerate(messages):
@@ -504,10 +501,7 @@ class RequestBuilder:
                 sources.append("persona.prompt")
                 continue
             role = m.get("role")
-            content = m.get("content")
-            if role == "user" and isinstance(content, str) and content.startswith("<memory>"):
-                sources.append("ltm_block")
-            elif role == "tool":
+            if role == "tool":
                 sources.append("tool_result")
             elif role == "assistant" and m.get("tool_calls"):
                 sources.append("tool_call")
@@ -520,6 +514,11 @@ class RequestBuilder:
                 if sources[i] == "history" and messages[i].get("role") == "user":
                     sources[i] = "composer"
                     break
+        for i, m in enumerate(messages):
+            content = m.get("content")
+            if i and m.get("role") == "user" and isinstance(content, str) \
+                    and content.startswith("<memory>"):
+                sources[i] += "+ltm"
         return sources
 
     async def assemble_request(
@@ -590,11 +589,26 @@ class RequestBuilder:
 
     @staticmethod
     def format_memory_block(hits: List[MemoryHit]) -> Optional[str]:
-        """Format MemoryHit list into a <memory> block for injection."""
+        """Format MemoryHit list into a <memory> block for injection.
+
+        The block rides at the head of the newest user turn (DP-431), so its
+        preamble has to say it is not the user's words, and that it is
+        background to draw on rather than something to answer. Hit times are
+        absolute (`prompt_time`), not "2 minutes ago": the same hits then
+        render the same text on every request, and they compare directly with
+        the turn stamps.
+        """
         if not hits:
             return None
 
-        lines = ["<memory>", "The following are relevant facts from previous conversations:", ""]
+        lines = [
+            "<memory>",
+            "Recalled from long-term memory for the message below. This is "
+            "background added by the system, not part of what the user wrote: "
+            "use whatever is relevant, ignore the rest, and do not reply to or "
+            "mention this block itself.",
+            "",
+        ]
 
         for hit in hits:
             tag_map: Dict[str, str] = {}
@@ -611,7 +625,7 @@ class RequestBuilder:
             if persona == "ambient":
                 label_parts.append("ambient")
             if hit.timestamp:
-                label_parts.append(_relative_time(hit.timestamp))
+                label_parts.append(prompt_time(hit.timestamp))
 
             lines.append(f"[{', '.join(label_parts)}]")
             for fact_line in hit.content.strip().split('\n'):
@@ -715,17 +729,14 @@ class RequestBuilder:
                 db_row_count,
             )
 
-        # Inject long-term memory block before the sliding window
+        # Recalled before the new turn is appended: on a retry the query falls
+        # back to the last history user turn, which must not carry the block.
         memory_block, has_untrusted = await self.retrieve_memory_block(
             ctx.persona, ctx.user_identifier, ctx.channel,
             ctx.server_id, ctx.conversation_history,
             current_message=ctx.message,
             oldest_interaction_id=ctx.oldest_interaction_id,
         )
-        memory_msg: Optional[Dict[str, Any]] = None
-        if memory_block:
-            memory_msg = {"role": "user", "content": memory_block}
-            ctx.conversation_history.insert(0, memory_msg)
         if has_untrusted:
             ctx.turn_tainted = True
             if "memory_recall" not in ctx.taint_sources:
@@ -749,6 +760,9 @@ class RequestBuilder:
                 content = _stamped(content, ctx.timestamp or datetime.now(timezone.utc))
             ctx.conversation_history.append({"role": "user", "content": content})
 
+        if memory_block:
+            self._attach_memory_block(ctx.conversation_history, memory_block)
+
         # Respect per-request context overrides from the portal for history truncation.
         ctx_limit = (ctx.local_inference_config or {}).get("max_context_length") or ctx.persona.get_max_context_tokens()
         prompt_budget = ctx_limit - ctx.persona.get_response_token_limit()
@@ -768,12 +782,9 @@ class RequestBuilder:
         # (atomic tool spans in the pruner, the tool_context replay guard in
         # build_conversation_history); the client_messages path above has
         # neither guard, and this also fails safe for any future producer.
-        # Runs after the token-prune, and the LTM block is passed as injected
-        # head content so the scan looks through it rather than stopping on it
-        # (it is not a real user turn).
+        # Runs after the token-prune.
         ctx.conversation_history, orphaned = drop_orphaned_tool_head(
             ctx.conversation_history,
-            injected=(memory_msg,) if memory_msg is not None else None,
         )
         if orphaned:
             logger.info(

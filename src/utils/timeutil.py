@@ -41,4 +41,10 @@ def prompt_stamp(ts: Union[datetime, str, bytes]) -> str:
     stamp is byte-identical on every request and the prompt prefix stays
     cacheable. The weekday is there because models cannot reliably derive it.
     """
-    return f"[{to_local(ts):%a %Y-%m-%d %H:%M}]"
+    return f"[{prompt_time(ts)}]"
+
+
+def prompt_time(ts: Union[datetime, str, bytes]) -> str:
+    """`Wed 2026-10-15 14:05` — the one rendering of a stored time a model
+    reads in the prompt: user-turn stamps and LTM hit labels (DP-431)."""
+    return f"{to_local(ts):%a %Y-%m-%d %H:%M}"

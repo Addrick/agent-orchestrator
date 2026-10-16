@@ -125,7 +125,7 @@ If the backend stops answering, the line turns amber and reads `backend unreacha
 
 **Slash dev-commands:** a portal message starting with `/` is routed to the dev-command endpoint instead of the LLM — e.g. `/set temperature 0.8` or `/what models` runs the same command surface Discord uses, and the response renders as a dismissible inline row (mutating commands also refresh the Inspector). The composer hints this live (`leading / = dev-command`); there is currently no escape for sending a literal chat message that starts with `/` (the draft is trimmed before the check).
 
-**LTM recall toggle:** the composer's **LTM recall** chip controls whether long-term-memory retrieval runs for this persona (it saves through `long_term_memory` on the persona, so it persists). When on, the context panel previews the `ltm_block` the engine would inject — re-fetched as you type (debounced) so the preview mirrors the per-message recall recomputed at submit.
+**LTM recall toggle:** the composer's **LTM recall** chip controls whether long-term-memory retrieval runs for this persona (it saves through `long_term_memory` on the persona, so it persists). When on, the context panel previews the `ltm_block` the engine would prepend to your message — re-fetched as you type (debounced) so the preview mirrors the per-message recall recomputed at submit.
 
 **Voice availability:** the mic (hold-to-talk), *voice auto-send*, and *listen* (always-listening dictation) controls appear only when the browser supports audio capture **and** the engine reports `voice_web` in `GET /api/v1/capabilities` (i.e. `VOICE_WEB_ENABLED` is set and the `/voice/*` routes are mounted). With voice disabled server-side the controls are hidden rather than failing on every press.
 
@@ -1794,7 +1794,7 @@ The bot automatically builds a long-term memory store from conversations in the 
 
 4. **Consolidation** — Periodically, similar episodic summaries (level 1) are clustered by similarity and merged into core profiles (level 2) via `submit_core_profile`. This creates a two-tier hierarchy: detailed episodic records and compressed concept profiles.
 
-5. **Retrieval** — On each LLM request, relevant summaries are retrieved via KNN vector search and injected into the context window *before* the sliding-window history. This gives the LLM access to facts from older conversations that would otherwise have fallen out of the context limit.
+5. **Retrieval** — On each LLM request, relevant summaries are retrieved via KNN vector search and injected as a `<memory>` block at the **start of your newest message** (DP-431) — not ahead of the history, where a block that changes every turn made a local model server reprocess the whole conversation each time. The block opens with a note telling the model it was added by the system, is not your words, and is background to draw on rather than something to reply to. Each fact is labelled with its channel, id and an absolute time in the same format as the message stamps (`[#web_ui, ID:7, Wed 2026-10-14 14:05]`), not "2 days ago". It is part of the prompt only — your stored message never contains it. This gives the LLM access to facts from older conversations that would otherwise have fallen out of the context limit.
 
 ### Scope
 

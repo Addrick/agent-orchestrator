@@ -3,7 +3,7 @@
 and the system prompt carry none."""
 
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -102,3 +102,76 @@ def test_recall_query_strip_matches_the_formatter():
     """The retry recall query strips the stamp by regex; it must keep matching
     what `prompt_stamp` emits, or a date leaks into recall as a time filter."""
     assert _PROMPT_STAMP.sub("", f"{prompt_stamp(T1)} Adam: hi") == "Adam: hi"
+
+
+# --- LTM block placement (DP-431) ---
+
+BLOCK = "<memory>\nfact\n</memory>"
+
+
+def test_block_rides_on_newest_user_turn():
+    history = [
+        {"role": "user", "content": "old"},
+        {"role": "assistant", "content": "a"},
+        {"role": "user", "content": "[Thu 2026-10-15 09:30] new"},
+    ]
+    RequestBuilder._attach_memory_block(history, BLOCK)
+    assert history[0]["content"] == "old"
+    assert history[-1]["content"] == f"{BLOCK}\n\n[Thu 2026-10-15 09:30] new"
+    # Roles still alternate: no extra message.
+    assert [m["role"] for m in history] == ["user", "assistant", "user"]
+
+
+def test_block_on_multimodal_turn_is_a_leading_text_part():
+    parts = [{"type": "image_url", "image_url": {"url": "x"}}]
+    history = [{"role": "user", "content": list(parts)}]
+    RequestBuilder._attach_memory_block(history, BLOCK)
+    assert history[0]["content"] == [{"type": "text", "text": BLOCK}] + parts
+
+
+def test_block_without_a_user_turn_is_dropped():
+    history = [{"role": "assistant", "content": "a"}]
+    RequestBuilder._attach_memory_block(history, BLOCK)
+    assert history == [{"role": "assistant", "content": "a"}]
+
+
+async def test_prepare_request_attaches_block_to_new_turn_not_head():
+    builder = _builder(ROWS[:2])
+    builder.retrieve_memory_block = AsyncMock(return_value=(BLOCK, False))
+    ctx = RequestContext(persona=_persona(), persona_name="p", user_identifier="u",
+                         channel="c", message="q", timestamp=T2)
+    await builder.prepare_request(ctx)
+    assert [m["content"] for m in ctx.conversation_history] == [
+        "[Wed 2026-10-14 14:05] hi",
+        "hello",
+        f"{BLOCK}\n\n[Thu 2026-10-15 09:30] q",
+    ]
+    sources = RequestBuilder.derive_message_sources(
+        [{"role": "system", "content": "sys"}] + ctx.conversation_history, is_retry=False)
+    assert sources == ["persona.prompt", "history", "history", "composer+ltm"]
+
+
+async def test_retry_attaches_block_to_the_replayed_user_turn():
+    rows = ROWS[:2] + [{"interaction_id": 3, "author_role": "user", "author_name": "Adam",
+                        "content": "again", "timestamp": T2},
+                       {"interaction_id": 4, "author_role": "assistant", "author_name": "p",
+                        "content": "discarded", "timestamp": T2}]
+    builder = _builder(rows)
+    builder.retrieve_memory_block = AsyncMock(return_value=(BLOCK, False))
+    ctx = RequestContext(persona=_persona(), persona_name="p", user_identifier="u",
+                         channel="c", message="again", timestamp=T2)
+    await builder.prepare_request(ctx, is_retry=True)
+    assert ctx.conversation_history[-1]["content"] == f"{BLOCK}\n\n[Thu 2026-10-15 09:30] again"
+    # The recall query was taken before the block was attached.
+    assert ctx.conversation_history[0]["content"] == "[Wed 2026-10-14 14:05] hi"
+
+
+def test_block_labels_are_absolute_and_preamble_disowns_user_authorship():
+    from src.memory.backend.base import MemoryHit
+    block = RequestBuilder.format_memory_block([
+        MemoryHit(id="7", content="likes tea", score=1.0,
+                  tags=["channel:web_ui"], timestamp=T1),
+    ])
+    assert "[#web_ui, ID:7, Wed 2026-10-14 14:05]" in block
+    assert "not part of what the user wrote" in block
+    assert " ago" not in block
