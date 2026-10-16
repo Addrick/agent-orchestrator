@@ -22,7 +22,7 @@ export function BudgetBar({ persona, systemPrompt, ltmBlock, ltmOn, historyText 
 
   const segs = [
     { label: 'system prompt', tokens: sysTok, color: 'var(--accent-dim)' },
-    ...(ltmOn ? [{ label: 'LTM / anote', tokens: ltmTok, color: 'var(--mem)' }] : []),
+    ...(ltmOn ? [{ label: 'LTM', tokens: ltmTok, color: 'var(--mem)' }] : []),
     { label: 'history', tokens: histTok, color: 'rgba(150,170,205,0.45)' },
     { label: 'reply reserve', tokens: reserve, color: 'var(--write)' },
   ]

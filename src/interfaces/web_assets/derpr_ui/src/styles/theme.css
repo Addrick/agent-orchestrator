@@ -395,7 +395,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 .ctxrow .lh { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
 .ctxrow .role { font-family: var(--mono); font-size: 10px; letter-spacing: 0.5px; }
 .ctxrow.system .role { color: var(--accent); }
-.ctxrow.anote  .role { color: var(--mem); }
+.ctxrow.ltm    .role { color: var(--mem); }
 .ctxrow.user   .role { color: var(--ok); }
 .ctxrow.assistant .role { color: var(--accent-2); }
 .ctxrow .text { font-family: var(--sans); font-size: 11.5px; color: var(--ink-2); line-height: 1.55; white-space: pre-wrap; }

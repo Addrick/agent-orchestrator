@@ -64,8 +64,8 @@ def truncate_messages_to_budget(
 
     Preserves: every `role == "system"` entry, and the most recent
     `role == "user"` entry (so the current turn is never evicted).
-    LTM authornote sits inside system / latest-user content by the time
-    this runs and is therefore preserved implicitly.
+    The LTM block rides inside the latest user turn (DP-431) and is
+    therefore preserved implicitly.
 
     Returns `(pruned_messages, dropped_count)`. No-op (`dropped_count=0`)
     when `max_tokens` is None / non-positive, or when the input already

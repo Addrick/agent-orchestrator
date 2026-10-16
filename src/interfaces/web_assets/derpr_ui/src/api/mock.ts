@@ -264,17 +264,18 @@ export const MOCK_ASSEMBLED: AssembledRequest = {
   },
   messages: [
     { role: 'system', content: MOCK_PERSONA.prompt, src: 'persona.prompt' },
-    {
-      role: 'user',
-      content: MOCK_LTM_BLOCK ?? '<memory>…</memory>',
-      src: 'ltm_block',
-    },
     { role: 'user', content: 'Reset the VPN cert for jdoe.', src: '#1041' },
     {
       role: 'assistant',
       content: 'Reissuing a VPN cert is gated by policy DP-204 (L2 approval).',
       src: '#1042 · v3 canonical',
     },
-    { role: 'user', content: 'Email Jane the confirmation too.', src: 'composer' },
+    {
+      role: 'user',
+      content: `${MOCK_LTM_BLOCK ?? '<memory>…</memory>'}
+
+Email Jane the confirmation too.`,
+      src: 'composer+ltm',
+    },
   ],
 }

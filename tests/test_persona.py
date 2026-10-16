@@ -541,26 +541,18 @@ def test_inject_timestamp_absent_in_legacy_config_defaults_true(base_persona_arg
     assert loaded["legacy"].get_inject_timestamp() is True
 
 
-def test_build_wire_messages_inject_timestamp(base_persona_args):
+@pytest.mark.parametrize("inject", [True, False])
+def test_build_wire_messages_system_prompt_carries_no_time(base_persona_args, inject):
+    """DP-431: the time moved onto user turns. A clock in the system prompt
+    changed token 0 every minute and defeated the local prompt cache."""
     from src.tools.tool_loop import build_wire_messages
-    p = Persona(**base_persona_args, inject_timestamp=True)
+    p = Persona(**base_persona_args, inject_timestamp=inject)
     history = [{"role": "user", "content": "hello"}]
     messages = build_wire_messages(p, history)
-    assert len(messages) == 2
-    assert messages[0]["role"] == "system"
-    assert "[Current Time:" in messages[0]["content"]
-    assert "You are a test persona." in messages[0]["content"]
-
-
-def test_build_wire_messages_no_inject_timestamp(base_persona_args):
-    from src.tools.tool_loop import build_wire_messages
-    p = Persona(**base_persona_args, inject_timestamp=False)
-    history = [{"role": "user", "content": "hello"}]
-    messages = build_wire_messages(p, history)
-    assert len(messages) == 2
-    assert messages[0]["role"] == "system"
-    assert "[Current Time:" not in messages[0]["content"]
-    assert messages[0]["content"] == "You are a test persona."
+    assert messages == [
+        {"role": "system", "content": "You are a test persona."},
+        {"role": "user", "content": "hello"},
+    ]
 
 
 

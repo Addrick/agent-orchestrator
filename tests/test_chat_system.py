@@ -47,7 +47,9 @@ def chat_system_with_mocks():
     mock_tool_manager = AsyncMock()
     mock_tool_manager.get_tool_definitions = MagicMock(return_value=[])
 
-    mock_persona = Persona('test_persona', 'mock_model', 'prompt')
+    # Bare turn text: these tests assert message content, not DP-431's
+    # stamps (covered in tests/test_prompt_timestamps.py).
+    mock_persona = Persona('test_persona', 'mock_model', 'prompt', inject_timestamp=False)
 
     system = make_chat_system(
         memory_manager=mock_memory_manager,
@@ -1198,10 +1200,9 @@ async def test_prepare_request_drops_orphaned_tool_head_from_client_messages(cha
 
 @pytest.mark.asyncio
 async def test_prepare_request_drops_orphaned_tool_head_behind_ltm_block(chat_system_with_mocks):
-    """DP-298: the LTM recall block is inserted at index 0 *after* the history is
-    built, so it sits in front of the orphan. It is not a real user turn and must
-    not shield it — otherwise the exact case this repair exists for (recall hit +
-    a window opening on tool traffic) still reaches the provider and 400s."""
+    """DP-298: a recall hit plus a window opening on tool traffic must still
+    drop the orphan, or the request 400s. Since DP-431 the block rides on the
+    newest user turn, so it can no longer shield the head at all."""
     system, memory_mock, _, persona, _ = chat_system_with_mocks
 
     memory_mock.get_channel_history.return_value = []
@@ -1220,11 +1221,14 @@ async def test_prepare_request_drops_orphaned_tool_head_behind_ltm_block(chat_sy
 
     await system.request_builder.prepare_request(ctx)
 
-    # The recall block is preserved at the head — only the orphan is removed.
-    assert ctx.conversation_history[0]["content"].startswith("[Recalled context]")
+    assert ctx.conversation_history[0]["role"] != "tool"
     assert not any(m.get("role") == "tool" or m.get("tool_calls")
                    for m in ctx.conversation_history)
-    assert ctx.conversation_history[-1] == {"role": "user", "content": "latest user msg"}
+    # The recall block survives, on the newest turn.
+    assert ctx.conversation_history[-1] == {
+        "role": "user",
+        "content": "[Recalled context] the user asked about agents earlier.\n\nlatest user msg",
+    }
 
 
 # --- Internal Logging Tests ---

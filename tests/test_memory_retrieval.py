@@ -9,7 +9,7 @@ import pytest
 
 from memory.memory_manager import MemoryManager
 from src.memory.scope_tags import recall_scope_tags
-from src.request_builder import RequestBuilder, _relative_time
+from src.request_builder import RequestBuilder
 from src.embedding_service import EmbeddingService
 from src.memory.backend.base import MemoryHit
 from src.persona import MemoryMode
@@ -418,26 +418,6 @@ async def test_retrieve_memory_block_channel_persona_keeps_channel(
     kwargs = system.memory_backend.recall.call_args.kwargs
     assert kwargs["memory_mode"] == "channel"
     assert "channel:web_ui" in kwargs["tag_filter"]
-
-
-# --- _relative_time Tests ---
-
-def test_relative_time_days():
-    assert "2 days ago" == _relative_time(datetime.now(timezone.utc) - timedelta(days=2))
-
-
-def test_relative_time_weeks():
-    assert "1 week ago" == _relative_time(datetime.now(timezone.utc) - timedelta(weeks=1))
-
-
-def test_relative_time_hours():
-    assert "3 hours ago" == _relative_time(datetime.now(timezone.utc) - timedelta(hours=3))
-
-
-def test_relative_time_naive_is_stored_utc():
-    """DP-413: a naive hit timestamp is UTC, whatever zone the host clock is in."""
-    naive_utc = (datetime.now(timezone.utc) - timedelta(hours=3)).replace(tzinfo=None)
-    assert "3 hours ago" == _relative_time(naive_utc)
 
 
 # --- Memory Block Formatting ---
