@@ -180,7 +180,7 @@ async def stream_chat_completions(
     yield {"type": "api_payload", "payload": openai_dump_params(api_params)}
 
     text_parts: List[str] = []
-    reasoning_parts: List[str] = []
+    saw_reasoning = False
     # index → {"id", "name", "arguments"} accumulated across delta chunks
     raw_calls: Dict[int, Dict[str, Any]] = {}
     stream: Any = None
@@ -194,10 +194,10 @@ async def stream_chat_completions(
             extra = getattr(delta, "model_extra", None)
             reasoning = extra.get("reasoning_content") if isinstance(extra, dict) else None
             if isinstance(reasoning, str) and reasoning:
-                reasoning_parts.append(reasoning)
+                saw_reasoning = True
                 yield {"type": "reasoning_delta", "text": reasoning}
             content = getattr(delta, "content", None)
-            if isinstance(content, str) and reasoning_parts and not text_parts:
+            if isinstance(content, str) and saw_reasoning and not text_parts:
                 # KoboldCPP opens the answer with the blank line that
                 # followed `</think>` in the raw stream; drop it.
                 content = content.lstrip()

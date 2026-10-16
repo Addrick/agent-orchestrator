@@ -178,6 +178,13 @@ export function usePortalStore() {
       reasoning: rDelta ? (s.reasoning ?? '') + rDelta : s.reasoning,
     }))
   }, [])
+  const scheduleFlush = useCallback(() => {
+    if (tokenRafRef.current == null)
+      tokenRafRef.current = requestAnimationFrame(() => {
+        tokenRafRef.current = null
+        flushTokens()
+      })
+  }, [flushTokens])
   // Drop any pending deltas from a previous stream (new stream start / dismiss).
   const resetTokenBuf = useCallback(() => {
     if (tokenRafRef.current != null) {
@@ -543,19 +550,11 @@ export function usePortalStore() {
     (personaName: string, channel: string) => ({
       onToken: (delta: string) => {
         tokenBufRef.current += delta
-        if (tokenRafRef.current == null)
-          tokenRafRef.current = requestAnimationFrame(() => {
-            tokenRafRef.current = null
-            flushTokens()
-          })
+        scheduleFlush()
       },
       onReasoning: (delta: string) => {
         reasoningBufRef.current += delta
-        if (tokenRafRef.current == null)
-          tokenRafRef.current = requestAnimationFrame(() => {
-            tokenRafRef.current = null
-            flushTokens()
-          })
+        scheduleFlush()
       },
       onToolStart: (f: ToolStartFrame) =>
         setStream((s) => ({
@@ -635,7 +634,7 @@ export function usePortalStore() {
         abortRef.current = null
       },
     }),
-    [refreshTranscript, refreshChannels, flushTokens],
+    [refreshTranscript, refreshChannels, flushTokens, scheduleFlush],
   )
 
   // ---- send a chat turn ---------------------------------------------

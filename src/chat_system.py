@@ -27,6 +27,7 @@ from src.generation_events import (
     ToolCallResultEvent as ToolCallResultEvent,
     ToolCallStartEvent as ToolCallStartEvent,
     format_internal_error as format_internal_error,
+    join_reasoning,
 )
 from src.message_handler import BotLogic
 from src.origin import ANONYMOUS, Origin
@@ -63,11 +64,6 @@ class _ContinuationState:
     siblings, so replaying one forks the conversation.
     """
     batch: List[Decision]
-
-
-def _joined_reasoning(parts: List[str]) -> Optional[str]:
-    """A turn's streamed reasoning deltas as its `reasoning_content` column."""
-    return "".join(parts).strip() or None
 
 
 def _render_resolution_nudge(batch: List[Decision]) -> str:
@@ -641,7 +637,7 @@ class ChatSystem:
                                 user_interaction_id=user_interaction_id,
                                 retry_assistant_id=retry_assistant_id,
                                 tool_context_json=tool_context_json,
-                                reasoning_content=_joined_reasoning(accumulated_reasoning),
+                                reasoning_content=join_reasoning(accumulated_reasoning),
                             )
                             # Writes gated before the loop died are still real
                             # proposals — register them against the row that
@@ -674,7 +670,7 @@ class ChatSystem:
                 # accumulated so the row reflects what the user actually saw,
                 # then re-raise so the surrounding StreamingResponse aborts.
                 partial = "".join(accumulated_parts)
-                partial_reasoning = _joined_reasoning(accumulated_reasoning)
+                partial_reasoning = join_reasoning(accumulated_reasoning)
                 if partial.strip() or partial_reasoning:
                     cancelled_id = self.turn_persistence.commit_or_update_assistant(
                         persona_name=persona_name, user_identifier=user_identifier,
@@ -704,7 +700,7 @@ class ChatSystem:
                 user_interaction_id=user_interaction_id,
                 retry_assistant_id=retry_assistant_id,
                 tool_context_json=tool_context_json,
-                reasoning_content=_joined_reasoning(accumulated_reasoning),
+                reasoning_content=join_reasoning(accumulated_reasoning),
             )
             self._register_parks(parks_this_turn, assistant_id)
             self._register_duplicates(dups_this_turn, assistant_id)
@@ -760,6 +756,7 @@ class ChatSystem:
                 response_type=response_type,
                 assistant_id=assistant_id,
                 user_interaction_id=user_interaction_id,
+                reasoning=join_reasoning(accumulated_reasoning),
                 # No ephemeral chunk: since DP-297 the turn's own text is
                 # persisted normally and each proposal carries its own token on
                 # its PendingConfirmationEvent instead.
@@ -928,7 +925,10 @@ class ChatSystem:
                 if isinstance(ev, TokenEvent):
                     continue
                 if isinstance(ev, DoneEvent):
-                    final_text = ev.text
+                    # A reply that was only thinking (out of tokens mid-think)
+                    # sends the thinking rather than nothing: these surfaces
+                    # have no reasoning fold, and an empty reply is silence.
+                    final_text = ev.text or ev.reasoning or ""
                     response_type = ev.response_type
                     assistant_id = ev.assistant_id
                     user_interaction_id = ev.user_interaction_id

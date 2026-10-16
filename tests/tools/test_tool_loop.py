@@ -1628,3 +1628,26 @@ async def test_reasoning_only_tool_turn_still_explains_the_park():
     park = [e for e in events if isinstance(e, ToolDeferredEvent)][0]
     assert park.audit_info["model_reasoning"] == "The outage needs a ticket."
     assert "content" not in history[0]
+
+
+@pytest.mark.asyncio
+async def test_exhaustion_wrap_up_reasoning_belongs_to_the_turn():
+    """DP-434: the wrap-up's thinking is the turn's reasoning like any
+    iteration's, not silently dropped — and never part of the answer."""
+    engine = _make_engine([
+        _spin(0),
+        [{"type": "reasoning_delta", "text": "summarise what the tool said"},
+         {"type": "text_delta", "text": "It spun."},
+         {"type": "done", "full_text": "It spun."}],
+    ])
+    loop = ToolLoop(engine, _make_tool_manager({"spinner": {"result": "spin"}}),
+                    max_iterations=50, max_tool_calls=1)
+
+    events = await _drain(loop.run(
+        persona=_make_persona(), conversation_history=[],
+        params=MagicMock(), tools=_OFFERED,
+    ))
+
+    reasoning = [e.delta for e in events if isinstance(e, ReasoningEvent)]
+    assert reasoning == ["summarise what the tool said"]
+    assert events[-1].retain_text == "It spun."

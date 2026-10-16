@@ -1,5 +1,6 @@
 # src/memory/memory_manager.py
 
+import re
 import sqlite3
 import json
 import logging
@@ -746,8 +747,72 @@ class MemoryManager:
                 logger.info(f"Syncing {missing_sums} missing memory summaries to sqlite-vec...")
                 conn.execute(f"INSERT INTO vec_Memory_Summaries(summary_id, embedding) SELECT summary_id, embedding FROM Memory_Summaries WHERE embedding IS NOT NULL AND length(embedding) = {EMBEDDING_DIMENSION * 4} AND summary_id NOT IN (SELECT summary_id FROM vec_Memory_Summaries)")
 
+            # After the vec tables exist: it drops embeddings of the rows it changes.
+            self._split_inline_reasoning(conn)
+
             conn.commit()
             logger.info("User memory database schema created or verified successfully.")
+
+    _INLINE_THINK = re.compile(r"^<think>\s*(.*?)\s*(?:</think>\s*(.*))?$", re.DOTALL)
+
+    @classmethod
+    def _split_think(cls, content: str, reasoning: Optional[str]) -> Optional[Tuple[str, str]]:
+        """`(content, reasoning)` with a leading `<think>` block moved out of
+        the content, or None when there is none. An unclosed block (a turn
+        stopped mid-think) is all reasoning."""
+        m = cls._INLINE_THINK.match(content or "")
+        if not m:
+            return None
+        inline = m.group(1).strip()
+        merged = "\n\n".join(p for p in ((reasoning or "").strip(), inline) if p)
+        return (m.group(2) or "").strip(), merged
+
+    def _split_inline_reasoning(self, conn: sqlite3.Connection) -> None:
+        """One-time move of inline `<think>` out of assistant `content` (DP-434).
+
+        Before DP-434 the local stream folded a turn's reasoning into its reply,
+        so those rows replay their thinking into every prompt and leak it to
+        Hindsight on retain. Idempotent: a moved row no longer starts with
+        `<think>`. Stale embeddings of a changed row are dropped so it is
+        re-embedded from the clean text, as `update_interaction_content` does.
+        """
+        rows = conn.execute(
+            "SELECT interaction_id, content, reasoning_content FROM User_Interactions"
+            " WHERE author_role = 'assistant' AND substr(content, 1, 7) = '<think>'"
+        ).fetchall()
+        for row in rows:
+            split = self._split_think(row["content"], row["reasoning_content"])
+            if split is None:
+                continue
+            conn.execute(
+                "UPDATE User_Interactions SET content = ?, reasoning_content = ?"
+                " WHERE interaction_id = ?",
+                (split[0], split[1] or None, row["interaction_id"]),
+            )
+            conn.execute("DELETE FROM Message_Embeddings WHERE interaction_id = ?",
+                         (row["interaction_id"],))
+            conn.execute("DELETE FROM vec_Message_Embeddings WHERE interaction_id = ?",
+                         (row["interaction_id"],))
+        archived = conn.execute(
+            "SELECT h.edit_id, h.old_content, h.old_reasoning_content"
+            " FROM Interaction_Edit_History h"
+            " JOIN User_Interactions u ON u.interaction_id = h.interaction_id"
+            " WHERE u.author_role = 'assistant' AND substr(h.old_content, 1, 7) = '<think>'"
+        ).fetchall()
+        for row in archived:
+            split = self._split_think(row["old_content"], row["old_reasoning_content"])
+            if split is None:
+                continue
+            conn.execute(
+                "UPDATE Interaction_Edit_History SET old_content = ?, old_reasoning_content = ?"
+                " WHERE edit_id = ?",
+                (split[0], split[1] or None, row["edit_id"]),
+            )
+        if rows or archived:
+            logger.info(
+                "DP-434: moved inline <think> reasoning out of %d assistant rows "
+                "and %d archived versions.", len(rows), len(archived),
+            )
 
     def log_message(self, user_identifier: str, persona_name: str, channel: str,
                     author_role: str, author_name: Optional[str], content: str,
@@ -911,7 +976,7 @@ class MemoryManager:
             # if a user turn is newer (or the trailing assistant was deleted),
             # there is nothing to regenerate in place.
             #
-            # Empty-content rows are excluded too: DP-296 parks write an
+            # Unrenderable rows are excluded too: DP-296 parks write an
             # assistant row carrying only tool_context, which renders nowhere.
             # Left in the lookup it would win "most recent", archive a blank
             # version into the chevron, and hand the retried turn the very row
@@ -922,7 +987,7 @@ class MemoryManager:
                 " FROM User_Interactions"
                 " WHERE persona_name = ? AND user_identifier = ? AND channel = ?"
                 + self._SUPPRESSION_SUBQUERY
-                + self._NON_EMPTY_CONTENT_FILTER +
+                + self._RENDERABLE_FILTER +
                 " ORDER BY timestamp DESC, interaction_id DESC LIMIT 1",
                 (persona_name, user_identifier, channel),
             )
@@ -1345,7 +1410,16 @@ class MemoryManager:
     # resolved park (DP-296). Kept as a filter rather than a DELETE: on a
     # *retried* park the same row is the canonical archived assistant turn.
     _CONTRIBUTES_TO_HISTORY = (
-        " AND (TRIM(COALESCE(content, '')) != '' OR tool_context IS NOT NULL)"
+        " AND (TRIM(COALESCE(content, '')) != '' OR tool_context IS NOT NULL"
+        " OR TRIM(COALESCE(reasoning_content, '')) != '')"
+    )
+
+    # A row the transcript renders: text or reasoning. A reply that was only
+    # thinking (stopped mid-think, or out of tokens) is a real, visible turn
+    # since DP-434 moved reasoning out of `content`.
+    _RENDERABLE_FILTER = (
+        " AND (TRIM(COALESCE(content, '')) != ''"
+        " OR TRIM(COALESCE(reasoning_content, '')) != '')"
     )
 
     @staticmethod

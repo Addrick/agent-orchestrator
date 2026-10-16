@@ -1,17 +1,4 @@
 /* shared helpers — kept dumb and pure */
-import type { Chunk } from '../types/contracts'
-
-/** A chunk's reasoning and reply. Since DP-434 reasoning arrives in its own
- *  field; rows persisted before that carry it folded into content as a
- *  leading '<think>\nR\n</think>\nC' block with `reasoning` null, so split
- *  those here. Temporary: remove once no legacy rows remain. */
-export function chunkParts(c: Chunk): { reasoning: string | null; body: string } {
-  if (c.role !== 'assistant') return { reasoning: null, body: c.content }
-  if (c.reasoning) return { reasoning: c.reasoning, body: c.content }
-  const m = c.content.match(/^<think>\s*([\s\S]*?)\s*<\/think>\s*([\s\S]*)$/)
-  if (m) return { reasoning: m[1], body: m[2] }
-  return { reasoning: null, body: c.content }
-}
 
 export function fmtTok(n: number): string {
   return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n)

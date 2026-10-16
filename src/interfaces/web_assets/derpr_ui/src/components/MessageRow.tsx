@@ -1,6 +1,5 @@
 import { memo, useState } from 'react'
 import type { Chunk, ToolDef } from '../types/contracts'
-import { chunkParts } from '../state/util'
 import { MessageBody } from './MessageBody'
 import { ReasoningFold } from './ReasoningFold'
 import { ToolCard } from './ToolCard'
@@ -34,7 +33,9 @@ export const MessageRow = memo(function MessageRow({
   isLastUser,
   isLastAssistant,
 }: Props) {
-  const { reasoning, body } = chunkParts(c)
+  // Reasoning is its own field (DP-434); content is the reply alone.
+  const reasoning = c.role === 'assistant' ? c.reasoning : null
+  const body = c.content
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(body)
 
