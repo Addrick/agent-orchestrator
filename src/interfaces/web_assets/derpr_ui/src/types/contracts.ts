@@ -13,6 +13,9 @@ export interface ToolContext {
   arguments: Record<string, unknown>
   result: string | null
   error: string | null
+  // The thinking that led to this call, on the first card of each step
+  // (DP-437). Rendered just above the card, in the order the model saw it.
+  reasoning?: string | null
 }
 
 export interface Chunk {

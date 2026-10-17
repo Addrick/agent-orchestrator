@@ -328,11 +328,13 @@ def seal_tool_context(
     answered = {
         m.get("tool_call_id") for m in tool_msgs if m.get("role") == "tool"
     }
-    # Reasoning rides an in-turn assistant entry so the next iteration's
-    # template can show the model its own thinking (DP-434); it is dropped
-    # here because tool_context replays into every later turn.
+    # Each assistant entry keeps its iteration's reasoning (DP-434) so the
+    # portal can show every step's thinking in front of the calls it led to
+    # (DP-437). The key is always written, null when the step did not think,
+    # so a transcript can tell a sealed-with-reasoning blob from an older one.
+    # Replay never sends it: see `replayable_tool_context`.
     sealed: List[Dict[str, Any]] = [
-        {k: v for k, v in m.items() if k != "reasoning_content"}
+        {**m, "reasoning_content": m.get("reasoning_content") or None}
         if m.get("role") == "assistant" else m
         for m in tool_msgs
     ]
@@ -353,6 +355,20 @@ def seal_tool_context(
                 ),
             })
     return json.dumps(sealed)
+
+
+def replayable_tool_context(tool_context_json: str) -> List[Dict[str, Any]]:
+    """A stored `tool_context` as messages for a later turn's prompt.
+
+    Drops each step's `reasoning_content`: the model keeps its thinking only
+    for the turn that produced it (DP-434), even though `seal_tool_context`
+    stores it for the portal (DP-437).
+    """
+    return [
+        {k: v for k, v in m.items() if k != "reasoning_content"}
+        if m.get("role") == "assistant" else m
+        for m in json.loads(tool_context_json)
+    ]
 
 
 def _render_confirmation_text(
@@ -948,7 +964,8 @@ class ToolLoop:
             # the rest of the turn — reasoning templates (Qwen's among them)
             # render it for tool-call steps after the last user message, and
             # losing it makes multi-step tool use re-derive its plan.
-            # `seal_tool_context` strips it before anything is persisted.
+            # It is persisted in `tool_context` for display (DP-437) and
+            # stripped on replay to later turns.
             iteration_reasoning = cast(
                 str, get_scrubber().scrub(join_reasoning(accumulated_reasoning) or ""),
             )

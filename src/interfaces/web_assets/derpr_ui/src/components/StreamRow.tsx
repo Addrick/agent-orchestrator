@@ -1,3 +1,4 @@
+import { Fragment } from 'react'
 import type { StreamState } from '../state/store'
 import type { ToolDef } from '../types/contracts'
 import { ReasoningFold } from './ReasoningFold'
@@ -67,11 +68,16 @@ export function StreamRow({ stream: s, tools, onDismiss, onRegen }: Props) {
           )}
         </div>
 
-        {reasoning && <ReasoningFold reasoning={reasoning} />}
-
+        {/* Prompt order (DP-437): each step's thinking, then its calls; the
+            thinking still streaming comes after the last card. */}
         {s.tools.map((tc) => (
-          <ToolCard key={tc.call_id} tc={tc} tools={tools} />
+          <Fragment key={tc.call_id}>
+            {tc.reasoning && <ReasoningFold reasoning={tc.reasoning} />}
+            <ToolCard tc={tc} tools={tools} />
+          </Fragment>
         ))}
+
+        {reasoning && <ReasoningFold reasoning={reasoning} />}
 
         {waiting ? (
           <div className="text typing">

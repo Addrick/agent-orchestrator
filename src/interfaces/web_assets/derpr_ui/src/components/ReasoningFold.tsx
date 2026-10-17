@@ -1,8 +1,10 @@
 import { useState } from 'react'
 import { estimateTokens, fmtTok } from '../state/util'
 
-export function ReasoningFold({ reasoning }: { reasoning: string }) {
+export function ReasoningFold({ reasoning: raw }: { reasoning: string }) {
   const [open, setOpen] = useState(false)
+  // A later step's thinking streams in after a paragraph break (DP-434).
+  const reasoning = raw.trim()
   return (
     <div className={'fold' + (open ? ' open' : '')}>
       <button className="fh" onClick={() => setOpen((o) => !o)}>
