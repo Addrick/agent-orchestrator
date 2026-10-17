@@ -2687,3 +2687,32 @@ def test_reasoning_event_is_a_reasoning_content_delta():
     assert label == "ReasoningEvent"
     payload = json.loads(frame.decode("utf-8").removeprefix("data: ").strip())
     assert payload["choices"][0]["delta"] == {"reasoning_content": "hmm"}
+
+
+def _portal_tree(tmp_path, src_mtime, dist_mtime):
+    import os
+    (tmp_path / "src").mkdir()
+    (tmp_path / "dist").mkdir()
+    src = tmp_path / "src" / "App.tsx"
+    index = tmp_path / "dist" / "index.html"
+    src.write_text("x")
+    index.write_text("x")
+    os.utime(src, (src_mtime, src_mtime))
+    os.utime(index, (dist_mtime, dist_mtime))
+    return str(index)
+
+
+def test_portal_stale_when_source_newer_than_dist(tmp_path, caplog):
+    """DP-436: a pull that updates derpr_ui/src without rebuilding is logged."""
+    from src.interfaces.kobold_engine_adapter import _warn_if_portal_stale
+    index = _portal_tree(tmp_path, src_mtime=2_000, dist_mtime=1_000)
+    with caplog.at_level("WARNING"):
+        assert _warn_if_portal_stale(str(tmp_path), index) is True
+    assert "npm run build" in caplog.text
+
+
+def test_portal_not_stale_when_dist_newer_or_absent(tmp_path):
+    from src.interfaces.kobold_engine_adapter import _warn_if_portal_stale
+    index = _portal_tree(tmp_path, src_mtime=1_000, dist_mtime=2_000)
+    assert _warn_if_portal_stale(str(tmp_path), index) is False
+    assert _warn_if_portal_stale(str(tmp_path), str(tmp_path / "missing.html")) is False
