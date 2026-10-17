@@ -5,6 +5,7 @@
 # which covered the retired kobold-native transport.
 
 import json
+import os
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock
 
@@ -320,3 +321,127 @@ async def test_get_local_client_refreshes_on_url_change(monkeypatch):
     assert c3 is not c1
     assert str(c3.base_url).rstrip("/") == "http://127.0.0.1:18080/v1"
     await engine.aclose()
+
+
+# --- DP-438: runtime backend switch -----------------------------------------
+
+from config import global_config  # noqa: E402
+from src.engine.providers import local_backend  # noqa: E402
+
+PRESETS = ('[{"label": "ct101", "url": "http://10.0.0.72:5001", "progress_url": "http://10.0.0.72:5011"},'
+           ' {"label": "dt21", "url": "http://10.0.0.69:5001"}]')
+
+
+@pytest.fixture
+def env_backend(monkeypatch, tmp_path):
+    monkeypatch.setattr(global_config, "LOCAL_BACKEND_FILE", str(tmp_path / "local_backend.json"))
+    monkeypatch.setenv("LOCAL_LLM_URL", "http://env-box:5001/v1")
+    monkeypatch.setenv("KOBOLD_PROGRESS_URL", "http://env-box:5011")
+    monkeypatch.setattr(global_config, "LOCAL_LLM_PRESETS", PRESETS)
+
+
+def test_env_applies_when_nothing_switched(env_backend):
+    backend, source = local_backend.active()
+    assert (backend.url, backend.progress_url, source) == ("http://env-box:5001", "http://env-box:5011", "env")
+
+
+def test_default_source_when_env_unset(monkeypatch):
+    monkeypatch.delenv("LOCAL_LLM_URL", raising=False)
+    monkeypatch.setattr(global_config, "LOCAL_LLM_URL", "http://cfg-box:5001/v1")
+    assert local_backend.active()[0].url == "http://cfg-box:5001"
+    assert local_backend.active()[1] == "default"
+
+
+def test_apply_overrides_env_and_drops_env_sidecar(env_backend):
+    """A typed-in URL has no sidecar: keeping the env one would show the old
+    box's ingest bar under the new box."""
+    local_backend.apply("other-box:9000/v1")
+    backend, source = local_backend.active()
+    assert (backend.url, backend.progress_url, source) == ("http://other-box:9000", None, "temporary")
+    assert local_base_url() == "http://other-box:9000"
+
+
+def test_apply_preset_url_inherits_label_and_sidecar(env_backend):
+    local_backend.apply("http://10.0.0.72:5001/v1")
+    backend, _ = local_backend.active()
+    assert (backend.label, backend.progress_url) == ("ct101", "http://10.0.0.72:5011")
+
+
+@pytest.mark.parametrize("bad", ["", "   ", "http://", "http://box:notaport", "http://bad host:5001"])
+def test_apply_rejects_non_urls(env_backend, bad):
+    with pytest.raises(ValueError):
+        local_backend.apply(bad)
+    assert local_backend.active()[1] == "env"
+
+
+def test_save_persists_and_survives_restart(env_backend):
+    local_backend.apply("http://10.0.0.69:5001")
+    local_backend.save()
+    assert local_backend.active()[1] == "saved"
+    with open(global_config.LOCAL_BACKEND_FILE, encoding="utf-8") as f:
+        assert json.load(f)["url"] == "http://10.0.0.69:5001"
+
+    local_backend._reset_for_tests()  # a restart: module state gone, file stays
+    backend, source = local_backend.active()
+    assert (backend.url, backend.label, source) == ("http://10.0.0.69:5001", "dt21", "saved")
+
+
+def test_temporary_beats_saved(env_backend):
+    local_backend.apply("http://10.0.0.69:5001")
+    local_backend.save()
+    local_backend.apply("http://10.0.0.72:5001")
+    assert local_backend.active()[0].label == "ct101"
+    assert local_backend.active()[1] == "temporary"
+
+
+def test_save_without_temporary_is_noop(env_backend):
+    local_backend.save()
+    assert local_backend.active()[1] == "env"
+    assert not os.path.exists(global_config.LOCAL_BACKEND_FILE)
+
+
+def test_reset_clears_temporary_and_saved(env_backend):
+    local_backend.apply("http://10.0.0.69:5001")
+    local_backend.save()
+    local_backend.apply("http://10.0.0.72:5001")
+    local_backend.reset()
+    assert local_backend.active()[1] == "env"
+    assert not os.path.exists(global_config.LOCAL_BACKEND_FILE)
+
+
+def test_corrupt_saved_file_falls_back_to_env(env_backend):
+    with open(global_config.LOCAL_BACKEND_FILE, "w", encoding="utf-8") as f:
+        f.write("{not json")
+    assert local_backend.active()[1] == "env"
+
+
+@pytest.mark.parametrize("raw", ["", "not json", "{}", '[{"label": "x"}, {"url": "http://ok:1"}]'])
+def test_bad_presets_never_raise(monkeypatch, raw):
+    monkeypatch.setattr(global_config, "LOCAL_LLM_PRESETS", raw)
+    out = local_backend.presets()
+    assert all(p.url for p in out)
+
+
+def test_state_hides_sidecar_urls(env_backend):
+    state = local_backend.state()
+    assert state["source"] == "env" and state["url"] == "http://env-box:5001"
+    assert state["presets"][0] == {"label": "ct101", "url": "http://10.0.0.72:5001"}
+    assert "5011" not in json.dumps(state)
+
+
+@pytest.mark.asyncio
+async def test_switch_retires_old_client_instead_of_closing_it(env_backend):
+    """Closing the old client would kill another turn still streaming
+    through its connection pool."""
+    engine = TextEngine()
+    c1 = await get_local_client(engine)
+    c1.close = AsyncMock()
+    local_backend.apply("http://10.0.0.69:5001")
+    c2 = await get_local_client(engine)
+    assert c2 is not c1 and str(c2.base_url).rstrip("/") == "http://10.0.0.69:5001/v1"
+    c1.close.assert_not_awaited()
+    assert engine.retired_local_clients == [c1]
+
+    await engine.aclose()
+    c1.close.assert_awaited_once()
+    assert engine.retired_local_clients == []

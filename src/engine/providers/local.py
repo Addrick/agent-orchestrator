@@ -20,7 +20,6 @@ What carried over, and how:
 """
 
 import os
-import re
 from contextlib import aclosing
 from typing import TYPE_CHECKING, Any, AsyncGenerator, AsyncIterator, Dict, List, Optional
 
@@ -31,6 +30,7 @@ from openai import AsyncOpenAI
 from config import global_config
 from src.generation_params import CHAT_TEMPLATE_THINKING, GenerationParams
 
+from . import local_backend
 from .base import Provider
 from .openai import build_openai_params, stream_chat_completions
 
@@ -43,31 +43,25 @@ KOBOLD_SAMPLER_EXTRAS = ("rep_pen", "rep_pen_range", "rep_pen_slope", "min_p", "
 
 
 def local_base_url() -> str:
-    """The local model server's base URL, without a trailing ``/v1``."""
-    raw = os.environ.get("LOCAL_LLM_URL", global_config.LOCAL_LLM_URL).strip().rstrip("/")
-    # Clean up duplicate schemes from copy-paste (e.g. http://http://... or https://http://...)
-    m = re.match(r"^(https?://)+", raw)
-    if m:
-        scheme = "https://" if "https://" in m.group(0) else "http://"
-        raw = scheme + raw[m.end():]
-    elif not raw.startswith(("http://", "https://")):
-        raw = f"http://{raw}"
-    raw = raw.rstrip("/")
-    if raw.endswith("/v1"):
-        raw = raw[:-3].rstrip("/")
-    return raw
+    """The local model server's base URL, without a trailing ``/v1``. Follows
+    the portal's runtime switch (DP-438) before ``LOCAL_LLM_URL``."""
+    return local_backend.active()[0].url
 
 
 async def get_local_client(engine: "TextEngine") -> AsyncOpenAI:
     """The (lazily cached) client for the local server. No retries: a retried
     streaming request would start a second generation, and the native
     transport never retried either. The long read timeout is for prefill on
-    a large prompt, which can run minutes before the first token."""
+    a large prompt, which can run minutes before the first token.
+
+    When the URL changes the old client is retired, not closed: another turn
+    may still be streaming through its connection pool, and closing it would
+    kill that generation mid-reply. Retired clients close with the engine."""
     expected_base_url = f"{local_base_url()}/v1"
     if engine.local_client is not None and isinstance(engine.local_client, AsyncOpenAI):
         current_base_url = str(engine.local_client.base_url).rstrip("/")
         if current_base_url != expected_base_url:
-            await engine.local_client.close()
+            engine.retired_local_clients.append(engine.local_client)
             engine.local_client = None
 
     if engine.local_client is None:

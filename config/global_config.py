@@ -412,6 +412,19 @@ LOCAL_LLM_URL = os.environ.get("LOCAL_LLM_URL", "http://10.0.0.70:5001/v1")
 # portal statusline falls back to last-completed counters (DP-311).
 KOBOLD_PROGRESS_URL = os.environ.get("KOBOLD_PROGRESS_URL", "")
 
+# DP-438: quick-pick targets for the portal's local-backend switch. JSON list of
+# {"label", "url", "progress_url"?}; `progress_url` is that box's kcpp-progress
+# sidecar, so the ingest bar follows the swap. Any URL can still be typed in.
+# Parsed (and validated) by src/engine/providers/local_backend.py.
+LOCAL_LLM_PRESETS = os.environ.get("LOCAL_LLM_PRESETS", "") or (
+    '[{"label": "ct101", "url": "http://10.0.0.72:5001", "progress_url": "http://10.0.0.72:5011"},'
+    ' {"label": "dt21", "url": "http://10.0.0.69:5001"},'
+    ' {"label": "omen", "url": "http://10.0.0.67:5099"}]'
+)
+# Where the portal's "Save" persists the chosen local backend (DP-438). Absent =
+# nothing saved; LOCAL_LLM_URL applies.
+LOCAL_BACKEND_FILE = os.environ.get("LOCAL_BACKEND_FILE", str(DATA_DIR / "local_backend.json"))
+
 # =============================================================================
 # --- API Rate Limiting ---
 # =============================================================================

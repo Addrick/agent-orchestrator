@@ -52,6 +52,7 @@ from src.memory.lite_save import (
 )
 from src.origin import Origin
 from src.security.scrubber import get_scrubber
+from src.engine.providers import local_backend
 from src.engine.providers.local import local_base_url
 from src.generation_params import CHAT_TEMPLATE_THINKING
 from src.personas.store import save_personas_to_file
@@ -193,10 +194,11 @@ def _kobold_progress_url() -> str:
 
     Separate from LOCAL_LLM_URL because the sidecar is a different process on a
     different port — and is optional: every deployment has KoboldCPP, only some
-    have the sidecar (see services/kcpp-progress/README.md).
+    have the sidecar (see services/kcpp-progress/README.md). It belongs to the
+    active local backend (DP-438): after a switch to a box without one this is
+    "", so the old box's ingest bar is never shown under the new one.
     """
-    raw = os.environ.get("KOBOLD_PROGRESS_URL", global_config.KOBOLD_PROGRESS_URL) or ""
-    return raw.rstrip("/")
+    return local_backend.active()[0].progress_url or ""
 
 
 def _channel_source(channel: str) -> str:
@@ -684,6 +686,47 @@ class KoboldEngineAdapter:
             return {
                 "voice_web": bool(getattr(global_config, "VOICE_WEB_ENABLED", False)),
             }
+
+        @self.app.get("/api/v1/local_backend")
+        async def get_local_backend() -> Any:
+            """DP-438: which server `model local` talks to, where that choice
+            came from (temporary | saved | env | default), and the presets."""
+            return local_backend.state()
+
+        @self.app.put("/api/v1/local_backend")
+        async def put_local_backend(request: Request) -> Any:
+            """Switch the local backend until restart. Body: {"url": str}.
+            In-flight turns finish on the old server (get_local_client retires
+            rather than closes its client)."""
+            data = await request.json()
+            url = data.get("url") if isinstance(data, dict) else None
+            if not isinstance(url, str) or not url.strip():
+                return JSONResponse(status_code=400, content={"error": "url required"})
+            try:
+                local_backend.apply(url)
+            except ValueError as e:
+                return JSONResponse(status_code=400, content={"error": str(e)})
+            return local_backend.state()
+
+        @self.app.post("/api/v1/local_backend/save")
+        async def save_local_backend() -> Any:
+            """Persist the temporary backend so it survives a restart."""
+            try:
+                local_backend.save()
+            except OSError as e:
+                logger.warning(f"local backend save failed: {e}")
+                return JSONResponse(status_code=500, content={"error": "save failed"})
+            return local_backend.state()
+
+        @self.app.delete("/api/v1/local_backend")
+        async def reset_local_backend() -> Any:
+            """Drop the temporary and saved backend; LOCAL_LLM_URL applies."""
+            try:
+                local_backend.reset()
+            except OSError as e:
+                logger.warning(f"local backend reset failed: {e}")
+                return JSONResponse(status_code=500, content={"error": "reset failed"})
+            return local_backend.state()
 
         @self.app.get("/api/v1/tools/catalog")
         async def get_tools_catalog() -> Any:

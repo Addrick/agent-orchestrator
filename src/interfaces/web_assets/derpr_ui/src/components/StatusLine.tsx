@@ -14,6 +14,7 @@ import {
   clockAt,
 } from '../state/useKoboldPerf'
 import { fmtTok } from '../state/util'
+import { LocalBackendSwitch } from './LocalBackendSwitch'
 
 /** Wall clock that re-renders on an interval, so the busy elapsed timer and the
  *  "N ago" stamp advance between polls. Kept in state rather than read during
@@ -30,7 +31,8 @@ function useNow(active: boolean, ms: number): number {
 }
 
 export function StatusLine() {
-  const { perf, prefill, stale, sampledAt } = useKoboldPerf()
+  const { perf, prefill, stale, sampledAt, refresh } = useKoboldPerf()
+  const backendSwitch = <LocalBackendSwitch onSwitched={refresh} />
   const busy = !!perf && perf.idle === 0
   const tick = useNow(!!perf, busy ? 250 : 5000)
   // Before the first tick lands, anchor on the sample itself so nothing renders
@@ -40,6 +42,7 @@ export function StatusLine() {
   if (!perf) {
     return (
       <div className="statusline" role="status">
+        {backendSwitch}
         <span className="sl-chip sl-muted">
           <span className="dot" /> backend · {stale ? 'unreachable' : 'connecting…'}
         </span>
@@ -75,6 +78,7 @@ export function StatusLine() {
 
   return (
     <div className="statusline" role="status">
+      {backendSwitch}
       <span className={`sl-chip ${busy ? 'sl-busy' : ''} ${stale ? 'sl-stale' : ''}`}>
         <span className="dot" />
         {stale

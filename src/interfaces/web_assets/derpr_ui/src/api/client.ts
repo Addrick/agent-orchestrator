@@ -40,6 +40,7 @@ import type {
   UploadResult,
   KoboldPerf,
   KoboldPrefill,
+  LocalBackendState,
 } from '../types/contracts'
 
 // Same-origin in production (served under /derpr by the adapter); the dev
@@ -575,3 +576,28 @@ export async function getKoboldPrefill(signal?: AbortSignal): Promise<KoboldPref
     d.done()
   }
 }
+
+// DP-438 — the local model server switch. Reads are open; the three writes are
+// control plane (operator token). Not routed through liveOr: a mock "switched"
+// would lie about which box answers.
+export function getLocalBackend(): Promise<LocalBackendState> {
+  return getJSON<LocalBackendState>('/api/v1/local_backend')
+}
+
+async function localBackendWrite(method: string, path: string, body?: unknown): Promise<LocalBackendState> {
+  const r = await fetch(`${BASE}${path}`, {
+    method,
+    headers: withAuth(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  const j = (await r.json().catch(() => ({}))) as LocalBackendState & { error?: string }
+  if (!r.ok || j.error) throw new Error(j.error || `local backend → ${r.status}`)
+  return j
+}
+
+/** Switch until restart (or Save). */
+export const applyLocalBackend = (url: string) => localBackendWrite('PUT', '/api/v1/local_backend', { url })
+/** Persist the temporary choice so it survives a restart. */
+export const saveLocalBackend = () => localBackendWrite('POST', '/api/v1/local_backend/save')
+/** Drop temporary + saved; LOCAL_LLM_URL applies again. */
+export const resetLocalBackend = () => localBackendWrite('DELETE', '/api/v1/local_backend')
