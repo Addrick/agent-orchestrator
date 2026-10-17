@@ -1339,6 +1339,27 @@ def test_format_raw_history_injects_tool_context(chat_system_with_mocks):
     assert formatted[3] == {'role': 'assistant', 'content': 'Here are results'}
 
 
+def test_format_raw_history_never_replays_stored_step_reasoning(chat_system_with_mocks):
+    """DP-437 stores each step's reasoning in tool_context for the portal;
+    a later turn's prompt must not carry it (DP-434)."""
+    system, _, _, _, _ = chat_system_with_mocks
+    tool_ctx = json.dumps([
+        {"role": "assistant", "reasoning_content": "secret plan",
+         "tool_calls": [{"id": "c1", "name": "web_search", "arguments": {}}]},
+        {"role": "tool", "tool_call_id": "c1", "name": "web_search", "content": "ok"},
+    ])
+    raw_history = [
+        {'author_role': 'user', 'author_name': 'Alice', 'content': 'search please'},
+        {'author_role': 'assistant', 'author_name': 'test_persona', 'content': 'Here',
+         'reasoning_content': 'secret plan', 'tool_context': tool_ctx},
+    ]
+
+    formatted = system.request_builder.format_raw_history_for_llm(raw_history, "channel", "test_persona", None)
+
+    assert 'tool_calls' in formatted[1]
+    assert "secret plan" not in json.dumps(formatted)
+
+
 def test_format_raw_history_drops_orphaned_tool_context(chat_system_with_mocks):
     """DP-296: a replayed tool block must never open the wire array.
 

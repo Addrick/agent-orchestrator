@@ -68,6 +68,55 @@ def test_transcript_parses_tool_context_json():
         "arguments": {"q": "x"}, "result": "x", "error": None,
     }]
 
+def _stepwise_row(row_reasoning, *steps):
+    """An assistant row whose tool_context was sealed with per-step reasoning
+    (DP-437): one tool-calling step per entry of `steps`."""
+    msgs = []
+    for i, step in enumerate(steps):
+        msgs.append({"role": "assistant", "reasoning_content": step,
+                     "tool_calls": [{"id": f"c{i}", "name": "t", "arguments": {}}]})
+        msgs.append({"role": "tool", "tool_call_id": f"c{i}", "content": "ok"})
+    return {"author_role": "assistant", "content": "done", "interaction_id": 7,
+            "reasoning_content": row_reasoning, "tool_context": json.dumps(msgs)}
+
+def test_transcript_puts_each_steps_reasoning_before_its_call():
+    """The portal shows the turn in the order the model saw it (DP-437):
+    think, call, think, call, then the thinking after the last result."""
+    row = _stepwise_row("plan a\n\nplan b\n\nwrap up", "plan a", "plan b")
+    chunk = build_transcript([row])["chunks"][0]
+    assert [c["reasoning"] for c in chunk["tool_context"]] == ["plan a", "plan b"]
+    assert chunk["reasoning"] == "wrap up"
+
+def test_transcript_step_without_thinking_keeps_order():
+    row = _stepwise_row("plan b", None, "plan b")
+    chunk = build_transcript([row])["chunks"][0]
+    assert [c["reasoning"] for c in chunk["tool_context"]] == [None, "plan b"]
+    assert chunk["reasoning"] is None
+
+def test_transcript_unsplittable_reasoning_stays_whole_above_the_tools():
+    """A row whose text no longer starts with its steps' text is shown whole,
+    once, rather than duplicated or partly lost."""
+    row = _stepwise_row("edited thinking", "plan a", "plan b")
+    chunk = build_transcript([row])["chunks"][0]
+    assert [c["reasoning"] for c in chunk["tool_context"]] == ["edited thinking", None]
+    assert chunk["reasoning"] is None
+
+def test_transcript_pre_dp437_tool_context_shows_reasoning_above_the_tools():
+    rows = [
+        {"author_role": "assistant", "content": "done", "interaction_id": 5,
+         "reasoning_content": "all of it",
+         "tool_context": json.dumps([
+             {"role": "assistant", "tool_calls": [{"id": "c1", "name": "t"}]},
+             {"role": "tool", "tool_call_id": "c1", "content": "x"},
+             {"role": "assistant", "tool_calls": [{"id": "c2", "name": "t"}]},
+             {"role": "tool", "tool_call_id": "c2", "content": "x"},
+         ])},
+    ]
+    chunk = build_transcript(rows)["chunks"][0]
+    assert chunk["tool_context"][0]["reasoning"] == "all of it"
+    assert "reasoning" not in chunk["tool_context"][1]
+    assert chunk["reasoning"] is None
+
 def test_transcript_skips_non_renderable_rows():
     rows = [
         {"author_role": "system", "content": "boot"},

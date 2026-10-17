@@ -15,7 +15,8 @@ from src.persona import ExecutionMode
 from src.tools.tool_loop import (
     PARK_STATUS_AWAITING, PARK_STATUS_DUPLICATE, ToolLoop, ToolDeferredEvent,
     _ApiPayloadEvent, _LoopFinishedEvent, _ToolContextEvent,
-    render_call_summary_footer, render_max_iteration_text, write_call_identity,
+    render_call_summary_footer, render_max_iteration_text, replayable_tool_context,
+    write_call_identity,
 )
 
 # DP-404: the loop refuses a call whose name was not offered, so these
@@ -1562,7 +1563,8 @@ def test_a_non_approval_deferral_is_summarized_without_asking_for_a_click():
 async def test_reasoning_is_its_own_event_and_stays_within_the_turn():
     """Reasoning is shown live, never mixed into content, and carried on the
     in-turn tool-call step so the next iteration still sees the model's own
-    thinking — but sealed out of tool_context, which replays to later turns."""
+    thinking. tool_context stores it per step for the portal (DP-437), and
+    the replay to later turns drops it."""
     engine = _make_engine([
         [
             {"type": "reasoning_delta", "text": "need the "},
@@ -1600,7 +1602,11 @@ async def test_reasoning_is_its_own_event_and_stays_within_the_turn():
     finished = events[-1]
     assert isinstance(finished, _LoopFinishedEvent)
     assert finished.final_text == "Done."
-    assert "need the" not in (finished.tool_context_json or "")
+    sealed = json.loads(finished.tool_context_json or "[]")
+    assert sealed[0]["reasoning_content"] == "need the ticket"
+    replayed = replayable_tool_context(finished.tool_context_json or "[]")
+    assert "need the" not in json.dumps(replayed)
+    assert [m["role"] for m in replayed] == ["assistant", "tool"]
 
 
 @pytest.mark.asyncio

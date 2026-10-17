@@ -556,9 +556,14 @@ export function usePortalStore() {
         reasoningBufRef.current += delta
         scheduleFlush()
       },
-      onToolStart: (f: ToolStartFrame) =>
+      onToolStart: (f: ToolStartFrame) => {
+        // The thinking streamed since the last call belongs to this one
+        // (DP-437): move it onto the card so it renders above it, and let
+        // `reasoning` collect the next step's.
+        flushTokens()
         setStream((s) => ({
           ...s,
+          reasoning: null,
           tools: [
             ...s.tools,
             {
@@ -568,9 +573,11 @@ export function usePortalStore() {
               arguments: f.arguments,
               result: null,
               error: null,
+              reasoning: s.reasoning,
             },
           ],
-        })),
+        }))
+      },
       onToolResult: (f: ToolResultFrame) =>
         setStream((s) => ({
           ...s,
