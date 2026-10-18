@@ -1,4 +1,4 @@
-import { memo, useState } from 'react'
+import { Fragment, memo, useState } from 'react'
 import type { Chunk, ToolDef } from '../types/contracts'
 import { MessageBody } from './MessageBody'
 import { ReasoningFold } from './ReasoningFold'
@@ -83,11 +83,16 @@ export const MessageRow = memo(function MessageRow({
           )}
         </div>
 
-        {reasoning && <ReasoningFold reasoning={reasoning} />}
-
+        {/* Prompt order (DP-437): each step's thinking above its calls; the
+            chunk's own reasoning is what came after the last tool result. */}
         {(c.tool_context || []).map((tc) => (
-          <ToolCard key={tc.call_id} tc={tc} tools={tools} />
+          <Fragment key={tc.call_id}>
+            {tc.reasoning && <ReasoningFold reasoning={tc.reasoning} />}
+            <ToolCard tc={tc} tools={tools} />
+          </Fragment>
         ))}
+
+        {reasoning && <ReasoningFold reasoning={reasoning} />}
 
         {editing ? (
           <div style={{ marginTop: 10 }}>
