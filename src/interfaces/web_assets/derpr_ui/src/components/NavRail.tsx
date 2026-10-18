@@ -1,7 +1,8 @@
 import type { PortalView } from '../App'
 
-// CHAT + MEMORY are built (MEMORY = DP-292 import panel). The remaining docks
-// stay disabled with a "soon" dot per the spec — DO NOT build them.
+// CHAT + MEMORY + INFRA are built (MEMORY = DP-292 import panel, INFRA = DP-439
+// Proxmox panel). The remaining docks stay disabled with a "soon" dot per the
+// spec — DO NOT build them.
 interface Dock {
   ic: string
   t: string
@@ -13,6 +14,7 @@ interface Dock {
 const DOCKS: Dock[] = [
   { ic: '▤', t: 'CHAT', view: 'chat', tip: 'Chat workspace (Control Room)' },
   { ic: '◈', t: 'MEMORY', view: 'memory', tip: 'Memory import panel' },
+  { ic: '⌬', t: 'INFRA', view: 'infra', tip: 'Proxmox node — guests, models, power' },
   { ic: '⊞', t: 'AGENTS', soon: true, tip: 'Agent monitor — soon' },
   { ic: '▰', t: 'BUDGET', soon: true, tip: 'Budget visualizer — soon' },
   { ic: '◔', t: 'STATS', soon: true, tip: 'Analytics / cost — soon' },

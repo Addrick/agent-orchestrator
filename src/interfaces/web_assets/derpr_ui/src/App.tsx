@@ -8,9 +8,10 @@ import { Conversation } from './components/Conversation'
 import { Inspector } from './components/Inspector'
 import { NewPersonaModal } from './components/NewPersonaModal'
 import { MemoryPanel } from './components/MemoryPanel'
+import { InfraPanel } from './components/InfraPanel'
 import { StatusLine } from './components/StatusLine'
 
-export type PortalView = 'chat' | 'memory'
+export type PortalView = 'chat' | 'memory' | 'infra'
 
 interface Collapsed {
   rail: boolean
@@ -65,8 +66,10 @@ export default function App() {
             <Conversation store={store} />
             <Inspector store={store} />
           </>
-        ) : (
+        ) : view === 'memory' ? (
           <MemoryPanel />
+        ) : (
+          <InfraPanel />
         )}
       </div>
       {newPersonaOpen && (

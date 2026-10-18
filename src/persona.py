@@ -9,7 +9,7 @@ from src.generation_params import GenerationParams
 from src.origin import (
     Origin,
     is_origin_allowed,
-    parse_operator_allowlist_entry,
+    parse_origin_allowlist_entry,
     split_allowlist_entries,
 )
 from src.tool_policy import KNOWN_OVERRIDES, ToolPolicy
@@ -371,10 +371,10 @@ class Persona:
             authored.append(text)
             # One entry at a time, through the single-entry parser: a comma
             # inside `text` is two grants glued together and must not be
-            # honoured. That rule lives in `parse_operator_allowlist_entry`, so
+            # honoured. That rule lives in `parse_origin_allowlist_entry`, so
             # a change to the separator cannot quietly turn a rejection here
             # into a grant.
-            entry_parsed = parse_operator_allowlist_entry(text)
+            entry_parsed = parse_origin_allowlist_entry(text)
             if entry_parsed is not None:
                 parsed.append(entry_parsed)
             else:
@@ -384,7 +384,7 @@ class Persona:
             logger.warning(
                 f"Persona '{persona_name}': dropped malformed origin_allowlist "
                 f"entries {rejected!r} (expected "
-                "'server_id[/channel_id[/author_id]]')."
+                "'server_id[/channel_id[/author_id]]' or 'portal')."
             )
         if (authored or rejected) and not parsed:
             logger.error(
