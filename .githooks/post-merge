@@ -1,0 +1,44 @@
+#!/bin/sh
+# Rebuild the DERPR Portal bundle when a merge brings in web UI changes (DP-436).
+#
+# dist/ is gitignored, so a pull that changes derpr_ui/src/ leaves the served
+# bundle stale until someone runs `npm run build` by hand — DP-434 shipped a new
+# reasoning wire format and the old bundle silently hid every thinking block.
+# post-merge fires on `git pull`, `git merge --ff-only` (incl. the SessionStart
+# autosync) and any IDE that drives the git CLI. post-rewrite forwards rebases
+# here.
+#
+# Fails open: a missing npm or a failed build warns and exits 0 — a pull must
+# never fail because of the front-end. A checkout that has never installed the
+# UI (no node_modules) is left alone.
+
+ui=src/interfaces/web_assets/derpr_ui
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+cd "$root" || exit 0
+
+git rev-parse --verify --quiet ORIG_HEAD >/dev/null || exit 0
+changed=$(git diff --name-only ORIG_HEAD HEAD -- "$ui" 2>/dev/null)
+[ -n "$changed" ] || exit 0
+
+[ -d "$ui/node_modules" ] || exit 0
+if ! command -v npm >/dev/null 2>&1; then
+  echo "[post-merge] web UI changed but npm is not on PATH; run 'npm run build' in $ui"
+  exit 0
+fi
+
+cd "$ui" || exit 0
+if echo "$changed" | grep -q 'package-lock\.json$'; then
+  echo "[post-merge] package-lock.json changed; running npm ci"
+  npm ci --no-audit --no-fund >/dev/null 2>&1 || {
+    echo "[post-merge] npm ci failed; run it by hand in $ui"
+    exit 0
+  }
+fi
+
+echo "[post-merge] web UI changed; rebuilding dist/"
+if npm run build >/dev/null 2>&1; then
+  echo "[post-merge] web UI rebuilt"
+else
+  echo "[post-merge] web UI build FAILED; run 'npm run build' in $ui to see why"
+fi
+exit 0
