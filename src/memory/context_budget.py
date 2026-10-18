@@ -35,25 +35,27 @@ def _message_tokens(msg: Dict[str, Any]) -> int:
     `tool_calls` when present. Role overhead is not modelled — char/4 already
     absorbs the rounding error.
 
-    `tool_calls` has to be counted: a tool-call assistant message carries no
+    `tool_calls` has to be counted: a call-only assistant message carries no
     `content` key at all, so scoring it 0 would let the pruner drop it without
     reducing the running total while its (non-empty) `tool` results survive.
+    `content` is counted beside them: since DP-338 a tool-call message may also
+    carry the prose the model wrote with its batch, which is replayed on every
+    later turn (DP-441).
     """
+    total = 0
     if msg.get("tool_calls"):
-        return estimate_tokens(json.dumps(msg["tool_calls"], default=str))
+        total += estimate_tokens(json.dumps(msg["tool_calls"], default=str))
     content = msg.get("content")
     if isinstance(content, str):
-        return estimate_tokens(content)
-    if isinstance(content, list):
-        total = 0
+        total += estimate_tokens(content)
+    elif isinstance(content, list):
         for part in content:
             if not isinstance(part, dict):
                 continue
             t = part.get("text")
             if isinstance(t, str):
                 total += estimate_tokens(t)
-        return total
-    return 0
+    return total
 
 
 def truncate_messages_to_budget(
