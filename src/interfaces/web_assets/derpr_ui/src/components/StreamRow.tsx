@@ -68,11 +68,12 @@ export function StreamRow({ stream: s, tools, onDismiss, onRegen }: Props) {
           )}
         </div>
 
-        {/* Prompt order (DP-437): each step's thinking, then its calls; the
-            thinking still streaming comes after the last card. */}
+        {/* Prompt order (DP-437): each step's thinking, its prose (DP-440),
+            then its calls; what is still streaming comes after the last card. */}
         {s.tools.map((tc) => (
           <Fragment key={tc.call_id}>
             {tc.reasoning && <ReasoningFold reasoning={tc.reasoning} />}
+            {tc.prose && <div className="text">{tc.prose}</div>}
             <ToolCard tc={tc} tools={tools} />
           </Fragment>
         ))}

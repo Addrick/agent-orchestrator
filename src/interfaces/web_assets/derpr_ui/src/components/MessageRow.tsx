@@ -83,11 +83,17 @@ export const MessageRow = memo(function MessageRow({
           )}
         </div>
 
-        {/* Prompt order (DP-437): each step's thinking above its calls; the
+        {/* Prompt order (DP-437): each step's thinking, then its prose
+            (DP-440), above its calls; the
             chunk's own reasoning is what came after the last tool result. */}
         {(c.tool_context || []).map((tc) => (
           <Fragment key={tc.call_id}>
             {tc.reasoning && <ReasoningFold reasoning={tc.reasoning} />}
+            {tc.prose && (
+              <div className="text">
+                <MessageBody content={tc.prose} />
+              </div>
+            )}
             <ToolCard tc={tc} tools={tools} />
           </Fragment>
         ))}
