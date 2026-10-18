@@ -35,7 +35,11 @@ def _parse_tool_context(raw: Any) -> Optional[Any]:
     A blob sealed with per-step reasoning (DP-437) gives every card a
     `reasoning` key: that step's thinking on its first card, None on the
     rest. Older blobs had it stripped, so their cards get no key, because a
-    missing value there means "unknown", not "did not think"."""
+    missing value there means "unknown", not "did not think".
+
+    The prose a model wrote beside a step's calls (DP-338) is that step's
+    assistant `content`. It goes on the step's first card as `prose` (DP-440),
+    only when there is some: the model reads it back on every later turn."""
     if not raw:
         return None
     try:
@@ -54,6 +58,8 @@ def _parse_tool_context(raw: Any) -> Optional[Any]:
             if msg.get("role") == "assistant" and "tool_calls" in msg:
                 stepwise = "reasoning_content" in msg
                 step_reasoning = (msg.get("reasoning_content") or "").strip() or None
+                step_prose = msg.get("content")
+                step_prose = step_prose.strip() if isinstance(step_prose, str) else ""
                 for call in msg.get("tool_calls", []):
                     if not isinstance(call, dict):
                         continue
@@ -81,6 +87,9 @@ def _parse_tool_context(raw: Any) -> Optional[Any]:
                         if stepwise:
                             contexts[call_id]["reasoning"] = step_reasoning
                             step_reasoning = None
+                        if step_prose:
+                            contexts[call_id]["prose"] = step_prose
+                            step_prose = ""
             elif msg.get("role") == "tool":
                 call_id = msg.get("tool_call_id")
                 if call_id and call_id in contexts:
@@ -157,7 +166,8 @@ def build_transcript(
           "content": "...",               # the reply alone; reasoning is separate
           "ephemeral": <bool>,            # true => not yet persisted
           "reasoning": "<str|null>",     # after the tools, when there are any
-          "tool_context": [...]|null,    # each card: its step's `reasoning`
+          "tool_context": [...]|null,    # each card: its step's `reasoning`,
+                                         # and `prose` on a step's first card
           "has_versions": <bool>,         # regen/edit archives exist
         }
 

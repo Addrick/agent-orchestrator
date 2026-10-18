@@ -559,11 +559,13 @@ export function usePortalStore() {
       onToolStart: (f: ToolStartFrame) => {
         // The thinking streamed since the last call belongs to this one
         // (DP-437): move it onto the card so it renders above it, and let
-        // `reasoning` collect the next step's.
+        // `reasoning` collect the next step's. The text streamed beside the
+        // call is that step's prose (DP-440), not the start of the reply.
         flushTokens()
         setStream((s) => ({
           ...s,
           reasoning: null,
+          text: '',
           tools: [
             ...s.tools,
             {
@@ -574,6 +576,7 @@ export function usePortalStore() {
               result: null,
               error: null,
               reasoning: s.reasoning,
+              prose: s.text.trim() || null,
             },
           ],
         }))

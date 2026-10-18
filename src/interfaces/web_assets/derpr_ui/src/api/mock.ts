@@ -183,6 +183,7 @@ export const MOCK_TRANSCRIPT: Chunk[] = [
       {
         call_id: 'c_91a2',
         group_id: 'g_1',
+        prose: "Reissuing jdoe's cert first, then I'll note it on the ticket.",
         tool_name: 'reset_vpn_cert',
         arguments: { user: 'jdoe', reason: 'ticket #8821' },
         result: 'cert reissued · serial 0x4F…A1 · expires 2027-06-03',

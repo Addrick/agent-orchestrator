@@ -117,6 +117,36 @@ def test_transcript_pre_dp437_tool_context_shows_reasoning_above_the_tools():
     assert "reasoning" not in chunk["tool_context"][1]
     assert chunk["reasoning"] is None
 
+def test_transcript_puts_each_steps_prose_on_its_first_card():
+    """The text a model writes beside its calls (DP-338) is replayed to it on
+    later turns, so the portal shows it too, per step (DP-440)."""
+    rows = [
+        {"author_role": "assistant", "content": "done", "interaction_id": 5,
+         "tool_context": json.dumps([
+             {"role": "assistant", "content": "  checking both  ", "tool_calls": [
+                 {"id": "c1", "name": "t"}, {"id": "c2", "name": "t"}]},
+             {"role": "tool", "tool_call_id": "c1", "content": "x"},
+             {"role": "tool", "tool_call_id": "c2", "content": "x"},
+             {"role": "assistant", "tool_calls": [{"id": "c3", "name": "t"}]},
+             {"role": "tool", "tool_call_id": "c3", "content": "x"},
+         ])},
+    ]
+    cards = build_transcript(rows)["chunks"][0]["tool_context"]
+    assert cards[0]["prose"] == "checking both"
+    assert "prose" not in cards[1]
+    assert "prose" not in cards[2]
+
+def test_transcript_blank_step_prose_adds_no_key():
+    rows = [
+        {"author_role": "assistant", "content": "done", "interaction_id": 5,
+         "tool_context": json.dumps([
+             {"role": "assistant", "content": "  ", "tool_calls": [
+                 {"id": "c1", "name": "t"}]},
+             {"role": "tool", "tool_call_id": "c1", "content": "x"},
+         ])},
+    ]
+    assert "prose" not in build_transcript(rows)["chunks"][0]["tool_context"][0]
+
 def test_transcript_skips_non_renderable_rows():
     rows = [
         {"author_role": "system", "content": "boot"},
