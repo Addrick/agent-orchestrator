@@ -9,45 +9,55 @@ the accept as delivery. This pass finds those operations and re-runs them with
 Hindsight's own `/retry`, which replays the stored payload.
 
 Blind retry is unsafe. A `replace` rewrites its document whole (a session's
-first turn, or a DP-409 retry rebuild), so re-running an old failed replace
-after newer operations on the same document landed would erase them. Hindsight
-claims one retain per document, oldest first, so the plan works per document
-on the operations in submission order:
+first turn, a DP-409 retry rebuild, an experience or upload re-ingest), so an
+old failed replace re-run after newer operations on the same document landed
+would erase them. Hindsight claims one retain per document, oldest first, so
+the plan works per document on the operations in submission order:
 
 - a failed operation older than a later *completed* replace is moot: that
-  replace already holds everything it carried (`superseded`);
-- a failed replace with a later completed operation is replayed as ONE new
-  replace of its content plus everything after it, in order, so a partial
-  replay can never leave the document worse than it was (`replayed`);
-- anything else is retried in place, with backoff, and given up after
-  RETAIN_RECONCILE_MAX_ATTEMPTS (`given_up`);
-- a document with an operation still pending or processing is left alone.
+  replace holds everything it carried (`superseded`);
+- a failed append is always retried: appending can only add;
+- a failed replace is retried only when nothing completed on its document
+  after it; otherwise it is `blocked` and reported — re-running it would
+  erase that later content, and rebuilding the document is a human call;
+- a document with an operation still pending or processing waits.
+
+Which documents an operation touched comes from its stored payload, never
+from the list's `document_id`: Hindsight leaves that null on most operations,
+multi-document batches included. An operation is retried only if every
+document it touches allows it. Retries back off to once a day and are never
+given up (Adam, 2026-10-18).
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
-import sqlite3
-import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Protocol, Set, Tuple
 
-from .base import (
-    RETAIN_RECONCILE_BACKOFF_CAP_SECONDS,
-    RETAIN_RECONCILE_INTERVAL_SECONDS,
-    RETAIN_RECONCILE_MAX_ATTEMPTS,
-)
+from src.utils.timeutil import to_utc
+
+from .base import RETAIN_RECONCILE_BACKOFF_CAP_SECONDS, RETAIN_RECONCILE_INTERVAL_SECONDS
+from .sqlite_store import LazySqliteStore
 
 logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 100  # Hindsight rejects a larger `limit`
 IN_FLIGHT = ("pending", "processing")
-TERMINAL_STATES = ("superseded", "replayed", "given_up")
+TERMINAL_STATES = ("superseded",)
+PAYLOAD_FETCH_CONCURRENCY = 8
+# Past this many retries an op is reported on every retry, so a deterministic
+# failure is visible by name rather than only as a daily count.
+LONG_FAILING_ATTEMPTS = 8
+STUCK_IN_FLIGHT_SECONDS = 3600
+
+# {document_id: 'replace' | 'append'}; None when the payload is gone.
+DocModes = Optional[Dict[str, str]]
 
 
 class _OpsClient(Protocol):
-    async def alist_banks(self) -> Dict[str, Any]: ...
     async def alist_operations(
         self, bank_id: str, *, status: Optional[str] = None,
         op_type: Optional[str] = None, limit: Optional[int] = None,
@@ -57,83 +67,90 @@ class _OpsClient(Protocol):
         self, bank_id: str, operation_id: str, *, include_payload: bool = False,
     ) -> Dict[str, Any]: ...
     async def aretry_operation(self, bank_id: str, operation_id: str) -> Dict[str, Any]: ...
-    async def aretain(
-        self, bank_id: str, items: List[Dict[str, Any]], *, async_: bool = True,
-    ) -> Dict[str, Any]: ...
 
 
 @dataclass
 class Op:
-    """One retain operation on a document, as the planner sees it."""
+    """One retain operation, as the planner sees it."""
     id: str
     status: str
     created_at: datetime
-    mode: Optional[str] = None  # 'replace' / 'append'; None until fetched
+    docs: DocModes = None
 
 
 @dataclass
-class DocPlan:
+class Plan:
     superseded: List[str] = field(default_factory=list)
     retry: List[str] = field(default_factory=list)
-    # Ops whose payloads are merged into one replace, oldest first; the failed
-    # ones among them are what the replay resolves.
-    replay: List[str] = field(default_factory=list)
-    replay_failed: List[str] = field(default_factory=list)
+    blocked: List[str] = field(default_factory=list)
 
 
-def plan_document(ops: List[Op]) -> DocPlan:
-    """Decide what to do with one document's failed operations.
-
-    `ops` are that document's operations from its oldest unresolved failure
-    on, in submission order. A completed op needs `mode`; so does a failed
-    one, unless it is older than a completed replace.
-    """
-    plan = DocPlan()
-    if any(o.status in IN_FLIGHT for o in ops):
-        return plan
-    last_full = max(
-        (i for i, o in enumerate(ops) if o.status == "completed" and o.mode == "replace"),
-        default=-1,
-    )
-    plan.superseded = [o.id for o in ops[:last_full + 1] if o.status == "failed"]
-    tail = [o for o in ops[last_full + 1:] if o.status in ("failed", "completed")]
-    for j, o in enumerate(tail):
-        if (o.status == "failed" and o.mode == "replace"
-                and any(p.status == "completed" for p in tail[j + 1:])):
-            # A replace holds the whole document up to itself, so failed
-            # appends before it are covered by replaying it too.
-            plan.replay = [p.id for p in tail[j:]]
-            plan.replay_failed = [p.id for p in tail if p.status == "failed"]
-            return plan
-    plan.retry = [o.id for o in tail if o.status == "failed"]
-    return plan
-
-
-def merge_replay(payloads: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
-    """One replace item carrying the replayed ops' content, in order.
-
-    Tags mirror DP-409's `replace_session`: the document's scope and persona
-    tags, no per-turn role tag, and untrusted if any part was.
-    """
-    items = [it for p in payloads for it in p]
-    tags: List[str] = []
+def doc_modes(op_id: str, items: List[Dict[str, Any]]) -> Dict[str, str]:
+    """Documents a payload touches, and whether it replaces each one. An item
+    with no document_id is a document of its own."""
+    modes: Dict[str, str] = {}
     for it in items:
-        for t in it.get("tags") or []:
-            if not t.startswith("role:") and t not in tags:
-                tags.append(t)
-    if "untrusted:true" in tags and "untrusted:false" in tags:
-        tags.remove("untrusted:false")
-    last = items[-1]
-    merged: Dict[str, Any] = {
-        "content": "\n\n".join(str(it.get("content") or "") for it in items),
-        "document_id": last.get("document_id"),
-        "update_mode": "replace",
-        "tags": tags,
-    }
-    for key in ("event_date", "timestamp", "mentioned_at", "metadata"):
-        if last.get(key) is not None:
-            merged[key] = last[key]
-    return merged
+        doc = str(it.get("document_id") or f"op:{op_id}")
+        if it.get("update_mode") == "replace" or modes.get(doc) == "replace":
+            modes[doc] = "replace"
+        else:
+            modes[doc] = "append"
+    return modes
+
+
+def plan_bank(ops: List[Op], unresolved: Set[str]) -> Plan:
+    """Decide what to do with a bank's unresolved failed operations.
+
+    `ops` are every retain op of the bank from its oldest unresolved failure
+    on, in submission order; `unresolved` are the failed ones still to settle.
+    An op whose payload is gone (`docs` None) cannot be placed on a document:
+    completed, it may follow any failed replace; failed, it cannot be retried.
+    """
+    by_doc: Dict[str, List[Tuple[int, Op, str]]] = {}
+    unknown_completed = [i for i, o in enumerate(ops) if o.status == "completed" and o.docs is None]
+    for i, o in enumerate(ops):
+        for doc, mode in (o.docs or {}).items():
+            by_doc.setdefault(doc, []).append((i, o, mode))
+
+    verdicts: Dict[str, Set[str]] = {}
+    for entries in by_doc.values():
+        waiting = any(o.status in IN_FLIGHT for _, o, _ in entries)
+        last_full = max((i for i, o, m in entries if o.status == "completed" and m == "replace"),
+                        default=-1)
+        for i, o, mode in entries:
+            if o.status != "failed" or o.id not in unresolved:
+                continue
+            if waiting:
+                verdict = "wait"
+            elif i < last_full:
+                verdict = "superseded"
+            elif mode == "append":
+                verdict = "retry"
+            elif (any(j > i and p.status == "completed" for j, p, _ in entries)
+                  or any(j > i for j in unknown_completed)):
+                verdict = "blocked"
+            else:
+                verdict = "retry"
+            verdicts.setdefault(o.id, set()).add(verdict)
+
+    plan = Plan()
+    for o in ops:
+        if o.status != "failed" or o.id not in unresolved:
+            continue
+        v = verdicts.get(o.id)
+        if not v:  # payload gone: nothing to retry it with
+            plan.blocked.append(o.id)
+        elif "wait" in v:
+            continue
+        elif v == {"superseded"}:
+            plan.superseded.append(o.id)
+        elif v == {"retry"}:
+            plan.retry.append(o.id)
+        else:
+            # A batch is re-run whole: one document's veto, or one it
+            # would replay behind a newer replace, stops all of it.
+            plan.blocked.append(o.id)
+    return plan
 
 
 def backoff_seconds(attempts: int) -> float:
@@ -143,11 +160,17 @@ def backoff_seconds(attempts: int) -> float:
                      RETAIN_RECONCILE_BACKOFF_CAP_SECONDS))
 
 
-class ReconcileStore:
-    """Per-operation reconcile state, kept beside the doc-scope store.
+def _ts(value: Any) -> datetime:
+    return to_utc(datetime.fromisoformat(str(value)))
+
+
+class ReconcileStore(LazySqliteStore):
+    """Per-operation reconcile state, in the doc-scope DB file.
 
     Hindsight resets an operation's own retry_count on every `/retry`, so the
-    attempt count and the terminal verdicts have to live here.
+    attempt count and verdicts live here. `Retain_Op_Docs` caches what a
+    completed operation touched, which never changes, so a long window is
+    not re-fetched payload by payload on every pass.
     """
 
     SCHEMA = """
@@ -158,22 +181,11 @@ class ReconcileStore:
         attempts     INTEGER NOT NULL DEFAULT 0,
         last_at      TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS Retain_Op_Docs (
+        operation_id TEXT PRIMARY KEY,
+        docs         TEXT NOT NULL
+    );
     """
-
-    def __init__(self, db_path: str):
-        self.db_path = db_path
-        self._lock = threading.RLock()
-        self._conn: Optional[sqlite3.Connection] = None
-
-    def _get(self) -> sqlite3.Connection:
-        if self._conn is None:
-            if self.db_path != ":memory:":
-                Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-            self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
-            self._conn.row_factory = sqlite3.Row
-            self._conn.executescript(self.SCHEMA)
-            self._conn.commit()
-        return self._conn
 
     def get(self, operation_id: str) -> Optional[Tuple[str, int, datetime]]:
         with self._lock:
@@ -183,7 +195,7 @@ class ReconcileStore:
             ).fetchone()
         if row is None:
             return None
-        return str(row["state"]), int(row["attempts"]), _parse_ts(row["last_at"])
+        return str(row["state"]), int(row["attempts"]), _ts(row["last_at"])
 
     def record(self, operation_id: str, bank_id: str, state: str,
                attempts: int, now: datetime) -> None:
@@ -197,50 +209,42 @@ class ReconcileStore:
             )
             conn.commit()
 
-    def close(self) -> None:
+    def cached_docs(self, operation_id: str) -> Optional[Dict[str, str]]:
         with self._lock:
-            if self._conn is not None:
-                self._conn.close()
-                self._conn = None
+            row = self._get().execute(
+                "SELECT docs FROM Retain_Op_Docs WHERE operation_id=?", (operation_id,),
+            ).fetchone()
+        return None if row is None else dict(json.loads(row["docs"]))
 
-
-def _parse_ts(value: Any) -> datetime:
-    ts = datetime.fromisoformat(str(value))
-    return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
-
-
-def _mode(payload_items: List[Dict[str, Any]]) -> str:
-    return "replace" if any(it.get("update_mode") == "replace" for it in payload_items) else "append"
+    def cache_docs(self, operation_id: str, docs: Dict[str, str]) -> None:
+        with self._lock:
+            conn = self._get()
+            conn.execute(
+                "INSERT OR REPLACE INTO Retain_Op_Docs (operation_id, docs) VALUES (?, ?)",
+                (operation_id, json.dumps(docs)),
+            )
+            conn.commit()
 
 
 class Reconciler:
-    """Drives one pass over every bank; see the module docstring."""
+    """Drives one pass over the given banks; see the module docstring."""
 
     def __init__(self, store: ReconcileStore):
         self.store = store
-        self._payloads: Dict[str, List[Dict[str, Any]]] = {}
 
     def _due(self, op_id: str, now: datetime) -> bool:
         rec = self.store.get(op_id)
         if rec is None:
             return True
-        state, attempts, last_at = rec
-        if state in TERMINAL_STATES:
-            return False
+        _state, attempts, last_at = rec
         return now >= last_at + timedelta(seconds=backoff_seconds(attempts))
-
-    async def _items(self, client: _OpsClient, bank_id: str, op_id: str) -> List[Dict[str, Any]]:
-        if op_id not in self._payloads:
-            op = await client.aget_operation(bank_id, op_id, include_payload=True)
-            payload = op.get("task_payload") or {}
-            self._payloads[op_id] = list(payload.get("contents") or [])
-        return self._payloads[op_id]
 
     async def _list(self, client: _OpsClient, bank_id: str, *, status: Optional[str],
                     stop_before: Optional[datetime] = None) -> List[Dict[str, Any]]:
-        """Retain ops newest first; with `stop_before`, stop paging once
-        a page reaches back past it."""
-        out: List[Dict[str, Any]] = []
+        """Retain ops newest first, without duplicates (offset paging over a
+        list that grows at its head repeats rows); with `stop_before`, stop
+        once a page reaches back past it."""
+        out: Dict[str, Dict[str, Any]] = {}
         offset = 0
         while True:
             page = await client.alist_operations(
@@ -248,101 +252,115 @@ class Reconciler:
                 offset=offset, exclude_parents=True,
             )
             ops = page.get("operations") or []
-            out.extend(ops)
+            for o in ops:
+                out.setdefault(str(o["id"]), o)
             offset += len(ops)
             if not ops or offset >= int(page.get("total") or 0):
-                return out
-            if stop_before is not None and _parse_ts(ops[-1]["created_at"]) < stop_before:
-                return out
+                return list(out.values())
+            if stop_before is not None and _ts(ops[-1]["created_at"]) < stop_before:
+                return list(out.values())
 
-    async def run(self, client: _OpsClient, now: Optional[datetime] = None) -> int:
-        """Reconcile every bank; returns how many operations were acted on."""
-        now = now or datetime.now(timezone.utc)
-        self._payloads = {}
-        banks = (await client.alist_banks()).get("banks") or []
+    async def _docs(self, client: _OpsClient, bank_id: str, raw: Dict[str, Any],
+                    sem: asyncio.Semaphore) -> DocModes:
+        op_id = str(raw["id"])
+        if raw["status"] == "completed":
+            cached = self.store.cached_docs(op_id)
+            if cached is not None:
+                return cached
+        try:
+            async with sem:
+                op = await client.aget_operation(bank_id, op_id, include_payload=True)
+        except Exception as e:  # noqa: BLE001 — an unreadable op is planned as unknown
+            logger.info("Retain reconcile: no payload for %s/%s: %s", bank_id, op_id, e)
+            return None
+        items = list((op.get("task_payload") or {}).get("contents") or [])
+        if not items:
+            return None
+        docs = doc_modes(op_id, items)
+        if raw["status"] == "completed":
+            self.store.cache_docs(op_id, docs)
+        return docs
+
+    async def run(self, client: _OpsClient, banks: List[str], now: datetime) -> int:
+        """Reconcile `banks`; returns how many operations were acted on."""
         acted = 0
-        for bank in banks:
-            bank_id = bank.get("bank_id")
-            if not bank_id:
-                continue
+        for bank_id in banks:
             try:
-                acted += await self._bank(client, str(bank_id), now)
+                acted += await self._bank(client, bank_id, now)
             except Exception as e:  # noqa: BLE001 — one bank must not stop the rest
                 logger.warning("Retain reconcile failed for bank %s: %s", bank_id, e)
         return acted
 
     async def _bank(self, client: _OpsClient, bank_id: str, now: datetime) -> int:
-        failed = [o for o in await self._list(client, bank_id, status="failed")
-                  if self._due(str(o["id"]), now)]
-        if not failed:
+        failed = await self._list(client, bank_id, status="failed")
+        unresolved = {str(o["id"]) for o in failed
+                      if (self.store.get(str(o["id"])) or ("",))[0] not in TERMINAL_STATES}
+        due = {op_id for op_id in unresolved if self._due(op_id, now)}
+        if not due:
             return 0
-        oldest = min(_parse_ts(o["created_at"]) for o in failed)
-        peers = await self._list(client, bank_id, status=None, stop_before=oldest)
-        by_doc: Dict[str, List[Dict[str, Any]]] = {}
-        loose: List[Dict[str, Any]] = []
-        for o in peers:
-            if _parse_ts(o["created_at"]) < oldest:
-                continue
-            doc = o.get("document_id")
-            if doc is None:
-                loose.append(o)  # multi-document batch: no peers to order against
-            else:
-                by_doc.setdefault(str(doc), []).append(o)
-        due_ids = {str(o["id"]) for o in failed}
-        acted = 0
-        for raw in loose:
-            if str(raw["id"]) in due_ids and raw["status"] == "failed":
-                acted += await self._retry(client, bank_id, [str(raw["id"])], now)
-        for raw_ops in by_doc.values():
-            if not any(str(o["id"]) in due_ids for o in raw_ops):
-                continue
-            acted += await self._document(client, bank_id, raw_ops, due_ids, now)
-        return acted
+        oldest = min(_ts(o["created_at"]) for o in failed if str(o["id"]) in unresolved)
+        window = [o for o in await self._list(client, bank_id, status=None, stop_before=oldest)
+                  if _ts(o["created_at"]) >= oldest]
+        window.sort(key=lambda o: (_ts(o["created_at"]), str(o["id"])))
+        sem = asyncio.Semaphore(PAYLOAD_FETCH_CONCURRENCY)
+        docs = await asyncio.gather(*(self._docs(client, bank_id, o, sem) for o in window))
+        ops = [Op(str(o["id"]), str(o["status"]), _ts(o["created_at"]), d)
+               for o, d in zip(window, docs)]
+        self._report_stuck(bank_id, window, now)
 
-    async def _document(self, client: _OpsClient, bank_id: str,
-                        raw_ops: List[Dict[str, Any]], due_ids: Set[str], now: datetime) -> int:
-        raw_ops = sorted(raw_ops, key=lambda o: (_parse_ts(o["created_at"]), str(o["id"])))
-        # Start at this document's oldest failure that is still unresolved.
-        start = next(i for i, o in enumerate(raw_ops) if str(o["id"]) in due_ids)
-        ops = [Op(str(o["id"]), str(o["status"]), _parse_ts(o["created_at"]))
-               for o in raw_ops[start:]
-               if o["status"] != "failed" or str(o["id"]) in due_ids]
-        if any(o.status in IN_FLIGHT for o in ops):
-            return 0
-        for o in ops:
-            if o.status in ("failed", "completed"):
-                o.mode = _mode(await self._items(client, bank_id, o.id))
-        plan = plan_document(ops)
+        plan = plan_bank(ops, unresolved)
         for op_id in plan.superseded:
             self.store.record(op_id, bank_id, "superseded", 0, now)
         acted = len(plan.superseded)
-        if plan.replay:
-            payloads = [await self._items(client, bank_id, op_id) for op_id in plan.replay]
-            await client.aretain(bank_id, [merge_replay(payloads)], async_=True)
-            for op_id in plan.replay_failed:
-                self.store.record(op_id, bank_id, "replayed", 0, now)
-            logger.info("Retain reconcile: replayed %d op(s) on %s/%s as one replace",
-                        len(plan.replay), bank_id, raw_ops[start].get("document_id"))
-            acted += len(plan.replay_failed)
-        acted += await self._retry(client, bank_id, plan.retry, now)
+        created = {o.id: o.created_at for o in ops}
+        for op_id in plan.blocked:
+            if op_id not in due:
+                continue
+            attempts = self._attempts(op_id) + 1
+            self.store.record(op_id, bank_id, "blocked", attempts, now)
+            logger.warning(
+                "Retain reconcile: %s/%s (failed %s) is not retried — it would rewrite its "
+                "document over content that landed after it, or its payload is gone. "
+                "Rebuild that document by hand if it matters.",
+                bank_id, op_id, created[op_id].date(),
+            )
+        acted += await self._retry(client, bank_id, [i for i in plan.retry if i in due],
+                                   created, now)
         return acted
 
-    async def _retry(self, client: _OpsClient, bank_id: str,
-                     op_ids: List[str], now: datetime) -> int:
+    def _attempts(self, op_id: str) -> int:
+        rec = self.store.get(op_id)
+        return rec[1] if rec else 0
+
+    def _report_stuck(self, bank_id: str, window: List[Dict[str, Any]], now: datetime) -> None:
+        for o in window:
+            if o["status"] not in IN_FLIGHT:
+                continue
+            seen = _ts(o.get("updated_at") or o["created_at"])
+            if (now - seen).total_seconds() > STUCK_IN_FLIGHT_SECONDS:
+                logger.warning(
+                    "Retain reconcile: %s/%s has been %s since %s; failures on its "
+                    "document wait until it settles", bank_id, o["id"], o["status"], seen,
+                )
+
+    async def _retry(self, client: _OpsClient, bank_id: str, op_ids: List[str],
+                     created: Dict[str, datetime], now: datetime) -> int:
         acted = 0
         for op_id in op_ids:
-            rec = self.store.get(op_id)
-            attempts = rec[1] if rec else 0
-            if attempts >= RETAIN_RECONCILE_MAX_ATTEMPTS:
-                self.store.record(op_id, bank_id, "given_up", attempts, now)
-                logger.warning(
-                    "Retain reconcile: giving up on %s/%s after %d retries; it stays "
-                    "failed in Hindsight's operations list", bank_id, op_id, attempts,
-                )
+            attempts = self._attempts(op_id) + 1
+            try:
+                await client.aretry_operation(bank_id, op_id)
+            except Exception as e:  # noqa: BLE001 — one op must not stop the rest
+                logger.warning("Retain reconcile: retry of %s/%s refused: %s", bank_id, op_id, e)
+                self.store.record(op_id, bank_id, "retrying", attempts, now)
                 continue
-            await client.aretry_operation(bank_id, op_id)
-            self.store.record(op_id, bank_id, "retrying", attempts + 1, now)
+            self.store.record(op_id, bank_id, "retrying", attempts, now)
             acted += 1
+            if attempts >= LONG_FAILING_ATTEMPTS:
+                logger.warning(
+                    "Retain reconcile: %s/%s still failing after %d retries (since %s)",
+                    bank_id, op_id, attempts - 1, created[op_id].date(),
+                )
         if acted:
             logger.info("Retain reconcile: retried %d failed op(s) in bank %s", acted, bank_id)
         return acted

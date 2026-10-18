@@ -430,8 +430,12 @@ class TurnPersistence:
                     server_id=server_id, oldest_window_id=oldest_window_id,
                     current_id=current_id,
                 )
+            # Under the flush lock: no flush of ours can land an append on a
+            # document between the pass listing its operations and retrying
+            # an older replace on it.
             try:
-                await self.memory_backend.reconcile_failed_retains()
+                async with self._flush_lock:
+                    await self.memory_backend.reconcile_failed_retains()
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"Retain reconcile failed: {e}")
 

@@ -2,115 +2,157 @@
 #
 # DP-443: re-running retains Hindsight accepted and then failed to extract.
 # The planner is pure; the Reconciler runs against an in-memory fake of the
-# operations API that keeps Hindsight's semantics: newest-first listing,
-# `limit` <= 100, `/retry` flips failed -> pending, payloads stored forever.
+# operations API that keeps Hindsight's semantics as measured on prod
+# 2026-10-18: newest-first listing, `limit` <= 100, list rows whose
+# `document_id` is null even for one-document ops (only the payload says which
+# documents an op touched), `/retry` flips failed -> pending.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
 
-from src.memory.backend.base import (
-    RETAIN_RECONCILE_INTERVAL_SECONDS,
-    RETAIN_RECONCILE_MAX_ATTEMPTS,
-)
+from src.memory.backend.base import RETAIN_RECONCILE_INTERVAL_SECONDS
 from src.memory.backend.hindsight import HindsightBackend, _DocScopeStore
 from src.memory.backend.hindsight_reconcile import (
+    LONG_FAILING_ATTEMPTS,
     Op,
     Reconciler,
     ReconcileStore,
     backoff_seconds,
-    merge_replay,
-    plan_document,
+    doc_modes,
+    plan_bank,
 )
 
 T0 = datetime(2026, 10, 15, 5, 0, tzinfo=timezone.utc)
 DOC = "explr:web_ui:2026-10-09T20:51:00+00:00"
+OTHER = "explr:web_ui:2026-10-01T00:00:00+00:00"
 
 
-def _op(i: int, status: str, mode: Optional[str] = None) -> Op:
-    return Op(f"op{i}", status, T0 + timedelta(minutes=i), mode)
+def _op(i: int, status: str, docs: Optional[Dict[str, str]] = None) -> Op:
+    return Op(f"op{i}", status, T0 + timedelta(minutes=i), docs)
 
 
-# ---------- plan_document ----------
+def R(doc: str = DOC) -> Dict[str, str]:
+    return {doc: "replace"}
+
+
+def A(doc: str = DOC) -> Dict[str, str]:
+    return {doc: "append"}
+
+
+def _unresolved(ops: List[Op]) -> set:
+    return {o.id for o in ops if o.status == "failed"}
+
+
+# ---------- plan_bank ----------
 
 
 def test_failures_older_than_a_completed_replace_are_superseded() -> None:
     """The live explr case: 17 failures, then DP-409 rebuilds that completed.
     Retrying the oldest (a short replace) would wipe the rebuilt document."""
-    ops = [_op(0, "failed", "replace"), _op(1, "failed", "append"),
-           _op(2, "failed", "replace"), _op(3, "completed", "replace"),
-           _op(4, "completed", "replace")]
-    plan = plan_document(ops)
+    ops = [_op(0, "failed", R()), _op(1, "failed", A()), _op(2, "failed", R()),
+           _op(3, "completed", R()), _op(4, "completed", R())]
+    plan = plan_bank(ops, _unresolved(ops))
     assert plan.superseded == ["op0", "op1", "op2"]
-    assert plan.retry == [] and plan.replay == []
+    assert plan.retry == [] and plan.blocked == []
 
 
 def test_failed_tail_is_retried_in_place_in_order() -> None:
-    ops = [_op(0, "failed", "replace"), _op(1, "failed", "append"), _op(2, "failed", "append")]
-    plan = plan_document(ops)
+    ops = [_op(0, "failed", R()), _op(1, "failed", A()), _op(2, "failed", A())]
+    plan = plan_bank(ops, _unresolved(ops))
     assert plan.retry == ["op0", "op1", "op2"]
-    assert plan.superseded == [] and plan.replay == []
 
 
 def test_failed_append_before_a_completed_append_is_retried() -> None:
-    plan = plan_document([_op(0, "failed", "append"), _op(1, "completed", "append")])
-    assert plan.retry == ["op0"] and plan.replay == []
+    ops = [_op(0, "failed", A()), _op(1, "completed", A())]
+    assert plan_bank(ops, _unresolved(ops)).retry == ["op0"]
 
 
-def test_failed_replace_with_a_later_completed_op_is_replayed() -> None:
-    """Retrying the replace in place would erase the append that landed after it."""
-    ops = [_op(0, "failed", "append"), _op(1, "failed", "replace"),
-           _op(2, "completed", "append"), _op(3, "failed", "append")]
-    plan = plan_document(ops)
-    assert plan.replay == ["op1", "op2", "op3"]
-    assert plan.replay_failed == ["op0", "op1", "op3"]
-    assert plan.retry == []
+def test_failed_replace_with_later_content_is_blocked_but_appends_still_retry() -> None:
+    """The hypr case: the session-opening replace failed, later appends
+    landed, then more appends failed. Re-running the replace would erase the
+    landed appends; the failed appends are safe."""
+    ops = [_op(0, "failed", R()), _op(1, "completed", A()),
+           _op(2, "failed", A()), _op(3, "failed", A())]
+    plan = plan_bank(ops, _unresolved(ops))
+    assert plan.blocked == ["op0"]
+    assert plan.retry == ["op2", "op3"]
 
 
-def test_document_with_an_op_in_flight_is_left_alone() -> None:
+def test_a_later_failed_rebuild_is_retried_and_the_earlier_replace_waits_on_it() -> None:
+    """A later failed replace already holds everything before it: retry it,
+    and do not re-run (or concatenate) the earlier one."""
+    ops = [_op(0, "failed", R()), _op(1, "completed", A()),
+           _op(2, "failed", R()), _op(3, "failed", A())]
+    plan = plan_bank(ops, _unresolved(ops))
+    assert plan.blocked == ["op0"]
+    assert plan.retry == ["op2", "op3"]
+    # Once the rebuild lands, the earlier replace is covered by it.
+    ops[2] = _op(2, "completed", R())
+    plan = plan_bank(ops, {"op0", "op3"})
+    assert plan.superseded == ["op0"]
+
+
+def test_document_with_an_op_in_flight_waits() -> None:
     for status in ("pending", "processing"):
-        plan = plan_document([_op(0, "failed", "replace"), _op(1, status)])
-        assert (plan.superseded, plan.retry, plan.replay) == ([], [], [])
+        ops = [_op(0, "failed", R()), _op(1, status, A())]
+        plan = plan_bank(ops, _unresolved(ops))
+        assert (plan.superseded, plan.retry, plan.blocked) == ([], [], [])
 
 
-def test_cancelled_ops_are_ignored() -> None:
-    plan = plan_document([_op(0, "failed", "append"), _op(1, "cancelled")])
-    assert plan.retry == ["op0"]
+def test_documents_are_independent() -> None:
+    ops = [_op(0, "failed", R(OTHER)), _op(1, "completed", A()), _op(2, "failed", R())]
+    plan = plan_bank(ops, _unresolved(ops))
+    assert plan.retry == ["op0", "op2"]
 
 
-# ---------- merge_replay / backoff ----------
+def test_a_batch_is_retried_only_if_every_document_allows_it() -> None:
+    # op0 appends to DOC and replaces OTHER; OTHER took content after it.
+    ops = [_op(0, "failed", {DOC: "append", OTHER: "replace"}), _op(1, "completed", A(OTHER))]
+    assert plan_bank(ops, _unresolved(ops)).blocked == ["op0"]
+    # Superseded on one document and retryable on the other: re-running the
+    # batch would replay the stale part too.
+    ops = [_op(0, "failed", {DOC: "append", OTHER: "append"}), _op(1, "completed", R(OTHER))]
+    assert plan_bank(ops, _unresolved(ops)).blocked == ["op0"]
+    ops = [_op(0, "failed", {DOC: "append", OTHER: "append"})]
+    assert plan_bank(ops, _unresolved(ops)).retry == ["op0"]
 
 
-def test_merge_replay_concatenates_in_order_as_one_replace() -> None:
-    merged = merge_replay([
-        [{"content": "A", "document_id": DOC, "update_mode": "replace",
-          "tags": ["channel:c", "persona:p", "untrusted:false"], "event_date": "t1"}],
-        [{"content": "B", "document_id": DOC, "update_mode": "append",
-          "tags": ["channel:c", "persona:p", "role:user", "untrusted:true"],
-          "event_date": "t2", "metadata": {"interaction_id": "7"}}],
-    ])
-    assert merged["content"] == "A\n\nB"
-    assert merged["update_mode"] == "replace"
-    assert merged["document_id"] == DOC
-    # Trust is sticky across the document (DP-409); role tags are per-turn.
-    assert merged["tags"] == ["channel:c", "persona:p", "untrusted:true"]
-    assert merged["event_date"] == "t2"
-    assert merged["metadata"] == {"interaction_id": "7"}
+def test_an_unreadable_completed_op_blocks_older_replaces_only() -> None:
+    """A completed op whose payload is gone could be on any document."""
+    ops = [_op(0, "failed", R()), _op(1, "failed", A()), _op(2, "completed", None)]
+    plan = plan_bank(ops, _unresolved(ops))
+    assert plan.blocked == ["op0"]
+    assert plan.retry == ["op1"]
 
 
-def test_backoff_doubles_to_the_cap_and_spans_days() -> None:
+def test_a_failed_op_without_payload_is_blocked() -> None:
+    ops = [_op(0, "failed", None)]
+    assert plan_bank(ops, _unresolved(ops)).blocked == ["op0"]
+
+
+def test_doc_modes_reads_the_payload() -> None:
+    assert doc_modes("x", [
+        {"document_id": DOC, "update_mode": "append"},
+        {"document_id": DOC, "update_mode": "replace"},
+        {"document_id": OTHER},
+        {"content": "no id"},
+    ]) == {DOC: "replace", OTHER: "append", "op:x": "append"}
+
+
+def test_backoff_doubles_to_once_a_day() -> None:
     assert backoff_seconds(0) == 0
     assert backoff_seconds(1) == RETAIN_RECONCILE_INTERVAL_SECONDS
     assert backoff_seconds(2) == 2 * RETAIN_RECONCILE_INTERVAL_SECONDS
-    assert backoff_seconds(50) == 6 * 3600
-    total = sum(backoff_seconds(n) for n in range(1, RETAIN_RECONCILE_MAX_ATTEMPTS))
-    assert total > 3 * 24 * 3600  # a multi-day outage still recovers
+    assert backoff_seconds(8) == 24 * 3600
+    assert backoff_seconds(10_000) == 24 * 3600
 
 
 # ---------- Reconciler against a fake operations API ----------
@@ -120,28 +162,32 @@ class FakeHindsight:
     def __init__(self) -> None:
         self.ops: Dict[str, Dict[str, Any]] = {}
         self.retried: List[str] = []
-        self.posted: List[List[Dict[str, Any]]] = []
-        self.payload_fetches = 0
+        self.payload_fetches: List[str] = []
+        self.on_page: Optional[Any] = None
+        self.refuse: set = set()
 
-    def add(self, op_id: str, status: str, minute: int, *, doc: Optional[str] = DOC,
-            mode: str = "append", content: str = "", bank: str = "explr",
-            tags: Optional[List[str]] = None) -> None:
+    def add(self, op_id: str, status: str, minute: float, *, bank: str = "explr",
+            items: Optional[List[Tuple[str, str]]] = None, payload: bool = True,
+            updated: Optional[datetime] = None) -> None:
+        created = T0 + timedelta(minutes=minute)
         self.ops[op_id] = {
             "id": op_id, "bank": bank, "status": status, "task_type": "retain",
-            "document_id": doc,
-            "created_at": (T0 + timedelta(minutes=minute)).isoformat(),
-            "items": [{"content": content or op_id, "document_id": doc, "update_mode": mode,
-                       "tags": tags or ["channel:web_ui", "persona:explr"]}],
+            "document_id": None,  # as on prod: the list does not say
+            "created_at": created.isoformat(),
+            "updated_at": (updated or created).isoformat(),
+            "items": None if not payload else [
+                {"document_id": d, "update_mode": m, "content": op_id}
+                for d, m in (items or [(DOC, "append")])
+            ],
         }
-
-    async def alist_banks(self) -> Dict[str, Any]:
-        return {"banks": [{"bank_id": b} for b in sorted({o["bank"] for o in self.ops.values()})]}
 
     async def alist_operations(self, bank_id: str, *, status: Optional[str] = None,
                                op_type: Optional[str] = None, limit: Optional[int] = None,
                                offset: Optional[int] = None,
                                exclude_parents: Optional[bool] = None) -> Dict[str, Any]:
         assert limit is not None and limit <= 100
+        if self.on_page is not None:
+            self.on_page(offset)
         rows = [o for o in self.ops.values() if o["bank"] == bank_id
                 and (status is None or o["status"] == status)]
         rows.sort(key=lambda o: o["created_at"], reverse=True)
@@ -151,19 +197,16 @@ class FakeHindsight:
 
     async def aget_operation(self, bank_id: str, operation_id: str, *,
                              include_payload: bool = False) -> Dict[str, Any]:
-        self.payload_fetches += 1
+        self.payload_fetches.append(operation_id)
+        items = self.ops[operation_id]["items"]
         return {"operation_id": operation_id,
-                "task_payload": {"contents": self.ops[operation_id]["items"]}}
+                "task_payload": None if items is None else {"contents": items}}
 
     async def aretry_operation(self, bank_id: str, operation_id: str) -> Dict[str, Any]:
-        assert self.ops[operation_id]["status"] == "failed"
+        if operation_id in self.refuse or self.ops[operation_id]["status"] != "failed":
+            raise httpx.HTTPError("409 not retryable")
         self.ops[operation_id]["status"] = "pending"
         self.retried.append(operation_id)
-        return {"success": True}
-
-    async def aretain(self, bank_id: str, items: List[Dict[str, Any]], *,
-                      async_: bool = True) -> Dict[str, Any]:
-        self.posted.append(items)
         return {"success": True}
 
     def settle(self, status: str) -> None:
@@ -177,107 +220,155 @@ def reconciler(tmp_path) -> Reconciler:
     return Reconciler(ReconcileStore(str(tmp_path / "doc_scope.db")))
 
 
+async def _run(r: Reconciler, fake: FakeHindsight, now: datetime,
+               banks: Optional[List[str]] = None) -> int:
+    return await r.run(fake, banks or sorted({o["bank"] for o in fake.ops.values()}), now)
+
+
 @pytest.mark.asyncio
 async def test_superseded_document_is_left_untouched(reconciler: Reconciler) -> None:
     fake = FakeHindsight()
-    fake.add("f0", "failed", 0, mode="replace", content="short")
+    fake.add("f0", "failed", 0, items=[(DOC, "replace")])
     fake.add("f1", "failed", 1)
-    fake.add("c2", "completed", 60, mode="replace", content="whole session")
-    assert await reconciler.run(fake, T0 + timedelta(days=2)) == 2
-    assert fake.retried == [] and fake.posted == []
-    # Resolved for good: the next pass does not even fetch payloads.
-    fetches = fake.payload_fetches
-    assert await reconciler.run(fake, T0 + timedelta(days=3)) == 0
-    assert fake.payload_fetches == fetches
+    fake.add("c2", "completed", 60, items=[(DOC, "replace")])
+    assert await _run(reconciler, fake, T0 + timedelta(days=2)) == 2
+    assert fake.retried == []
+    # Resolved for good: the next pass lists failures and stops there.
+    fake.payload_fetches.clear()
+    assert await _run(reconciler, fake, T0 + timedelta(days=3)) == 0
+    assert fake.payload_fetches == []
 
 
 @pytest.mark.asyncio
-async def test_failed_ops_are_retried_with_backoff_then_given_up(reconciler: Reconciler) -> None:
+async def test_failed_ops_are_retried_with_backoff_and_never_given_up(reconciler: Reconciler) -> None:
     fake = FakeHindsight()
-    fake.add("f0", "failed", 0, mode="replace")
+    fake.add("f0", "failed", 0, items=[(DOC, "replace")])
     fake.add("f1", "failed", 1)
     now = T0 + timedelta(hours=1)
-    assert await reconciler.run(fake, now) == 2
+    assert await _run(reconciler, fake, now) == 2
     assert fake.retried == ["f0", "f1"]
 
     fake.settle("failed")  # the model server is still down
     fake.retried.clear()
-    assert await reconciler.run(fake, now + timedelta(minutes=5)) == 0
-    assert fake.retried == []  # inside the backoff window
+    assert await _run(reconciler, fake, now + timedelta(minutes=5)) == 0
     now += timedelta(seconds=backoff_seconds(1))
-    assert await reconciler.run(fake, now) == 2
+    assert await _run(reconciler, fake, now) == 2
 
-    for _ in range(RETAIN_RECONCILE_MAX_ATTEMPTS):
+    for _ in range(40):  # a month and more of daily failures
         fake.settle("failed")
-        now += timedelta(seconds=backoff_seconds(RETAIN_RECONCILE_MAX_ATTEMPTS))
-        await reconciler.run(fake, now)
-    assert reconciler.store.get("f0")[0] == "given_up"  # type: ignore[index]
+        now += timedelta(days=1)
+        await _run(reconciler, fake, now)
+    fake.settle("failed")
     fake.retried.clear()
-    await reconciler.run(fake, now + timedelta(days=30))
-    assert fake.retried == []
+    assert await _run(reconciler, fake, now + timedelta(hours=23)) == 0
+    assert await _run(reconciler, fake, now + timedelta(days=1)) == 2
+
+
+@pytest.mark.asyncio
+async def test_long_failing_op_is_named_in_a_warning(reconciler: Reconciler, caplog) -> None:
+    fake = FakeHindsight()
+    fake.add("f0", "failed", 0)
+    now = T0
+    with caplog.at_level(logging.WARNING):
+        for _ in range(LONG_FAILING_ATTEMPTS):
+            now += timedelta(days=1)
+            await _run(reconciler, fake, now)
+            fake.settle("failed")
+    assert any("f0 still failing" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.asyncio
 async def test_recovered_retry_drops_out(reconciler: Reconciler) -> None:
     fake = FakeHindsight()
     fake.add("f0", "failed", 0)
-    await reconciler.run(fake, T0 + timedelta(hours=1))
+    await _run(reconciler, fake, T0 + timedelta(hours=1))
     fake.settle("completed")
     fake.retried.clear()
-    assert await reconciler.run(fake, T0 + timedelta(days=1)) == 0
-    assert fake.retried == []
+    assert await _run(reconciler, fake, T0 + timedelta(days=1)) == 0
 
 
 @pytest.mark.asyncio
-async def test_failed_replace_superseded_by_append_is_replayed_once(reconciler: Reconciler) -> None:
+async def test_hypr_case_blocks_the_replace_and_retries_the_appends(
+        reconciler: Reconciler, caplog) -> None:
     fake = FakeHindsight()
-    fake.add("f0", "failed", 0, mode="replace", content="rebuilt session")
-    fake.add("c1", "completed", 5, content="later turn",
-             tags=["channel:web_ui", "persona:explr", "role:user"])
-    assert await reconciler.run(fake, T0 + timedelta(hours=1)) == 1
-    assert fake.retried == []
-    assert len(fake.posted) == 1 and len(fake.posted[0]) == 1
-    item = fake.posted[0][0]
-    assert item["update_mode"] == "replace"
-    assert item["content"] == "rebuilt session\n\nlater turn"
-    assert item["document_id"] == DOC
-    assert "role:user" not in item["tags"]
-    assert reconciler.store.get("f0")[0] == "replayed"  # type: ignore[index]
-    assert await reconciler.run(fake, T0 + timedelta(days=1)) == 0
-    assert len(fake.posted) == 1
+    fake.add("r0", "failed", 0, items=[(DOC, "replace")])
+    fake.add("c1", "completed", 5)
+    fake.add("a2", "failed", 10)
+    with caplog.at_level(logging.WARNING):
+        assert await _run(reconciler, fake, T0 + timedelta(hours=1)) == 1
+    assert fake.retried == ["a2"]
+    assert reconciler.store.get("r0")[0] == "blocked"  # type: ignore[index]
+    assert any("r0" in r.getMessage() and "Rebuild" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.asyncio
-async def test_in_flight_document_waits(reconciler: Reconciler) -> None:
+async def test_failures_in_backoff_still_count_as_peers(reconciler: Reconciler) -> None:
+    """A failure that is not due this pass is still on its document: a later
+    decision must not treat it as absent."""
     fake = FakeHindsight()
-    fake.add("f0", "failed", 0, mode="replace")
-    fake.add("p1", "pending", 3)
-    assert await reconciler.run(fake, T0 + timedelta(hours=1)) == 0
+    fake.add("a1", "failed", 0)
+    fake.add("r2", "failed", 1, items=[(DOC, "replace")])
+    now = T0 + timedelta(hours=1)
+    reconciler.store.record("a1", "explr", "retrying", 3, now)  # in backoff
+    await _run(reconciler, fake, now)
+    assert fake.retried == ["r2"]  # a1 waits its turn, and is not superseded
+    assert reconciler.store.get("a1")[0] == "retrying"  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_completed_payloads_are_fetched_once(reconciler: Reconciler) -> None:
+    fake = FakeHindsight()
+    fake.add("f0", "failed", 0)
+    fake.add("c1", "completed", 1)
+    await _run(reconciler, fake, T0 + timedelta(hours=1))
+    fake.settle("failed")
+    fake.payload_fetches.clear()
+    await _run(reconciler, fake, T0 + timedelta(days=1))
+    assert fake.payload_fetches == ["f0"]
+
+
+@pytest.mark.asyncio
+async def test_in_flight_document_waits_and_a_stuck_op_is_reported(
+        reconciler: Reconciler, caplog) -> None:
+    fake = FakeHindsight()
+    fake.add("f0", "failed", 0, items=[(DOC, "replace")])
+    fake.add("p1", "processing", 3)
+    with caplog.at_level(logging.WARNING):
+        assert await _run(reconciler, fake, T0 + timedelta(hours=3)) == 0
     assert fake.retried == []
+    assert any("p1 has been processing" in r.getMessage() for r in caplog.records)
     fake.ops["p1"]["status"] = "completed"
-    assert await reconciler.run(fake, T0 + timedelta(hours=2)) == 1
-    assert fake.posted  # f0 is a replace with a completed op after it
+    await _run(reconciler, fake, T0 + timedelta(hours=4))
+    assert reconciler.store.get("f0")[0] == "blocked"  # type: ignore[index]
 
 
 @pytest.mark.asyncio
-async def test_documentless_batch_and_other_banks_are_retried(reconciler: Reconciler) -> None:
+async def test_paging_dedupes_ops_shifted_by_new_arrivals(reconciler: Reconciler) -> None:
     fake = FakeHindsight()
-    fake.add("loose", "failed", 0, doc=None)
-    fake.add("exp", "failed", 1, doc="agent_action:246", mode="replace", bank="managr")
-    assert await reconciler.run(fake, T0 + timedelta(hours=1)) == 2
-    assert sorted(fake.retried) == ["exp", "loose"]
+    fake.add("f0", "failed", 0)
+    for i in range(1, 151):
+        fake.add(f"c{i}", "completed", i, items=[(f"other:{i}", "append")])
+    arrivals = iter(range(1000, 1100))
+
+    def new_head(offset: Optional[int]) -> None:
+        if offset:  # a turn lands between pages
+            n = next(arrivals)
+            fake.add(f"n{n}", "completed", n, items=[(f"new:{n}", "append")])
+
+    fake.on_page = new_head
+    assert await _run(reconciler, fake, T0 + timedelta(days=1)) == 1
+    assert fake.retried == ["f0"]
+    assert len(fake.payload_fetches) == len(set(fake.payload_fetches))
 
 
 @pytest.mark.asyncio
-async def test_paging_reaches_back_to_the_oldest_failure(reconciler: Reconciler) -> None:
-    """More than one page of newer ops sits between the failure and now."""
+async def test_a_refused_retry_does_not_stop_the_rest(reconciler: Reconciler) -> None:
     fake = FakeHindsight()
-    fake.add("f0", "failed", 0, mode="replace", content="old")
-    for i in range(1, 251):
-        fake.add(f"c{i}", "completed", i, doc=f"other:{i}")
-    fake.add("c_last", "completed", 300, content="new turn")
-    await reconciler.run(fake, T0 + timedelta(days=1))
-    assert fake.posted and fake.posted[0][0]["content"] == "old\n\nnew turn"
+    fake.add("bad", "failed", 0, items=[("doc:a", "append")])
+    fake.add("good", "failed", 1, items=[("doc:b", "append")])
+    fake.refuse.add("bad")
+    assert await _run(reconciler, fake, T0 + timedelta(hours=1)) == 1
+    assert fake.retried == ["good"]
 
 
 @pytest.mark.asyncio
@@ -293,25 +384,26 @@ async def test_one_bank_failing_does_not_stop_the_rest(reconciler: Reconciler) -
         return await real(bank_id, **kw)
 
     fake.alist_operations = flaky  # type: ignore[method-assign]
-    assert await reconciler.run(fake, T0 + timedelta(hours=1)) == 1
+    assert await _run(reconciler, fake, T0 + timedelta(hours=1)) == 1
     assert fake.retried == ["b"]
 
 
 # ---------- Store: lives beside an existing doc-scope DB ----------
 
 
-def test_store_adds_its_table_to_an_existing_doc_scope_db(tmp_path) -> None:
+def test_store_adds_its_tables_to_an_existing_doc_scope_db(tmp_path) -> None:
     path = str(tmp_path / "doc_scope.db")
     scope = _DocScopeStore(path)
     doc_id, _ = scope.resolve("explr:web_ui", T0)
     scope.close()
 
     store = ReconcileStore(path)
-    store.record("op1", "explr", "superseded", 0, T0)
-    assert store.get("op1") == ("superseded", 0, T0)
+    store.record("op1", "explr", "blocked", 2, T0)
+    store.cache_docs("op2", {DOC: "replace"})
     store.close()
     store = ReconcileStore(path)  # idempotent reopen
-    assert store.get("op1") == ("superseded", 0, T0)
+    assert store.get("op1") == ("blocked", 2, T0)
+    assert store.cached_docs("op2") == {DOC: "replace"}
     store.close()
 
     conn = sqlite3.connect(path)
@@ -332,24 +424,43 @@ def backend(tmp_path) -> HindsightBackend:
 
 
 @pytest.mark.asyncio
-async def test_backend_pass_is_throttled_unless_forced(backend: HindsightBackend) -> None:
+async def test_backend_reconciles_only_its_own_banks(backend: HindsightBackend) -> None:
+    run = AsyncMock(return_value=0)
+    client = backend._get_client()
+    with patch.object(backend._reconciler, "run", run):
+        # Nothing provisioned yet: no pass, and the throttle stays open.
+        assert await backend.reconcile_failed_retains() == 0
+        assert run.await_count == 0
+        with patch.object(client, "_request", AsyncMock(return_value={})):
+            await backend.ensure_bank("explr")
+        await backend.reconcile_failed_retains()
+    assert run.await_args.args[1] == ["explr"]  # never lme_* or other foreign banks
+    await backend.aclose()
+
+
+@pytest.mark.asyncio
+async def test_backend_pass_is_throttled(backend: HindsightBackend) -> None:
+    backend._own_banks.add("explr")
     run = AsyncMock(return_value=3)
     with patch.object(backend._reconciler, "run", run):
         assert await backend.reconcile_failed_retains() == 3
         assert await backend.reconcile_failed_retains() == 0
         assert run.await_count == 1
-        assert await backend.reconcile_failed_retains(force=True) == 3
-        assert run.await_count == 2
+        backend._reconciled_at = datetime.now(timezone.utc) - timedelta(
+            seconds=RETAIN_RECONCILE_INTERVAL_SECONDS + 1)
+        assert await backend.reconcile_failed_retains() == 3
     await backend.aclose()
 
 
 @pytest.mark.asyncio
 async def test_backend_pass_never_raises(backend: HindsightBackend) -> None:
-    client = backend._get_client()
-    with patch.object(client, "alist_banks", AsyncMock(side_effect=httpx.ConnectError("down"))):
+    backend._own_banks.add("explr")
+    with patch.object(backend._reconciler, "run",
+                      AsyncMock(side_effect=httpx.ConnectError("down"))):
         assert await backend.reconcile_failed_retains() == 0
+    backend._reconciled_at = None
     with patch.object(backend._reconciler, "run", AsyncMock(side_effect=RuntimeError("bug"))):
-        assert await backend.reconcile_failed_retains(force=True) == 0
+        assert await backend.reconcile_failed_retains() == 0
     await backend.aclose()
 
 
